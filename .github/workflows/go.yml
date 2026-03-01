@@ -18,7 +18,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
