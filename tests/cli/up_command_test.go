@@ -617,7 +617,7 @@ func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
 	}
 }
 
-func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
+func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
@@ -643,8 +643,8 @@ func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
 		})
 	})
 
-	if code != 6 {
-		t.Fatalf("unexpected exit code: got=%d want=6 stderr=%s", code, stderr.String())
+	if code != 3 {
+		t.Fatalf("unexpected exit code: got=%d want=3 stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "ingestion failed") {
 		t.Fatalf("expected ingestion error in stderr, got: %s", stderr.String())
@@ -793,8 +793,8 @@ func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
 		})
 	})
 
-	if code != 2 {
-		t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+	if code != 5 {
+		t.Fatalf("unexpected exit code: got=%d want=5 stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "x402 facilitator URL is required") {
 		t.Fatalf("expected x402 validation error, got: %s", stderr.String())

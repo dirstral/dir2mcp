@@ -35,13 +35,19 @@ import (
 )
 
 const (
-	exitSuccess = iota
-	exitGeneric
-	exitConfigInvalid
-	exitRootInaccessible
+	exitSuccess        = iota // 0
+	exitGeneric               // 1
+	exitConfigInvalid         // 2
+	exitIngestionFatal        // 3
 	exitServerBindFailure
-	exitIndexLoadFailure
-	exitIngestionFatal
+	exitAuthOrPayment
+	exitSignalInterrupt
+)
+
+const (
+	// Compatibility aliases retained for existing call sites.
+	exitRootInaccessible = exitConfigInvalid
+	exitIndexLoadFailure = exitGeneric
 )
 
 const (
@@ -301,7 +307,11 @@ func (a *App) storeForConfig(cfg config.Config) model.Store {
 func (a *App) Run(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	return a.RunWithContext(ctx, args)
+	code := a.RunWithContext(ctx, args)
+	if errors.Is(ctx.Err(), context.Canceled) && code == exitSuccess {
+		return exitSignalInterrupt
+	}
+	return code
 }
 
 func (a *App) RunWithContext(ctx context.Context, args []string) int {
@@ -421,12 +431,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		data, err := os.ReadFile(filepath.Clean(opts.x402FacilitatorTokenFile))
 		if err != nil {
 			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
-			return exitConfigInvalid
+			return exitAuthOrPayment
 		}
 		token := strings.TrimSpace(string(data))
 		if token == "" {
 			writef(a.stderr, "x402 facilitator token file is empty\n")
-			return exitConfigInvalid
+			return exitAuthOrPayment
 		}
 		cfg.X402.FacilitatorToken = token
 		x402TokenSource = "file"
@@ -486,7 +496,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	strictX402 := strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "required")
 	if err := cfg.ValidateX402(strictX402); err != nil {
 		writef(a.stderr, "CONFIG_INVALID: %v\n", err)
-		return exitConfigInvalid
+		return exitAuthOrPayment
 	}
 
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
@@ -525,7 +535,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	auth, err := prepareAuthMaterial(cfg)
 	if err != nil {
 		writef(a.stderr, "auth setup: %v\n", err)
-		return exitConfigInvalid
+		return exitAuthOrPayment
 	}
 	cfg.AuthMode = auth.mode
 	cfg.ResolvedAuthToken = auth.token

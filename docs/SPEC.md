@@ -135,10 +135,10 @@ Current high-level status:
 - `0` success
 - `1` generic error
 - `2` config invalid
-- `3` root inaccessible
-- `4` server bind/listen failure
-- `5` index load/upgrade failure
-- `6` ingestion fatal error (per-file errors are non-fatal)
+- `3` ingestion error (fatal; per-file errors remain non-fatal)
+- `4` server startup error (bind/listen/runtime startup failure)
+- `5` auth/payment error
+- `6` signal/interrupt
 
 ### 2.5 Startup interaction contract (`up`)
 
