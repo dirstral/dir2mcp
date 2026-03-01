@@ -677,6 +677,23 @@ func TestDefault_ChatModel(t *testing.T) {
 	}
 }
 
+func TestDefault_NestedConfigFieldDefaults(t *testing.T) {
+	cfg := config.Default()
+
+	if cfg.RAGMaxContextChars != 20000 || cfg.RAGOversampleFactor != 5 {
+		t.Fatalf("unexpected rag defaults: max=%d oversample=%d", cfg.RAGMaxContextChars, cfg.RAGOversampleFactor)
+	}
+	if !cfg.IngestGitignore || cfg.IngestFollowSymlinks || cfg.IngestMaxFileMB != 20 {
+		t.Fatalf("unexpected ingest defaults: gitignore=%v follow=%v max=%d", cfg.IngestGitignore, cfg.IngestFollowSymlinks, cfg.IngestMaxFileMB)
+	}
+	if cfg.STTProvider != "mistral" || cfg.STTMistralModel == "" || cfg.STTElevenLabsModel == "" {
+		t.Fatalf("unexpected stt defaults: provider=%q mistral=%q eleven=%q", cfg.STTProvider, cfg.STTMistralModel, cfg.STTElevenLabsModel)
+	}
+	if cfg.ServerTLSCertFile != "" || cfg.ServerTLSKeyFile != "" {
+		t.Fatalf("unexpected tls defaults: cert=%q key=%q", cfg.ServerTLSCertFile, cfg.ServerTLSKeyFile)
+	}
+}
+
 func TestLoad_EnvOverridesChatModel(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.WithWorkingDir(t, tmp, func() {
