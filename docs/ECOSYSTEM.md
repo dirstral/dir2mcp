@@ -93,6 +93,13 @@ This enables:
 - native paywalling without mandatory extra infrastructure
 - optional multi-node policy control via gateway when needed
 
+### Hosted demo operational smoke check
+
+For hosted endpoints, run `scripts/smoke_hosted_demo.sh` as a minimal runbook probe before sharing an endpoint:
+- validates `initialize` and session issuance
+- validates `tools/list` schema surface
+- validates `tools/call` reachability (`200 OK`) or expected x402 gating (`402 Payment Required` with `PAYMENT-REQUIRED`)
+
 ---
 
 ## 5) What makes a “sellable” MCP knowledge service

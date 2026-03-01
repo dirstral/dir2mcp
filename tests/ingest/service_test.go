@@ -13,6 +13,7 @@ import (
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/elevenlabs"
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 )
@@ -46,7 +47,7 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 	cfg.PathExcludes = []string{"**/exclude/**"}
 
 	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(indexState)
 
 	if err := svc.Run(context.Background()); err != nil {
@@ -115,7 +116,7 @@ func TestServiceRun_ReturnsErrorOnInvalidSecretPattern(t *testing.T) {
 	cfg.RootDir = root
 	cfg.SecretPatterns = []string{"["}
 
-	svc := ingest.NewService(cfg, newMemoryStore())
+	svc := mustNewIngestService(t, cfg, newMemoryStore())
 	if err := svc.Run(context.Background()); err == nil {
 		t.Fatal("expected error for invalid secret pattern")
 	}
@@ -131,7 +132,7 @@ func TestServiceRun_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	svc := ingest.NewService(cfg, newMemoryStore())
+	svc := mustNewIngestService(t, cfg, newMemoryStore())
 	if err := svc.Run(ctx); err == nil {
 		t.Fatal("expected context cancellation error")
 	}
@@ -152,7 +153,7 @@ func TestProcessDocument_DocIDSetBeforeRepGeneration(t *testing.T) {
 	cfg.RootDir = root
 
 	st := newMemoryStore()
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 
 	// run a single scan by invoking Run; service will create raw text
 	// representation since memoryStore implements model.RepresentationStore.
@@ -178,7 +179,7 @@ func TestServiceRun_AudioGeneratesTranscriptRepresentation(t *testing.T) {
 	cfg.StateDir = filepath.Join(root, ".dir2mcp")
 
 	st := newMemoryStore()
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] hello\n[00:02] world"})
 
 	if err := svc.Run(context.Background()); err != nil {
@@ -221,7 +222,7 @@ func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
 
 	st := newMemoryStore()
 	state := appstate.NewIndexingState(appstate.ModeIncremental)
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(state)
 	svc.SetTranscriber(errTranscriber{err: errors.New("provider down")})
 
@@ -242,6 +243,96 @@ func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
 	}
 	if doc.Status != "ok" {
 		t.Fatalf("expected audio document status to remain ok, got %q", doc.Status)
+	}
+}
+
+func TestDiscoverOptionsFromConfig_DefaultsRemainSafe(t *testing.T) {
+	cfg := config.Default()
+	options := ingest.DiscoverOptionsFromConfig(cfg)
+	if options.FollowSymlinks {
+		t.Fatal("expected follow_symlinks default to false")
+	}
+	if !options.UseGitIgnore {
+		t.Fatal("expected gitignore default to true")
+	}
+	if options.MaxSizeBytes <= 0 {
+		t.Fatalf("expected positive max size default, got %d", options.MaxSizeBytes)
+	}
+}
+
+func TestTranscriberFromConfig_AutoWiresElevenLabsWhenAPIKeyPresent(t *testing.T) {
+	cfg := config.Default()
+	cfg.ElevenLabsAPIKey = "test-key"
+	cfg.ElevenLabsBaseURL = "https://example.test"
+	cfg.STTProvider = "elevenlabs"
+
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("TranscriberFromConfig failed: %v", err)
+	}
+	if transcriber == nil {
+		t.Fatal("expected transcriber instance")
+	}
+	client, ok := transcriber.(*elevenlabs.Client)
+	if !ok {
+		t.Fatalf("expected elevenlabs client, got %T", transcriber)
+	}
+	if client.BaseURL != "https://example.test" {
+		t.Fatalf("unexpected base URL: %q", client.BaseURL)
+	}
+}
+
+func TestTranscriberFromConfig_ExplicitProviderRequiresCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		wantErr  string
+	}{
+		{
+			name:     "mistral missing key",
+			provider: "mistral",
+			wantErr:  "requires MISTRAL_API_KEY",
+		},
+		{
+			name:     "elevenlabs missing key",
+			provider: "elevenlabs",
+			wantErr:  "requires ELEVENLABS_API_KEY",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.STTProvider = tc.provider
+			cfg.MistralAPIKey = ""
+			cfg.ElevenLabsAPIKey = ""
+
+			transcriber, err := ingest.TranscriberFromConfig(cfg)
+			if err == nil {
+				t.Fatalf("expected error for provider %q", tc.provider)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error mismatch: got=%v want substring=%q", err, tc.wantErr)
+			}
+			if transcriber != nil {
+				t.Fatalf("expected nil transcriber on config error, got %T", transcriber)
+			}
+		})
+	}
+}
+
+func TestTranscriberFromConfig_AutoProviderWithoutCredentialsReturnsNil(t *testing.T) {
+	cfg := config.Default()
+	cfg.STTProvider = "auto"
+	cfg.MistralAPIKey = ""
+	cfg.ElevenLabsAPIKey = ""
+
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("TranscriberFromConfig should not fail in auto mode without credentials: %v", err)
+	}
+	if transcriber != nil {
+		t.Fatalf("expected nil transcriber in auto mode without credentials, got %T", transcriber)
 	}
 }
 

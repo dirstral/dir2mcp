@@ -57,6 +57,83 @@ func TestDiscoverFiles_ContextCancelled(t *testing.T) {
 	}
 }
 
+func TestDiscoverFilesWithOptions_GitIgnore(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("hello"))
+	mustWriteFile(t, filepath.Join(root, "ignore.tmp"), []byte("tmp"))
+	mustWriteFile(t, filepath.Join(root, "secret.env"), []byte("env"))
+	mustWriteFile(t, filepath.Join(root, ".gitignore"), []byte("*.tmp\n*.env\n.gitignore\n"))
+
+	files, err := ingest.DiscoverFilesWithOptions(context.Background(), root, ingest.DiscoverOptions{
+		MaxSizeBytes: 1024,
+		UseGitIgnore: true,
+	})
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithOptions failed: %v", err)
+	}
+
+	got := make([]string, 0, len(files))
+	for _, f := range files {
+		got = append(got, f.RelPath)
+	}
+	if !slices.Equal(got, []string{"keep.txt"}) {
+		t.Fatalf("unexpected files with gitignore enabled: %v", got)
+	}
+}
+
+func TestDiscoverFilesWithOptions_FollowSymlinks_RespectsRootAndPreventsCycles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior requires elevated privileges on windows")
+	}
+
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "target.txt"), []byte("in-root"))
+	mustWriteFile(t, filepath.Join(root, "loop", "inside.txt"), []byte("loop"))
+	mustWriteFile(t, filepath.Join(root, "..cache", "inner.txt"), []byte("dotdot"))
+
+	if err := os.Symlink(filepath.Join(root, "target.txt"), filepath.Join(root, "alias.txt")); err != nil {
+		t.Fatalf("create in-root symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "..cache", "inner.txt"), filepath.Join(root, "dotdot-cache-link.txt")); err != nil {
+		t.Fatalf("create dotdot in-root symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "loop"), filepath.Join(root, "loop", "self")); err != nil {
+		t.Fatalf("create cycle symlink: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	mustWriteFile(t, filepath.Join(outsideRoot, "outside.txt"), []byte("outside"))
+	if err := os.Symlink(filepath.Join(outsideRoot, "outside.txt"), filepath.Join(root, "outside-link.txt")); err != nil {
+		t.Fatalf("create outside symlink: %v", err)
+	}
+
+	files, err := ingest.DiscoverFilesWithOptions(context.Background(), root, ingest.DiscoverOptions{
+		MaxSizeBytes:   1024,
+		FollowSymlinks: true,
+	})
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithOptions failed: %v", err)
+	}
+
+	got := make([]string, 0, len(files))
+	for _, f := range files {
+		got = append(got, f.RelPath)
+	}
+
+	if !slices.Contains(got, "alias.txt") {
+		t.Fatalf("expected followed in-root symlink file, got %v", got)
+	}
+	if !slices.Contains(got, "dotdot-cache-link.txt") {
+		t.Fatalf("expected followed in-root '..cache' symlink file, got %v", got)
+	}
+	if slices.Contains(got, "outside-link.txt") {
+		t.Fatalf("outside-root symlink should be skipped, got %v", got)
+	}
+	if !slices.Contains(got, "loop/inside.txt") {
+		t.Fatalf("expected file in loop directory, got %v", got)
+	}
+}
+
 func mustWriteFile(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

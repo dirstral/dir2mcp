@@ -40,11 +40,11 @@ var mediumLogoLines = []string{
 type StartChoice string
 
 const (
-	ChoiceBreeze     StartChoice = "Breeze"
-	ChoiceTempest    StartChoice = "Tempest"
-	ChoiceLighthouse StartChoice = "Lighthouse"
-	ChoiceSettings   StartChoice = "Settings"
-	ChoiceQuit       StartChoice = "Exit"
+	ChoiceChat     StartChoice = "Chat"
+	ChoiceVoice    StartChoice = "Voice"
+	ChoiceServer   StartChoice = "Start/Stop MCP Server"
+	ChoiceSettings StartChoice = "Settings"
+	ChoiceQuit     StartChoice = "Exit"
 )
 
 type LogoTier int
@@ -56,7 +56,7 @@ const (
 )
 
 func StartMenuItems() []string {
-	return []string{string(ChoiceBreeze), string(ChoiceTempest), string(ChoiceLighthouse), string(ChoiceSettings), string(ChoiceQuit)}
+	return []string{string(ChoiceChat), string(ChoiceVoice), string(ChoiceServer), string(ChoiceSettings), string(ChoiceQuit)}
 }
 
 func ChooseTier(width int) LogoTier {

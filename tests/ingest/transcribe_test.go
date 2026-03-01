@@ -32,7 +32,7 @@ func TestGenerateTranscriptRepresentation_PersistsTimeChunks(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})
 
 	doc := model.Document{
@@ -90,7 +90,7 @@ func TestReadOrComputeTranscript_UsesCache(t *testing.T) {
 	}
 
 	transcriber := &fakeTranscriber{text: "[00:00] fresh transcript"}
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetTranscriber(transcriber)
 
 	doc := model.Document{RelPath: "audio/cached.mp3", DocType: "audio"}
@@ -110,7 +110,7 @@ func TestGenerateTranscriptRepresentation_TranscriberError(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{err: errors.New("provider down")})
 
 	doc := model.Document{DocID: 9, RelPath: "audio/fail.wav", DocType: "audio"}
@@ -126,7 +126,7 @@ func TestGenerateTranscriptRepresentation_TranscriberError(t *testing.T) {
 func TestReadOrComputeTranscript_PrunesCacheByTTL(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(0, time.Second)
 
 	oldContent := []byte("old-audio")
@@ -187,7 +187,7 @@ func TestTranscriptIngest_EndToEnd_AppearsInAskWithCitations(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})
 
 	doc := model.Document{

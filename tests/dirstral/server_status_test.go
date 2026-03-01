@@ -71,7 +71,7 @@ func TestStatusReturnsErrorWhenMCPUnready(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-nil status error when MCP is unready")
 	}
-	if !strings.Contains(err.Error(), "lighthouse not ready") {
+	if !strings.Contains(err.Error(), "mcp server not ready") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestStatusRemoteReturnsErrorForEmptyEndpoint(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for empty endpoint")
 	}
-	if !strings.Contains(err.Error(), "lighthouse not ready") {
+	if !strings.Contains(err.Error(), "mcp server not ready") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"testing"
@@ -149,5 +151,134 @@ func TestElevenLabsSynthesize_Maps5xxToRetryableFailure(t *testing.T) {
 	}
 	if !providerErr.Retryable {
 		t.Fatal("expected retryable failure for 5xx")
+	}
+}
+
+func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
+	var (
+		gotPath      string
+		gotMethod    string
+		gotAuth      string
+		gotModelID   string
+		gotLanguage  string
+		gotFileBytes []byte
+	)
+
+	rt := elevenLabsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("xi-api-key")
+
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("parse content-type: %v", err)
+		}
+		if mediaType != "multipart/form-data" {
+			t.Fatalf("unexpected media type: %q", mediaType)
+		}
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read multipart part: %v", err)
+			}
+			body, _ := io.ReadAll(part)
+			switch part.FormName() {
+			case "model_id":
+				gotModelID = string(body)
+			case "language_code":
+				gotLanguage = string(body)
+			case "file":
+				gotFileBytes = body
+			}
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"segments":[{"start":0,"text":"hello"},{"start":2.4,"text":"world"}]}`)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})
+
+	client := elevenlabs.NewClient("test-api-key", "voice-default")
+	client.HTTPClient = &http.Client{Transport: rt}
+	client.TranscribeLanguageCode = "en-US"
+
+	text, err := client.Transcribe(context.Background(), "audio/sample.mp3", []byte("fake-audio"))
+	if err != nil {
+		t.Fatalf("Transcribe failed: %v", err)
+	}
+	if text != "[00:00] hello\n[00:02] world" {
+		t.Fatalf("unexpected transcript: %q", text)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("unexpected method: %q", gotMethod)
+	}
+	if gotPath != "/v1/speech-to-text" {
+		t.Fatalf("unexpected request path: %q", gotPath)
+	}
+	if gotAuth != "test-api-key" {
+		t.Fatalf("unexpected xi-api-key header: %q", gotAuth)
+	}
+	if gotModelID != "scribe_v1" {
+		t.Fatalf("unexpected model_id: %q", gotModelID)
+	}
+	if gotLanguage != "en-US" {
+		t.Fatalf("unexpected language_code: %q", gotLanguage)
+	}
+	if string(gotFileBytes) != "fake-audio" {
+		t.Fatalf("unexpected uploaded bytes: %q", string(gotFileBytes))
+	}
+}
+
+func TestElevenLabsTranscribe_FallbacksToTextField(t *testing.T) {
+	rt := elevenLabsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"text":"plain transcript"}`)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})
+
+	client := elevenlabs.NewClient("test-api-key", "voice-default")
+	client.HTTPClient = &http.Client{Transport: rt}
+
+	text, err := client.Transcribe(context.Background(), "audio/sample.mp3", []byte("fake-audio"))
+	if err != nil {
+		t.Fatalf("Transcribe failed: %v", err)
+	}
+	if text != "plain transcript" {
+		t.Fatalf("unexpected transcript: %q", text)
+	}
+}
+
+func TestElevenLabsTranscribe_MapsAuthError(t *testing.T) {
+	rt := elevenLabsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(bytes.NewBufferString("unauthorized")),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})
+
+	client := elevenlabs.NewClient("test-api-key", "voice-default")
+	client.HTTPClient = &http.Client{Transport: rt}
+
+	_, err := client.Transcribe(context.Background(), "audio/sample.mp3", []byte("fake-audio"))
+	if err == nil {
+		t.Fatal("expected provider error")
+	}
+	var providerErr *model.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("expected ProviderError, got %T", err)
+	}
+	if providerErr.Code != "ELEVENLABS_AUTH" {
+		t.Fatalf("unexpected code: %s", providerErr.Code)
 	}
 }

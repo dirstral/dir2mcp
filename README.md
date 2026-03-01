@@ -22,7 +22,7 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
 - Optional facilitator-backed x402 payment gating for `tools/call`
 - Monorepo layout with two binaries:
   - `dir2mcp`: MCP server and indexing/runtime host
-  - `dirstral`: terminal client (Breeze/Tempest/Lighthouse/Settings)
+  - `dirstral`: terminal client (Chat/Voice/Start/Stop MCP Server/Settings)
 
 ## Quickstart
 
@@ -37,12 +37,12 @@ cp .env.example .env        # add your API keys
 # cp .env.example .env.local
 make build
 ./dir2mcp up
-./dirstral breeze
+./dirstral chat
 ```
 
-`DIRSTRAL_MCP_URL` controls where Breeze/Tempest connect (local or remote).
-Lighthouse process management (`lighthouse up|status|down`) is local-only. Use
-`dirstral lighthouse remote` to probe a remote MCP endpoint without process control.
+`DIRSTRAL_MCP_URL` controls where Chat/Voice connect (local or remote).
+Server process management (`server start|status|stop`) is local-only. Use
+`dirstral server remote` to probe a remote MCP endpoint without process control.
 
 Or build each binary directly:
 
@@ -55,6 +55,21 @@ Precedence (highest to lowest): shell environment variables > `.env.local` > `.e
 ### Local development environment
 
 `dir2mcp` automatically loads both `.env` and `.env.local` from the working directory; `.env.local` overrides `.env`, and real shell environment variables take ultimate precedence.
+
+### Hosted demo smoke runbook
+
+For a quick hosted readiness check (issue #19 scope), run:
+
+```bash
+DIR2MCP_DEMO_URL="https://your-host.example/mcp" \
+DIR2MCP_DEMO_TOKEN="<optional-bearer-token>" \
+./scripts/smoke_hosted_demo.sh
+```
+
+What it verifies:
+- `initialize` returns HTTP 200 and a valid `MCP-Session-Id`
+- `tools/list` returns HTTP 200 with tool metadata
+- `tools/call` for `dir2mcp.list_files` returns HTTP 200, or HTTP 402 with `PAYMENT-REQUIRED` when x402 is enabled
 
 ## CLI Commands
 

@@ -8,12 +8,12 @@ import (
 	"net/url"
 	"strings"
 
-	"dir2mcp/internal/dirstral/breeze"
+	"dir2mcp/internal/dirstral/chat"
 	"dir2mcp/internal/dirstral/config"
 	"dir2mcp/internal/dirstral/host"
 	"dir2mcp/internal/dirstral/mcp"
 	"dir2mcp/internal/dirstral/settings"
-	"dir2mcp/internal/dirstral/tempest"
+	"dir2mcp/internal/dirstral/voice"
 	"github.com/spf13/cobra"
 )
 
@@ -38,16 +38,16 @@ func newRootCommand(cfg config.Config) *cobra.Command {
 				}
 				choice := StartChoice(result.Chosen)
 				switch choice {
-				case ChoiceBreeze:
-					printModeHeader("Breeze")
-					printModeFeedback("Breeze", runBreeze(cmd.Context(), cfg))
-				case ChoiceTempest:
-					printModeHeader("Tempest")
+				case ChoiceChat:
+					printModeHeader("Chat")
+					printModeFeedback("Chat", runChat(cmd.Context(), cfg))
+				case ChoiceVoice:
+					printModeHeader("Voice")
 					mcpURL := ResolveMCPURL(cfg.MCP.URL, "", false, cfg.MCP.Transport)
-					opts := BuildTempestOptions(cfg, mcpURL, cfg.ElevenLabs.Voice, "", false, cfg.Verbose, cfg.ElevenLabs.BaseURL)
-					printModeFeedback("Tempest", tempest.Run(cmd.Context(), opts))
-				case ChoiceLighthouse:
-					if err := runLighthouseMenu(cmd.Context(), cfg); err != nil {
+					opts := BuildVoiceOptions(cfg, mcpURL, cfg.ElevenLabs.Voice, "", false, cfg.Verbose, cfg.ElevenLabs.BaseURL)
+					printModeFeedback("Voice", voice.Run(cmd.Context(), opts))
+				case ChoiceServer:
+					if err := runServerMenu(cmd.Context(), cfg); err != nil {
 						printUIError(err)
 					}
 				case ChoiceSettings:
@@ -67,9 +67,9 @@ func newRootCommand(cfg config.Config) *cobra.Command {
 		},
 	}
 
-	root.AddCommand(newBreezeCommand(cfg))
-	root.AddCommand(newTempestCommand(cfg))
-	root.AddCommand(newLighthouseCommand(cfg))
+	root.AddCommand(newChatCommand(cfg))
+	root.AddCommand(newVoiceCommand(cfg))
+	root.AddCommand(newServerCommand(cfg))
 	root.AddCommand(newManifestCommand(cfg))
 	return root
 }
@@ -131,15 +131,15 @@ func printModeFeedbackTo(mode string, err error, destination string) {
 	printReturnTo(destination)
 }
 
-func newBreezeCommand(cfg config.Config) *cobra.Command {
-	options := breeze.Options{MCPURL: cfg.MCP.URL, Transport: cfg.MCP.Transport, Model: cfg.Model, Verbose: cfg.Verbose, JSON: false}
+func newChatCommand(cfg config.Config) *cobra.Command {
+	options := chat.Options{MCPURL: cfg.MCP.URL, Transport: cfg.MCP.Transport, Model: cfg.Model, Verbose: cfg.Verbose, JSON: false}
 	cmd := &cobra.Command{
-		Use:   "breeze",
-		Short: "Start text-to-text mode",
+		Use:   "chat",
+		Short: "Start chat mode",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runOptions := options
 			runOptions.MCPURL = ResolveMCPURL(cfg.MCP.URL, options.MCPURL, cmd.Flags().Changed("mcp"), runOptions.Transport)
-			return breeze.Run(cmd.Context(), runOptions)
+			return chat.Run(cmd.Context(), runOptions)
 		},
 	}
 	cmd.Flags().StringVar(&options.MCPURL, "mcp", options.MCPURL, "MCP server URL (streamable-http) or stdio command")
@@ -150,30 +150,30 @@ func newBreezeCommand(cfg config.Config) *cobra.Command {
 	return cmd
 }
 
-func newTempestCommand(cfg config.Config) *cobra.Command {
+func newVoiceCommand(cfg config.Config) *cobra.Command {
 	var mcpURL string
-	var voice string
+	var voiceID string
 	var device string
 	var mute bool
 	var verbose bool
 	var baseURL string
 
 	mcpURL = cfg.MCP.URL
-	voice = cfg.ElevenLabs.Voice
+	voiceID = cfg.ElevenLabs.Voice
 	verbose = cfg.Verbose
 	baseURL = cfg.ElevenLabs.BaseURL
 
 	cmd := &cobra.Command{
-		Use:   "tempest",
+		Use:   "voice",
 		Short: "Start voice mode",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolvedMCPURL := ResolveMCPURL(cfg.MCP.URL, mcpURL, cmd.Flags().Changed("mcp"), cfg.MCP.Transport)
-			opts := BuildTempestOptions(cfg, resolvedMCPURL, voice, device, mute, verbose, baseURL)
-			return tempest.Run(cmd.Context(), opts)
+			opts := BuildVoiceOptions(cfg, resolvedMCPURL, voiceID, device, mute, verbose, baseURL)
+			return voice.Run(cmd.Context(), opts)
 		},
 	}
 	cmd.Flags().StringVar(&mcpURL, "mcp", mcpURL, "MCP server URL")
-	cmd.Flags().StringVar(&voice, "voice", voice, "Voice id or name")
+	cmd.Flags().StringVar(&voiceID, "voice", voiceID, "Voice id or name")
 	cmd.Flags().StringVar(&device, "device", "", "Audio input device")
 	cmd.Flags().BoolVar(&mute, "mute", false, "Disable TTS playback")
 	cmd.Flags().BoolVar(&verbose, "verbose", verbose, "Verbose logging")
@@ -181,7 +181,7 @@ func newTempestCommand(cfg config.Config) *cobra.Command {
 	return cmd
 }
 
-func newLighthouseCommand(cfg config.Config) *cobra.Command {
+func newServerCommand(cfg config.Config) *cobra.Command {
 	var dir string
 	var port int
 	var listen string
@@ -189,9 +189,9 @@ func newLighthouseCommand(cfg config.Config) *cobra.Command {
 	var asJSON bool
 	var remoteMCP string
 
-	cmd := &cobra.Command{Use: "lighthouse", Short: "Manage local host or probe remote MCP"}
-	up := &cobra.Command{
-		Use:   "up",
+	cmd := &cobra.Command{Use: "server", Short: "Start/stop local host or probe remote MCP"}
+	start := &cobra.Command{
+		Use:   "start",
 		Short: "Start local dir2mcp and stream logs",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts := host.UpOptions{
@@ -204,16 +204,16 @@ func newLighthouseCommand(cfg config.Config) *cobra.Command {
 			return host.Up(cmd.Context(), opts)
 		},
 	}
-	up.Flags().StringVar(&dir, "dir", "", "Directory to serve/index")
-	up.Flags().IntVar(&port, "port", 0, "Port for dir2mcp listen")
-	up.Flags().StringVar(&listen, "listen", cfg.Host.Listen, "Listen host:port")
-	up.Flags().StringVar(&mcpPath, "mcp-path", cfg.Host.MCPPath, "MCP endpoint path")
-	up.Flags().BoolVar(&asJSON, "json", false, "Pass --json to dir2mcp up")
+	start.Flags().StringVar(&dir, "dir", "", "Directory to serve/index")
+	start.Flags().IntVar(&port, "port", 0, "Port for dir2mcp listen")
+	start.Flags().StringVar(&listen, "listen", cfg.Host.Listen, "Listen host:port")
+	start.Flags().StringVar(&mcpPath, "mcp-path", cfg.Host.MCPPath, "MCP endpoint path")
+	start.Flags().BoolVar(&asJSON, "json", false, "Pass --json to dir2mcp up")
 
 	status := &cobra.Command{Use: "status", Short: "Show local host status", RunE: func(cmd *cobra.Command, args []string) error {
 		return host.Status()
 	}}
-	down := &cobra.Command{Use: "down", Short: "Stop local managed dir2mcp process", RunE: func(cmd *cobra.Command, args []string) error {
+	stop := &cobra.Command{Use: "stop", Short: "Stop local managed dir2mcp process", RunE: func(cmd *cobra.Command, args []string) error {
 		return host.Down()
 	}}
 	remote := &cobra.Command{Use: "remote", Short: "Probe remote MCP endpoint health", RunE: func(cmd *cobra.Command, args []string) error {
@@ -222,7 +222,7 @@ func newLighthouseCommand(cfg config.Config) *cobra.Command {
 	remoteMCP = cfg.MCP.URL
 	remote.Flags().StringVar(&remoteMCP, "mcp", remoteMCP, "Remote MCP URL (default: DIRSTRAL_MCP_URL/config mcp.url)")
 
-	cmd.AddCommand(up, status, down, remote)
+	cmd.AddCommand(start, status, stop, remote)
 	return cmd
 }
 
@@ -275,9 +275,9 @@ func newManifestCommand(cfg config.Config) *cobra.Command {
 	return cmd
 }
 
-func runBreeze(ctx context.Context, cfg config.Config) error {
+func runChat(ctx context.Context, cfg config.Config) error {
 	mcpURL := ResolveMCPURL(cfg.MCP.URL, "", false, cfg.MCP.Transport)
-	return breeze.Run(ctx, breeze.Options{MCPURL: mcpURL, Transport: cfg.MCP.Transport, Model: cfg.Model, Verbose: cfg.Verbose})
+	return chat.Run(ctx, chat.Options{MCPURL: mcpURL, Transport: cfg.MCP.Transport, Model: cfg.Model, Verbose: cfg.Verbose})
 }
 
 func ResolveMCPURL(defaultURL, explicitURL string, explicitOverride bool, transport string) string {
@@ -323,21 +323,21 @@ func shouldPreferManagedHost(defaultURL string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func BuildTempestOptions(cfg config.Config, mcpURL, voice, device string, mute, verbose bool, baseURL string) tempest.Options {
+func BuildVoiceOptions(cfg config.Config, mcpURL, voiceName, device string, mute, verbose bool, baseURL string) voice.Options {
 	if mcpURL == "" {
 		mcpURL = cfg.MCP.URL
 	}
-	if voice == "" {
-		voice = cfg.ElevenLabs.Voice
+	if voiceName == "" {
+		voiceName = cfg.ElevenLabs.Voice
 	}
 	if baseURL == "" {
 		baseURL = cfg.ElevenLabs.BaseURL
 	}
-	return tempest.Options{
+	return voice.Options{
 		MCPURL:    mcpURL,
 		Transport: cfg.MCP.Transport,
 		Model:     cfg.Model,
-		Voice:     voice,
+		Voice:     voiceName,
 		Device:    device,
 		Mute:      mute,
 		Verbose:   verbose,
@@ -345,52 +345,52 @@ func BuildTempestOptions(cfg config.Config, mcpURL, voice, device string, mute, 
 	}
 }
 
-func runLighthouseMenu(ctx context.Context, cfg config.Config) error {
+func runServerMenu(ctx context.Context, cfg config.Config) error {
 	for {
-		result, err := RunMenu(screenLighthouse)
+		result, err := RunMenu(screenServer)
 		if err != nil {
 			return err
 		}
 		switch result.Chosen {
-		case lighthouseActionStart:
-			printModeHeader("Lighthouse / Start Server")
+		case serverActionStart:
+			printModeHeader("Start/Stop MCP Server / Start MCP Server")
 			if err := host.UpDetached(ctx, host.UpOptions{Listen: cfg.Host.Listen, MCPPath: cfg.Host.MCPPath}); err != nil {
-				printModeFeedbackTo("Lighthouse start", err, "Lighthouse menu")
+				printModeFeedbackTo("MCP server start", err, "Start/Stop MCP Server menu")
 				continue
 			}
 			if health := host.CheckHealth(); strings.TrimSpace(health.MCPURL) != "" {
-				fmt.Println(statusLine("Lighthouse", "Active endpoint: "+health.MCPURL))
+				fmt.Println(statusLine("MCP Server", "Active endpoint: "+health.MCPURL))
 			}
-			fmt.Println(styleMuted.Render("Server started in background. Use Status for readiness details."))
-			printReturnTo("Lighthouse menu")
-		case lighthouseActionStatus:
-			printModeHeader("Lighthouse / Server Status")
+			fmt.Println(styleMuted.Render("MCP server started in background. Use Status for readiness details."))
+			printReturnTo("Start/Stop MCP Server menu")
+		case serverActionStatus:
+			printModeHeader("Start/Stop MCP Server / Status")
 			if err := host.Status(); err != nil {
-				printModeFeedbackTo("Lighthouse status", err, "Lighthouse menu")
+				printModeFeedbackTo("MCP server status", err, "Start/Stop MCP Server menu")
 				continue
 			}
-			printReturnTo("Lighthouse menu")
-		case lighthouseActionLogs:
-			printModeHeader("Lighthouse / Logs")
-			if err := runLogViewer(); err != nil {
-				printModeFeedbackTo("Lighthouse logs", err, "Lighthouse menu")
+			printReturnTo("Start/Stop MCP Server menu")
+		case serverActionLogs:
+			printModeHeader("Start/Stop MCP Server / Logs")
+			if err := runServerLogViewer(); err != nil {
+				printModeFeedbackTo("MCP server logs", err, "Start/Stop MCP Server menu")
 				continue
 			}
-			printReturnTo("Lighthouse menu")
-		case lighthouseActionRemote:
-			printModeHeader("Lighthouse / Remote MCP")
+			printReturnTo("Start/Stop MCP Server menu")
+		case serverActionRemote:
+			printModeHeader("Start/Stop MCP Server / Remote")
 			if err := host.StatusRemote(ctx, strings.TrimSpace(cfg.MCP.URL)); err != nil {
-				printModeFeedbackTo("Lighthouse remote", err, "Lighthouse menu")
+				printModeFeedbackTo("MCP server remote", err, "Start/Stop MCP Server menu")
 				continue
 			}
-			printReturnTo("Lighthouse menu")
-		case lighthouseActionStop:
-			printModeHeader("Lighthouse / Stop Server")
+			printReturnTo("Start/Stop MCP Server menu")
+		case serverActionStop:
+			printModeHeader("Start/Stop MCP Server / Stop MCP Server")
 			if err := host.Down(); err != nil {
-				printModeFeedbackTo("Lighthouse stop", err, "Lighthouse menu")
+				printModeFeedbackTo("MCP server stop", err, "Start/Stop MCP Server menu")
 				continue
 			}
-			printReturnTo("Lighthouse menu")
+			printReturnTo("Start/Stop MCP Server menu")
 		default:
 			return nil
 		}

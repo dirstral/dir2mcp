@@ -20,8 +20,8 @@ type appResult struct {
 type screenID int
 
 const (
-	screenStart      screenID = iota
-	screenLighthouse screenID = iota
+	screenStart  screenID = iota
+	screenServer screenID = iota
 )
 
 // appModel is the top-level bubbletea model that manages screen transitions.
@@ -37,8 +37,8 @@ type appModel struct {
 func newAppModel(screen screenID) appModel {
 	var cfg MenuConfig
 	switch screen {
-	case screenLighthouse:
-		cfg = LighthouseMenuConfig()
+	case screenServer:
+		cfg = ServerMenuConfig()
 	default:
 		cfg = StartMenuConfig()
 	}
@@ -52,19 +52,19 @@ func (m appModel) Init() tea.Cmd {
 	// Kick off both the initial status check and the menu reveal animation.
 	menuInit := m.menu.Init()
 	if m.screen == screenStart {
-		return tea.Batch(pollLighthouseStatus, menuInit, tickStartupTip())
+		return tea.Batch(pollServerStatus, menuInit, tickStartupTip())
 	}
-	return tea.Batch(pollLighthouseStatus, menuInit)
+	return tea.Batch(pollServerStatus, menuInit)
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case lighthouseStatusMsg:
+	case serverStatusMsg:
 		m.statusLoaded = true
 		m.serverRunning = msg.Health.Alive
 		m.updateDynamicItems(msg)
 		// Schedule next poll.
-		return m, tickLighthouseStatus()
+		return m, tickServerStatus()
 	case tipTickMsg:
 		if m.screen != screenStart {
 			return m, nil
@@ -92,19 +92,19 @@ func (m *appModel) refreshStartupIntro() {
 		return
 	}
 	m.menu.SetIntro([]string{
-		"Launch mode: Breeze (chat), Tempest (voice), Lighthouse (host MCP)",
+		"Launch mode: Chat (chat), Voice (voice), Start/Stop MCP Server (host MCP)",
 		StartupTip(m.tipIndex),
 	})
 }
 
-// updateDynamicItems adjusts menu items based on lighthouse status.
-func (m *appModel) updateDynamicItems(msg lighthouseStatusMsg) {
+// updateDynamicItems adjusts menu items based on server status.
+func (m *appModel) updateDynamicItems(msg serverStatusMsg) {
 	switch m.screen {
 	case screenStart:
-		// Add a status badge to the Lighthouse item.
+		// Add a status badge to the server item.
 		items := StartMenuConfig().Items
 		for i := range items {
-			if items[i].Value == string(ChoiceLighthouse) {
+			if items[i].Value == string(ChoiceServer) {
 				if !m.statusLoaded {
 					items[i].Badge = "..."
 				} else if msg.Health.Alive {
@@ -118,34 +118,34 @@ func (m *appModel) updateDynamicItems(msg lighthouseStatusMsg) {
 		}
 		m.menu.SetItems(items)
 
-	case screenLighthouse:
+	case screenServer:
 		// Show/hide Start/Stop based on current state.
-		m.menu.SetIntro(buildLighthouseIntro(msg.Health))
-		m.menu.SetItems(lighthouseItemsForHealth(msg.Health))
+		m.menu.SetIntro(buildServerIntro(msg.Health))
+		m.menu.SetItems(serverItemsForHealth(msg.Health))
 	}
 }
 
-func lighthouseItemsForHealth(health host.HealthInfo) []MenuItem {
+func serverItemsForHealth(health host.HealthInfo) []MenuItem {
 	if health.Alive {
 		return []MenuItem{
-			{Label: lighthouseActionStop, Description: "Terminate managed dir2mcp", Value: lighthouseActionStop},
-			{Label: lighthouseActionStatus, Description: "Check process and endpoint health", Value: lighthouseActionStatus},
-			{Label: lighthouseActionRemote, Description: "Probe configured remote MCP endpoint", Value: lighthouseActionRemote},
-			{Label: lighthouseActionLogs, Description: "Tail dir2mcp output", Value: lighthouseActionLogs},
-			{Label: lighthouseActionBack, Description: "Return to main menu", Value: lighthouseActionBack},
+			{Label: serverActionStop, Description: "Terminate managed dir2mcp", Value: serverActionStop},
+			{Label: serverActionStatus, Description: "Check process and endpoint health", Value: serverActionStatus},
+			{Label: serverActionRemote, Description: "Probe configured remote MCP endpoint", Value: serverActionRemote},
+			{Label: serverActionLogs, Description: "Tail dir2mcp output", Value: serverActionLogs},
+			{Label: serverActionBack, Description: "Return to main menu", Value: serverActionBack},
 		}
 	}
 
 	return []MenuItem{
-		{Label: lighthouseActionStart, Description: "Launch dir2mcp in background", Value: lighthouseActionStart},
-		{Label: lighthouseActionStatus, Description: "Check process and endpoint health", Value: lighthouseActionStatus},
-		{Label: lighthouseActionRemote, Description: "Probe configured remote MCP endpoint", Value: lighthouseActionRemote},
-		{Label: lighthouseActionLogs, Description: "Tail dir2mcp output", Value: lighthouseActionLogs},
-		{Label: lighthouseActionBack, Description: "Return to main menu", Value: lighthouseActionBack},
+		{Label: serverActionStart, Description: "Launch dir2mcp in background", Value: serverActionStart},
+		{Label: serverActionStatus, Description: "Check process and endpoint health", Value: serverActionStatus},
+		{Label: serverActionRemote, Description: "Probe configured remote MCP endpoint", Value: serverActionRemote},
+		{Label: serverActionLogs, Description: "Tail dir2mcp output", Value: serverActionLogs},
+		{Label: serverActionBack, Description: "Return to main menu", Value: serverActionBack},
 	}
 }
 
-func buildLighthouseIntro(health host.HealthInfo) []string {
+func buildServerIntro(health host.HealthInfo) []string {
 	if !health.Found {
 		return []string{
 			"Manage local dir2mcp host process (remote checks use DIRSTRAL_MCP_URL).",
@@ -201,8 +201,8 @@ func RunMenu(screen screenID) (appResult, error) {
 func runFallbackMenu(screen screenID) (appResult, error) {
 	var cfg MenuConfig
 	switch screen {
-	case screenLighthouse:
-		cfg = LighthouseMenuConfig()
+	case screenServer:
+		cfg = ServerMenuConfig()
 	default:
 		cfg = StartMenuConfig()
 	}

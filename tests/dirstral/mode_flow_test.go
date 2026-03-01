@@ -12,14 +12,14 @@ import (
 	"testing"
 
 	"dir2mcp/internal/dirstral/app"
-	"dir2mcp/internal/dirstral/breeze"
+	"dir2mcp/internal/dirstral/chat"
 	"dir2mcp/internal/dirstral/config"
 	"dir2mcp/internal/dirstral/host"
 	"dir2mcp/internal/dirstral/mcp"
 	"dir2mcp/internal/protocol"
 )
 
-func TestModeFlowSmokeLighthouseToBreezeToTempestHandoff(t *testing.T) {
+func TestModeFlowSmokeServerToChatToVoiceHandoff(t *testing.T) {
 	setTestConfigDir(t)
 	_ = host.ClearState()
 	t.Cleanup(func() {
@@ -40,33 +40,33 @@ func TestModeFlowSmokeLighthouseToBreezeToTempestHandoff(t *testing.T) {
 
 	health := host.CheckHealth()
 	if !health.Ready {
-		t.Fatalf("host segment: expected active lighthouse endpoint to be ready, got ready=%v reachable=%v mcp_ready=%v detail=%q", health.Ready, health.Reachable, health.MCPReady, health.LastError)
+		t.Fatalf("host segment: expected active server endpoint to be ready, got ready=%v reachable=%v mcp_ready=%v detail=%q", health.Ready, health.Reachable, health.MCPReady, health.LastError)
 	}
 
-	breezeURL := app.ResolveMCPURL(staleConfigEndpoint, "", false, "streamable-http")
-	if breezeURL != activeEndpoint {
-		t.Fatalf("breeze segment: expected handoff endpoint %q from lighthouse, got %q", activeEndpoint, breezeURL)
+	chatURL := app.ResolveMCPURL(staleConfigEndpoint, "", false, "streamable-http")
+	if chatURL != activeEndpoint {
+		t.Fatalf("chat segment: expected handoff endpoint %q from server, got %q", activeEndpoint, chatURL)
 	}
 
-	client := mcp.NewWithTransport(breezeURL, "streamable-http", false)
+	client := mcp.NewWithTransport(chatURL, "streamable-http", false)
 	defer func() {
 		_ = client.Close()
 	}()
-	requireNoErrSegment(t, "breeze", client.Initialize(context.Background()))
+	requireNoErrSegment(t, "chat", client.Initialize(context.Background()))
 
 	in := bytes.NewBufferString("/list src\n/quit\n")
 	out := &bytes.Buffer{}
-	breezeOpts := breeze.Options{
-		MCPURL:    breezeURL,
+	chatOpts := chat.Options{
+		MCPURL:    chatURL,
 		Transport: "streamable-http",
 		Model:     "mistral-small-latest",
 		JSON:      true,
 	}
-	requireNoErrSegment(t, "breeze", breeze.RunJSONLoopWithIO(context.Background(), client, breezeOpts, in, out))
+	requireNoErrSegment(t, "chat", chat.RunJSONLoopWithIO(context.Background(), client, chatOpts, in, out))
 
-	events := decodeModeFlowEvents(t, "breeze", out.Bytes())
+	events := decodeModeFlowEvents(t, "chat", out.Bytes())
 	if len(events) < 3 {
-		t.Fatalf("breeze segment: expected at least 3 events (session/tool_result/exit), got %d", len(events))
+		t.Fatalf("chat segment: expected at least 3 events (session/tool_result/exit), got %d", len(events))
 	}
 
 	var sawToolResult bool
@@ -82,27 +82,27 @@ func TestModeFlowSmokeLighthouseToBreezeToTempestHandoff(t *testing.T) {
 		}
 	}
 	if !sawToolResult {
-		t.Fatalf("breeze segment: expected tool_result for %s", protocol.ToolNameListFiles)
+		t.Fatalf("chat segment: expected tool_result for %s", protocol.ToolNameListFiles)
 	}
 
 	if !calls.HasToolCall(protocol.ToolNameListFiles) {
-		t.Fatalf("breeze segment: expected MCP tools/call for %s, got calls=%v", protocol.ToolNameListFiles, calls.ToolCalls())
+		t.Fatalf("chat segment: expected MCP tools/call for %s, got calls=%v", protocol.ToolNameListFiles, calls.ToolCalls())
 	}
 
 	cfg := config.Default()
 	cfg.MCP.URL = staleConfigEndpoint
 
-	tempestURL := app.ResolveMCPURL(cfg.MCP.URL, "", false, cfg.MCP.Transport)
-	if tempestURL != activeEndpoint {
-		t.Fatalf("tempest segment: expected handoff endpoint %q from lighthouse, got %q", activeEndpoint, tempestURL)
+	voiceURL := app.ResolveMCPURL(cfg.MCP.URL, "", false, cfg.MCP.Transport)
+	if voiceURL != activeEndpoint {
+		t.Fatalf("voice segment: expected handoff endpoint %q from server, got %q", activeEndpoint, voiceURL)
 	}
 
-	tempestOpts := app.BuildTempestOptions(cfg, tempestURL, "", "", true, false, "")
-	if tempestOpts.MCPURL != activeEndpoint {
-		t.Fatalf("tempest segment: expected options MCPURL %q, got %q", activeEndpoint, tempestOpts.MCPURL)
+	voiceOpts := app.BuildVoiceOptions(cfg, voiceURL, "", "", true, false, "")
+	if voiceOpts.MCPURL != activeEndpoint {
+		t.Fatalf("voice segment: expected options MCPURL %q, got %q", activeEndpoint, voiceOpts.MCPURL)
 	}
-	if tempestOpts.Transport != cfg.MCP.Transport {
-		t.Fatalf("tempest segment: expected transport %q, got %q", cfg.MCP.Transport, tempestOpts.Transport)
+	if voiceOpts.Transport != cfg.MCP.Transport {
+		t.Fatalf("voice segment: expected transport %q, got %q", cfg.MCP.Transport, voiceOpts.Transport)
 	}
 }
 
@@ -127,19 +127,19 @@ func TestModeFlowPrefersActiveEndpointOverStaleConfig(t *testing.T) {
 
 	health := host.CheckHealth()
 	if !health.Ready {
-		t.Fatalf("host segment: expected lighthouse ready for runtime endpoint preference check, got ready=%v detail=%q", health.Ready, health.LastError)
+		t.Fatalf("host segment: expected server ready for runtime endpoint preference check, got ready=%v detail=%q", health.Ready, health.LastError)
 	}
 
 	resolved := app.ResolveMCPURL(staleConfigEndpoint, "", false, "streamable-http")
 	if resolved != activeEndpoint {
-		t.Fatalf("breeze segment: expected runtime endpoint %q to override stale config %q, got %q", activeEndpoint, staleConfigEndpoint, resolved)
+		t.Fatalf("chat segment: expected runtime endpoint %q to override stale config %q, got %q", activeEndpoint, staleConfigEndpoint, resolved)
 	}
 
 	cfg := config.Default()
 	cfg.MCP.URL = staleConfigEndpoint
-	tempestOpts := app.BuildTempestOptions(cfg, resolved, "", "", true, false, "")
-	if tempestOpts.MCPURL != activeEndpoint {
-		t.Fatalf("tempest segment: expected runtime endpoint %q to override stale config %q, got %q", activeEndpoint, staleConfigEndpoint, tempestOpts.MCPURL)
+	voiceOpts := app.BuildVoiceOptions(cfg, resolved, "", "", true, false, "")
+	if voiceOpts.MCPURL != activeEndpoint {
+		t.Fatalf("voice segment: expected runtime endpoint %q to override stale config %q, got %q", activeEndpoint, staleConfigEndpoint, voiceOpts.MCPURL)
 	}
 }
 

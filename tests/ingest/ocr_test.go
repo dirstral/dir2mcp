@@ -86,7 +86,7 @@ func (s *fakeIngestStore) WithTx(ctx context.Context, fn func(tx model.Represent
 func TestGenerateOCRMarkdownRepresentation_PersistsPagedChunks(t *testing.T) {
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetOCR(&fakeOCR{text: "page-1 text\fpage-2 text"})
 
 	doc := model.Document{
@@ -137,7 +137,7 @@ func TestReadOrComputeOCR_UsesCache(t *testing.T) {
 	}
 
 	ocr := &fakeOCR{text: "fresh ocr"}
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCR(ocr)
 	doc := model.Document{RelPath: "docs/spec.pdf"}
 
@@ -155,7 +155,7 @@ func TestReadOrComputeOCR_UsesCache(t *testing.T) {
 
 func TestReadOrComputeOCR_PrunesCacheByMaxBytes(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(10, 0)
 
 	// create two cache entries, one old and one newer.  the combined size (11
@@ -196,7 +196,7 @@ func TestReadOrComputeOCR_PrunesCacheByMaxBytes(t *testing.T) {
 
 func TestReadOrComputeOCR_PrunesCacheByTTL(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(0, time.Second)
 
 	contentOld := []byte("old")
@@ -235,7 +235,7 @@ func TestReadOrComputeOCR_PrunesCacheByTTL(t *testing.T) {
 
 func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(10, time.Second)
 
 	cacheDir := filepath.Join(stateDir, "cache", "ocr")
@@ -328,7 +328,7 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 	// set up a cache with two entries that would exceed a tiny maxBytes limit
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(5, 0)  // total limit only 5 bytes
 	svc.SetOCRCachePruneEvery(2) // only enforce every two writes
 
@@ -390,7 +390,7 @@ func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 
 func TestClearOCRCache(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	// seed one file
 	if err := os.MkdirAll(filepath.Join(stateDir, "cache", "ocr"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -413,7 +413,7 @@ func TestEnforceOCRCachePolicy_SkipsStatError(t *testing.T) {
 	// eviction of unrelated files. this regression test ensures we no
 	// longer remove good data in that scenario.
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(5, 0) // very small size limit so evictions are easy
 
 	cacheDir := filepath.Join(stateDir, "cache", "ocr")
@@ -461,7 +461,7 @@ func TestEnforceOCRCachePolicy_SkipsStatError(t *testing.T) {
 
 func TestReadOrComputeOCR_EnforceErrorIgnored(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(1024, 0)
 	// make enforcement fail
 	svc.SetOCRCacheEnforceHook(func(dir string) error { return fmt.Errorf("simulated failure") })

@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/dirstral/breeze"
+	"dir2mcp/internal/dirstral/chat"
 	"dir2mcp/internal/protocol"
 )
 
 func TestPlannerModelProfileAffectsStrategyAndSynthesis(t *testing.T) {
-	largePlan, err := breeze.PlanTurn("explain indexing", "mistral-large-latest")
+	largePlan, err := chat.PlanTurn("explain indexing", "mistral-large-latest")
 	if err != nil {
 		t.Fatalf("large plan error: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestPlannerModelProfileAffectsStrategyAndSynthesis(t *testing.T) {
 		t.Fatalf("expected analytical synthesis for large model, got %q", largePlan.Synthesis)
 	}
 
-	smallPlan, err := breeze.PlanTurn("explain indexing", "mistral-small-latest")
+	smallPlan, err := chat.PlanTurn("explain indexing", "mistral-small-latest")
 	if err != nil {
 		t.Fatalf("small plan error: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestPlannerModelProfileAffectsStrategyAndSynthesis(t *testing.T) {
 }
 
 func TestPlannerSupportsClearCommand(t *testing.T) {
-	plan, err := breeze.PlanTurn("/clear", "mistral-small-latest")
+	plan, err := chat.PlanTurn("/clear", "mistral-small-latest")
 	if err != nil {
 		t.Fatalf("plan error: %v", err)
 	}
@@ -57,19 +57,19 @@ func TestParseInputMapsCommonCommands(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		want  breeze.ParsedInput
+		want  chat.ParsedInput
 	}{
-		{name: "quit", input: "/quit", want: breeze.ParsedInput{Quit: true}},
-		{name: "help", input: "/help", want: breeze.ParsedInput{Help: true}},
-		{name: "clear", input: "/clear", want: breeze.ParsedInput{Clear: true}},
-		{name: "transcribe", input: "/transcribe file.mp3", want: breeze.ParsedInput{Tool: protocol.ToolNameTranscribe, Args: map[string]any{"rel_path": "file.mp3"}}},
-		{name: "transcribe_and_ask", input: "/transcribe_and_ask file.mp3 what?", want: breeze.ParsedInput{Tool: protocol.ToolNameTranscribeAndAsk, Args: map[string]any{"rel_path": "file.mp3", "question": "what?", "k": 6}}}, // Assuming mistral-small-latest is used with k=6
-		{name: "annotate", input: "/annotate file.txt {\"type\":\"object\"}", want: breeze.ParsedInput{Tool: protocol.ToolNameAnnotate, Args: map[string]any{"rel_path": "file.txt", "schema_json": map[string]any{"type": "object"}}}},
+		{name: "quit", input: "/quit", want: chat.ParsedInput{Quit: true}},
+		{name: "help", input: "/help", want: chat.ParsedInput{Help: true}},
+		{name: "clear", input: "/clear", want: chat.ParsedInput{Clear: true}},
+		{name: "transcribe", input: "/transcribe file.mp3", want: chat.ParsedInput{Tool: protocol.ToolNameTranscribe, Args: map[string]any{"rel_path": "file.mp3"}}},
+		{name: "transcribe_and_ask", input: "/transcribe_and_ask file.mp3 what?", want: chat.ParsedInput{Tool: protocol.ToolNameTranscribeAndAsk, Args: map[string]any{"rel_path": "file.mp3", "question": "what?", "k": 6}}}, // Assuming mistral-small-latest is used with k=6
+		{name: "annotate", input: "/annotate file.txt {\"type\":\"object\"}", want: chat.ParsedInput{Tool: protocol.ToolNameAnnotate, Args: map[string]any{"rel_path": "file.txt", "schema_json": map[string]any{"type": "object"}}}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := breeze.ParseInput(tc.input, "mistral-small-latest")
+			got := chat.ParseInput(tc.input, "mistral-small-latest")
 			if got.Quit != tc.want.Quit || got.Help != tc.want.Help || got.Clear != tc.want.Clear || got.Tool != tc.want.Tool {
 				t.Fatalf("unexpected parsed flags: got %+v want %+v", got, tc.want)
 			}
@@ -83,23 +83,23 @@ func TestParseInputMapsCommonCommands(t *testing.T) {
 }
 
 func TestParseInputOpenWithoutPathFallsBackToHelp(t *testing.T) {
-	got := breeze.ParseInput("/open", "mistral-small-latest")
+	got := chat.ParseInput("/open", "mistral-small-latest")
 	if !got.Help {
 		t.Fatalf("expected /open without path to map to help, got %+v", got)
 	}
 }
 
 func TestRequiresApprovalPolicy(t *testing.T) {
-	if breeze.RequiresApproval(protocol.ToolNameSearch) {
+	if chat.RequiresApproval(protocol.ToolNameSearch) {
 		t.Fatal("search should be auto-approved")
 	}
-	if !breeze.RequiresApproval("dir2mcp.delete_everything") {
+	if !chat.RequiresApproval("dir2mcp.delete_everything") {
 		t.Fatal("unknown tools should require approval")
 	}
 }
 
 func TestExecutePlanEmptyReturnsNoOutput(t *testing.T) {
-	res, err := breeze.ExecutePlan(context.Background(), nil, breeze.TurnPlan{})
+	res, err := chat.ExecutePlan(context.Background(), nil, chat.TurnPlan{})
 	if err != nil {
 		t.Fatalf("expected no error for empty plan, got %v", err)
 	}

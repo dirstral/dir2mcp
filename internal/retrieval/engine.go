@@ -19,6 +19,9 @@ import (
 
 type engineRetriever interface {
 	Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error)
+	SetRAGSystemPrompt(prompt string)
+	SetMaxContextChars(maxChars int)
+	SetOversampleFactor(factor int)
 }
 
 type embeddedChunkMetadataSource interface {
@@ -37,6 +40,21 @@ type Engine struct {
 	closeFns   []func()
 	closeOnce  sync.Once
 	askTimeout time.Duration
+}
+
+// NewEngineForTesting creates an Engine with a caller-supplied retriever.
+// It is primarily used by black-box tests in tests/retrieval to assert
+// runtime behavior without requiring full on-disk state bootstrap.
+func NewEngineForTesting(retriever interface {
+	Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error)
+	SetRAGSystemPrompt(prompt string)
+	SetMaxContextChars(maxChars int)
+	SetOversampleFactor(factor int)
+}) *Engine {
+	return &Engine{
+		retriever:  retriever,
+		askTimeout: defaultEngineAskTimeout,
+	}
 }
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
@@ -96,6 +114,9 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 	svc.SetRootDir(effective.RootDir)
 	svc.SetStateDir(effective.StateDir)
 	svc.SetProtocolVersion(effective.ProtocolVersion)
+	svc.SetRAGSystemPrompt(effective.RAGSystemPrompt)
+	svc.SetMaxContextChars(effective.RAGMaxContextChars)
+	svc.SetOversampleFactor(effective.RAGOversampleFactor)
 
 	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
 		preloadCtx, cancel := context.WithTimeout(ctx, defaultEnginePreloadTimeout)
@@ -194,6 +215,15 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	}
 	if v := strings.TrimSpace(override.ChatModel); v != "" {
 		merged.ChatModel = v
+	}
+	if v := strings.TrimSpace(override.RAGSystemPrompt); v != "" {
+		merged.RAGSystemPrompt = v
+	}
+	if override.RAGMaxContextChars > 0 {
+		merged.RAGMaxContextChars = override.RAGMaxContextChars
+	}
+	if override.RAGOversampleFactor > 0 {
+		merged.RAGOversampleFactor = override.RAGOversampleFactor
 	}
 
 	return merged
@@ -302,6 +332,30 @@ func (e *Engine) AskWithContext(ctx context.Context, question string, opts AskOp
 // previous versions (timeout-only semantics).
 func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
 	return e.AskWithContext(context.Background(), question, opts)
+}
+
+// SetSystemPrompt updates the generation system prompt used by Ask.
+func (e *Engine) SetSystemPrompt(prompt string) {
+	if e == nil || e.retriever == nil {
+		return
+	}
+	e.retriever.SetRAGSystemPrompt(prompt)
+}
+
+// SetMaxContextChars updates the context budget used in prompt assembly.
+func (e *Engine) SetMaxContextChars(maxChars int) {
+	if e == nil || e.retriever == nil {
+		return
+	}
+	e.retriever.SetMaxContextChars(maxChars)
+}
+
+// SetOversampleFactor updates retrieval fanout during index search.
+func (e *Engine) SetOversampleFactor(factor int) {
+	if e == nil || e.retriever == nil {
+		return
+	}
+	e.retriever.SetOversampleFactor(factor)
 }
 
 func preloadEngineChunkMetadata(ctx context.Context, source embeddedChunkMetadataSource, ret *Service) (int, error) {

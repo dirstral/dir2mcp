@@ -10,17 +10,17 @@ import (
 	"os/exec"
 	"testing"
 
-	"dir2mcp/internal/dirstral/breeze"
+	"dir2mcp/internal/dirstral/chat"
 	"dir2mcp/internal/dirstral/mcp"
 	"dir2mcp/internal/protocol"
 )
 
-func TestSmokeBreezeJSONOverStdio(t *testing.T) {
+func TestSmokeChatJSONOverStdio(t *testing.T) {
 	envPath, err := exec.LookPath("env")
 	if err != nil {
 		envPath = "env"
 	}
-	endpoint := fmt.Sprintf("%s GO_WANT_HELPER_PROCESS=1 %s -test.run=TestHelperProcessBreezeSmokeMCPStdio --", envPath, os.Args[0])
+	endpoint := fmt.Sprintf("%s GO_WANT_HELPER_PROCESS=1 %s -test.run=TestHelperProcessChatSmokeMCPStdio --", envPath, os.Args[0])
 
 	client := mcp.NewWithTransport(endpoint, "stdio", false)
 	defer func() {
@@ -35,14 +35,14 @@ func TestSmokeBreezeJSONOverStdio(t *testing.T) {
 
 	in := bytes.NewBufferString("/list src\n/quit\n")
 	out := &bytes.Buffer{}
-	opts := breeze.Options{
+	opts := chat.Options{
 		MCPURL:    endpoint,
 		Transport: "stdio",
 		Model:     "mistral-small-latest",
 		JSON:      true,
 	}
-	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
-		t.Fatalf("breeze run failed: %v", err)
+	if err := chat.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
+		t.Fatalf("chat run failed: %v", err)
 	}
 
 	events := decodeEvents(t, out.Bytes())
@@ -75,7 +75,7 @@ func TestSmokeBreezeJSONOverStdio(t *testing.T) {
 	}
 }
 
-func TestHelperProcessBreezeSmokeMCPStdio(t *testing.T) {
+func TestHelperProcessChatSmokeMCPStdio(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}

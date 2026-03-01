@@ -89,7 +89,7 @@ func TestProcessDocument_IncrementalSkipsUnchangedRepresentation(t *testing.T) {
 			ContentHash: hash,
 		},
 	}
-	svc := ingest.NewService(config.Config{RootDir: root}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root}, st)
 	df := ingest.DiscoveredFile{
 		AbsPath:   absPath,
 		RelPath:   "a.txt",
@@ -123,7 +123,7 @@ func TestProcessDocument_ForceReindexRegeneratesRepresentation(t *testing.T) {
 			ContentHash: hash,
 		},
 	}
-	svc := ingest.NewService(config.Config{RootDir: root}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root}, st)
 	df := ingest.DiscoveredFile{
 		AbsPath:   absPath,
 		RelPath:   "main.go",

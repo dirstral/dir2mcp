@@ -216,7 +216,7 @@ func (m MenuModel) View() string {
 
 		if compactRows || descWidth < 10 {
 			label := truncateText(item.Label+badgePlain, maxInt(contentWidth-6, 4))
-			if badgeStyled != "" {
+			if badgeStyled != "" && !isSelected {
 				label = strings.Replace(label, badgePlain, badgeStyled, 1)
 			}
 			if isSelected {
@@ -228,7 +228,7 @@ func (m MenuModel) View() string {
 		}
 
 		paddedLabel := fitText(item.Label+badgePlain, labelWidth)
-		if badgeStyled != "" {
+		if badgeStyled != "" && !isSelected {
 			paddedLabel = strings.Replace(paddedLabel, badgePlain, badgeStyled, 1)
 		}
 		desc := fitText(item.Description, descWidth)

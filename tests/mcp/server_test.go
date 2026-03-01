@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"dir2mcp/internal/buildinfo"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/protocol"
@@ -211,5 +212,45 @@ func TestMCPInitialize_RejectsMissingJSONRPCVersion(t *testing.T) {
 	}
 	if envelope.Error.Data.Code != "INVALID_FIELD" {
 		t.Fatalf("canonical code=%q want=%q", envelope.Error.Data.Code, "INVALID_FIELD")
+	}
+}
+
+func TestMCPInitialize_UsesBuildInfoVersion(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+	req, err := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			ServerInfo struct {
+				Version string `json:"version"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.ServerInfo.Version != buildinfo.Version {
+		t.Fatalf("server version=%q want=%q", envelope.Result.ServerInfo.Version, buildinfo.Version)
 	}
 }

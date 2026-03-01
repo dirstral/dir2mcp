@@ -196,10 +196,10 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	var stderr bytes.Buffer
 	var seenCfg config.Config
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
 			seenCfg = cfg
 			// return the failingIngestor defined later in this file
-			return failingIngestor{}
+			return failingIngestor{}, nil
 		},
 	})
 
@@ -249,12 +249,12 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	var stderr bytes.Buffer
 	var hashAtReindexTime string
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
 			return &capturingIngestor{
 				store:        st,
 				relPath:      "docs/a.md",
 				capturedHash: &hashAtReindexTime,
-			}
+			}, nil
 		},
 	})
 
@@ -391,7 +391,7 @@ func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
 	}
 }
 
-func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
+func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
@@ -399,8 +399,8 @@ func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			return failingIngestor{}
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
+			return failingIngestor{}, nil
 		},
 	})
 
@@ -417,8 +417,8 @@ func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
 		})
 	})
 
-	if code != 6 {
-		t.Fatalf("unexpected exit code: got=%d want=6 stderr=%s", code, stderr.String())
+	if code != 3 {
+		t.Fatalf("unexpected exit code: got=%d want=3 stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "ingestion failed") {
 		t.Fatalf("expected ingestion error in stderr, got: %s", stderr.String())

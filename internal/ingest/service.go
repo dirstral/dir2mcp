@@ -17,6 +17,8 @@ import (
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/elevenlabs"
+	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
 )
 
@@ -28,6 +30,11 @@ const (
 	annotationChunkSize    = 1200
 	annotationChunkOverlap = 200
 	annotationChunkMinSize = 120
+
+	transcriberProviderAuto       = "auto"
+	transcriberProviderMistral    = "mistral"
+	transcriberProviderElevenLabs = "elevenlabs"
+	transcriberProviderOff        = "off"
 )
 
 type Service struct {
@@ -93,16 +100,91 @@ type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
 }
 
-func NewService(cfg config.Config, store model.Store) *Service {
+func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc := &Service{
 		cfg:    cfg,
 		store:  store,
 		logger: log.Default(),
 	}
+	transcriber, err := TranscriberFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("configure transcriber: %w", err)
+	}
+	svc.transcriber = transcriber
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
-	return svc
+	return svc, nil
+}
+
+// DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
+// Defaults mirror config.Config defaults: .gitignore support is enabled by
+// default (IngestGitignore=true), and symlink following is disabled by default
+// (IngestFollowSymlinks=false).
+func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
+	options := DefaultDiscoverOptions()
+	options.UseGitIgnore = cfg.IngestGitignore
+	options.FollowSymlinks = cfg.IngestFollowSymlinks
+	if cfg.IngestMaxFileMB > 0 {
+		options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * 1024 * 1024
+	}
+	return options
+}
+
+// TranscriberFromConfig resolves the configured STT provider instance.
+func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
+	provider := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
+	if provider == "" {
+		provider = transcriberProviderAuto
+	}
+
+	switch provider {
+	case transcriberProviderOff, "none", "disabled":
+		return nil, nil
+	case transcriberProviderMistral:
+		if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+			return nil, fmt.Errorf("stt provider %q requires MISTRAL_API_KEY", transcriberProviderMistral)
+		}
+		client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+		if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
+			client.DefaultTranscribeModel = modelName
+		}
+		return client, nil
+	case transcriberProviderAuto:
+		if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+			client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+			if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
+				client.DefaultTranscribeModel = modelName
+			}
+			return client, nil
+		}
+		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
+			return nil, nil
+		}
+		provider = transcriberProviderElevenLabs
+	case transcriberProviderElevenLabs:
+		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
+			return nil, fmt.Errorf("stt provider %q requires ELEVENLABS_API_KEY", transcriberProviderElevenLabs)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported transcriber provider %q", provider)
+	}
+
+	if provider != transcriberProviderElevenLabs {
+		return nil, nil
+	}
+
+	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
+	if baseURL := strings.TrimSpace(cfg.ElevenLabsBaseURL); baseURL != "" {
+		client.BaseURL = strings.TrimRight(baseURL, "/")
+	}
+	if modelName := strings.TrimSpace(cfg.STTElevenLabsModel); modelName != "" {
+		client.TranscribeModel = modelName
+	}
+	if languageCode := strings.TrimSpace(cfg.STTElevenLabsLanguageCode); languageCode != "" {
+		client.TranscribeLanguageCode = languageCode
+	}
+	return client, nil
 }
 
 // healthCheckInterval returns the configured base poll interval for connector
@@ -241,7 +323,7 @@ func (s *Service) runScan(ctx context.Context) error {
 		return errors.New("ingest store is not configured")
 	}
 
-	discovered, err := DiscoverFiles(ctx, s.cfg.RootDir, defaultMaxFileSizeBytes)
+	discovered, err := DiscoverFilesWithOptions(ctx, s.cfg.RootDir, DiscoverOptionsFromConfig(s.cfg))
 	if err != nil {
 		return err
 	}

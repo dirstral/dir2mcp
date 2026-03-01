@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"dir2mcp/internal/buildinfo"
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
@@ -646,8 +647,8 @@ func TestAskKAboveMaxFails(t *testing.T) {
 
 	withWorkingDir(t, tmp, func() {
 		code := app.RunWithContext(context.Background(), []string{"ask", "--k", "51", "q"})
-		if code != 1 {
-			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
 		}
 	})
 
@@ -664,11 +665,25 @@ func TestAskMissingQuestionFails(t *testing.T) {
 
 	withWorkingDir(t, tmp, func() {
 		code := app.RunWithContext(context.Background(), []string{"ask", "--k", "2"})
-		if code != 1 {
-			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
 		}
 	})
 	if !strings.Contains(stderr.String(), "requires a question argument") {
 		t.Fatalf("expected missing-question message, got: %s", stderr.String())
+	}
+}
+
+func TestVersionUsesBuildInfo(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	code := app.RunWithContext(context.Background(), []string{"version"})
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+	want := "dir2mcp v" + strings.TrimPrefix(buildinfo.Version, "v")
+	if strings.TrimSpace(stdout.String()) != want {
+		t.Fatalf("version output=%q want=%q", strings.TrimSpace(stdout.String()), want)
 	}
 }

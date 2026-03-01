@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/model"
 	"dir2mcp/internal/retrieval"
 )
 
@@ -122,6 +123,84 @@ func TestEngineAsk_ContextCanceled(t *testing.T) {
 	if !strings.Contains(err.Error(), "ask canceled") {
 		t.Fatalf("expected wrapped cancellation message, got: %v", err)
 	}
+}
+
+func TestEngine_RuntimeRetrievalTunables(t *testing.T) {
+	backend := &fakeEngineTunablesRetriever{}
+	engine := retrieval.NewEngineForTesting(backend)
+	engine.SetSystemPrompt("Use concise output")
+	engine.SetMaxContextChars(128)
+
+	engine.SetOversampleFactor(1)
+	withoutOverfetch, err := engine.AskWithContext(context.Background(), "what changed?", retrieval.AskOptions{K: 1})
+	if err != nil {
+		t.Fatalf("AskWithContext failed with oversample=1: %v", err)
+	}
+	if withoutOverfetch == nil {
+		t.Fatal("expected non-nil AskResult with oversample=1")
+	}
+	if len(withoutOverfetch.Citations) != 0 {
+		t.Fatalf("expected zero citations with oversample=1, got %d", len(withoutOverfetch.Citations))
+	}
+
+	engine.SetOversampleFactor(2)
+
+	result, err := engine.AskWithContext(context.Background(), "what changed?", retrieval.AskOptions{K: 1})
+	if err != nil {
+		t.Fatalf("AskWithContext failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil AskResult")
+	}
+	if len(result.Citations) == 0 {
+		t.Fatal("expected oversample_factor to produce at least one citation")
+	}
+	if !strings.Contains(result.Answer, "Use concise output") {
+		t.Fatalf("expected answer to include system prompt marker, got %q", result.Answer)
+	}
+	parts := strings.SplitN(result.Answer, "context=", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected answer to include context marker, got %q", result.Answer)
+	}
+	if got := len([]rune(parts[1])); got > 128 {
+		t.Fatalf("expected context section to be <= 128 runes, got %d", got)
+	}
+	if backend.lastK != 1 {
+		t.Fatalf("expected ask query K to be forwarded, got %d", backend.lastK)
+	}
+}
+
+type fakeEngineTunablesRetriever struct {
+	systemPrompt string
+	maxContext   int
+	oversample   int
+	lastK        int
+}
+
+func (f *fakeEngineTunablesRetriever) Ask(_ context.Context, _ string, query model.SearchQuery) (model.AskResult, error) {
+	f.lastK = query.K
+	contextText := strings.Repeat("x", 256)
+	if f.maxContext > 0 && len(contextText) > f.maxContext {
+		contextText = contextText[:f.maxContext]
+	}
+	answer := "system=" + f.systemPrompt + "\ncontext=" + contextText
+	result := model.AskResult{Answer: answer}
+	if f.oversample > 1 {
+		result.Citations = []model.Citation{{ChunkID: 2, RelPath: "docs/guide.md", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 2}}}
+	}
+	return result, nil
+}
+
+func (f *fakeEngineTunablesRetriever) SetRAGSystemPrompt(prompt string) {
+	f.systemPrompt = prompt
+}
+
+func (f *fakeEngineTunablesRetriever) SetMaxContextChars(maxChars int) {
+	f.maxContext = maxChars
+}
+
+func (f *fakeEngineTunablesRetriever) SetOversampleFactor(factor int) {
+	f.oversample = factor
 }
 
 func newFakeMistralEmbeddingServer() *httptest.Server {
