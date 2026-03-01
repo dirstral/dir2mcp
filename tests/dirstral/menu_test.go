@@ -209,6 +209,10 @@ func TestMenuNarrowWidthTruncatesLongRows(t *testing.T) {
 }
 
 func TestSelectedRowBadgeDoesNotBreakHighlight(t *testing.T) {
+	// Force no-color rendering to make View() output deterministic.
+	// t.Setenv automatically restores the original value after the test.
+	t.Setenv("NO_COLOR", "1")
+
 	badgeStyle := lipgloss.NewStyle().Padding(0, 1)
 
 	m := app.NewMenuModel(app.MenuConfig{
