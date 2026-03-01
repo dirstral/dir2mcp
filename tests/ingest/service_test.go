@@ -13,6 +13,7 @@ import (
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/elevenlabs"
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 )
@@ -242,6 +243,42 @@ func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
 	}
 	if doc.Status != "ok" {
 		t.Fatalf("expected audio document status to remain ok, got %q", doc.Status)
+	}
+}
+
+func TestDiscoverOptionsFromConfig_DefaultsRemainSafe(t *testing.T) {
+	cfg := config.Default()
+	options := ingest.DiscoverOptionsFromConfig(cfg)
+	if options.FollowSymlinks {
+		t.Fatal("expected follow_symlinks default to false")
+	}
+	if !options.UseGitIgnore {
+		t.Fatal("expected gitignore default to true")
+	}
+	if options.MaxSizeBytes <= 0 {
+		t.Fatalf("expected positive max size default, got %d", options.MaxSizeBytes)
+	}
+}
+
+func TestTranscriberFromConfig_AutoWiresElevenLabsWhenAPIKeyPresent(t *testing.T) {
+	cfg := config.Default()
+	cfg.ElevenLabsAPIKey = "test-key"
+	cfg.ElevenLabsBaseURL = "https://example.test"
+	cfg.STTProvider = "elevenlabs"
+
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("TranscriberFromConfig failed: %v", err)
+	}
+	if transcriber == nil {
+		t.Fatal("expected transcriber instance")
+	}
+	client, ok := transcriber.(*elevenlabs.Client)
+	if !ok {
+		t.Fatalf("expected elevenlabs client, got %T", transcriber)
+	}
+	if client.BaseURL != "https://example.test" {
+		t.Fatalf("unexpected base URL: %q", client.BaseURL)
 	}
 }
 
