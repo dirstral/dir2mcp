@@ -68,6 +68,8 @@ type App struct {
 	newIngestor  func(config.Config, model.Store) model.Ingestor
 	newStore     func(config.Config) model.Store
 	newRetriever func(config.Config, model.Store) model.Retriever
+
+	cachedStyles map[bool]*styles
 }
 
 type indexingStateAware interface {
@@ -282,6 +284,22 @@ func writeln(out io.Writer, args ...interface{}) {
 	_, _ = fmt.Fprintln(out, args...)
 }
 
+// sty returns the cached styles instance, creating one on first call.
+// Pass jsonMode=true to disable colors even when stdout is a TTY.
+func (a *App) sty(jsonMode bool) styles {
+	if a.cachedStyles != nil {
+		if cached, ok := a.cachedStyles[jsonMode]; ok && cached != nil {
+			return *cached
+		}
+	}
+	if a.cachedStyles == nil {
+		a.cachedStyles = make(map[bool]*styles, 2)
+	}
+	s := newStyles(a.stdout, jsonMode)
+	a.cachedStyles[jsonMode] = &s
+	return s
+}
+
 func (a *App) storeForConfig(cfg config.Config) model.Store {
 	if a != nil && a.newStore != nil {
 		return a.newStore(cfg)
@@ -328,7 +346,8 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "config":
 		return a.runConfig(ctx, globalOpts, remaining[1:])
 	case "version":
-		writeln(a.stdout, "dir2mcp v0.0.0-dev")
+		s := a.sty(globalOpts.jsonOutput)
+		writef(a.stdout, "%s %s\n", s.banner(), s.dim("v0.0.0-dev"))
 		return exitSuccess
 	default:
 		writef(a.stderr, "unknown command: %s\n", remaining[0])
@@ -338,10 +357,20 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 }
 
 func (a *App) printUsage() {
-	writeln(a.stdout, "dir2mcp")
-	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
-	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
-	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, --x402, --x402-facilitator-url, ...")
+	s := a.sty(false)
+	writeln(a.stdout)
+	writef(a.stdout, "  %s\n", s.banner())
+	writeln(a.stdout)
+	writef(a.stdout, "  %s dir2mcp [--json] [--non-interactive] <command>\n", s.Dim.Render("Usage:"))
+	writeln(a.stdout)
+	writef(a.stdout, "  %s\n", s.sectionHeader("Commands"))
+	writef(a.stdout, "    %s   %s\n", s.Brand.Render("up      "), s.dim("Start MCP server with indexing"))
+	writef(a.stdout, "    %s   %s\n", s.Brand.Render("status  "), s.dim("Show indexing progress & corpus stats"))
+	writef(a.stdout, "    %s   %s\n", s.Brand.Render("ask     "), s.dim("Query with RAG answer generation"))
+	writef(a.stdout, "    %s   %s\n", s.Brand.Render("reindex "), s.dim("Force re-indexing of all files"))
+	writef(a.stdout, "    %s   %s\n", s.Brand.Render("config  "), s.dim("Manage configuration (init, print)"))
+	writef(a.stdout, "    %s   %s\n", s.Brand.Render("version "), s.dim("Show version"))
+	writeln(a.stdout)
 }
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
@@ -443,7 +472,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 		authMode := strings.TrimSpace(cfg.AuthMode)
 		if strings.EqualFold(authMode, "none") && !opts.forceInsecure {
-			writeln(a.stderr, "ERROR: CONFIG_INVALID: --public requires auth. Use --auth auto or --force-insecure to override (unsafe).")
+			se := a.sty(opts.jsonOutput)
+			writef(a.stderr, "%s --public requires auth. Use --auth auto or --force-insecure to override (unsafe).\n", se.errPrefix())
 			return exitConfigInvalid
 		}
 	}
@@ -480,12 +510,13 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	nonInteractiveMode := opts.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
 	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+		se := a.sty(opts.jsonOutput)
 		if nonInteractiveMode {
-			writeln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s CONFIG_INVALID: Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
 			writeln(a.stderr, "Or run: dir2mcp config init")
 		} else {
-			writeln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Run: dir2mcp config init")
 		}
 		return exitConfigInvalid
@@ -893,36 +924,55 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		return exitSuccess
 	}
 
-	writeln(a.stdout, "State:", cfg.StateDir)
-	writef(a.stdout, "Source: %s\n", source)
-	writef(a.stdout, "Timestamp: %s\n", snapshot.Timestamp)
+	s := a.sty(false)
 	writeln(a.stdout)
-	writeln(a.stdout, "Indexing:")
-	writef(a.stdout, "  mode=%s running=%t scanned=%d indexed=%d skipped=%d deleted=%d reps=%d chunks=%d embedded=%d errors=%d unknown=%d\n",
-		snapshot.Indexing.Mode,
-		snapshot.Indexing.Running,
-		snapshot.Indexing.Scanned,
-		snapshot.Indexing.Indexed,
-		snapshot.Indexing.Skipped,
-		snapshot.Indexing.Deleted,
-		snapshot.Indexing.Representations,
-		snapshot.Indexing.ChunksTotal,
-		snapshot.Indexing.EmbeddedOK,
-		snapshot.Indexing.Errors,
-		snapshot.Indexing.Unknown,
+	writeln(a.stdout, s.kv("State", cfg.StateDir))
+	writeln(a.stdout, s.kv("Source", source))
+	writeln(a.stdout, s.kv("Timestamp", snapshot.Timestamp))
+	writeln(a.stdout)
+
+	runningLabel := s.dim("stopped")
+	if snapshot.Indexing.Running {
+		runningLabel = s.Green.Render("running")
+	}
+
+	writef(a.stdout, "  %s  %s  %s\n", s.sectionHeader("Indexing"), s.dim("mode="+snapshot.Indexing.Mode), runningLabel)
+	writef(a.stdout, "    %s  %s  %s  %s\n",
+		s.stat("scanned", snapshot.Indexing.Scanned),
+		s.stat("indexed", snapshot.Indexing.Indexed),
+		s.stat("skipped", snapshot.Indexing.Skipped),
+		s.stat("deleted", snapshot.Indexing.Deleted),
 	)
-	writef(a.stdout, "Documents: total=%d code_ratio=%.4f\n", snapshot.TotalDocs, snapshot.CodeRatio)
+	writef(a.stdout, "    %s  %s  %s  %s",
+		s.stat("reps", snapshot.Indexing.Representations),
+		s.stat("chunks", snapshot.Indexing.ChunksTotal),
+		s.stat("embedded", snapshot.Indexing.EmbeddedOK),
+		s.stat("unknown", snapshot.Indexing.Unknown),
+	)
+	if snapshot.Indexing.Errors > 0 {
+		writef(a.stdout, "  %s", s.Red.Render(fmt.Sprintf("errors=%d", snapshot.Indexing.Errors)))
+	} else {
+		writef(a.stdout, "  %s", s.stat("errors", snapshot.Indexing.Errors))
+	}
+	writeln(a.stdout)
+	writeln(a.stdout)
+
+	writef(a.stdout, "  %s  %s  %s\n",
+		s.sectionHeader("Documents"),
+		s.stat("total", snapshot.TotalDocs),
+		s.stat("code_ratio", fmt.Sprintf("%.4f", snapshot.CodeRatio)),
+	)
 	if len(snapshot.DocCounts) > 0 {
 		keys := make([]string, 0, len(snapshot.DocCounts))
 		for key := range snapshot.DocCounts {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
-		writeln(a.stdout, "Doc counts:")
 		for _, key := range keys {
-			writef(a.stdout, "  %s=%d\n", key, snapshot.DocCounts[key])
+			writef(a.stdout, "    %s\n", s.stat(key, snapshot.DocCounts[key]))
 		}
 	}
+	writeln(a.stdout)
 	return exitSuccess
 }
 
@@ -943,13 +993,14 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	}
 
 	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+		se := a.sty(global.jsonOutput)
 		nonInteractiveMode := global.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
 		if nonInteractiveMode {
-			writeln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s CONFIG_INVALID: Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
 			writeln(a.stderr, "Or run: dir2mcp config init")
 		} else {
-			writeln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Run: dir2mcp config init")
 		}
 		return exitConfigInvalid
@@ -1009,15 +1060,18 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 			return exitSuccess
 		}
 
-		writef(a.stdout, "found %d supporting result(s)\n", len(hits))
-		for _, hit := range hits {
+		s := a.sty(false)
+		writeln(a.stdout)
+		writef(a.stdout, "  %s %s\n\n", s.sectionHeader("Search results"), s.dim(fmt.Sprintf("(%d hits)", len(hits))))
+		for i, hit := range hits {
 			snippet := strings.TrimSpace(hit.Snippet)
 			if snippet == "" {
 				snippet = "(no snippet)"
 			}
-			writef(a.stdout, "- %s [score=%.4f]\n", hit.RelPath, hit.Score)
-			writef(a.stdout, "  %s\n", snippet)
+			writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Cyan.Render(hit.RelPath), s.dim(fmt.Sprintf("score=%.4f", hit.Score)))
+			writef(a.stdout, "      %s\n", s.dim(snippet))
 		}
+		writeln(a.stdout)
 		return exitSuccess
 	}
 
@@ -1042,14 +1096,21 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		return exitSuccess
 	}
 
+	s := a.sty(false)
+	writeln(a.stdout)
 	writeln(a.stdout, askResult.Answer)
 	if len(askResult.Citations) > 0 {
 		writeln(a.stdout)
-		writeln(a.stdout, "Citations:")
-		for _, citation := range askResult.Citations {
-			writef(a.stdout, "- chunk=%d path=%s span=%s\n", citation.ChunkID, citation.RelPath, formatSpan(citation.Span))
+		writef(a.stdout, "  %s\n", s.sectionHeader("Citations"))
+		for i, citation := range askResult.Citations {
+			writef(a.stdout, "  %s %s  %s\n",
+				s.Brand.Render(fmt.Sprintf("[%d]", i+1)),
+				s.Cyan.Render(citation.RelPath),
+				s.dim(fmt.Sprintf("chunk=%d span=%s", citation.ChunkID, formatSpan(citation.Span))),
+			)
 		}
 	}
+	writeln(a.stdout)
 	return exitSuccess
 }
 
@@ -1197,15 +1258,17 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 		return exitSuccess
 	}
 
+	s := a.sty(false)
 	if created {
-		writef(a.stdout, "created %s with baseline settings\n", configPath)
+		writef(a.stdout, "%s created %s with baseline settings\n", s.Success.Render("✓"), configPath)
 	} else {
-		writef(a.stdout, "updated %s and ensured baseline settings are present\n", configPath)
+		writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
 	}
-	writeln(a.stdout, "Next steps:")
+	writef(a.stdout, "\n%s\n", s.sectionHeader("Next steps"))
 	for _, step := range nextSteps {
-		writef(a.stdout, "- %s\n", step)
+		writef(a.stdout, "  %s %s\n", s.dim("•"), step)
 	}
+	writeln(a.stdout)
 	return exitSuccess
 }
 
@@ -2037,33 +2100,49 @@ func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 }
 
 func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool) {
-	writef(a.stdout, "Index: %s\n", cfg.StateDir)
+	s := a.sty(false)
+	writeln(a.stdout)
+	writef(a.stdout, "  %s %s\n", s.banner(), s.dim("v0.0.0-dev"))
+	writeln(a.stdout, s.separator(44))
+	writeln(a.stdout)
+
 	mode := "incremental (server-first; indexing in background)"
 	if readOnly {
-		mode += ", read-only=true"
+		mode += ", read-only"
 	}
-	mode += fmt.Sprintf(", public=%t", cfg.Public)
-	writef(a.stdout, "Mode: %s\n\n", mode)
 	if cfg.Public {
-		writeln(a.stdout, "WARNING: server is bound to all interfaces. Ensure auth is enabled.")
+		mode += ", public"
+	}
+	writeln(a.stdout, s.kv("Index", cfg.StateDir))
+	writeln(a.stdout, s.kv("Mode", mode))
+	writeln(a.stdout)
+
+	if cfg.Public {
+		writef(a.stdout, "  %s server is bound to all interfaces. Ensure auth is enabled.\n", s.warnPrefix())
 		writeln(a.stdout)
 	}
-	writeln(a.stdout, "MCP endpoint:")
-	writef(a.stdout, "  URL:    %s\n", connection.URL)
+
+	writef(a.stdout, "  %s\n", s.sectionHeader("MCP endpoint"))
+	writeln(a.stdout, s.kv("URL", s.URL.Render(connection.URL)))
 	if auth.mode == "none" {
-		writeln(a.stdout, "  Auth:   none")
+		writeln(a.stdout, s.kv("Auth", s.Yellow.Render("none")))
 	} else {
-		writef(a.stdout, "  Auth:   Bearer (source=%s)\n", auth.tokenSource)
+		writeln(a.stdout, s.kv("Auth", fmt.Sprintf("Bearer %s", s.dim("(source="+auth.tokenSource+")"))))
 	}
 	if auth.tokenFile != "" {
-		writef(a.stdout, "  Token file: %s\n", auth.tokenFile)
+		writeln(a.stdout, s.kv("Token file", auth.tokenFile))
 	}
-	writeln(a.stdout, "  Headers:")
-	writef(a.stdout, "    %s: %s\n", protocol.MCPProtocolVersionHeader, cfg.ProtocolVersion)
+	writeln(a.stdout)
+
+	writef(a.stdout, "  %s\n", s.sectionHeader("Required headers"))
+	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPProtocolVersionHeader+":"), cfg.ProtocolVersion)
 	if auth.mode != "none" {
-		writeln(a.stdout, "    Authorization: Bearer <token>")
+		writef(a.stdout, "    %s %s\n", s.Dim.Render("Authorization:"), "Bearer <token>")
 	}
-	writeln(a.stdout, "    MCP-Session-Id: (assigned after initialize response)")
+	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPSessionHeader+":"), s.dim("(assigned after initialize response)"))
+	writeln(a.stdout)
+	writeln(a.stdout, s.separator(44))
+	writef(a.stdout, "  %s\n\n", s.Success.Render("Ready for connections"))
 }
 
 func isTerminal(file *os.File) bool {
