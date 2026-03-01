@@ -686,6 +686,9 @@ func TestDefault_NestedConfigFieldDefaults(t *testing.T) {
 	if !cfg.IngestGitignore || cfg.IngestFollowSymlinks || cfg.IngestMaxFileMB != 20 {
 		t.Fatalf("unexpected ingest defaults: gitignore=%v follow=%v max=%d", cfg.IngestGitignore, cfg.IngestFollowSymlinks, cfg.IngestMaxFileMB)
 	}
+	if cfg.IngestPDFMode != "ocr" || cfg.IngestImagesMode != "ocr_auto" || cfg.IngestAudioMode != "auto" || cfg.IngestArchivesMode != "deep" {
+		t.Fatalf("unexpected ingest mode defaults: pdf=%q images=%q audio=%q archives=%q", cfg.IngestPDFMode, cfg.IngestImagesMode, cfg.IngestAudioMode, cfg.IngestArchivesMode)
+	}
 	if cfg.STTProvider != "mistral" || cfg.STTMistralModel == "" || cfg.STTElevenLabsModel == "" {
 		t.Fatalf("unexpected stt defaults: provider=%q mistral=%q eleven=%q", cfg.STTProvider, cfg.STTMistralModel, cfg.STTElevenLabsModel)
 	}
