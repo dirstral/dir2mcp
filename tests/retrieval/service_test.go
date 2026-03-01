@@ -22,11 +22,13 @@ type fakeRetrievalEmbedder struct {
 }
 
 type fakeGenerator struct {
-	out string
-	err error
+	out        string
+	err        error
+	lastPrompt string
 }
 
-func (g *fakeGenerator) Generate(_ context.Context, _ string) (string, error) {
+func (g *fakeGenerator) Generate(_ context.Context, prompt string) (string, error) {
+	g.lastPrompt = prompt
 	if g.err != nil {
 		return "", g.err
 	}
@@ -278,7 +280,7 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 		t.Fatalf("expected default overfetch 5x (got %d)", fi.lastK)
 	}
 	// change multiplier to a smaller value and verify it takes effect
-	svc.SetOverfetchMultiplier(2)
+	svc.SetOversampleFactor(2)
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3}); err != nil {
 		t.Fatalf("Search error: %v", err)
 	}
@@ -286,7 +288,7 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 		t.Fatalf("expected overfetch 2x after set (got %d)", fi.lastK)
 	}
 	// invalid values should be normalized
-	svc.SetOverfetchMultiplier(0)
+	svc.SetOversampleFactor(0)
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1}); err != nil {
 		t.Fatalf("Search error: %v", err)
 	}
@@ -294,12 +296,21 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 		t.Fatalf("multiplier lower bound not enforced (got %d)", fi.lastK)
 	}
 	// extremely large value should be capped
-	svc.SetOverfetchMultiplier(1000)
+	svc.SetOversampleFactor(1000)
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1}); err != nil {
 		t.Fatalf("Search error: %v", err)
 	}
 	if fi.lastK > 100*1 {
 		t.Fatalf("multiplier upper cap not enforced (got %d)", fi.lastK)
+	}
+
+	// backward-compatible setter should still work.
+	svc.SetOverfetchMultiplier(3)
+	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 2}); err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if fi.lastK != 2*3 {
+		t.Fatalf("expected overfetch 3x after legacy setter (got %d)", fi.lastK)
 	}
 }
 
@@ -310,7 +321,7 @@ func TestSearch_OverflowProtection(t *testing.T) {
 	fi := &fakeRetrievalIndex{}
 	svc := retrieval.NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// set multiplier to max allowed by the setter; the service doesn't crash
-	svc.SetOverfetchMultiplier(100)
+	svc.SetOversampleFactor(100)
 	// choose a k that's guaranteed to overflow when multiplied by 100
 	bigK := math.MaxInt/100 + 1
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: bigK}); err != nil {
@@ -716,6 +727,62 @@ func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
 	}
 	if got.Answer != "Generated answer with [docs/a.md]" {
 		t.Fatalf("expected generated answer, got %q", got.Answer)
+	}
+}
+
+func TestAsk_UsesConfiguredSystemPromptAndContextBudget(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+
+	gen := &fakeGenerator{out: "ok [docs/a.md]"}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/a.md",
+		Snippet: strings.Repeat("alpha ", 80),
+		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
+	})
+	svc.SetRAGSystemPrompt("Custom system prompt")
+	svc.SetMaxContextChars(40)
+
+	if _, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1}); err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if !strings.Contains(gen.lastPrompt, "Custom system prompt") {
+		t.Fatalf("expected custom system prompt, got %q", gen.lastPrompt)
+	}
+	if strings.Contains(gen.lastPrompt, "Answer the question using only the provided context.") {
+		t.Fatalf("expected default system prompt to be replaced, got %q", gen.lastPrompt)
+	}
+	parts := strings.SplitN(gen.lastPrompt, "\n\nContext:\n", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected Context section in prompt, got %q", gen.lastPrompt)
+	}
+	if got := len([]rune(parts[1])); got > 40 {
+		t.Fatalf("context budget exceeded: got %d chars, want <= 40", got)
+	}
+}
+
+func TestAsk_DefaultSystemPromptCompatibility(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+
+	gen := &fakeGenerator{out: "ok [docs/a.md]"}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/a.md", Snippet: "alpha"})
+
+	if _, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1}); err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if !strings.Contains(gen.lastPrompt, "Answer the question using only the provided context.") {
+		t.Fatalf("expected backward-compatible default prompt, got %q", gen.lastPrompt)
 	}
 }
 

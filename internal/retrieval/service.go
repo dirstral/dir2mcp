@@ -47,6 +47,15 @@ var defaultSecretPatternLiterals = []string{
 	`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
 }
 
+const (
+	defaultOverfetchMultiplier = 5
+	maxOverfetchMultiplier     = 100
+
+	defaultRAGSystemPrompt = "Answer the question using only the provided context.\nInclude concise source attributions in the form [rel_path]."
+	defaultRAGMaxContext   = 20000
+	maxRAGMaxContext       = 200000
+)
+
 // Service implements retrieval operations over embedded data.
 // It holds necessary components like store, index, embedder and
 // supports configurable overfetching during searches. OverfetchMultiplier
@@ -79,6 +88,8 @@ type Service struct {
 	textModel           string
 	codeModel           string
 	overfetchMultiplier int
+	ragSystemPrompt     string
+	ragMaxContextChars  int
 	metaMu              sync.RWMutex
 	chunkByLabel        map[uint64]model.SearchHit
 	chunkByIndex        map[string]map[uint64]model.SearchHit
@@ -116,7 +127,9 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		logger:              log.Default(),
 		textModel:           "mistral-embed",
 		codeModel:           "codestral-embed",
-		overfetchMultiplier: 5,
+		overfetchMultiplier: defaultOverfetchMultiplier,
+		ragSystemPrompt:     defaultRAGSystemPrompt,
+		ragMaxContextChars:  defaultRAGMaxContext,
 		chunkByLabel:        make(map[uint64]model.SearchHit),
 		chunkByIndex: map[string]map[uint64]model.SearchHit{
 			"text": make(map[uint64]model.SearchHit),
@@ -311,6 +324,41 @@ func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metad
 	s.metaMu.Unlock()
 }
 
+func (s *Service) SetRAGSystemPrompt(prompt string) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		prompt = defaultRAGSystemPrompt
+	}
+	s.metaMu.Lock()
+	s.ragSystemPrompt = prompt
+	s.metaMu.Unlock()
+}
+
+func (s *Service) SetMaxContextChars(maxChars int) {
+	if maxChars <= 0 {
+		maxChars = defaultRAGMaxContext
+	}
+	if maxChars > maxRAGMaxContext {
+		maxChars = maxRAGMaxContext
+	}
+	s.metaMu.Lock()
+	s.ragMaxContextChars = maxChars
+	s.metaMu.Unlock()
+}
+
+// SetOversampleFactor changes retrieval fanout used for index search.
+func (s *Service) SetOversampleFactor(factor int) {
+	if factor < 1 {
+		factor = 1
+	}
+	if factor > maxOverfetchMultiplier {
+		factor = maxOverfetchMultiplier
+	}
+	s.metaMu.Lock()
+	s.overfetchMultiplier = factor
+	s.metaMu.Unlock()
+}
+
 // SetOverfetchMultiplier changes the multiplier used when querying the
 // underlying vector index.  The service will ask for `k * multiplier`
 // neighbors for a request that originally asked for `k` hits.  Values
@@ -318,15 +366,7 @@ func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metad
 // 100 are capped to prevent unreasonable work.  This method is safe to
 // call concurrently.
 func (s *Service) SetOverfetchMultiplier(m int) {
-	if m < 1 {
-		m = 1
-	}
-	if m > 100 {
-		m = 100
-	}
-	s.metaMu.Lock()
-	s.overfetchMultiplier = m
-	s.metaMu.Unlock()
+	s.SetOversampleFactor(m)
 }
 
 func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, error) {
@@ -392,7 +432,11 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 
 	answer := buildFallbackAnswer(question, hits)
 	if s.gen != nil && len(hits) > 0 {
-		prompt := buildRAGPrompt(question, hits)
+		s.metaMu.RLock()
+		systemPrompt := s.ragSystemPrompt
+		maxContextChars := s.ragMaxContextChars
+		s.metaMu.RUnlock()
+		prompt := buildRAGPrompt(question, hits, systemPrompt, maxContextChars)
 		generated, genErr := s.gen.Generate(ctx, prompt)
 		if genErr != nil {
 			// log the error so callers have visibility; fall back to the
@@ -973,32 +1017,67 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildRAGPrompt(question string, hits []model.SearchHit) string {
+func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string, maxContextChars int) string {
+	systemPrompt = strings.TrimSpace(systemPrompt)
+	if systemPrompt == "" {
+		systemPrompt = defaultRAGSystemPrompt
+	}
+	if maxContextChars <= 0 {
+		maxContextChars = defaultRAGMaxContext
+	}
+	if maxContextChars > maxRAGMaxContext {
+		maxContextChars = maxRAGMaxContext
+	}
+
 	var b strings.Builder
-	b.WriteString("Answer the question using only the provided context.\n")
-	b.WriteString("Include concise source attributions in the form [rel_path].\n\n")
+	b.WriteString(systemPrompt)
+	b.WriteString("\n\n")
 	b.WriteString("Question:\n")
 	b.WriteString(question)
 	b.WriteString("\n\nContext:\n")
 
+	remaining := maxContextChars
 	limit := len(hits)
 	if limit > 8 {
 		limit = 8
 	}
-	for i := 0; i < limit; i++ {
+	for i := 0; i < limit && remaining > 0; i++ {
 		h := hits[i]
-		b.WriteString("- [")
-		b.WriteString(h.RelPath)
-		b.WriteString("] ")
+		line := "- [" + h.RelPath + "] "
 		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
 		if snippet == "" {
-			b.WriteString("(no snippet)\n")
+			snippet = "(no snippet)"
+		}
+		line += snippet + "\n"
+
+		lineLen := len([]rune(line))
+		if lineLen <= remaining {
+			b.WriteString(line)
+			remaining -= lineLen
 			continue
 		}
-		b.WriteString(snippet)
-		b.WriteString("\n")
+
+		truncated := truncateRunes(line, remaining)
+		if strings.TrimSpace(truncated) != "" {
+			b.WriteString(truncated)
+		}
+		remaining = 0
 	}
 	return b.String()
+}
+
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	if maxRunes <= 3 {
+		return string(r[:maxRunes])
+	}
+	return string(r[:maxRunes-3]) + "..."
 }
 
 func truncateSnippet(s string, maxRunes int) string {

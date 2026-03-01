@@ -124,6 +124,21 @@ func TestEngineAsk_ContextCanceled(t *testing.T) {
 	}
 }
 
+func TestEngine_RuntimeRetrievalTunables(t *testing.T) {
+	engine := newTestEngine(t)
+	engine.SetSystemPrompt("Use concise output")
+	engine.SetMaxContextChars(128)
+	engine.SetOversampleFactor(2)
+
+	result, err := engine.AskWithContext(context.Background(), "what changed?", retrieval.AskOptions{K: 1})
+	if err != nil {
+		t.Fatalf("AskWithContext failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil AskResult")
+	}
+}
+
 func newFakeMistralEmbeddingServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/embeddings" {
