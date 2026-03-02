@@ -282,6 +282,40 @@ func TestTranscriberFromConfig_AutoWiresElevenLabsWhenAPIKeyPresent(t *testing.T
 	}
 }
 
+func TestTranscriberFromConfig_MistralExplicitMissingKeyReturnsError(t *testing.T) {
+	cfg := config.Default()
+	cfg.STTProvider = "mistral"
+	cfg.MistralAPIKey = ""
+
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error when mistral provider is explicit and API key is missing")
+	}
+	if transcriber != nil {
+		t.Fatalf("expected nil transcriber, got %T", transcriber)
+	}
+	if !strings.Contains(err.Error(), "mistral_api_key") {
+		t.Fatalf("expected mistral_api_key in error, got %v", err)
+	}
+}
+
+func TestTranscriberFromConfig_ElevenLabsExplicitMissingKeyReturnsError(t *testing.T) {
+	cfg := config.Default()
+	cfg.STTProvider = "elevenlabs"
+	cfg.ElevenLabsAPIKey = ""
+
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error when elevenlabs provider is explicit and API key is missing")
+	}
+	if transcriber != nil {
+		t.Fatalf("expected nil transcriber, got %T", transcriber)
+	}
+	if !strings.Contains(err.Error(), "elevenlabs_api_key") {
+		t.Fatalf("expected elevenlabs_api_key in error, got %v", err)
+	}
+}
+
 type memoryStore struct {
 	docs map[string]model.Document
 	// hold persisted representations for verification

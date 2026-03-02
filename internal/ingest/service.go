@@ -118,17 +118,20 @@ func NewService(cfg config.Config, store model.Store) *Service {
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
-// Defaults remain strict: no .gitignore support and no symlink following.
+// Defaults remain strict for traversal safety: symlink following is disabled.
+// .gitignore support is enabled by default (config.Default().IngestGitignore).
 func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options := DefaultDiscoverOptions()
 	options.UseGitIgnore = cfg.IngestGitignore
 	options.FollowSymlinks = cfg.IngestFollowSymlinks
 	if cfg.IngestMaxFileMB > 0 {
 		const bytesPerMB int64 = 1024 * 1024
-		if int64(cfg.IngestMaxFileMB) > math.MaxInt64/bytesPerMB {
-			options.MaxSizeBytes = math.MaxInt64
+		maxAllowedMB := int64(^uint64(0)>>1) / bytesPerMB
+		mb := int64(cfg.IngestMaxFileMB)
+		if mb > maxAllowedMB {
+			options.MaxSizeBytes = int64(^uint64(0) >> 1)
 		} else {
-			options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * bytesPerMB
+			options.MaxSizeBytes = mb * bytesPerMB
 		}
 	}
 	return options
@@ -146,7 +149,7 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		return nil, nil
 	case transcriberProviderMistral:
 		if strings.TrimSpace(cfg.MistralAPIKey) == "" {
-			return nil, nil
+			return nil, fmt.Errorf("mistral transcriber provider requires mistral_api_key")
 		}
 		client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 		if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
@@ -173,6 +176,9 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 
 	if provider != transcriberProviderElevenLabs {
 		return nil, nil
+	}
+	if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
+		return nil, fmt.Errorf("elevenlabs transcriber provider requires elevenlabs_api_key")
 	}
 
 	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)

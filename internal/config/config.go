@@ -357,7 +357,180 @@ func SaveFile(path string, cfg Config) error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
-	serializable := persistedConfig{
+	serializable := buildPersistedConfig(&cfg)
+
+	raw, err := marshalConfigYAML(serializable)
+	if err != nil {
+		return fmt.Errorf("marshal config yaml: %w", err)
+	}
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return fmt.Errorf("write config file %s: %w", path, err)
+	}
+	return nil
+}
+
+func EffectiveSnapshotPath(stateDir string) string {
+	trimmed := strings.TrimSpace(stateDir)
+	if trimmed == "" {
+		trimmed = Default().StateDir
+	}
+	return filepath.Join(trimmed, EffectiveConfigSnapshotFile)
+}
+
+func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", fmt.Errorf("validate config: %w", err)
+	}
+
+	path := EffectiveSnapshotPath(cfg.StateDir)
+	serializable := buildPersistedConfig(&cfg)
+
+	raw, err := marshalConfigYAML(serializable)
+	if err != nil {
+		return "", fmt.Errorf("marshal snapshot yaml: %w", err)
+	}
+	raw = appendSnapshotSecretSourceMetadata(raw, sources)
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("create snapshot directory: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return "", fmt.Errorf("write snapshot file %s: %w", path, err)
+	}
+	return path, nil
+}
+
+func LoadEffectiveSnapshot(path string) (Config, SecretSourceMetadata, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, SecretSourceMetadata{}, fmt.Errorf("read snapshot file %s: %w", path, err)
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return Default(), SecretSourceMetadata{}, nil
+	}
+
+	fileCfg, err := parseConfigYAML(raw)
+	if err != nil {
+		return Config{}, SecretSourceMetadata{}, fmt.Errorf("parse snapshot file %s: %w", path, err)
+	}
+	sources, err := parseSecretSourceMetadata(raw)
+	if err != nil {
+		return Config{}, SecretSourceMetadata{}, fmt.Errorf("parse secret source metadata in snapshot file %s: %w", path, err)
+	}
+
+	cfg := Default()
+	applyParsedFileOverrides(&cfg, fileCfg)
+	if err := cfg.Validate(); err != nil {
+		return Config{}, SecretSourceMetadata{}, err
+	}
+	return cfg, sources, nil
+}
+
+func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata) []byte {
+	entries := []struct {
+		key   string
+		value string
+	}{
+		{key: "mistral_api_key", value: strings.TrimSpace(sources.MistralAPIKey)},
+		{key: "elevenlabs_api_key", value: strings.TrimSpace(sources.ElevenLabsAPIKey)},
+		{key: "x402_facilitator_token", value: strings.TrimSpace(sources.X402FacilitatorToken)},
+		{key: "auth_token", value: strings.TrimSpace(sources.AuthToken)},
+	}
+
+	buf := strings.Builder{}
+	for _, entry := range entries {
+		if entry.value == "" {
+			continue
+		}
+		if buf.Len() == 0 {
+			buf.WriteString("secret_sources:\n")
+		}
+		buf.WriteString("  ")
+		buf.WriteString(entry.key)
+		buf.WriteString(": ")
+		buf.WriteString(entry.value)
+		buf.WriteByte('\n')
+	}
+	if buf.Len() == 0 {
+		return raw
+	}
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+	return append(raw, []byte(buf.String())...)
+}
+
+func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
+	meta := SecretSourceMetadata{}
+	reader := strings.NewReader(string(raw))
+	scanner := bufio.NewScanner(reader)
+	sectionByIndent := map[int]string{}
+	lineNo := 0
+
+	for scanner.Scan() {
+		lineNo++
+		rawLine := scanner.Text()
+		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " "))
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "- ") {
+			continue
+		}
+		for level := range sectionByIndent {
+			if level >= indent {
+				delete(sectionByIndent, level)
+			}
+		}
+		prefix := nearestSectionPrefix(sectionByIndent, indent)
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			return SecretSourceMetadata{}, fmt.Errorf("invalid snapshot metadata syntax at line %d: expected key:value", lineNo)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			return SecretSourceMetadata{}, fmt.Errorf("invalid snapshot metadata syntax at line %d: empty key", lineNo)
+		}
+		if prefix != "" && !strings.Contains(key, ".") {
+			key = prefix + "." + key
+		}
+		if value == "" && isMapSectionKey(key) {
+			sectionByIndent[indent] = key
+			continue
+		}
+
+		value = unquoteYAMLScalar(value)
+		switch key {
+		case "secret_sources.mistral_api_key":
+			meta.MistralAPIKey = value
+		case "secret_sources.elevenlabs_api_key":
+			meta.ElevenLabsAPIKey = value
+		case "secret_sources.x402_facilitator_token":
+			meta.X402FacilitatorToken = value
+		case "secret_sources.auth_token":
+			meta.AuthToken = value
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return SecretSourceMetadata{}, fmt.Errorf("scan snapshot metadata: %w", err)
+	}
+	return meta, nil
+}
+
+func buildPersistedConfig(cfg *Config) persistedConfig {
+	if cfg == nil {
+		return persistedConfig{}
+	}
+	return persistedConfig{
 		RootDir:                   cfg.RootDir,
 		StateDir:                  cfg.StateDir,
 		ListenAddr:                cfg.ListenAddr,
@@ -410,210 +583,6 @@ func SaveFile(path string, cfg Config) error {
 		SessionMaxLifetime:       cfg.SessionMaxLifetime,
 		HealthCheckInterval:      cfg.HealthCheckInterval,
 	}
-
-	raw, err := marshalConfigYAML(serializable)
-	if err != nil {
-		return fmt.Errorf("marshal config yaml: %w", err)
-	}
-	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-		raw = append(raw, '\n')
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
-		return fmt.Errorf("write config file %s: %w", path, err)
-	}
-	return nil
-}
-
-func EffectiveSnapshotPath(stateDir string) string {
-	trimmed := strings.TrimSpace(stateDir)
-	if trimmed == "" {
-		trimmed = Default().StateDir
-	}
-	return filepath.Join(trimmed, EffectiveConfigSnapshotFile)
-}
-
-func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, error) {
-	if err := cfg.Validate(); err != nil {
-		return "", fmt.Errorf("validate config: %w", err)
-	}
-
-	path := EffectiveSnapshotPath(cfg.StateDir)
-	serializable := persistedConfig{
-		RootDir:                   cfg.RootDir,
-		StateDir:                  cfg.StateDir,
-		ListenAddr:                cfg.ListenAddr,
-		MCPPath:                   cfg.MCPPath,
-		ProtocolVersion:           cfg.ProtocolVersion,
-		Public:                    cfg.Public,
-		AuthMode:                  cfg.AuthMode,
-		RateLimitRPS:              cfg.RateLimitRPS,
-		RateLimitBurst:            cfg.RateLimitBurst,
-		TrustedProxies:            append([]string(nil), cfg.TrustedProxies...),
-		PathExcludes:              append([]string(nil), cfg.PathExcludes...),
-		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
-		MistralBaseURL:            cfg.MistralBaseURL,
-		SessionInactivityTimeout:  cfg.SessionInactivityTimeout,
-		SessionMaxLifetime:        cfg.SessionMaxLifetime,
-		HealthCheckInterval:       cfg.HealthCheckInterval,
-		ElevenLabsBaseURL:         cfg.ElevenLabsBaseURL,
-		ElevenLabsTTSVoiceID:      cfg.ElevenLabsTTSVoiceID,
-		AllowedOrigins:            append([]string(nil), cfg.AllowedOrigins...),
-		EmbedModelText:            cfg.EmbedModelText,
-		EmbedModelCode:            cfg.EmbedModelCode,
-		ChatModel:                 cfg.ChatModel,
-		RAGSystemPrompt:           cfg.RAGSystemPrompt,
-		RAGGenerateAnswer:         cfg.RAGGenerateAnswer,
-		RAGKDefault:               cfg.RAGKDefault,
-		RAGMaxContextChars:        cfg.RAGMaxContextChars,
-		RAGOversampleFactor:       cfg.RAGOversampleFactor,
-		ChunkingStrategy:          cfg.ChunkingStrategy,
-		ChunkingMaxTokens:         cfg.ChunkingMaxTokens,
-		ChunkingOverlapTokens:     cfg.ChunkingOverlapTokens,
-		IngestGitignore:           cfg.IngestGitignore,
-		IngestFollowSymlinks:      cfg.IngestFollowSymlinks,
-		IngestMaxFileMB:           cfg.IngestMaxFileMB,
-		STTProvider:               cfg.STTProvider,
-		STTMistralModel:           cfg.STTMistralModel,
-		STTElevenLabsModel:        cfg.STTElevenLabsModel,
-		STTElevenLabsLanguageCode: cfg.STTElevenLabsLanguageCode,
-		ServerTLSCertFile:         cfg.ServerTLSCertFile,
-		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
-		X402Mode:                  cfg.X402.Mode,
-		X402FacilitatorURL:        cfg.X402.FacilitatorURL,
-		X402ResourceBaseURL:       cfg.X402.ResourceBaseURL,
-		X402ToolsCallEnabled:      cfg.X402.ToolsCallEnabled,
-		X402PriceAtomic:           cfg.X402.PriceAtomic,
-		X402Network:               cfg.X402.Network,
-		X402Scheme:                cfg.X402.Scheme,
-		X402Asset:                 cfg.X402.Asset,
-		X402PayTo:                 cfg.X402.PayTo,
-	}
-
-	raw, err := marshalConfigYAML(serializable)
-	if err != nil {
-		return "", fmt.Errorf("marshal snapshot yaml: %w", err)
-	}
-	raw = appendSnapshotSecretSourceMetadata(raw, sources)
-	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-		raw = append(raw, '\n')
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", fmt.Errorf("create snapshot directory: %w", err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		return "", fmt.Errorf("write snapshot file %s: %w", path, err)
-	}
-	return path, nil
-}
-
-func LoadEffectiveSnapshot(path string) (Config, SecretSourceMetadata, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, SecretSourceMetadata{}, fmt.Errorf("read snapshot file %s: %w", path, err)
-	}
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		return Default(), SecretSourceMetadata{}, nil
-	}
-
-	fileCfg, err := parseConfigYAML(raw)
-	if err != nil {
-		return Config{}, SecretSourceMetadata{}, fmt.Errorf("parse snapshot file %s: %w", path, err)
-	}
-	sources := parseSecretSourceMetadata(raw)
-
-	cfg := Default()
-	applyParsedFileOverrides(&cfg, fileCfg)
-	if err := cfg.Validate(); err != nil {
-		return Config{}, SecretSourceMetadata{}, err
-	}
-	return cfg, sources, nil
-}
-
-func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata) []byte {
-	entries := []struct {
-		key   string
-		value string
-	}{
-		{key: "mistral_api_key", value: strings.TrimSpace(sources.MistralAPIKey)},
-		{key: "elevenlabs_api_key", value: strings.TrimSpace(sources.ElevenLabsAPIKey)},
-		{key: "x402_facilitator_token", value: strings.TrimSpace(sources.X402FacilitatorToken)},
-		{key: "auth_token", value: strings.TrimSpace(sources.AuthToken)},
-	}
-
-	buf := strings.Builder{}
-	for _, entry := range entries {
-		if entry.value == "" {
-			continue
-		}
-		if buf.Len() == 0 {
-			buf.WriteString("secret_sources:\n")
-		}
-		buf.WriteString("  ")
-		buf.WriteString(entry.key)
-		buf.WriteString(": ")
-		buf.WriteString(entry.value)
-		buf.WriteByte('\n')
-	}
-	if buf.Len() == 0 {
-		return raw
-	}
-	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-		raw = append(raw, '\n')
-	}
-	return append(raw, []byte(buf.String())...)
-}
-
-func parseSecretSourceMetadata(raw []byte) SecretSourceMetadata {
-	meta := SecretSourceMetadata{}
-	reader := strings.NewReader(string(raw))
-	scanner := bufio.NewScanner(reader)
-	sectionByIndent := map[int]string{}
-
-	for scanner.Scan() {
-		rawLine := scanner.Text()
-		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " "))
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "- ") {
-			continue
-		}
-		for level := range sectionByIndent {
-			if level >= indent {
-				delete(sectionByIndent, level)
-			}
-		}
-		prefix := nearestSectionPrefix(sectionByIndent, indent)
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if prefix != "" && !strings.Contains(key, ".") {
-			key = prefix + "." + key
-		}
-		if value == "" && isMapSectionKey(key) {
-			sectionByIndent[indent] = key
-			continue
-		}
-
-		value = unquoteYAMLScalar(value)
-		switch key {
-		case "secret_sources.mistral_api_key":
-			meta.MistralAPIKey = value
-		case "secret_sources.elevenlabs_api_key":
-			meta.ElevenLabsAPIKey = value
-		case "secret_sources.x402_facilitator_token":
-			meta.X402FacilitatorToken = value
-		case "secret_sources.auth_token":
-			meta.AuthToken = value
-		}
-	}
-	return meta
 }
 
 func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, error) {
