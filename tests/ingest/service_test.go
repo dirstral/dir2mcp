@@ -108,6 +108,72 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 	}
 }
 
+func TestServiceRun_UnicodeDashesStillGenerateRepresentations(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "docs", "flow.md"), []byte("x402 – Payment Flow\navoid hard‑coding secrets.\n"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	st := newMemoryStore()
+	svc := mustNewIngestService(t, cfg, st)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	doc := st.docs["docs/flow.md"]
+	if doc.Status != "ok" {
+		t.Fatalf("flow.md status=%q want=ok", doc.Status)
+	}
+	if len(st.reps) == 0 {
+		t.Fatal("expected at least one representation for unicode markdown")
+	}
+	if len(st.chunks) == 0 {
+		t.Fatal("expected at least one chunk for unicode markdown")
+	}
+}
+
+func TestServiceRun_DoesNotExcludeAWSSecretsManagerProse(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "security.md"), []byte("Credentials are stored in AWS Secrets Manager.\n"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	st := newMemoryStore()
+	svc := mustNewIngestService(t, cfg, st)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	doc := st.docs["security.md"]
+	if doc.Status != "ok" {
+		t.Fatalf("security.md status=%q want=ok", doc.Status)
+	}
+}
+
+func TestServiceRun_StillExcludesAWSSecretAssignments(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "secrets.md"), []byte("AWS Secret Access Key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	st := newMemoryStore()
+	svc := mustNewIngestService(t, cfg, st)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	doc := st.docs["secrets.md"]
+	if doc.Status != "secret_excluded" {
+		t.Fatalf("secrets.md status=%q want=secret_excluded", doc.Status)
+	}
+}
+
 func TestServiceRun_ReturnsErrorOnInvalidSecretPattern(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))

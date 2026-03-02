@@ -1,5 +1,7 @@
 # VISION.md
 
+This document is intentionally product-level. Normative technical contracts and implementation details live in [SPEC.md](SPEC.md).
+
 ## dir2mcp: the deployment primitive for the agent web
 
 ### One sentence
@@ -91,24 +93,14 @@ Use case: archived data, customer logs, large repos, one-off investigations.
 Local deployment with retrieval-only exposure, strong provenance, and no mandatory external API dependency.  
 Use case: defense/healthcare/finance compliance constraints.
 
-For true air-gapped mode, embeddings/OCR/transcription must run via local/on-prem connectors deployed inside the same air-gapped network boundary. Local/on-prem connectors implement the runtime interfaces `embed(text) -> vector`, `ocr(image) -> text`, and `transcribe(audio) -> text`; if required connectors are unavailable, the runtime must fall back to text-first retrieval/citation mode and disable OCR/transcription-dependent ingestion paths.
+For true air-gapped mode, embeddings/OCR/transcription run through local/on-prem connectors inside the same trust boundary.
 
-Text-first retrieval/citation mode means retrieval is limited to existing text content already available to the index—plain text/code/docs, PDFs' extracted text if already present, and previously stored transcripts/OCR text—and embeddings are generated through `embed(text)` when available. When `embed(text) -> vector` is unavailable, the fallback ranking algorithm is deterministic BM25 (k1=1.5, b=0.75) with tokenization by Unicode word boundaries and lowercase normalization. Stop-word handling is configurable: by default common stop words are removed using the standard **Lucene English** stop‑word list[^lucene], but implementations MAY instead choose “no stop words” when absolute determinism is required. OCR/transcription-dependent ingestion pipelines are disabled in this mode.
+If a required connector for a given modality is unavailable, dir2mcp degrades gracefully:
+- retrieval remains available over existing text representations,
+- unavailable ingestion paths are paused until connector health is restored,
+- operators get explicit warnings so degraded mode is visible.
 
-"Required connectors" means only the connector types needed for modalities present in the current corpus segment (not all three universally):
-- `embed(text)` is required for vector retrieval on text content
-- `ocr(image)` is required only when image/PDF OCR ingestion is needed
-- `transcribe(audio)` is required only when audio ingestion is needed
-
-Already-ingested OCR/transcription artifacts remain searchable during fallback, must be flagged as `derived`, and should be scheduled for re-validation once connector health is restored (optional outside regulated environments; required for use case #2). Entering fallback must emit a user-visible and logged warning with connector name(s) and timestamp for operator remediation.
-
-See **Connector interface contract (local/on-prem)** below for the full implementation contract.
-
-[^lucene]: The Lucene English stop‑word list is a widely used default set of roughly 33 short words
-(e.g. “a”, “an”, “the”, “and”, “or”, “but”, “if”, etc.).  Implementations may substitute
-another standard list (such as NLTK’s English stop words) or disable stop‑word
-filtering entirely when determinism is paramount.  The canonical Lucene list is
-published at <https://lucene.apache.org/core/analysis-common/8_11_0/org/apache/lucene/analysis/en/EnglishAnalyzer.html#stopwords>.
+See [SPEC.md](SPEC.md) for the exact connector contract and fallback semantics.
 
 ### 3) Agent sidecar for large repos
 Agents navigate a repository via `search`, `open_file`, and citations—without reading everything.  
@@ -119,196 +111,24 @@ Download a corpus, deploy, query, delete. No workspace provisioning.
 
 ---
 
-## Connector interface contract (local/on-prem)
+## Connector strategy (local/on-prem)
 
-Local/on-prem connectors are pluggable components running inside the regulated or air-gapped environment that provide model-backed ingestion services to dir2mcp without requiring external APIs.
+For regulated and air-gapped deployments, dir2mcp supports connector-based
+operation so ingestion and retrieval can stay inside a controlled network.
 
-Minimum contract:
-- must expose `embed(text)`, `ocr(image)`, and/or `transcribe(audio)` interfaces
-- must support both batch requests and streaming requests where applicable
-- must return the standard metadata envelope defined in **Connector metadata envelope (JSON contract)**
-- must support connector authentication in this preference order: mTLS, bearer token/API key, then HTTP Basic Auth (legacy only)
-- must support secure credential storage (environment variables preferred; encrypted config files allowed); plaintext credentials in committed config are not allowed
-- must support credential rotation without process restart
-- must enforce TLS 1.2+ with certificate validation; self-signed certificates are disallowed in production by default — **exception**: air-gapped or regulated environments may use self-signed or internally-issued certificates provided they are validated against a configured trusted internal root CA (via certificate pinning or a configurable trusted CA bundle); this exception requires strict certificate validation (no hostname suppression, no skip-verify), documented key-rotation procedures, and explicit opt-in configuration; any use of internally-issued certificates must be documented in the deployment configuration
-- must expose configurable model selection and resource limits (timeouts, concurrency, memory/throughput caps)
-	- recommended defaults (baseline):
-		- timeout: `embed=10s`, `ocr=60s`, `transcribe=120s`
-		- per-connector concurrency limit: `8` in-flight requests
-		- per-connector memory cap: `2 GiB`
-		- batch size limit: `embed<=128` items, `ocr<=16` pages/images, `transcribe<=8` audio segments
-		- per-connector rate limit: `120` requests/minute
-- must emit deterministic error codes so the runtime can distinguish transient failures, auth/config failures, and capability unavailability
+At a vision level, the rule is simple:
+- keep the same product behavior and MCP tool surface,
+- swap model execution to local/on-prem connectors where required,
+- degrade gracefully to text-first mode when specific modalities are unavailable.
 
-Connector discovery and configuration:
-- connectors are loaded from explicit runtime config (`connectors` block in YAML/JSON) and may be overridden by environment variables for endpoint/auth values
-- each connector definition must include transport endpoint details (HTTP/HTTPS URL, UNIX socket path, or gRPC endpoint), auth credentials/reference, supported capabilities, and allowed model selections
-- startup sequence: read config → register each connector → perform handshake/capability validation (`embed(text)`, `ocr(image)`, `transcribe(audio)` as declared) → validate model/resource constraints → persist the connector metadata envelope for runtime selection and diagnostics
-- if any startup step fails (for example: handshake timeout, capability mismatch, invalid model constraints), apply configured retries/timeouts, then log a structured error including connector name, endpoint, and error code; mark that connector unavailable; continue initializing remaining connectors; if all connectors fail, enter text-first degraded mode
+This keeps the product promise stable across deployment environments without
+turning the core project into a connector framework.
 
-Health-check and recovery protocol:
-- connectors must expose health probes (`/health` for HTTP or gRPC HealthCheck equivalent) that return deterministic status/error codes
-- runtime polls health at a configurable interval (`health_check_interval` in config, default `5s`) and on failure switches to bounded exponential backoff (max: `300s`) until a successful probe resets to the fixed interval
-- on unhealthy state, disable affected ingestion paths and enter text-first retrieval/citation mode as needed
-- on healthy restoration, re-enable ingestion paths and trigger re-validation of `derived` artifacts created during degraded operation
-
-Re-validation mechanics and outcomes:
-- on connector restoration, re-run the original ingestion operation on the original source artifact (OCR/transcription as applicable)
-- perform deterministic comparison between newly generated output and stored `derived` artifact using connector/type-specific thresholds
-- pass criteria: differences at or below configured threshold
-- fail criteria: differences above threshold -> mark artifact `validation-failed`, flag for manual review, and update index only after explicit approval or documented automated reconciliation policy
-- required logging for every re-validation: artifact path, connector id, timestamp, diff summary, threshold used, and reviewer/action taken
-- threshold policy must be configurable per connector and artifact type; any automated index updates must be auditable
-
-Runtime behavior requirements:
-- when connector unavailability is detected from deterministic error codes, dir2mcp falls back to text-first retrieval/citation mode
-- OCR/transcription-dependent ingestion paths are disabled until connector health is restored
-
-Acceptable connector implementations include:
-- local model runtimes on CPU/GPU hosts
-- internal GPU inference servers
-- vendor on-prem appliance endpoints
-
-### Connector metadata envelope (JSON contract)
-
-The metadata envelope is a JSON object returned by connector operations and handshake/health responses.
-
-Required fields:
-- `provider` (string): connector/provider identifier
-- `model` (string): selected model identifier
-- `version` (string): connector or model version string
-- `latency_ms` (number; integer or float accepted): end-to-end latency in **milliseconds** (fractional values allowed to represent sub‑millisecond timings, e.g. `0.45`).  Implementations reporting sub‑ms precision should round or truncate consistently; values must be `>= 0`.
-- `trace_or_request_id` (string): request correlation or request identifier.  Connectors **should** generate UUID‑v4 identifiers when possible (e.g. `550e8400-e29b-41d4-a716-446655440000`) but **may** generate arbitrary strings if a UUID cannot be generated (e.g. `req-12345`).  Consumers **must** accept non‑UUID identifiers and record them as provided but are encouraged to treat UUIDs specially for tracing and de‑duplication.  Connectors may log or normalize the generated value for internal purposes but must include the final identifier in the returned metadata envelope.
-Optional fields:
-- `token_or_compute_usage` (object): usage counters
-	- `input_tokens` (number, `>= 0`) optional
-	- `output_tokens` (number, `>= 0`) optional
-	- `compute_ms` (number, `>= 0`) optional
-	- `gpu_seconds` (number, `>= 0`) optional
-	- `currency` (string) optional
-	- `cost` (number, `>= 0`) optional
-
-Null/omitted semantics:
-- optional fields may be omitted when not available
-- fields may be `null` only when explicitly unsupported by the connector; required fields must never be null
-
-Canonical example:
-```json
-{
-	"provider": "internal-gpu-inference",
-	"model": "mistral-embed-v1",
-	"version": "2026.02.1",
-	"latency_ms": 47.3,
-	"trace_or_request_id": "550e8400-e29b-41d4-a716-446655440000",
-	"token_or_compute_usage": {
-		"input_tokens": 312,
-		"output_tokens": 0,
-		"compute_ms": 45,
-		"gpu_seconds": 0.02,
-		"currency": "USD",
-		"cost": 0.0003
-	}
-}
-```
-
-### Envelope-specific error codes
-
-Codes specifically used by metadata envelope parsers; refer to parser
-requirements earlier in this section for usage context.
-
-- `ENVELOPE_MALFORMED_JSON (2003)` – JSON syntax error in metadata envelope.
-- `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` – required field absent.
-- `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)` – field present but wrong type.
-- `ENVELOPE_CONSTRAINT_VIOLATION (2006)` – numeric constraint violation.
-
-Parser requirements:
-- connectors must return valid JSON for metadata envelopes; malformed JSON must produce structured connector errors (recommended: `ENVELOPE_MALFORMED_JSON (2003)`; see §"Envelope-specific error codes" above)
-- missing required fields (`provider`, `model`, `version`, `latency_ms`, `trace_or_request_id`) must produce `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` (see §"Envelope-specific error codes" above); `CONFIG_MISSING (2002)` is reserved for global connector configuration errors, not per-envelope missing fields
-- required-field type mismatches (for example `latency_ms` not numeric, `provider` not string) must produce a structured connector error (recommended: `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)`; see §"Envelope-specific error codes" above)
-- numeric constraint violations (for example negative `latency_ms`, negative values in `token_or_compute_usage`) must produce validation errors (recommended: `ENVELOPE_CONSTRAINT_VIOLATION (2006)`; see §"Envelope-specific error codes" above)
-- unexpected additional fields must be ignored for forward compatibility and must not fail parsing
-
-### Connector error taxonomy (deterministic, machine-parseable)
-
-Connector errors must use a structured object:
-
-```json
-{
-	"code": 1001,
-	"type": "NETWORK_TIMEOUT",
-	"message": "Connector timed out while processing embed(text)"
-}
-```
-
-Required fields:
-- `code` (number): stable numeric error code
-- `type` (string): machine-readable enum constant
-- `message` (string): human-readable diagnostic summary
-
-Reserved code ranges:
-- `1000-1999`: transient/retryable failures
-	- `NETWORK_TIMEOUT (1001)`
-	- `UPSTREAM_UNAVAILABLE (1002)`
-- `2000-2999`: auth/config failures
-	- `AUTH_INVALID_CREDENTIALS (2001)`
-	- `CONFIG_MISSING (2002)`
-
-- `3000-3999`: capability unavailable failures
-	- `CAPABILITY_NOT_SUPPORTED (3001)`
-	- `MODEL_NOT_AVAILABLE (3002)`
-- `4000-4999`: client/input failures
-	- `INVALID_REQUEST (4001)`
-	- `VALIDATION_FAILED (4002)`
-- `5000-5999`: resource exhaustion/rate/quota failures
-	- `RATE_LIMIT_EXCEEDED (5001)`
-	- `QUOTA_EXCEEDED (5002)`
-- `6000-6999`: internal/implementation failures
-	- `INTERNAL_ERROR (6001)`
-	- `PANIC_UNEXPECTED (6002)`
-
-Canonical HTTP status mappings (explicit per-error recommendations):
-
-Each named connector error constant is paired with a single “recommended” HTTP
-status code.  The table below lists every constant defined in the taxonomy along
-with its associated status; implementers should return the annotated status for
-that error and may use the more general range guidance when new codes are
-introduced.
-
-| Error constant            | Code | HTTP status | Notes |
-|---------------------------|------|-------------|-------|
-| NETWORK_TIMEOUT           | 1001 | 503         | retryable/temporary |
-| UPSTREAM_UNAVAILABLE      | 1002 | 502         | bad‑gateway connector fault |
-| AUTH_INVALID_CREDENTIALS  | 2001 | 401         | invalid or missing authentication |
-| CONFIG_MISSING            | 2002 | 503         | server-side config absent; service unavailable until corrected |
-| CAPABILITY_NOT_SUPPORTED  | 3001 | 501         | unimplemented capability |
-| MODEL_NOT_AVAILABLE       | 3002 | 422         | semantically unprocessable request |
-| INVALID_REQUEST           | 4001 | 400         | malformed or invalid client input |
-| VALIDATION_FAILED         | 4002 | 422         | well‑formed but semantically invalid input |
-| RATE_LIMIT_EXCEEDED       | 5001 | 429         | rate/quota exhaustion |
-| QUOTA_EXCEEDED            | 5002 | 429         | rate/quota exhaustion |
-| INTERNAL_ERROR            | 6001 | 500         | internal server fault |
-| PANIC_UNEXPECTED          | 6002 | 500         | internal server fault |
-
-Generalized range guidelines (for new or unspecified codes):
-- transient/retryable (`1000-1999`) → `503` for temporary overload/idempotent
-  retry‑later conditions, `502` for upstream/bad‑gateway connector failures
-- auth/config (`2000-2999`) → `401` for missing/invalid authentication, `403`
-  for authenticated but forbidden/insufficient permissions or explicit policy
-  denial, `503` for missing server-side configuration that makes the service
-  unavailable (e.g. `CONFIG_MISSING`)
-- capability unavailable (`3000-3999`) → `422` for semantically unprocessable
-  requests, `501` for unimplemented/nonexistent capabilities
-- client/input (`4000-4999`) → `400` for malformed/invalid client request, `422`
-  for semantically invalid but well‑formed input
-- resource exhaustion (`5000-5999`) → `429` for rate/quota exhaustion, `503`
-  when capacity exhaustion is temporary service-side overload
-- internal/implementation (`6000-6999`) → `500` for internal faults, `502`
-  when fault is surfaced through an upstream connector boundary
-
-Propagation requirements:
-- connectors must return this structured error object in API error responses
-- SDK wrappers/exceptions must preserve `code`, `type`, and `message` as machine-readable fields
-- runtime and connector logs must emit the same structured error object for all surfaced failures
+Implementation-level contracts (auth, health checks, metadata envelope,
+error taxonomy, retries, re-validation policy) are intentionally specified in
+the technical docs:
+- [SPEC.md](SPEC.md) — normative contracts and wire/config behavior
+- [ECOSYSTEM.md](ECOSYSTEM.md) — ecosystem/deployment positioning
 
 ## What makes dir2mcp different
 

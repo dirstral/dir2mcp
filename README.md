@@ -11,10 +11,15 @@
 
 # dir2mcp
 
-Deploy any local directory as an MCP knowledge server with indexing, retrieval, citations, and optional x402 request gating (x402 is a payment/request‑gating protocol).
+Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations, built to maximize use of Mistral models across embedding, OCR, transcription, and generation. Optional layers include ElevenLabs voice output and x402 request gating (payment/request‑gating protocol).
 
 ## Why dir2mcp
 
+- Mistral-first pipeline:
+  - Embeddings: `mistral-embed` (text) + `codestral-embed` (code)
+  - OCR: `mistral-ocr-latest`
+  - STT default: `voxtral-mini-latest`
+  - RAG generation: Mistral chat models
 - Single Go binary (`dir2mcp`) with local-first state in `.dir2mcp/`
 - MCP Streamable HTTP server with a stable tool surface
 - Multimodal ingestion: text/code, OCR, transcripts, structured annotations
@@ -138,7 +143,7 @@ vary by deployment. The commonly used variables are:
 
 | Variable | Required | Description |
 |---|---|---|
-| `MISTRAL_API_KEY` | Yes | Mistral API key for embeddings, OCR, and generation |
+| `MISTRAL_API_KEY` | Yes | Primary API key used across embeddings, OCR, default STT, and generation |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
 | `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` | No | Session inactivity timeout (default: `24h`) |
@@ -175,10 +180,10 @@ Core server, ingestion pipeline, retrieval, citations, and x402 gating are imple
 
 ## Documentation
 
-- [docs/SPEC.md](docs/SPEC.md) — output contracts, interfaces, schema and operational details
-- [docs/VISION.md](docs/VISION.md) — product direction and architectural principles
-- [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) — discovery, trust, metering, payment ecosystem framing
-- [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) — facilitator-facing x402 adapter contract
+- [docs/VISION.md](docs/VISION.md) — product vision and strategic direction
+- [docs/SPEC.md](docs/SPEC.md) — normative behavior, schemas, and runtime contracts
+- [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) — ecosystem/market/discovery/payment context
+- [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) — facilitator adapter contract
 
 ## Development
 
