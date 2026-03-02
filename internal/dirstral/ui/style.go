@@ -11,7 +11,7 @@ import (
 
 // Color palette (256-color).
 var (
-	ClrBrand  = lipgloss.Color("214") // orange
+	ClrBrand  = lipgloss.Color("208") // orange (#ff8700 — closest 256-color to SVG brand #F2911A)
 	ClrMuted  = lipgloss.Color("245") // gray
 	ClrSubtle = lipgloss.Color("242") // darker gray
 	ClrGreen  = lipgloss.Color("114") // green

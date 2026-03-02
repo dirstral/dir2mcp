@@ -12,19 +12,20 @@ import (
 const (
 	ansiReset = "\033[0m"
 
-	colorBrandStrong = "\033[38;5;214m"
-	colorBrand       = "\033[38;5;208m"
+	colorBrandStrong = "\033[38;5;208m" // #ff8700 — warm orange (SVG top stop ~#F2911A)
+	colorBrand       = "\033[38;5;166m" // #d75f00 — orange-red (SVG mid stop ~#E8601B)
 	colorMuted       = "\033[38;5;245m"
 	colorSubtle      = "\033[38;5;242m"
 	colorError       = "\033[38;5;203m"
 	colorBold        = "\033[1m"
 
-	colorTint1 = "\033[38;5;220m"
-	colorTint2 = "\033[38;5;215m"
-	colorTint3 = "\033[38;5;214m"
-	colorTint4 = "\033[38;5;209m"
-	colorTint5 = "\033[38;5;208m"
-	colorTint6 = "\033[38;5;202m"
+	// Logo tints: top→bottom gradient matching the SVG brand gradient (#F2911A → #C71B18).
+	colorTint1 = "\033[38;5;208m" // #ff8700 — warm orange
+	colorTint2 = "\033[38;5;202m" // #ff5f00 — orange-red
+	colorTint3 = "\033[38;5;166m" // #d75f00 — darker orange-red
+	colorTint4 = "\033[38;5;160m" // #d70000 — deep red
+	colorTint5 = "\033[38;5;124m" // #af0000 — crimson
+	colorTint6 = "\033[38;5;124m" // #af0000 — crimson (SVG bottom stop ~#C71B18)
 )
 
 // Lipgloss color palette.
