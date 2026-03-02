@@ -377,10 +377,78 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 }
 
 func (a *App) printUsage() {
-	writeln(a.stdout, "dir2mcp")
-	writeln(a.stdout, "usage: dir2mcp [--dir <path>] [--config <path>] [--state-dir <path>] [--json] [--non-interactive] [--quiet] <command>")
-	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
-	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --tls-cert, --tls-key, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, --x402, --x402-facilitator-url, ...")
+	s := a.sty(false)
+	o := a.stdout
+
+	writeln(o, s.Brand.Render("dir2mcp")+" "+s.Dim.Render("· deploy a directory as an MCP knowledge server"))
+	writeln(o)
+
+	writeln(o, s.sectionHeader("Usage"))
+	writeln(o, "  dir2mcp [global flags] <command> [command flags]")
+	writeln(o)
+
+	writeln(o, s.sectionHeader("Commands"))
+	cmds := [][2]string{
+		{"up", "start the MCP server and begin indexing"},
+		{"status", "show server health and corpus stats"},
+		{"ask", "query the knowledge base from the CLI"},
+		{"reindex", "force a full re-index of all documents"},
+		{"config", "view or edit configuration"},
+		{"version", "print build version"},
+	}
+	for _, c := range cmds {
+		writef(o, "  %-12s %s\n", s.Bold.Render(c[0]), s.Dim.Render(c[1]))
+	}
+	writeln(o)
+
+	writeln(o, s.sectionHeader("Global Flags"))
+	globals := [][2]string{
+		{"--dir <path>", "root directory to serve (default: current dir)"},
+		{"--config <path>", "config file path"},
+		{"--state-dir <path>", "state / cache directory"},
+		{"--json", "output machine-readable JSON"},
+		{"--non-interactive", "disable prompts and progress output"},
+		{"--quiet", "suppress non-error output"},
+	}
+	for _, f := range globals {
+		writef(o, "  %-26s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
+	}
+	writeln(o)
+
+	writeln(o, s.sectionHeader("Server Flags")+" "+s.Dim.Render("(up)"))
+	serverFlags := [][2]string{
+		{"--listen <addr>", "listen address (default: 127.0.0.1:0)"},
+		{"--mcp-path <path>", "HTTP route for the MCP endpoint"},
+		{"--public", "bind to all interfaces (requires auth or --force-insecure)"},
+		{"--read-only", "disable write operations"},
+		{"--auth <token>", "bearer token (or set DIR2MCP_AUTH_TOKEN)"},
+		{"--tls-cert / --tls-key", "TLS certificate and key files"},
+		{"--allowed-origins <csv>", "CORS allowed origins"},
+	}
+	for _, f := range serverFlags {
+		writef(o, "  %-30s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
+	}
+	writeln(o)
+
+	writeln(o, s.sectionHeader("Model Flags")+" "+s.Dim.Render("(up)"))
+	modelFlags := [][2]string{
+		{"--embed-model-text <model>", "embedding model for text chunks"},
+		{"--embed-model-code <model>", "embedding model for code chunks"},
+		{"--chat-model <model>", "model used for ask / retrieval"},
+	}
+	for _, f := range modelFlags {
+		writef(o, "  %-30s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
+	}
+	writeln(o)
+
+	writeln(o, s.sectionHeader("Payment Flags")+" "+s.Dim.Render("(up, x402)"))
+	x402Flags := [][2]string{
+		{"--x402 <mode>", "payment gating: off | on | required"},
+		{"--x402-facilitator-url", "x402 facilitator endpoint"},
+	}
+	for _, f := range x402Flags {
+		writef(o, "  %-30s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
+	}
 }
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
