@@ -103,7 +103,7 @@ func recordAudio(ctx context.Context, device string) (string, error) {
 func transcribeElevenLabs(ctx context.Context, baseURL, audioPath string) (string, error) {
 	apiKey := strings.TrimSpace(os.Getenv("ELEVENLABS_API_KEY"))
 	if apiKey == "" {
-		return "", fmt.Errorf("ELEVENLABS_API_KEY is required")
+		return "", fmt.Errorf("ELEVENLABS_API_KEY is not set — add it in Settings or set the environment variable")
 	}
 	buf := &bytes.Buffer{}
 	writer := multipart.NewWriter(buf)
@@ -180,7 +180,7 @@ func preflight(opts Options) error {
 		return fmt.Errorf("ffmpeg is required for Voice mic recording")
 	}
 	if strings.TrimSpace(os.Getenv("ELEVENLABS_API_KEY")) == "" {
-		return fmt.Errorf("ELEVENLABS_API_KEY is required")
+		return fmt.Errorf("ELEVENLABS_API_KEY is not set — add it in Settings or set the environment variable")
 	}
 	if opts.Mute || opts.TranscriptOnly {
 		return nil

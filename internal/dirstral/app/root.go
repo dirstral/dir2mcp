@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"dir2mcp/internal/dirstral/chat"
 	"dir2mcp/internal/dirstral/config"
@@ -141,7 +142,7 @@ func BuildModeFeedback(mode string, err error) ModeFeedback {
 }
 
 func printModeFeedback(mode string, err error) {
-	printModeFeedbackTo(mode, err, "home")
+	printModeFeedbackTo(mode, err, "main menu")
 }
 
 func printModeFeedbackTo(mode string, err error, destination string) {
@@ -384,10 +385,25 @@ func runServerMenu(ctx context.Context, cfg config.Config) error {
 			if err := host.UpDetached(ctx, host.UpOptions{Listen: cfg.Host.Listen, MCPPath: cfg.Host.MCPPath}); err != nil {
 				printModeFeedbackTo("MCP server start", err, "MCP Server menu")
 			} else {
-				if health := host.CheckHealth(); strings.TrimSpace(health.MCPURL) != "" {
-					fmt.Println(statusLine("MCP Server", "Active endpoint: "+health.MCPURL))
+				fmt.Print(styleMuted.Render("starting"))
+				var health host.HealthInfo
+				for i := 0; i < 15; i++ {
+					time.Sleep(300 * time.Millisecond)
+					health = host.CheckHealth()
+					if health.Ready {
+						break
+					}
+					fmt.Print(styleMuted.Render("."))
 				}
-				fmt.Println(styleMuted.Render("MCP server started in background. Use Status for readiness details."))
+				fmt.Println()
+				if health.Ready {
+					fmt.Println(statusLine("MCP Server", "ready · "+health.MCPURL))
+				} else if strings.TrimSpace(health.MCPURL) != "" {
+					fmt.Println(statusLine("MCP Server", "started · "+health.MCPURL))
+					fmt.Println(styleMuted.Render("  (still initializing — use Status to confirm readiness)"))
+				} else {
+					fmt.Println(statusLine("MCP Server", "started — use Status to confirm readiness"))
+				}
 				printReturnTo("MCP Server menu")
 			}
 			waitForEnter()

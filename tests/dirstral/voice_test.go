@@ -25,7 +25,7 @@ func TestVoiceRunFailsFastWithoutAudioPrereqs(t *testing.T) {
 	}
 
 	msg := strings.ToLower(err.Error())
-	if !strings.Contains(msg, "elevenlabs_api_key is required") {
+	if !strings.Contains(msg, "elevenlabs_api_key") {
 		t.Fatalf("unexpected voice preflight error: %v", err)
 	}
 }
