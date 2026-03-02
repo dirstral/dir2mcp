@@ -42,25 +42,42 @@ func newRootCommand(cfg config.Config) *cobra.Command {
 				switch choice {
 				case ChoiceChat:
 					printModeHeader("Chat")
-					printModeFeedback("Chat", runChat(cmd.Context(), cfg))
+					if err := runChat(cmd.Context(), cfg); err != nil {
+						printModeFeedback("Chat", err)
+						waitForEnter()
+					}
 				case ChoiceVoice:
 					printModeHeader("Voice")
 					mcpURL := ResolveMCPURL(cfg.MCP.URL, "", false, cfg.MCP.Transport)
-					opts := BuildVoiceOptions(cfg, mcpURL, cfg.ElevenLabs.Voice, "", false, cfg.Verbose, cfg.ElevenLabs.BaseURL)
-					printModeFeedback("Voice", voice.Run(cmd.Context(), opts))
+					var voiceErr error
+					if strings.TrimSpace(mcpURL) == "" {
+						voiceErr = fmt.Errorf("no MCP server available — start the local server from the MCP Server menu, or set mcp.url in Settings")
+					} else {
+						opts := BuildVoiceOptions(cfg, mcpURL, cfg.ElevenLabs.Voice, "", false, cfg.Verbose, cfg.ElevenLabs.BaseURL)
+						voiceErr = voice.Run(cmd.Context(), opts)
+					}
+					if voiceErr != nil {
+						printModeFeedback("Voice", voiceErr)
+						waitForEnter()
+					}
 				case ChoiceServer:
 					if err := runServerMenu(cmd.Context(), cfg); err != nil {
 						printUIError(err)
+						waitForEnter()
 					}
 				case ChoiceSettings:
 					printModeHeader("Settings")
-					err := settings.Run(cfg)
+					settingsErr := settings.Run(cfg)
 					if refreshed, loadErr := config.Load(); loadErr == nil {
 						cfg = refreshed
 					} else {
 						printUIError(fmt.Errorf("reload config: %w", loadErr))
+						waitForEnter()
 					}
-					printModeFeedback("Settings", err)
+					if settingsErr != nil {
+						printModeFeedback("Settings", settingsErr)
+						waitForEnter()
+					}
 				default:
 					fmt.Println(styleMuted.Render("bye"))
 					return nil
@@ -284,6 +301,9 @@ func newManifestCommand(cfg config.Config) *cobra.Command {
 
 func runChat(ctx context.Context, cfg config.Config) error {
 	mcpURL := ResolveMCPURL(cfg.MCP.URL, "", false, cfg.MCP.Transport)
+	if strings.TrimSpace(mcpURL) == "" {
+		return fmt.Errorf("no MCP server available — start the local server from the MCP Server menu, or set mcp.url in Settings")
+	}
 	return chat.Run(ctx, chat.Options{MCPURL: mcpURL, Transport: cfg.MCP.Transport, Model: cfg.Model, Verbose: cfg.Verbose})
 }
 
@@ -360,46 +380,45 @@ func runServerMenu(ctx context.Context, cfg config.Config) error {
 		}
 		switch result.Chosen {
 		case serverActionStart:
-			printModeHeader("Start/Stop MCP Server / Start MCP Server")
+			printModeHeader("Start MCP Server")
 			if err := host.UpDetached(ctx, host.UpOptions{Listen: cfg.Host.Listen, MCPPath: cfg.Host.MCPPath}); err != nil {
-				printModeFeedbackTo("MCP server start", err, "Start/Stop MCP Server menu")
+				printModeFeedbackTo("MCP server start", err, "MCP Server menu")
 			} else {
 				if health := host.CheckHealth(); strings.TrimSpace(health.MCPURL) != "" {
 					fmt.Println(statusLine("MCP Server", "Active endpoint: "+health.MCPURL))
 				}
 				fmt.Println(styleMuted.Render("MCP server started in background. Use Status for readiness details."))
-				printReturnTo("Start/Stop MCP Server menu")
+				printReturnTo("MCP Server menu")
 			}
 			waitForEnter()
 		case serverActionStatus:
-			printModeHeader("Start/Stop MCP Server / Status")
+			printModeHeader("MCP Server Status")
 			if err := host.Status(); err != nil {
-				printModeFeedbackTo("MCP server status", err, "Start/Stop MCP Server menu")
+				printModeFeedbackTo("MCP server status", err, "MCP Server menu")
 			} else {
-				printReturnTo("Start/Stop MCP Server menu")
+				printReturnTo("MCP Server menu")
 			}
 			waitForEnter()
 		case serverActionLogs:
-			printModeHeader("Start/Stop MCP Server / Logs")
+			printModeHeader("Server Logs")
 			if err := runServerLogViewer(); err != nil {
-				printModeFeedbackTo("MCP server logs", err, "Start/Stop MCP Server menu")
-				continue
+				printModeFeedbackTo("MCP server logs", err, "MCP Server menu")
+				waitForEnter()
 			}
-			printReturnTo("Start/Stop MCP Server menu")
 		case serverActionRemote:
-			printModeHeader("Start/Stop MCP Server / Remote")
+			printModeHeader("Remote MCP Status")
 			if err := host.StatusRemote(ctx, strings.TrimSpace(cfg.MCP.URL)); err != nil {
-				printModeFeedbackTo("MCP server remote", err, "Start/Stop MCP Server menu")
+				printModeFeedbackTo("MCP server remote", err, "MCP Server menu")
 			} else {
-				printReturnTo("Start/Stop MCP Server menu")
+				printReturnTo("MCP Server menu")
 			}
 			waitForEnter()
 		case serverActionStop:
-			printModeHeader("Start/Stop MCP Server / Stop MCP Server")
+			printModeHeader("Stop MCP Server")
 			if err := host.Down(); err != nil {
-				printModeFeedbackTo("MCP server stop", err, "Start/Stop MCP Server menu")
+				printModeFeedbackTo("MCP server stop", err, "MCP Server menu")
 			} else {
-				printReturnTo("Start/Stop MCP Server menu")
+				printReturnTo("MCP Server menu")
 			}
 			waitForEnter()
 		default:
