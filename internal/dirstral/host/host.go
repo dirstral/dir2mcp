@@ -325,8 +325,12 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 			fmt.Printf("%s DIR2MCP_AUTH_TOKEN is not set\n", ui.Yellow.Render("hint:"))
 		}
 		fmt.Printf("%s export DIR2MCP_AUTH_TOKEN=<token>\n", ui.Dim("      "))
-		fmt.Printf("%s the token is the bearer secret configured on the server\n", ui.Dim("      "))
-		fmt.Printf("%s if using secret.token: export DIR2MCP_AUTH_TOKEN=$(cat /path/to/dir/.dir2mcp/secret.token)\n", ui.Dim("      "))
+		tokenFilePath := resolveTokenFilePath(endpoint)
+		if tokenFilePath != "" {
+			fmt.Printf("%s export DIR2MCP_AUTH_TOKEN=$(cat %s)\n", ui.Dim("      "), tokenFilePath)
+		} else {
+			fmt.Printf("%s if using secret.token: export DIR2MCP_AUTH_TOKEN=$(cat /path/to/dir/.dir2mcp/secret.token)\n", ui.Dim("      "))
+		}
 	}
 
 	if !reachable || !mcpReady {
@@ -336,6 +340,27 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 		return fmt.Errorf("%w", errUnhealthy)
 	}
 	return nil
+}
+
+// resolveTokenFilePath returns the actual path to secret.token for the given
+// endpoint by checking the local state file. Returns "" if unavailable.
+func resolveTokenFilePath(endpoint string) string {
+	state, err := LoadState()
+	if err != nil {
+		return ""
+	}
+	// Only show the local path when probing the locally managed server.
+	if !strings.EqualFold(strings.TrimRight(state.MCPURL, "/"), strings.TrimRight(endpoint, "/")) {
+		return ""
+	}
+	root := strings.TrimSpace(state.RootDir)
+	if root == "" {
+		root = resolveRootDir("", state.WorkDir)
+	}
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, ".dir2mcp", "secret.token")
 }
 
 func isAuthRelatedError(s string) bool {
