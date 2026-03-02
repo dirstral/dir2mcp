@@ -241,6 +241,82 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	}
 }
 
+func TestMCPToolsCallTranscribe_CreatesAudioDocWhenNotYetIndexed(t *testing.T) {
+	rootDir := t.TempDir()
+	stateDir := filepath.Join(rootDir, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rootDir, "audio"), 0o755); err != nil {
+		t.Fatalf("mkdir audio dir: %v", err)
+	}
+	relPath := "audio/voice.wav"
+	if err := os.WriteFile(filepath.Join(rootDir, relPath), []byte("RIFF0000WAVEfmt data"), 0o644); err != nil {
+		t.Fatalf("write audio file: %v", err)
+	}
+
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init sqlite store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := config.Default()
+	cfg.RootDir = rootDir
+	cfg.StateDir = stateDir
+	cfg.MCPPath = protocol.DefaultMCPPath
+	cfg.AuthMode = "none"
+	cfg.MistralAPIKey = "test-key"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/audio/transcriptions" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			t.Fatalf("parse multipart form: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"segments":[{"start":1,"end":2,"text":"alpha"}]}`)
+	}))
+	defer upstream.Close()
+	cfg.MistralBaseURL = upstream.URL
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":320,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"audio/voice.wav"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected success, got %#v", envelope.Result.StructuredContent)
+	}
+
+	doc, err := st.GetDocumentByPath(context.Background(), relPath)
+	if err != nil {
+		t.Fatalf("expected document to be upserted for audio path: %v", err)
+	}
+	if doc.DocType != "audio" {
+		t.Fatalf("expected doc_type audio, got %q", doc.DocType)
+	}
+}
+
 func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())

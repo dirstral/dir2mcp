@@ -996,12 +996,9 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 
-	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
+	doc, toolErr := s.lookupOrInitAudioDocumentForTool(ctx, relPath)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
-	}
-	if doc.DocType != "audio" {
-		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
 	}
 
 	// if a language override is provided we always force a retranscription.
@@ -1222,12 +1219,9 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
-	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
+	doc, toolErr := s.lookupOrInitAudioDocumentForTool(ctx, relPath)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
-	}
-	if doc.DocType != "audio" {
-		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
 	}
 	_, transcribed, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
 	if toolErr != nil {
@@ -1481,6 +1475,85 @@ func (s *Server) lookupDocumentForTool(ctx context.Context, relPath string) (mod
 	return doc, nil
 }
 
+// lookupOrInitAudioDocumentForTool resolves an audio document for transcription
+// tools. If the document hasn't been indexed yet but a valid audio file exists
+// under root, it creates the document row on demand so transcription can run
+// before background indexing reaches that path.
+func (s *Server) lookupOrInitAudioDocumentForTool(ctx context.Context, relPath string) (model.Document, *toolExecutionError) {
+	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
+	if toolErr == nil {
+		if doc.DocType != "audio" {
+			return model.Document{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
+		}
+		return doc, nil
+	}
+	if toolErr.Code != protocol.ErrorCodeFileNotFound {
+		return model.Document{}, toolErr
+	}
+
+	normalizedRel := strings.TrimSpace(relPath)
+	if ingest.ClassifyDocType(normalizedRel) != "audio" {
+		return model.Document{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
+	}
+	if s.store == nil {
+		return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: "store not configured", Retryable: false}
+	}
+
+	absPath, pathErr := s.resolveDocumentPath(normalizedRel)
+	if pathErr != nil {
+		switch {
+		case errors.Is(pathErr, model.ErrPathOutsideRoot):
+			return model.Document{}, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: pathErr.Error(), Retryable: false}
+		case errors.Is(pathErr, os.ErrNotExist):
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
+		default:
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: pathErr.Error(), Retryable: false}
+		}
+	}
+
+	info, statErr := os.Stat(absPath)
+	if statErr != nil {
+		switch {
+		case errors.Is(statErr, os.ErrNotExist):
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
+		default:
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: statErr.Error(), Retryable: false}
+		}
+	}
+
+	content, readErr := os.ReadFile(absPath)
+	if readErr != nil {
+		switch {
+		case errors.Is(readErr, os.ErrNotExist):
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
+		default:
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: readErr.Error(), Retryable: false}
+		}
+	}
+
+	upsertDoc := model.Document{
+		RelPath:     normalizedRel,
+		DocType:     "audio",
+		SourceType:  "filesystem",
+		SizeBytes:   info.Size(),
+		MTimeUnix:   info.ModTime().Unix(),
+		ContentHash: ingest.ComputeContentHash(content),
+		Status:      "ok",
+		Deleted:     false,
+	}
+	if err := s.store.UpsertDocument(ctx, upsertDoc); err != nil {
+		return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
+	}
+	doc, toolErr = s.lookupDocumentForTool(ctx, normalizedRel)
+	if toolErr != nil {
+		return model.Document{}, toolErr
+	}
+	if doc.DocType != "audio" {
+		return model.Document{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
+	}
+	return doc, nil
+}
+
 func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, bool, *toolExecutionError) {
 	content, err := s.readDocumentContent(doc.RelPath)
 	if err != nil {
@@ -1615,28 +1688,36 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 }
 
 func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
-	rootAbs, err := filepath.Abs(strings.TrimSpace(s.cfg.RootDir))
+	targetReal, err := s.resolveDocumentPath(relPath)
 	if err != nil {
 		return nil, err
+	}
+	return os.ReadFile(targetReal)
+}
+
+func (s *Server) resolveDocumentPath(relPath string) (string, error) {
+	rootAbs, err := filepath.Abs(strings.TrimSpace(s.cfg.RootDir))
+	if err != nil {
+		return "", err
 	}
 	rootReal, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
 	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
-		return nil, model.ErrPathOutsideRoot
+		return "", model.ErrPathOutsideRoot
 	}
 	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
 	targetReal, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	rel, err := filepath.Rel(rootReal, targetReal)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, model.ErrPathOutsideRoot
+		return "", model.ErrPathOutsideRoot
 	}
-	return os.ReadFile(targetReal)
+	return targetReal, nil
 }
 func escapeGlobLiteral(input string) string {
 	var b strings.Builder
