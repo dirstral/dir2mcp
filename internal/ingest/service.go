@@ -124,7 +124,12 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options.UseGitIgnore = cfg.IngestGitignore
 	options.FollowSymlinks = cfg.IngestFollowSymlinks
 	if cfg.IngestMaxFileMB > 0 {
-		options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * 1024 * 1024
+		const bytesPerMB int64 = 1024 * 1024
+		if int64(cfg.IngestMaxFileMB) > math.MaxInt64/bytesPerMB {
+			options.MaxSizeBytes = math.MaxInt64
+		} else {
+			options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * bytesPerMB
+		}
 	}
 	return options
 }
