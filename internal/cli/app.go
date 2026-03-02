@@ -328,7 +328,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "config":
 		return a.runConfig(ctx, globalOpts, remaining[1:])
 	case "version":
-		writeln(a.stdout, "dir2mcp v0.0.0-dev")
+		writeln(a.stdout, "dir2mcp "+Version)
 		return exitSuccess
 	default:
 		writef(a.stderr, "unknown command: %s\n", remaining[0])

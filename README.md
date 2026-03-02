@@ -24,6 +24,28 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
   - `dir2mcp`: MCP server and indexing/runtime host
   - `dirstral`: terminal client (Breeze/Tempest/Lighthouse/Settings)
 
+## Installation
+
+Install `dir2mcp` via Homebrew tap:
+
+```bash
+brew install dirstral/tap/dir2mcp
+```
+
+Then verify:
+
+```bash
+dir2mcp version
+```
+
+Build-from-source remains available as an alternative:
+
+```bash
+git clone https://github.com/Dirstral/dir2mcp
+cd dir2mcp
+make build
+```
+
 ## Quickstart
 
 **Prerequisites:** Go 1.22+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
@@ -150,6 +172,10 @@ make check        # fmt + vet + lint + test
 make build        # build binary
 make benchmark    # run retrieval benchmarks
 ```
+
+Release automation:
+- Pushing a `v*` tag triggers `.github/workflows/release.yml` and publishes artifacts via GoReleaser.
+- Homebrew formula updates require `HOMEBREW_TAP_GITHUB_TOKEN` with write access to `Dirstral/homebrew-tap`.
 
 API notes:
 - `retrieval.NewEngine` now requires a context as its first parameter:

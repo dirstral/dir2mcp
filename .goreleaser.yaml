@@ -1,0 +1,98 @@
+version: 2
+
+project_name: dir2mcp
+
+builds:
+  - id: dir2mcp
+    main: ./cmd/dir2mcp
+    binary: dir2mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X dir2mcp/internal/cli.Version={{.Version}} -X dir2mcp/internal/cli.Commit={{.Commit}} -X dir2mcp/internal/cli.Date={{.Date}}
+
+  - id: dirstral
+    main: ./cmd/dirstral
+    binary: dirstral
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X dir2mcp/internal/dirstral/app.Version={{.Version}} -X dir2mcp/internal/dirstral/app.Commit={{.Commit}} -X dir2mcp/internal/dirstral/app.Date={{.Date}}
+
+archives:
+  - id: dir2mcp-archive
+    ids:
+      - dir2mcp
+    formats: [tar.gz]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: dirstral-archive
+    ids:
+      - dirstral
+    formats: [tar.gz]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: Dirstral
+    name: dir2mcp
+  name_template: "{{.ProjectName}} {{.Tag}}"
+
+brews:
+  - name: dir2mcp
+    ids:
+      - dir2mcp-archive
+    repository:
+      owner: Dirstral
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/Dirstral/dir2mcp
+    description: Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations.
+    license: MIT
+    install: |
+      bin.install "dir2mcp"
+    test: |
+      system "#{bin}/dir2mcp", "version"
+
+  - name: dirstral
+    ids:
+      - dirstral-archive
+    repository:
+      owner: Dirstral
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/Dirstral/dir2mcp
+    description: Interactive TUI client for dir2mcp knowledge bases.
+    license: MIT
+    install: |
+      bin.install "dirstral"
+    test: |
+      system "#{bin}/dirstral", "version"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"

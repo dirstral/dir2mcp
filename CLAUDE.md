@@ -50,6 +50,21 @@ claude mcp add --transport stdio github -- npx -y @modelcontextprotocol/server-g
 claude mcp add --transport stdio context7 -- npx -y @upstash/context7-mcp
 ```
 
+## Releasing
+
+Releases are automated via GoReleaser and triggered by pushing a version tag. The tag **must point to a commit on `main`** — tagging mid-PR or branch commits will release whatever that commit contains.
+
+```bash
+# 1. Merge all PRs first, then:
+git checkout main && git pull
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow will build both binaries for `darwin/linux × amd64/arm64`, publish a GitHub release with checksums, and push updated formulas to `Dirstral/homebrew-tap` automatically.
+
+Requires `HOMEBREW_TAP_GITHUB_TOKEN` to be set as a repository secret (a PAT with `repo` scope on `Dirstral/homebrew-tap`).
+
 ## Working conventions
 
 - Keep changes scoped to the issue.

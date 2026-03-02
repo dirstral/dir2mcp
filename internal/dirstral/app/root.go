@@ -67,11 +67,23 @@ func newRootCommand(cfg config.Config) *cobra.Command {
 		},
 	}
 
+	root.Version = Version
 	root.AddCommand(newBreezeCommand(cfg))
 	root.AddCommand(newTempestCommand(cfg))
 	root.AddCommand(newLighthouseCommand(cfg))
 	root.AddCommand(newManifestCommand(cfg))
+	root.AddCommand(newVersionCommand())
 	return root
+}
+
+func newVersionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print version",
+		Run: func(cmd *cobra.Command, args []string) {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "dirstral "+Version)
+		},
+	}
 }
 
 func printModeHeader(mode string) {
