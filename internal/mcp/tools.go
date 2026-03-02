@@ -2196,7 +2196,7 @@ func searchOutputSchema() map[string]interface{} {
 			"hits":              map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/definitions/Hit"}},
 			"indexing_complete": map[string]interface{}{"type": "boolean"},
 		},
-		"required":    []string{"query", "hits", "indexing_complete"},
+		"required":    []string{"query", "k", "index_used", "hits", "indexing_complete"},
 		"definitions": sharedDefinitions(),
 	}
 }
@@ -2241,7 +2241,7 @@ func askOutputSchema() map[string]interface{} {
 			"hits":              map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/definitions/Hit"}},
 			"indexing_complete": map[string]interface{}{"type": "boolean"},
 		},
-		"required":    []string{"question", "citations", "hits", "indexing_complete"},
+		"required":    []string{"question", "answer", "citations", "hits", "indexing_complete"},
 		"definitions": sharedDefinitions(),
 	}
 }

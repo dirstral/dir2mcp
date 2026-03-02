@@ -1260,6 +1260,77 @@ func TestMCPToolsCallSearch_StructuredHitsSchemaShape(t *testing.T) {
 	}
 }
 
+func TestMCPToolsCallSearch_RequiredOutputFieldsPresent(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{searchHits: []model.SearchHit{}, indexingComplete: true}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":94,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"anything"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("unexpected error: %#v", envelope.Result.StructuredContent)
+	}
+	sc := envelope.Result.StructuredContent
+	for _, field := range []string{"query", "k", "index_used", "hits", "indexing_complete"} {
+		if _, ok := sc[field]; !ok {
+			t.Errorf("required field %q missing from search response; got keys: %v", field, sc)
+		}
+	}
+}
+
+func TestMCPToolsCallAsk_RequiredOutputFieldsPresent(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		askResult: model.AskResult{
+			Question:         "anything",
+			Answer:           "an answer",
+			IndexingComplete: true,
+		},
+		EchoQuestion: true,
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":95,"method":"tools/call","params":{"name":"dir2mcp.ask","arguments":{"question":"anything"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("unexpected error: %#v", envelope.Result.StructuredContent)
+	}
+	sc := envelope.Result.StructuredContent
+	for _, field := range []string{"question", "answer", "citations", "hits", "indexing_complete"} {
+		if _, ok := sc[field]; !ok {
+			t.Errorf("required field %q missing from ask response; got keys: %v", field, sc)
+		}
+	}
+}
+
 // failingListFilesStore is a minimal store stub that forces ListFiles to
 // return a configured error for error-path testing.
 type failingListFilesStore struct {
