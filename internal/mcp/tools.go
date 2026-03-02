@@ -576,7 +576,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 		"query":             query,
 		"k":                 k,
 		"index_used":        indexUsed,
-		"hits":              hits,
+		"hits":              serializeSearchHits(hits),
 		"indexing_complete": indexingComplete,
 	}
 
@@ -1994,6 +1994,14 @@ func serializeHit(h model.SearchHit) map[string]interface{} {
 		"snippet":  h.Snippet,
 		"span":     buildOpenFileSpan(h.Span),
 	}
+}
+
+func serializeSearchHits(hits []model.SearchHit) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, serializeHit(h))
+	}
+	return out
 }
 
 func buildAskStructuredContent(result model.AskResult) map[string]interface{} {

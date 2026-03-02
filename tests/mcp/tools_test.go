@@ -1194,6 +1194,69 @@ func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
 	}
 }
 
+func TestMCPToolsCallSearch_StructuredHitsSchemaShape(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		searchHits: []model.SearchHit{
+			{
+				ChunkID: 42,
+				RelPath: "docs/payment.md",
+				DocType: "text",
+				RepType: "raw",
+				Score:   0.9,
+				Snippet: "payment flow",
+				Span:    model.Span{Kind: "lines", StartLine: 10, EndLine: 20},
+			},
+		},
+		indexingComplete: true,
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"payment flow","k":5}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected search success, got isError=true: %#v", envelope.Result.StructuredContent)
+	}
+
+	hits, ok := envelope.Result.StructuredContent["hits"].([]interface{})
+	if !ok || len(hits) != 1 {
+		t.Fatalf("expected one serialized hit, got %#v", envelope.Result.StructuredContent["hits"])
+	}
+	hit, ok := hits[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected hit object, got %#v", hits[0])
+	}
+	span, ok := hit["span"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected span object, got %#v", hit["span"])
+	}
+	if span["kind"] != "lines" {
+		t.Fatalf("expected span.kind=lines, got %#v", span["kind"])
+	}
+	if _, hasCamel := span["startLine"]; hasCamel {
+		t.Fatalf("unexpected camelCase field in span: %#v", span)
+	}
+}
+
 // failingListFilesStore is a minimal store stub that forces ListFiles to
 // return a configured error for error-path testing.
 type failingListFilesStore struct {
