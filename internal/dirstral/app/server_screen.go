@@ -13,6 +13,6 @@ func ServerMenuConfig() MenuConfig {
 			{Label: serverActionBack, Description: "Back", Value: serverActionBack},
 		},
 		ShowLogo: false,
-		Controls: "↑↓ / jk  move · enter  select · esc  back",
+		Controls: "↑↓ / j/k  move · enter  select · esc/q  back",
 	}
 }

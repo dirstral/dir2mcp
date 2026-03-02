@@ -123,7 +123,7 @@ func TestStatusIncludesConnectionContractDetails(t *testing.T) {
 	if !strings.Contains(clean, "session_header="+protocol.MCPSessionHeader) {
 		t.Fatalf("expected session header details in output, got: %q", clean)
 	}
-	if !strings.Contains(clean, "auth_source=secret.token") {
+	if !strings.Contains(clean, "auth_source=file") {
 		t.Fatalf("expected auth source details in output, got: %q", clean)
 	}
 }

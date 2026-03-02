@@ -37,6 +37,6 @@ func StartMenuConfig() MenuConfig {
 			{Label: string(ChoiceQuit), Description: "Quit", Value: string(ChoiceQuit)},
 		},
 		ShowLogo: true,
-		Controls: "↑↓ / jk  move · enter  select · esc  quit",
+		Controls: "↑↓ / j/k  move · enter  select · esc/q  quit",
 	}
 }

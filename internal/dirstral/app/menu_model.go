@@ -44,7 +44,7 @@ type MenuModel struct {
 // NewMenuModel creates a MenuModel from a config.
 func NewMenuModel(cfg MenuConfig) MenuModel {
 	if cfg.Controls == "" {
-		cfg.Controls = "↑↓ / jk  move · enter  select · esc  back"
+		cfg.Controls = "↑↓ / j/k  move · enter  select · esc/q  back"
 	}
 	animate := animationsEnabled()
 	revealed := -1 // show all by default
