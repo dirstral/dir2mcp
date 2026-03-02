@@ -31,7 +31,7 @@ func TestTailLogLinesHandlesEmptyAndUnlimited(t *testing.T) {
 
 func TestHostLogPathUsesTempDir(t *testing.T) {
 	got := host.LogPath()
-	want := filepath.Join(os.TempDir(), "dirstral-lighthouse.log")
+	want := filepath.Join(os.TempDir(), "dirstral-mcp-server.log")
 	if got != want {
 		t.Fatalf("unexpected log path: got %q want %q", got, want)
 	}

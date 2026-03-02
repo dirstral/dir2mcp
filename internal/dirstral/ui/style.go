@@ -33,7 +33,7 @@ var (
 	Keyword = lipgloss.NewStyle().Foreground(ClrBrand)
 )
 
-// Prompt renders a mode prompt like "breeze> " with color.
+// Prompt renders a mode prompt like "chat> " with color.
 func Prompt(mode string) string {
 	return Brand.Render(mode+">") + " "
 }

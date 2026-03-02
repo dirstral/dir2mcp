@@ -4,9 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/url"
 	"os"
@@ -141,6 +147,95 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	}
 }
 
+func TestUpSupportsGlobalDirAndStateDirFlags(t *testing.T) {
+	tmp := t.TempDir()
+	rootDir := filepath.Join(tmp, "workspace")
+	stateDir := filepath.Join(tmp, "custom-state")
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		code := app.RunWithContext(ctx, []string{
+			"--dir", rootDir,
+			"--state-dir", stateDir,
+			"up",
+			"--listen", "127.0.0.1:0",
+		})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	if _, err := os.Stat(filepath.Join(stateDir, "connection.json")); err != nil {
+		t.Fatalf("expected connection.json in custom state dir: %v", err)
+	}
+}
+
+func TestUpTLSRequiresCertAndKeyTogether(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	certPath, _ := writeTestTLSCertPair(t, tmp)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"up", "--tls-cert", certPath})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	if !strings.Contains(stderr.String(), "--tls-cert and --tls-key must be provided together") {
+		t.Fatalf("expected tls validation error, got: %s", stderr.String())
+	}
+}
+
+func TestUpTLSConnectionURLUsesHTTPS(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	certPath, keyPath := writeTestTLSCertPair(t, tmp)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		code := app.RunWithContext(ctx, []string{
+			"up",
+			"--listen", "127.0.0.1:0",
+			"--tls-cert", certPath,
+			"--tls-key", keyPath,
+		})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	connection := readConnectionPayload(t, filepath.Join(tmp, ".dir2mcp", "connection.json"))
+	if !strings.HasPrefix(connection.URL, "https://") {
+		t.Fatalf("expected https connection URL when TLS is enabled, got %q", connection.URL)
+	}
+}
+
 // Up command prints a warning when both a direct facilitator token and a
 // token file are supplied; the file takes precedence and the direct flag
 // is ignored. This exercises the new CLI warning logic.
@@ -247,6 +342,26 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 	}
 }
 
+func TestReindexRejectsUnexpectedArguments(t *testing.T) {
+	tmp := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	var code int
+	withWorkingDir(t, tmp, func() {
+		code = app.RunWithContext(context.Background(), []string{"reindex", "extra"})
+	})
+
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2", code)
+	}
+	if !strings.Contains(stderr.String(), "reindex command does not accept arguments") {
+		t.Fatalf("expected argument validation error, got: %s", stderr.String())
+	}
+}
+
 // When a real configuration is available it should be passed through to the
 // ingestor factory.  Previously runReindex always used config.Default(),
 // causing the ingest service to be unaware of any environment overrides.
@@ -260,10 +375,10 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	var stderr bytes.Buffer
 	var seenCfg config.Config
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
 			seenCfg = cfg
 			// return the failingIngestor defined later in this file
-			return failingIngestor{}
+			return failingIngestor{}, nil
 		},
 	})
 
@@ -315,12 +430,12 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	var stderr bytes.Buffer
 	var hashAtReindexTime string
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
 			return &capturingIngestor{
 				store:        st,
 				relPath:      "docs/a.md",
 				capturedHash: &hashAtReindexTime,
-			}
+			}, nil
 		},
 	})
 
@@ -502,7 +617,7 @@ func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
 	}
 }
 
-func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
+func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
@@ -510,8 +625,8 @@ func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			return failingIngestor{}
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
+			return failingIngestor{}, nil
 		},
 	})
 
@@ -528,8 +643,8 @@ func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
 		})
 	})
 
-	if code != 6 {
-		t.Fatalf("unexpected exit code: got=%d want=6 stderr=%s", code, stderr.String())
+	if code != 3 {
+		t.Fatalf("unexpected exit code: got=%d want=3 stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "ingestion failed") {
 		t.Fatalf("expected ingestion error in stderr, got: %s", stderr.String())
@@ -678,8 +793,8 @@ func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
 		})
 	})
 
-	if code != 2 {
-		t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+	if code != 5 {
+		t.Fatalf("unexpected exit code: got=%d want=5 stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "x402 facilitator URL is required") {
 		t.Fatalf("expected x402 validation error, got: %s", stderr.String())
@@ -817,6 +932,49 @@ func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
 type connectionFilePayload struct {
 	URL    string `json:"url"`
 	Public bool   `json:"public"`
+}
+
+func writeTestTLSCertPair(t *testing.T, dir string) (string, string) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rsa key: %v", err)
+	}
+
+	now := time.Now().UTC()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(now.UnixNano()),
+		Subject: pkix.Name{
+			CommonName: "127.0.0.1",
+		},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+
+	certPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	return certPath, keyPath
 }
 
 func readConnectionPayload(t *testing.T, path string) connectionFilePayload {

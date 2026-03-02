@@ -16,13 +16,13 @@ import (
 	"dir2mcp/internal/protocol"
 )
 
-func TestBuildTempestOptionsPrefersFlags(t *testing.T) {
+func TestBuildVoiceOptionsPrefersFlags(t *testing.T) {
 	cfg := config.Config{}
 	cfg.MCP.URL = "http://default-mcp"
 	cfg.ElevenLabs.Voice = "DefaultVoice"
 	cfg.ElevenLabs.BaseURL = "https://default-elevenlabs"
 
-	got := app.BuildTempestOptions(cfg, "http://flag-mcp", "FlagVoice", "Mic A", true, true, "https://flag-elevenlabs")
+	got := app.BuildVoiceOptions(cfg, "http://flag-mcp", "FlagVoice", "Mic A", true, true, "https://flag-elevenlabs")
 
 	if got.MCPURL != "http://flag-mcp" {
 		t.Fatalf("unexpected mcp url: %s", got.MCPURL)
@@ -45,7 +45,7 @@ func TestBuildTempestOptionsPrefersFlags(t *testing.T) {
 }
 
 func TestBuildModeFeedbackSuccess(t *testing.T) {
-	fb := app.BuildModeFeedback("Breeze", nil)
+	fb := app.BuildModeFeedback("Chat", nil)
 	if fb.IsError {
 		t.Fatalf("expected success feedback")
 	}
@@ -58,7 +58,7 @@ func TestBuildModeFeedbackSuccess(t *testing.T) {
 }
 
 func TestBuildModeFeedbackCancellation(t *testing.T) {
-	fb := app.BuildModeFeedback("Tempest", context.Canceled)
+	fb := app.BuildModeFeedback("Voice", context.Canceled)
 	if fb.IsError {
 		t.Fatalf("expected canceled feedback to be non-error")
 	}
@@ -68,7 +68,7 @@ func TestBuildModeFeedbackCancellation(t *testing.T) {
 }
 
 func TestBuildModeFeedbackFailure(t *testing.T) {
-	fb := app.BuildModeFeedback("Tempest", errors.New("missing key"))
+	fb := app.BuildModeFeedback("Voice", errors.New("missing key"))
 	if !fb.IsError {
 		t.Fatalf("expected failure feedback")
 	}
@@ -80,13 +80,13 @@ func TestBuildModeFeedbackFailure(t *testing.T) {
 	}
 }
 
-func TestBuildTempestOptionsFallsBackToConfig(t *testing.T) {
+func TestBuildVoiceOptionsFallsBackToConfig(t *testing.T) {
 	cfg := config.Config{}
 	cfg.MCP.URL = "http://default-mcp"
 	cfg.ElevenLabs.Voice = "DefaultVoice"
 	cfg.ElevenLabs.BaseURL = "https://default-elevenlabs"
 
-	got := app.BuildTempestOptions(cfg, "", "", "", false, false, "")
+	got := app.BuildVoiceOptions(cfg, "", "", "", false, false, "")
 
 	if got.MCPURL != cfg.MCP.URL {
 		t.Fatalf("expected config mcp url, got %s", got.MCPURL)

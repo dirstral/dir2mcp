@@ -168,6 +168,14 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"  oversample_factor: 7\n"+
 		"ingest:\n"+
 		"  gitignore: false\n"+
+		"  pdf:\n"+
+		"    mode: ocr\n"+
+		"  images:\n"+
+		"    mode: ocr_auto\n"+
+		"  audio:\n"+
+		"    mode: auto\n"+
+		"  archives:\n"+
+		"    mode: deep\n"+
 		"  follow_symlinks: true\n"+
 		"  max_file_mb: 42\n"+
 		"stt:\n"+
@@ -180,7 +188,11 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"server:\n"+
 		"  tls:\n"+
 		"    cert_file: /tmp/cert.pem\n"+
-		"    key_file: /tmp/key.pem\n")
+		"    key_file: /tmp/key.pem\n"+
+		"secrets:\n"+
+		"  mistral_api_key: nested-mistral\n"+
+		"  elevenlabs_api_key: nested-eleven\n"+
+		"  x402_facilitator_url: https://facilitator.example\n")
 
 	cfg, err := config.LoadFile(path)
 	if err != nil {
@@ -204,6 +216,9 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	if cfg.IngestMaxFileMB != 42 {
 		t.Fatalf("IngestMaxFileMB=%d", cfg.IngestMaxFileMB)
 	}
+	if cfg.IngestPDFMode != "ocr" || cfg.IngestImagesMode != "ocr_auto" || cfg.IngestAudioMode != "auto" || cfg.IngestArchivesMode != "deep" {
+		t.Fatalf("unexpected ingest mode values: pdf=%q images=%q audio=%q archives=%q", cfg.IngestPDFMode, cfg.IngestImagesMode, cfg.IngestAudioMode, cfg.IngestArchivesMode)
+	}
 	if cfg.STTProvider != "elevenlabs" {
 		t.Fatalf("STTProvider=%q", cfg.STTProvider)
 	}
@@ -222,6 +237,15 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	if cfg.ServerTLSKeyFile != "/tmp/key.pem" {
 		t.Fatalf("ServerTLSKeyFile=%q", cfg.ServerTLSKeyFile)
 	}
+	if cfg.MistralAPIKey != "nested-mistral" {
+		t.Fatalf("MistralAPIKey=%q", cfg.MistralAPIKey)
+	}
+	if cfg.ElevenLabsAPIKey != "nested-eleven" {
+		t.Fatalf("ElevenLabsAPIKey=%q", cfg.ElevenLabsAPIKey)
+	}
+	if cfg.X402.FacilitatorURL != "https://facilitator.example" {
+		t.Fatalf("X402.FacilitatorURL=%q", cfg.X402.FacilitatorURL)
+	}
 }
 
 func TestLoadFile_FlatAliasesRemainSupportedForNestedFields(t *testing.T) {
@@ -232,12 +256,19 @@ func TestLoadFile_FlatAliasesRemainSupportedForNestedFields(t *testing.T) {
 		"max_context_chars: 999\n"+
 		"oversample_factor: 3\n"+
 		"ingest_gitignore: false\n"+
+		"ingest_pdf_mode: auto\n"+
+		"ingest_images_mode: ocr_on\n"+
+		"ingest_audio_mode: on\n"+
+		"ingest_archives_mode: shallow\n"+
 		"follow_symlinks: true\n"+
 		"max_file_mb: 10\n"+
 		"stt_provider: mistral\n"+
 		"stt_mistral_model: voxtral-mini-latest\n"+
 		"stt_elevenlabs_model: scribe\n"+
 		"elevenlabs_language_code: en\n"+
+		"secrets.mistral_api_key: flat-mistral\n"+
+		"secrets.elevenlabs_api_key: flat-eleven\n"+
+		"secrets.x402_facilitator_url: https://flat-facilitator.example\n"+
 		"tls_cert_file: /etc/cert.pem\n"+
 		"tls_key_file: /etc/key.pem\n")
 
@@ -251,8 +282,17 @@ func TestLoadFile_FlatAliasesRemainSupportedForNestedFields(t *testing.T) {
 	if cfg.IngestGitignore || !cfg.IngestFollowSymlinks || cfg.IngestMaxFileMB != 10 {
 		t.Fatalf("ingest aliases not applied: gitignore=%v follow=%v max=%d", cfg.IngestGitignore, cfg.IngestFollowSymlinks, cfg.IngestMaxFileMB)
 	}
+	if cfg.IngestPDFMode != "auto" || cfg.IngestImagesMode != "ocr_on" || cfg.IngestAudioMode != "on" || cfg.IngestArchivesMode != "shallow" {
+		t.Fatalf("ingest mode aliases not applied: pdf=%q images=%q audio=%q archives=%q", cfg.IngestPDFMode, cfg.IngestImagesMode, cfg.IngestAudioMode, cfg.IngestArchivesMode)
+	}
 	if cfg.STTProvider != "mistral" || cfg.STTMistralModel != "voxtral-mini-latest" || cfg.STTElevenLabsModel != "scribe" || cfg.STTElevenLabsLanguageCode != "en" {
 		t.Fatalf("stt aliases not applied: %+v", cfg)
+	}
+	if cfg.MistralAPIKey != "flat-mistral" || cfg.ElevenLabsAPIKey != "flat-eleven" {
+		t.Fatalf("secret aliases not applied: mistral=%q eleven=%q", cfg.MistralAPIKey, cfg.ElevenLabsAPIKey)
+	}
+	if cfg.X402.FacilitatorURL != "https://flat-facilitator.example" {
+		t.Fatalf("x402 facilitator alias not applied: %q", cfg.X402.FacilitatorURL)
 	}
 	if cfg.ServerTLSCertFile != "/etc/cert.pem" || cfg.ServerTLSKeyFile != "/etc/key.pem" {
 		t.Fatalf("tls aliases not applied: cert=%q key=%q", cfg.ServerTLSCertFile, cfg.ServerTLSKeyFile)

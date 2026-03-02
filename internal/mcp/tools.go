@@ -1155,7 +1155,10 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 
 	// create a request-scoped ingest service to avoid cross-request mutation of
 	// OCR/transcriber settings under concurrency.
-	ing := ingest.NewService(s.cfg, s.store)
+	ing, err := ingest.NewService(s.cfg, s.store)
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "CONFIG_INVALID", Message: err.Error(), Retryable: false}
+	}
 	preview, persistErr := ing.StoreAnnotationRepresentations(ctx, doc, annotationObj, indexFlattenedText)
 	if persistErr != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: persistErr.Error(), Retryable: false}
@@ -1537,7 +1540,10 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	if strings.TrimSpace(language) != "" {
 		client.DefaultTranscribeLanguage = strings.TrimSpace(language)
 	}
-	ing := ingest.NewService(s.cfg, s.store)
+	ing, err := ingest.NewService(s.cfg, s.store)
+	if err != nil {
+		return "", false, false, &toolExecutionError{Code: "CONFIG_INVALID", Message: err.Error(), Retryable: false}
+	}
 	ing.SetTranscriber(client)
 
 	// generate transcript text first so we can accurately determine whether
@@ -1582,7 +1588,10 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if toolErr != nil {
 			return "", "", toolErr
 		}
-		ing := ingest.NewService(s.cfg, s.store)
+		ing, err := ingest.NewService(s.cfg, s.store)
+		if err != nil {
+			return "", "", &toolExecutionError{Code: "CONFIG_INVALID", Message: err.Error(), Retryable: false}
+		}
 		ing.SetOCR(client)
 		text, ocrErr := ing.ReadOrComputeOCR(ctx, doc, content)
 		if ocrErr != nil {

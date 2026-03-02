@@ -58,7 +58,8 @@ Current high-level status:
 - Retrieval `Stats()` service contract: **Planned** (see issue #71)
 - Advanced retrieval answer quality/completion work: **In progress** (see issue #70)
 - Native x402 tools/call gating path: **Implemented** (optional and facilitator-backed)
-- Hosted smoke/runbook and release-completion checklist: **In progress** (see issues #19 and #12)
+- Hosted smoke/runbook guidance: **Implemented** (see issue #19)
+- Release-completion checklist hardening: **In progress** (see issue #12)
 
 ---
 
@@ -134,10 +135,10 @@ Current high-level status:
 - `0` success
 - `1` generic error
 - `2` config invalid
-- `3` root inaccessible
-- `4` server bind/listen failure
-- `5` index load/upgrade failure
-- `6` ingestion fatal error (per-file errors are non-fatal)
+- `3` ingestion error (fatal; per-file errors remain non-fatal)
+- `4` server startup error (bind/listen/runtime startup failure)
+- `5` auth/payment error
+- `6` signal/interrupt
 
 ### 2.5 Startup interaction contract (`up`)
 
@@ -248,6 +249,28 @@ ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY
 Set env: MISTRAL_API_KEY=...
 Or run: dir2mcp config init
 ```
+
+### 3.4 Hosted demo smoke probe (operational runbook)
+
+For a hosted endpoint readiness check, use `./scripts/smoke_hosted_demo.sh`.
+Set `DIR2MCP_DEMO_TOKEN` whenever the hosted MCP endpoint enforces auth
+(bearer token required). It is optional only for deployments with no auth; if
+you omit it against an auth-enabled endpoint the script can fail early (for
+example with HTTP `401`) before the MCP pass conditions below are evaluated.
+
+```bash
+DIR2MCP_DEMO_URL="https://your-host.example/mcp" \
+DIR2MCP_DEMO_TOKEN="<optional-bearer-token>" \
+./scripts/smoke_hosted_demo.sh
+```
+
+Expected pass conditions:
+
+* `initialize` returns HTTP `200` and includes `MCP-Session-Id`.
+* `tools/list` returns HTTP `200` and includes tool metadata.
+* `tools/call` against `dir2mcp.list_files` returns either:
+  * HTTP `200` with JSON-RPC body, or
+  * HTTP `402` with `PAYMENT-REQUIRED` when x402 route gating is enabled.
 
 ---
 
@@ -1547,7 +1570,7 @@ stt:
     timestamps: true
   elevenlabs:
     api_key: ${ELEVENLABS_API_KEY}
-    model: scribe
+    model: scribe_v1
     timestamps: true
 
 x402:

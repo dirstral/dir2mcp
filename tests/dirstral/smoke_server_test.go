@@ -19,11 +19,11 @@ import (
 	"dir2mcp/internal/protocol"
 )
 
-func TestSmokeLighthouseLifecycleWithFakeDir2MCP(t *testing.T) {
+func TestSmokeServerLifecycleWithFakeDir2MCP(t *testing.T) {
 	setTestConfigDir(t)
 	installFakeDir2MCPOnPath(t)
 
-	errCh := startLighthouseWithRetry(t, 5)
+	errCh := startServerWithRetry(t, 5)
 
 	waitFor(t, 3*time.Second, func() bool {
 		_, err := host.LoadState()
@@ -44,7 +44,7 @@ func TestSmokeLighthouseLifecycleWithFakeDir2MCP(t *testing.T) {
 			t.Fatalf("up returned error after down: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for lighthouse up to exit")
+		t.Fatalf("timed out waiting for server up to exit")
 	}
 
 	if _, err := host.LoadState(); err == nil {
@@ -52,7 +52,7 @@ func TestSmokeLighthouseLifecycleWithFakeDir2MCP(t *testing.T) {
 	}
 }
 
-func startLighthouseWithRetry(t *testing.T, attempts int) chan error {
+func startServerWithRetry(t *testing.T, attempts int) chan error {
 	t.Helper()
 
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -71,15 +71,15 @@ func startLighthouseWithRetry(t *testing.T, attempts int) chan error {
 				continue
 			}
 			if err != nil {
-				t.Fatalf("lighthouse up failed (attempt %d/%d): %v", attempt, attempts, err)
+				t.Fatalf("server up failed (attempt %d/%d): %v", attempt, attempts, err)
 			}
-			t.Fatalf("lighthouse up exited before test shutdown (attempt %d/%d)", attempt, attempts)
+			t.Fatalf("server up exited before test shutdown (attempt %d/%d)", attempt, attempts)
 		case <-time.After(350 * time.Millisecond):
 			return errCh
 		}
 	}
 
-	t.Fatalf("failed to start lighthouse after %d attempts", attempts)
+	t.Fatalf("failed to start server after %d attempts", attempts)
 	return nil
 }
 

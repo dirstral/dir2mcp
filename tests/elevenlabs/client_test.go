@@ -160,6 +160,7 @@ func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
 		gotMethod    string
 		gotAuth      string
 		gotModelID   string
+		gotLanguage  string
 		gotFileBytes []byte
 	)
 
@@ -188,6 +189,8 @@ func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
 			switch part.FormName() {
 			case "model_id":
 				gotModelID = string(body)
+			case "language_code":
+				gotLanguage = string(body)
 			case "file":
 				gotFileBytes = body
 			}
@@ -203,6 +206,7 @@ func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
 
 	client := elevenlabs.NewClient("test-api-key", "voice-default")
 	client.HTTPClient = &http.Client{Transport: rt}
+	client.TranscribeLanguageCode = "en-US"
 
 	text, err := client.Transcribe(context.Background(), "audio/sample.mp3", []byte("fake-audio"))
 	if err != nil {
@@ -222,6 +226,9 @@ func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
 	}
 	if gotModelID != "scribe_v1" {
 		t.Fatalf("unexpected model_id: %q", gotModelID)
+	}
+	if gotLanguage != "en-US" {
+		t.Fatalf("unexpected language_code: %q", gotLanguage)
 	}
 	if string(gotFileBytes) != "fake-audio" {
 		t.Fatalf("unexpected uploaded bytes: %q", string(gotFileBytes))

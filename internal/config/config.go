@@ -109,6 +109,10 @@ type Config struct {
 	IngestGitignore      bool
 	IngestFollowSymlinks bool
 	IngestMaxFileMB      int
+	IngestPDFMode        string
+	IngestImagesMode     string
+	IngestAudioMode      string
+	IngestArchivesMode   string
 
 	STTProvider               string
 	STTMistralModel           string
@@ -146,6 +150,7 @@ type fileConfig struct {
 	TrustedProxies  []string
 	PathExcludes    []string
 	SecretPatterns  []string
+	MistralAPIKey   *string
 	MistralBaseURL  *string
 
 	ElevenLabsBaseURL         *string
@@ -165,10 +170,15 @@ type fileConfig struct {
 	IngestGitignore           *bool
 	IngestFollowSymlinks      *bool
 	IngestMaxFileMB           *int
+	IngestPDFMode             *string
+	IngestImagesMode          *string
+	IngestAudioMode           *string
+	IngestArchivesMode        *string
 	STTProvider               *string
 	STTMistralModel           *string
 	STTElevenLabsModel        *string
 	STTElevenLabsLanguageCode *string
+	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
 	// session timings expressed as YAML duration strings.  populated by
@@ -226,6 +236,10 @@ type persistedConfig struct {
 	IngestGitignore           bool     `yaml:"ingest_gitignore"`
 	IngestFollowSymlinks      bool     `yaml:"ingest_follow_symlinks"`
 	IngestMaxFileMB           int      `yaml:"ingest_max_file_mb"`
+	IngestPDFMode             string   `yaml:"ingest_pdf_mode"`
+	IngestImagesMode          string   `yaml:"ingest_images_mode"`
+	IngestAudioMode           string   `yaml:"ingest_audio_mode"`
+	IngestArchivesMode        string   `yaml:"ingest_archives_mode"`
 	STTProvider               string   `yaml:"stt_provider"`
 	STTMistralModel           string   `yaml:"stt_mistral_model"`
 	STTElevenLabsModel        string   `yaml:"stt_elevenlabs_model"`
@@ -314,9 +328,13 @@ func Default() Config {
 		IngestGitignore:           true,
 		IngestFollowSymlinks:      false,
 		IngestMaxFileMB:           20,
+		IngestPDFMode:             "ocr",
+		IngestImagesMode:          "ocr_auto",
+		IngestAudioMode:           "auto",
+		IngestArchivesMode:        "deep",
 		STTProvider:               "mistral",
 		STTMistralModel:           "voxtral-mini-latest",
-		STTElevenLabsModel:        "scribe",
+		STTElevenLabsModel:        "scribe_v1",
 		STTElevenLabsLanguageCode: "",
 		ServerTLSCertFile:         "",
 		ServerTLSKeyFile:          "",
@@ -343,6 +361,69 @@ func Load(path string) (Config, error) {
 // apply dotenv/env overrides. This is useful for config init/update flows.
 func LoadFile(path string) (Config, error) {
 	return load(path, nil, false)
+}
+
+func buildPersistedConfig(cfg *Config) persistedConfig {
+	if cfg == nil {
+		return persistedConfig{}
+	}
+
+	return persistedConfig{
+		RootDir:                   cfg.RootDir,
+		StateDir:                  cfg.StateDir,
+		ListenAddr:                cfg.ListenAddr,
+		MCPPath:                   cfg.MCPPath,
+		ProtocolVersion:           cfg.ProtocolVersion,
+		Public:                    cfg.Public,
+		AuthMode:                  cfg.AuthMode,
+		RateLimitRPS:              cfg.RateLimitRPS,
+		RateLimitBurst:            cfg.RateLimitBurst,
+		TrustedProxies:            append([]string(nil), cfg.TrustedProxies...),
+		PathExcludes:              append([]string(nil), cfg.PathExcludes...),
+		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
+		MistralBaseURL:            cfg.MistralBaseURL,
+		SessionInactivityTimeout:  cfg.SessionInactivityTimeout,
+		SessionMaxLifetime:        cfg.SessionMaxLifetime,
+		HealthCheckInterval:       cfg.HealthCheckInterval,
+		ElevenLabsBaseURL:         cfg.ElevenLabsBaseURL,
+		ElevenLabsTTSVoiceID:      cfg.ElevenLabsTTSVoiceID,
+		AllowedOrigins:            append([]string(nil), cfg.AllowedOrigins...),
+		EmbedModelText:            cfg.EmbedModelText,
+		EmbedModelCode:            cfg.EmbedModelCode,
+		ChatModel:                 cfg.ChatModel,
+		RAGSystemPrompt:           cfg.RAGSystemPrompt,
+		RAGGenerateAnswer:         cfg.RAGGenerateAnswer,
+		RAGKDefault:               cfg.RAGKDefault,
+		RAGMaxContextChars:        cfg.RAGMaxContextChars,
+		RAGOversampleFactor:       cfg.RAGOversampleFactor,
+		ChunkingStrategy:          cfg.ChunkingStrategy,
+		ChunkingMaxTokens:         cfg.ChunkingMaxTokens,
+		ChunkingOverlapTokens:     cfg.ChunkingOverlapTokens,
+		IngestGitignore:           cfg.IngestGitignore,
+		IngestFollowSymlinks:      cfg.IngestFollowSymlinks,
+		IngestMaxFileMB:           cfg.IngestMaxFileMB,
+		IngestPDFMode:             cfg.IngestPDFMode,
+		IngestImagesMode:          cfg.IngestImagesMode,
+		IngestAudioMode:           cfg.IngestAudioMode,
+		IngestArchivesMode:        cfg.IngestArchivesMode,
+		STTProvider:               cfg.STTProvider,
+		STTMistralModel:           cfg.STTMistralModel,
+		STTElevenLabsModel:        cfg.STTElevenLabsModel,
+		STTElevenLabsLanguageCode: cfg.STTElevenLabsLanguageCode,
+		ServerTLSCertFile:         cfg.ServerTLSCertFile,
+		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
+		X402Mode:                  cfg.X402.Mode,
+		X402FacilitatorURL:        cfg.X402.FacilitatorURL,
+		// token intentionally omitted to avoid persisting secrets
+		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
+		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
+		X402ToolsCallEnabled: cfg.X402.ToolsCallEnabled,
+		X402PriceAtomic:      cfg.X402.PriceAtomic,
+		X402Network:          cfg.X402.Network,
+		X402Scheme:           cfg.X402.Scheme,
+		X402Asset:            cfg.X402.Asset,
+		X402PayTo:            cfg.X402.PayTo,
+	}
 }
 
 func SaveFile(path string, cfg Config) error {
@@ -425,7 +506,7 @@ func LoadEffectiveSnapshot(path string) (Config, SecretSourceMetadata, error) {
 	}
 	sources, err := parseSecretSourceMetadata(raw)
 	if err != nil {
-		return Config{}, SecretSourceMetadata{}, fmt.Errorf("parse secret source metadata in snapshot file %s: %w", path, err)
+		return Config{}, SecretSourceMetadata{}, fmt.Errorf("parse snapshot secret source metadata %s: %w", path, err)
 	}
 
 	cfg := Default()
@@ -475,10 +556,8 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	reader := strings.NewReader(string(raw))
 	scanner := bufio.NewScanner(reader)
 	sectionByIndent := map[int]string{}
-	lineNo := 0
 
 	for scanner.Scan() {
-		lineNo++
 		rawLine := scanner.Text()
 		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " "))
 		line := strings.TrimSpace(rawLine)
@@ -493,13 +572,10 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 		prefix := nearestSectionPrefix(sectionByIndent, indent)
 		key, value, ok := strings.Cut(line, ":")
 		if !ok {
-			return SecretSourceMetadata{}, fmt.Errorf("invalid snapshot metadata syntax at line %d: expected key:value", lineNo)
+			continue
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" {
-			return SecretSourceMetadata{}, fmt.Errorf("invalid snapshot metadata syntax at line %d: empty key", lineNo)
-		}
 		if prefix != "" && !strings.Contains(key, ".") {
 			key = prefix + "." + key
 		}
@@ -521,68 +597,9 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return SecretSourceMetadata{}, fmt.Errorf("scan snapshot metadata: %w", err)
+		return SecretSourceMetadata{}, err
 	}
 	return meta, nil
-}
-
-func buildPersistedConfig(cfg *Config) persistedConfig {
-	if cfg == nil {
-		return persistedConfig{}
-	}
-	return persistedConfig{
-		RootDir:                   cfg.RootDir,
-		StateDir:                  cfg.StateDir,
-		ListenAddr:                cfg.ListenAddr,
-		MCPPath:                   cfg.MCPPath,
-		ProtocolVersion:           cfg.ProtocolVersion,
-		Public:                    cfg.Public,
-		AuthMode:                  cfg.AuthMode,
-		RateLimitRPS:              cfg.RateLimitRPS,
-		RateLimitBurst:            cfg.RateLimitBurst,
-		TrustedProxies:            append([]string(nil), cfg.TrustedProxies...),
-		PathExcludes:              append([]string(nil), cfg.PathExcludes...),
-		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
-		MistralBaseURL:            cfg.MistralBaseURL,
-		ElevenLabsBaseURL:         cfg.ElevenLabsBaseURL,
-		ElevenLabsTTSVoiceID:      cfg.ElevenLabsTTSVoiceID,
-		AllowedOrigins:            append([]string(nil), cfg.AllowedOrigins...),
-		EmbedModelText:            cfg.EmbedModelText,
-		EmbedModelCode:            cfg.EmbedModelCode,
-		ChatModel:                 cfg.ChatModel,
-		RAGSystemPrompt:           cfg.RAGSystemPrompt,
-		RAGGenerateAnswer:         cfg.RAGGenerateAnswer,
-		RAGKDefault:               cfg.RAGKDefault,
-		RAGMaxContextChars:        cfg.RAGMaxContextChars,
-		RAGOversampleFactor:       cfg.RAGOversampleFactor,
-		ChunkingStrategy:          cfg.ChunkingStrategy,
-		ChunkingMaxTokens:         cfg.ChunkingMaxTokens,
-		ChunkingOverlapTokens:     cfg.ChunkingOverlapTokens,
-		IngestGitignore:           cfg.IngestGitignore,
-		IngestFollowSymlinks:      cfg.IngestFollowSymlinks,
-		IngestMaxFileMB:           cfg.IngestMaxFileMB,
-		STTProvider:               cfg.STTProvider,
-		STTMistralModel:           cfg.STTMistralModel,
-		STTElevenLabsModel:        cfg.STTElevenLabsModel,
-		STTElevenLabsLanguageCode: cfg.STTElevenLabsLanguageCode,
-		ServerTLSCertFile:         cfg.ServerTLSCertFile,
-		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
-		X402Mode:                  cfg.X402.Mode,
-		X402FacilitatorURL:        cfg.X402.FacilitatorURL,
-		// token intentionally omitted to avoid persisting secrets
-		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
-		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
-		X402ToolsCallEnabled: cfg.X402.ToolsCallEnabled,
-		X402PriceAtomic:      cfg.X402.PriceAtomic,
-		X402Network:          cfg.X402.Network,
-		X402Scheme:           cfg.X402.Scheme,
-		X402Asset:            cfg.X402.Asset,
-		X402PayTo:            cfg.X402.PayTo,
-		// session settings
-		SessionInactivityTimeout: cfg.SessionInactivityTimeout,
-		SessionMaxLifetime:       cfg.SessionMaxLifetime,
-		HealthCheckInterval:      cfg.HealthCheckInterval,
-	}
 }
 
 func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, error) {
@@ -690,6 +707,9 @@ func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 	if fileCfg.MistralBaseURL != nil {
 		cfg.MistralBaseURL = *fileCfg.MistralBaseURL
 	}
+	if fileCfg.MistralAPIKey != nil {
+		cfg.MistralAPIKey = *fileCfg.MistralAPIKey
+	}
 	if fileCfg.SessionInactivityTimeout != nil {
 		cfg.SessionInactivityTimeout = *fileCfg.SessionInactivityTimeout
 	}
@@ -701,6 +721,9 @@ func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fileCfg.ElevenLabsBaseURL
+	}
+	if fileCfg.ElevenLabsAPIKey != nil {
+		cfg.ElevenLabsAPIKey = *fileCfg.ElevenLabsAPIKey
 	}
 	if fileCfg.ElevenLabsTTSVoiceID != nil {
 		cfg.ElevenLabsTTSVoiceID = *fileCfg.ElevenLabsTTSVoiceID
@@ -749,6 +772,18 @@ func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.IngestMaxFileMB != nil {
 		cfg.IngestMaxFileMB = *fileCfg.IngestMaxFileMB
+	}
+	if fileCfg.IngestPDFMode != nil {
+		cfg.IngestPDFMode = *fileCfg.IngestPDFMode
+	}
+	if fileCfg.IngestImagesMode != nil {
+		cfg.IngestImagesMode = *fileCfg.IngestImagesMode
+	}
+	if fileCfg.IngestAudioMode != nil {
+		cfg.IngestAudioMode = *fileCfg.IngestAudioMode
+	}
+	if fileCfg.IngestArchivesMode != nil {
+		cfg.IngestArchivesMode = *fileCfg.IngestArchivesMode
 	}
 	if fileCfg.STTProvider != nil {
 		cfg.STTProvider = *fileCfg.STTProvider
@@ -951,6 +986,12 @@ func canonicalizeConfigKey(key string) string {
 		return "embed_model_code"
 	case "mistral.chat_model":
 		return "chat_model"
+	case "mistral.api_key", "stt.mistral.api_key", "secrets.mistral_api_key":
+		return "mistral_api_key"
+	case "stt.elevenlabs.api_key", "secrets.elevenlabs_api_key":
+		return "elevenlabs_api_key"
+	case "secrets.x402_facilitator_url":
+		return "x402_facilitator_url"
 	case "rag_generate_answer", "generate_answer":
 		return "rag.generate_answer"
 	case "rag_k_default", "k_default":
@@ -973,6 +1014,14 @@ func canonicalizeConfigKey(key string) string {
 		return "ingest.follow_symlinks"
 	case "ingest_max_file_mb", "max_file_mb":
 		return "ingest.max_file_mb"
+	case "ingest_pdf_mode", "pdf_mode":
+		return "ingest.pdf.mode"
+	case "ingest_images_mode", "images_mode":
+		return "ingest.images.mode"
+	case "ingest_audio_mode", "audio_mode":
+		return "ingest.audio.mode"
+	case "ingest_archives_mode", "archives_mode":
+		return "ingest.archives.mode"
 	case "stt_provider":
 		return "stt.provider"
 	case "stt_mistral_model":
@@ -1014,6 +1063,8 @@ func isMapSectionKey(key string) bool {
 	switch key {
 	case "rag", "ingest", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking":
 		return true
+	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
+		return true
 	default:
 		return false
 	}
@@ -1053,8 +1104,12 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.RateLimitBurst = intPtr(parsed)
 	case "mistral_base_url":
 		cfg.MistralBaseURL = strPtr(value)
+	case "mistral_api_key":
+		cfg.MistralAPIKey = strPtr(value)
 	case "elevenlabs_base_url":
 		cfg.ElevenLabsBaseURL = strPtr(value)
+	case "elevenlabs_api_key":
+		cfg.ElevenLabsAPIKey = strPtr(value)
 	case "elevenlabs_tts_voice_id":
 		cfg.ElevenLabsTTSVoiceID = strPtr(value)
 	case "embed_model_text":
@@ -1121,6 +1176,14 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 			return fmt.Errorf("invalid integer for %s", key)
 		}
 		cfg.IngestMaxFileMB = intPtr(parsed)
+	case "ingest.pdf.mode":
+		cfg.IngestPDFMode = strPtr(value)
+	case "ingest.images.mode":
+		cfg.IngestImagesMode = strPtr(value)
+	case "ingest.audio.mode":
+		cfg.IngestAudioMode = strPtr(value)
+	case "ingest.archives.mode":
+		cfg.IngestArchivesMode = strPtr(value)
 	case "stt.provider":
 		cfg.STTProvider = strPtr(value)
 	case "stt.mistral.model":
@@ -1287,6 +1350,10 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("ingest_gitignore", cfg.IngestGitignore)
 	writeBool("ingest_follow_symlinks", cfg.IngestFollowSymlinks)
 	writeInt("ingest_max_file_mb", cfg.IngestMaxFileMB)
+	writeScalar("ingest_pdf_mode", cfg.IngestPDFMode)
+	writeScalar("ingest_images_mode", cfg.IngestImagesMode)
+	writeScalar("ingest_audio_mode", cfg.IngestAudioMode)
+	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
 	writeScalar("stt_provider", cfg.STTProvider)
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
@@ -1492,8 +1559,17 @@ func (c *Config) Validate() error {
 	if c.RAGMaxContextChars < 0 {
 		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
 	}
+	if c.RAGKDefault < 0 {
+		return fmt.Errorf("rag.k_default must be non-negative: %d", c.RAGKDefault)
+	}
 	if c.RAGOversampleFactor < 0 {
 		return fmt.Errorf("rag.oversample_factor must be non-negative: %d", c.RAGOversampleFactor)
+	}
+	if c.ChunkingMaxTokens < 0 {
+		return fmt.Errorf("chunking.max_tokens must be non-negative: %d", c.ChunkingMaxTokens)
+	}
+	if c.ChunkingOverlapTokens < 0 {
+		return fmt.Errorf("chunking.overlap_tokens must be non-negative: %d", c.ChunkingOverlapTokens)
 	}
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)

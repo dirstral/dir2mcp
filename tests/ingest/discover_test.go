@@ -89,9 +89,13 @@ func TestDiscoverFilesWithOptions_FollowSymlinks_RespectsRootAndPreventsCycles(t
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "target.txt"), []byte("in-root"))
 	mustWriteFile(t, filepath.Join(root, "loop", "inside.txt"), []byte("loop"))
+	mustWriteFile(t, filepath.Join(root, "..cache", "inner.txt"), []byte("dotdot"))
 
 	if err := os.Symlink(filepath.Join(root, "target.txt"), filepath.Join(root, "alias.txt")); err != nil {
 		t.Fatalf("create in-root symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "..cache", "inner.txt"), filepath.Join(root, "dotdot-cache-link.txt")); err != nil {
+		t.Fatalf("create dotdot in-root symlink: %v", err)
 	}
 	if err := os.Symlink(filepath.Join(root, "loop"), filepath.Join(root, "loop", "self")); err != nil {
 		t.Fatalf("create cycle symlink: %v", err)
@@ -118,6 +122,9 @@ func TestDiscoverFilesWithOptions_FollowSymlinks_RespectsRootAndPreventsCycles(t
 
 	if !slices.Contains(got, "alias.txt") {
 		t.Fatalf("expected followed in-root symlink file, got %v", got)
+	}
+	if !slices.Contains(got, "dotdot-cache-link.txt") {
+		t.Fatalf("expected followed in-root '..cache' symlink file, got %v", got)
 	}
 	if slices.Contains(got, "outside-link.txt") {
 		t.Fatalf("outside-root symlink should be skipped, got %v", got)

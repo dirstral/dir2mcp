@@ -100,39 +100,33 @@ type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
 }
 
-func NewService(cfg config.Config, store model.Store) *Service {
+func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc := &Service{
 		cfg:    cfg,
 		store:  store,
 		logger: log.Default(),
 	}
-	if transcriber, err := TranscriberFromConfig(cfg); err == nil {
-		svc.transcriber = transcriber
-	} else {
-		svc.getLogger().Printf("transcriber config skipped: %v", err)
+	transcriber, err := TranscriberFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("configure transcriber: %w", err)
 	}
+	svc.transcriber = transcriber
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
-	return svc
+	return svc, nil
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
-// Defaults remain strict for traversal safety: symlink following is disabled.
-// .gitignore support is enabled by default (config.Default().IngestGitignore).
+// Defaults mirror config.Config defaults: .gitignore support is enabled by
+// default (IngestGitignore=true), and symlink following is disabled by default
+// (IngestFollowSymlinks=false).
 func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options := DefaultDiscoverOptions()
 	options.UseGitIgnore = cfg.IngestGitignore
 	options.FollowSymlinks = cfg.IngestFollowSymlinks
 	if cfg.IngestMaxFileMB > 0 {
-		const bytesPerMB int64 = 1024 * 1024
-		maxAllowedMB := int64(^uint64(0)>>1) / bytesPerMB
-		mb := int64(cfg.IngestMaxFileMB)
-		if mb > maxAllowedMB {
-			options.MaxSizeBytes = int64(^uint64(0) >> 1)
-		} else {
-			options.MaxSizeBytes = mb * bytesPerMB
-		}
+		options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * 1024 * 1024
 	}
 	return options
 }
@@ -149,7 +143,7 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		return nil, nil
 	case transcriberProviderMistral:
 		if strings.TrimSpace(cfg.MistralAPIKey) == "" {
-			return nil, fmt.Errorf("mistral transcriber provider requires mistral_api_key")
+			return nil, fmt.Errorf("stt provider %q requires MISTRAL_API_KEY", transcriberProviderMistral)
 		}
 		client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 		if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
@@ -169,16 +163,15 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		}
 		provider = transcriberProviderElevenLabs
 	case transcriberProviderElevenLabs:
-		// handled below
+		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
+			return nil, fmt.Errorf("stt provider %q requires ELEVENLABS_API_KEY", transcriberProviderElevenLabs)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported transcriber provider %q", provider)
 	}
 
 	if provider != transcriberProviderElevenLabs {
 		return nil, nil
-	}
-	if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
-		return nil, fmt.Errorf("elevenlabs transcriber provider requires elevenlabs_api_key")
 	}
 
 	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)

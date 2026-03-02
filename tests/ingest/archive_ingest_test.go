@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"dir2mcp/internal/config"
-	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 	"dir2mcp/internal/store"
 )
@@ -80,7 +79,7 @@ func runArchiveIngest(t *testing.T, archiveName string, archiveData []byte) *sto
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 
 	if err := svc.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -198,7 +197,7 @@ func TestArchiveIngest_MembersNotTombstonedOnRescan(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 
 	// First scan — members should be ingested.
 	if err := svc.Run(ctx); err != nil {

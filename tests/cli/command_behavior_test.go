@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"dir2mcp/internal/buildinfo"
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
@@ -123,8 +124,8 @@ func TestStatusReadsCorpusSnapshotHuman(t *testing.T) {
 	})
 
 	out := stdout.String()
-	if !strings.Contains(out, "Source: corpus_json") {
-		t.Fatalf("expected source line in stdout, got: %s", out)
+	if !strings.Contains(out, "corpus_json") {
+		t.Fatalf("expected source in stdout, got: %s", out)
 	}
 	if !strings.Contains(out, "scanned=12") || !strings.Contains(out, "indexed=8") {
 		t.Fatalf("expected indexing stats in stdout, got: %s", out)
@@ -432,7 +433,7 @@ func TestAskAnswerModeWithFlagsAndCitations(t *testing.T) {
 	if !strings.Contains(out, "alpha is documented") {
 		t.Fatalf("expected answer in stdout, got: %s", out)
 	}
-	if !strings.Contains(out, "Citations:") {
+	if !strings.Contains(out, "Citations") {
 		t.Fatalf("expected citations section in stdout, got: %s", out)
 	}
 }
@@ -467,7 +468,7 @@ func TestAskSearchOnlyCallsSearch(t *testing.T) {
 	if stub.askCalled {
 		t.Fatal("did not expect Ask to be called in search_only mode")
 	}
-	if !strings.Contains(stdout.String(), "found 1 supporting result(s)") {
+	if !strings.Contains(stdout.String(), "Search results") || !strings.Contains(stdout.String(), "docs/a.md") {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
 	}
 }
@@ -646,8 +647,8 @@ func TestAskKAboveMaxFails(t *testing.T) {
 
 	withWorkingDir(t, tmp, func() {
 		code := app.RunWithContext(context.Background(), []string{"ask", "--k", "51", "q"})
-		if code != 1 {
-			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
 		}
 	})
 
@@ -664,11 +665,25 @@ func TestAskMissingQuestionFails(t *testing.T) {
 
 	withWorkingDir(t, tmp, func() {
 		code := app.RunWithContext(context.Background(), []string{"ask", "--k", "2"})
-		if code != 1 {
-			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
 		}
 	})
 	if !strings.Contains(stderr.String(), "requires a question argument") {
 		t.Fatalf("expected missing-question message, got: %s", stderr.String())
+	}
+}
+
+func TestVersionUsesBuildInfo(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	code := app.RunWithContext(context.Background(), []string{"version"})
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+	want := "dir2mcp v" + strings.TrimPrefix(buildinfo.Version, "v")
+	if strings.TrimSpace(stdout.String()) != want {
+		t.Fatalf("version output=%q want=%q", strings.TrimSpace(stdout.String()), want)
 	}
 }

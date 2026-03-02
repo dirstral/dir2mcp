@@ -2,8 +2,11 @@
 .PHONY: build build-dir2mcp build-dirstral
 build: build-dir2mcp build-dirstral
 
+DIR2MCP_VERSION ?= 0.0.0-dev
+DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
+
 build-dir2mcp:
-	go build -o dir2mcp ./cmd/dir2mcp/
+	go build -ldflags "$(DIR2MCP_LDFLAGS)" -o dir2mcp ./cmd/dir2mcp/
 
 build-dirstral:
 	go build -o dirstral ./cmd/dirstral/

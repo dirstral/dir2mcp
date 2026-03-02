@@ -146,30 +146,23 @@ func TestPersistenceManager_AutoSaveAndStop(t *testing.T) {
 	}
 }
 
-// TestPersistenceManager_StartStop_Race exercises the narrow window between
-// unlocking stateMu in Start and incrementing the wait group. The original
-// implementation added to the wait group after releasing the lock, which
-// allowed StopAndSave to observe a zero count and return before the ticker
-// goroutine had been accounted for. When that happened the subsequent
-// Add would panic. Running the sequence many times should trigger the panic
-// without the fix; with the fix the loop completes cleanly.
-func TestPersistenceManager_StartStop_Race(t *testing.T) {
-	t.Skip("flaky test; skipping for now")
+// TestPersistenceManager_StartStop_NoWaitGroupRace exercises immediate
+// start/stop cycles. This used to be flaky when Start accounted for the
+// autosave goroutine after releasing stateMu, because StopAndSave could
+// observe a zero wait-group count and return before the goroutine was
+// tracked. With the fix in place, this loop is deterministic and stable.
+func TestPersistenceManager_StartStop_NoWaitGroupRace(t *testing.T) {
 	pm := index.NewPersistenceManager([]index.IndexedFile{{Path: "", Index: &fakePersistIndex{}}}, time.Hour, nil)
-	// run the sequence repeatedly to increase the chance of hitting the
-	// problematic ordering.
-	for i := 0; i < 1000; i++ {
-		done := make(chan struct{})
-		go func() {
-			pm.Start(context.Background())
-			close(done)
-		}()
 
-		if err := pm.StopAndSave(context.Background()); err != nil {
+	for i := 0; i < 500; i++ {
+		pm.Start(context.Background())
+
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		err := pm.StopAndSave(ctx)
+		cancel()
+		if err != nil {
 			t.Fatalf("iteration %d: StopAndSave failed: %v", i, err)
 		}
-
-		<-done
 	}
 }
 

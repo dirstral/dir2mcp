@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"dir2mcp/internal/appstate"
+	"dir2mcp/internal/buildinfo"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/elevenlabs"
 	"dir2mcp/internal/index"
@@ -34,13 +35,19 @@ import (
 )
 
 const (
-	exitSuccess = iota
-	exitGeneric
-	exitConfigInvalid
-	exitRootInaccessible
+	exitSuccess        = iota // 0
+	exitGeneric               // 1
+	exitConfigInvalid         // 2
+	exitIngestionFatal        // 3
 	exitServerBindFailure
-	exitIndexLoadFailure
-	exitIngestionFatal
+	exitAuthOrPayment
+	exitSignalInterrupt
+)
+
+const (
+	// Compatibility aliases retained for existing call sites.
+	exitRootInaccessible = exitConfigInvalid
+	exitIndexLoadFailure = exitGeneric
 )
 
 const (
@@ -65,9 +72,11 @@ type App struct {
 	stdout io.Writer
 	stderr io.Writer
 
-	newIngestor  func(config.Config, model.Store) model.Ingestor
+	newIngestor  func(config.Config, model.Store) (model.Ingestor, error)
 	newStore     func(config.Config) model.Store
 	newRetriever func(config.Config, model.Store) model.Retriever
+
+	cachedStyles map[bool]*styles
 }
 
 type indexingStateAware interface {
@@ -91,7 +100,7 @@ type corpusStatsStore interface {
 }
 
 type RuntimeHooks struct {
-	NewIngestor  func(config.Config, model.Store) model.Ingestor
+	NewIngestor  func(config.Config, model.Store) (model.Ingestor, error)
 	NewStore     func(config.Config) model.Store
 	NewRetriever func(config.Config, model.Store) model.Retriever
 }
@@ -99,6 +108,10 @@ type RuntimeHooks struct {
 type globalOptions struct {
 	jsonOutput     bool
 	nonInteractive bool
+	rootDir        string
+	configPath     string
+	stateDir       string
+	quiet          bool
 }
 
 type upOptions struct {
@@ -126,6 +139,8 @@ type upOptions struct {
 	auth                          string
 	listen                        string
 	mcpPath                       string
+	tlsCert                       string
+	tlsKey                        string
 	allowedOrigins                string
 	// overrideable models, set via flags or env/config
 	embedModelText string
@@ -243,14 +258,16 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 	return &App{
 		stdout: stdout,
 		stderr: stderr,
-		newIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			svc := ingest.NewService(cfg, st)
+		newIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
+			svc, err := ingest.NewService(cfg, st)
+			if err != nil {
+				return nil, err
+			}
 			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
 				client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 				svc.SetOCR(client)
-				svc.SetTranscriber(client)
 			}
-			return svc
+			return svc, nil
 		},
 		// default store constructor uses sqlite in the configured state
 		// directory.  tests can override via RuntimeHooks.NewStore.
@@ -282,6 +299,22 @@ func writeln(out io.Writer, args ...interface{}) {
 	_, _ = fmt.Fprintln(out, args...)
 }
 
+// sty returns the cached styles instance, creating one on first call.
+// Pass jsonMode=true to disable colors even when stdout is a TTY.
+func (a *App) sty(jsonMode bool) styles {
+	if a.cachedStyles != nil {
+		if cached, ok := a.cachedStyles[jsonMode]; ok && cached != nil {
+			return *cached
+		}
+	}
+	if a.cachedStyles == nil {
+		a.cachedStyles = make(map[bool]*styles, 2)
+	}
+	s := newStyles(a.stdout, jsonMode)
+	a.cachedStyles[jsonMode] = &s
+	return s
+}
+
 func (a *App) storeForConfig(cfg config.Config) model.Store {
 	if a != nil && a.newStore != nil {
 		return a.newStore(cfg)
@@ -292,7 +325,11 @@ func (a *App) storeForConfig(cfg config.Config) model.Store {
 func (a *App) Run(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	return a.RunWithContext(ctx, args)
+	code := a.RunWithContext(ctx, args)
+	if errors.Is(ctx.Err(), context.Canceled) && code == exitSuccess {
+		return exitSignalInterrupt
+	}
+	return code
 }
 
 func (a *App) RunWithContext(ctx context.Context, args []string) int {
@@ -304,7 +341,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	globalOpts, remaining, err := parseGlobalOptions(args)
 	if err != nil {
 		writef(a.stderr, "%v\n", err)
-		return exitGeneric
+		return exitConfigInvalid
 	}
 	if len(remaining) == 0 {
 		a.printUsage()
@@ -324,11 +361,13 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "ask":
 		return a.runAsk(ctx, globalOpts, remaining[1:])
 	case "reindex":
-		return a.runReindex(ctx)
+		return a.runReindex(ctx, globalOpts, remaining[1:])
 	case "config":
 		return a.runConfig(ctx, globalOpts, remaining[1:])
 	case "version":
-		writeln(a.stdout, "dir2mcp "+Version)
+		if !globalOpts.quiet {
+			writeln(a.stdout, "dir2mcp v"+strings.TrimPrefix(buildinfo.Version, "v"))
+		}
 		return exitSuccess
 	default:
 		writef(a.stderr, "unknown command: %s\n", remaining[0])
@@ -339,17 +378,31 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 
 func (a *App) printUsage() {
 	writeln(a.stdout, "dir2mcp")
-	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
+	writeln(a.stdout, "usage: dir2mcp [--dir <path>] [--config <path>] [--state-dir <path>] [--json] [--non-interactive] [--quiet] <command>")
 	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
-	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, --x402, --x402-facilitator-url, ...")
+	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --tls-cert, --tls-key, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, --x402, --x402-facilitator-url, ...")
 }
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
-	cfg, err := config.Load(".dir2mcp.yaml")
+	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
 	if err != nil {
 		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
 	}
+	tlsCertFile := strings.TrimSpace(opts.tlsCert)
+	if tlsCertFile == "" {
+		tlsCertFile = strings.TrimSpace(cfg.ServerTLSCertFile)
+	}
+	tlsKeyFile := strings.TrimSpace(opts.tlsKey)
+	if tlsKeyFile == "" {
+		tlsKeyFile = strings.TrimSpace(cfg.ServerTLSKeyFile)
+	}
+	if err := validateTLSFlags(tlsCertFile, tlsKeyFile); err != nil {
+		writef(a.stderr, "CONFIG_INVALID: %v\n", err)
+		return exitConfigInvalid
+	}
+	cfg.ServerTLSCertFile = tlsCertFile
+	cfg.ServerTLSKeyFile = tlsKeyFile
 	// warn the user if a direct facilitator token was supplied but is being
 	// ignored in favor of a file path. parseUpOptions recorded the original
 	// flag presence in x402FacilitatorTokenDirectSet.
@@ -390,23 +443,29 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if strings.TrimSpace(opts.x402FacilitatorURL) != "" {
 		cfg.X402.FacilitatorURL = strings.TrimSpace(opts.x402FacilitatorURL)
 	}
+	x402TokenSource := ""
 	// precedence: file path > env var > flag
 	if opts.x402FacilitatorTokenFile != "" {
 		data, err := os.ReadFile(filepath.Clean(opts.x402FacilitatorTokenFile))
 		if err != nil {
 			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
-			return exitConfigInvalid
+			return exitAuthOrPayment
 		}
 		token := strings.TrimSpace(string(data))
 		if token == "" {
 			writef(a.stderr, "x402 facilitator token file is empty\n")
-			return exitConfigInvalid
+			return exitAuthOrPayment
 		}
 		cfg.X402.FacilitatorToken = token
+		x402TokenSource = "file"
 	} else if token := strings.TrimSpace(os.Getenv(x402FacilitatorTokenEnvVar)); token != "" {
 		cfg.X402.FacilitatorToken = token
+		x402TokenSource = "env"
 	} else if strings.TrimSpace(opts.x402FacilitatorToken) != "" {
 		cfg.X402.FacilitatorToken = strings.TrimSpace(opts.x402FacilitatorToken)
+		x402TokenSource = "flag"
+	} else if strings.TrimSpace(cfg.X402.FacilitatorToken) != "" {
+		x402TokenSource = "configured"
 	}
 	if strings.TrimSpace(opts.x402ResourceBaseURL) != "" {
 		cfg.X402.ResourceBaseURL = strings.TrimSpace(opts.x402ResourceBaseURL)
@@ -443,7 +502,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 		authMode := strings.TrimSpace(cfg.AuthMode)
 		if strings.EqualFold(authMode, "none") && !opts.forceInsecure {
-			writeln(a.stderr, "ERROR: CONFIG_INVALID: --public requires auth. Use --auth auto or --force-insecure to override (unsafe).")
+			se := a.sty(opts.jsonOutput)
+			writef(a.stderr, "%s --public requires auth. Use --auth auto or --force-insecure to override (unsafe).\n", se.errPrefix())
 			return exitConfigInvalid
 		}
 	}
@@ -455,7 +515,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	strictX402 := strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "required")
 	if err := cfg.ValidateX402(strictX402); err != nil {
 		writef(a.stderr, "CONFIG_INVALID: %v\n", err)
-		return exitConfigInvalid
+		return exitAuthOrPayment
 	}
 
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
@@ -480,12 +540,13 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	nonInteractiveMode := opts.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
 	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+		se := a.sty(opts.jsonOutput)
 		if nonInteractiveMode {
-			writeln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s CONFIG_INVALID: Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
 			writeln(a.stderr, "Or run: dir2mcp config init")
 		} else {
-			writeln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Run: dir2mcp config init")
 		}
 		return exitConfigInvalid
@@ -494,10 +555,13 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	auth, err := prepareAuthMaterial(cfg)
 	if err != nil {
 		writef(a.stderr, "auth setup: %v\n", err)
-		return exitConfigInvalid
+		return exitAuthOrPayment
 	}
 	cfg.AuthMode = auth.mode
 	cfg.ResolvedAuthToken = auth.token
+	if snapErr := saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource); snapErr != nil && !opts.quiet {
+		writef(a.stderr, "warning: write config snapshot: %v\n", snapErr)
+	}
 
 	st := a.storeForConfig(cfg)
 	defer func() { _ = st.Close() }()
@@ -540,6 +604,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
 	ret.SetProtocolVersion(cfg.ProtocolVersion)
+	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
+	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
+	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
@@ -580,7 +647,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
-	ing := a.newIngestor(cfg, st)
+	ing, err := a.newIngestor(cfg, st)
+	if err != nil {
+		writef(a.stderr, "initialize ingestor: %v\n", err)
+		return exitConfigInvalid
+	}
 	if stateAware, ok := ing.(indexingStateAware); ok {
 		stateAware.SetIndexingState(indexingState)
 	}
@@ -636,10 +707,14 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if cfg.Public {
 		mcpAddr = publicURLAddress(cfg.ListenAddr, mcpAddr)
 	}
-	mcpURL := buildMCPURL(mcpAddr, cfg.MCPPath)
+	mcpURL := buildMCPURL(mcpAddr, cfg.MCPPath, tlsCertFile != "")
 
 	serverErrCh := make(chan error, 1)
 	go func() {
+		if tlsCertFile != "" {
+			serverErrCh <- mcpServer.RunOnListenerTLS(runCtx, ln, tlsCertFile, tlsKeyFile)
+			return
+		}
 		serverErrCh <- mcpServer.RunOnListener(runCtx, ln)
 	}()
 
@@ -671,7 +746,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		"errors":   0,
 	})
 
-	if !opts.jsonOutput {
+	if !opts.jsonOutput && !opts.quiet {
 		a.printHumanConnection(cfg, connection, auth, opts.readOnly)
 	}
 
@@ -839,10 +914,10 @@ func startEmbeddingWorkers(
 func (a *App) runStatus(ctx context.Context, global globalOptions, args []string) int {
 	if len(args) > 0 {
 		writef(a.stderr, "status command does not accept arguments: %s\n", strings.Join(args, " "))
-		return exitGeneric
+		return exitConfigInvalid
 	}
 
-	cfg, err := config.Load(".dir2mcp.yaml")
+	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
 		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
@@ -893,36 +968,58 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		return exitSuccess
 	}
 
-	writeln(a.stdout, "State:", cfg.StateDir)
-	writef(a.stdout, "Source: %s\n", source)
-	writef(a.stdout, "Timestamp: %s\n", snapshot.Timestamp)
+	if global.quiet {
+		return exitSuccess
+	}
+	s := a.sty(false)
 	writeln(a.stdout)
-	writeln(a.stdout, "Indexing:")
-	writef(a.stdout, "  mode=%s running=%t scanned=%d indexed=%d skipped=%d deleted=%d reps=%d chunks=%d embedded=%d errors=%d unknown=%d\n",
-		snapshot.Indexing.Mode,
-		snapshot.Indexing.Running,
-		snapshot.Indexing.Scanned,
-		snapshot.Indexing.Indexed,
-		snapshot.Indexing.Skipped,
-		snapshot.Indexing.Deleted,
-		snapshot.Indexing.Representations,
-		snapshot.Indexing.ChunksTotal,
-		snapshot.Indexing.EmbeddedOK,
-		snapshot.Indexing.Errors,
-		snapshot.Indexing.Unknown,
+	writeln(a.stdout, s.kv("State", cfg.StateDir))
+	writeln(a.stdout, s.kv("Source", source))
+	writeln(a.stdout, s.kv("Timestamp", snapshot.Timestamp))
+	writeln(a.stdout)
+
+	runningLabel := s.dim("stopped")
+	if snapshot.Indexing.Running {
+		runningLabel = s.Green.Render("running")
+	}
+
+	writef(a.stdout, "  %s  %s  %s\n", s.sectionHeader("Indexing"), s.dim("mode="+snapshot.Indexing.Mode), runningLabel)
+	writef(a.stdout, "    %s  %s  %s  %s\n",
+		s.stat("scanned", snapshot.Indexing.Scanned),
+		s.stat("indexed", snapshot.Indexing.Indexed),
+		s.stat("skipped", snapshot.Indexing.Skipped),
+		s.stat("deleted", snapshot.Indexing.Deleted),
 	)
-	writef(a.stdout, "Documents: total=%d code_ratio=%.4f\n", snapshot.TotalDocs, snapshot.CodeRatio)
+	writef(a.stdout, "    %s  %s  %s  %s",
+		s.stat("reps", snapshot.Indexing.Representations),
+		s.stat("chunks", snapshot.Indexing.ChunksTotal),
+		s.stat("embedded", snapshot.Indexing.EmbeddedOK),
+		s.stat("unknown", snapshot.Indexing.Unknown),
+	)
+	if snapshot.Indexing.Errors > 0 {
+		writef(a.stdout, "  %s", s.Red.Render(fmt.Sprintf("errors=%d", snapshot.Indexing.Errors)))
+	} else {
+		writef(a.stdout, "  %s", s.stat("errors", snapshot.Indexing.Errors))
+	}
+	writeln(a.stdout)
+	writeln(a.stdout)
+
+	writef(a.stdout, "  %s  %s  %s\n",
+		s.sectionHeader("Documents"),
+		s.stat("total", snapshot.TotalDocs),
+		s.stat("code_ratio", fmt.Sprintf("%.4f", snapshot.CodeRatio)),
+	)
 	if len(snapshot.DocCounts) > 0 {
 		keys := make([]string, 0, len(snapshot.DocCounts))
 		for key := range snapshot.DocCounts {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
-		writeln(a.stdout, "Doc counts:")
 		for _, key := range keys {
-			writef(a.stdout, "  %s=%d\n", key, snapshot.DocCounts[key])
+			writef(a.stdout, "    %s\n", s.stat(key, snapshot.DocCounts[key]))
 		}
 	}
+	writeln(a.stdout)
 	return exitSuccess
 }
 
@@ -930,10 +1027,10 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	opts, err := parseAskOptions(args)
 	if err != nil {
 		writef(a.stderr, "invalid ask flags: %v\n", err)
-		return exitGeneric
+		return exitConfigInvalid
 	}
 
-	cfg, err := config.Load(".dir2mcp.yaml")
+	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
 		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
@@ -943,13 +1040,14 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	}
 
 	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+		se := a.sty(global.jsonOutput)
 		nonInteractiveMode := global.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
 		if nonInteractiveMode {
-			writeln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s CONFIG_INVALID: Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
 			writeln(a.stderr, "Or run: dir2mcp config init")
 		} else {
-			writeln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writef(a.stderr, "%s Missing MISTRAL_API_KEY\n", se.errPrefix())
 			writeln(a.stderr, "Run: dir2mcp config init")
 		}
 		return exitConfigInvalid
@@ -1009,15 +1107,21 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 			return exitSuccess
 		}
 
-		writef(a.stdout, "found %d supporting result(s)\n", len(hits))
-		for _, hit := range hits {
+		if global.quiet {
+			return exitSuccess
+		}
+		s := a.sty(false)
+		writeln(a.stdout)
+		writef(a.stdout, "  %s %s\n\n", s.sectionHeader("Search results"), s.dim(fmt.Sprintf("(%d hits)", len(hits))))
+		for i, hit := range hits {
 			snippet := strings.TrimSpace(hit.Snippet)
 			if snippet == "" {
 				snippet = "(no snippet)"
 			}
-			writef(a.stdout, "- %s [score=%.4f]\n", hit.RelPath, hit.Score)
-			writef(a.stdout, "  %s\n", snippet)
+			writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Cyan.Render(hit.RelPath), s.dim(fmt.Sprintf("score=%.4f", hit.Score)))
+			writef(a.stdout, "      %s\n", s.dim(snippet))
 		}
+		writeln(a.stdout)
 		return exitSuccess
 	}
 
@@ -1042,23 +1146,38 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		return exitSuccess
 	}
 
+	if global.quiet {
+		return exitSuccess
+	}
+	s := a.sty(false)
+	writeln(a.stdout)
 	writeln(a.stdout, askResult.Answer)
 	if len(askResult.Citations) > 0 {
 		writeln(a.stdout)
-		writeln(a.stdout, "Citations:")
-		for _, citation := range askResult.Citations {
-			writef(a.stdout, "- chunk=%d path=%s span=%s\n", citation.ChunkID, citation.RelPath, formatSpan(citation.Span))
+		writef(a.stdout, "  %s\n", s.sectionHeader("Citations"))
+		for i, citation := range askResult.Citations {
+			writef(a.stdout, "  %s %s  %s\n",
+				s.Brand.Render(fmt.Sprintf("[%d]", i+1)),
+				s.Cyan.Render(citation.RelPath),
+				s.dim(fmt.Sprintf("chunk=%d span=%s", citation.ChunkID, formatSpan(citation.Span))),
+			)
 		}
 	}
+	writeln(a.stdout)
 	return exitSuccess
 }
 
-func (a *App) runReindex(ctx context.Context) int {
+func (a *App) runReindex(ctx context.Context, global globalOptions, args []string) int {
+	if len(args) > 0 {
+		writef(a.stderr, "reindex command does not accept arguments: %s\n", strings.Join(args, " "))
+		return exitConfigInvalid
+	}
+
 	// load configuration first so that both the ingestor and any
 	// auxiliary components (OCR client) share the same settings.  When
 	// Load returns an error we treat it as fatal instead of silently
 	// proceeding with defaults as was previously the case.
-	cfg, err := config.Load(".dir2mcp.yaml")
+	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
 		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
@@ -1102,11 +1221,17 @@ func (a *App) runReindex(ctx context.Context) int {
 	}
 
 	// use the factory hook (same as runUp) to allow tests to intercept
-	ing := a.newIngestor(cfg, st)
+	ing, err := a.newIngestor(cfg, st)
+	if err != nil {
+		writef(a.stderr, "initialize ingestor: %v\n", err)
+		return exitConfigInvalid
+	}
 
 	err = ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
-		writeln(a.stdout, "reindex is not available yet: ingestion pipeline not implemented")
+		if !global.quiet {
+			writeln(a.stdout, "reindex is not available yet: ingestion pipeline not implemented")
+		}
 		return exitSuccess
 	}
 	if err != nil {
@@ -1125,10 +1250,13 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 	case "init":
 		return a.runConfigInit(global, args[1:])
 	case "print":
-		cfg, err := config.Load(".dir2mcp.yaml")
+		cfg, err := loadConfigWithGlobalOptions(global)
 		if err != nil {
 			writef(a.stderr, "load config: %v\n", err)
 			return exitConfigInvalid
+		}
+		if global.quiet {
+			return exitSuccess
 		}
 		writef(
 			a.stdout,
@@ -1142,7 +1270,7 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 		)
 	default:
 		writef(a.stderr, "unknown config subcommand: %s\n", args[0])
-		return exitGeneric
+		return exitConfigInvalid
 	}
 	return exitSuccess
 }
@@ -1150,11 +1278,12 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 func (a *App) runConfigInit(global globalOptions, args []string) int {
 	if len(args) > 0 {
 		writef(a.stderr, "config init does not accept arguments: %s\n", strings.Join(args, " "))
-		return exitGeneric
+		return exitConfigInvalid
 	}
 
-	configPath := ".dir2mcp.yaml"
+	configPath := resolveConfigPath(global)
 	cfg := config.Default()
+	cfg = applyGlobalPathOverrides(cfg, global)
 	created := false
 
 	if _, err := os.Stat(configPath); err != nil {
@@ -1171,6 +1300,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 		}
 		cfg = existing
 	}
+	cfg = applyGlobalPathOverrides(cfg, global)
 
 	if err := config.SaveFile(configPath, cfg); err != nil {
 		writef(a.stderr, "save config file: %v\n", err)
@@ -1197,15 +1327,19 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 		return exitSuccess
 	}
 
-	if created {
-		writef(a.stdout, "created %s with baseline settings\n", configPath)
-	} else {
-		writef(a.stdout, "updated %s and ensured baseline settings are present\n", configPath)
+	if !global.quiet {
+		s := a.sty(false)
+		if created {
+			writef(a.stdout, "%s created %s with baseline settings\n", s.Success.Render("✓"), configPath)
+		} else {
+			writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
+		}
+		writef(a.stdout, "\n%s\n", s.sectionHeader("Next steps"))
+		for _, step := range nextSteps {
+			writef(a.stdout, "  %s %s\n", s.dim("•"), step)
+		}
 	}
-	writeln(a.stdout, "Next steps:")
-	for _, step := range nextSteps {
-		writef(a.stdout, "- %s\n", step)
-	}
+	writeln(a.stdout)
 	return exitSuccess
 }
 
@@ -1240,6 +1374,9 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
 	ret.SetProtocolVersion(cfg.ProtocolVersion)
+	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
+	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
+	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {
@@ -1411,13 +1548,64 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 		}
 
 		switch arg {
+		case "--dir":
+			value, consumed, err := consumeGlobalFlagValue(arg, remaining)
+			if err != nil {
+				return globalOptions{}, nil, err
+			}
+			opts.rootDir = value
+			remaining = remaining[consumed:]
+		case "--config":
+			value, consumed, err := consumeGlobalFlagValue(arg, remaining)
+			if err != nil {
+				return globalOptions{}, nil, err
+			}
+			opts.configPath = value
+			remaining = remaining[consumed:]
+		case "--state-dir":
+			value, consumed, err := consumeGlobalFlagValue(arg, remaining)
+			if err != nil {
+				return globalOptions{}, nil, err
+			}
+			opts.stateDir = value
+			remaining = remaining[consumed:]
 		case "--json":
 			opts.jsonOutput = true
 			remaining = remaining[1:]
 		case "--non-interactive":
 			opts.nonInteractive = true
 			remaining = remaining[1:]
+		case "--quiet":
+			opts.quiet = true
+			remaining = remaining[1:]
 		default:
+			if strings.HasPrefix(arg, "--dir=") {
+				value, consumed, err := consumeGlobalFlagValue("--dir", remaining)
+				if err != nil {
+					return globalOptions{}, nil, err
+				}
+				opts.rootDir = value
+				remaining = remaining[consumed:]
+				continue
+			}
+			if strings.HasPrefix(arg, "--config=") {
+				value, consumed, err := consumeGlobalFlagValue("--config", remaining)
+				if err != nil {
+					return globalOptions{}, nil, err
+				}
+				opts.configPath = value
+				remaining = remaining[consumed:]
+				continue
+			}
+			if strings.HasPrefix(arg, "--state-dir=") {
+				value, consumed, err := consumeGlobalFlagValue("--state-dir", remaining)
+				if err != nil {
+					return globalOptions{}, nil, err
+				}
+				opts.stateDir = value
+				remaining = remaining[consumed:]
+				continue
+			}
 			if strings.HasPrefix(arg, "-") {
 				return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
 			}
@@ -1426,6 +1614,114 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	}
 
 	return opts, remaining, nil
+}
+
+func consumeGlobalFlagValue(flagName string, args []string) (string, int, error) {
+	if len(args) == 0 {
+		return "", 0, fmt.Errorf("missing value for %s", flagName)
+	}
+	if strings.HasPrefix(args[0], flagName+"=") {
+		value := strings.TrimSpace(strings.TrimPrefix(args[0], flagName+"="))
+		if value == "" {
+			return "", 0, fmt.Errorf("missing value for %s", flagName)
+		}
+		return value, 1, nil
+	}
+	if len(args) < 2 {
+		return "", 0, fmt.Errorf("missing value for %s", flagName)
+	}
+	value := strings.TrimSpace(args[1])
+	if value == "" {
+		return "", 0, fmt.Errorf("missing value for %s", flagName)
+	}
+	return value, 2, nil
+}
+
+func resolveConfigPath(global globalOptions) string {
+	if trimmed := strings.TrimSpace(global.configPath); trimmed != "" {
+		return trimmed
+	}
+	return ".dir2mcp.yaml"
+}
+
+func applyGlobalPathOverrides(cfg config.Config, global globalOptions) config.Config {
+	if root := strings.TrimSpace(global.rootDir); root != "" {
+		stateLooksDefault := strings.TrimSpace(cfg.StateDir) == "" ||
+			filepath.Clean(cfg.StateDir) == filepath.Clean(config.Default().StateDir)
+		cfg.RootDir = root
+		if strings.TrimSpace(global.stateDir) == "" && stateLooksDefault {
+			cfg.StateDir = filepath.Join(root, ".dir2mcp")
+		}
+	}
+	if state := strings.TrimSpace(global.stateDir); state != "" {
+		cfg.StateDir = state
+	}
+	return cfg
+}
+
+func loadConfigWithGlobalOptions(global globalOptions) (config.Config, error) {
+	cfg, err := config.Load(resolveConfigPath(global))
+	if err != nil {
+		return config.Config{}, err
+	}
+	cfg = applyGlobalPathOverrides(cfg, global)
+	if snapErr := saveEffectiveConfigSnapshot(cfg, authMaterial{}, ""); snapErr != nil {
+		cfg.Warnings = append(cfg.Warnings, fmt.Errorf("write config snapshot: %w", snapErr))
+	}
+	return cfg, nil
+}
+
+func saveEffectiveConfigSnapshot(cfg config.Config, auth authMaterial, x402TokenSource string) error {
+	sources := config.SecretSourceMetadata{}
+	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+		sources.MistralAPIKey = "configured"
+		if strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != "" {
+			sources.MistralAPIKey = "env"
+		}
+	}
+	if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
+		sources.ElevenLabsAPIKey = "configured"
+		if strings.TrimSpace(os.Getenv("ELEVENLABS_API_KEY")) != "" {
+			sources.ElevenLabsAPIKey = "env"
+		}
+	}
+	if strings.TrimSpace(cfg.X402.FacilitatorToken) != "" {
+		source := strings.TrimSpace(x402TokenSource)
+		if source == "" {
+			source = "configured"
+		}
+		sources.X402FacilitatorToken = source
+	}
+	if strings.TrimSpace(auth.token) != "" {
+		source := strings.TrimSpace(auth.tokenSource)
+		if source == "" {
+			source = "configured"
+		}
+		sources.AuthToken = source
+	}
+	_, err := config.SaveEffectiveSnapshot(cfg, sources)
+	return err
+}
+
+func validateTLSFlags(certPath, keyPath string) error {
+	certPath = strings.TrimSpace(certPath)
+	keyPath = strings.TrimSpace(keyPath)
+	if certPath == "" && keyPath == "" {
+		return nil
+	}
+	if certPath == "" || keyPath == "" {
+		return errors.New("--tls-cert and --tls-key must be provided together")
+	}
+	for _, p := range []string{certPath, keyPath} {
+		info, err := os.Stat(p)
+		if err != nil {
+			return fmt.Errorf("tls file %q: %w", p, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("tls file %q is a directory", p)
+		}
+	}
+	return nil
 }
 
 func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
@@ -1452,6 +1748,8 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.auth, "auth", "", "auth mode: auto|none|file:<path>")
 	fs.StringVar(&opts.listen, "listen", "", "listen address")
 	fs.StringVar(&opts.mcpPath, "mcp-path", "", "MCP route path")
+	fs.StringVar(&opts.tlsCert, "tls-cert", "", "path to TLS certificate file (PEM)")
+	fs.StringVar(&opts.tlsKey, "tls-key", "", "path to TLS private key file (PEM)")
 	fs.StringVar(&opts.allowedOrigins, "allowed-origins", "", "comma-separated origins to append to the allowlist")
 	fs.StringVar(&opts.embedModelText, "embed-model-text", "", "override embedding model used for text chunks")
 	fs.StringVar(&opts.embedModelCode, "embed-model-code", "", "override embedding model used for code chunks")
@@ -1607,11 +1905,15 @@ func writeSecretToken(path, token string) error {
 	return nil
 }
 
-func buildMCPURL(addr, path string) string {
+func buildMCPURL(addr, path string, tlsEnabled bool) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	return "http://" + addr + path
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
+	return scheme + "://" + addr + path
 }
 
 // PublicURLAddress derives the public-facing address using the configured
@@ -2037,33 +2339,49 @@ func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 }
 
 func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool) {
-	writef(a.stdout, "Index: %s\n", cfg.StateDir)
+	s := a.sty(false)
+	writeln(a.stdout)
+	writef(a.stdout, "  %s %s\n", s.banner(), s.dim("v0.0.0-dev"))
+	writeln(a.stdout, s.separator(44))
+	writeln(a.stdout)
+
 	mode := "incremental (server-first; indexing in background)"
 	if readOnly {
-		mode += ", read-only=true"
+		mode += ", read-only"
 	}
-	mode += fmt.Sprintf(", public=%t", cfg.Public)
-	writef(a.stdout, "Mode: %s\n\n", mode)
 	if cfg.Public {
-		writeln(a.stdout, "WARNING: server is bound to all interfaces. Ensure auth is enabled.")
+		mode += ", public"
+	}
+	writeln(a.stdout, s.kv("Index", cfg.StateDir))
+	writeln(a.stdout, s.kv("Mode", mode))
+	writeln(a.stdout)
+
+	if cfg.Public {
+		writef(a.stdout, "  %s server is bound to all interfaces. Ensure auth is enabled.\n", s.warnPrefix())
 		writeln(a.stdout)
 	}
-	writeln(a.stdout, "MCP endpoint:")
-	writef(a.stdout, "  URL:    %s\n", connection.URL)
+
+	writef(a.stdout, "  %s\n", s.sectionHeader("MCP endpoint"))
+	writeln(a.stdout, s.kv("URL", s.URL.Render(connection.URL)))
 	if auth.mode == "none" {
-		writeln(a.stdout, "  Auth:   none")
+		writeln(a.stdout, s.kv("Auth", s.Yellow.Render("none")))
 	} else {
-		writef(a.stdout, "  Auth:   Bearer (source=%s)\n", auth.tokenSource)
+		writeln(a.stdout, s.kv("Auth", fmt.Sprintf("Bearer %s", s.dim("(source="+auth.tokenSource+")"))))
 	}
 	if auth.tokenFile != "" {
-		writef(a.stdout, "  Token file: %s\n", auth.tokenFile)
+		writeln(a.stdout, s.kv("Token file", auth.tokenFile))
 	}
-	writeln(a.stdout, "  Headers:")
-	writef(a.stdout, "    %s: %s\n", protocol.MCPProtocolVersionHeader, cfg.ProtocolVersion)
+	writeln(a.stdout)
+
+	writef(a.stdout, "  %s\n", s.sectionHeader("Required headers"))
+	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPProtocolVersionHeader+":"), cfg.ProtocolVersion)
 	if auth.mode != "none" {
-		writeln(a.stdout, "    Authorization: Bearer <token>")
+		writef(a.stdout, "    %s %s\n", s.Dim.Render("Authorization:"), "Bearer <token>")
 	}
-	writeln(a.stdout, "    MCP-Session-Id: (assigned after initialize response)")
+	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPSessionHeader+":"), s.dim("(assigned after initialize response)"))
+	writeln(a.stdout)
+	writeln(a.stdout, s.separator(44))
+	writef(a.stdout, "  %s\n\n", s.Success.Render("Ready for connections"))
 }
 
 func isTerminal(file *os.File) bool {

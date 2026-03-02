@@ -11,7 +11,8 @@
 - Directory indexing + retrieval + citations are implemented and tested.
 - Multimodal ingestion paths (OCR/transcription/annotation) and related MCP tools are available.
 - Optional x402 request gating is implemented as facilitator-backed route protection for MCP `tools/call`.
-- Active work focuses on release hardening, retrieval quality/completeness, and final hosted smoke/runbook quality.
+- Active work focuses on release hardening and retrieval quality/completeness.
+- Hosted demo smoke/runbook coverage now includes a scriptable MCP probe (`scripts/smoke_hosted_demo.sh`) for initialize/tools/list/tools-call readiness checks.
 
 ---
 

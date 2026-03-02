@@ -42,6 +42,21 @@ type Engine struct {
 	askTimeout time.Duration
 }
 
+// NewEngineForTesting creates an Engine with a caller-supplied retriever.
+// It is primarily used by black-box tests in tests/retrieval to assert
+// runtime behavior without requiring full on-disk state bootstrap.
+func NewEngineForTesting(retriever interface {
+	Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error)
+	SetRAGSystemPrompt(prompt string)
+	SetMaxContextChars(maxChars int)
+	SetOversampleFactor(factor int)
+}) *Engine {
+	return &Engine{
+		retriever:  retriever,
+		askTimeout: defaultEngineAskTimeout,
+	}
+}
+
 // NewEngine creates a retrieval engine backed by the on-disk state.
 //
 // ctx must be non-nil; pass context.Background() or context.TODO() if no

@@ -1,4 +1,4 @@
-package breeze
+package chat
 
 import (
 	"context"
@@ -24,7 +24,7 @@ type mcpResponseMsg struct {
 	clear  bool
 }
 
-type breezeModel struct {
+type chatModel struct {
 	client    *mcp.Client
 	ctx       context.Context
 	modelName string
@@ -43,7 +43,7 @@ type breezeModel struct {
 	confirmingPlan TurnPlan
 }
 
-func initialModel(ctx context.Context, client *mcp.Client, opts Options) breezeModel {
+func initialModel(ctx context.Context, client *mcp.Client, opts Options) chatModel {
 	ti := textinput.New()
 	ti.Placeholder = "Ask a question or type /help..."
 	ti.Focus()
@@ -56,7 +56,7 @@ func initialModel(ctx context.Context, client *mcp.Client, opts Options) breezeM
 
 	msgs := connectedBanner(opts.MCPURL, opts.Transport, client.SessionID(), opts.Model, opts.StartupHint)
 
-	return breezeModel{
+	return chatModel{
 		client:    client,
 		ctx:       ctx,
 		modelName: opts.Model,
@@ -67,11 +67,11 @@ func initialModel(ctx context.Context, client *mcp.Client, opts Options) breezeM
 	}
 }
 
-func (m breezeModel) Init() tea.Cmd {
+func (m chatModel) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.spinner.Tick)
 }
 
-func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
@@ -133,7 +133,7 @@ func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.textInput.SetValue("")
 
-			m.messages = append(m.messages, ui.Prompt("breeze")+input)
+			m.messages = append(m.messages, ui.Prompt("chat")+input)
 
 			m.isLoading = true
 			m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
@@ -188,7 +188,7 @@ func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd, spCmd)
 }
 
-func (m breezeModel) View() string {
+func (m chatModel) View() string {
 	if !m.ready {
 		return "\n  Initializing..."
 	}
@@ -215,7 +215,7 @@ func (m breezeModel) View() string {
 		if m.isLoading {
 			b.WriteString(m.spinner.View() + " ")
 		} else {
-			b.WriteString(ui.Prompt("breeze"))
+			b.WriteString(ui.Prompt("chat"))
 		}
 		b.WriteString(m.textInput.View())
 	}
@@ -225,7 +225,7 @@ func (m breezeModel) View() string {
 	return b.String()
 }
 
-func (m *breezeModel) applyWindowSize(width, height int) {
+func (m *chatModel) applyWindowSize(width, height int) {
 	if width <= 0 || height <= 0 {
 		return
 	}
@@ -254,7 +254,7 @@ func (m *breezeModel) applyWindowSize(width, height int) {
 	m.viewport.Height = vpHeight
 }
 
-func (m breezeModel) renderHelpBlock(width, height int) string {
+func (m chatModel) renderHelpBlock(width, height int) string {
 	helpText := formatHelp()
 	if width < 56 || height < 14 {
 		helpText = formatHelpCompact()
@@ -275,7 +275,7 @@ type helpCommand struct {
 
 var helpCommands = []helpCommand{
 	{name: "/help", description: "Show help"},
-	{name: "/quit", description: "Exit Breeze"},
+	{name: "/quit", description: "Exit Chat"},
 	{name: "/clear", description: "Clear chat history"},
 	{name: "/list [prefix]", description: "List indexed files"},
 	{name: "/search <query>", description: "Search corpus"},
@@ -297,7 +297,7 @@ func formatHelpCompact() string {
 	return b.String()
 }
 
-func (m *breezeModel) processInputCmd(input string) tea.Cmd {
+func (m *chatModel) processInputCmd(input string) tea.Cmd {
 	return func() tea.Msg {
 		plan, err := PlanTurn(input, m.modelName)
 		if err != nil {
@@ -319,7 +319,7 @@ func (m *breezeModel) processInputCmd(input string) tea.Cmd {
 	}
 }
 
-func (m *breezeModel) checkApprovalAndRunPlan(plan TurnPlan) tea.Msg {
+func (m *chatModel) checkApprovalAndRunPlan(plan TurnPlan) tea.Msg {
 	for _, step := range plan.Steps {
 		if needsApproval(step.Tool) {
 			return approvalReqMsg{plan: plan}
@@ -332,7 +332,7 @@ func (m *breezeModel) checkApprovalAndRunPlan(plan TurnPlan) tea.Msg {
 	return mcpResponseMsg{output: execRes.Output}
 }
 
-func (m *breezeModel) runPlanCmd(plan TurnPlan) tea.Cmd {
+func (m *chatModel) runPlanCmd(plan TurnPlan) tea.Cmd {
 	return func() tea.Msg {
 		execRes, err := ExecutePlan(m.ctx, m.client, plan)
 		if err != nil {

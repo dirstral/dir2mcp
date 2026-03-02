@@ -145,7 +145,7 @@ func (m logModel) View() string {
 	}
 
 	header := fmt.Sprintf("%s  %s",
-		styleBrandStrong.Render("Lighthouse Logs"),
+		styleBrandStrong.Render("MCP Server Logs"),
 		styleSubtle.Render(m.logPath),
 	)
 	footer := styleMuted.Render("q/esc back · up/down scroll · G end")
@@ -153,7 +153,7 @@ func (m logModel) View() string {
 	return header + "\n\n" + m.viewport.View() + "\n\n" + footer
 }
 
-func runLogViewer() error {
+func runServerLogViewer() error {
 	model := newLogModel()
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()
