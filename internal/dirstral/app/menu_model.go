@@ -191,8 +191,6 @@ func (m MenuModel) View() string {
 	if m.revealedCount >= 0 {
 		showCount = m.revealedCount
 	}
-	rowGap := 0
-
 	for i, item := range m.config.Items {
 		if i >= showCount {
 			break
@@ -239,9 +237,6 @@ func (m MenuModel) View() string {
 		}
 		row := fmt.Sprintf("  %s %s%s%s", marker, labelCell, strings.Repeat(" ", gutterWidth), descCell)
 		menuLines = append(menuLines, row)
-		if rowGap == 1 && i < showCount-1 {
-			menuLines = append(menuLines, "")
-		}
 	}
 	if len(menuLines) == 0 {
 		menuLines = append(menuLines, styleSubtle.Render("  (no options)"))
@@ -271,7 +266,7 @@ func (m MenuModel) View() string {
 			body = joinVerticalNonEmpty(lipgloss.Center, header, helpBox)
 		}
 	}
-	content := composeWithPinnedFooter(body, footer, m.height)
+	content := joinVerticalNonEmpty(lipgloss.Left, body, footer)
 
 	if showLogo {
 		logo := RenderLogo(viewWidth)
@@ -293,17 +288,16 @@ func (m MenuModel) View() string {
 				b.WriteByte('\n')
 			}
 		}
-		return composeWithPinnedFooter(b.String(), "", m.height)
+		if m.height <= 0 {
+			return b.String()
+		}
+		return lipgloss.Place(viewWidth, m.height, lipgloss.Center, lipgloss.Center, strings.TrimRight(b.String(), "\n"))
 	}
 
 	if m.height <= 0 {
 		return content
 	}
-	vAlign := lipgloss.Center
-	if tinyHeight {
-		vAlign = lipgloss.Top
-	}
-	return lipgloss.Place(viewWidth, m.height, lipgloss.Center, vAlign, content)
+	return lipgloss.Place(viewWidth, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
 // menuHelpText renders the shared menu keymap panel with screen context.
