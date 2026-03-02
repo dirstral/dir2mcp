@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -1375,18 +1376,55 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 		return exitGeneric
 	}
 
-	nextSteps := []string{
-		"Set env: MISTRAL_API_KEY=...",
-		"Or add MISTRAL_API_KEY to .env.local/.env",
-		"Run: dir2mcp up",
+	// Print config file result immediately so it appears before any prompt.
+	if !global.quiet && !global.jsonOutput {
+		s := a.sty(false)
+		if created {
+			writef(a.stdout, "%s created %s with baseline settings\n", s.Success.Render("✓"), configPath)
+		} else {
+			writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
+		}
 	}
+
+	// Prompt for the Mistral API key when running interactively and the key is
+	// not already present in the environment.
+	apiKeySet := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != ""
+	apiKeySaved := false
+	if !global.nonInteractive && !global.jsonOutput && !apiKeySet &&
+		isTerminal(os.Stdin) && isTerminal(os.Stdout) {
+		s := a.sty(false)
+		writef(a.stdout, "\n%s\n", s.sectionHeader("Mistral API Key"))
+		writef(a.stdout, "  Get one free at https://console.mistral.ai/api-keys\n\n")
+		writef(a.stdout, "  MISTRAL_API_KEY (leave blank to skip): ")
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		if key := strings.TrimSpace(line); key != "" {
+			envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
+			if err := saveEnvLocalKey(envPath, "MISTRAL_API_KEY", key); err != nil {
+				writef(a.stderr, "save .env.local: %v\n", err)
+			} else {
+				apiKeySaved = true
+				if !global.quiet {
+					writef(a.stdout, "%s saved MISTRAL_API_KEY to %s\n", s.Success.Render("✓"), envPath)
+				}
+			}
+		}
+	}
+
+	nextSteps := []string{}
+	if !apiKeySet && !apiKeySaved {
+		nextSteps = append(nextSteps, "Set env: export MISTRAL_API_KEY=<your-key>")
+		nextSteps = append(nextSteps, "Or add MISTRAL_API_KEY=<key> to .env.local in this directory")
+	}
+	nextSteps = append(nextSteps, "Run: dir2mcp up")
 
 	if global.jsonOutput {
 		payload := map[string]interface{}{
-			"path":       configPath,
-			"created":    created,
-			"updated":    !created,
-			"next_steps": nextSteps,
+			"path":          configPath,
+			"created":       created,
+			"updated":       !created,
+			"api_key_saved": apiKeySaved,
+			"next_steps":    nextSteps,
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
 			writef(a.stderr, "encode config init json: %v\n", err)
@@ -1395,13 +1433,8 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 		return exitSuccess
 	}
 
-	if !global.quiet {
+	if !global.quiet && len(nextSteps) > 0 {
 		s := a.sty(false)
-		if created {
-			writef(a.stdout, "%s created %s with baseline settings\n", s.Success.Render("✓"), configPath)
-		} else {
-			writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
-		}
 		writef(a.stdout, "\n%s\n", s.sectionHeader("Next steps"))
 		for _, step := range nextSteps {
 			writef(a.stdout, "  %s %s\n", s.dim("•"), step)
@@ -1409,6 +1442,33 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	}
 	writeln(a.stdout)
 	return exitSuccess
+}
+
+// saveEnvLocalKey writes keyName=value to the given .env file, replacing any
+// existing line for that key. Creates the file (mode 0600) if it does not exist.
+func saveEnvLocalKey(path, keyName, value string) error {
+	var existing []byte
+	if _, statErr := os.Stat(path); statErr == nil {
+		var err error
+		existing, err = os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+	}
+	prefix := keyName + "="
+	lines := strings.Split(string(existing), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, prefix) {
+			out = append(out, line)
+		}
+	}
+	// Trim trailing blank lines, then append the key assignment.
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	out = append(out, prefix+value)
+	return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0o600)
 }
 
 func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st model.Store) (model.Retriever, func(), error) {
