@@ -819,6 +819,23 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		a.printHumanConnection(cfg, connection, auth, opts.readOnly)
 	}
 
+	// In interactive mode, listen for a quit command on stdin so the user can
+	// stop the server without reaching for Ctrl+C.
+	stdinQuitCh := make(chan struct{})
+	if !nonInteractiveMode && !opts.jsonOutput {
+		go func() {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				line := strings.TrimSpace(strings.ToLower(scanner.Text()))
+				if line == "q" || line == "quit" || line == "exit" || line == "stop" || line == "" {
+					close(stdinQuitCh)
+					return
+				}
+			}
+			close(stdinQuitCh)
+		}()
+	}
+
 	ingestErrCh := make(chan error, 1)
 	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 
@@ -842,6 +859,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	for {
 		select {
 		case <-runCtx.Done():
+			return exitSuccess
+		case <-stdinQuitCh:
+			cancel()
 			return exitSuccess
 		case serverErr := <-serverErrCh:
 			if serverErr != nil {
@@ -2502,14 +2522,15 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	writeln(a.stdout)
 
 	writef(a.stdout, "  %s\n", s.sectionHeader("Required headers"))
-	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPProtocolVersionHeader+":"), cfg.ProtocolVersion)
+	writeln(a.stdout, s.subkv(protocol.MCPProtocolVersionHeader, cfg.ProtocolVersion))
 	if auth.mode != "none" {
-		writef(a.stdout, "    %s %s\n", s.Dim.Render("Authorization:"), "Bearer <token>")
+		writeln(a.stdout, s.subkv("Authorization", "Bearer <token>"))
 	}
-	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPSessionHeader+":"), s.dim("(assigned after initialize response)"))
+	writeln(a.stdout, s.subkv(protocol.MCPSessionHeader, s.dim("(assigned after initialize response)")))
 	writeln(a.stdout)
 	writeln(a.stdout, s.separator(44))
-	writef(a.stdout, "  %s\n\n", s.Success.Render("Ready for connections"))
+	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
+	writef(a.stdout, "  %s\n\n", s.dim("(q + Enter to stop)"))
 }
 
 func isTerminal(file *os.File) bool {

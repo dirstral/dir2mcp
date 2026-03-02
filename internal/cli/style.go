@@ -158,6 +158,17 @@ func (s styles) stat(label string, value interface{}) string {
 	return fmt.Sprintf("%s=%s", s.Dim.Render(label), s.Value.Render(fmt.Sprintf("%v", value)))
 }
 
+// subkv formats a nested key-value pair with a wider key column (for long header names).
+func (s styles) subkv(key, value string) string {
+	if !s.enabled {
+		return fmt.Sprintf("    %-24s %s", key+":", value)
+	}
+	return fmt.Sprintf("    %s %s",
+		s.Key.Render(fmt.Sprintf("%-24s", key+":")),
+		s.Value.Render(value),
+	)
+}
+
 // separator returns a thin horizontal rule.
 func (s styles) separator(width int) string {
 	if width <= 0 {
