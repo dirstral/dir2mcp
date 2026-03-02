@@ -390,6 +390,12 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	}
 
 	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
+	// Documents that previously failed representation generation should be
+	// retried on the next run even if their content has not changed, so the
+	// operator does not need a full reindex to recover from a transient error.
+	if existingDoc.Status == "error" {
+		needsProcessing = true
+	}
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
@@ -440,6 +446,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	}
 
 	if err := s.generateRepresentations(ctx, doc, content); err != nil {
+		// Persist error status so the next incremental run retries this document
+		// and operators can identify it via status queries.  Silence the upsert
+		// error since the original rep error is the more actionable signal.
+		doc.Status = "error"
+		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
 	return nil
@@ -542,6 +553,9 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		return fmt.Errorf("get existing document: %w", err)
 	}
 	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
+	if existingDoc.Status == "error" {
+		needsProcessing = true
+	}
 
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
@@ -556,6 +570,11 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		return nil
 	}
 	if err := s.generateRepresentations(ctx, doc, content); err != nil {
+		// Persist error status so the next incremental run retries this document
+		// and operators can identify it via status queries.  Silence the upsert
+		// error since the original rep error is the more actionable signal.
+		doc.Status = "error"
+		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
 	return nil

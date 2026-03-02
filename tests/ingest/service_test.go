@@ -174,6 +174,75 @@ func TestServiceRun_StillExcludesAWSSecretAssignments(t *testing.T) {
 	}
 }
 
+// TestServiceRun_RepGenerationFailureMarksDocAsError verifies that when
+// representation generation fails (e.g. a transient store error), the
+// document is updated to status=error rather than being left as status=ok
+// with zero representations.
+func TestServiceRun_RepGenerationFailureMarksDocAsError(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "fail.txt"), []byte("some valid text content\n"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	inner := newMemoryStore()
+	st := &failingChunkMemoryStore{memoryStore: inner}
+	svc := mustNewIngestService(t, cfg, st)
+
+	// Run should not return a top-level error; per-document errors are swallowed.
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned unexpected error: %v", err)
+	}
+
+	doc, ok := st.docs["fail.txt"]
+	if !ok {
+		t.Fatal("expected fail.txt to be persisted in store")
+	}
+	if doc.Status != "error" {
+		t.Fatalf("expected fail.txt status=error after rep generation failure, got %q", doc.Status)
+	}
+	if len(st.reps) != 0 {
+		t.Fatalf("expected no representations after rollback, got %d", len(st.reps))
+	}
+}
+
+// TestServiceRun_ErrorStatusDocIsRetriedOnNextRun verifies that a document
+// previously stuck with status=error (zero representations) is re-processed on
+// the next incremental scan even when its content hash has not changed.
+func TestServiceRun_ErrorStatusDocIsRetriedOnNextRun(t *testing.T) {
+	root := t.TempDir()
+	content := []byte("some valid text content\n")
+	mustWriteFile(t, filepath.Join(root, "retry.txt"), content)
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	st := newMemoryStore()
+	// Pre-populate the store simulating a previous run that left the document
+	// stuck in error status with the same content hash.
+	st.docs["retry.txt"] = model.Document{
+		DocID:       1,
+		RelPath:     "retry.txt",
+		DocType:     "text",
+		SizeBytes:   int64(len(content)),
+		ContentHash: ingest.ComputeContentHash(content),
+		Status:      "error",
+	}
+
+	svc := mustNewIngestService(t, cfg, st)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	doc := st.docs["retry.txt"]
+	if doc.Status != "ok" {
+		t.Fatalf("expected retry.txt to be re-indexed to ok, got %q", doc.Status)
+	}
+	if len(st.reps) == 0 {
+		t.Fatal("expected representations to be generated on retry")
+	}
+}
+
 func TestServiceRun_ReturnsErrorOnInvalidSecretPattern(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
@@ -521,6 +590,32 @@ func (s *memoryStore) MarkDocumentDeleted(_ context.Context, relPath string) err
 	doc.Deleted = true
 	s.docs[relPath] = doc
 	return nil
+}
+
+// failingChunkMemoryStore wraps memoryStore but always returns an error from
+// InsertChunkWithSpans to simulate a representation generation failure.
+type failingChunkMemoryStore struct {
+	*memoryStore
+}
+
+func (s *failingChunkMemoryStore) InsertChunkWithSpans(_ context.Context, _ model.Chunk, _ []model.Span) (int64, error) {
+	return 0, errors.New("injected chunk insert failure")
+}
+
+// WithTx must pass the wrapper (not the inner store) to fn so that the
+// overridden InsertChunkWithSpans is called and the rollback logic covers
+// the representation upserted inside the transaction.
+func (s *failingChunkMemoryStore) WithTx(ctx context.Context, fn func(tx model.RepresentationStore) error) error {
+	origReps := append([]model.Representation(nil), s.reps...)
+	origChunks := append([]model.Chunk(nil), s.chunks...)
+	origSpans := append([]model.Span(nil), s.spans...)
+	err := fn(s)
+	if err != nil {
+		s.reps = origReps
+		s.chunks = origChunks
+		s.spans = origSpans
+	}
+	return err
 }
 
 func TestMemoryStoreListFilesPaging(t *testing.T) {
