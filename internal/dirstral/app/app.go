@@ -87,15 +87,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *appModel) refreshStartupIntro() {
-	if m.screen != screenStart {
-		return
-	}
-	m.menu.SetIntro([]string{
-		"Launch mode: Chat (chat), Voice (voice), Start/Stop MCP Server (host MCP)",
-		StartupTip(m.tipIndex),
-	})
-}
+func (m *appModel) refreshStartupIntro() {}
 
 // updateDynamicItems adjusts menu items based on server status.
 func (m *appModel) updateDynamicItems(msg serverStatusMsg) {

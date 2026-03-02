@@ -44,7 +44,7 @@ type MenuModel struct {
 // NewMenuModel creates a MenuModel from a config.
 func NewMenuModel(cfg MenuConfig) MenuModel {
 	if cfg.Controls == "" {
-		cfg.Controls = "arrows navigate · enter select · q/esc back"
+		cfg.Controls = "↑↓ / jk  move · enter  select · esc  back"
 	}
 	animate := animationsEnabled()
 	revealed := -1 // show all by default
@@ -192,9 +192,6 @@ func (m MenuModel) View() string {
 		showCount = m.revealedCount
 	}
 	rowGap := 0
-	if !tinyHeight && !compactRows {
-		rowGap = 1
-	}
 
 	for i, item := range m.config.Items {
 		if i >= showCount {
@@ -220,7 +217,7 @@ func (m MenuModel) View() string {
 				label = strings.Replace(label, badgePlain, badgeStyled, 1)
 			}
 			if isSelected {
-				menuLines = append(menuLines, fmt.Sprintf(" %s %s", styleSelected.Render(">"), styleSelectedRow.Render(" "+label+" ")))
+				menuLines = append(menuLines, fmt.Sprintf(" %s %s", styleSelected.Render("▸"), styleSelectedRow.Render(" "+label+" ")))
 			} else {
 				menuLines = append(menuLines, fmt.Sprintf("   %s", styleMuted.Render(label)))
 			}
@@ -236,7 +233,7 @@ func (m MenuModel) View() string {
 		labelCell := styleMuted.Width(labelWidth).Render(paddedLabel)
 		descCell := styleDescription.Width(descWidth).Render(desc)
 		if isSelected {
-			marker = styleSelected.Render(">")
+			marker = styleSelected.Render("▸")
 			labelCell = styleSelectedRow.Width(labelWidth).Render(paddedLabel)
 			descCell = styleSelectedDesc.Width(descWidth).Render(desc)
 		}
