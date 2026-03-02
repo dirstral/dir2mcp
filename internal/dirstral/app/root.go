@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 
 	"dir2mcp/internal/dirstral/chat"
@@ -82,6 +84,11 @@ func printModeHeader(mode string) {
 func printReturnTo(label string) {
 	fmt.Println()
 	fmt.Println(statusLine("Transition", "Returning to "+label))
+}
+
+func waitForEnter() {
+	fmt.Print(styleSubtle.Render("  Press Enter to continue..."))
+	bufio.NewReader(os.Stdin).ReadString('\n') //nolint:errcheck
 }
 
 func printUIError(err error) {
@@ -356,20 +363,22 @@ func runServerMenu(ctx context.Context, cfg config.Config) error {
 			printModeHeader("Start/Stop MCP Server / Start MCP Server")
 			if err := host.UpDetached(ctx, host.UpOptions{Listen: cfg.Host.Listen, MCPPath: cfg.Host.MCPPath}); err != nil {
 				printModeFeedbackTo("MCP server start", err, "Start/Stop MCP Server menu")
-				continue
+			} else {
+				if health := host.CheckHealth(); strings.TrimSpace(health.MCPURL) != "" {
+					fmt.Println(statusLine("MCP Server", "Active endpoint: "+health.MCPURL))
+				}
+				fmt.Println(styleMuted.Render("MCP server started in background. Use Status for readiness details."))
+				printReturnTo("Start/Stop MCP Server menu")
 			}
-			if health := host.CheckHealth(); strings.TrimSpace(health.MCPURL) != "" {
-				fmt.Println(statusLine("MCP Server", "Active endpoint: "+health.MCPURL))
-			}
-			fmt.Println(styleMuted.Render("MCP server started in background. Use Status for readiness details."))
-			printReturnTo("Start/Stop MCP Server menu")
+			waitForEnter()
 		case serverActionStatus:
 			printModeHeader("Start/Stop MCP Server / Status")
 			if err := host.Status(); err != nil {
 				printModeFeedbackTo("MCP server status", err, "Start/Stop MCP Server menu")
-				continue
+			} else {
+				printReturnTo("Start/Stop MCP Server menu")
 			}
-			printReturnTo("Start/Stop MCP Server menu")
+			waitForEnter()
 		case serverActionLogs:
 			printModeHeader("Start/Stop MCP Server / Logs")
 			if err := runServerLogViewer(); err != nil {
@@ -381,16 +390,18 @@ func runServerMenu(ctx context.Context, cfg config.Config) error {
 			printModeHeader("Start/Stop MCP Server / Remote")
 			if err := host.StatusRemote(ctx, strings.TrimSpace(cfg.MCP.URL)); err != nil {
 				printModeFeedbackTo("MCP server remote", err, "Start/Stop MCP Server menu")
-				continue
+			} else {
+				printReturnTo("Start/Stop MCP Server menu")
 			}
-			printReturnTo("Start/Stop MCP Server menu")
+			waitForEnter()
 		case serverActionStop:
 			printModeHeader("Start/Stop MCP Server / Stop MCP Server")
 			if err := host.Down(); err != nil {
 				printModeFeedbackTo("MCP server stop", err, "Start/Stop MCP Server menu")
-				continue
+			} else {
+				printReturnTo("Start/Stop MCP Server menu")
 			}
-			printReturnTo("Start/Stop MCP Server menu")
+			waitForEnter()
 		default:
 			return nil
 		}
