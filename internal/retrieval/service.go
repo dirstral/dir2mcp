@@ -311,6 +311,31 @@ func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
 	s.metaMu.Unlock()
 }
 
+// EvictDocument removes all in-memory chunk metadata for the given document.
+// It is called when a document is tombstoned in the store so that its chunks
+// no longer appear in search results for the remainder of the server session.
+// The HNSW vector index has no delete support, so evicted labels will still
+// be returned by the ANN search, but matchFilters will discard them because
+// searchHitForLabel falls back to a stub with an empty RelPath.
+func (s *Service) EvictDocument(relPath string) {
+	if strings.TrimSpace(relPath) == "" {
+		return
+	}
+	norm := strings.TrimSpace(filepath.ToSlash(relPath))
+
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+
+	for label, hit := range s.chunkByLabel {
+		if strings.TrimSpace(filepath.ToSlash(hit.RelPath)) == norm {
+			delete(s.chunkByLabel, label)
+			for _, byIndex := range s.chunkByIndex {
+				delete(byIndex, label)
+			}
+		}
+	}
+}
+
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
 	kind := strings.ToLower(strings.TrimSpace(indexName))
 	if kind != "text" && kind != "code" {
@@ -1133,6 +1158,12 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 }
 
 func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
+	// Orphaned or evicted chunks have an empty RelPath and must never be
+	// surfaced to callers regardless of any other filter criteria.
+	if strings.TrimSpace(hit.RelPath) == "" {
+		return false
+	}
+
 	if query.PathPrefix != "" && !strings.HasPrefix(hit.RelPath, query.PathPrefix) {
 		return false
 	}

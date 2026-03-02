@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"dir2mcp/internal/appstate"
@@ -131,6 +132,52 @@ func TestServiceRun_UnicodeDashesStillGenerateRepresentations(t *testing.T) {
 	}
 	if len(st.chunks) == 0 {
 		t.Fatal("expected at least one chunk for unicode markdown")
+	}
+}
+
+// TestServiceRun_OnDocumentDeletedHookFired verifies that SetOnDocumentDeleted
+// registers a callback that is invoked once for each document tombstoned by
+// markMissingAsDeleted, and is not called for documents that still exist on disk.
+func TestServiceRun_OnDocumentDeletedHookFired(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "alive.txt"), []byte("still here"))
+
+	st := newMemoryStore()
+	// Pre-populate two docs that are no longer on disk so they will be deleted.
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	svc := mustNewIngestService(t, cfg, st)
+
+	var mu sync.Mutex
+	deleted := []string{}
+	svc.SetOnDocumentDeleted(func(relPath string) {
+		mu.Lock()
+		deleted = append(deleted, relPath)
+		mu.Unlock()
+	})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	sort.Strings(deleted)
+	wantDeleted := []string{"gone1.txt", "gone2.txt"}
+	if !slices.Equal(deleted, wantDeleted) {
+		t.Fatalf("deleted hook received %v, want %v", deleted, wantDeleted)
+	}
+
+	// The live document must NOT appear in the deleted list.
+	for _, d := range deleted {
+		if d == "alive.txt" {
+			t.Fatal("alive.txt must not be in the deleted callback list")
+		}
 	}
 }
 

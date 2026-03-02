@@ -73,6 +73,11 @@ type Service struct {
 	// write counter/hook so both cache trees follow one policy and cadence.
 	ocrCacheEnforce func(string) error
 
+	// optional callback invoked after a document is successfully tombstoned.
+	// Used by the CLI to evict the document's chunks from the retrieval
+	// service's in-memory maps so deleted files are no longer searchable.
+	onDocumentDeleted func(relPath string)
+
 	// mutex protecting all of the OCR cache configuration fields and the
 	// related bookkeeping state.  In particular it guards access to
 	// ocrCacheMaxBytes, ocrCacheTTL (and the associated hooks
@@ -115,6 +120,14 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
 	return svc, nil
+}
+
+// SetOnDocumentDeleted registers a callback that is invoked after each document
+// is successfully tombstoned by markMissingAsDeleted. The callback receives the
+// document's relative path so callers (e.g. the CLI) can evict its chunks from
+// the retrieval service's in-memory maps without a full server restart.
+func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
+	s.onDocumentDeleted = fn
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
@@ -673,6 +686,9 @@ func (s *Service) markMissingAsDeleted(ctx context.Context, existing, seen map[s
 			continue
 		}
 		s.addDeleted(1)
+		if s.onDocumentDeleted != nil {
+			s.onDocumentDeleted(relPath)
+		}
 	}
 	return nil
 }
