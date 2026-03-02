@@ -275,7 +275,9 @@ func (m MenuModel) View() string {
 		b.WriteByte('\n')
 		b.WriteByte('\n')
 
-		contentLines := strings.Split(content, "\n")
+		// Trim trailing newlines before splitting to avoid phantom blank lines
+		// that inflate the block height and break vertical centering.
+		contentLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 		tier := ChooseTier(viewWidth)
 		if tier == LogoCompact {
 			for _, line := range contentLines {
@@ -291,7 +293,11 @@ func (m MenuModel) View() string {
 		if m.height <= 0 {
 			return b.String()
 		}
-		return lipgloss.Place(viewWidth, m.height, lipgloss.Center, lipgloss.Center, strings.TrimRight(b.String(), "\n"))
+		// RenderLogo already centers lines horizontally via centerBlockLines,
+		// and the menu content lines above also go through centerBlockLines.
+		// Use Left placement so lipgloss.Place only adds vertical padding and
+		// does not shift the pre-centered content a second time.
+		return lipgloss.Place(viewWidth, m.height, lipgloss.Left, lipgloss.Center, strings.TrimRight(b.String(), "\n"))
 	}
 
 	if m.height <= 0 {

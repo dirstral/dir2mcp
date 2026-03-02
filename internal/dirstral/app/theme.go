@@ -20,11 +20,11 @@ const (
 	colorBold        = "\033[1m"
 
 	colorTint1 = "\033[38;5;220m"
-	colorTint2 = "\033[38;5;220m"
+	colorTint2 = "\033[38;5;215m"
 	colorTint3 = "\033[38;5;214m"
-	colorTint4 = "\033[38;5;214m"
+	colorTint4 = "\033[38;5;209m"
 	colorTint5 = "\033[38;5;208m"
-	colorTint6 = "\033[38;5;208m"
+	colorTint6 = "\033[38;5;202m"
 )
 
 // Lipgloss color palette.
