@@ -2,32 +2,28 @@ version: 2
 
 project_name: dir2mcp
 
+x-default-build: &default_build
+  env:
+    - CGO_ENABLED=0
+  goos:
+    - darwin
+    - linux
+  goarch:
+    - amd64
+    - arm64
+
 builds:
   - id: dir2mcp
+    <<: *default_build
     main: ./cmd/dir2mcp
     binary: dir2mcp
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - darwin
-      - linux
-    goarch:
-      - amd64
-      - arm64
     ldflags:
       - -s -w -X dir2mcp/internal/cli.Version={{.Version}} -X dir2mcp/internal/cli.Commit={{.Commit}} -X dir2mcp/internal/cli.Date={{.Date}}
 
   - id: dirstral
+    <<: *default_build
     main: ./cmd/dirstral
     binary: dirstral
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - darwin
-      - linux
-    goarch:
-      - amd64
-      - arm64
     ldflags:
       - -s -w -X dir2mcp/internal/dirstral/app.Version={{.Version}} -X dir2mcp/internal/dirstral/app.Commit={{.Commit}} -X dir2mcp/internal/dirstral/app.Date={{.Date}}
 

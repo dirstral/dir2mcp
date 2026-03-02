@@ -26,6 +26,16 @@ jobs:
       - name: Run checks
         run: make ci
 
+      - name: Ensure tag points to main
+        run: |
+          git fetch origin main
+          tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          main_commit="$(git rev-parse origin/main)"
+          if [ "$tag_commit" != "$main_commit" ]; then
+            echo "tag commit ($tag_commit) does not match origin/main ($main_commit)"
+            exit 1
+          fi
+
       - name: GoReleaser release
         uses: goreleaser/goreleaser-action@v6
         with:
