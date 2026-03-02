@@ -325,29 +325,6 @@ func menuHelpText(width int, screenTitle string) string {
 	return lipgloss.NewStyle().MaxWidth(maxInt(width-2, 12)).Render(strings.Join(lines, "\n"))
 }
 
-func composeWithPinnedFooter(body, footer string, height int) string {
-	if height <= 0 {
-		return joinVerticalNonEmpty(lipgloss.Left, body, footer)
-	}
-	bodyLines := splitLines(body)
-	footerLines := splitLines(footer)
-	if len(footerLines) >= height {
-		return strings.Join(footerLines[:height], "\n")
-	}
-	bodyBudget := height - len(footerLines)
-	if bodyBudget < len(bodyLines) {
-		if bodyBudget <= 0 {
-			bodyLines = nil
-		} else {
-			bodyLines = bodyLines[:bodyBudget]
-		}
-	}
-	lines := make([]string, 0, len(bodyLines)+len(footerLines))
-	lines = append(lines, bodyLines...)
-	lines = append(lines, footerLines...)
-	return strings.Join(lines, "\n")
-}
-
 func joinVerticalNonEmpty(pos lipgloss.Position, items ...string) string {
 	nonEmpty := make([]string, 0, len(items))
 	for _, item := range items {
@@ -360,13 +337,6 @@ func joinVerticalNonEmpty(pos lipgloss.Position, items ...string) string {
 		return ""
 	}
 	return lipgloss.JoinVertical(pos, nonEmpty...)
-}
-
-func splitLines(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return strings.Split(s, "\n")
 }
 
 func truncateText(s string, width int) string {
