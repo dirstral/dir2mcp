@@ -515,7 +515,7 @@ Indices are treated as append-only:
 * Exclude obvious secrets/credentials patterns (regexes applied to file **contents**):
 
   * AWS Access Key ID: `AKIA[0-9A-Z]{16}`
-  * AWS Secret Access Key (heuristic): `(?i)aws(.{0,20})?secret` or `([0-9a-zA-Z/+=]{40})`
+  * AWS/Secret assignment heuristic: `(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`
   * JWTs: `(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` (context-anchored)
   * Generic bearer token: `(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
   * Common API key formats (e.g. `sk_[a-z0-9]{32}`, `api_[A-Za-z0-9]{32}`)
@@ -525,7 +525,7 @@ Indices are treated as append-only:
   Expected false positives and tuning notes (map each note to its default rule):
 
   * **AWS Access Key ID** (`AKIA[0-9A-Z]{16}`): may match synthetic examples in docs/tests or random uppercase identifiers of the same shape.
-  * **AWS Secret Access Key (heuristic)** (`(?i)aws(.{0,20})?secret` or `([0-9a-zA-Z/+=]{40})`): the 40-char branch can match benign hashes/base64-like strings; the keyword branch can match prose or comments discussing secrets.
+  * **AWS/Secret assignment heuristic** (`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`): reduces prose false positives (for example “AWS Secrets Manager”) by requiring assignment-like context.
   * **JWTs** (`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`): reduced false positives via auth/key context and minimum segment lengths; can still match synthetic token-like test strings with those contexts.
   * **Generic bearer token** (`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`): can match innocuous config values named `token` (feature tokens, cache tokens) that are not credentials.
   * **Common API key formats** (`sk_[a-z0-9]{32}`, `api_[A-Za-z0-9]{32}`): can match placeholders, test fixtures, or generated IDs that happen to share the prefix/length.
@@ -541,7 +541,7 @@ Indices are treated as append-only:
 
   * JWT: anchor to `Authorization: Bearer` or token key names and enforce minimum segment lengths.
   * Bearer token: constrain key names (`access_token`, `bearer_token`) and reduce accidental matches in generic `token=` fields.
-  * AWS secret heuristic: split keyword and 40-char rules; apply the 40-char branch only in credential-like contexts.
+  * AWS secret heuristic: keep assignment/credential context anchors and avoid broad prose matching.
 
   Testing approach for pattern updates:
 
@@ -1647,7 +1647,7 @@ security:
     - "**/id_rsa"
   secret_patterns:
     - 'AKIA[0-9A-Z]{16}'
-    - '(?i)aws(.{0,20})?secret|([0-9a-zA-Z/+=]{40})'
+    - '(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}'
     - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
     - '(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
     - 'sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}'

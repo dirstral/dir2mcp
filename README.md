@@ -180,10 +180,10 @@ Core server, ingestion pipeline, retrieval, citations, and x402 gating are imple
 
 ## Documentation
 
-- [docs/SPEC.md](docs/SPEC.md) — output contracts, interfaces, schema and operational details
-- [docs/VISION.md](docs/VISION.md) — product direction and architectural principles
-- [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) — discovery, trust, metering, payment ecosystem framing
-- [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) — facilitator-facing x402 adapter contract
+- [docs/VISION.md](docs/VISION.md) — product vision and strategic direction
+- [docs/SPEC.md](docs/SPEC.md) — normative behavior, schemas, and runtime contracts
+- [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) — ecosystem/market/discovery/payment context
+- [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) — facilitator adapter contract
 
 ## Development
 
