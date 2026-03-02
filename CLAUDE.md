@@ -61,7 +61,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release workflow will build both binaries for `darwin/linux × amd64/arm64`, publish a GitHub release with checksums, and push updated formulas to `Dirstral/homebrew-tap` automatically.
+The release workflow will build binaries for `darwin/linux × amd64/arm64`, publish a GitHub release with checksums, and push updated formulas to `Dirstral/homebrew-tap` automatically.
 
 Requires `HOMEBREW_TAP_GITHUB_TOKEN` to be set as a repository secret (a PAT with `repo` scope on `Dirstral/homebrew-tap`).
 
