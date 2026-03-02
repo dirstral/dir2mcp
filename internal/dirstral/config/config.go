@@ -225,7 +225,7 @@ func Save(cfg Config) error {
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("encoding config: %w", err)
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
+	return os.WriteFile(path, buf.Bytes(), 0o600)
 }
 
 // SaveSecret writes a key=value pair into ~/.config/dirstral/.env.local.

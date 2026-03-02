@@ -20,11 +20,11 @@ const (
 	colorBold        = "\033[1m"
 
 	colorTint1 = "\033[38;5;220m"
-	colorTint2 = "\033[38;5;214m"
-	colorTint3 = "\033[38;5;208m"
-	colorTint4 = "\033[38;5;202m"
-	colorTint5 = "\033[38;5;196m"
-	colorTint6 = "\033[38;5;166m"
+	colorTint2 = "\033[38;5;215m"
+	colorTint3 = "\033[38;5;214m"
+	colorTint4 = "\033[38;5;209m"
+	colorTint5 = "\033[38;5;208m"
+	colorTint6 = "\033[38;5;202m"
 )
 
 // Lipgloss color palette.
@@ -38,15 +38,15 @@ var (
 // Reusable lipgloss styles.
 var (
 	styleBrandStrong  = lipgloss.NewStyle().Foreground(clrBrandStrong).Bold(true)
-	styleTitle        = lipgloss.NewStyle().Foreground(clrBrandStrong).Bold(true).Underline(true)
+	styleTitle        = lipgloss.NewStyle().Foreground(clrBrandStrong).Bold(true)
 	styleMuted        = lipgloss.NewStyle().Foreground(clrMuted)
 	styleSubtle       = lipgloss.NewStyle().Foreground(clrSubtle)
 	styleSelected     = lipgloss.NewStyle().Foreground(clrBrandStrong).Bold(true)
-	styleSelectedRow  = lipgloss.NewStyle().Background(clrBrandStrong).Foreground(lipgloss.Color("0")).Bold(true)
-	styleDescription  = lipgloss.NewStyle().Foreground(clrSubtle).Italic(true)
-	styleSelectedDesc = lipgloss.NewStyle().Foreground(clrBrandStrong).Italic(true)
+	styleSelectedRow  = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+	styleDescription  = lipgloss.NewStyle().Foreground(clrSubtle)
+	styleSelectedDesc = lipgloss.NewStyle().Foreground(clrMuted)
 	styleGreen        = lipgloss.NewStyle().Foreground(clrGreen)
-	styleMenuBox      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(clrSubtle).Padding(1, 2).MarginTop(1).MarginBottom(1)
+	styleMenuBox      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(clrMuted).Padding(1, 3).MarginTop(1).MarginBottom(1)
 )
 
 // paint wraps text in raw ANSI codes. Used by logo rendering.

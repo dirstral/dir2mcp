@@ -29,19 +29,14 @@ func StartupTip(index int) string {
 // StartMenuConfig returns the menu configuration for the start screen.
 func StartMenuConfig() MenuConfig {
 	return MenuConfig{
-		Title: "Welcome to Dirstral",
-		Intro: []string{
-			"Launch mode: Chat (chat), Voice (voice), Start/Stop MCP Server (local host + remote checks)",
-			StartupTip(0),
-		},
 		Items: []MenuItem{
-			{Label: string(ChoiceChat), Description: "Interactive text chat with MCP tools", Value: string(ChoiceChat)},
+			{Label: string(ChoiceChat), Description: "Text chat with MCP tools", Value: string(ChoiceChat)},
 			{Label: string(ChoiceVoice), Description: "Voice-powered agent loop", Value: string(ChoiceVoice)},
-			{Label: string(ChoiceServer), Description: "Manage local host and probe remote MCP", Value: string(ChoiceServer)},
-			{Label: string(ChoiceSettings), Description: "Edit config and API settings", Value: string(ChoiceSettings)},
-			{Label: string(ChoiceQuit), Description: "Exit Dirstral", Value: string(ChoiceQuit)},
+			{Label: "MCP Server", Description: "Manage local server and probe remote MCP", Value: string(ChoiceServer)},
+			{Label: string(ChoiceSettings), Description: "Configure dirstral", Value: string(ChoiceSettings)},
+			{Label: string(ChoiceQuit), Description: "Quit", Value: string(ChoiceQuit)},
 		},
 		ShowLogo: true,
-		Controls: "up/down or j/k move · enter select · esc/q quit",
+		Controls: "↑↓ / j/k  move · enter  select · esc/q  quit",
 	}
 }

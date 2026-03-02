@@ -141,13 +141,13 @@ func TestMenuHelpOverlayToggle(t *testing.T) {
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	withHelp := updated.(app.MenuModel)
-	if !strings.Contains(withHelp.View(), "Welcome to Dirstral Keymap") {
+	if !strings.Contains(withHelp.View(), "Keymap") {
 		t.Fatalf("expected help overlay to show keymap")
 	}
 
 	updated, _ = withHelp.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	withoutHelp := updated.(app.MenuModel)
-	if strings.Contains(withoutHelp.View(), "Welcome to Dirstral Keymap") {
+	if strings.Contains(withoutHelp.View(), "up/down or j/k  move") {
 		t.Fatalf("expected help overlay to close after second ?")
 	}
 }
@@ -179,13 +179,13 @@ func TestMenuHelpOverlayCtrlKToggle(t *testing.T) {
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
 	withHelp := updated.(app.MenuModel)
-	if !strings.Contains(withHelp.View(), "Welcome to Dirstral Keymap") {
+	if !strings.Contains(withHelp.View(), "Keymap") {
 		t.Fatalf("expected help overlay to open on ctrl+k")
 	}
 
 	updated, _ = withHelp.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
 	withoutHelp := updated.(app.MenuModel)
-	if strings.Contains(withoutHelp.View(), "Welcome to Dirstral Keymap") {
+	if strings.Contains(withoutHelp.View(), "up/down or j/k  move") {
 		t.Fatalf("expected help overlay to close on second ctrl+k")
 	}
 }

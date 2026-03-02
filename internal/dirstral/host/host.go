@@ -298,11 +298,11 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 	}
 	safeEndpoint := sanitizeEndpointForLog(endpoint)
 
+	token := strings.TrimSpace(os.Getenv("DIR2MCP_AUTH_TOKEN"))
 	reachable := endpointReachable(endpoint)
 	mcpReady := false
 	lastErr := ""
 	if reachable {
-		token := strings.TrimSpace(os.Getenv("DIR2MCP_AUTH_TOKEN"))
 		mcpReady, lastErr = probeMCPReady(ctx, endpoint, token)
 	} else {
 		lastErr = "endpoint not reachable"
@@ -320,6 +320,18 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 	if lastErr != "" {
 		fmt.Printf("%s detail=%s\n", ui.Brand.Render("mcp server(remote):"), ui.Dim(lastErr))
 	}
+	if !mcpReady && isAuthRelatedError(lastErr) {
+		if token == "" {
+			fmt.Printf("%s DIR2MCP_AUTH_TOKEN is not set\n", ui.Yellow.Render("hint:"))
+		}
+		fmt.Printf("%s export DIR2MCP_AUTH_TOKEN=<token>\n", ui.Dim("      "))
+		tokenFilePath := resolveTokenFilePath(endpoint)
+		if tokenFilePath != "" {
+			fmt.Printf("%s export DIR2MCP_AUTH_TOKEN=$(cat %s)\n", ui.Dim("      "), tokenFilePath)
+		} else {
+			fmt.Printf("%s if using secret.token: export DIR2MCP_AUTH_TOKEN=$(cat /path/to/dir/.dir2mcp/secret.token)\n", ui.Dim("      "))
+		}
+	}
 
 	if !reachable || !mcpReady {
 		if lastErr != "" {
@@ -328,6 +340,36 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 		return fmt.Errorf("%w", errUnhealthy)
 	}
 	return nil
+}
+
+// resolveTokenFilePath returns the actual path to secret.token for the given
+// endpoint by checking the local state file. Returns "" if unavailable.
+func resolveTokenFilePath(endpoint string) string {
+	state, err := LoadState()
+	if err != nil {
+		return ""
+	}
+	// Only show the local path when probing the locally managed server.
+	if !strings.EqualFold(strings.TrimRight(state.MCPURL, "/"), strings.TrimRight(endpoint, "/")) {
+		return ""
+	}
+	root := strings.TrimSpace(state.RootDir)
+	if root == "" {
+		root = resolveRootDir("", state.WorkDir)
+	}
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, ".dir2mcp", "secret.token")
+}
+
+func isAuthRelatedError(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "bearer token") ||
+		strings.Contains(s, "unauthorized") ||
+		strings.Contains(s, "401") ||
+		(strings.Contains(s, "missing") && strings.Contains(s, "token")) ||
+		(strings.Contains(s, "invalid") && strings.Contains(s, "token"))
 }
 
 func Down() error {
@@ -825,6 +867,11 @@ func readConnectionContractDetails(state State) (protocolHeader, sessionHeaderNa
 
 func deriveAuthSourceType(tokenSource, tokenFile string) string {
 	source := strings.TrimSpace(tokenSource)
+	// "secret.token" is the label written by dir2mcp when using the
+	// .dir2mcp/secret.token file — normalise it to the canonical "file" type.
+	if strings.EqualFold(source, "secret.token") {
+		return "file"
+	}
 	if source != "" {
 		return source
 	}

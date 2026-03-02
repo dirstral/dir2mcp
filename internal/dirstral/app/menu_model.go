@@ -44,7 +44,7 @@ type MenuModel struct {
 // NewMenuModel creates a MenuModel from a config.
 func NewMenuModel(cfg MenuConfig) MenuModel {
 	if cfg.Controls == "" {
-		cfg.Controls = "arrows navigate · enter select · q/esc back"
+		cfg.Controls = "↑↓ / j/k  move · enter  select · esc/q  back"
 	}
 	animate := animationsEnabled()
 	revealed := -1 // show all by default
@@ -191,11 +191,6 @@ func (m MenuModel) View() string {
 	if m.revealedCount >= 0 {
 		showCount = m.revealedCount
 	}
-	rowGap := 0
-	if !tinyHeight && !compactRows {
-		rowGap = 1
-	}
-
 	for i, item := range m.config.Items {
 		if i >= showCount {
 			break
@@ -220,7 +215,7 @@ func (m MenuModel) View() string {
 				label = strings.Replace(label, badgePlain, badgeStyled, 1)
 			}
 			if isSelected {
-				menuLines = append(menuLines, fmt.Sprintf(" %s %s", styleSelected.Render(">"), styleSelectedRow.Render(" "+label+" ")))
+				menuLines = append(menuLines, fmt.Sprintf(" %s %s", styleSelected.Render("▸"), styleSelectedRow.Render(" "+label+" ")))
 			} else {
 				menuLines = append(menuLines, fmt.Sprintf("   %s", styleMuted.Render(label)))
 			}
@@ -236,15 +231,12 @@ func (m MenuModel) View() string {
 		labelCell := styleMuted.Width(labelWidth).Render(paddedLabel)
 		descCell := styleDescription.Width(descWidth).Render(desc)
 		if isSelected {
-			marker = styleSelected.Render(">")
+			marker = styleSelected.Render("▸")
 			labelCell = styleSelectedRow.Width(labelWidth).Render(paddedLabel)
 			descCell = styleSelectedDesc.Width(descWidth).Render(desc)
 		}
 		row := fmt.Sprintf("  %s %s%s%s", marker, labelCell, strings.Repeat(" ", gutterWidth), descCell)
 		menuLines = append(menuLines, row)
-		if rowGap == 1 && i < showCount-1 {
-			menuLines = append(menuLines, "")
-		}
 	}
 	if len(menuLines) == 0 {
 		menuLines = append(menuLines, styleSubtle.Render("  (no options)"))
@@ -274,7 +266,7 @@ func (m MenuModel) View() string {
 			body = joinVerticalNonEmpty(lipgloss.Center, header, helpBox)
 		}
 	}
-	content := composeWithPinnedFooter(body, footer, m.height)
+	content := joinVerticalNonEmpty(lipgloss.Left, body, footer)
 
 	if showLogo {
 		logo := RenderLogo(viewWidth)
@@ -283,7 +275,9 @@ func (m MenuModel) View() string {
 		b.WriteByte('\n')
 		b.WriteByte('\n')
 
-		contentLines := strings.Split(content, "\n")
+		// Trim trailing newlines before splitting to avoid phantom blank lines
+		// that inflate the block height and break vertical centering.
+		contentLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 		tier := ChooseTier(viewWidth)
 		if tier == LogoCompact {
 			for _, line := range contentLines {
@@ -296,17 +290,20 @@ func (m MenuModel) View() string {
 				b.WriteByte('\n')
 			}
 		}
-		return composeWithPinnedFooter(b.String(), "", m.height)
+		if m.height <= 0 {
+			return b.String()
+		}
+		// RenderLogo already centers lines horizontally via centerBlockLines,
+		// and the menu content lines above also go through centerBlockLines.
+		// Use Left placement so lipgloss.Place only adds vertical padding and
+		// does not shift the pre-centered content a second time.
+		return lipgloss.Place(viewWidth, m.height, lipgloss.Left, lipgloss.Center, strings.TrimRight(b.String(), "\n"))
 	}
 
 	if m.height <= 0 {
 		return content
 	}
-	vAlign := lipgloss.Center
-	if tinyHeight {
-		vAlign = lipgloss.Top
-	}
-	return lipgloss.Place(viewWidth, m.height, lipgloss.Center, vAlign, content)
+	return lipgloss.Place(viewWidth, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
 // menuHelpText renders the shared menu keymap panel with screen context.

@@ -51,9 +51,21 @@ cd dir2mcp
 make build
 ```
 
+## Runtime Prerequisites (By Scenario)
+
+Pick the row that matches how you run `dir2mcp`:
+
+| Scenario | Required |
+|---|---|
+| Local MCP only (`127.0.0.1`) | `dir2mcp` binary, `MISTRAL_API_KEY` |
+| Public MCP (no tunnel) | Local MCP requirements + reachable host/port + secure auth token mode |
+| Public MCP via Cloudflare Tunnel | Local MCP requirements + `cloudflared` installed |
+| Public MCP via ngrok | Local MCP requirements + `ngrok` installed + verified ngrok account + authtoken |
+| x402-gated MCP | Public MCP requirements + facilitator URL + facilitator token + full x402 route policy fields |
+
 ## Quickstart
 
-**Prerequisites:** Go 1.22+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
+**Build prerequisites (source build only):** Go 1.22+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
 
 ```bash
 git clone https://github.com/Dirstral/dir2mcp
@@ -93,10 +105,47 @@ DIR2MCP_DEMO_TOKEN="<optional-bearer-token>" \
 ./scripts/smoke_hosted_demo.sh
 ```
 
+Notes:
+- `DIR2MCP_DEMO_TOKEN` is required whenever auth is enabled.
+- The script now runs the full MCP init sequence (`initialize` -> `notifications/initialized` -> `tools/list` -> `tools/call`).
+- If your endpoint is x402-gated, `tools/call` returning HTTP `402` with `PAYMENT-REQUIRED` is treated as healthy.
+
 What it verifies:
 - `initialize` returns HTTP 200 and a valid `MCP-Session-Id`
 - `tools/list` returns HTTP 200 with tool metadata
 - `tools/call` for `dir2mcp.list_files` returns HTTP 200, or HTTP 402 with `PAYMENT-REQUIRED` when x402 is enabled
+
+### Tunnel setup (copy/paste)
+
+Cloudflare quick tunnel (no account-required quick mode):
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8092 --no-autoupdate
+```
+
+ngrok (requires verified account + authtoken):
+
+```bash
+ngrok config add-authtoken <YOUR_NGROK_TOKEN>
+ngrok http http://127.0.0.1:8092
+```
+
+Get ngrok public URL from local API:
+
+```bash
+curl -sS http://127.0.0.1:4040/api/tunnels \
+  | jq -r '.tunnels[] | select(.proto=="https") | .public_url'
+```
+
+If you do not have `jq`, copy the public URL from the ngrok web UI (`http://127.0.0.1:4040`).
+
+Then run the hosted smoke probe against either tunnel URL:
+
+```bash
+DIR2MCP_DEMO_URL="https://<public-url>/mcp" \
+DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
+./scripts/smoke_hosted_demo.sh
+```
 
 ## CLI Commands
 
@@ -155,6 +204,19 @@ vary by deployment. The commonly used variables are:
 | `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
 | `ELEVENLABS_BASE_URL` | No | ElevenLabs base URL (default: `https://api.elevenlabs.io`) |
 
+### Auth token behavior
+
+`dir2mcp` bearer auth can come from:
+
+1. `--auth file:<path>` (explicit file source)
+2. `DIR2MCP_AUTH_TOKEN` (environment)
+3. auto-generated `secret.token` in the state directory (`auth=auto` default)
+
+Operational guidance:
+- Do not pass bearer tokens directly on command lines in shared environments.
+- Prefer token files (`--auth file:<path>`) or environment variables.
+- In public mode, do not run `--auth none` unless you intentionally set `--force-insecure`.
+
 ## Security Defaults
 
 - Default listen address is local (`127.0.0.1:0`)
@@ -171,6 +233,35 @@ x402 is optional and additive. Configure with `--x402 off|on|required` and facil
 | `off` | Disabled (default) |
 | `on` | Enabled; fail-open if config is incomplete |
 | `required` | Strict validation and gating |
+
+Required fields in `required` mode:
+- `--x402-facilitator-url`
+- `--x402-resource-base-url`
+- `--x402-network` (CAIP-2, for example `eip155:8453`)
+- `--x402-price`
+- `--x402-scheme`
+- `--x402-asset`
+- `--x402-pay-to`
+- `DIR2MCP_X402_FACILITATOR_TOKEN` (or equivalent secret source)
+
+Minimal example:
+
+```bash
+DIR2MCP_X402_FACILITATOR_TOKEN="<token>" \
+dir2mcp up \
+  --public \
+  --listen 0.0.0.0:8092 \
+  --x402 required \
+  --x402-facilitator-url https://<facilitator> \
+  --x402-resource-base-url https://<your-public-host> \
+  --x402-network eip155:8453 \
+  --x402-price 1000 \
+  --x402-scheme exact \
+  --x402-asset usdc \
+  --x402-pay-to 0x1111111111111111111111111111111111111111
+```
+
+If unpaid calls are blocked correctly, `tools/call` returns HTTP `402` plus `PAYMENT-REQUIRED`.
 
 See [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) for the full facilitator adapter contract.
 

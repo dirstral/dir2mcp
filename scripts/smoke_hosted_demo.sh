@@ -48,12 +48,18 @@ post_json() {
   printf '%s\n%s\n%s\n' "${http_code}" "${headers_file}" "${body_file}"
 }
 
+extract_result_line() {
+  local value="$1"
+  local line_no="$2"
+  printf '%s\n' "${value}" | sed -n "${line_no}p"
+}
+
 echo "[1/3] initialize"
 init_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"clientInfo":{"name":"smoke-hosted-demo","version":"0.1.0"}}}'
-mapfile -t init_result < <(post_json "${init_payload}")
-init_code="${init_result[0]}"
-init_headers="${init_result[1]}"
-init_body="${init_result[2]}"
+init_result="$(post_json "${init_payload}")"
+init_code="$(extract_result_line "${init_result}" 1)"
+init_headers="$(extract_result_line "${init_result}" 2)"
+init_body="$(extract_result_line "${init_result}" 3)"
 
 if [[ "${init_code}" != "200" ]]; then
   echo "error: initialize failed with HTTP ${init_code}" >&2
@@ -61,7 +67,7 @@ if [[ "${init_code}" != "200" ]]; then
   exit 1
 fi
 
-session_id="$(sed -nE '/^[[:space:]]*[Mm][Cc][Pp]-[Ss]ession-[Ii]d:/ { s/^[[:space:]]*[Mm][Cc][Pp]-[Ss]ession-[Ii]d:[[:space:]]*(.*)[[:space:]]*$/\1/; p; q; }' "${init_headers}")"
+session_id="$(sed -nE '/^[[:space:]]*[Mm][Cc][Pp]-[Ss]ession-[Ii]d:/ { s/^[[:space:]]*[Mm][Cc][Pp]-[Ss]ession-[Ii]d:[[:space:]]*(.*)[[:space:]]*$/\1/; p; q; }' "${init_headers}" | tr -d '\r')"
 if [[ -z "${session_id}" ]]; then
   echo "error: initialize succeeded but MCP-Session-Id header is missing" >&2
   exit 1
@@ -72,11 +78,22 @@ if ! grep -q '"jsonrpc"' "${init_body}"; then
   exit 1
 fi
 
-echo "[2/3] tools/list"
+echo "[2/4] notifications/initialized"
+initialized_payload='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+initialized_result="$(post_json "${initialized_payload}" "${session_id}")"
+initialized_code="$(extract_result_line "${initialized_result}" 1)"
+initialized_body="$(extract_result_line "${initialized_result}" 3)"
+if [[ "${initialized_code}" != "202" && "${initialized_code}" != "200" && "${initialized_code}" != "204" ]]; then
+  echo "error: notifications/initialized failed with HTTP ${initialized_code}" >&2
+  cat "${initialized_body}" >&2
+  exit 1
+fi
+
+echo "[3/4] tools/list"
 list_payload='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-mapfile -t list_result < <(post_json "${list_payload}" "${session_id}")
-list_code="${list_result[0]}"
-list_body="${list_result[2]}"
+list_result="$(post_json "${list_payload}" "${session_id}")"
+list_code="$(extract_result_line "${list_result}" 1)"
+list_body="$(extract_result_line "${list_result}" 3)"
 
 if [[ "${list_code}" != "200" ]]; then
   echo "error: tools/list failed with HTTP ${list_code}" >&2
@@ -89,12 +106,12 @@ if ! grep -q '"tools"' "${list_body}"; then
   exit 1
 fi
 
-echo "[3/3] tools/call dir2mcp.list_files"
+echo "[4/4] tools/call dir2mcp.list_files"
 call_payload='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":1}}}'
-mapfile -t call_result < <(post_json "${call_payload}" "${session_id}")
-call_code="${call_result[0]}"
-call_headers="${call_result[1]}"
-call_body="${call_result[2]}"
+call_result="$(post_json "${call_payload}" "${session_id}")"
+call_code="$(extract_result_line "${call_result}" 1)"
+call_headers="$(extract_result_line "${call_result}" 2)"
+call_body="$(extract_result_line "${call_result}" 3)"
 
 if [[ "${call_code}" == "200" ]]; then
   if ! grep -q '"jsonrpc"' "${call_body}"; then
