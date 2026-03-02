@@ -123,6 +123,11 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 	}
 
 	segments := chunkRawTextByDocType(doc.DocType, string(normalizedContent))
+	// A non-empty source should never silently produce zero chunks. If this
+	// happens, surface an error so the caller can mark/document the failure.
+	if strings.TrimSpace(string(normalizedContent)) != "" && len(segments) == 0 {
+		return fmt.Errorf("chunking produced zero segments for non-empty %s", doc.RelPath)
+	}
 	return rg.store.WithTx(ctx, func(tx model.RepresentationStore) error {
 		repID, err := tx.UpsertRepresentation(ctx, rep)
 		if err != nil {

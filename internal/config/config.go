@@ -299,7 +299,7 @@ func Default() Config {
 		},
 		SecretPatterns: []string{
 			`AKIA[0-9A-Z]{16}`,
-			`(?i)aws(.{0,20})?secret|([0-9a-zA-Z/+=]{40})`,
+			`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
 			`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,

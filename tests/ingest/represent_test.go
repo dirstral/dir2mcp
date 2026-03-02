@@ -188,6 +188,26 @@ func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
 	}
 }
 
+func TestGenerateRawTextFromContent_UnicodeDashesProduceChunks(t *testing.T) {
+	st := &fakeRepStore{failAfter: -1}
+	rg := ingest.NewRepresentationGenerator(st)
+	doc := model.Document{DocID: 1, RelPath: "flow.md", DocType: "md"}
+
+	content := []byte("x402 – Payment Flow\navoid hard‑coding secrets.\n")
+	if err := rg.GenerateRawTextFromContent(context.Background(), doc, content); err != nil {
+		t.Fatalf("GenerateRawTextFromContent failed: %v", err)
+	}
+	if len(st.reps) == 0 {
+		t.Fatal("expected at least one representation")
+	}
+	if len(st.chunks) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+	if !strings.Contains(st.chunks[0].Text, "–") || !strings.Contains(st.chunks[0].Text, "‑") {
+		t.Fatalf("expected unicode dashes to be preserved, got %q", st.chunks[0].Text)
+	}
+}
+
 func TestGenerateRawTextTooLarge(t *testing.T) {
 	// use failAfter=-1 to ensure the fake store does not inject failures for
 	// this test, which only verifies oversized-file rejection before any
