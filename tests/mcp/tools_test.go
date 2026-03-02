@@ -236,6 +236,9 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	if got, ok := envelope.Result.StructuredContent["transcribed"].(bool); !ok || !got {
 		t.Fatalf("expected transcribed=true, got %#v", envelope.Result.StructuredContent["transcribed"])
 	}
+	if got, ok := envelope.Result.StructuredContent["transcribed_now"].(bool); !ok || !got {
+		t.Fatalf("expected transcribed_now=true for fresh transcription, got %#v", envelope.Result.StructuredContent["transcribed_now"])
+	}
 	if got, ok := envelope.Result.StructuredContent["indexed"].(bool); !ok || !got {
 		t.Fatalf("expected indexed=true, got %#v", envelope.Result.StructuredContent["indexed"])
 	}
@@ -1260,7 +1263,8 @@ func TestMCPToolsCallSearch_StructuredHitsSchemaShape(t *testing.T) {
 // failingListFilesStore is a minimal store stub that forces ListFiles to
 // return a configured error for error-path testing.
 type failingListFilesStore struct {
-	err error
+	err  error
+	docs []model.Document
 }
 
 func (s *failingListFilesStore) Init(_ context.Context) error {
@@ -1276,7 +1280,12 @@ func (s *failingListFilesStore) GetDocumentByPath(_ context.Context, _ string) (
 }
 
 func (s *failingListFilesStore) ListFiles(_ context.Context, _, _ string, _, _ int) ([]model.Document, int64, error) {
-	return nil, 0, s.err
+	if s.err != nil {
+		return nil, 0, s.err
+	}
+	out := make([]model.Document, len(s.docs))
+	copy(out, s.docs)
+	return out, int64(len(out)), nil
 }
 
 func (s *failingListFilesStore) Close() error {
@@ -1286,6 +1295,122 @@ func (s *failingListFilesStore) Close() error {
 // compile-time assertion: ensure our stub satisfies the Store interface used by
 // mcp.WithStore.  This will fail to compile if the interface changes.
 var _ model.Store = (*failingListFilesStore)(nil)
+
+func TestMCPToolsCallListFiles_TotalReflectsHiddenFilter(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	st := &failingListFilesStore{
+		docs: []model.Document{
+			{RelPath: ".DS_Store", DocType: "binary_ignored", SizeBytes: 1, MTimeUnix: 1, Status: "skipped"},
+			{RelPath: ".claude/settings.local.json", DocType: "data", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+			{RelPath: "Gilles Deleuze.md", DocType: "md", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+		},
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected success, got %#v", envelope.Result.StructuredContent)
+	}
+	if got := envelope.Result.StructuredContent["total"]; got != float64(1) {
+		t.Fatalf("expected filtered total=1, got %#v", got)
+	}
+	files, ok := envelope.Result.StructuredContent["files"].([]interface{})
+	if !ok {
+		t.Fatalf("expected files array, got %#v", envelope.Result.StructuredContent["files"])
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 visible file, got %d", len(files))
+	}
+	f, ok := files[0].(map[string]interface{})
+	if !ok || f["rel_path"] != "Gilles Deleuze.md" {
+		t.Fatalf("unexpected visible file payload: %#v", files[0])
+	}
+}
+
+func TestMCPToolsCallListFiles_IncludeHiddenTrue(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	st := &failingListFilesStore{
+		docs: []model.Document{
+			{RelPath: ".DS_Store", DocType: "binary_ignored", SizeBytes: 1, MTimeUnix: 1, Status: "skipped"},
+			{RelPath: ".claude/settings.local.json", DocType: "data", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+			{RelPath: "Gilles Deleuze.md", DocType: "md", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+		},
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0,"include_hidden":true}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected success, got %#v", envelope.Result.StructuredContent)
+	}
+	if got := envelope.Result.StructuredContent["total"]; got != float64(3) {
+		t.Fatalf("expected total=3 with include_hidden=true, got %#v", got)
+	}
+	files, ok := envelope.Result.StructuredContent["files"].([]interface{})
+	if !ok {
+		t.Fatalf("expected files array, got %#v", envelope.Result.StructuredContent["files"])
+	}
+	if len(files) != 3 {
+		t.Fatalf("expected 3 files with include_hidden=true, got %d", len(files))
+	}
+}
+
+func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		openFileConfigured: true,
+		openFileContent:    "fake audio bytes",
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":93,"method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"recording.mp3"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	assertToolCallErrorCode(t, resp, "DOC_TYPE_UNSUPPORTED")
+}
 
 // assertToolCallErrorCode validates that a tools/call response returned a
 // tool-level error payload with the expected canonical error code.
@@ -1400,6 +1525,12 @@ type askAudioRetrieverStub struct {
 	// handlers, so it does not currently need to be atomic.  keep as a
 	// plain bool for now.
 	indexingComplete bool
+
+	// open_file stub; when openFileConfigured is true, OpenFile returns
+	// openFileContent/openFileErr instead of ErrNotImplemented.
+	openFileConfigured bool
+	openFileContent    string
+	openFileErr        error
 }
 
 func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
@@ -1432,6 +1563,9 @@ func (s *askAudioRetrieverStub) Ask(_ context.Context, question string, _ model.
 }
 
 func (s *askAudioRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
+	if s.openFileConfigured {
+		return s.openFileContent, s.openFileErr
+	}
 	return "", model.ErrNotImplemented
 }
 

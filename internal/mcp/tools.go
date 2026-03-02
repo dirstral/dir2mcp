@@ -383,10 +383,11 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 
 func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"path_prefix": {},
-		"glob":        {},
-		"limit":       {},
-		"offset":      {},
+		"path_prefix":    {},
+		"glob":           {},
+		"limit":          {},
+		"offset":         {},
+		"include_hidden": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -423,6 +424,10 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 	if offset < 0 {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "offset must be >= 0", Retryable: false}
 	}
+	includeHidden, err := parseOptionalBool(args, "include_hidden", false)
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
 
 	var (
 		docs  []model.Document
@@ -432,7 +437,16 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 		docs = []model.Document{}
 		total = 0
 	} else {
-		listedDocs, listedTotal, listErr := s.store.ListFiles(ctx, pathPrefix, glob, limit, offset)
+		var (
+			listedDocs  []model.Document
+			listedTotal int64
+			listErr     error
+		)
+		if includeHidden {
+			listedDocs, listedTotal, listErr = s.store.ListFiles(ctx, pathPrefix, glob, limit, offset)
+		} else {
+			listedDocs, listedTotal, listErr = s.listVisibleFiles(ctx, pathPrefix, glob, limit, offset)
+		}
 		if listErr != nil && !errors.Is(listErr, model.ErrNotImplemented) {
 			return toolCallResult{}, &toolExecutionError{
 				Code:      "STORE_CORRUPT",
@@ -473,6 +487,40 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 		},
 		StructuredContent: structured,
 	}, nil
+}
+
+func (s *Server) listVisibleFiles(ctx context.Context, pathPrefix, glob string, limit, offset int) ([]model.Document, int64, error) {
+	const pageSize = 500
+	collected := make([]model.Document, 0, limit)
+	visibleSeen := 0
+	storeOffset := 0
+	var storeTotal int64
+
+	for {
+		docs, total, err := s.store.ListFiles(ctx, pathPrefix, glob, pageSize, storeOffset)
+		if err != nil {
+			return nil, 0, err
+		}
+		storeTotal = total
+		if len(docs) == 0 {
+			break
+		}
+		for _, doc := range docs {
+			if isListFilesNoisePath(doc.RelPath) {
+				continue
+			}
+			if visibleSeen >= offset && len(collected) < limit {
+				collected = append(collected, doc)
+			}
+			visibleSeen++
+		}
+		storeOffset += len(docs)
+		if int64(storeOffset) >= storeTotal {
+			break
+		}
+	}
+
+	return collected, int64(visibleSeen), nil
 }
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
@@ -1010,10 +1058,11 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 	if strings.TrimSpace(language) != "" {
 		retranscribe = true
 	}
-	transcript, transcribed, indexed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, retranscribe, language)
+	transcript, transcribedNow, indexed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, retranscribe, language)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	transcribed := strings.TrimSpace(transcript) != ""
 
 	segments := make([]map[string]interface{}, 0)
 	if timestamps {
@@ -1027,12 +1076,13 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 	}
 
 	structured := map[string]interface{}{
-		"rel_path":    relPath,
-		"provider":    defaultSTTProvider,
-		"model":       defaultSTTModel,
-		"indexed":     indexed,
-		"segments":    segments,
-		"transcribed": transcribed,
+		"rel_path":        relPath,
+		"provider":        defaultSTTProvider,
+		"model":           defaultSTTModel,
+		"indexed":         indexed,
+		"segments":        segments,
+		"transcribed":     transcribed,
+		"transcribed_now": transcribedNow,
 	}
 
 	return toolCallResult{
@@ -1223,7 +1273,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
-	_, transcribed, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
+	transcriptText, transcribedNow, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1244,7 +1294,8 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	structured := buildAskStructuredContent(askResult)
 	structured["transcript_provider"] = defaultSTTProvider
 	structured["transcript_model"] = defaultSTTModel
-	structured["transcribed"] = transcribed
+	structured["transcribed"] = strings.TrimSpace(transcriptText) != ""
+	structured["transcribed_now"] = transcribedNow
 
 	answerText := strings.TrimSpace(askResult.Answer)
 	if answerText == "" {
@@ -1406,6 +1457,13 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		"doc_type":  inferDocType(relPath),
 		"content":   content,
 		"truncated": truncated,
+	}
+	if looksLikeBinaryContent(relPath, content) {
+		return toolCallResult{}, &toolExecutionError{
+			Code:      "DOC_TYPE_UNSUPPORTED",
+			Message:   "open_file does not support binary content; use transcribe for audio files",
+			Retryable: false,
+		}
 	}
 	if strings.TrimSpace(span.Kind) != "" {
 		structured["span"] = buildOpenFileSpan(span)
@@ -1984,6 +2042,28 @@ func normalizeFileStatus(status string) string {
 	}
 }
 
+func isListFilesNoisePath(relPath string) bool {
+	normalized := strings.TrimSpace(filepath.ToSlash(relPath))
+	if normalized == "" {
+		return false
+	}
+	first := normalized
+	if idx := strings.IndexByte(normalized, '/'); idx >= 0 {
+		first = normalized[:idx]
+	}
+	if strings.HasPrefix(first, ".") {
+		return true
+	}
+	return false
+}
+
+func looksLikeBinaryContent(relPath, content string) bool {
+	if strings.IndexByte(content, 0) >= 0 {
+		return true
+	}
+	return inferDocType(relPath) == "audio"
+}
+
 func serializeHit(h model.SearchHit) map[string]interface{} {
 	return map[string]interface{}{
 		"chunk_id": h.ChunkID,
@@ -2213,11 +2293,12 @@ func transcribeOutputSchema() map[string]interface{} {
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
-			"rel_path":    map[string]interface{}{"type": "string"},
-			"provider":    map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}},
-			"model":       map[string]interface{}{"type": "string"},
-			"indexed":     map[string]interface{}{"type": "boolean"},
-			"transcribed": map[string]interface{}{"type": "boolean"},
+			"rel_path":        map[string]interface{}{"type": "string"},
+			"provider":        map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}},
+			"model":           map[string]interface{}{"type": "string"},
+			"indexed":         map[string]interface{}{"type": "boolean"},
+			"transcribed":     map[string]interface{}{"type": "boolean"},
+			"transcribed_now": map[string]interface{}{"type": "boolean"},
 			"segments": map[string]interface{}{
 				"type": "array",
 				"items": map[string]interface{}{
@@ -2303,6 +2384,7 @@ func transcribeAndAskOutputSchema() map[string]interface{} {
 	properties["transcript_provider"] = map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}}
 	properties["transcript_model"] = map[string]interface{}{"type": "string"}
 	properties["transcribed"] = map[string]interface{}{"type": "boolean"}
+	properties["transcribed_now"] = map[string]interface{}{"type": "boolean"}
 	schema["properties"] = properties
 
 	// handle required list; original is usually []string
@@ -2362,10 +2444,11 @@ func listFilesInputSchema() map[string]interface{} {
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
-			"path_prefix": map[string]interface{}{"type": "string"},
-			"glob":        map[string]interface{}{"type": "string"},
-			"limit":       map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 5000, "default": 200},
-			"offset":      map[string]interface{}{"type": "integer", "minimum": 0, "default": 0},
+			"path_prefix":    map[string]interface{}{"type": "string"},
+			"glob":           map[string]interface{}{"type": "string"},
+			"limit":          map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 5000, "default": 200},
+			"offset":         map[string]interface{}{"type": "integer", "minimum": 0, "default": 0},
+			"include_hidden": map[string]interface{}{"type": "boolean", "default": false},
 		},
 	}
 }
