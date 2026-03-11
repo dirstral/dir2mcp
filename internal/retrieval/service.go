@@ -323,17 +323,30 @@ func (s *Service) EvictDocument(relPath string) {
 	}
 	norm := strings.TrimSpace(filepath.ToSlash(relPath))
 
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-
+	// First, scan under a read lock to find labels to delete without blocking
+	// concurrent readers for the duration of the O(totalChunks) scan.
+	s.metaMu.RLock()
+	var labelsToDelete []uint64
 	for label, hit := range s.chunkByLabel {
 		if strings.TrimSpace(filepath.ToSlash(hit.RelPath)) == norm {
-			delete(s.chunkByLabel, label)
-			for _, byIndex := range s.chunkByIndex {
-				delete(byIndex, label)
-			}
+			labelsToDelete = append(labelsToDelete, label)
 		}
 	}
+	s.metaMu.RUnlock()
+
+	if len(labelsToDelete) == 0 {
+		return
+	}
+
+	// Now take the write lock only for the actual deletions.
+	s.metaMu.Lock()
+	for _, label := range labelsToDelete {
+		delete(s.chunkByLabel, label)
+		for _, byIndex := range s.chunkByIndex {
+			delete(byIndex, label)
+		}
+	}
+	s.metaMu.Unlock()
 }
 
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
