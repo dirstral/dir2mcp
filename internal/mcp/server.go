@@ -27,8 +27,8 @@ import (
 	"dir2mcp/internal/buildinfo"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
-	"dir2mcp/internal/x402"
+	"github.com/dirstral/dirstral-spec/protocol"
+	"github.com/dirstral/dirstral-spec/x402"
 )
 
 const (

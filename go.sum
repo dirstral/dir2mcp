@@ -25,6 +25,10 @@ github.com/clipperhouse/stringish v0.1.1/go.mod h1:v/WhFtE1q0ovMta2+m+UbpZ+2/HEX
 github.com/clipperhouse/uax29/v2 v2.5.0 h1:x7T0T4eTHDONxFJsL94uKNKPHrclyFI0lm7+w94cO8U=
 github.com/clipperhouse/uax29/v2 v2.5.0/go.mod h1:Wn1g7MK6OoeDT0vL+Q0SQLDz/KpfsVRgg6W7ihQeh4g=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
+github.com/dirstral/dirstral-spec v0.0.0-20260312213723-c9c145c544b0 h1:17mnK2roUra+GofgoCX3OEWEVxdg1u/GIoLhfE6TCv0=
+github.com/dirstral/dirstral-spec v0.0.0-20260312213723-c9c145c544b0/go.mod h1:aytF/mdHqxiqJ3lHR5Li7JBtpMh8Eu4Z4kLgK7qPNUk=
+github.com/dirstral/dirstral-spec v0.0.0-20260312214207-1b0bdbed8634 h1:KjEdIABhaaaM5m1xxcwPsZRFrdj1g9db7GeV6r26uaQ=
+github.com/dirstral/dirstral-spec v0.0.0-20260312214207-1b0bdbed8634/go.mod h1:aytF/mdHqxiqJ3lHR5Li7JBtpMh8Eu4Z4kLgK7qPNUk=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6baUTXGLOoWe4PQhGxaX0KpnayAqC48p4=

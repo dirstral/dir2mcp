@@ -30,7 +30,7 @@ import (
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dirstral-spec/protocol"
 	"dir2mcp/internal/retrieval"
 	"dir2mcp/internal/store"
 )

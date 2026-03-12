@@ -15,7 +15,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dirstral-spec/protocol"
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {

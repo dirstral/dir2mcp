@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/x402"
+	"github.com/dirstral/dirstral-spec/x402"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
