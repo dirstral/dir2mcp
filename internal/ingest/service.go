@@ -737,8 +737,8 @@ func safePanicValue(r interface{}) string {
 		return "type=" + typeName
 	}
 	const maxLen = 200
-	if len(value) > maxLen {
-		value = value[:maxLen] + "..."
+	if runes := []rune(value); len(runes) > maxLen {
+		value = string(runes[:maxLen]) + "..."
 	}
 	return fmt.Sprintf("type=%s value=%q", typeName, value)
 }
