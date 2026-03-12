@@ -932,6 +932,39 @@ func TestEvictDocument_RemovesChunksFromSearch(t *testing.T) {
 	}
 }
 
+func TestEvictDocuments_RemovesMultipleDocumentsFromSearch(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	for _, l := range []uint64{1, 2, 3} {
+		if err := idx.Add(l, []float32{1, 0}); err != nil {
+			t.Fatalf("idx.Add(%d): %v", l, err)
+		}
+	}
+
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/keep.md", DocType: "md", Snippet: "keep"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/drop-a.md", DocType: "md", Snippet: "drop a"})
+	svc.SetChunkMetadata(3, model.SearchHit{RelPath: "docs/drop-b.md", DocType: "md", Snippet: "drop b"})
+
+	svc.EvictDocuments([]string{"docs/drop-a.md", "docs/drop-b.md"})
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for _, h := range hits {
+		if h.RelPath == "docs/drop-a.md" || h.RelPath == "docs/drop-b.md" {
+			t.Fatalf("evicted document still appears in results: %#v", h)
+		}
+	}
+	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
+		return h.RelPath == "docs/keep.md"
+	}) {
+		t.Fatalf("docs/keep.md missing after batch eviction, got %v", hits)
+	}
+}
+
 func TestSearch_ExpandsCandidateWindowAfterEvictions(t *testing.T) {
 	idx := &expandingRetrievalIndex{
 		labels: []uint64{1, 2, 3, 4, 5, 6},

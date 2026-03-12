@@ -135,10 +135,10 @@ func TestServiceRun_UnicodeDashesStillGenerateRepresentations(t *testing.T) {
 	}
 }
 
-// TestServiceRun_OnDocumentDeletedHookFired verifies that SetOnDocumentDeleted
-// registers a callback that is invoked once for each document tombstoned by
-// markMissingAsDeleted, and is not called for documents that still exist on disk.
-func TestServiceRun_OnDocumentDeletedHookFired(t *testing.T) {
+// TestServiceRun_OnDocumentsDeletedHookFired verifies that
+// SetOnDocumentsDeleted receives a single batch of tombstoned documents, and
+// does not report documents that still exist on disk.
+func TestServiceRun_OnDocumentsDeletedHookFired(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "alive.txt"), []byte("still here"))
 
@@ -153,10 +153,10 @@ func TestServiceRun_OnDocumentDeletedHookFired(t *testing.T) {
 	svc := mustNewIngestService(t, cfg, st)
 
 	var mu sync.Mutex
-	deleted := []string{}
-	svc.SetOnDocumentDeleted(func(relPath string) {
+	var batches [][]string
+	svc.SetOnDocumentsDeleted(func(relPaths []string) {
 		mu.Lock()
-		deleted = append(deleted, relPath)
+		batches = append(batches, append([]string(nil), relPaths...))
 		mu.Unlock()
 	})
 
@@ -167,6 +167,10 @@ func TestServiceRun_OnDocumentDeletedHookFired(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
+	if len(batches) != 1 {
+		t.Fatalf("expected exactly one deletion batch, got %d", len(batches))
+	}
+	deleted := append([]string(nil), batches[0]...)
 	sort.Strings(deleted)
 	wantDeleted := []string{"gone1.txt", "gone2.txt"}
 	if !slices.Equal(deleted, wantDeleted) {
@@ -178,6 +182,31 @@ func TestServiceRun_OnDocumentDeletedHookFired(t *testing.T) {
 		if d == "alive.txt" {
 			t.Fatal("alive.txt must not be in the deleted callback list")
 		}
+	}
+}
+
+func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapper(t *testing.T) {
+	root := t.TempDir()
+	st := newMemoryStore()
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	svc := mustNewIngestService(t, cfg, st)
+	var deleted []string
+	svc.SetOnDocumentDeleted(func(relPath string) {
+		deleted = append(deleted, relPath)
+	})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	sort.Strings(deleted)
+	if !slices.Equal(deleted, []string{"gone1.txt", "gone2.txt"}) {
+		t.Fatalf("compatibility wrapper received %v", deleted)
 	}
 }
 

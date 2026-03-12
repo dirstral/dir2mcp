@@ -85,7 +85,7 @@ type indexingStateAware interface {
 }
 
 type documentDeleteNotifier interface {
-	SetOnDocumentDeleted(fn func(relPath string))
+	SetOnDocumentsDeleted(fn func(relPaths []string))
 }
 
 type contentHashResetter interface {
@@ -729,7 +729,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		stateAware.SetIndexingState(indexingState)
 	}
 	if notifier, ok := ing.(documentDeleteNotifier); ok {
-		notifier.SetOnDocumentDeleted(ret.EvictDocument)
+		notifier.SetOnDocumentsDeleted(ret.EvictDocuments)
 	}
 
 	emitter.Emit("info", "index_loaded", map[string]interface{}{

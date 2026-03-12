@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -76,8 +77,8 @@ type Service struct {
 	// optional callback invoked after a document is successfully tombstoned.
 	// Used by the CLI to evict the document's chunks from the retrieval
 	// service's in-memory maps so deleted files are no longer searchable.
-	onDocumentDeleted   func(relPath string)
-	onDocumentDeletedMu sync.RWMutex
+	onDocumentsDeleted   func(relPaths []string)
+	onDocumentsDeletedMu sync.RWMutex
 
 	// mutex protecting all of the OCR cache configuration fields and the
 	// related bookkeeping state.  In particular it guards access to
@@ -123,14 +124,28 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	return svc, nil
 }
 
-// SetOnDocumentDeleted registers a callback that is invoked after each document
-// is successfully tombstoned by markMissingAsDeleted. The callback receives the
-// document's relative path so callers (e.g. the CLI) can evict its chunks from
-// the retrieval service's in-memory maps without a full server restart.
+// SetOnDocumentDeleted registers a compatibility wrapper for callers that still
+// expect per-document callbacks. New code should prefer SetOnDocumentsDeleted.
 func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
-	s.onDocumentDeletedMu.Lock()
-	defer s.onDocumentDeletedMu.Unlock()
-	s.onDocumentDeleted = fn
+	if fn == nil {
+		s.SetOnDocumentsDeleted(nil)
+		return
+	}
+	s.SetOnDocumentsDeleted(func(relPaths []string) {
+		for _, relPath := range relPaths {
+			fn(relPath)
+		}
+	})
+}
+
+// SetOnDocumentsDeleted registers a callback that is invoked once after
+// markMissingAsDeleted tombstones one or more documents. The callback receives
+// the set of deleted relative paths so callers can evict retrieval metadata in
+// a single pass without rescanning for each individual document.
+func (s *Service) SetOnDocumentsDeleted(fn func(relPaths []string)) {
+	s.onDocumentsDeletedMu.Lock()
+	defer s.onDocumentsDeletedMu.Unlock()
+	s.onDocumentsDeleted = fn
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
@@ -680,6 +695,7 @@ func (s *Service) markMissingAsDeleted(ctx context.Context, existing, seen map[s
 	}
 	sort.Strings(paths)
 
+	deletedPaths := make([]string, 0, len(paths))
 	for _, relPath := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -689,22 +705,42 @@ func (s *Service) markMissingAsDeleted(ctx context.Context, existing, seen map[s
 			continue
 		}
 		s.addDeleted(1)
-		s.onDocumentDeletedMu.RLock()
-		onDeleted := s.onDocumentDeleted
-		s.onDocumentDeletedMu.RUnlock()
-		if onDeleted != nil {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						s.addErrors(1)
-						s.getLogger().Printf("onDocumentDeleted panic for %s: %v", relPath, r)
-					}
-				}()
-				onDeleted(relPath)
+		deletedPaths = append(deletedPaths, relPath)
+	}
+	if len(deletedPaths) == 0 {
+		return nil
+	}
+	s.onDocumentsDeletedMu.RLock()
+	onDeleted := s.onDocumentsDeleted
+	s.onDocumentsDeletedMu.RUnlock()
+	if onDeleted != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.addErrors(1)
+					s.getLogger().Printf("onDocumentsDeleted panic for %d paths (%s)", len(deletedPaths), safePanicValue(r))
+				}
 			}()
-		}
+			onDeleted(append([]string(nil), deletedPaths...))
+		}()
 	}
 	return nil
+}
+
+func safePanicValue(r interface{}) string {
+	typeName := "<nil>"
+	if t := reflect.TypeOf(r); t != nil {
+		typeName = t.String()
+	}
+	value := strings.TrimSpace(fmt.Sprint(r))
+	if value == "" {
+		return "type=" + typeName
+	}
+	const maxLen = 200
+	if len(value) > maxLen {
+		value = value[:maxLen] + "..."
+	}
+	return fmt.Sprintf("type=%s value=%q", typeName, value)
 }
 
 func (s *Service) addScanned(delta int64) {

@@ -311,24 +311,40 @@ func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
 	s.metaMu.Unlock()
 }
 
-// EvictDocument removes all in-memory chunk metadata for the given document.
-// It is called when a document is tombstoned in the store so that its chunks
-// no longer appear in search results for the remainder of the server session.
-// The HNSW vector index has no delete support, so evicted labels will still
-// be returned by the ANN search, but matchFilters will discard them because
-// searchHitForLabel falls back to a stub with an empty RelPath.
+// EvictDocument removes all in-memory chunk metadata for one document.
 func (s *Service) EvictDocument(relPath string) {
-	if strings.TrimSpace(relPath) == "" {
+	s.EvictDocuments([]string{relPath})
+}
+
+// EvictDocuments removes all in-memory chunk metadata for the given
+// documents. It is called when documents are tombstoned in the store so that
+// their chunks no longer appear in search results for the remainder of the
+// server session. The HNSW vector index has no delete support, so evicted
+// labels will still be returned by the ANN search, but matchFilters will
+// discard them because searchHitForLabel falls back to a stub with an empty
+// RelPath.
+func (s *Service) EvictDocuments(relPaths []string) {
+	if len(relPaths) == 0 {
 		return
 	}
-	norm := strings.TrimSpace(filepath.ToSlash(relPath))
+	normalized := make(map[string]struct{}, len(relPaths))
+	for _, relPath := range relPaths {
+		norm := strings.TrimSpace(filepath.ToSlash(relPath))
+		if norm == "" {
+			continue
+		}
+		normalized[norm] = struct{}{}
+	}
+	if len(normalized) == 0 {
+		return
+	}
 
 	// First, scan under a read lock to find labels to delete without blocking
 	// concurrent readers for the duration of the O(totalChunks) scan.
 	s.metaMu.RLock()
 	var labelsToDelete []uint64
 	for label, hit := range s.chunkByLabel {
-		if strings.TrimSpace(filepath.ToSlash(hit.RelPath)) == norm {
+		if _, ok := normalized[strings.TrimSpace(filepath.ToSlash(hit.RelPath))]; ok {
 			labelsToDelete = append(labelsToDelete, label)
 		}
 	}
