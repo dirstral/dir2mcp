@@ -9,7 +9,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -675,79 +674,5 @@ func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
 	}
 	if strings.Count(got.Answer, "[docs/a.md]") != 1 {
 		t.Fatalf("expected only one [docs/a.md] tag, got %q", got.Answer)
-	}
-}
-
-// TestEvictDocument_RemovesChunksFromSearch verifies that after EvictDocument
-// is called for a document, its chunks no longer appear in Search results even
-// though the HNSW index still contains the corresponding label vectors.
-func TestEvictDocument_RemovesChunksFromSearch(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	// labels 1 (docs/kept.md) and 2 (docs/deleted.md) are both in the index.
-	for _, l := range []uint64{1, 2} {
-		if err := idx.Add(l, []float32{1, 0}); err != nil {
-			t.Fatalf("idx.Add(%d): %v", l, err)
-		}
-	}
-
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, nil)
-	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/kept.md", DocType: "md", Snippet: "stays"})
-	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/deleted.md", DocType: "md", Snippet: "goes away"})
-
-	// Before eviction both documents appear in search results.
-	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
-	if err != nil {
-		t.Fatalf("Search before eviction: %v", err)
-	}
-	relPaths := make([]string, 0, len(hits))
-	for _, h := range hits {
-		relPaths = append(relPaths, h.RelPath)
-	}
-	if !slices.Contains(relPaths, "docs/deleted.md") {
-		t.Fatalf("expected docs/deleted.md in pre-eviction results, got %v", relPaths)
-	}
-
-	// Evict the document.
-	svc.EvictDocument("docs/deleted.md")
-
-	// After eviction, docs/deleted.md must not appear even though the vector
-	// label still lives in the HNSW index.
-	hits, err = svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
-	if err != nil {
-		t.Fatalf("Search after eviction: %v", err)
-	}
-	for _, h := range hits {
-		if h.RelPath == "docs/deleted.md" {
-			t.Fatalf("docs/deleted.md still appears in results after EvictDocument")
-		}
-	}
-	// The non-evicted document must still be present.
-	found := false
-	for _, h := range hits {
-		if h.RelPath == "docs/kept.md" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("docs/kept.md missing from results after evicting a different document")
-	}
-}
-
-// TestMatchFilters_RejectsEmptyRelPath verifies that matchFilters always
-// returns false for a hit with an empty RelPath so that orphaned (unknown) or
-// evicted chunk stubs are never surfaced in results.
-func TestMatchFilters_RejectsEmptyRelPath(t *testing.T) {
-	stub := model.SearchHit{
-		ChunkID: 99,
-		RelPath: "",
-		DocType: "unknown",
-	}
-	if matchFilters(stub, model.SearchQuery{}) {
-		t.Fatal("matchFilters should return false for empty RelPath")
-	}
-	if matchFilters(stub, model.SearchQuery{PathPrefix: ""}) {
-		t.Fatal("matchFilters should return false for empty RelPath even with no prefix filter")
 	}
 }

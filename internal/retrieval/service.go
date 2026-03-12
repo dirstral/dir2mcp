@@ -877,44 +877,57 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	s.metaMu.RLock()
 	overfetchMultiplier := s.overfetchMultiplier
 	s.metaMu.RUnlock()
-	// protect multiplication k * overfetchMultiplier against overflow
-	// by checking against MaxInt. If the caller supplied a huge k value we
-	// simply clamp the request size rather than allow wraparound.  An
-	// alternative would be to return an error; at present callers only ever
-	// pass reasonably small k's so clamping is acceptable.
-	var n int
-	if k > math.MaxInt/overfetchMultiplier {
-		// avoid overflow and also prevent asking the index for more
-		// neighbors than an int can represent; this keeps downstream code
-		// consistent (e.g. fakeIndex in tests) and mirrors the behavior of
-		// capping the multiplier itself via SetOverfetchMultiplier.
-		n = math.MaxInt
-	} else {
-		n = k * overfetchMultiplier
-	}
-	labels, scores, err := idx.Search(vectors[0], n)
-	if err != nil {
-		return nil, err
-	}
-
-	// avoid trying to preallocate a gigantic slice when k is absurdly large
+	// Avoid trying to preallocate a gigantic slice when k is absurdly large.
+	// This is only a capacity hint; appends can still grow the slice as needed.
 	cap := k
-	if cap > len(labels) {
-		cap = len(labels)
+	if cap > 1024 {
+		cap = 1024
 	}
 	filtered := make([]model.SearchHit, 0, cap)
-	for i, label := range labels {
-		hit := s.searchHitForLabel(indexName, label)
-		hit.Score = float64(scores[i])
-		if !matchFilters(hit, filters) {
-			continue
+	seen := make(map[uint64]struct{}, cap)
+	for n := initialSearchFanout(k, overfetchMultiplier); len(filtered) < k; {
+		labels, scores, err := idx.Search(vectors[0], n)
+		if err != nil {
+			return nil, err
 		}
-		filtered = append(filtered, hit)
-		if len(filtered) >= k {
+		for i, label := range labels {
+			if _, ok := seen[label]; ok {
+				continue
+			}
+			seen[label] = struct{}{}
+
+			hit := s.searchHitForLabel(indexName, label)
+			hit.Score = float64(scores[i])
+			if !matchFilters(hit, filters) {
+				continue
+			}
+			filtered = append(filtered, hit)
+			if len(filtered) >= k {
+				break
+			}
+		}
+
+		if len(filtered) >= k || len(labels) < n || n == math.MaxInt {
 			break
 		}
+		n = nextSearchFanout(n)
 	}
 	return filtered, nil
+}
+
+func initialSearchFanout(k, overfetchMultiplier int) int {
+	// Protect multiplication k * overfetchMultiplier against overflow.
+	if k > math.MaxInt/overfetchMultiplier {
+		return math.MaxInt
+	}
+	return k * overfetchMultiplier
+}
+
+func nextSearchFanout(current int) int {
+	if current >= math.MaxInt/2 {
+		return math.MaxInt
+	}
+	return current * 2
 }
 
 func (s *Service) searchBothIndices(ctx context.Context, query string, k int, textModel, codeModel string, textIndex, codeIndex model.Index, filters model.SearchQuery) ([]model.SearchHit, error) {

@@ -181,6 +181,45 @@ func TestServiceRun_OnDocumentDeletedHookFired(t *testing.T) {
 	}
 }
 
+func TestServiceRun_OnDocumentDeletedPanicRecovered(t *testing.T) {
+	root := t.TempDir()
+
+	st := newMemoryStore()
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetIndexingState(indexState)
+	svc.SetOnDocumentDeleted(func(relPath string) {
+		if relPath == "gone1.txt" {
+			panic("boom")
+		}
+	})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if !st.docs["gone1.txt"].Deleted {
+		t.Fatal("gone1.txt should still be tombstoned when delete hook panics")
+	}
+	if !st.docs["gone2.txt"].Deleted {
+		t.Fatal("gone2.txt should still be tombstoned after a prior hook panic")
+	}
+
+	snapshot := indexState.Snapshot()
+	if snapshot.Deleted != 2 {
+		t.Fatalf("snapshot.Deleted=%d want=2", snapshot.Deleted)
+	}
+	if snapshot.Errors != 1 {
+		t.Fatalf("snapshot.Errors=%d want=1", snapshot.Errors)
+	}
+}
+
 func TestServiceRun_DoesNotExcludeAWSSecretsManagerProse(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "security.md"), []byte("Credentials are stored in AWS Secrets Manager.\n"))

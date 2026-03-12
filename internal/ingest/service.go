@@ -76,7 +76,8 @@ type Service struct {
 	// optional callback invoked after a document is successfully tombstoned.
 	// Used by the CLI to evict the document's chunks from the retrieval
 	// service's in-memory maps so deleted files are no longer searchable.
-	onDocumentDeleted func(relPath string)
+	onDocumentDeleted   func(relPath string)
+	onDocumentDeletedMu sync.RWMutex
 
 	// mutex protecting all of the OCR cache configuration fields and the
 	// related bookkeeping state.  In particular it guards access to
@@ -127,7 +128,9 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 // document's relative path so callers (e.g. the CLI) can evict its chunks from
 // the retrieval service's in-memory maps without a full server restart.
 func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
+	s.onDocumentDeletedMu.Lock()
 	s.onDocumentDeleted = fn
+	s.onDocumentDeletedMu.Unlock()
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
@@ -686,8 +689,19 @@ func (s *Service) markMissingAsDeleted(ctx context.Context, existing, seen map[s
 			continue
 		}
 		s.addDeleted(1)
-		if s.onDocumentDeleted != nil {
-			s.onDocumentDeleted(relPath)
+		s.onDocumentDeletedMu.RLock()
+		onDeleted := s.onDocumentDeleted
+		s.onDocumentDeletedMu.RUnlock()
+		if onDeleted != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.addErrors(1)
+						s.getLogger().Printf("onDocumentDeleted panic for %s: %v", relPath, r)
+					}
+				}()
+				onDeleted(relPath)
+			}()
 		}
 	}
 	return nil
