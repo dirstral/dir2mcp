@@ -19,7 +19,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/model"
-	"github.com/dirstral/dirstral-spec/protocol"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/store"
 )
 

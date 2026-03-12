@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dirstral/dirstral-spec/x402"
+	"dir2mcp/internal/x402"
 )
 
 type paymentExecutionOutcome struct {

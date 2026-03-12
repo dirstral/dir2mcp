@@ -12,7 +12,7 @@ import (
 	"dir2mcp/internal/buildinfo"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
-	"github.com/dirstral/dirstral-spec/protocol"
+	"dir2mcp/internal/protocol"
 )
 
 func postToolsListWithSession(serverURL, mcpPath, sessionID string) (*http.Response, error) {

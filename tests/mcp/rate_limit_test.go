@@ -9,7 +9,7 @@ import (
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
-	"github.com/dirstral/dirstral-spec/protocol"
+	"dir2mcp/internal/protocol"
 )
 
 func TestRateLimit_NotActiveWhenServerIsNotPublic(t *testing.T) {

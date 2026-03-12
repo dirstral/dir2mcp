@@ -17,7 +17,7 @@ import (
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
-	"github.com/dirstral/dirstral-spec/protocol"
+	"dir2mcp/internal/protocol"
 )
 
 const (
