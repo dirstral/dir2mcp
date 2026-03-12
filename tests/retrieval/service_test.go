@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -150,6 +151,48 @@ func (f *fakeRetrievalIndex) Search(vector []float32, k int) ([]uint64, []float3
 func (f *fakeRetrievalIndex) Save(path string) error { return nil }
 func (f *fakeRetrievalIndex) Load(path string) error { return nil }
 func (f *fakeRetrievalIndex) Close() error           { return nil }
+
+type expandingRetrievalIndex struct {
+	labels  []uint64
+	scores  []float32
+	queries []int
+}
+
+func (e *expandingRetrievalIndex) Add(label uint64, vector []float32) error { return nil }
+func (e *expandingRetrievalIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
+	e.queries = append(e.queries, k)
+	if k > len(e.labels) {
+		k = len(e.labels)
+	}
+	labels := append([]uint64(nil), e.labels[:k]...)
+	scores := append([]float32(nil), e.scores[:k]...)
+	return labels, scores, nil
+}
+func (e *expandingRetrievalIndex) Save(path string) error { return nil }
+func (e *expandingRetrievalIndex) Load(path string) error { return nil }
+func (e *expandingRetrievalIndex) Close() error           { return nil }
+
+type cancelAfterFirstSearchIndex struct {
+	labels []uint64
+	scores []float32
+	calls  int
+	cancel func()
+}
+
+func (c *cancelAfterFirstSearchIndex) Add(label uint64, vector []float32) error { return nil }
+func (c *cancelAfterFirstSearchIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
+	c.calls++
+	if c.calls == 1 && c.cancel != nil {
+		c.cancel()
+	}
+	if k > len(c.labels) {
+		k = len(c.labels)
+	}
+	return append([]uint64(nil), c.labels[:k]...), append([]float32(nil), c.scores[:k]...), nil
+}
+func (c *cancelAfterFirstSearchIndex) Save(path string) error { return nil }
+func (c *cancelAfterFirstSearchIndex) Load(path string) error { return nil }
+func (c *cancelAfterFirstSearchIndex) Close() error           { return nil }
 
 func (e *fakeRetrievalEmbedder) Embed(_ context.Context, model string, texts []string) ([][]float32, error) {
 	// return one embedding per input text, matching the real embedder behaviour
@@ -855,5 +898,187 @@ func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
 	}
 	if strings.Count(got.Answer, "[docs/a.md]") != 1 {
 		t.Fatalf("expected only one [docs/a.md] tag, got %q", got.Answer)
+	}
+}
+
+// TestEvictDocument_RemovesChunksFromSearch verifies that after EvictDocument
+// is called for a document, its chunks no longer appear in Search results even
+// though the HNSW index still contains the corresponding label vectors.
+func TestEvictDocument_RemovesChunksFromSearch(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	// labels 1 (docs/kept.md) and 2 (docs/deleted.md) are both in the index.
+	for _, l := range []uint64{1, 2} {
+		if err := idx.Add(l, []float32{1, 0}); err != nil {
+			t.Fatalf("idx.Add(%d): %v", l, err)
+		}
+	}
+
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/kept.md", DocType: "md", Snippet: "stays"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/deleted.md", DocType: "md", Snippet: "goes away"})
+
+	// Before eviction both documents appear in search results.
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search before eviction: %v", err)
+	}
+	relPaths := make([]string, 0, len(hits))
+	for _, h := range hits {
+		relPaths = append(relPaths, h.RelPath)
+	}
+	if !slices.Contains(relPaths, "docs/deleted.md") {
+		t.Fatalf("expected docs/deleted.md in pre-eviction results, got %v", relPaths)
+	}
+
+	// Evict the document.
+	svc.EvictDocument("docs/deleted.md")
+
+	// After eviction, docs/deleted.md must not appear even though the vector
+	// label still lives in the HNSW index.
+	hits, err = svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search after eviction: %v", err)
+	}
+	for _, h := range hits {
+		if h.RelPath == "docs/deleted.md" {
+			t.Fatalf("docs/deleted.md still appears in results after EvictDocument")
+		}
+	}
+	// The non-evicted document must still be present.
+	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
+		return h.RelPath == "docs/kept.md"
+	}) {
+		t.Fatalf("docs/kept.md missing from results after evicting a different document")
+	}
+}
+
+func TestEvictDocuments_RemovesMultipleDocumentsFromSearch(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	for _, l := range []uint64{1, 2, 3} {
+		if err := idx.Add(l, []float32{1, 0}); err != nil {
+			t.Fatalf("idx.Add(%d): %v", l, err)
+		}
+	}
+
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/keep.md", DocType: "md", Snippet: "keep"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/drop-a.md", DocType: "md", Snippet: "drop a"})
+	svc.SetChunkMetadata(3, model.SearchHit{RelPath: "docs/drop-b.md", DocType: "md", Snippet: "drop b"})
+
+	svc.EvictDocuments([]string{"docs/drop-a.md", "docs/drop-b.md"})
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for _, h := range hits {
+		if h.RelPath == "docs/drop-a.md" || h.RelPath == "docs/drop-b.md" {
+			t.Fatalf("evicted document still appears in results: %#v", h)
+		}
+	}
+	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
+		return h.RelPath == "docs/keep.md"
+	}) {
+		t.Fatalf("docs/keep.md missing after batch eviction, got %v", hits)
+	}
+}
+
+func TestSearch_ExpandsCandidateWindowAfterEvictions(t *testing.T) {
+	idx := &expandingRetrievalIndex{
+		labels: []uint64{1, 2, 3, 4, 5, 6},
+		scores: []float32{0.99, 0.98, 0.97, 0.96, 0.95, 0.94},
+	}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetOversampleFactor(5)
+
+	for _, label := range []uint64{1, 2, 3, 4, 5} {
+		svc.SetChunkMetadata(label, model.SearchHit{
+			RelPath: "docs/deleted.md",
+			DocType: "md",
+			Snippet: "deleted",
+		})
+	}
+	svc.SetChunkMetadata(6, model.SearchHit{
+		RelPath: "docs/live.md",
+		DocType: "md",
+		Snippet: "live",
+	})
+	svc.EvictDocument("docs/deleted.md")
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 1})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit after expanding candidate window, got %d", len(hits))
+	}
+	if hits[0].RelPath != "docs/live.md" {
+		t.Fatalf("expected docs/live.md, got %#v", hits[0])
+	}
+	if len(idx.queries) < 2 {
+		t.Fatalf("expected multiple ANN searches after evictions, got %v", idx.queries)
+	}
+	if idx.queries[0] != 5 || idx.queries[1] <= idx.queries[0] {
+		t.Fatalf("unexpected ANN search fanout progression: %v", idx.queries)
+	}
+}
+
+func TestSearch_StopsExpandingWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	idx := &cancelAfterFirstSearchIndex{
+		labels: []uint64{1, 2, 3, 4, 5},
+		scores: []float32{0.99, 0.98, 0.97, 0.96, 0.95},
+		cancel: cancel,
+	}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetOversampleFactor(5)
+	for _, label := range []uint64{1, 2, 3, 4, 5} {
+		svc.SetChunkMetadata(label, model.SearchHit{
+			RelPath: "docs/deleted.md",
+			DocType: "md",
+			Snippet: "deleted",
+		})
+	}
+	svc.EvictDocument("docs/deleted.md")
+
+	_, err := svc.Search(ctx, model.SearchQuery{Query: "q", K: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if idx.calls != 1 {
+		t.Fatalf("expected one ANN search before cancellation, got %d", idx.calls)
+	}
+}
+
+// TestSearch_EmptyRelPathChunkNotReturned verifies that a chunk registered with
+// an empty RelPath (e.g. an orphaned eviction stub) is never surfaced in Search
+// results, exercising the matchFilters guard via the public API.
+func TestSearch_EmptyRelPathChunkNotReturned(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(99, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(99, model.SearchHit{ChunkID: 99, RelPath: "", DocType: "unknown"})
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for _, h := range hits {
+		if h.RelPath == "" {
+			t.Fatal("Search returned a hit with empty RelPath")
+		}
 	}
 }

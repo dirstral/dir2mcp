@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -30,6 +31,8 @@ const (
 	annotationChunkSize    = 1200
 	annotationChunkOverlap = 200
 	annotationChunkMinSize = 120
+
+	defaultOnDocumentDeletedMaxConcurrency = 8
 
 	transcriberProviderAuto       = "auto"
 	transcriberProviderMistral    = "mistral"
@@ -73,6 +76,15 @@ type Service struct {
 	// write counter/hook so both cache trees follow one policy and cadence.
 	ocrCacheEnforce func(string) error
 
+	// optional callback invoked after a document is successfully tombstoned.
+	// Used by the CLI to evict the document's chunks from the retrieval
+	// service's in-memory maps so deleted files are no longer searchable.
+	onDocumentsDeleted   func(relPaths []string)
+	onDocumentsDeletedMu sync.RWMutex
+	// bounds the compatibility wrapper used by SetOnDocumentDeleted so large
+	// deletion batches do not spawn an unbounded number of goroutines.
+	onDocumentDeletedMaxConcurrency int
+
 	// mutex protecting all of the OCR cache configuration fields and the
 	// related bookkeeping state.  In particular it guards access to
 	// ocrCacheMaxBytes, ocrCacheTTL (and the associated hooks
@@ -102,9 +114,10 @@ type documentDeleteMarker interface {
 
 func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc := &Service{
-		cfg:    cfg,
-		store:  store,
-		logger: log.Default(),
+		cfg:                             cfg,
+		store:                           store,
+		logger:                          log.Default(),
+		onDocumentDeletedMaxConcurrency: defaultOnDocumentDeletedMaxConcurrency,
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -115,6 +128,60 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
 	return svc, nil
+}
+
+// SetOnDocumentDeleted registers a compatibility wrapper for callers that still
+// expect per-document callbacks. New code should prefer SetOnDocumentsDeleted.
+func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
+	if fn == nil {
+		s.SetOnDocumentsDeleted(nil)
+		return
+	}
+	s.SetOnDocumentsDeleted(func(relPaths []string) {
+		maxConcurrency := s.onDocumentDeletedMaxConcurrency
+		if maxConcurrency <= 0 {
+			maxConcurrency = defaultOnDocumentDeletedMaxConcurrency
+		}
+		sem := make(chan struct{}, maxConcurrency)
+		var wg sync.WaitGroup
+		for _, relPath := range relPaths {
+			sem <- struct{}{}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					<-sem
+				}()
+				defer func() {
+					if r := recover(); r != nil {
+						s.addErrors(1)
+						s.getLogger().Printf("onDocumentDeleted panic for path %q (%s)", relPath, safePanicValue(r))
+					}
+				}()
+				fn(relPath)
+			}()
+		}
+		wg.Wait()
+	})
+}
+
+// SetOnDocumentDeletedMaxConcurrency bounds the compatibility wrapper used by
+// SetOnDocumentDeleted. Values less than 1 restore the default.
+func (s *Service) SetOnDocumentDeletedMaxConcurrency(n int) {
+	if n < 1 {
+		n = defaultOnDocumentDeletedMaxConcurrency
+	}
+	s.onDocumentDeletedMaxConcurrency = n
+}
+
+// SetOnDocumentsDeleted registers a callback that is invoked once after
+// markMissingAsDeleted tombstones one or more documents. The callback receives
+// the set of deleted relative paths so callers can evict retrieval metadata in
+// a single pass without rescanning for each individual document.
+func (s *Service) SetOnDocumentsDeleted(fn func(relPaths []string)) {
+	s.onDocumentsDeletedMu.Lock()
+	defer s.onDocumentsDeletedMu.Unlock()
+	s.onDocumentsDeleted = fn
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
@@ -664,6 +731,7 @@ func (s *Service) markMissingAsDeleted(ctx context.Context, existing, seen map[s
 	}
 	sort.Strings(paths)
 
+	deletedPaths := make([]string, 0, len(paths))
 	for _, relPath := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -673,8 +741,34 @@ func (s *Service) markMissingAsDeleted(ctx context.Context, existing, seen map[s
 			continue
 		}
 		s.addDeleted(1)
+		deletedPaths = append(deletedPaths, relPath)
+	}
+	if len(deletedPaths) == 0 {
+		return nil
+	}
+	s.onDocumentsDeletedMu.RLock()
+	onDeleted := s.onDocumentsDeleted
+	s.onDocumentsDeletedMu.RUnlock()
+	if onDeleted != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.addErrors(1)
+					s.getLogger().Printf("onDocumentsDeleted panic for %d paths (%s)", len(deletedPaths), safePanicValue(r))
+				}
+			}()
+			onDeleted(append([]string(nil), deletedPaths...))
+		}()
 	}
 	return nil
+}
+
+func safePanicValue(r interface{}) string {
+	typeName := "<nil>"
+	if t := reflect.TypeOf(r); t != nil {
+		typeName = t.String()
+	}
+	return "type=" + typeName
 }
 
 func (s *Service) addScanned(delta int64) {

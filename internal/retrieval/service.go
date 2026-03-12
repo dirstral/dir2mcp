@@ -311,6 +311,60 @@ func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
 	s.metaMu.Unlock()
 }
 
+// EvictDocument removes all in-memory chunk metadata for one document.
+func (s *Service) EvictDocument(relPath string) {
+	s.EvictDocuments([]string{relPath})
+}
+
+// EvictDocuments removes all in-memory chunk metadata for the given
+// documents. It is called when documents are tombstoned in the store so that
+// their chunks no longer appear in search results for the remainder of the
+// server session. The HNSW vector index has no delete support, so evicted
+// labels will still be returned by the ANN search, but matchFilters will
+// discard them because searchHitForLabel falls back to a stub with an empty
+// RelPath.
+func (s *Service) EvictDocuments(relPaths []string) {
+	if len(relPaths) == 0 {
+		return
+	}
+	normalized := make(map[string]struct{}, len(relPaths))
+	for _, relPath := range relPaths {
+		norm := strings.TrimSpace(filepath.ToSlash(relPath))
+		if norm == "" {
+			continue
+		}
+		normalized[norm] = struct{}{}
+	}
+	if len(normalized) == 0 {
+		return
+	}
+
+	// First, scan under a read lock to find labels to delete without blocking
+	// concurrent readers for the duration of the O(totalChunks) scan.
+	s.metaMu.RLock()
+	var labelsToDelete []uint64
+	for label, hit := range s.chunkByLabel {
+		if _, ok := normalized[strings.TrimSpace(filepath.ToSlash(hit.RelPath))]; ok {
+			labelsToDelete = append(labelsToDelete, label)
+		}
+	}
+	s.metaMu.RUnlock()
+
+	if len(labelsToDelete) == 0 {
+		return
+	}
+
+	// Now take the write lock only for the actual deletions.
+	s.metaMu.Lock()
+	for _, label := range labelsToDelete {
+		delete(s.chunkByLabel, label)
+		for _, byIndex := range s.chunkByIndex {
+			delete(byIndex, label)
+		}
+	}
+	s.metaMu.Unlock()
+}
+
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
 	kind := strings.ToLower(strings.TrimSpace(indexName))
 	if kind != "text" && kind != "code" {
@@ -839,44 +893,63 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	s.metaMu.RLock()
 	overfetchMultiplier := s.overfetchMultiplier
 	s.metaMu.RUnlock()
-	// protect multiplication k * overfetchMultiplier against overflow
-	// by checking against MaxInt. If the caller supplied a huge k value we
-	// simply clamp the request size rather than allow wraparound.  An
-	// alternative would be to return an error; at present callers only ever
-	// pass reasonably small k's so clamping is acceptable.
-	var n int
-	if k > math.MaxInt/overfetchMultiplier {
-		// avoid overflow and also prevent asking the index for more
-		// neighbors than an int can represent; this keeps downstream code
-		// consistent (e.g. fakeIndex in tests) and mirrors the behavior of
-		// capping the multiplier itself via SetOverfetchMultiplier.
-		n = math.MaxInt
-	} else {
-		n = k * overfetchMultiplier
-	}
-	labels, scores, err := idx.Search(vectors[0], n)
-	if err != nil {
-		return nil, err
-	}
-
-	// avoid trying to preallocate a gigantic slice when k is absurdly large
+	// Avoid trying to preallocate a gigantic slice when k is absurdly large.
+	// This is only a capacity hint; appends can still grow the slice as needed.
 	cap := k
-	if cap > len(labels) {
-		cap = len(labels)
+	if cap > 1024 {
+		cap = 1024
 	}
 	filtered := make([]model.SearchHit, 0, cap)
-	for i, label := range labels {
-		hit := s.searchHitForLabel(indexName, label)
-		hit.Score = float64(scores[i])
-		if !matchFilters(hit, filters) {
-			continue
+	seen := make(map[uint64]struct{}, cap)
+	for n := initialSearchFanout(k, overfetchMultiplier); len(filtered) < k; {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		filtered = append(filtered, hit)
-		if len(filtered) >= k {
+		labels, scores, err := idx.Search(vectors[0], n)
+		if err != nil {
+			return nil, err
+		}
+		for i, label := range labels {
+			if _, ok := seen[label]; ok {
+				continue
+			}
+			seen[label] = struct{}{}
+
+			hit := s.searchHitForLabel(indexName, label)
+			hit.Score = float64(scores[i])
+			if !matchFilters(hit, filters) {
+				continue
+			}
+			filtered = append(filtered, hit)
+			if len(filtered) >= k {
+				break
+			}
+		}
+
+		if len(filtered) >= k || len(labels) < n || n == math.MaxInt {
 			break
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n = nextSearchFanout(n)
 	}
 	return filtered, nil
+}
+
+func initialSearchFanout(k, overfetchMultiplier int) int {
+	// Protect multiplication k * overfetchMultiplier against overflow.
+	if k > math.MaxInt/overfetchMultiplier {
+		return math.MaxInt
+	}
+	return k * overfetchMultiplier
+}
+
+func nextSearchFanout(current int) int {
+	if current >= math.MaxInt/2 {
+		return math.MaxInt
+	}
+	return current * 2
 }
 
 func (s *Service) searchBothIndices(ctx context.Context, query string, k int, textModel, codeModel string, textIndex, codeIndex model.Index, filters model.SearchQuery) ([]model.SearchHit, error) {
@@ -1133,6 +1206,12 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 }
 
 func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
+	// Orphaned or evicted chunks have an empty RelPath and must never be
+	// surfaced to callers regardless of any other filter criteria.
+	if strings.TrimSpace(hit.RelPath) == "" {
+		return false
+	}
+
 	if query.PathPrefix != "" && !strings.HasPrefix(hit.RelPath, query.PathPrefix) {
 		return false
 	}

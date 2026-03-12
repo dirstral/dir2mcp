@@ -1,15 +1,19 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
@@ -131,6 +135,216 @@ func TestServiceRun_UnicodeDashesStillGenerateRepresentations(t *testing.T) {
 	}
 	if len(st.chunks) == 0 {
 		t.Fatal("expected at least one chunk for unicode markdown")
+	}
+}
+
+// TestServiceRun_OnDocumentsDeletedHookFired verifies that
+// SetOnDocumentsDeleted receives a single batch of tombstoned documents, and
+// does not report documents that still exist on disk.
+func TestServiceRun_OnDocumentsDeletedHookFired(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "alive.txt"), []byte("still here"))
+
+	st := newMemoryStore()
+	// Pre-populate two docs that are no longer on disk so they will be deleted.
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	svc := mustNewIngestService(t, cfg, st)
+
+	var mu sync.Mutex
+	var batches [][]string
+	svc.SetOnDocumentsDeleted(func(relPaths []string) {
+		mu.Lock()
+		batches = append(batches, append([]string(nil), relPaths...))
+		mu.Unlock()
+	})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(batches) != 1 {
+		t.Fatalf("expected exactly one deletion batch, got %d", len(batches))
+	}
+	deleted := append([]string(nil), batches[0]...)
+	sort.Strings(deleted)
+	wantDeleted := []string{"gone1.txt", "gone2.txt"}
+	if !slices.Equal(deleted, wantDeleted) {
+		t.Fatalf("deleted hook received %v, want %v", deleted, wantDeleted)
+	}
+
+	// The live document must NOT appear in the deleted list.
+	for _, d := range deleted {
+		if d == "alive.txt" {
+			t.Fatal("alive.txt must not be in the deleted callback list")
+		}
+	}
+}
+
+func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapper(t *testing.T) {
+	root := t.TempDir()
+	st := newMemoryStore()
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	svc := mustNewIngestService(t, cfg, st)
+	var mu sync.Mutex
+	var deleted []string
+	svc.SetOnDocumentDeleted(func(relPath string) {
+		mu.Lock()
+		deleted = append(deleted, relPath)
+		mu.Unlock()
+	})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	sort.Strings(deleted)
+	if !slices.Equal(deleted, []string{"gone1.txt", "gone2.txt"}) {
+		t.Fatalf("compatibility wrapper received %v", deleted)
+	}
+}
+
+func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapperBoundsConcurrency(t *testing.T) {
+	root := t.TempDir()
+	st := newMemoryStore()
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetOnDocumentDeletedMaxConcurrency(1)
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	current := 0
+	maxSeen := 0
+	svc.SetOnDocumentDeleted(func(relPath string) {
+		mu.Lock()
+		current++
+		if current > maxSeen {
+			maxSeen = current
+		}
+		mu.Unlock()
+
+		started <- relPath
+		<-release
+
+		mu.Lock()
+		current--
+		mu.Unlock()
+	})
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- svc.Run(context.Background())
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first delete callback did not start")
+	}
+
+	select {
+	case relPath := <-started:
+		t.Fatalf("second callback started before release: %s", relPath)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("second delete callback did not start after release")
+	}
+
+	release <- struct{}{}
+
+	select {
+	case err := <-runErrCh:
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not finish")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maxSeen != 1 {
+		t.Fatalf("max concurrent callbacks=%d want=1", maxSeen)
+	}
+}
+
+func TestServiceRun_OnDocumentDeletedPanicRecovered(t *testing.T) {
+	root := t.TempDir()
+
+	st := newMemoryStore()
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetIndexingState(indexState)
+	var buf bytes.Buffer
+	svc.SetLogger(log.New(&buf, "", 0))
+	var notified []string
+	var notifiedMu sync.Mutex
+	svc.SetOnDocumentDeleted(func(relPath string) {
+		notifiedMu.Lock()
+		notified = append(notified, relPath)
+		notifiedMu.Unlock()
+		if relPath == "gone1.txt" {
+			panic("boom secret-token")
+		}
+	})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if !st.docs["gone1.txt"].Deleted {
+		t.Fatal("gone1.txt should still be tombstoned when delete hook panics")
+	}
+	if !st.docs["gone2.txt"].Deleted {
+		t.Fatal("gone2.txt should still be tombstoned after a prior hook panic")
+	}
+
+	snapshot := indexState.Snapshot()
+	if snapshot.Deleted != 2 {
+		t.Fatalf("snapshot.Deleted=%d want=2", snapshot.Deleted)
+	}
+	if snapshot.Errors != 1 {
+		t.Fatalf("snapshot.Errors=%d want=1", snapshot.Errors)
+	}
+	notifiedMu.Lock()
+	defer notifiedMu.Unlock()
+	if !slices.Contains(notified, "gone2.txt") {
+		t.Fatalf("expected gone2.txt notification after earlier panic, got %v", notified)
+	}
+	if strings.Contains(buf.String(), "secret-token") {
+		t.Fatalf("panic payload leaked to logs: %q", buf.String())
 	}
 }
 
