@@ -925,13 +925,9 @@ func TestEvictDocument_RemovesChunksFromSearch(t *testing.T) {
 		}
 	}
 	// The non-evicted document must still be present.
-	found := false
-	for _, h := range hits {
-		if h.RelPath == "docs/kept.md" {
-			found = true
-		}
-	}
-	if !found {
+	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
+		return h.RelPath == "docs/kept.md"
+	}) {
 		t.Fatalf("docs/kept.md missing from results after evicting a different document")
 	}
 }
@@ -944,6 +940,7 @@ func TestSearch_ExpandsCandidateWindowAfterEvictions(t *testing.T) {
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, nil)
+	svc.SetOversampleFactor(5)
 
 	for _, label := range []uint64{1, 2, 3, 4, 5} {
 		svc.SetChunkMetadata(label, model.SearchHit{

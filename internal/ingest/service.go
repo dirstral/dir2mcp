@@ -129,8 +129,8 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 // the retrieval service's in-memory maps without a full server restart.
 func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
 	s.onDocumentDeletedMu.Lock()
+	defer s.onDocumentDeletedMu.Unlock()
 	s.onDocumentDeleted = fn
-	s.onDocumentDeletedMu.Unlock()
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
