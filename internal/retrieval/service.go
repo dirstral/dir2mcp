@@ -902,6 +902,9 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	filtered := make([]model.SearchHit, 0, cap)
 	seen := make(map[uint64]struct{}, cap)
 	for n := initialSearchFanout(k, overfetchMultiplier); len(filtered) < k; {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		labels, scores, err := idx.Search(vectors[0], n)
 		if err != nil {
 			return nil, err
@@ -925,6 +928,9 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 
 		if len(filtered) >= k || len(labels) < n || n == math.MaxInt {
 			break
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		n = nextSearchFanout(n)
 	}

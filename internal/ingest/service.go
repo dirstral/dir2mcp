@@ -132,9 +132,22 @@ func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
 		return
 	}
 	s.SetOnDocumentsDeleted(func(relPaths []string) {
+		var wg sync.WaitGroup
 		for _, relPath := range relPaths {
-			fn(relPath)
+			relPath := relPath
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						s.addErrors(1)
+						s.getLogger().Printf("onDocumentDeleted panic for path %q (%s)", relPath, safePanicValue(r))
+					}
+				}()
+				fn(relPath)
+			}()
 		}
+		wg.Wait()
 	})
 }
 
@@ -732,15 +745,7 @@ func safePanicValue(r interface{}) string {
 	if t := reflect.TypeOf(r); t != nil {
 		typeName = t.String()
 	}
-	value := strings.TrimSpace(fmt.Sprint(r))
-	if value == "" {
-		return "type=" + typeName
-	}
-	const maxLen = 200
-	if runes := []rune(value); len(runes) > maxLen {
-		value = string(runes[:maxLen]) + "..."
-	}
-	return fmt.Sprintf("type=%s value=%q", typeName, value)
+	return "type=" + typeName
 }
 
 func (s *Service) addScanned(delta int64) {

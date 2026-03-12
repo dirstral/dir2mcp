@@ -172,6 +172,28 @@ func (e *expandingRetrievalIndex) Save(path string) error { return nil }
 func (e *expandingRetrievalIndex) Load(path string) error { return nil }
 func (e *expandingRetrievalIndex) Close() error           { return nil }
 
+type cancelAfterFirstSearchIndex struct {
+	labels []uint64
+	scores []float32
+	calls  int
+	cancel func()
+}
+
+func (c *cancelAfterFirstSearchIndex) Add(label uint64, vector []float32) error { return nil }
+func (c *cancelAfterFirstSearchIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
+	c.calls++
+	if c.calls == 1 && c.cancel != nil {
+		c.cancel()
+	}
+	if k > len(c.labels) {
+		k = len(c.labels)
+	}
+	return append([]uint64(nil), c.labels[:k]...), append([]float32(nil), c.scores[:k]...), nil
+}
+func (c *cancelAfterFirstSearchIndex) Save(path string) error { return nil }
+func (c *cancelAfterFirstSearchIndex) Load(path string) error { return nil }
+func (c *cancelAfterFirstSearchIndex) Close() error           { return nil }
+
 func (e *fakeRetrievalEmbedder) Embed(_ context.Context, model string, texts []string) ([][]float32, error) {
 	// return one embedding per input text, matching the real embedder behaviour
 	n := len(texts)
@@ -1004,6 +1026,35 @@ func TestSearch_ExpandsCandidateWindowAfterEvictions(t *testing.T) {
 	}
 	if idx.queries[0] != 5 || idx.queries[1] <= idx.queries[0] {
 		t.Fatalf("unexpected ANN search fanout progression: %v", idx.queries)
+	}
+}
+
+func TestSearch_StopsExpandingWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	idx := &cancelAfterFirstSearchIndex{
+		labels: []uint64{1, 2, 3, 4, 5},
+		scores: []float32{0.99, 0.98, 0.97, 0.96, 0.95},
+		cancel: cancel,
+	}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetOversampleFactor(5)
+	for _, label := range []uint64{1, 2, 3, 4, 5} {
+		svc.SetChunkMetadata(label, model.SearchHit{
+			RelPath: "docs/deleted.md",
+			DocType: "md",
+			Snippet: "deleted",
+		})
+	}
+	svc.EvictDocument("docs/deleted.md")
+
+	_, err := svc.Search(ctx, model.SearchQuery{Query: "q", K: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if idx.calls != 1 {
+		t.Fatalf("expected one ANN search before cancellation, got %d", idx.calls)
 	}
 }
 

@@ -1,8 +1,10 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -223,9 +225,16 @@ func TestServiceRun_OnDocumentDeletedPanicRecovered(t *testing.T) {
 	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(indexState)
+	var buf bytes.Buffer
+	svc.SetLogger(log.New(&buf, "", 0))
+	var notified []string
+	var notifiedMu sync.Mutex
 	svc.SetOnDocumentDeleted(func(relPath string) {
+		notifiedMu.Lock()
+		notified = append(notified, relPath)
+		notifiedMu.Unlock()
 		if relPath == "gone1.txt" {
-			panic("boom")
+			panic("boom secret-token")
 		}
 	})
 
@@ -246,6 +255,14 @@ func TestServiceRun_OnDocumentDeletedPanicRecovered(t *testing.T) {
 	}
 	if snapshot.Errors != 1 {
 		t.Fatalf("snapshot.Errors=%d want=1", snapshot.Errors)
+	}
+	notifiedMu.Lock()
+	defer notifiedMu.Unlock()
+	if !slices.Contains(notified, "gone2.txt") {
+		t.Fatalf("expected gone2.txt notification after earlier panic, got %v", notified)
+	}
+	if strings.Contains(buf.String(), "secret-token") {
+		t.Fatalf("panic payload leaked to logs: %q", buf.String())
 	}
 }
 
