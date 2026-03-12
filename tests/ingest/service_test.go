@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
@@ -197,18 +198,99 @@ func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapper(t *testing.T) {
 	cfg.RootDir = root
 
 	svc := mustNewIngestService(t, cfg, st)
+	var mu sync.Mutex
 	var deleted []string
 	svc.SetOnDocumentDeleted(func(relPath string) {
+		mu.Lock()
 		deleted = append(deleted, relPath)
+		mu.Unlock()
 	})
 
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	sort.Strings(deleted)
 	if !slices.Equal(deleted, []string{"gone1.txt", "gone2.txt"}) {
 		t.Fatalf("compatibility wrapper received %v", deleted)
+	}
+}
+
+func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapperBoundsConcurrency(t *testing.T) {
+	root := t.TempDir()
+	st := newMemoryStore()
+	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
+	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetOnDocumentDeletedMaxConcurrency(1)
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	current := 0
+	maxSeen := 0
+	svc.SetOnDocumentDeleted(func(relPath string) {
+		mu.Lock()
+		current++
+		if current > maxSeen {
+			maxSeen = current
+		}
+		mu.Unlock()
+
+		started <- relPath
+		<-release
+
+		mu.Lock()
+		current--
+		mu.Unlock()
+	})
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- svc.Run(context.Background())
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first delete callback did not start")
+	}
+
+	select {
+	case relPath := <-started:
+		t.Fatalf("second callback started before release: %s", relPath)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("second delete callback did not start after release")
+	}
+
+	release <- struct{}{}
+
+	select {
+	case err := <-runErrCh:
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not finish")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maxSeen != 1 {
+		t.Fatalf("max concurrent callbacks=%d want=1", maxSeen)
 	}
 }
 

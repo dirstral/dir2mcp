@@ -32,6 +32,8 @@ const (
 	annotationChunkOverlap = 200
 	annotationChunkMinSize = 120
 
+	defaultOnDocumentDeletedMaxConcurrency = 8
+
 	transcriberProviderAuto       = "auto"
 	transcriberProviderMistral    = "mistral"
 	transcriberProviderElevenLabs = "elevenlabs"
@@ -79,6 +81,9 @@ type Service struct {
 	// service's in-memory maps so deleted files are no longer searchable.
 	onDocumentsDeleted   func(relPaths []string)
 	onDocumentsDeletedMu sync.RWMutex
+	// bounds the compatibility wrapper used by SetOnDocumentDeleted so large
+	// deletion batches do not spawn an unbounded number of goroutines.
+	onDocumentDeletedMaxConcurrency int
 
 	// mutex protecting all of the OCR cache configuration fields and the
 	// related bookkeeping state.  In particular it guards access to
@@ -109,9 +114,10 @@ type documentDeleteMarker interface {
 
 func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc := &Service{
-		cfg:    cfg,
-		store:  store,
-		logger: log.Default(),
+		cfg:                             cfg,
+		store:                           store,
+		logger:                          log.Default(),
+		onDocumentDeletedMaxConcurrency: defaultOnDocumentDeletedMaxConcurrency,
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -132,12 +138,20 @@ func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
 		return
 	}
 	s.SetOnDocumentsDeleted(func(relPaths []string) {
+		maxConcurrency := s.onDocumentDeletedMaxConcurrency
+		if maxConcurrency <= 0 {
+			maxConcurrency = defaultOnDocumentDeletedMaxConcurrency
+		}
+		sem := make(chan struct{}, maxConcurrency)
 		var wg sync.WaitGroup
 		for _, relPath := range relPaths {
-			relPath := relPath
+			sem <- struct{}{}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer func() {
+					<-sem
+				}()
 				defer func() {
 					if r := recover(); r != nil {
 						s.addErrors(1)
@@ -149,6 +163,15 @@ func (s *Service) SetOnDocumentDeleted(fn func(relPath string)) {
 		}
 		wg.Wait()
 	})
+}
+
+// SetOnDocumentDeletedMaxConcurrency bounds the compatibility wrapper used by
+// SetOnDocumentDeleted. Values less than 1 restore the default.
+func (s *Service) SetOnDocumentDeletedMaxConcurrency(n int) {
+	if n < 1 {
+		n = defaultOnDocumentDeletedMaxConcurrency
+	}
+	s.onDocumentDeletedMaxConcurrency = n
 }
 
 // SetOnDocumentsDeleted registers a callback that is invoked once after
