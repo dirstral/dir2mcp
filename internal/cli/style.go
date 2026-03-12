@@ -8,19 +8,16 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
-
-	"dir2mcp/internal/dirstral/ui"
 )
 
 // palette holds the ANSI-256 color values used throughout the CLI.
-// Shared colors are imported from internal/dirstral/ui to ensure consistency.
 var (
-	clrBrand  = ui.ClrBrand
-	clrGreen  = ui.ClrGreen
-	clrRed    = ui.ClrRed
-	clrYellow = ui.ClrYellow
-	clrCyan   = ui.ClrCyan
-	clrDim    = ui.ClrMuted
+	clrBrand  = lipgloss.Color("208") // orange — matches SVG brand #F2911A
+	clrGreen  = lipgloss.Color("114")
+	clrRed    = lipgloss.Color("203")
+	clrYellow = lipgloss.Color("220")
+	clrCyan   = lipgloss.Color("81")
+	clrDim    = lipgloss.Color("245")
 	clrWhite  = lipgloss.Color("255")
 )
 
