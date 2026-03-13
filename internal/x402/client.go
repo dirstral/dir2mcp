@@ -350,9 +350,22 @@ func truncateString(s string, max int) string {
 	if len(s) == 0 || max <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= max {
+
+	runeCount := 0
+	cutPos := len(s)
+	for idx := range s {
+		if runeCount == max {
+			// idx is the start of the (max+1)-th rune; truncate just before it.
+			cutPos = idx
+			break
+		}
+		runeCount++
+	}
+
+	// If the string contains max or fewer runes, return it unchanged.
+	if cutPos == len(s) {
 		return s
 	}
-	return string(runes[:max]) + "… (truncated)"
+
+	return s[:cutPos] + "… (truncated)"
 }
