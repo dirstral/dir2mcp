@@ -243,7 +243,7 @@ func normalizeResponsePayload(payload []byte) json.RawMessage {
 	}
 
 	fallback, _ := json.Marshal(map[string]string{
-		"raw": string(trimmed),
+		"raw": fmt.Sprintf("non-JSON response body omitted (%d bytes)", len(trimmed)),
 	})
 	return json.RawMessage(fallback)
 }
@@ -271,6 +271,7 @@ var sensitiveKeys = map[string]struct{}{
 	"credential":          {},
 	"auth":                {},
 	"bearer":              {},
+	"raw":                 {},
 }
 
 // redactRecursive walks v (which may be a map, slice, or other value) and
