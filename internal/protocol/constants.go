@@ -33,7 +33,7 @@ const (
 	MCPSessionExpiredHeader  = "X-MCP-Session-Expired"
 	MCPProtocolVersionHeader = "MCP-Protocol-Version"
 
-	DefaultProtocolVersion = "2025-11-25"
+	ProtocolDefaultVersion = "2025-11-25"
 )
 
 const (
