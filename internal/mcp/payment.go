@@ -544,8 +544,14 @@ func safePaymentResponseFields(raw json.RawMessage) map[string]interface{} {
 	}
 	out := make(map[string]interface{}, len(allowed))
 	for _, key := range allowed {
-		if v, ok := parsed[key]; ok {
+		v, ok := parsed[key]
+		if !ok {
+			continue
+		}
+		switch v.(type) {
+		case string, float64, bool, nil:
 			out[key] = v
+		// skip nested objects and arrays
 		}
 	}
 	return out

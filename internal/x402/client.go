@@ -184,11 +184,16 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if isFallback {
+			code := CodePaymentFacilitatorUnavailable
+			if operation == "settle" {
+				code = CodePaymentSettlementUnavailable
+			}
 			return nil, &FacilitatorError{
-				Operation: operation,
-				Code:      CodePaymentFacilitatorUnavailable,
-				Message:   "malformed facilitator response",
-				Retryable: false,
+				Operation:  operation,
+				StatusCode: resp.StatusCode,
+				Code:       code,
+				Message:    "malformed facilitator response",
+				Retryable:  false,
 			}
 		}
 		return normalized, nil
@@ -217,15 +222,18 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 }
 
 func toRequirementPayload(req Requirement) map[string]interface{} {
-	return map[string]interface{}{
-		"scheme":            strings.ToLower(strings.TrimSpace(req.Scheme)),
-		"network":           strings.TrimSpace(req.Network),
-		"amount":            strings.TrimSpace(req.Amount),
-		"maxAmountRequired": strings.TrimSpace(req.MaxAmountRequired),
-		"asset":             strings.TrimSpace(req.Asset),
-		"payTo":             strings.TrimSpace(req.PayTo),
-		"resource":          strings.TrimSpace(req.Resource),
+	m := map[string]interface{}{
+		"scheme":   strings.ToLower(strings.TrimSpace(req.Scheme)),
+		"network":  strings.TrimSpace(req.Network),
+		"amount":   strings.TrimSpace(req.Amount),
+		"asset":    strings.TrimSpace(req.Asset),
+		"payTo":    strings.TrimSpace(req.PayTo),
+		"resource": strings.TrimSpace(req.Resource),
 	}
+	if max := strings.TrimSpace(req.MaxAmountRequired); max != "" {
+		m["maxAmountRequired"] = max
+	}
+	return m
 }
 
 func isRetryableStatus(status int) bool {
