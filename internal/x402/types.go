@@ -112,7 +112,7 @@ func (r Requirement) Validate() error {
 		return fmt.Errorf("x402 asset is required")
 	}
 	if strings.TrimSpace(r.PayTo) == "" {
-		return fmt.Errorf("x402 pay_to is required")
+		return fmt.Errorf("x402 payTo is required")
 	}
 	if strings.TrimSpace(r.Resource) == "" {
 		return fmt.Errorf("x402 resource is required")
