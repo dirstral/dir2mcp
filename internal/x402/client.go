@@ -103,9 +103,13 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 	if err != nil {
 		// request construction failures are programming/validation issues; not
 		// retryable since a retry will never succeed.
+		code := CodePaymentFacilitatorUnavailable
+		if operation == "settle" {
+			code = CodePaymentSettlementUnavailable
+		}
 		return nil, &FacilitatorError{
 			Operation: operation,
-			Code:      CodePaymentFacilitatorUnavailable,
+			Code:      code,
 			Message:   "failed to create facilitator request",
 			Retryable: false,
 			Cause:     err,
@@ -148,9 +152,13 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		// can handle it like other transport-level failures.  This situation
 		// is unlikely but we treat it as retryable since it usually indicates
 		// a transient network or server problem.
+		code := CodePaymentFacilitatorUnavailable
+		if operation == "settle" {
+			code = CodePaymentSettlementUnavailable
+		}
 		return nil, &FacilitatorError{
 			Operation: operation,
-			Code:      CodePaymentFacilitatorUnavailable,
+			Code:      code,
 			Message:   "failed to read facilitator response",
 			Retryable: true,
 			Cause:     err,
@@ -161,16 +169,28 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		// examine the first maxRespSize+1 bytes. Treat over-limit responses as
 		// deterministic validation failures rather than applying content-based
 		// heuristics.
+		code := CodePaymentFacilitatorUnavailable
+		if operation == "settle" {
+			code = CodePaymentSettlementUnavailable
+		}
 		return nil, &FacilitatorError{
 			Operation: operation,
-			Code:      CodePaymentFacilitatorUnavailable,
+			Code:      code,
 			Message:   fmt.Sprintf("facilitator response exceeds maximum size (%d bytes)", maxRespSize),
 			Retryable: false,
 		}
 	}
-	normalized := normalizeResponsePayload(respBody)
+	normalized, isFallback := normalizeResponsePayload(respBody)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if isFallback {
+			return nil, &FacilitatorError{
+				Operation: operation,
+				Code:      CodePaymentFacilitatorUnavailable,
+				Message:   "malformed facilitator response",
+				Retryable: false,
+			}
+		}
 		return normalized, nil
 	}
 
@@ -187,21 +207,12 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		}
 	}
 
-	message := strings.TrimSpace(extractFacilitatorMessage(respBody))
-	if message == "" {
-		message = fmt.Sprintf("facilitator %s request failed with status %d", operation, resp.StatusCode)
-	}
-
-	// redact the body before exposing it in the error object.  We still
-	// preserve a human-readable summary via extractFacilitatorMessage above,
-	// but the raw payload may contain secrets that should not leak.
 	return nil, &FacilitatorError{
 		Operation:  operation,
 		StatusCode: resp.StatusCode,
 		Retryable:  retryable,
 		Code:       code,
-		Message:    message,
-		Body:       redactNormalizedPayload(normalized),
+		Message:    fmt.Sprintf("facilitator %s request failed with status %d", operation, resp.StatusCode),
 	}
 }
 
@@ -229,144 +240,20 @@ func isRetryableStatus(status int) bool {
 	}
 }
 
-const maxFacilitatorBody = 1024
-
-func normalizeResponsePayload(payload []byte) json.RawMessage {
+// normalizeResponsePayload parses the raw facilitator response body into a
+// json.RawMessage. The bool return is true when the body was non-empty but
+// not valid JSON (a fallback {"raw":...} wrapper is NOT returned in that case;
+// callers should treat isFallback=true as an error on the success path).
+func normalizeResponsePayload(payload []byte) (json.RawMessage, bool) {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 {
-		return json.RawMessage(`{}`)
+		return json.RawMessage(`{}`), false
 	}
 
 	var check json.RawMessage
 	if err := json.Unmarshal(trimmed, &check); err == nil {
-		return json.RawMessage(trimmed)
+		return json.RawMessage(trimmed), false
 	}
 
-	fallback, _ := json.Marshal(map[string]string{
-		"raw": fmt.Sprintf("non-JSON response body omitted (%d bytes)", len(trimmed)),
-	})
-	return json.RawMessage(fallback)
-}
-
-// redactNormalizedPayload returns a safe string representation of the
-// normalized JSON returned by the facilitator.  The goal is to avoid
-// including potentially sensitive information (payment payloads,
-// tokens, etc.) and to prevent unbounded logging of very large error
-// responses.  It attempts to parse the payload and redact a handful of
-// common keys, then truncates the result to a reasonable maximum length.
-// list of keys whose values should be masked when found in a JSON
-// object.  Note that keys are normalized exactly; casing matters, but the
-// set includes both snake_case and camelCase forms used in various APIs.
-var sensitiveKeys = map[string]struct{}{
-	"paymentPayload":      {},
-	"token":               {},
-	"secret":              {},
-	"password":            {},
-	"authorization":       {},
-	"authorizationHeader": {},
-	"api_key":             {},
-	"apiKey":              {},
-	"access_token":        {},
-	"refresh_token":       {},
-	"credential":          {},
-	"auth":                {},
-	"bearer":              {},
-	"raw":                 {},
-}
-
-// redactRecursive walks v (which may be a map, slice, or other value) and
-// replaces any values associated with sensitive keys with the string
-// "[REDACTED]".  Non-map/slice values are left untouched.  The function is
-// safe when called with nil or unknown types.
-func redactRecursive(v interface{}) {
-	switch t := v.(type) {
-	case map[string]interface{}:
-		for k, val := range t {
-			if _, ok := sensitiveKeys[k]; ok {
-				t[k] = "[REDACTED]"
-			} else {
-				redactRecursive(val)
-			}
-		}
-	case []interface{}:
-		for i := range t {
-			redactRecursive(t[i])
-		}
-	default:
-		// primitives and other types are ignored
-	}
-}
-
-func redactNormalizedPayload(normalized json.RawMessage) string {
-	s := string(normalized)
-	if s == "" {
-		return ""
-	}
-
-	var obj interface{}
-	if err := json.Unmarshal(normalized, &obj); err == nil {
-		// we expect a JSON object most of the time, but our helper can handle
-		// arrays or other top-level types as well.
-		redactRecursive(obj)
-		if data, err := json.Marshal(obj); err == nil {
-			s = string(data)
-		}
-	}
-	return truncateString(s, maxFacilitatorBody)
-}
-
-func extractFacilitatorMessage(payload []byte) string {
-	trimmed := bytes.TrimSpace(payload)
-	if len(trimmed) == 0 {
-		return ""
-	}
-
-	var asObj map[string]interface{}
-	if err := json.Unmarshal(trimmed, &asObj); err != nil {
-		// failure to parse means we can't rely on structured keys; return
-		// a truncated, UTF-8-safe rendition of the raw payload so that very
-		// large or sensitive blobs are not accidentally logged or surfaced.
-		return truncateString(string(trimmed), 256)
-	}
-	for _, key := range []string{"message", "error", "reason"} {
-		if raw, ok := asObj[key]; ok {
-			switch value := raw.(type) {
-			case string:
-				// always truncate extracted strings to avoid unbounded length
-				return truncateString(value, 256)
-			case map[string]interface{}:
-				if msg, ok := value["message"].(string); ok {
-					return truncateString(msg, 256)
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// truncateString returns a UTF-8-safe slice of s limited to max runes. If
-// the input exceeds the limit it appends an ellipsis indicator. This is used
-// when dumping unparsed payloads so we don't expose huge or sensitive content.
-func truncateString(s string, max int) string {
-	if len(s) == 0 || max <= 0 {
-		return ""
-	}
-
-	runeCount := 0
-	cutPos := len(s)
-	for idx := range s {
-		if runeCount == max {
-			// idx is the start of the (max+1)-th rune; truncate just before it.
-			cutPos = idx
-			break
-		}
-		runeCount++
-	}
-
-	// If the string contains max or fewer runes, return it unchanged.
-	if cutPos == len(s) {
-		return s
-	}
-
-	return s[:cutPos] + "… (truncated)"
+	return nil, true
 }

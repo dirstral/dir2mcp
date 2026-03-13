@@ -65,56 +65,64 @@ type AcceptEntry struct {
 
 const allowedSchemesText = "exact, upto"
 
+func (r Requirement) Normalize() Requirement {
+	r.Scheme = strings.ToLower(strings.TrimSpace(r.Scheme))
+	r.Network = strings.TrimSpace(r.Network)
+	r.Amount = strings.TrimSpace(r.Amount)
+	r.MaxAmountRequired = strings.TrimSpace(r.MaxAmountRequired)
+	r.Asset = strings.TrimSpace(r.Asset)
+	r.PayTo = strings.TrimSpace(r.PayTo)
+	r.Resource = strings.TrimSpace(r.Resource)
+	return r
+}
+
 func (r Requirement) Validate() error {
-	// normalize and check scheme value
-	scheme := strings.ToLower(strings.TrimSpace(r.Scheme))
-	if scheme == "" {
+	r = r.Normalize()
+	if r.Scheme == "" {
 		return fmt.Errorf("x402 scheme is required")
 	}
-	switch scheme {
+	switch r.Scheme {
 	case "exact", "upto":
 	default:
 		return fmt.Errorf("x402 scheme must be one of: %s", allowedSchemesText)
 	}
-	if strings.TrimSpace(r.Network) == "" {
+	if r.Network == "" {
 		return fmt.Errorf("x402 network is required")
 	}
 	if !IsCAIP2Network(r.Network) {
 		return fmt.Errorf("x402 network must be CAIP-2")
 	}
 	// amount must be a non-empty positive integer.
-	amt := strings.TrimSpace(r.Amount)
-	if amt == "" {
+	if r.Amount == "" {
 		return fmt.Errorf("x402 amount is required")
 	}
 	value := new(big.Int)
-	if _, ok := value.SetString(amt, 10); !ok || value.Sign() <= 0 {
+	if _, ok := value.SetString(r.Amount, 10); !ok || value.Sign() <= 0 {
 		return fmt.Errorf("x402 amount must be a positive integer")
 	}
 
 	// For "upto" scheme we also require a max value which must be a
 	// positive integer and not smaller than amount.  The MaxAmountRequired
 	// field may be empty for "exact" since it is ignored.
-	if scheme == "upto" {
-		max := strings.TrimSpace(r.MaxAmountRequired)
-		if max == "" {
+	if r.Scheme == "upto" {
+		if r.MaxAmountRequired == "" {
 			return fmt.Errorf("x402 maxAmountRequired is required for upto scheme")
 		}
 		maxVal := new(big.Int)
-		if _, ok := maxVal.SetString(max, 10); !ok || maxVal.Sign() <= 0 {
+		if _, ok := maxVal.SetString(r.MaxAmountRequired, 10); !ok || maxVal.Sign() <= 0 {
 			return fmt.Errorf("x402 maxAmountRequired must be a positive integer")
 		}
 		if maxVal.Cmp(value) < 0 {
 			return fmt.Errorf("x402 maxAmountRequired must be >= amount")
 		}
 	}
-	if strings.TrimSpace(r.Asset) == "" {
+	if r.Asset == "" {
 		return fmt.Errorf("x402 asset is required")
 	}
-	if strings.TrimSpace(r.PayTo) == "" {
+	if r.PayTo == "" {
 		return fmt.Errorf("x402 payTo is required")
 	}
-	if strings.TrimSpace(r.Resource) == "" {
+	if r.Resource == "" {
 		return fmt.Errorf("x402 resource is required")
 	}
 	return nil
@@ -123,6 +131,7 @@ func (r Requirement) Validate() error {
 // BuildPaymentRequiredHeaderValue returns a machine-readable challenge payload
 // suitable for the PAYMENT-REQUIRED header.
 func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
+	req = req.Normalize()
 	if err := req.Validate(); err != nil {
 		return "", err
 	}
@@ -133,13 +142,13 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 		X402Version: X402Version,
 		Accept: []AcceptEntry{
 			{
-				Scheme:            strings.ToLower(strings.TrimSpace(req.Scheme)),
-				Network:           strings.TrimSpace(req.Network),
-				Amount:            strings.TrimSpace(req.Amount),
-				MaxAmountRequired: strings.TrimSpace(req.MaxAmountRequired),
-				Asset:             strings.TrimSpace(req.Asset),
-				PayTo:             strings.TrimSpace(req.PayTo),
-				Resource:          strings.TrimSpace(req.Resource),
+				Scheme:            req.Scheme,
+				Network:           req.Network,
+				Amount:            req.Amount,
+				MaxAmountRequired: req.MaxAmountRequired,
+				Asset:             req.Asset,
+				PayTo:             req.PayTo,
+				Resource:          req.Resource,
 			},
 		},
 	}

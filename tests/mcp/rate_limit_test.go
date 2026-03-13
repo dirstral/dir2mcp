@@ -66,7 +66,8 @@ func TestRateLimit_TrafficBelowLimitPasses(t *testing.T) {
 		t.Fatalf("first request status=%d want=%d body=%s", first.Code, http.StatusOK, first.Body.String())
 	}
 
-	time.Sleep(150 * time.Millisecond)
+	// Allow enough margin for CI jitter before expecting a token refill at 10 RPS.
+	time.Sleep(300 * time.Millisecond)
 
 	second := initializeRequestFromIP(t, handler, cfg.MCPPath, "198.51.100.30", "127.0.0.1:5003")
 	if second.Code != http.StatusOK {
@@ -205,7 +206,7 @@ func initializeRequestFromXFF(t *testing.T, handler http.Handler, path, xff, rem
 	return rr
 }
 
-func initializeRequestFromIP(t *testing.T, handler http.Handler, path, ip, remoteAddr string) *httptest.ResponseRecorder {
+func initializeRequestFromIP(t *testing.T, handler http.Handler, path, xffIP, remoteAddr string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	reqBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
@@ -214,8 +215,8 @@ func initializeRequestFromIP(t *testing.T, handler http.Handler, path, ip, remot
 	if remoteAddr != "" {
 		req.RemoteAddr = remoteAddr
 	}
-	if ip != "" {
-		req.Header.Set("X-Forwarded-For", ip)
+	if xffIP != "" {
+		req.Header.Set("X-Forwarded-For", xffIP)
 	}
 
 	rr := httptest.NewRecorder()

@@ -165,12 +165,10 @@ func TestVerify_ResponseTooLarge_HtmlProxy(t *testing.T) {
 	}
 }
 
-// When the facilitator returns a non-2xx status we include a copy of the
-// normalized response in FacilitatorError.Body.  That payload should be
-// redacted/truncated so that large or sensitive fields are not exposed.
-func TestVerify_BodyRedactedOnError(t *testing.T) {
-	secret := strings.Repeat("x", 2000)
-	orig := fmt.Sprintf(`{"ok":false,"secret":%q}`, secret)
+// When the facilitator returns a non-2xx status the error message must be a
+// generic, non-secret summary — no facilitator-provided text and no raw body.
+func TestVerify_ErrorIsGenericOnNonSuccess(t *testing.T) {
+	orig := `{"ok":false,"secret":"topsecret","message":"do not copy this"}`
 	resp := &http.Response{
 		StatusCode: 400,
 		Header:     make(http.Header),
@@ -204,128 +202,17 @@ func TestVerify_BodyRedactedOnError(t *testing.T) {
 	if !errors.As(err, &fe) {
 		t.Fatalf("expected FacilitatorError, got %v", err)
 	}
-	if strings.Contains(fe.Body, secret) {
-		t.Errorf("body contains full secret, should be redacted or truncated")
+	// Body must be empty — no raw facilitator payload exposed.
+	if fe.Body != "" {
+		t.Errorf("expected empty Body, got %q", fe.Body)
 	}
-	if !strings.Contains(fe.Body, "[REDACTED]") {
-		t.Errorf("expected redacted value in body, got %q", fe.Body)
+	// Message must be the generic format, not facilitator-provided text.
+	want := "facilitator verify request failed with status 400"
+	if fe.Message != want {
+		t.Errorf("expected generic message %q, got %q", want, fe.Message)
 	}
-}
-
-// Nested sensitive fields (in maps and arrays) should also be scrubbed.
-func TestVerify_BodyRedactedOnError_Nested(t *testing.T) {
-	secret := "topsecret"
-	orig := fmt.Sprintf(`{
-		"ok":false,
-		"nested": {"password": %q, "inner": {"apiKey":"abc"}},
-		"arr": [{"bearer":"token"},"plain"],
-		"secret": %q
-	}`, "pw", secret)
-	resp := &http.Response{
-		StatusCode: 400,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(bytes.NewBufferString(orig)),
-		Request: &http.Request{
-			Method: http.MethodPost,
-			URL:    &url.URL{Scheme: "https", Host: "api.example.com", Path: "/"},
-		},
-	}
-	resp.Header.Set("Content-Type", "application/json")
-
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return resp, nil
-	})
-
-	client := x402.NewHTTPClient("https://facilitator.test", "token", &http.Client{Transport: rt})
-	req := x402.Requirement{
-		Scheme:            "exact",
-		Network:           "foo:bar",
-		Amount:            "1",
-		MaxAmountRequired: "1",
-		Asset:             "asset",
-		PayTo:             "pay",
-		Resource:          "res",
-	}
-	_, err := client.Verify(context.Background(), "sig", req)
-	if err == nil {
-		t.Fatalf("expected error from bad status code")
-	}
-	var fe *x402.FacilitatorError
-	if !errors.As(err, &fe) {
-		t.Fatalf("expected FacilitatorError, got %v", err)
-	}
-	if strings.Contains(fe.Body, "pw") || strings.Contains(fe.Body, "abc") || strings.Contains(fe.Body, "token") || strings.Contains(fe.Body, secret) {
-		t.Errorf("nested sensitive values leaked: %s", fe.Body)
-	}
-	count := strings.Count(fe.Body, "[REDACTED]")
-	if count < 4 {
-		t.Errorf("expected at least 4 redactions; got %d body=%s", count, fe.Body)
-	}
-}
-
-// When a structured payload includes a long message key we should still
-// truncate the returned error message.  This covers the top‑level "message"
-// case plus nested maps such as {"error":{"message":"…"}} and simple
-// "reason" keys.  All branches pass through truncateString(…,256).
-func TestVerify_MessageTruncatedOnStructuredPayload(t *testing.T) {
-	long := strings.Repeat("a", 300)
-	testCases := []struct {
-		name    string
-		payload string
-	}{
-		{"top", fmt.Sprintf(`{"message":%q}`, long)},
-		{"nested", fmt.Sprintf(`{"error":{"message":%q}}`, long)},
-		{"reason", fmt.Sprintf(`{"reason":%q}`, long)},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := &http.Response{
-				StatusCode: 400,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(bytes.NewBufferString(tc.payload)),
-				Request: &http.Request{
-					Method: http.MethodPost,
-					URL:    &url.URL{Scheme: "https", Host: "api.example.com", Path: "/"},
-				},
-			}
-			resp.Header.Set("Content-Type", "application/json")
-
-			rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				return resp, nil
-			})
-
-			client := x402.NewHTTPClient("https://facilitator.test", "token", &http.Client{Transport: rt})
-			req := x402.Requirement{
-				Scheme:            "exact",
-				Network:           "foo:bar",
-				Amount:            "1",
-				MaxAmountRequired: "1",
-				Asset:             "asset",
-				PayTo:             "pay",
-				Resource:          "res",
-			}
-			_, err := client.Verify(context.Background(), "sig", req)
-			if err == nil {
-				t.Fatalf("expected error from bad status code")
-			}
-			var fe *x402.FacilitatorError
-			if !errors.As(err, &fe) {
-				t.Fatalf("expected FacilitatorError, got %v", err)
-			}
-			// maxContentRunes is the maximum number of runes allowed for the
-			// *content portion* of the error message. The truncation indicator
-			// string (`sel`) may be appended afterward, so the total length of
-			// `fe.Message` is allowed to exceed maxContentRunes by len(sel).
-			maxContentRunes := 256
-			sel := "… (truncated)"
-			if !strings.Contains(fe.Message, sel) {
-				t.Errorf("expected truncation indicator %q, got %q", sel, fe.Message)
-			}
-			if len([]rune(fe.Message)) > maxContentRunes+len([]rune(sel)) {
-				t.Errorf("message too long after truncation (%d runes); %q", len([]rune(fe.Message)), fe.Message)
-			}
-		})
+	if strings.Contains(fe.Message, "do not copy this") || strings.Contains(fe.Message, "topsecret") {
+		t.Errorf("facilitator-provided text leaked into message: %q", fe.Message)
 	}
 }
 
