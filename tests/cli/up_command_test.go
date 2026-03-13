@@ -26,7 +26,6 @@ import (
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
-	"github.com/dirstral/dirstral-spec/protocol"
 	"dir2mcp/internal/store"
 )
 
@@ -121,11 +120,11 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	if connection.Transport != "mcp_streamable_http" {
 		t.Fatalf("unexpected transport: %q", connection.Transport)
 	}
-	if !strings.HasSuffix(connection.URL, protocol.DefaultMCPPath) {
+	if !strings.HasSuffix(connection.URL, "/mcp") {
 		t.Fatalf("unexpected connection URL: %q", connection.URL)
 	}
-	if connection.Headers[protocol.MCPProtocolVersionHeader] != config.DefaultProtocolVersion {
-		t.Fatalf("unexpected protocol version header: %q", connection.Headers[protocol.MCPProtocolVersionHeader])
+	if connection.Headers["MCP-Protocol-Version"] != "2025-11-25" {
+		t.Fatalf("unexpected protocol version header: %q", connection.Headers["MCP-Protocol-Version"])
 	}
 	if connection.TokenSource != "secret.token" {
 		t.Fatalf("unexpected token_source: %q", connection.TokenSource)
@@ -139,7 +138,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	if !connection.Session.UsesMCPSessionID {
 		t.Fatal("expected session.uses_mcp_session_id=true")
 	}
-	if connection.Session.HeaderName != protocol.MCPSessionHeader {
+	if connection.Session.HeaderName != "MCP-Session-Id" {
 		t.Fatalf("unexpected session.header_name: %q", connection.Session.HeaderName)
 	}
 	if !connection.Session.AssignedOnInitialize {

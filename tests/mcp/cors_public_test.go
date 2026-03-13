@@ -11,7 +11,7 @@ import (
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
-	"github.com/dirstral/dirstral-spec/protocol"
+	"dir2mcp/internal/protocol"
 )
 
 // TestCORS_PreflightReturns204 verifies allowed-origin preflight requests return 204 with CORS headers.

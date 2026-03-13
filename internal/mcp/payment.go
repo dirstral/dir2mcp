@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dirstral/dirstral-spec/x402"
+	"dir2mcp/internal/x402"
 )
 
 type paymentExecutionOutcome struct {
@@ -110,12 +110,8 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		s.handlePaymentFailure(w, id, "verify", err, executionKey)
 		return
 	}
-	s.emitPaymentEvent("info", "payment_verified", map[string]interface{}{
-		"response": json.RawMessage(verifyResponse),
-	})
-	s.appendPaymentLog("payment_verified", map[string]interface{}{
-		"response": json.RawMessage(verifyResponse),
-	})
+	s.emitPaymentEvent("info", "payment_verified", safePaymentResponseFields(verifyResponse))
+	s.appendPaymentLog("payment_verified", safePaymentResponseFields(verifyResponse))
 
 	result, statusCode, rpcErr := s.processToolsCall(ctx, rawParams)
 	outcome := paymentExecutionOutcome{
@@ -163,12 +159,8 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 	}
 	s.replayPaymentExecutionOutcome(w, id, updated)
 
-	s.emitPaymentEvent("info", "payment_settled", map[string]interface{}{
-		"response": json.RawMessage(settleResponse),
-	})
-	s.appendPaymentLog("payment_settled", map[string]interface{}{
-		"response": json.RawMessage(settleResponse),
-	})
+	s.emitPaymentEvent("info", "payment_settled", safePaymentResponseFields(settleResponse))
+	s.appendPaymentLog("payment_settled", safePaymentResponseFields(settleResponse))
 }
 
 func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, operation string, err error, executionKey string) {
@@ -269,14 +261,10 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 	}
 	s.replayPaymentExecutionOutcome(w, id, updated)
 
-	s.emitPaymentEvent("info", "payment_settled", map[string]interface{}{
-		"response": json.RawMessage(settleResponse),
-		"replay":   true,
-	})
-	s.appendPaymentLog("payment_settled", map[string]interface{}{
-		"response": json.RawMessage(settleResponse),
-		"replay":   true,
-	})
+	fields := safePaymentResponseFields(settleResponse)
+	fields["replay"] = true
+	s.emitPaymentEvent("info", "payment_settled", fields)
+	s.appendPaymentLog("payment_settled", fields)
 	return true
 }
 
@@ -543,6 +531,30 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 	}
 
 	// done successfully
+}
+
+// safePaymentResponseFields returns a log-safe subset of a facilitator
+// response, including only explicitly allowed fields to avoid recording
+// unexpected or sensitive fields that the facilitator may add in future.
+func safePaymentResponseFields(raw json.RawMessage) map[string]interface{} {
+	allowed := []string{"ok", "txHash", "status", "network", "amount"}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return map[string]interface{}{}
+	}
+	out := make(map[string]interface{}, len(allowed))
+	for _, key := range allowed {
+		v, ok := parsed[key]
+		if !ok {
+			continue
+		}
+		switch v.(type) {
+		case string, float64, bool, nil:
+			out[key] = v
+		// skip nested objects and arrays
+		}
+	}
+	return out
 }
 
 func (s *Server) emitPaymentLogWarning(err error) {
