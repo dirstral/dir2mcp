@@ -1,4 +1,4 @@
-package mcp
+package tests
 
 import (
 	"context"
@@ -6,48 +6,50 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/mcp"
 )
 
 func TestNewTransport_Legacy(t *testing.T) {
-	srv := NewServer(config.Config{}, nil)
-	tr, err := NewTransport("legacy", srv, "", "")
+	srv := mcp.NewServer(config.Config{}, nil)
+	tr, err := mcp.NewTransport("legacy", srv, "", "")
 	if err != nil {
 		t.Fatalf("NewTransport legacy: %v", err)
 	}
-	if _, ok := tr.(*LegacyTransport); !ok {
-		t.Fatalf("expected *LegacyTransport, got %T", tr)
+	if _, ok := tr.(*mcp.LegacyTransport); !ok {
+		t.Fatalf("expected *mcp.LegacyTransport, got %T", tr)
 	}
 }
 
 func TestNewTransport_DefaultsToLegacy(t *testing.T) {
-	t.Setenv(transportModeEnvVar, "")
-	srv := NewServer(config.Config{}, nil)
-	tr, err := NewTransport("", srv, "", "")
+	t.Setenv("MCP_TRANSPORT", "")
+	srv := mcp.NewServer(config.Config{}, nil)
+	tr, err := mcp.NewTransport("", srv, "", "")
 	if err != nil {
 		t.Fatalf("NewTransport empty mode: %v", err)
 	}
-	if _, ok := tr.(*LegacyTransport); !ok {
-		t.Fatalf("expected *LegacyTransport, got %T", tr)
+	if _, ok := tr.(*mcp.LegacyTransport); !ok {
+		t.Fatalf("expected *mcp.LegacyTransport, got %T", tr)
 	}
 }
 
 func TestNewTransport_EnvVar(t *testing.T) {
-	t.Setenv(transportModeEnvVar, "legacy")
-	srv := NewServer(config.Config{}, nil)
-	tr, err := NewTransport("", srv, "", "")
+	t.Setenv("MCP_TRANSPORT", "legacy")
+	srv := mcp.NewServer(config.Config{}, nil)
+	tr, err := mcp.NewTransport("", srv, "", "")
 	if err != nil {
 		t.Fatalf("NewTransport env=legacy: %v", err)
 	}
-	if _, ok := tr.(*LegacyTransport); !ok {
-		t.Fatalf("expected *LegacyTransport, got %T", tr)
+	if _, ok := tr.(*mcp.LegacyTransport); !ok {
+		t.Fatalf("expected *mcp.LegacyTransport, got %T", tr)
 	}
 }
 
 func TestNewTransport_SDK_NotImplemented(t *testing.T) {
-	srv := NewServer(config.Config{}, nil)
-	_, err := NewTransport("sdk", srv, "", "")
+	srv := mcp.NewServer(config.Config{}, nil)
+	_, err := mcp.NewTransport("sdk", srv, "", "")
 	if err == nil {
 		t.Fatal("expected error for sdk transport")
 	}
@@ -57,8 +59,8 @@ func TestNewTransport_SDK_NotImplemented(t *testing.T) {
 }
 
 func TestNewTransport_Unknown(t *testing.T) {
-	srv := NewServer(config.Config{}, nil)
-	_, err := NewTransport("bogus", srv, "", "")
+	srv := mcp.NewServer(config.Config{}, nil)
+	_, err := mcp.NewTransport("bogus", srv, "", "")
 	if err == nil {
 		t.Fatal("expected error for unknown transport")
 	}
@@ -67,9 +69,22 @@ func TestNewTransport_Unknown(t *testing.T) {
 	}
 }
 
+func TestLegacyTransport_NilGuard(t *testing.T) {
+	var tr *mcp.LegacyTransport
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	err = tr.Serve(context.Background(), ln)
+	if err == nil {
+		t.Fatal("expected error for nil transport")
+	}
+}
+
 func TestLegacyTransport_Serve(t *testing.T) {
-	srv := NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
-	tr := NewLegacyTransport(srv, "", "")
+	srv := mcp.NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
+	tr := mcp.NewLegacyTransport(srv, "", "")
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -83,16 +98,16 @@ func TestLegacyTransport_Serve(t *testing.T) {
 		done <- tr.Serve(ctx, ln)
 	}()
 
-	// Make a real HTTP request through the transport.
+	client := &http.Client{Timeout: 3 * time.Second}
 	url := "http://" + ln.Addr().String() + "/mcp"
 	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	resp, err := http.Post(url, "application/json", body)
+	resp, err := client.Post(url, "application/json", body)
 	if err != nil {
 		cancel()
 		t.Fatalf("POST /mcp: %v", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 600 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		cancel()
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}

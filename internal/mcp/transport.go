@@ -41,6 +41,9 @@ func NewLegacyTransport(server *Server, certFile, keyFile string) *LegacyTranspo
 
 // Serve implements [Transport] by delegating to the underlying [Server].
 func (t *LegacyTransport) Serve(ctx context.Context, ln net.Listener) error {
+	if t == nil || t.server == nil {
+		return errors.New("legacy transport requires a non-nil server")
+	}
 	if (t.certFile == "") != (t.keyFile == "") {
 		return fmt.Errorf("legacy transport TLS configuration requires both certFile and keyFile")
 	}
