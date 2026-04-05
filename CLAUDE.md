@@ -75,6 +75,7 @@ Requires `HOMEBREW_TAP_GITHUB_TOKEN` to be set as a repository secret (a PAT wit
 
 ## PR checklist
 
+- [ ] `coderabbit review` run and findings addressed
 - [ ] `make check` passes locally
 - [ ] New/changed behavior has test coverage
 - [ ] `README.md` and `docs/` remain truthful
