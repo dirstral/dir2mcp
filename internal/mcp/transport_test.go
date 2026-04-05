@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -67,7 +68,7 @@ func TestNewTransport_Unknown(t *testing.T) {
 }
 
 func TestLegacyTransport_Serve(t *testing.T) {
-	srv := NewServer(config.Config{MCPPath: "/mcp"}, nil)
+	srv := NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
 	tr := NewLegacyTransport(srv, "", "")
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -82,7 +83,20 @@ func TestLegacyTransport_Serve(t *testing.T) {
 		done <- tr.Serve(ctx, ln)
 	}()
 
-	// cancel context to stop the server
+	// Make a real HTTP request through the transport.
+	url := "http://" + ln.Addr().String() + "/mcp"
+	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	resp, err := http.Post(url, "application/json", body)
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /mcp: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 600 {
+		cancel()
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Serve returned unexpected error: %v", err)
