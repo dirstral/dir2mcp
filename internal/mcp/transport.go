@@ -5,79 +5,77 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"strings"
+	"net/http"
 )
 
-// Transport abstracts how the MCP server serves accepted connections.
-// Implementations accept and serve on the provided listener until ctx is
-// cancelled or a fatal error occurs. The caller creates and closes the
-// listener.
+// Handler is the MCP request dispatcher.  It is intentionally identical to
+// http.Handler so that the existing Server implementation can expose a
+// compatible handler via Server.Handler() without any wrapping, and so that
+// future SDK-based implementations can produce a compatible handler with
+// minimal adaptation.
+type Handler = http.Handler
+
+// Transport abstracts the wire-framing layer so that the hand-rolled HTTP
+// transport can be swapped for the official MCP Go SDK transport behind a
+// feature flag, without changing any externally-observable behavior.
+//
+// Serve runs until ctx is cancelled or a fatal error occurs.  The supplied
+// handler is responsible for all MCP request dispatch; the transport is only
+// responsible for accepting connections and framing messages.
 type Transport interface {
-	// Serve starts accepting connections on ln and blocks until ctx is done or
-	// an unrecoverable error occurs. The caller is responsible for closing ln
-	// after Serve returns.
-	Serve(ctx context.Context, ln net.Listener) error
+	Serve(ctx context.Context, handler Handler) error
 }
 
-// LegacyTransport wraps [Server] and delegates to its existing
-// RunOnListener / RunOnListenerTLS methods, preserving the current behaviour
-// with zero changes to the serving logic.
+// LegacyTransport is the hand-rolled HTTP/TCP transport that was the only
+// transport before the abstraction seam was introduced.  It delegates to
+// Server.runOnListener, which owns session cleanup, rate-limit cleanup,
+// payment-outcome cleanup, and graceful shutdown.
 type LegacyTransport struct {
 	server   *Server
+	listener net.Listener
 	certFile string
 	keyFile  string
 }
 
-// NewLegacyTransport creates a LegacyTransport for the given server.
-// Pass non-empty certFile and keyFile to enable TLS.
-func NewLegacyTransport(server *Server, certFile, keyFile string) *LegacyTransport {
+// NewLegacyTransport constructs a LegacyTransport.  certFile and keyFile are
+// optional; both must be non-empty to enable TLS (matching the existing
+// Server.RunOnListenerTLS contract).
+func NewLegacyTransport(server *Server, listener net.Listener, certFile, keyFile string) *LegacyTransport {
 	return &LegacyTransport{
 		server:   server,
-		certFile: strings.TrimSpace(certFile),
-		keyFile:  strings.TrimSpace(keyFile),
+		listener: listener,
+		certFile: certFile,
+		keyFile:  keyFile,
 	}
 }
 
-// Serve implements [Transport] by delegating to the underlying [Server].
-func (t *LegacyTransport) Serve(ctx context.Context, ln net.Listener) error {
+// Serve implements Transport.  The handler argument is accepted for interface
+// compatibility but is intentionally unused: LegacyTransport delegates
+// entirely to Server.runOnListener, which calls Server.Handler() internally to
+// produce its own http.Handler.  Any future SDK-based transport would use the
+// handler argument directly.
+func (t *LegacyTransport) Serve(ctx context.Context, _ Handler) error {
 	if t == nil || t.server == nil {
-		return errors.New("legacy transport requires a non-nil server")
+		return errors.New("legacy transport: nil server")
 	}
-	if (t.certFile == "") != (t.keyFile == "") {
-		return fmt.Errorf("legacy transport TLS configuration requires both certFile and keyFile")
+	if t.listener == nil {
+		return errors.New("legacy transport: nil listener")
 	}
-	if t.certFile != "" && t.keyFile != "" {
-		return t.server.RunOnListenerTLS(ctx, ln, t.certFile, t.keyFile)
-	}
-	return t.server.RunOnListener(ctx, ln)
+	return t.server.runOnListener(ctx, t.listener, t.certFile, t.keyFile)
 }
 
-// transportModeEnvVar is the environment variable that selects the transport
-// implementation.  Recognised values: "legacy" (default), "sdk".
-const transportModeEnvVar = "MCP_TRANSPORT"
-
-// NewTransport is a factory that returns a [Transport] based on the mode
-// string.  If mode is empty the value of the MCP_TRANSPORT environment
-// variable is used; if that is also empty the default is "legacy".
-//
-// Supported modes:
-//   - "legacy" – [LegacyTransport] backed by the existing HTTP server.
-//   - "sdk"    – not yet implemented; returns an error.
-func NewTransport(mode string, server *Server, certFile, keyFile string) (Transport, error) {
-	if strings.TrimSpace(mode) == "" {
-		mode = strings.TrimSpace(os.Getenv(transportModeEnvVar))
-	}
-	if strings.TrimSpace(mode) == "" {
-		mode = "legacy"
-	}
-
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "legacy":
-		return NewLegacyTransport(server, certFile, keyFile), nil
+// NewTransport returns a Transport for the given mode string.  mode should be
+// one of "legacy" or "sdk"; an empty string defaults to "legacy".  Callers
+// typically source mode from the MCP_TRANSPORT environment variable.
+// Currently only "legacy" is implemented; "sdk" returns an error so the
+// feature-flag wire-up exists and can be extended in a follow-up.
+func NewTransport(mode string, server *Server, listener net.Listener, certFile, keyFile string) (Transport, error) {
+	switch mode {
+	case "", "legacy":
+		return NewLegacyTransport(server, listener, certFile, keyFile), nil
 	case "sdk":
-		return nil, errors.New("transport mode \"sdk\": not yet implemented")
+		return nil, errors.New("MCP_TRANSPORT=sdk: not yet implemented")
 	default:
-		return nil, fmt.Errorf("transport mode %q: unknown transport mode", mode)
+		return nil, fmt.Errorf("MCP_TRANSPORT=%q: unknown transport mode (valid: legacy, sdk)", mode)
 	}
 }
