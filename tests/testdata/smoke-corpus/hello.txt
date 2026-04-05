@@ -1,0 +1,3 @@
+Hello from the smoke-test corpus.
+
+This file exists so the inspector smoke test has something to index.

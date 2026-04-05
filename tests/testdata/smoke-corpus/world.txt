@@ -1,0 +1,3 @@
+A second smoke-test document.
+
+dir2mcp indexes this file alongside hello.txt.

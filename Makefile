@@ -13,7 +13,7 @@ build-dir2mcp:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt vet lint test check ci benchmark
+.PHONY: all clean clean-all help fmt vet lint test check ci benchmark inspector-smoke
 
 all: check
 
@@ -28,7 +28,8 @@ help:
 	@echo "  test   - run go test"
 	@echo "  check  - fmt + vet + lint + test + build"
 	@echo "  ci     - vet + test (CI-safe default)"
-	@echo "  benchmark - run the large-corpus retrieval benchmark"
+	@echo "  benchmark        - run the large-corpus retrieval benchmark"
+	@echo "  inspector-smoke  - build and run MCP inspector headless smoke test"
 
 fmt:
 	gofmt -w $$(find cmd internal tests -name '*.go')
@@ -50,6 +51,10 @@ ci: vet test
 benchmark:
 	# run the large-corpus retrieval benchmark only
 	go test -bench BenchmarkSearchBothLargeCorpus -run ^$$ -benchmem ./internal/retrieval
+
+SMOKE_CORPUS ?= tests/testdata/smoke-corpus
+inspector-smoke: build
+	bash scripts/inspector-smoke.sh ./dir2mcp "$(SMOKE_CORPUS)"
 
 clean:
 	rm -f dir2mcp coverage.out
