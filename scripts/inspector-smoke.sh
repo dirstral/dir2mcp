@@ -67,10 +67,12 @@ echo "[smoke] dir2mcp pid=${SERVER_PID} url=${MCP_URL}"
 # response both confirm the server is up.
 TIMEOUT=10
 elapsed=0
-until curl -sf -o /dev/null --max-time 1 \
-      -X POST "$MCP_URL" \
-      -H "Content-Type: application/json" \
-      -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}' 2>/dev/null; do
+until status_code="$(
+  curl -s -o /dev/null -w "%{http_code}" --max-time 1 \
+    -X POST "$MCP_URL" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}' 2>/dev/null || true
+)"; [[ "$status_code" =~ ^[24][0-9][0-9]$ ]]; do
   if [[ $elapsed -ge $TIMEOUT ]]; then
     echo "[smoke] ERROR: server did not become ready within ${TIMEOUT}s" >&2
     exit 1

@@ -9,9 +9,10 @@ import (
 )
 
 // Handler is the MCP request dispatcher.  It is intentionally identical to
-// http.Handler so that the existing Server implementation satisfies it without
-// any wrapping, and so that future SDK-based implementations can produce a
-// compatible handler with minimal adaptation.
+// http.Handler so that the existing Server implementation can expose a
+// compatible handler via Server.Handler() without any wrapping, and so that
+// future SDK-based implementations can produce a compatible handler with
+// minimal adaptation.
 type Handler = http.Handler
 
 // Transport abstracts the wire-framing layer so that the hand-rolled HTTP
@@ -54,16 +55,17 @@ func NewLegacyTransport(server *Server, listener net.Listener, certFile, keyFile
 // produce its own http.Handler.  Any future SDK-based transport would use the
 // handler argument directly.
 func (t *LegacyTransport) Serve(ctx context.Context, _ Handler) error {
+	if t == nil || t.server == nil {
+		return errors.New("legacy transport: nil server")
+	}
 	return t.server.runOnListener(ctx, t.listener, t.certFile, t.keyFile)
 }
 
-// NewTransport is the factory that selects a Transport implementation based on
-// the value of the MCP_TRANSPORT environment variable.  Currently only
-// "legacy" (the default) is implemented; "sdk" returns an error so the
+// NewTransport returns a Transport for the given mode string.  mode should be
+// one of "legacy" or "sdk"; an empty string defaults to "legacy".  Callers
+// typically source mode from the MCP_TRANSPORT environment variable.
+// Currently only "legacy" is implemented; "sdk" returns an error so the
 // feature-flag wire-up exists and can be extended in a follow-up.
-//
-// mode should be one of "legacy" or "sdk".  An empty string is treated as
-// "legacy".
 func NewTransport(mode string, server *Server, listener net.Listener, certFile, keyFile string) (Transport, error) {
 	switch mode {
 	case "", "legacy":

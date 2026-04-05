@@ -551,7 +551,7 @@ func safePaymentResponseFields(raw json.RawMessage) map[string]interface{} {
 		switch v.(type) {
 		case string, float64, bool, nil:
 			out[key] = v
-		// skip nested objects and arrays
+			// skip nested objects and arrays
 		}
 	}
 	return out
