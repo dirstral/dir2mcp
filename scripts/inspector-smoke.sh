@@ -13,8 +13,24 @@ set -euo pipefail
 BINARY="${1:?first arg must be path to dir2mcp binary}"
 CORPUS="${2:?second arg must be path to corpus directory}"
 
-# Use a fixed port in the ephemeral range.
-PORT=18765
+# Allow callers to override the port; otherwise pick an available local port.
+choose_port() {
+  if [[ -n "${MCP_PORT:-}" ]]; then
+    printf '%s\n' "$MCP_PORT"
+    return
+  fi
+
+  python3 - <<'PY'
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.bind(("127.0.0.1", 0))
+print(sock.getsockname()[1])
+sock.close()
+PY
+}
+
+PORT="$(choose_port)"
 MCP_URL="http://127.0.0.1:${PORT}/mcp"
 
 SERVER_PID=""
