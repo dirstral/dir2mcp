@@ -11,7 +11,7 @@ import (
 // Handler is the MCP request dispatcher.  It is intentionally identical to
 // http.Handler so that the existing Server implementation satisfies it without
 // any wrapping, and so that future SDK-based implementations can produce a
-// compatible handler with minimal adaption.
+// compatible handler with minimal adaptation.
 type Handler = http.Handler
 
 // Transport abstracts the wire-framing layer so that the hand-rolled HTTP
