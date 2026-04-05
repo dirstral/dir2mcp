@@ -26,3 +26,21 @@ jobs:
       - name: Check
         run: make check
 
+  inspector-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run inspector smoke test
+        run: make inspector-smoke
+
