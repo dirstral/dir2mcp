@@ -785,13 +785,16 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	mcpURL := buildMCPURL(mcpAddr, cfg.MCPPath, tlsCertFile != "")
 
+	mcpTransportMode := strings.TrimSpace(os.Getenv("MCP_TRANSPORT"))
+	transport, err := mcp.NewTransport(mcpTransportMode, mcpServer, ln, tlsCertFile, tlsKeyFile)
+	if err != nil {
+		writef(a.stderr, "transport init: %v\n", err)
+		return exitConfigInvalid
+	}
+
 	serverErrCh := make(chan error, 1)
 	go func() {
-		if tlsCertFile != "" {
-			serverErrCh <- mcpServer.RunOnListenerTLS(runCtx, ln, tlsCertFile, tlsKeyFile)
-			return
-		}
-		serverErrCh <- mcpServer.RunOnListener(runCtx, ln)
+		serverErrCh <- transport.Serve(runCtx, mcpServer.Handler())
 	}()
 
 	emitter.Emit("info", "server_started", map[string]interface{}{
