@@ -9,12 +9,13 @@ import (
 	"strings"
 )
 
-// Transport abstracts how the MCP server accepts connections.
-// Implementations are responsible for listening and serving until ctx is
-// cancelled or a fatal error occurs.
+// Transport abstracts how the MCP server serves accepted connections.
+// Implementations accept and serve on the provided listener until ctx is
+// cancelled or a fatal error occurs. The caller creates and closes the
+// listener.
 type Transport interface {
 	// Serve starts accepting connections on ln and blocks until ctx is done or
-	// an unrecoverable error occurs.  The caller is responsible for closing ln
+	// an unrecoverable error occurs. The caller is responsible for closing ln
 	// after Serve returns.
 	Serve(ctx context.Context, ln net.Listener) error
 }
