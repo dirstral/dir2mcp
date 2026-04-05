@@ -67,9 +67,12 @@ func (f *parityMockFacilitator) ServeHTTP(w http.ResponseWriter, r *http.Request
 }
 
 // baseX402Config returns a fully-populated x402 config for use in tests that
-// need a working facilitator.
-func baseX402Config(facilitatorURL string) config.Config {
+// need a working facilitator.  StateDir is set to a per-test temporary
+// directory so that concurrent tests do not share payment log state.
+func baseX402Config(t *testing.T, facilitatorURL string) config.Config {
+	t.Helper()
 	cfg := config.Default()
+	cfg.StateDir = t.TempDir()
 	cfg.AuthMode = "none"
 	cfg.X402.ToolsCallEnabled = true
 	cfg.X402.FacilitatorURL = facilitatorURL
@@ -296,7 +299,7 @@ func TestParityModeOn_NoPaymentHeaderReturns402(t *testing.T) {
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -329,7 +332,7 @@ func TestParityModeOn_ValidPaymentAccepted(t *testing.T) {
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -357,7 +360,7 @@ func TestParityModeOn_ValidPaymentAccepted(t *testing.T) {
 }
 
 // TestParityModeOn_FacilitatorUnavailableIsRetryable verifies that when
-// mode=on and the facilitator is unreachable (connection refused), the server
+// mode=on and the facilitator returns a server error (HTTP 503), the server
 // returns a retryable 503.  This is fail-open at the transport level — the
 // caller can retry rather than treating the request as definitively rejected.
 func TestParityModeOn_FacilitatorUnavailableIsRetryable(t *testing.T) {
@@ -368,7 +371,7 @@ func TestParityModeOn_FacilitatorUnavailableIsRetryable(t *testing.T) {
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -449,7 +452,7 @@ func TestParityModeRequired_NoPaymentHeaderReturns402(t *testing.T) {
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -482,7 +485,7 @@ func TestParityModeRequired_ValidPaymentAccepted(t *testing.T) {
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -515,7 +518,7 @@ func TestParityModeRequired_FacilitatorUnavailableIsFailClosed(t *testing.T) {
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -558,7 +561,7 @@ func TestParityPaymentRequiredHeaderContainsValidJSON(t *testing.T) {
 		mode := mode
 		t.Run("mode="+mode, func(t *testing.T) {
 			t.Parallel()
-			cfg := baseX402Config(facSrv.URL)
+			cfg := baseX402Config(t, facSrv.URL)
 			cfg.X402.Mode = mode
 
 			srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -625,7 +628,7 @@ func TestParityModeOn_InvalidPaymentProofReturns402WithChallenge(t *testing.T) {
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -660,7 +663,7 @@ func TestParityModeRequired_InvalidPaymentProofReturns402WithChallenge(t *testin
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
-	cfg := baseX402Config(facSrv.URL)
+	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
 	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
