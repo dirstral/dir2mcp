@@ -396,18 +396,19 @@ func TestParityModeOn_FacilitatorUnavailableIsRetryable(t *testing.T) {
 // Mode: required
 // ---------------------------------------------------------------------------
 
-// TestParityModeRequired_MissingConfigRejectsAtStartup verifies that when
-// mode=required and the x402 config is incomplete, x402 gating is not enabled
-// (the server treats it as misconfigured and the payment gate does not arm).
+// TestParityModeRequired_MissingConfigReturns503WhenChallengeCannotBeBuilt
+// verifies the observable behaviour when mode=required is enabled with
+// incomplete x402 config: the server still starts, but tools/call returns 503
+// because it cannot build a valid PAYMENT-REQUIRED challenge from the empty
+// requirement fields.
 //
 // Note: unlike mode=on, mode=required with incomplete config still needs
 // explicit handling. The current implementation in initPaymentConfig only
 // calls ValidateX402(true) for mode=on; for mode=required, it always enables
-// gating if ToolsCallEnabled is true.  However, with an empty FacilitatorURL,
+// gating if ToolsCallEnabled is true. However, with an empty FacilitatorURL,
 // the x402 client itself will return CodePaymentConfigInvalid on any call,
-// leading to a 503 response — which is still gating, just with a different
-// error. This test validates the observable behaviour.
-func TestParityModeRequired_MissingConfigRejectsAtStartup(t *testing.T) {
+// leading to a 503 response. This test validates that runtime behaviour.
+func TestParityModeRequired_MissingConfigReturns503WhenChallengeCannotBeBuilt(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default()
 	cfg.AuthMode = "none"
