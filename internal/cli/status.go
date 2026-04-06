@@ -34,7 +34,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
 		if _, statErr := os.Stat(metaPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
-				writeln(a.stderr, "no state found in .dir2mcp; run: dir2mcp up")
+				writef(a.stderr, "no state found in %s; run: dir2mcp up\n", cfg.StateDir)
 				return exitGeneric
 			}
 			writef(a.stderr, "read state: %v\n", statErr)
