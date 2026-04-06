@@ -13,7 +13,7 @@ build-dir2mcp:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt vet lint test check ci benchmark inspector-smoke
+.PHONY: all clean clean-all help fmt vet lint test check ci benchmark inspector-smoke conformance
 
 all: check
 
@@ -28,6 +28,7 @@ help:
 	@echo "  test   - run go test"
 	@echo "  check  - fmt + vet + lint + test + build"
 	@echo "  ci     - vet + test (CI-safe default)"
+	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
 	@echo "  inspector-smoke  - build and run MCP inspector headless smoke test"
 
@@ -44,9 +45,12 @@ lint:
 test:
 	go test ./...
 
+conformance:
+	go test ./tests/conformance/...
+
 check: fmt vet lint test build
 
-ci: vet test
+ci: vet test conformance
 
 benchmark:
 	# run the large-corpus retrieval benchmark only
