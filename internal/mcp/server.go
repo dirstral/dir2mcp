@@ -216,7 +216,15 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(s.cfg.MCPPath, s.handleMCP)
+	mux.Handle(s.cfg.MCPPath, s.withMiddlewares(
+		http.HandlerFunc(s.handleMCP),
+		s.rateLimitMiddleware,
+		s.protocolValidationMiddleware,
+		s.authMiddleware,
+		s.originMiddleware,
+		s.rpcEnvelopeMiddleware,
+		s.x402Middleware,
+	))
 	return s.corsMiddleware(mux)
 }
 
@@ -347,104 +355,37 @@ func (s *Server) runOnListener(ctx context.Context, ln net.Listener, certFile, k
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	if s.rateLimiter != nil {
-		if !s.rateLimiter.allow(realIP(r, s.rateLimiter)) {
-			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimitExceeded, true)
-			return
-		}
-	}
-
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	rc, ok := r.Context().Value(requestContextKey{}).(requestContext)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, nil, -32603, "request context missing", "", false)
 		return
 	}
 
-	ct := r.Header.Get("Content-Type")
-	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
-		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
-		return
-	}
-
-	if !s.authorize(w, r) {
-		return
-	}
-
-	if !s.allowOrigin(w, r) {
-		return
-	}
-
-	req, parseErr := parseRequest(r.Body)
-	if parseErr != nil {
-		canonicalCode := "INVALID_FIELD"
-		var vErr validationError
-		if errors.As(parseErr, &vErr) && vErr.canonicalCode != "" {
-			canonicalCode = vErr.canonicalCode
-		}
-		writeError(w, http.StatusBadRequest, nil, -32600, parseErr.Error(), canonicalCode, false)
-		return
-	}
-
-	id, hasID, idErr := parseID(req.ID)
-	if idErr != nil {
-		canonicalCode := "INVALID_FIELD"
-		var vErr validationError
-		if errors.As(idErr, &vErr) && vErr.canonicalCode != "" {
-			canonicalCode = vErr.canonicalCode
-		}
-		writeError(w, http.StatusBadRequest, nil, -32600, idErr.Error(), canonicalCode, false)
-		return
-	}
-
-	if req.Method == "" {
-		writeError(w, http.StatusBadRequest, id, -32600, "method is required", "MISSING_FIELD", false)
-		return
-	}
-
-	if req.Method != "initialize" {
-		sessionID := strings.TrimSpace(r.Header.Get(protocol.MCPSessionHeader))
-		if sessionID == "" {
-			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-			return
-		}
-		if ok, reason := s.hasActiveSession(sessionID, time.Now()); !ok {
-			// optional diagnostic header
-			if reason != "" {
-				w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
-			}
-			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-			return
-		}
-	}
-
-	switch req.Method {
-	case "initialize":
-		s.handleInitialize(w, id, hasID)
-	case "notifications/initialized":
-		if !hasID {
+	switch rc.req.Method {
+	case protocol.RPCMethodInitialize:
+		s.handleInitialize(w, rc.id, rc.hasID)
+	case protocol.RPCMethodNotificationsInitialized:
+		if !rc.hasID {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		writeResult(w, http.StatusOK, id, map[string]interface{}{})
-	case "tools/list":
-		if !hasID {
+		writeResult(w, http.StatusOK, rc.id, map[string]interface{}{})
+	case protocol.RPCMethodToolsList:
+		if !rc.hasID {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		s.handleToolsList(w, id)
-	case "tools/call":
-		if !hasID {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		s.handleToolsCallRequest(r.Context(), w, r, req.Params, id)
+		s.handleToolsList(w, rc.id)
+	case protocol.RPCMethodToolsCall:
+		// tools/call is intercepted by x402Middleware, which preserves both
+		// x402-enabled and x402-disabled execution paths via handleToolsCallRequest.
+		writeError(w, http.StatusInternalServerError, rc.id, -32603, "tools/call middleware not configured", "", false)
 	default:
-		if !hasID {
+		if !rc.hasID {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		writeError(w, http.StatusOK, id, -32601, "method not found", "METHOD_NOT_FOUND", false)
+		writeError(w, http.StatusOK, rc.id, -32601, "method not found", "METHOD_NOT_FOUND", false)
 	}
 }
 
