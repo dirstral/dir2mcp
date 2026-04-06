@@ -39,6 +39,12 @@ dir2mcp is a single-binary Go service that indexes local directory content and s
 
 ## Mandatory commands
 
+Run before committing:
+
+```bash
+coderabbit review
+```
+
 Run before proposing merge:
 
 ```bash
