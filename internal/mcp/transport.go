@@ -59,7 +59,7 @@ func (t *LegacyTransport) Serve(ctx context.Context, _ Handler) error {
 		return errors.New("legacy transport: nil server")
 	}
 	if t.listener == nil {
-		return errors.New("legacy transport: nil listener")
+		return errors.New("nil listener passed to RunOnListener")
 	}
 	return t.server.runOnListener(ctx, t.listener, t.certFile, t.keyFile)
 }
