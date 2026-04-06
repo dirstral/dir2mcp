@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"os"
 	"testing"
-
-	"dir2mcp/internal/protocol"
 )
 
 // TestTools_ListContainsExpectedTools verifies that tools/list returns a list
@@ -46,10 +44,10 @@ func TestTools_ListContainsExpectedTools(t *testing.T) {
 	}
 
 	required := []string{
-		protocol.ToolNameListFiles,
-		protocol.ToolNameSearch,
-		protocol.ToolNameOpenFile,
-		protocol.ToolNameAsk,
+		"dir2mcp.list_files",
+		"dir2mcp.search",
+		"dir2mcp.open_file",
+		"dir2mcp.ask",
 	}
 	for _, name := range required {
 		if !nameSet[name] {

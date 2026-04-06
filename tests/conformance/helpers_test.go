@@ -1,9 +1,9 @@
-// Package conformance contains black-box conformance tests that drive the
-// dir2mcp MCP server over HTTP and assert externally-observable behaviour:
-// tool response shapes, error codes, session lifecycle, and x402 header
-// behaviour.  All tests construct the server using mcp.NewServer + httptest and
-// drive it with raw JSON-RPC payloads via net/http — no internal functions are
-// called directly from the test assertions.
+// Package conformance contains conformance tests that drive the dir2mcp MCP
+// server over HTTP and assert externally-observable behaviour: tool response
+// shapes, error codes, session lifecycle, and x402 header behaviour.  Tests
+// construct the server in-process using mcp.NewServer + httptest and drive it
+// exclusively with raw JSON-RPC payloads via net/http — assertions are made
+// only against HTTP responses, not against internal state.
 package conformance
 
 import (
@@ -183,7 +183,7 @@ func statsCallBody(id int) string {
 // targeting the given directory.
 func listFilesCallBody(id int, dir string) string {
 	b, _ := json.Marshal(dir)
-	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"path":` + string(b) + `}}}`
+	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"path_prefix":` + string(b) + `}}}`
 }
 
 // headerPresent returns true if the named header is set and non-empty.
