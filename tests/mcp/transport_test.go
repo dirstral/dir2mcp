@@ -29,7 +29,6 @@ func TestNewTransport_Legacy(t *testing.T) {
 }
 
 func TestNewTransport_DefaultsToLegacy(t *testing.T) {
-	t.Setenv("MCP_TRANSPORT", "")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
