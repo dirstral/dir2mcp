@@ -1,0 +1,3 @@
+[submodule "dirstral-spec"]
+	path = dirstral-spec
+	url = https://github.com/dirstral/dirstral-spec.git

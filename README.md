@@ -46,10 +46,13 @@ dir2mcp version
 Build-from-source remains available as an alternative:
 
 ```bash
-git clone https://github.com/Dirstral/dir2mcp
+git clone --recurse-submodules https://github.com/Dirstral/dir2mcp
 cd dir2mcp
 make build
 ```
+
+> **Existing clones:** run `git submodule update --init --recursive` to fetch the `dirstral-spec` submodule.
+> To update the spec to the latest pinned version: `git submodule update --remote dirstral-spec`.
 
 ## Runtime Prerequisites (By Scenario)
 
