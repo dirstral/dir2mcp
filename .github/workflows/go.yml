@@ -28,6 +28,20 @@ jobs:
       - name: Check
         run: make check
 
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run conformance tests
+        run: make conformance
+
   inspector-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 5
