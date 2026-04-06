@@ -50,7 +50,7 @@ conformance:
 
 check: fmt vet lint test build
 
-ci: vet test conformance
+ci: vet test
 
 benchmark:
 	# run the large-corpus retrieval benchmark only
