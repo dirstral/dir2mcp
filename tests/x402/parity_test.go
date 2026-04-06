@@ -45,8 +45,8 @@ func newParityFacilitator() *parityMockFacilitator {
 	return &parityMockFacilitator{
 		verifyStatus: http.StatusOK,
 		settleStatus: http.StatusOK,
-		verifyBody:   `{"ok":true}`,
-		settleBody:   `{"ok":true}`,
+		verifyBody:   `{"ok":true,"isValid":true,"payer":"payer-1"}`,
+		settleBody:   `{"ok":true,"success":true,"transaction":"tx-1","txHash":"tx-1","network":"eip155:8453"}`,
 	}
 }
 
@@ -57,7 +57,15 @@ func (f *parityMockFacilitator) ServeHTTP(w http.ResponseWriter, r *http.Request
 		f.verifyCalls.Add(1)
 		w.WriteHeader(f.verifyStatus)
 		_, _ = w.Write([]byte(f.verifyBody))
+	case "/verify":
+		f.verifyCalls.Add(1)
+		w.WriteHeader(f.verifyStatus)
+		_, _ = w.Write([]byte(f.verifyBody))
 	case "/v2/x402/settle":
+		f.settleCalls.Add(1)
+		w.WriteHeader(f.settleStatus)
+		_, _ = w.Write([]byte(f.settleBody))
+	case "/settle":
 		f.settleCalls.Add(1)
 		w.WriteHeader(f.settleStatus)
 		_, _ = w.Write([]byte(f.settleBody))
@@ -327,8 +335,8 @@ func TestParityModeOn_NoPaymentHeaderReturns402(t *testing.T) {
 func TestParityModeOn_ValidPaymentAccepted(t *testing.T) {
 	t.Parallel()
 	fac := newParityFacilitator()
-	fac.verifyBody = `{"ok":true,"kind":"verify"}`
-	fac.settleBody = `{"ok":true,"kind":"settle","txHash":"abc"}`
+	fac.verifyBody = `{"ok":true,"isValid":true,"payer":"payer-1"}`
+	fac.settleBody = `{"ok":true,"success":true,"transaction":"abc","txHash":"abc","network":"eip155:8453"}`
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 
@@ -480,8 +488,8 @@ func TestParityModeRequired_NoPaymentHeaderReturns402(t *testing.T) {
 func TestParityModeRequired_ValidPaymentAccepted(t *testing.T) {
 	t.Parallel()
 	fac := newParityFacilitator()
-	fac.verifyBody = `{"ok":true}`
-	fac.settleBody = `{"ok":true,"txHash":"xyz"}`
+	fac.verifyBody = `{"ok":true,"isValid":true,"payer":"payer-1"}`
+	fac.settleBody = `{"ok":true,"success":true,"transaction":"xyz","txHash":"xyz","network":"eip155:8453"}`
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 

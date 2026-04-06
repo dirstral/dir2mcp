@@ -71,8 +71,8 @@ func TestX402ToolsCall_PaidRetrySucceedsAndReturnsPaymentResponse(t *testing.T) 
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusOK
 	fac.settleStatus = http.StatusOK
-	fac.verifyBody = `{"ok":true,"kind":"verify"}`
-	fac.settleBody = `{"ok":true,"kind":"settle","txHash":"abc123"}`
+	fac.verifyBody = `{"ok":true,"isValid":true,"payer":"payer-1"}`
+	fac.settleBody = `{"ok":true,"success":true,"transaction":"abc123","txHash":"abc123","network":"eip155:8453"}`
 	facServer := httptest.NewServer(fac)
 	defer facServer.Close()
 
@@ -278,7 +278,7 @@ func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *test
 	fac.settleStatuses = []int{http.StatusServiceUnavailable, http.StatusOK}
 	fac.settleBodies = []string{
 		`{"message":"settlement unavailable"}`,
-		`{"ok":true,"txHash":"abc123"}`,
+		`{"ok":true,"success":true,"transaction":"abc123","txHash":"abc123","network":"eip155:8453"}`,
 	}
 	facServer := httptest.NewServer(fac)
 	defer facServer.Close()
@@ -413,8 +413,8 @@ func newFacilitatorStub(t *testing.T) *facilitatorStub {
 		t:            t,
 		verifyStatus: http.StatusOK,
 		settleStatus: http.StatusOK,
-		verifyBody:   `{"ok":true}`,
-		settleBody:   `{"ok":true}`,
+		verifyBody:   `{"ok":true,"isValid":true,"payer":"payer-1"}`,
+		settleBody:   `{"ok":true,"success":true,"transaction":"tx-1","txHash":"tx-1","network":"eip155:8453"}`,
 	}
 	// initialize atomic values
 	f.lastAuthorization.Store("")
@@ -448,7 +448,28 @@ func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(f.verifyStatus)
 		_, _ = w.Write([]byte(f.verifyBody))
+	case "/verify":
+		f.verifyCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(f.verifyStatus)
+		_, _ = w.Write([]byte(f.verifyBody))
 	case "/v2/x402/settle":
+		status := f.settleStatus
+		body := f.settleBody
+		// compute an index atomically (get-and-increment) so concurrent
+		// requests don't race against each other. the returned value is the
+		// previous counter, so subtract one to use it as an index.
+		idx := int(f.settleCalls.Add(1) - 1)
+		if len(f.settleStatuses) > 0 {
+			status = f.settleStatuses[clampIndex(idx, len(f.settleStatuses))]
+		}
+		if len(f.settleBodies) > 0 {
+			body = f.settleBodies[clampIndex(idx, len(f.settleBodies))]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	case "/settle":
 		status := f.settleStatus
 		body := f.settleBody
 		// compute an index atomically (get-and-increment) so concurrent
