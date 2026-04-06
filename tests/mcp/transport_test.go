@@ -129,7 +129,12 @@ func TestLegacyTransport_Serve(t *testing.T) {
 	}
 
 	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("Serve returned unexpected error: %v", err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Serve to exit after context cancellation")
 	}
 }
