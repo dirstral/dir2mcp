@@ -79,7 +79,7 @@ type Server struct {
 
 	rateLimiter *ipRateLimiter
 
-	x402Client      *x402.HTTPClient
+	x402Client      x402.FacilitatorClient
 	x402Requirement x402.Requirement
 	x402Enabled     bool
 	paymentLogPath  string

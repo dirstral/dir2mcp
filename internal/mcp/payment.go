@@ -64,7 +64,7 @@ func (s *Server) initPaymentConfig() {
 		PayTo:             strings.TrimSpace(s.cfg.X402.PayTo),
 		Resource:          strings.TrimSpace(buildPaymentResourceURL(s.cfg.X402.ResourceBaseURL, s.cfg.MCPPath)),
 	}
-	s.x402Client = x402.NewHTTPClient(s.cfg.X402.FacilitatorURL, s.cfg.X402.FacilitatorToken, nil)
+	s.x402Client = x402.NewFacilitatorClient(s.cfg.X402.FacilitatorURL, s.cfg.X402.FacilitatorToken, nil)
 	s.x402Enabled = true
 	s.paymentLogPath = filepath.Join(s.cfg.StateDir, "payments", "settlement.log")
 }
