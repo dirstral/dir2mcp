@@ -248,6 +248,54 @@ func TestSDKTransport_X402MissingPaymentSignature(t *testing.T) {
 	}
 }
 
+func TestSDKTransport_RejectsOversizedBody(t *testing.T) {
+	srv := mcp.NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	tr := mcp.NewSDKTransport(srv, ln, "", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.Serve(ctx, srv.Handler())
+	}()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	url := "http://" + ln.Addr().String() + "/mcp"
+	oversized := strings.Repeat("x", (1<<20)+8)
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(oversized))
+	if err != nil {
+		cancel()
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("POST oversized body: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		cancel()
+		t.Fatalf("expected 413 for oversized body, got %d", resp.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Serve to exit after context cancellation")
+	}
+}
+
 func TestNewTransport_Unknown(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

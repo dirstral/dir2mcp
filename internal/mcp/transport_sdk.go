@@ -116,6 +116,10 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 			writeError(w, http.StatusBadRequest, nil, -32600, err.Error(), "INVALID_FIELD", false)
 			return
 		}
+		if len(body) > maxRequestBody {
+			writeError(w, http.StatusRequestEntityTooLarge, nil, -32600, "request body too large", "INVALID_FIELD", false)
+			return
+		}
 		req.Body = io.NopCloser(bytes.NewReader(body))
 
 		// Probe the request so we can preserve the legacy request-level
@@ -356,7 +360,8 @@ func convertToolCallResult(res toolCallResult) *sdkmcp.CallToolResult {
 		case "audio":
 			data, err := base64.StdEncoding.DecodeString(item.Data)
 			if err != nil {
-				data = []byte(item.Data)
+				log.Printf("warning: dropping invalid base64 audio content (mime=%q): %v", item.MIMEType, err)
+				continue
 			}
 			out.Content = append(out.Content, &sdkmcp.AudioContent{
 				MIMEType: item.MIMEType,
