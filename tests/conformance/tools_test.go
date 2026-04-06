@@ -61,7 +61,8 @@ func TestTools_ListContainsExpectedTools(t *testing.T) {
 }
 
 // TestTools_CallListFilesSuccess verifies that tools/call with list_files
-// against an existing temp directory returns a 200 with a result.
+// against an existing temp directory returns a 200 with a successful result
+// that mentions the fixture file.
 func TestTools_CallListFilesSuccess(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
@@ -84,12 +85,35 @@ func TestTools_CallListFilesSuccess(t *testing.T) {
 	if !hasResult(body) {
 		t.Fatalf("list_files: expected result field body=%s", body)
 	}
+	if isToolError(body) {
+		t.Fatalf("list_files: expected successful result, got isError=true body=%s", body)
+	}
+	// Verify the response has the expected structured shape regardless of how
+	// many files are indexed (store may be empty without ingestion).
+	var envelope struct {
+		Result struct {
+			StructuredContent *struct {
+				Files  json.RawMessage `json:"files"`
+				Total  int             `json:"total"`
+				Limit  int             `json:"limit"`
+				Offset int             `json:"offset"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("list_files: decode response: %v body=%s", err, body)
+	}
+	if envelope.Result.StructuredContent == nil {
+		t.Fatalf("list_files: missing structuredContent body=%s", body)
+	}
+	if envelope.Result.StructuredContent.Files == nil {
+		t.Fatalf("list_files: missing structuredContent.files body=%s", body)
+	}
 }
 
 // TestTools_CallUnknownToolReturnsError verifies that tools/call with an
-// unknown tool name returns an error response — either a JSON-RPC error or a
-// tool result with isError=true (per MCP spec, tools/call errors are returned
-// as tool-level errors rather than JSON-RPC protocol errors).
+// unknown tool name returns a tool-level isError=true result (per MCP spec,
+// tools/call errors are returned as tool-level errors, not JSON-RPC errors).
 func TestTools_CallUnknownToolReturnsError(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
@@ -107,13 +131,13 @@ func TestTools_CallUnknownToolReturnsError(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unknown tool: status=%d body=%s", resp.StatusCode, body)
 	}
-	if !hasError(body) && !isToolError(body) {
-		t.Fatalf("unknown tool: expected error or isError result body=%s", body)
+	if !isToolError(body) {
+		t.Fatalf("unknown tool: expected tool-level isError=true result body=%s", body)
 	}
 }
 
 // TestTools_CallMissingRequiredParamReturnsError verifies that tools/call with
-// a valid tool but missing required param returns an error.
+// a valid tool but missing required param returns a tool-level isError=true.
 func TestTools_CallMissingRequiredParamReturnsError(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
@@ -131,8 +155,8 @@ func TestTools_CallMissingRequiredParamReturnsError(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("missing param: status=%d body=%s", resp.StatusCode, body)
 	}
-	if !hasError(body) && !isToolError(body) {
-		t.Fatalf("missing param: expected error or isError result body=%s", body)
+	if !isToolError(body) {
+		t.Fatalf("missing param: expected tool-level isError=true result body=%s", body)
 	}
 }
 
@@ -167,5 +191,8 @@ func TestTools_StatsCallReturnsResult(t *testing.T) {
 	}
 	if !hasResult(body) {
 		t.Fatalf("stats: expected result field body=%s", body)
+	}
+	if isToolError(body) {
+		t.Fatalf("stats: expected successful result, got isError=true body=%s", body)
 	}
 }
