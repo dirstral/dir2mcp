@@ -48,7 +48,7 @@ func (s *Server) protocolValidationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
-			w.WriteHeader(http.StatusMethodNotAllowed)
+			writeError(w, http.StatusMethodNotAllowed, nil, http.StatusMethodNotAllowed, "Method Not Allowed", "METHOD_NOT_ALLOWED", false)
 			return
 		}
 
@@ -84,11 +84,13 @@ func (s *Server) rpcEnvelopeMiddleware(next http.Handler) http.Handler {
 		req, parseErr := parseRequest(r.Body)
 		if parseErr != nil {
 			canonicalCode := "INVALID_FIELD"
+			message := "failed to read request body"
 			var vErr validationError
 			if errors.As(parseErr, &vErr) && vErr.canonicalCode != "" {
 				canonicalCode = vErr.canonicalCode
+				message = vErr.Error()
 			}
-			writeError(w, http.StatusBadRequest, nil, -32600, parseErr.Error(), canonicalCode, false)
+			writeError(w, http.StatusBadRequest, nil, -32600, message, canonicalCode, false)
 			return
 		}
 
