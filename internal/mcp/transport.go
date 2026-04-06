@@ -66,16 +66,14 @@ func (t *LegacyTransport) Serve(ctx context.Context, _ Handler) error {
 }
 
 // NewTransport returns a Transport for the given mode string.  mode should be
-// one of "legacy" or "sdk"; an empty string defaults to "legacy".  Callers
+// one of "legacy" or "sdk"; an empty string defaults to "legacy". Callers
 // typically source mode from the MCP_TRANSPORT environment variable.
-// Currently only "legacy" is implemented; "sdk" returns an error so the
-// feature-flag wire-up exists and can be extended in a follow-up.
 func NewTransport(mode string, server *Server, listener net.Listener, certFile, keyFile string) (Transport, error) {
 	switch mode {
 	case "", "legacy":
 		return NewLegacyTransport(server, listener, certFile, keyFile), nil
 	case "sdk":
-		return nil, errors.New("MCP_TRANSPORT=sdk: not yet implemented")
+		return NewSDKTransport(listener, certFile, keyFile), nil
 	default:
 		return nil, fmt.Errorf("MCP_TRANSPORT=%q: unknown transport mode (valid: legacy, sdk)", mode)
 	}

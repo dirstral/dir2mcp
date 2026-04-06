@@ -44,19 +44,96 @@ func TestNewTransport_DefaultsToLegacy(t *testing.T) {
 	}
 }
 
-func TestNewTransport_SDK_NotImplemented(t *testing.T) {
+func TestNewTransport_SDK(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer func() { _ = ln.Close() }()
 	srv := mcp.NewServer(config.Config{}, nil)
-	_, err = mcp.NewTransport("sdk", srv, ln, "", "")
-	if err == nil {
-		t.Fatal("expected error for sdk transport")
+	tr, err := mcp.NewTransport("sdk", srv, ln, "", "")
+	if err != nil {
+		t.Fatalf("NewTransport sdk: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
+	if _, ok := tr.(*mcp.SDKTransport); !ok {
+		t.Fatalf("expected *mcp.SDKTransport, got %T", tr)
+	}
+}
+
+func TestSDKTransport_NilTransportGuard(t *testing.T) {
+	var tr *mcp.SDKTransport
+	err := tr.Serve(context.Background(), http.NotFoundHandler())
+	if err == nil {
+		t.Fatal("expected error for nil transport")
+	}
+}
+
+func TestSDKTransport_NilListenerGuard(t *testing.T) {
+	tr := mcp.NewSDKTransport(nil, "", "")
+	err := tr.Serve(context.Background(), http.NotFoundHandler())
+	if err == nil {
+		t.Fatal("expected error for nil listener")
+	}
+	if !strings.Contains(err.Error(), "nil listener") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestSDKTransport_NilHandlerGuard(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	tr := mcp.NewSDKTransport(ln, "", "")
+	err = tr.Serve(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for nil handler")
+	}
+	if !strings.Contains(err.Error(), "nil handler") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestSDKTransport_Serve(t *testing.T) {
+	srv := mcp.NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	tr := mcp.NewSDKTransport(ln, "", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.Serve(ctx, srv.Handler())
+	}()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	url := "http://" + ln.Addr().String() + "/mcp"
+	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	resp, err := client.Post(url, "application/json", body)
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /mcp: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		cancel()
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Serve to exit after context cancellation")
 	}
 }
 
