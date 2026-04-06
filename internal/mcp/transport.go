@@ -73,7 +73,7 @@ func NewTransport(mode string, server *Server, listener net.Listener, certFile, 
 	case "", "legacy":
 		return NewLegacyTransport(server, listener, certFile, keyFile), nil
 	case "sdk":
-		return NewSDKTransport(listener, certFile, keyFile), nil
+		return NewSDKTransport(server, listener, certFile, keyFile), nil
 	default:
 		return nil, fmt.Errorf("MCP_TRANSPORT=%q: unknown transport mode (valid: legacy, sdk)", mode)
 	}
