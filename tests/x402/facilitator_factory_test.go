@@ -2,7 +2,10 @@ package x402_test
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"dir2mcp/internal/x402"
@@ -36,22 +39,81 @@ func TestNewFacilitatorClient_UnknownFallsBackToLegacy(t *testing.T) {
 	}
 }
 
-func TestNewFacilitatorClient_SDKReturnsConfigInvalidError(t *testing.T) {
+func TestNewFacilitatorClient_SDKUsesSDKFacilitatorClient(t *testing.T) {
 	t.Setenv(x402.X402ClientEnvVar, x402.X402ClientSDK)
-	client := x402.NewFacilitatorClient("https://facilitator.test", "token", nil)
 
-	_, err := client.Verify(context.Background(), "sig", validRequirement())
-	if err == nil {
-		t.Fatal("expected sdk adapter verify error")
+	var verifyCalls, settleCalls int
+	var verifyAuthorization, settleAuthorization string
+	facServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/verify":
+			verifyCalls++
+			verifyAuthorization = r.Header.Get("Authorization")
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"isValid": true,
+				"payer":   "payer-1",
+			})
+		case "/settle":
+			settleCalls++
+			settleAuthorization = r.Header.Get("Authorization")
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":     true,
+				"transaction": "tx-1",
+				"network":     "eip155:8453",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer facServer.Close()
+
+	client := x402.NewFacilitatorClient(facServer.URL, "token", nil)
+	if _, ok := client.(*x402.HTTPClient); ok {
+		t.Fatalf("expected sdk-backed client, got legacy %T", client)
 	}
-	var facErr *x402.FacilitatorError
-	if !errors.As(err, &facErr) {
-		t.Fatalf("expected FacilitatorError, got %T", err)
+
+	paymentPayload := `{"x402Version":2,"payload":{"paymentSignature":"sig"}}`
+
+	verifyRaw, err := client.Verify(context.Background(), paymentPayload, validRequirement())
+	if err != nil {
+		t.Fatalf("verify: %v", err)
 	}
-	if facErr.Code != x402.CodePaymentConfigInvalid {
-		t.Fatalf("code=%q want=%q", facErr.Code, x402.CodePaymentConfigInvalid)
+	if verifyCalls != 1 {
+		t.Fatalf("verify calls=%d want=1", verifyCalls)
 	}
-	if facErr.Retryable {
-		t.Fatalf("expected non-retryable error for sdk stub")
+
+	settleRaw, err := client.Settle(context.Background(), paymentPayload, validRequirement())
+	if err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if settleCalls != 1 {
+		t.Fatalf("settle calls=%d want=1", settleCalls)
+	}
+	if verifyAuthorization != "Bearer token" {
+		t.Fatalf("verify authorization header=%q want=%q", verifyAuthorization, "Bearer token")
+	}
+	if settleAuthorization != "Bearer token" {
+		t.Fatalf("settle authorization header=%q want=%q", settleAuthorization, "Bearer token")
+	}
+
+	var verifyResp map[string]any
+	if err := json.Unmarshal(verifyRaw, &verifyResp); err != nil {
+		t.Fatalf("decode verify response: %v body=%s", err, string(verifyRaw))
+	}
+	if got := verifyResp["payer"]; got != "payer-1" {
+		t.Fatalf("verify payer=%v want=%q", got, "payer-1")
+	}
+
+	var settleResp map[string]any
+	if err := json.Unmarshal(settleRaw, &settleResp); err != nil {
+		t.Fatalf("decode settle response: %v body=%s", err, string(settleRaw))
+	}
+	if got := settleResp["transaction"]; got != "tx-1" {
+		t.Fatalf("settle transaction=%v want=%q", got, "tx-1")
 	}
 }

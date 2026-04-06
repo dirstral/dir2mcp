@@ -1,138 +1,323 @@
 package x402
 
-// sdk_adapter.go — adapter layer for the Coinbase x402 Go SDK.
-//
-// # SDK research findings (issue #110)
-//
-// The Coinbase x402 Go SDK lives at github.com/coinbase/x402/go (module path
-// github.com/coinbase/x402/go).  Its HTTP facilitator client is in the
-// sub-package github.com/coinbase/x402/go/http (HTTPFacilitatorClient).
-//
-// The SDK is real and well-maintained, but is NOT a drop-in replacement for
-// dir2mcp's legacy client for several reasons:
-//
-//  1. Wire-format mismatch.  The legacy client posts to
-//     /v2/x402/verify and /v2/x402/settle with body shape
-//     {"paymentPayload":…,"paymentRequirements":[…]}.
-//     The SDK's HTTPFacilitatorClient posts to /verify and /settle with body
-//     {"x402Version":…,"paymentPayload":{…},"paymentRequirements":{…}}.
-//     These are incompatible: a facilitator expecting the SDK format will reject
-//     legacy requests and vice-versa.
-//
-//  2. Heavy transitive dependencies.  The SDK module requires
-//     github.com/ethereum/go-ethereum, github.com/gagliardetto/solana-go, and
-//     gin — totaling many megabytes of chain-library code.  dir2mcp is a lean
-//     binary and importing the full SDK solely for its HTTP plumbing is
-//     disproportionate.
-//
-//  3. API shape mismatch.  The SDK's Verify/Settle methods accept raw
-//     []byte payloads that represent serialized SDK-specific structs
-//     (types.PaymentPayload, types.PaymentRequirements), whereas dir2mcp's
-//     FacilitatorClient accepts a plain string signature and a Requirement
-//     struct.  A non-trivial translation layer would be required.
-//
-//  4. Response schema mismatch.  The SDK returns typed *VerifyResponse /
-//     *SettleResponse structs; dir2mcp's FacilitatorClient returns
-//     json.RawMessage (the raw facilitator body) so that payment.go can log
-//     and forward it unchanged.
-//
-// # Design decision
-//
-// Rather than adding the SDK as a direct dependency now, this file establishes
-// the adapter skeleton that makes the eventual migration a contained,
-// low-risk change:
-//
-//   - The FacilitatorClient interface (see facilitator.go) is the sole
-//     contract consumed by payment.go.
-//   - NewFacilitatorClient is the single construction point, selected by the
-//     X402_CLIENT environment variable (values: "legacy" or "sdk").
-//   - sdkAdapterClient is a typed stub that makes the SDK code-path visible
-//     at compile time and returns a clear error if activated before the SDK
-//     adapter is fully implemented.
-//
-// When the SDK integration is ready, the body of sdkAdapterClient.Verify and
-// sdkAdapterClient.Settle should be replaced with calls to the SDK's
-// HTTPFacilitatorClient.  The feature flag wiring and interface boundary are
-// already in place — the swap should require no changes outside this file.
-//
-// # Feature flag
-//
-// Set X402_CLIENT=sdk to activate the SDK path (currently returns
-// CodePaymentConfigInvalid to prevent accidental use in production).
-// The default (X402_CLIENT unset or "legacy") uses the battle-tested
-// HTTPClient.
-
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+
+	sdkhttp "github.com/coinbase/x402/go/http"
 )
 
 const (
-	// X402ClientEnvVar is the environment variable that selects the
-	// facilitator client implementation.  Accepted values are "legacy"
-	// (default) and "sdk".
+	// X402ClientEnvVar selects the facilitator client implementation.
+	// Accepted values are "legacy" (default) and "sdk".
 	X402ClientEnvVar = "X402_CLIENT"
 
 	// X402ClientLegacy selects the hand-rolled HTTPClient (default).
 	X402ClientLegacy = "legacy"
 
-	// X402ClientSDK selects the Coinbase x402 SDK adapter.  This value is
-	// reserved for future use; activating it currently returns an explicit
-	// error explaining that the adapter is pending SDK integration.
+	// X402ClientSDK selects the Coinbase x402 SDK-backed facilitator client.
 	X402ClientSDK = "sdk"
 )
 
 // NewFacilitatorClient constructs a FacilitatorClient according to the
 // X402_CLIENT environment variable.
 //
-//   - "legacy" or unset → &HTTPClient (existing hand-rolled client)
-//   - "sdk"             → &sdkAdapterClient (SDK adapter stub)
-//   - any other value   → &HTTPClient (falls back to legacy with no error)
+//   - "legacy" or unset -> HTTPClient (existing hand-rolled client)
+//   - "sdk"             -> SDK-backed facilitator client
+//   - any other value    -> HTTPClient (falls back to legacy with no error)
 //
-// The httpClient argument is forwarded to the legacy implementation; pass nil
+// The httpClient argument is forwarded to the selected implementation; pass nil
 // to use the package default timeout.
 func NewFacilitatorClient(baseURL, bearerToken string, httpClient *http.Client) FacilitatorClient {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv(X402ClientEnvVar)))
 	if raw == X402ClientSDK {
-		return &sdkAdapterClient{
-			baseURL:     baseURL,
-			bearerToken: bearerToken,
-		}
+		return newSDKFacilitatorClient(baseURL, bearerToken, httpClient)
 	}
-	// "legacy", "", or any unrecognised value → use the existing HTTP client.
 	return NewHTTPClient(baseURL, bearerToken, httpClient)
 }
 
-// sdkAdapterClient is a placeholder that satisfies FacilitatorClient.
-// It is instantiated when X402_CLIENT=sdk and communicates to the operator
-// (via a structured FacilitatorError) that the SDK integration is pending.
-//
-// To complete the SDK migration, replace the bodies of Verify and Settle with
-// calls to github.com/coinbase/x402/go/http.HTTPFacilitatorClient after
-// resolving the wire-format and dependency concerns documented at the top of
-// this file.
 type sdkAdapterClient struct {
 	baseURL     string
-	bearerToken string
+	facilitator *sdkhttp.HTTPFacilitatorClient
+}
+
+type sdkBearerAuthProvider struct {
+	token string
+}
+
+func (p sdkBearerAuthProvider) GetAuthHeaders(context.Context) (sdkhttp.AuthHeaders, error) {
+	headers := map[string]string{"Authorization": "Bearer " + p.token}
+	return sdkhttp.AuthHeaders{
+		Verify:    headers,
+		Settle:    headers,
+		Supported: headers,
+		Discovery: headers,
+	}, nil
+}
+
+func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Client) FacilitatorClient {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
+	}
+	if baseURL == "" {
+		return &sdkAdapterClient{
+			baseURL: baseURL,
+		}
+	}
+
+	cfg := &sdkhttp.FacilitatorConfig{
+		URL:        baseURL,
+		HTTPClient: httpClient,
+		Timeout:    defaultHTTPTimeout,
+	}
+	if token := strings.TrimSpace(bearerToken); token != "" {
+		cfg.AuthProvider = sdkBearerAuthProvider{token: token}
+	}
+
+	return &sdkAdapterClient{
+		baseURL:     baseURL,
+		facilitator: sdkhttp.NewFacilitatorClient(cfg),
+	}
 }
 
 func (c *sdkAdapterClient) Verify(ctx context.Context, paymentSignature string, req Requirement) (json.RawMessage, error) {
-	return nil, &FacilitatorError{
-		Operation: "verify",
-		Code:      CodePaymentConfigInvalid,
-		Message:   "X402_CLIENT=sdk is not yet fully implemented; set X402_CLIENT=legacy or unset to use the default client",
-		Retryable: false,
-	}
+	return c.do(ctx, "verify", paymentSignature, req)
 }
 
 func (c *sdkAdapterClient) Settle(ctx context.Context, paymentSignature string, req Requirement) (json.RawMessage, error) {
-	return nil, &FacilitatorError{
-		Operation: "settle",
-		Code:      CodePaymentConfigInvalid,
-		Message:   "X402_CLIENT=sdk is not yet fully implemented; set X402_CLIENT=legacy or unset to use the default client",
-		Retryable: false,
+	return c.do(ctx, "settle", paymentSignature, req)
+}
+
+func (c *sdkAdapterClient) do(ctx context.Context, operation, paymentSignature string, req Requirement) (json.RawMessage, error) {
+	if c == nil || strings.TrimSpace(c.baseURL) == "" || c.facilitator == nil {
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      CodePaymentConfigInvalid,
+			Message:   "x402 facilitator URL is required",
+			Retryable: false,
+		}
 	}
+	if err := req.Validate(); err != nil {
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      CodePaymentConfigInvalid,
+			Message:   err.Error(),
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	paymentSignature = strings.TrimSpace(paymentSignature)
+	if paymentSignature == "" {
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      CodePaymentRequired,
+			Message:   "missing payment signature",
+			Retryable: false,
+		}
+	}
+
+	payloadBytes, err := buildSDKPaymentPayloadBytes(paymentSignature, req)
+	if err != nil {
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      CodePaymentConfigInvalid,
+			Message:   "failed to serialize x402 payment payload",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	requirementsBytes, err := buildSDKPaymentRequirementsBytes(req)
+	if err != nil {
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      CodePaymentConfigInvalid,
+			Message:   "failed to serialize x402 payment requirements",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	var rawResponse any
+	switch operation {
+	case "verify":
+		rawResponse, err = c.facilitator.Verify(ctx, payloadBytes, requirementsBytes)
+	case "settle":
+		rawResponse, err = c.facilitator.Settle(ctx, payloadBytes, requirementsBytes)
+	default:
+		err = fmt.Errorf("unsupported facilitator operation: %s", operation)
+	}
+	if err != nil {
+		return nil, mapSDKFacilitatorError(operation, err)
+	}
+
+	raw, err := json.Marshal(rawResponse)
+	if err != nil {
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      facilitatorUnavailableCode(operation),
+			Message:   "failed to serialize facilitator response",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	return json.RawMessage(raw), nil
+}
+
+type sdkPaymentPayload struct {
+	X402Version int                    `json:"x402Version"`
+	Scheme      string                 `json:"scheme"`
+	Network     string                 `json:"network"`
+	Payload     map[string]interface{} `json:"payload"`
+}
+
+type sdkPaymentRequirements struct {
+	Scheme  string                 `json:"scheme"`
+	Network string                 `json:"network"`
+	Amount  string                 `json:"amount"`
+	Asset   string                 `json:"asset"`
+	PayTo   string                 `json:"payTo"`
+	Extra   map[string]interface{} `json:"extra,omitempty"`
+}
+
+func buildSDKPaymentPayloadBytes(paymentSignature string, req Requirement) ([]byte, error) {
+	trimmed := strings.TrimSpace(paymentSignature)
+	if trimmed == "" {
+		return nil, errors.New("empty payment signature")
+	}
+	if json.Valid([]byte(trimmed)) {
+		return []byte(trimmed), nil
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(trimmed); err == nil && json.Valid(decoded) {
+		return decoded, nil
+	}
+
+	payload := sdkPaymentPayload{
+		X402Version: X402Version,
+		Scheme:      strings.ToLower(strings.TrimSpace(req.Scheme)),
+		Network:     strings.TrimSpace(req.Network),
+		Payload: map[string]interface{}{
+			"paymentSignature": trimmed,
+		},
+	}
+	return json.Marshal(payload)
+}
+
+func buildSDKPaymentRequirementsBytes(req Requirement) ([]byte, error) {
+	extra := make(map[string]interface{})
+	if trimmed := strings.TrimSpace(req.Resource); trimmed != "" {
+		extra["resource"] = trimmed
+	}
+	if trimmed := strings.TrimSpace(req.MaxAmountRequired); trimmed != "" {
+		extra["maxAmountRequired"] = trimmed
+	}
+	if len(extra) == 0 {
+		extra = nil
+	}
+
+	payload := sdkPaymentRequirements{
+		Scheme:  strings.ToLower(strings.TrimSpace(req.Scheme)),
+		Network: strings.TrimSpace(req.Network),
+		Amount:  strings.TrimSpace(req.Amount),
+		Asset:   strings.TrimSpace(req.Asset),
+		PayTo:   strings.TrimSpace(req.PayTo),
+		Extra:   extra,
+	}
+	return json.Marshal(payload)
+}
+
+func mapSDKFacilitatorError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &FacilitatorError{
+			Operation: operation,
+			Code:      facilitatorUnavailableCode(operation),
+			Message:   "facilitator request failed",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) || isURLTransportError(err) {
+		return &FacilitatorError{
+			Operation: operation,
+			Code:      facilitatorUnavailableCode(operation),
+			Message:   "facilitator request failed",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+
+	lower := strings.ToLower(err.Error())
+	if isSDKInvalidFailure(lower) {
+		code := CodePaymentInvalid
+		if operation == "settle" {
+			code = CodePaymentSettlementFailed
+		}
+		return &FacilitatorError{
+			Operation: operation,
+			Code:      code,
+			Message:   err.Error(),
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	return &FacilitatorError{
+		Operation: operation,
+		Code:      facilitatorUnavailableCode(operation),
+		Message:   "facilitator request failed",
+		Retryable: true,
+		Cause:     err,
+	}
+}
+
+func facilitatorUnavailableCode(operation string) string {
+	if operation == "settle" {
+		return CodePaymentSettlementUnavailable
+	}
+	return CodePaymentFacilitatorUnavailable
+}
+
+func isURLTransportError(err error) bool {
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}
+
+func isSDKInvalidFailure(lowerErr string) bool {
+	invalidSignals := []string{
+		"invalid",
+		"rejected",
+		"reject",
+		"insufficient",
+		"expired",
+		"unauthorized",
+		"forbidden",
+		"unprocessable",
+		"bad request",
+		"status 4",
+		" status 4",
+		"400",
+		"401",
+		"403",
+		"404",
+		"422",
+	}
+	for _, sig := range invalidSignals {
+		if strings.Contains(lowerErr, sig) {
+			return true
+		}
+	}
+	return false
 }
