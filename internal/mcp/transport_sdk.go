@@ -1,22 +1,30 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+
+	"dir2mcp/internal/buildinfo"
+	"dir2mcp/internal/protocol"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// SDKTransport is an http.Handler-based transport that serves requests on the
-// provided listener using the standard library's net/http.Server.  It is
-// intended to be progressively enriched with official MCP Go SDK primitives as
-// the SDK matures; today it provides a fully-functional HTTP path that is
-// behaviourally identical to LegacyTransport but uses the handler argument
-// instead of delegating back to Server.runOnListener.
-//
-// This is the transport selected when MCP_TRANSPORT=sdk.
+// SDKTransport serves MCP over HTTP using the official MCP Go SDK for the
+// transport and protocol layers.  When x402 is enabled, tools/call requests are
+// routed through the existing payment-aware path so that payment headers and
+// replay behavior stay identical to the legacy implementation.
 type SDKTransport struct {
+	server   *Server
 	listener net.Listener
 	certFile string
 	keyFile  string
@@ -25,21 +33,22 @@ type SDKTransport struct {
 // NewSDKTransport constructs an SDKTransport.  certFile and keyFile are
 // optional; both must be non-empty to enable TLS, matching the contract of
 // LegacyTransport / Server.RunOnListenerTLS.
-func NewSDKTransport(listener net.Listener, certFile, keyFile string) *SDKTransport {
+func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile string) *SDKTransport {
 	return &SDKTransport{
+		server:   server,
 		listener: listener,
 		certFile: certFile,
 		keyFile:  keyFile,
 	}
 }
 
-// Serve implements Transport.  It serves handler on the listener until ctx is
-// cancelled, then performs a graceful shutdown with a 5-second timeout
-// (matching LegacyTransport's shutdown behaviour).  TLS is enabled when both
-// certFile and keyFile are non-empty.
+// Serve implements Transport.
 func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	if t == nil {
 		return errors.New("sdk transport: nil transport")
+	}
+	if t.server == nil {
+		return errors.New("sdk transport: nil server")
 	}
 	if t.listener == nil {
 		return errors.New("nil listener passed to SDKTransport.Serve")
@@ -48,8 +57,157 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 		return errors.New("sdk transport: nil handler")
 	}
 
+	sdkServer := t.server.buildSDKServer()
+	sdkHandler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		return sdkServer
+	}, &sdkmcp.StreamableHTTPOptions{
+		JSONResponse: true,
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go t.server.runSessionCleanup(runCtx)
+	if t.server.rateLimiter != nil {
+		go t.server.runRateLimitCleanup(runCtx)
+	}
+	if t.server.x402Enabled {
+		go t.server.runPaymentOutcomeCleanup(runCtx)
+	}
+	defer func() {
+		if err := t.server.Close(); err != nil {
+			// Match the legacy shutdown path: close errors are best-effort and
+			// should not mask the transport shutdown result.
+			log.Printf("error closing payment log: %v", err)
+		}
+	}()
+
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if t.server.rateLimiter != nil {
+			if !t.server.rateLimiter.allow(realIP(req, t.server.rateLimiter)) {
+				w.Header().Set("Retry-After", "1")
+				writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimitExceeded, true)
+				return
+			}
+		}
+
+		if req.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		ct := req.Header.Get("Content-Type")
+		if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+			writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
+			return
+		}
+
+		if !t.server.authorize(w, req) {
+			return
+		}
+		if !t.server.allowOrigin(w, req) {
+			return
+		}
+		if strings.TrimSpace(req.Header.Get("Accept")) == "" {
+			req.Header.Set("Accept", "application/json, text/event-stream")
+		}
+
+		body, err := io.ReadAll(io.LimitReader(req.Body, maxRequestBody+1))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, nil, -32600, err.Error(), "INVALID_FIELD", false)
+			return
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+
+		// Probe the request so we can preserve the legacy request-level
+		// validation behavior while still delegating successful requests to the
+		// official SDK transport.
+		parsedReq, parseErr := parseRequest(io.NopCloser(bytes.NewReader(body)))
+		if parseErr != nil {
+			canonicalCode := "INVALID_FIELD"
+			var vErr validationError
+			if errors.As(parseErr, &vErr) && vErr.canonicalCode != "" {
+				canonicalCode = vErr.canonicalCode
+			}
+			writeError(w, http.StatusBadRequest, nil, -32600, parseErr.Error(), canonicalCode, false)
+			return
+		}
+
+		id, hasID, idErr := parseID(parsedReq.ID)
+		if idErr != nil {
+			canonicalCode := "INVALID_FIELD"
+			var vErr validationError
+			if errors.As(idErr, &vErr) && vErr.canonicalCode != "" {
+				canonicalCode = vErr.canonicalCode
+			}
+			writeError(w, http.StatusBadRequest, nil, -32600, idErr.Error(), canonicalCode, false)
+			return
+		}
+
+		if parsedReq.Method == "" {
+			writeError(w, http.StatusBadRequest, id, -32600, "method is required", "MISSING_FIELD", false)
+			return
+		}
+
+		if parsedReq.Method != protocol.RPCMethodInitialize {
+			sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
+			if sessionID == "" {
+				writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+				return
+			}
+			if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
+				if reason != "" {
+					w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+				}
+				writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+				return
+			}
+		}
+
+		switch parsedReq.Method {
+		case protocol.RPCMethodInitialize:
+			if !hasID {
+				writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
+				return
+			}
+			rec := newBufferedResponseWriter()
+			sdkHandler.ServeHTTP(rec, req)
+			if sessionID := strings.TrimSpace(rec.header.Get(protocol.MCPSessionHeader)); sessionID != "" {
+				t.server.storeSession(sessionID)
+			}
+			copyBufferedResponse(w, rec)
+		case protocol.RPCMethodNotificationsInitialized:
+			if !hasID {
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+			writeResult(w, http.StatusOK, id, map[string]interface{}{})
+		case protocol.RPCMethodToolsList:
+			if !hasID {
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+			sdkHandler.ServeHTTP(w, req)
+		case protocol.RPCMethodToolsCall:
+			if !hasID {
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+			if t.server.x402Enabled {
+				t.server.handleToolsCallRequest(req.Context(), w, req, parsedReq.Params, id)
+				return
+			}
+			sdkHandler.ServeHTTP(w, req)
+		default:
+			if !hasID {
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+			writeError(w, http.StatusOK, id, -32601, "method not found", "METHOD_NOT_FOUND", false)
+		}
+	})
+
 	server := &http.Server{
-		Handler:           handler,
+		Handler:           wrapped,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -79,4 +237,134 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+type bufferedResponseWriter struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newBufferedResponseWriter() *bufferedResponseWriter {
+	return &bufferedResponseWriter{
+		header: make(http.Header),
+	}
+}
+
+func (w *bufferedResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *bufferedResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *bufferedResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(p)
+}
+
+func copyBufferedResponse(dst http.ResponseWriter, src *bufferedResponseWriter) {
+	for name, values := range src.header {
+		dst.Header()[name] = append([]string(nil), values...)
+	}
+	if src.status != 0 {
+		dst.WriteHeader(src.status)
+	}
+	_, _ = dst.Write(src.body.Bytes())
+}
+
+func (s *Server) buildSDKServer() *sdkmcp.Server {
+	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{
+		Name:    "dir2mcp",
+		Title:   "dir2mcp: Directory RAG MCP Server",
+		Version: buildinfo.Version,
+	}, &sdkmcp.ServerOptions{
+		Instructions: "Use tools/list then tools/call. Results include citations.",
+	})
+
+	sdkServer.AddReceivingMiddleware(func(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
+		return func(ctx context.Context, method string, req sdkmcp.Request) (sdkmcp.Result, error) {
+			result, err := next(ctx, method, req)
+			if err != nil {
+				return result, err
+			}
+			if method != protocol.RPCMethodInitialize {
+				return result, nil
+			}
+			initResult, ok := result.(*sdkmcp.InitializeResult)
+			if !ok || initResult == nil || initResult.Capabilities == nil {
+				return result, nil
+			}
+			initResult.Capabilities.Logging = nil
+			if initResult.Capabilities.Tools == nil {
+				initResult.Capabilities.Tools = &sdkmcp.ToolCapabilities{}
+			}
+			initResult.Capabilities.Tools.ListChanged = false
+			return initResult, nil
+		}
+	})
+
+	for _, name := range toolOrder {
+		tool, ok := s.tools[name]
+		if !ok {
+			continue
+		}
+		td := tool
+		sdkServer.AddTool(&sdkmcp.Tool{
+			Name:         td.Name,
+			Description:  td.Description,
+			InputSchema:  td.InputSchema,
+			OutputSchema: td.OutputSchema,
+		}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+			args := make(map[string]interface{})
+			if len(req.Params.Arguments) > 0 {
+				if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+					return nil, fmt.Errorf("invalid tool arguments: %w", err)
+				}
+			}
+			res, toolErr := td.handler(ctx, args)
+			if toolErr != nil {
+				res = newToolErrorResult(*toolErr)
+			}
+			return convertToolCallResult(res), nil
+		})
+	}
+
+	return sdkServer
+}
+
+func convertToolCallResult(res toolCallResult) *sdkmcp.CallToolResult {
+	out := &sdkmcp.CallToolResult{
+		StructuredContent: res.StructuredContent,
+		IsError:           res.IsError,
+	}
+	if len(res.Content) == 0 {
+		out.Content = []sdkmcp.Content{}
+		return out
+	}
+
+	out.Content = make([]sdkmcp.Content, 0, len(res.Content))
+	for _, item := range res.Content {
+		switch item.Type {
+		case "text":
+			out.Content = append(out.Content, &sdkmcp.TextContent{Text: item.Text})
+		case "audio":
+			data, err := base64.StdEncoding.DecodeString(item.Data)
+			if err != nil {
+				data = []byte(item.Data)
+			}
+			out.Content = append(out.Content, &sdkmcp.AudioContent{
+				MIMEType: item.MIMEType,
+				Data:     data,
+			})
+		default:
+			out.Content = append(out.Content, &sdkmcp.TextContent{Text: item.Text})
+		}
+	}
+	return out
 }
