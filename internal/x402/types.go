@@ -105,15 +105,8 @@ func (r Requirement) Validate() error {
 	// positive integer and not smaller than amount.  The MaxAmountRequired
 	// field may be empty for "exact" since it is ignored.
 	if r.Scheme == "upto" {
-		if r.MaxAmountRequired == "" {
-			return fmt.Errorf("x402 maxAmountRequired is required for upto scheme")
-		}
-		maxVal := new(big.Int)
-		if _, ok := maxVal.SetString(r.MaxAmountRequired, 10); !ok || maxVal.Sign() <= 0 {
-			return fmt.Errorf("x402 maxAmountRequired must be a positive integer")
-		}
-		if maxVal.Cmp(value) < 0 {
-			return fmt.Errorf("x402 maxAmountRequired must be >= amount")
+		if err := validateUptoMaxAmount(r.MaxAmountRequired, value); err != nil {
+			return err
 		}
 	}
 	if r.Asset == "" {
@@ -158,6 +151,20 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func validateUptoMaxAmount(raw string, amount *big.Int) error {
+	if raw == "" {
+		return fmt.Errorf("x402 maxAmountRequired is required for upto scheme")
+	}
+	maxVal := new(big.Int)
+	if _, ok := maxVal.SetString(raw, 10); !ok || maxVal.Sign() <= 0 {
+		return fmt.Errorf("x402 maxAmountRequired must be a positive integer")
+	}
+	if maxVal.Cmp(amount) < 0 {
+		return fmt.Errorf("x402 maxAmountRequired must be >= amount")
+	}
+	return nil
 }
 
 func NormalizeMode(mode string) string {
@@ -211,6 +218,25 @@ func IsModeEnabled(mode string) bool {
 	}
 }
 
+func isCAIP2Namespace(ns string) bool {
+	for _, r := range ns {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func isCAIP2Reference(ref string) bool {
+	for _, r := range ref {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // IsCAIP2Network validates a conservative CAIP-2 identifier shape:
 // <namespace>:<reference>
 func IsCAIP2Network(network string) bool {
@@ -219,25 +245,12 @@ func IsCAIP2Network(network string) bool {
 	if len(parts) != 2 {
 		return false
 	}
-
 	ns := parts[0]
 	ref := parts[1]
 	if len(ns) == 0 || len(ns) > 32 || len(ref) == 0 || len(ref) > 128 {
 		return false
 	}
-
-	for _, r := range ns {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
-			return false
-		}
-	}
-	for _, r := range ref {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			continue
-		}
-		return false
-	}
-	return true
+	return isCAIP2Namespace(ns) && isCAIP2Reference(ref)
 }
 
 type FacilitatorError struct {

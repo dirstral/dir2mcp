@@ -41,20 +41,13 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	// update cfg so that the store factory uses the same baseDir
 	cfg.StateDir = baseDir
 	st := a.storeForConfig(cfg)
-	defer func() {
-		if closeErr := st.Close(); closeErr != nil {
-			writef(a.stderr, "close store: %v\n", closeErr)
-		}
-	}()
+	defer a.closeStoreWithLog(st)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		writef(a.stderr, "initialize metadata store: %v\n", err)
 		return exitIndexLoadFailure
 	}
-	if resetter, ok := interface{}(st).(contentHashResetter); ok {
-		if err := resetter.ClearDocumentContentHashes(ctx); err != nil {
-			writef(a.stderr, "clear content hashes: %v\n", err)
-			return exitGeneric
-		}
+	if exitCode := clearContentHashesIfSupported(ctx, st, a.stderr); exitCode != exitSuccess {
+		return exitCode
 	}
 	for _, indexPath := range []string{textIndexPath, codeIndexPath} {
 		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {

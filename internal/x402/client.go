@@ -41,6 +41,30 @@ func (c *HTTPClient) Settle(ctx context.Context, paymentSignature string, req Re
 	return c.do(ctx, "settle", paymentSignature, req)
 }
 
+// unavailableCode returns the appropriate "unavailable" error code for the operation.
+func unavailableCode(operation string) string {
+	if operation == "settle" {
+		return CodePaymentSettlementUnavailable
+	}
+	return CodePaymentFacilitatorUnavailable
+}
+
+// failedCode returns the appropriate "failed" error code for the operation.
+func failedCode(operation string) string {
+	if operation == "settle" {
+		return CodePaymentSettlementFailed
+	}
+	return CodePaymentInvalid
+}
+
+// isContextuallyRetryable returns false when err represents a context
+// cancellation or deadline, which should not be retried.
+func isContextuallyRetryable(err error, req *http.Request) bool {
+	return !errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) &&
+		req.Context().Err() == nil
+}
+
 func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string, req Requirement) (json.RawMessage, error) {
 	// constructor already trims/normalizes baseURL, so a simple empty
 	// comparison is sufficient here.
@@ -103,13 +127,9 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 	if err != nil {
 		// request construction failures are programming/validation issues; not
 		// retryable since a retry will never succeed.
-		code := CodePaymentFacilitatorUnavailable
-		if operation == "settle" {
-			code = CodePaymentSettlementUnavailable
-		}
 		return nil, &FacilitatorError{
 			Operation: operation,
-			Code:      code,
+			Code:      unavailableCode(operation),
 			Message:   "failed to create facilitator request",
 			Retryable: false,
 			Cause:     err,
@@ -123,21 +143,11 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		code := CodePaymentFacilitatorUnavailable
-		if operation == "settle" {
-			code = CodePaymentSettlementUnavailable
-		}
-		retryable := true
-		// context cancellation or deadline errors should not be retried
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-			httpReq.Context().Err() != nil {
-			retryable = false
-		}
 		return nil, &FacilitatorError{
 			Operation: operation,
-			Code:      code,
+			Code:      unavailableCode(operation),
 			Message:   "facilitator request failed",
-			Retryable: retryable,
+			Retryable: isContextuallyRetryable(err, httpReq),
 			Cause:     err,
 		}
 	}
@@ -148,34 +158,19 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 	const maxRespSize = 1 << 20
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRespSize+1))
 	if err != nil {
-		// reading the response failed; wrap in a FacilitatorError so callers
-		// can handle it like other transport-level failures.  This situation
-		// is unlikely but we treat it as retryable since it usually indicates
-		// a transient network or server problem.
-		code := CodePaymentFacilitatorUnavailable
-		if operation == "settle" {
-			code = CodePaymentSettlementUnavailable
-		}
+		// reading the response failed; treat as retryable transient failure.
 		return nil, &FacilitatorError{
 			Operation: operation,
-			Code:      code,
+			Code:      unavailableCode(operation),
 			Message:   "failed to read facilitator response",
 			Retryable: true,
 			Cause:     err,
 		}
 	}
 	if len(respBody) > maxRespSize {
-		// The response body was truncated by LimitReader above, so we only
-		// examine the first maxRespSize+1 bytes. Treat over-limit responses as
-		// deterministic validation failures rather than applying content-based
-		// heuristics.
-		code := CodePaymentFacilitatorUnavailable
-		if operation == "settle" {
-			code = CodePaymentSettlementUnavailable
-		}
 		return nil, &FacilitatorError{
 			Operation: operation,
-			Code:      code,
+			Code:      unavailableCode(operation),
 			Message:   fmt.Sprintf("facilitator response exceeds maximum size (%d bytes)", maxRespSize),
 			Retryable: false,
 		}
@@ -184,14 +179,10 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if isFallback {
-			code := CodePaymentFacilitatorUnavailable
-			if operation == "settle" {
-				code = CodePaymentSettlementUnavailable
-			}
 			return nil, &FacilitatorError{
 				Operation:  operation,
 				StatusCode: resp.StatusCode,
-				Code:       code,
+				Code:       unavailableCode(operation),
 				Message:    "malformed facilitator response",
 				Retryable:  false,
 			}
@@ -200,16 +191,9 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 	}
 
 	retryable := isRetryableStatus(resp.StatusCode)
-	code := CodePaymentInvalid
-	if operation == "settle" {
-		code = CodePaymentSettlementFailed
-	}
+	code := failedCode(operation)
 	if retryable {
-		if operation == "settle" {
-			code = CodePaymentSettlementUnavailable
-		} else {
-			code = CodePaymentFacilitatorUnavailable
-		}
+		code = unavailableCode(operation)
 	}
 
 	return nil, &FacilitatorError{

@@ -61,6 +61,80 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	return c.SynthesizeWithVoice(ctx, text, c.VoiceID)
 }
 
+// sanitizeSTTFileName extracts a usable filename from relPath for multipart
+// uploads.  Falls back to "audio.wav" when the path produces an empty or
+// degenerate base name.
+func sanitizeSTTFileName(relPath string) string {
+	name := strings.TrimSpace(filepath.Base(relPath))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "audio.wav"
+	}
+	return name
+}
+
+// buildSTTRequestBody constructs the multipart/form-data body for the ElevenLabs
+// speech-to-text API.  Returns the encoded body, the multipart writer (for its
+// Content-Type boundary), and any error.
+func (c *Client) buildSTTRequestBody(data []byte, fileName string) ([]byte, *multipart.Writer, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		return nil, nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to build STT request body", Retryable: false, Cause: err}
+	}
+	if _, err := part.Write(data); err != nil {
+		return nil, nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to write STT input", Retryable: false, Cause: err}
+	}
+	modelName := strings.TrimSpace(c.TranscribeModel)
+	if modelName == "" {
+		modelName = defaultSTTModel
+	}
+	if err := writer.WriteField("model_id", modelName); err != nil {
+		return nil, nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to set STT model", Retryable: false, Cause: err}
+	}
+	if languageCode := strings.TrimSpace(c.TranscribeLanguageCode); languageCode != "" {
+		if err := writer.WriteField("language_code", languageCode); err != nil {
+			return nil, nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to set STT language", Retryable: false, Cause: err}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to finalize STT request body", Retryable: false, Cause: err}
+	}
+	return body.Bytes(), writer, nil
+}
+
+// parseTranscribeResult extracts the transcript text from a parsed ElevenLabs
+// STT response.  Returns ("", false) when no text is present.
+func parseTranscribeResult(parsed transcribeResponse) (string, bool) {
+	if len(parsed.Segments) > 0 {
+		lines := make([]string, 0, len(parsed.Segments))
+		for _, segment := range parsed.Segments {
+			text := strings.TrimSpace(segment.Text)
+			if text == "" {
+				continue
+			}
+			startMS := int(segment.StartMS)
+			if startMS <= 0 {
+				startMS = int(segment.Start * 1000)
+			}
+			mm := (startMS / 1000) / 60
+			ss := (startMS / 1000) % 60
+			lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
+		}
+		if len(lines) > 0 {
+			return strings.Join(lines, "\n"), true
+		}
+	}
+	text := strings.TrimSpace(parsed.Text)
+	if text == "" {
+		text = strings.TrimSpace(parsed.Transcript)
+	}
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
 	apiKey := strings.TrimSpace(c.APIKey)
 	if apiKey == "" {
@@ -78,35 +152,10 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 		}
 	}
 
-	fileName := strings.TrimSpace(filepath.Base(relPath))
-	if fileName == "" || fileName == "." || fileName == string(filepath.Separator) {
-		fileName = "audio.wav"
-	}
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("file", fileName)
+	fileName := sanitizeSTTFileName(relPath)
+	body, writer, err := c.buildSTTRequestBody(data, fileName)
 	if err != nil {
-		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to build STT request body", Retryable: false, Cause: err}
-	}
-	if _, err := part.Write(data); err != nil {
-		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to write STT input", Retryable: false, Cause: err}
-	}
-
-	modelName := strings.TrimSpace(c.TranscribeModel)
-	if modelName == "" {
-		modelName = defaultSTTModel
-	}
-	if err := writer.WriteField("model_id", modelName); err != nil {
-		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to set STT model", Retryable: false, Cause: err}
-	}
-	if languageCode := strings.TrimSpace(c.TranscribeLanguageCode); languageCode != "" {
-		if err := writer.WriteField("language_code", languageCode); err != nil {
-			return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to set STT language", Retryable: false, Cause: err}
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to finalize STT request body", Retryable: false, Cause: err}
+		return "", err
 	}
 
 	baseURL := strings.TrimSpace(c.BaseURL)
@@ -115,7 +164,7 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/speech-to-text", bytes.NewReader(body.Bytes()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/speech-to-text", bytes.NewReader(body))
 	if err != nil {
 		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to build STT request", Retryable: false, Cause: err}
 	}
@@ -153,31 +202,8 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to decode STT response", Retryable: false, Cause: err}
 	}
 
-	if len(parsed.Segments) > 0 {
-		lines := make([]string, 0, len(parsed.Segments))
-		for _, segment := range parsed.Segments {
-			text := strings.TrimSpace(segment.Text)
-			if text == "" {
-				continue
-			}
-			startMS := int(segment.StartMS)
-			if startMS <= 0 {
-				startMS = int(segment.Start * 1000)
-			}
-			mm := (startMS / 1000) / 60
-			ss := (startMS / 1000) % 60
-			lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
-		}
-		if len(lines) > 0 {
-			return strings.Join(lines, "\n"), nil
-		}
-	}
-
-	text := strings.TrimSpace(parsed.Text)
-	if text == "" {
-		text = strings.TrimSpace(parsed.Transcript)
-	}
-	if text == "" {
+	text, ok := parseTranscribeResult(parsed)
+	if !ok {
 		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "stt response had no text content", Retryable: false}
 	}
 	return text, nil

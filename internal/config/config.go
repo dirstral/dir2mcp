@@ -553,8 +553,7 @@ func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata
 
 func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	meta := SecretSourceMetadata{}
-	reader := strings.NewReader(string(raw))
-	scanner := bufio.NewScanner(reader)
+	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
 	sectionByIndent := map[int]string{}
 
 	for scanner.Scan() {
@@ -564,42 +563,34 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "- ") {
 			continue
 		}
-		for level := range sectionByIndent {
-			if level >= indent {
-				delete(sectionByIndent, level)
-			}
-		}
-		prefix := nearestSectionPrefix(sectionByIndent, indent)
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
+		pruneStaleIndents(sectionByIndent, indent)
+		key, value, err := resolveYAMLKey(line, sectionByIndent, indent)
+		if err != nil {
 			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if prefix != "" && !strings.Contains(key, ".") {
-			key = prefix + "." + key
 		}
 		if value == "" && isMapSectionKey(key) {
 			sectionByIndent[indent] = key
 			continue
 		}
-
-		value = unquoteYAMLScalar(value)
-		switch key {
-		case "secret_sources.mistral_api_key":
-			meta.MistralAPIKey = value
-		case "secret_sources.elevenlabs_api_key":
-			meta.ElevenLabsAPIKey = value
-		case "secret_sources.x402_facilitator_token":
-			meta.X402FacilitatorToken = value
-		case "secret_sources.auth_token":
-			meta.AuthToken = value
-		}
+		applySecretSourceField(&meta, key, unquoteYAMLScalar(value))
 	}
 	if err := scanner.Err(); err != nil {
 		return SecretSourceMetadata{}, err
 	}
 	return meta, nil
+}
+
+func applySecretSourceField(meta *SecretSourceMetadata, key, value string) {
+	switch key {
+	case "secret_sources.mistral_api_key":
+		meta.MistralAPIKey = value
+	case "secret_sources.elevenlabs_api_key":
+		meta.ElevenLabsAPIKey = value
+	case "secret_sources.x402_facilitator_token":
+		meta.X402FacilitatorToken = value
+	case "secret_sources.auth_token":
+		meta.AuthToken = value
+	}
 }
 
 func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, error) {
@@ -668,169 +659,201 @@ func applyFileOverrides(cfg *Config, path string) error {
 }
 
 func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
-	if fileCfg.RootDir != nil {
-		cfg.RootDir = *fileCfg.RootDir
+	applyServerFileParsed(cfg, fileCfg)
+	applyModelFileParsed(cfg, fileCfg)
+	applyIngestFileParsed(cfg, fileCfg)
+	applyX402FileParsed(cfg, fileCfg)
+}
+
+func applyServerFileParsed(cfg *Config, fc fileConfig) {
+	applyServerCoreFileParsed(cfg, fc)
+	applyServerNetworkFileParsed(cfg, fc)
+}
+
+func applyServerCoreFileParsed(cfg *Config, fc fileConfig) {
+	if fc.RootDir != nil {
+		cfg.RootDir = *fc.RootDir
 	}
-	if fileCfg.StateDir != nil {
-		cfg.StateDir = *fileCfg.StateDir
+	if fc.StateDir != nil {
+		cfg.StateDir = *fc.StateDir
 	}
-	if fileCfg.ListenAddr != nil {
-		cfg.ListenAddr = *fileCfg.ListenAddr
+	if fc.ListenAddr != nil {
+		cfg.ListenAddr = *fc.ListenAddr
 	}
-	if fileCfg.MCPPath != nil {
-		cfg.MCPPath = *fileCfg.MCPPath
+	if fc.MCPPath != nil {
+		cfg.MCPPath = *fc.MCPPath
 	}
-	if fileCfg.ProtocolVersion != nil {
-		cfg.ProtocolVersion = *fileCfg.ProtocolVersion
+	if fc.ProtocolVersion != nil {
+		cfg.ProtocolVersion = *fc.ProtocolVersion
 	}
-	if fileCfg.Public != nil {
-		cfg.Public = *fileCfg.Public
+	if fc.Public != nil {
+		cfg.Public = *fc.Public
 	}
-	if fileCfg.AuthMode != nil {
-		cfg.AuthMode = *fileCfg.AuthMode
+	if fc.AuthMode != nil {
+		cfg.AuthMode = *fc.AuthMode
 	}
-	if fileCfg.RateLimitRPS != nil {
-		cfg.RateLimitRPS = *fileCfg.RateLimitRPS
+	if fc.RateLimitRPS != nil {
+		cfg.RateLimitRPS = *fc.RateLimitRPS
 	}
-	if fileCfg.RateLimitBurst != nil {
-		cfg.RateLimitBurst = *fileCfg.RateLimitBurst
+	if fc.RateLimitBurst != nil {
+		cfg.RateLimitBurst = *fc.RateLimitBurst
 	}
-	if fileCfg.TrustedProxies != nil {
-		cfg.TrustedProxies = normalizeStringSlice(fileCfg.TrustedProxies)
+}
+
+func applyServerNetworkFileParsed(cfg *Config, fc fileConfig) {
+	if fc.TrustedProxies != nil {
+		cfg.TrustedProxies = normalizeStringSlice(fc.TrustedProxies)
 	}
-	if fileCfg.PathExcludes != nil {
-		cfg.PathExcludes = normalizeStringSlice(fileCfg.PathExcludes)
+	if fc.PathExcludes != nil {
+		cfg.PathExcludes = normalizeStringSlice(fc.PathExcludes)
 	}
-	if fileCfg.SecretPatterns != nil {
-		cfg.SecretPatterns = normalizeStringSlice(fileCfg.SecretPatterns)
+	if fc.SecretPatterns != nil {
+		cfg.SecretPatterns = normalizeStringSlice(fc.SecretPatterns)
 	}
-	if fileCfg.MistralBaseURL != nil {
-		cfg.MistralBaseURL = *fileCfg.MistralBaseURL
+	if fc.AllowedOrigins != nil {
+		cfg.AllowedOrigins = normalizeStringSlice(fc.AllowedOrigins)
 	}
-	if fileCfg.MistralAPIKey != nil {
-		cfg.MistralAPIKey = *fileCfg.MistralAPIKey
+	if fc.ServerTLSCertFile != nil {
+		cfg.ServerTLSCertFile = *fc.ServerTLSCertFile
 	}
-	if fileCfg.SessionInactivityTimeout != nil {
-		cfg.SessionInactivityTimeout = *fileCfg.SessionInactivityTimeout
+	if fc.ServerTLSKeyFile != nil {
+		cfg.ServerTLSKeyFile = *fc.ServerTLSKeyFile
 	}
-	if fileCfg.SessionMaxLifetime != nil {
-		cfg.SessionMaxLifetime = *fileCfg.SessionMaxLifetime
+}
+
+func applyModelFileParsed(cfg *Config, fc fileConfig) {
+	applyModelClientsFileParsed(cfg, fc)
+	applyModelRAGFileParsed(cfg, fc)
+}
+
+func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
+	if fc.MistralBaseURL != nil {
+		cfg.MistralBaseURL = *fc.MistralBaseURL
 	}
-	if fileCfg.HealthCheckInterval != nil {
-		cfg.HealthCheckInterval = *fileCfg.HealthCheckInterval
+	if fc.MistralAPIKey != nil {
+		cfg.MistralAPIKey = *fc.MistralAPIKey
 	}
-	if fileCfg.ElevenLabsBaseURL != nil {
-		cfg.ElevenLabsBaseURL = *fileCfg.ElevenLabsBaseURL
+	if fc.ElevenLabsBaseURL != nil {
+		cfg.ElevenLabsBaseURL = *fc.ElevenLabsBaseURL
 	}
-	if fileCfg.ElevenLabsAPIKey != nil {
-		cfg.ElevenLabsAPIKey = *fileCfg.ElevenLabsAPIKey
+	if fc.ElevenLabsAPIKey != nil {
+		cfg.ElevenLabsAPIKey = *fc.ElevenLabsAPIKey
 	}
-	if fileCfg.ElevenLabsTTSVoiceID != nil {
-		cfg.ElevenLabsTTSVoiceID = *fileCfg.ElevenLabsTTSVoiceID
+	if fc.ElevenLabsTTSVoiceID != nil {
+		cfg.ElevenLabsTTSVoiceID = *fc.ElevenLabsTTSVoiceID
 	}
-	if fileCfg.AllowedOrigins != nil {
-		cfg.AllowedOrigins = normalizeStringSlice(fileCfg.AllowedOrigins)
+	if fc.EmbedModelText != nil {
+		cfg.EmbedModelText = *fc.EmbedModelText
 	}
-	if fileCfg.EmbedModelText != nil {
-		cfg.EmbedModelText = *fileCfg.EmbedModelText
+	if fc.EmbedModelCode != nil {
+		cfg.EmbedModelCode = *fc.EmbedModelCode
 	}
-	if fileCfg.EmbedModelCode != nil {
-		cfg.EmbedModelCode = *fileCfg.EmbedModelCode
+	if fc.ChatModel != nil {
+		cfg.ChatModel = *fc.ChatModel
 	}
-	if fileCfg.ChatModel != nil {
-		cfg.ChatModel = *fileCfg.ChatModel
+}
+
+func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
+	if fc.RAGSystemPrompt != nil {
+		cfg.RAGSystemPrompt = *fc.RAGSystemPrompt
 	}
-	if fileCfg.RAGSystemPrompt != nil {
-		cfg.RAGSystemPrompt = *fileCfg.RAGSystemPrompt
+	if fc.RAGGenerateAnswer != nil {
+		cfg.RAGGenerateAnswer = *fc.RAGGenerateAnswer
 	}
-	if fileCfg.RAGGenerateAnswer != nil {
-		cfg.RAGGenerateAnswer = *fileCfg.RAGGenerateAnswer
+	if fc.RAGKDefault != nil {
+		cfg.RAGKDefault = *fc.RAGKDefault
 	}
-	if fileCfg.RAGKDefault != nil {
-		cfg.RAGKDefault = *fileCfg.RAGKDefault
+	if fc.RAGMaxContextChars != nil {
+		cfg.RAGMaxContextChars = *fc.RAGMaxContextChars
 	}
-	if fileCfg.RAGMaxContextChars != nil {
-		cfg.RAGMaxContextChars = *fileCfg.RAGMaxContextChars
+	if fc.RAGOversampleFactor != nil {
+		cfg.RAGOversampleFactor = *fc.RAGOversampleFactor
 	}
-	if fileCfg.RAGOversampleFactor != nil {
-		cfg.RAGOversampleFactor = *fileCfg.RAGOversampleFactor
+	if fc.SessionInactivityTimeout != nil {
+		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
 	}
-	if fileCfg.ChunkingStrategy != nil {
-		cfg.ChunkingStrategy = *fileCfg.ChunkingStrategy
+	if fc.SessionMaxLifetime != nil {
+		cfg.SessionMaxLifetime = *fc.SessionMaxLifetime
 	}
-	if fileCfg.ChunkingMaxTokens != nil {
-		cfg.ChunkingMaxTokens = *fileCfg.ChunkingMaxTokens
+	if fc.HealthCheckInterval != nil {
+		cfg.HealthCheckInterval = *fc.HealthCheckInterval
 	}
-	if fileCfg.ChunkingOverlapTokens != nil {
-		cfg.ChunkingOverlapTokens = *fileCfg.ChunkingOverlapTokens
+}
+
+func applyIngestFileParsed(cfg *Config, fc fileConfig) {
+	if fc.ChunkingStrategy != nil {
+		cfg.ChunkingStrategy = *fc.ChunkingStrategy
 	}
-	if fileCfg.IngestGitignore != nil {
-		cfg.IngestGitignore = *fileCfg.IngestGitignore
+	if fc.ChunkingMaxTokens != nil {
+		cfg.ChunkingMaxTokens = *fc.ChunkingMaxTokens
 	}
-	if fileCfg.IngestFollowSymlinks != nil {
-		cfg.IngestFollowSymlinks = *fileCfg.IngestFollowSymlinks
+	if fc.ChunkingOverlapTokens != nil {
+		cfg.ChunkingOverlapTokens = *fc.ChunkingOverlapTokens
 	}
-	if fileCfg.IngestMaxFileMB != nil {
-		cfg.IngestMaxFileMB = *fileCfg.IngestMaxFileMB
+	if fc.IngestGitignore != nil {
+		cfg.IngestGitignore = *fc.IngestGitignore
 	}
-	if fileCfg.IngestPDFMode != nil {
-		cfg.IngestPDFMode = *fileCfg.IngestPDFMode
+	if fc.IngestFollowSymlinks != nil {
+		cfg.IngestFollowSymlinks = *fc.IngestFollowSymlinks
 	}
-	if fileCfg.IngestImagesMode != nil {
-		cfg.IngestImagesMode = *fileCfg.IngestImagesMode
+	if fc.IngestMaxFileMB != nil {
+		cfg.IngestMaxFileMB = *fc.IngestMaxFileMB
 	}
-	if fileCfg.IngestAudioMode != nil {
-		cfg.IngestAudioMode = *fileCfg.IngestAudioMode
+	if fc.IngestPDFMode != nil {
+		cfg.IngestPDFMode = *fc.IngestPDFMode
 	}
-	if fileCfg.IngestArchivesMode != nil {
-		cfg.IngestArchivesMode = *fileCfg.IngestArchivesMode
+	if fc.IngestImagesMode != nil {
+		cfg.IngestImagesMode = *fc.IngestImagesMode
 	}
-	if fileCfg.STTProvider != nil {
-		cfg.STTProvider = *fileCfg.STTProvider
+	if fc.IngestAudioMode != nil {
+		cfg.IngestAudioMode = *fc.IngestAudioMode
 	}
-	if fileCfg.STTMistralModel != nil {
-		cfg.STTMistralModel = *fileCfg.STTMistralModel
+	if fc.IngestArchivesMode != nil {
+		cfg.IngestArchivesMode = *fc.IngestArchivesMode
 	}
-	if fileCfg.STTElevenLabsModel != nil {
-		cfg.STTElevenLabsModel = *fileCfg.STTElevenLabsModel
+	if fc.STTProvider != nil {
+		cfg.STTProvider = *fc.STTProvider
 	}
-	if fileCfg.STTElevenLabsLanguageCode != nil {
-		cfg.STTElevenLabsLanguageCode = *fileCfg.STTElevenLabsLanguageCode
+	if fc.STTMistralModel != nil {
+		cfg.STTMistralModel = *fc.STTMistralModel
 	}
-	if fileCfg.ServerTLSCertFile != nil {
-		cfg.ServerTLSCertFile = *fileCfg.ServerTLSCertFile
+	if fc.STTElevenLabsModel != nil {
+		cfg.STTElevenLabsModel = *fc.STTElevenLabsModel
 	}
-	if fileCfg.ServerTLSKeyFile != nil {
-		cfg.ServerTLSKeyFile = *fileCfg.ServerTLSKeyFile
+	if fc.STTElevenLabsLanguageCode != nil {
+		cfg.STTElevenLabsLanguageCode = *fc.STTElevenLabsLanguageCode
 	}
-	if fileCfg.X402Mode != nil {
-		cfg.X402.Mode = *fileCfg.X402Mode
+}
+
+func applyX402FileParsed(cfg *Config, fc fileConfig) {
+	if fc.X402Mode != nil {
+		cfg.X402.Mode = *fc.X402Mode
 	}
-	if fileCfg.X402FacilitatorURL != nil {
-		cfg.X402.FacilitatorURL = *fileCfg.X402FacilitatorURL
+	if fc.X402FacilitatorURL != nil {
+		cfg.X402.FacilitatorURL = *fc.X402FacilitatorURL
 	}
 	// ignore any x402_facilitator_token value from disk; tokens must come from
 	// the environment to avoid persistence.
-	if fileCfg.X402ResourceBaseURL != nil {
-		cfg.X402.ResourceBaseURL = *fileCfg.X402ResourceBaseURL
+	if fc.X402ResourceBaseURL != nil {
+		cfg.X402.ResourceBaseURL = *fc.X402ResourceBaseURL
 	}
-	if fileCfg.X402ToolsCallEnabled != nil {
-		cfg.X402.ToolsCallEnabled = *fileCfg.X402ToolsCallEnabled
+	if fc.X402ToolsCallEnabled != nil {
+		cfg.X402.ToolsCallEnabled = *fc.X402ToolsCallEnabled
 	}
-	if fileCfg.X402PriceAtomic != nil {
-		cfg.X402.PriceAtomic = *fileCfg.X402PriceAtomic
+	if fc.X402PriceAtomic != nil {
+		cfg.X402.PriceAtomic = *fc.X402PriceAtomic
 	}
-	if fileCfg.X402Network != nil {
-		cfg.X402.Network = *fileCfg.X402Network
+	if fc.X402Network != nil {
+		cfg.X402.Network = *fc.X402Network
 	}
-	if fileCfg.X402Scheme != nil {
-		cfg.X402.Scheme = *fileCfg.X402Scheme
+	if fc.X402Scheme != nil {
+		cfg.X402.Scheme = *fc.X402Scheme
 	}
-	if fileCfg.X402Asset != nil {
-		cfg.X402.Asset = *fileCfg.X402Asset
+	if fc.X402Asset != nil {
+		cfg.X402.Asset = *fc.X402Asset
 	}
-	if fileCfg.X402PayTo != nil {
-		cfg.X402.PayTo = *fileCfg.X402PayTo
+	if fc.X402PayTo != nil {
+		cfg.X402.PayTo = *fc.X402PayTo
 	}
 }
 
@@ -851,8 +874,7 @@ func normalizeStringSlice(values []string) []string {
 
 func parseConfigYAML(raw []byte) (fileConfig, error) {
 	cfg := fileConfig{}
-	reader := strings.NewReader(string(raw))
-	scanner := bufio.NewScanner(reader)
+	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
 	lineNo := 0
 	currentListKey := ""
 	sectionByIndent := map[int]string{}
@@ -870,67 +892,33 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			if currentListKey == "" {
 				return fileConfig{}, fmt.Errorf("line %d: list item without a list key", lineNo)
 			}
-			value := strings.TrimSpace(strings.TrimPrefix(line, "- "))
-			value = unquoteYAMLScalar(value)
-			setFileListValue(&cfg, currentListKey, value)
+			setFileListValue(&cfg, currentListKey, unquoteYAMLScalar(strings.TrimPrefix(line, "- ")))
 			continue
 		}
 
 		currentListKey = ""
-		for level := range sectionByIndent {
-			if level >= indent {
-				delete(sectionByIndent, level)
-			}
-		}
-		sectionPrefix := nearestSectionPrefix(sectionByIndent, indent)
+		pruneStaleIndents(sectionByIndent, indent)
 
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			return fileConfig{}, fmt.Errorf("line %d: expected key: value", lineNo)
+		key, value, err := resolveYAMLKey(line, sectionByIndent, indent)
+		if err != nil {
+			return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
-		key = strings.TrimSpace(key)
-		if sectionPrefix != "" && !strings.Contains(key, ".") {
-			key = sectionPrefix + "." + key
-		}
-		key = canonicalizeConfigKey(key)
-		value = strings.TrimSpace(value)
 		if key == "" {
 			return fileConfig{}, fmt.Errorf("line %d: empty key", lineNo)
 		}
 
 		if value == "" {
-			if isListConfigKey(key) {
-				currentListKey = key
-				setFileListValue(&cfg, key, "")
-				continue
-			}
-			if isMapSectionKey(key) {
-				sectionByIndent[indent] = key
-				continue
-			}
-			if err := setFileScalarValue(&cfg, key, ""); err != nil {
+			newListKey, err := handleYAMLEmptyValue(&cfg, key, sectionByIndent, indent)
+			if err != nil {
 				return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 			}
+			currentListKey = newListKey
 			continue
 		}
-		if value == "[]" {
-			if isListConfigKey(key) {
-				setFileListValue(&cfg, key, "")
-			}
-			continue
-		}
-		if strings.HasPrefix(value, "[") && !strings.HasSuffix(value, "]") {
-			return fileConfig{}, fmt.Errorf("line %d: malformed list value for %s", lineNo, key)
-		}
-		if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
-			inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]"))
-			if inner == "" {
-				setFileListValue(&cfg, key, "")
-				continue
-			}
-			for _, token := range strings.Split(inner, ",") {
-				token = unquoteYAMLScalar(strings.TrimSpace(token))
-				setFileListValue(&cfg, key, token)
+
+		if strings.HasPrefix(value, "[") {
+			if err := handleYAMLInlineList(&cfg, key, value, lineNo); err != nil {
+				return fileConfig{}, err
 			}
 			continue
 		}
@@ -949,6 +937,62 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 	return cfg, nil
 }
 
+func resolveYAMLKey(line string, sectionByIndent map[int]string, indent int) (key, value string, err error) {
+	k, v, ok := strings.Cut(line, ":")
+	if !ok {
+		return "", "", fmt.Errorf("expected key: value")
+	}
+	k = strings.TrimSpace(k)
+	if prefix := nearestSectionPrefix(sectionByIndent, indent); prefix != "" && !strings.Contains(k, ".") {
+		k = prefix + "." + k
+	}
+	return canonicalizeConfigKey(k), strings.TrimSpace(v), nil
+}
+
+func pruneStaleIndents(sectionByIndent map[int]string, indent int) {
+	for level := range sectionByIndent {
+		if level >= indent {
+			delete(sectionByIndent, level)
+		}
+	}
+}
+
+func handleYAMLEmptyValue(cfg *fileConfig, key string, sectionByIndent map[int]string, indent int) (newListKey string, err error) {
+	if isListConfigKey(key) {
+		setFileListValue(cfg, key, "")
+		return key, nil
+	}
+	if isMapSectionKey(key) {
+		sectionByIndent[indent] = key
+		return "", nil
+	}
+	if err := setFileScalarValue(cfg, key, ""); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func handleYAMLInlineList(cfg *fileConfig, key, value string, lineNo int) error {
+	if !strings.HasSuffix(value, "]") {
+		return fmt.Errorf("line %d: malformed list value for %s", lineNo, key)
+	}
+	if value == "[]" || !isListConfigKey(key) {
+		if isListConfigKey(key) {
+			setFileListValue(cfg, key, "")
+		}
+		return nil
+	}
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]"))
+	if inner == "" {
+		setFileListValue(cfg, key, "")
+		return nil
+	}
+	for _, token := range strings.Split(inner, ",") {
+		setFileListValue(cfg, key, unquoteYAMLScalar(strings.TrimSpace(token)))
+	}
+	return nil
+}
+
 func nearestSectionPrefix(sectionByIndent map[int]string, indent int) string {
 	bestIndent := -1
 	best := ""
@@ -961,102 +1005,84 @@ func nearestSectionPrefix(sectionByIndent map[int]string, indent int) string {
 	return best
 }
 
+// configKeyAliases maps legacy/alternate key spellings to their canonical form.
+// Keys not present in the map are returned unchanged by canonicalizeConfigKey.
+var configKeyAliases = map[string]string{
+	"server.listen":                        "listen_addr",
+	"server.mcp_path":                      "mcp_path",
+	"server.protocol_version":              "protocol_version",
+	"server.public":                        "public",
+	"security.auth.mode":                   "auth_mode",
+	"security.allowed_origins":             "allowed_origins",
+	"security.path_excludes":               "path_excludes",
+	"security.secret_patterns":             "secret_patterns",
+	"mistral.embed_text_model":             "embed_model_text",
+	"mistral.embed_code_model":             "embed_model_code",
+	"mistral.chat_model":                   "chat_model",
+	"mistral.api_key":                      "mistral_api_key",
+	"stt.mistral.api_key":                  "mistral_api_key",
+	"secrets.mistral_api_key":              "mistral_api_key",
+	"stt.elevenlabs.api_key":               "elevenlabs_api_key",
+	"secrets.elevenlabs_api_key":           "elevenlabs_api_key",
+	"secrets.x402_facilitator_url":         "x402_facilitator_url",
+	"rag_generate_answer":                  "rag.generate_answer",
+	"generate_answer":                      "rag.generate_answer",
+	"rag_k_default":                        "rag.k_default",
+	"k_default":                            "rag.k_default",
+	"rag_system_prompt":                    "rag.system_prompt",
+	"system_prompt":                        "rag.system_prompt",
+	"rag_max_context_chars":                "rag.max_context_chars",
+	"max_context_chars":                    "rag.max_context_chars",
+	"rag_oversample_factor":                "rag.oversample_factor",
+	"oversample_factor":                    "rag.oversample_factor",
+	"chunking_strategy":                    "chunking.strategy",
+	"chunking_max_tokens":                  "chunking.max_tokens",
+	"chunking_overlap_tokens":              "chunking.overlap_tokens",
+	"ingest_gitignore":                     "ingest.gitignore",
+	"gitignore":                            "ingest.gitignore",
+	"ingest_follow_symlinks":               "ingest.follow_symlinks",
+	"follow_symlinks":                      "ingest.follow_symlinks",
+	"ingest_max_file_mb":                   "ingest.max_file_mb",
+	"max_file_mb":                          "ingest.max_file_mb",
+	"ingest_pdf_mode":                      "ingest.pdf.mode",
+	"pdf_mode":                             "ingest.pdf.mode",
+	"ingest_images_mode":                   "ingest.images.mode",
+	"images_mode":                          "ingest.images.mode",
+	"ingest_audio_mode":                    "ingest.audio.mode",
+	"audio_mode":                           "ingest.audio.mode",
+	"ingest_archives_mode":                 "ingest.archives.mode",
+	"archives_mode":                        "ingest.archives.mode",
+	"stt_provider":                         "stt.provider",
+	"stt_mistral_model":                    "stt.mistral.model",
+	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
+	"stt_elevenlabs_language_code":         "stt.elevenlabs.language_code",
+	"elevenlabs_language_code":             "stt.elevenlabs.language_code",
+	"server_tls_cert_file":                 "server.tls.cert_file",
+	"tls_cert_file":                        "server.tls.cert_file",
+	"cert_file":                            "server.tls.cert_file",
+	"server.tls.cert":                      "server.tls.cert_file",
+	"server_tls_key_file":                  "server.tls.key_file",
+	"tls_key_file":                         "server.tls.key_file",
+	"key_file":                             "server.tls.key_file",
+	"server.tls.key":                       "server.tls.key_file",
+	"x402.mode":                            "x402_mode",
+	"x402.facilitator_url":                 "x402_facilitator_url",
+	"x402.resource_base_url":               "x402_resource_base_url",
+	"x402.facilitator_token":               "x402_facilitator_token",
+	"x402.route_policy.tools_call.enabled": "x402_tools_call_enabled",
+	"x402.route_policy.tools_call.price":   "x402_price_atomic",
+	"x402.route_policy.tools_call.network": "x402_network",
+	"x402.route_policy.tools_call.scheme":  "x402_scheme",
+	"x402.route_policy.tools_call.asset":   "x402_asset",
+	"x402.route_policy.tools_call.pay_to":  "x402_pay_to",
+}
+
 func canonicalizeConfigKey(key string) string {
 	key = strings.TrimSpace(strings.ToLower(key))
-	switch key {
-	case "server.listen":
-		return "listen_addr"
-	case "server.mcp_path":
-		return "mcp_path"
-	case "server.protocol_version":
-		return "protocol_version"
-	case "server.public":
-		return "public"
-	case "security.auth.mode":
-		return "auth_mode"
-	case "security.allowed_origins":
-		return "allowed_origins"
-	case "security.path_excludes":
-		return "path_excludes"
-	case "security.secret_patterns":
-		return "secret_patterns"
-	case "mistral.embed_text_model":
-		return "embed_model_text"
-	case "mistral.embed_code_model":
-		return "embed_model_code"
-	case "mistral.chat_model":
-		return "chat_model"
-	case "mistral.api_key", "stt.mistral.api_key", "secrets.mistral_api_key":
-		return "mistral_api_key"
-	case "stt.elevenlabs.api_key", "secrets.elevenlabs_api_key":
-		return "elevenlabs_api_key"
-	case "secrets.x402_facilitator_url":
-		return "x402_facilitator_url"
-	case "rag_generate_answer", "generate_answer":
-		return "rag.generate_answer"
-	case "rag_k_default", "k_default":
-		return "rag.k_default"
-	case "rag_system_prompt", "system_prompt":
-		return "rag.system_prompt"
-	case "rag_max_context_chars", "max_context_chars":
-		return "rag.max_context_chars"
-	case "rag_oversample_factor", "oversample_factor":
-		return "rag.oversample_factor"
-	case "chunking_strategy":
-		return "chunking.strategy"
-	case "chunking_max_tokens":
-		return "chunking.max_tokens"
-	case "chunking_overlap_tokens":
-		return "chunking.overlap_tokens"
-	case "ingest_gitignore", "gitignore":
-		return "ingest.gitignore"
-	case "ingest_follow_symlinks", "follow_symlinks":
-		return "ingest.follow_symlinks"
-	case "ingest_max_file_mb", "max_file_mb":
-		return "ingest.max_file_mb"
-	case "ingest_pdf_mode", "pdf_mode":
-		return "ingest.pdf.mode"
-	case "ingest_images_mode", "images_mode":
-		return "ingest.images.mode"
-	case "ingest_audio_mode", "audio_mode":
-		return "ingest.audio.mode"
-	case "ingest_archives_mode", "archives_mode":
-		return "ingest.archives.mode"
-	case "stt_provider":
-		return "stt.provider"
-	case "stt_mistral_model":
-		return "stt.mistral.model"
-	case "stt_elevenlabs_model":
-		return "stt.elevenlabs.model"
-	case "stt_elevenlabs_language_code", "elevenlabs_language_code":
-		return "stt.elevenlabs.language_code"
-	case "server_tls_cert_file", "tls_cert_file", "cert_file", "server.tls.cert":
-		return "server.tls.cert_file"
-	case "server_tls_key_file", "tls_key_file", "key_file", "server.tls.key":
-		return "server.tls.key_file"
-	case "x402.mode":
-		return "x402_mode"
-	case "x402.facilitator_url":
-		return "x402_facilitator_url"
-	case "x402.resource_base_url":
-		return "x402_resource_base_url"
-	case "x402.facilitator_token":
-		return "x402_facilitator_token"
-	case "x402.route_policy.tools_call.enabled":
-		return "x402_tools_call_enabled"
-	case "x402.route_policy.tools_call.price":
-		return "x402_price_atomic"
-	case "x402.route_policy.tools_call.network":
-		return "x402_network"
-	case "x402.route_policy.tools_call.scheme":
-		return "x402_scheme"
-	case "x402.route_policy.tools_call.asset":
-		return "x402_asset"
-	case "x402.route_policy.tools_call.pay_to":
-		return "x402_pay_to"
-	default:
-		return key
+	if canonical, ok := configKeyAliases[key]; ok {
+		return canonical
 	}
+	return key
 }
 
 func isMapSectionKey(key string) bool {
@@ -1071,6 +1097,104 @@ func isMapSectionKey(key string) bool {
 }
 
 func setFileScalarValue(cfg *fileConfig, key, value string) error {
+	if err := setBoolFileScalar(cfg, key, value); err != nil {
+		return err
+	}
+	if err := setIntFileScalar(cfg, key, value); err != nil {
+		return err
+	}
+	if err := setDurationFileScalar(cfg, key, value); err != nil {
+		return err
+	}
+	setStringFileScalar(cfg, key, value)
+	return nil
+}
+
+func setBoolFileScalar(cfg *fileConfig, key, value string) error {
+	var target **bool
+	switch key {
+	case "public":
+		target = &cfg.Public
+	case "rag.generate_answer":
+		target = &cfg.RAGGenerateAnswer
+	case "ingest.gitignore":
+		target = &cfg.IngestGitignore
+	case "ingest.follow_symlinks":
+		target = &cfg.IngestFollowSymlinks
+	case "x402_tools_call_enabled":
+		target = &cfg.X402ToolsCallEnabled
+	default:
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("invalid boolean for %s", key)
+	}
+	*target = boolPtr(parsed)
+	return nil
+}
+
+func setIntFileScalar(cfg *fileConfig, key, value string) error {
+	var target **int
+	switch key {
+	case "rate_limit_rps":
+		target = &cfg.RateLimitRPS
+	case "rate_limit_burst":
+		target = &cfg.RateLimitBurst
+	case "rag.k_default":
+		target = &cfg.RAGKDefault
+	case "rag.max_context_chars":
+		target = &cfg.RAGMaxContextChars
+	case "rag.oversample_factor":
+		target = &cfg.RAGOversampleFactor
+	case "chunking.max_tokens":
+		target = &cfg.ChunkingMaxTokens
+	case "chunking.overlap_tokens":
+		target = &cfg.ChunkingOverlapTokens
+	case "ingest.max_file_mb":
+		target = &cfg.IngestMaxFileMB
+	default:
+		return nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fmt.Errorf("invalid integer for %s", key)
+	}
+	*target = intPtr(parsed)
+	return nil
+}
+
+func setDurationFileScalar(cfg *fileConfig, key, value string) error {
+	var target **time.Duration
+	switch key {
+	case "session_inactivity_timeout":
+		target = &cfg.SessionInactivityTimeout
+	case "session_max_lifetime":
+		target = &cfg.SessionMaxLifetime
+	case "health_check_interval":
+		target = &cfg.HealthCheckInterval
+	default:
+		return nil
+	}
+	if value == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("invalid duration for %s", key)
+	}
+	*target = &d
+	return nil
+}
+
+func setStringFileScalar(cfg *fileConfig, key, value string) {
+	setServerStringFileScalar(cfg, key, value)
+	setModelStringFileScalar(cfg, key, value)
+	setIngestStringFileScalar(cfg, key, value)
+	setX402StringFileScalar(cfg, key, value)
+}
+
+func setServerStringFileScalar(cfg *fileConfig, key, value string) {
 	switch key {
 	case "root_dir":
 		cfg.RootDir = strPtr(value)
@@ -1082,26 +1206,17 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.MCPPath = strPtr(value)
 	case "protocol_version":
 		cfg.ProtocolVersion = strPtr(value)
-	case "public":
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for %s", key)
-		}
-		cfg.Public = boolPtr(parsed)
 	case "auth_mode":
 		cfg.AuthMode = strPtr(value)
-	case "rate_limit_rps":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.RateLimitRPS = intPtr(parsed)
-	case "rate_limit_burst":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.RateLimitBurst = intPtr(parsed)
+	case "server.tls.cert_file":
+		cfg.ServerTLSCertFile = strPtr(value)
+	case "server.tls.key_file":
+		cfg.ServerTLSKeyFile = strPtr(value)
+	}
+}
+
+func setModelStringFileScalar(cfg *fileConfig, key, value string) {
+	switch key {
 	case "mistral_base_url":
 		cfg.MistralBaseURL = strPtr(value)
 	case "mistral_api_key":
@@ -1118,64 +1233,15 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.EmbedModelCode = strPtr(value)
 	case "chat_model":
 		cfg.ChatModel = strPtr(value)
-	case "rag.generate_answer":
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for %s", key)
-		}
-		cfg.RAGGenerateAnswer = boolPtr(parsed)
-	case "rag.k_default":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.RAGKDefault = intPtr(parsed)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
-	case "rag.max_context_chars":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.RAGMaxContextChars = intPtr(parsed)
-	case "rag.oversample_factor":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.RAGOversampleFactor = intPtr(parsed)
 	case "chunking.strategy":
 		cfg.ChunkingStrategy = strPtr(value)
-	case "chunking.max_tokens":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.ChunkingMaxTokens = intPtr(parsed)
-	case "chunking.overlap_tokens":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.ChunkingOverlapTokens = intPtr(parsed)
-	case "ingest.gitignore":
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for %s", key)
-		}
-		cfg.IngestGitignore = boolPtr(parsed)
-	case "ingest.follow_symlinks":
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for %s", key)
-		}
-		cfg.IngestFollowSymlinks = boolPtr(parsed)
-	case "ingest.max_file_mb":
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid integer for %s", key)
-		}
-		cfg.IngestMaxFileMB = intPtr(parsed)
+	}
+}
+
+func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
+	switch key {
 	case "ingest.pdf.mode":
 		cfg.IngestPDFMode = strPtr(value)
 	case "ingest.images.mode":
@@ -1192,37 +1258,11 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.STTElevenLabsModel = strPtr(value)
 	case "stt.elevenlabs.language_code":
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
-	case "server.tls.cert_file":
-		cfg.ServerTLSCertFile = strPtr(value)
-	case "server.tls.key_file":
-		cfg.ServerTLSKeyFile = strPtr(value)
-	case "session_inactivity_timeout":
-		if value == "" {
-			return nil
-		}
-		d, err := time.ParseDuration(value)
-		if err != nil {
-			return fmt.Errorf("invalid duration for %s", key)
-		}
-		cfg.SessionInactivityTimeout = &d
-	case "session_max_lifetime":
-		if value == "" {
-			return nil
-		}
-		d, err := time.ParseDuration(value)
-		if err != nil {
-			return fmt.Errorf("invalid duration for %s", key)
-		}
-		cfg.SessionMaxLifetime = &d
-	case "health_check_interval":
-		if value == "" {
-			return nil
-		}
-		d, err := time.ParseDuration(value)
-		if err != nil {
-			return fmt.Errorf("invalid duration for %s", key)
-		}
-		cfg.HealthCheckInterval = &d
+	}
+}
+
+func setX402StringFileScalar(cfg *fileConfig, key, value string) {
+	switch key {
 	case "x402_mode":
 		cfg.X402Mode = strPtr(value)
 	case "x402_facilitator_url":
@@ -1231,12 +1271,6 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		// field deliberately ignored; tokens are env-only for security
 	case "x402_resource_base_url":
 		cfg.X402ResourceBaseURL = strPtr(value)
-	case "x402_tools_call_enabled":
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for %s", key)
-		}
-		cfg.X402ToolsCallEnabled = boolPtr(parsed)
 	case "x402_price_atomic":
 		cfg.X402PriceAtomic = strPtr(value)
 	case "x402_network":
@@ -1247,10 +1281,7 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.X402Asset = strPtr(value)
 	case "x402_pay_to":
 		cfg.X402PayTo = strPtr(value)
-	default:
-		// unknown keys are intentionally ignored for forward compatibility
 	}
-	return nil
 }
 
 func setFileListValue(cfg *fileConfig, key, value string) {
@@ -1398,46 +1429,63 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if cfg == nil {
 		return
 	}
-	if apiKey, ok := envLookup("MISTRAL_API_KEY", overrideEnv); ok && strings.TrimSpace(apiKey) != "" {
+	applyMistralEnvOverrides(cfg, overrideEnv)
+	applyElevenLabsEnvOverrides(cfg, overrideEnv)
+	applyNetworkEnvOverrides(cfg, overrideEnv)
+	applySessionEnvOverrides(cfg, overrideEnv)
+	applyX402EnvOverrides(cfg, overrideEnv)
+}
+
+func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
+	if apiKey, ok := envLookup("MISTRAL_API_KEY", env); ok && strings.TrimSpace(apiKey) != "" {
 		cfg.MistralAPIKey = apiKey
 	}
-	if baseURL, ok := envLookup("MISTRAL_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
+	if baseURL, ok := envLookup("MISTRAL_BASE_URL", env); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
 	}
-	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", overrideEnv); ok && strings.TrimSpace(m) != "" {
+	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", env); ok && strings.TrimSpace(m) != "" {
 		cfg.EmbedModelText = strings.TrimSpace(m)
 	}
-	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_CODE", overrideEnv); ok && strings.TrimSpace(m) != "" {
+	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_CODE", env); ok && strings.TrimSpace(m) != "" {
 		cfg.EmbedModelCode = strings.TrimSpace(m)
 	}
-	if m, ok := envLookup("DIR2MCP_CHAT_MODEL", overrideEnv); ok && strings.TrimSpace(m) != "" {
+	if m, ok := envLookup("DIR2MCP_CHAT_MODEL", env); ok && strings.TrimSpace(m) != "" {
 		cfg.ChatModel = strings.TrimSpace(m)
 	}
-	if apiKey, ok := envLookup("ELEVENLABS_API_KEY", overrideEnv); ok && strings.TrimSpace(apiKey) != "" {
+}
+
+func applyElevenLabsEnvOverrides(cfg *Config, env map[string]string) {
+	if apiKey, ok := envLookup("ELEVENLABS_API_KEY", env); ok && strings.TrimSpace(apiKey) != "" {
 		cfg.ElevenLabsAPIKey = apiKey
 	}
-	if baseURL, ok := envLookup("ELEVENLABS_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
+	if baseURL, ok := envLookup("ELEVENLABS_BASE_URL", env); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.ElevenLabsBaseURL = baseURL
 	}
-	if voiceID, ok := envLookup("ELEVENLABS_VOICE_ID", overrideEnv); ok && strings.TrimSpace(voiceID) != "" {
+	if voiceID, ok := envLookup("ELEVENLABS_VOICE_ID", env); ok && strings.TrimSpace(voiceID) != "" {
 		cfg.ElevenLabsTTSVoiceID = strings.TrimSpace(voiceID)
 	}
-	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
+}
+
+func applyNetworkEnvOverrides(cfg *Config, env map[string]string) {
+	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", env); ok {
 		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
 	}
-	if rawRPS, ok := envLookup("DIR2MCP_RATE_LIMIT_RPS", overrideEnv); ok {
+	if rawRPS, ok := envLookup("DIR2MCP_RATE_LIMIT_RPS", env); ok {
 		if rps, err := strconv.Atoi(strings.TrimSpace(rawRPS)); err == nil && rps >= 0 {
 			cfg.RateLimitRPS = rps
 		}
 	}
-	if rawBurst, ok := envLookup("DIR2MCP_RATE_LIMIT_BURST", overrideEnv); ok {
+	if rawBurst, ok := envLookup("DIR2MCP_RATE_LIMIT_BURST", env); ok {
 		if burst, err := strconv.Atoi(strings.TrimSpace(rawBurst)); err == nil && burst >= 0 {
 			cfg.RateLimitBurst = burst
 		}
 	}
-	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
+	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", env); ok {
 		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
 	}
+}
+
+func applySessionEnvOverrides(cfg *Config, env map[string]string) {
 	// session-related environment variables are durations parsed by time.ParseDuration.
 	// Syntactically invalid values (parse errors) are warned about but not fatal; values
 	// that parse successfully (including negative durations) are stored and may still
@@ -1445,64 +1493,65 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	// Historically the variable was named DIR2MCP_SESSION_TIMEOUT; we
 	// elect to prefer the more explicit DIR2MCP_SESSION_INACTIVITY_TIMEOUT
 	// while still accepting the old name for compatibility.
-	if raw, ok := envLookup("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", overrideEnv); ok {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed != "" {
-			d, err := time.ParseDuration(trimmed)
-			if err != nil {
-				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_INACTIVITY_TIMEOUT: %q (%v)", trimmed, err))
-			} else {
-				cfg.SessionInactivityTimeout = d
-			}
-		}
-	} else if raw, ok := envLookup("DIR2MCP_SESSION_TIMEOUT", overrideEnv); ok {
+	if raw, ok := envLookup("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", env); ok {
+		applyDurationEnvField(cfg, raw, "DIR2MCP_SESSION_INACTIVITY_TIMEOUT", &cfg.SessionInactivityTimeout)
+	} else if raw, ok := envLookup("DIR2MCP_SESSION_TIMEOUT", env); ok {
 		// fallback to old name
 		trimmed := strings.TrimSpace(raw)
 		if trimmed != "" {
 			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("DIR2MCP_SESSION_TIMEOUT is deprecated; use DIR2MCP_SESSION_INACTIVITY_TIMEOUT instead (current value: %q)", trimmed))
-			d, err := time.ParseDuration(trimmed)
-			if err != nil {
-				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_TIMEOUT: %q (%v)", trimmed, err))
-			} else {
-				cfg.SessionInactivityTimeout = d
-			}
+			applyDurationEnvField(cfg, raw, "DIR2MCP_SESSION_TIMEOUT", &cfg.SessionInactivityTimeout)
 		}
 	}
-	if raw, ok := envLookup("DIR2MCP_SESSION_MAX_LIFETIME", overrideEnv); ok {
-		if trimmed := strings.TrimSpace(raw); trimmed != "" {
-			d, err := time.ParseDuration(trimmed)
-			if err != nil {
-				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_MAX_LIFETIME: %q (%v)", trimmed, err))
-			} else {
-				cfg.SessionMaxLifetime = d
-			}
-		}
+	if raw, ok := envLookup("DIR2MCP_SESSION_MAX_LIFETIME", env); ok {
+		applyDurationEnvField(cfg, raw, "DIR2MCP_SESSION_MAX_LIFETIME", &cfg.SessionMaxLifetime)
 	}
 	// health check interval env; zero duration interpreted as default later
-	if raw, ok := envLookup("DIR2MCP_HEALTH_CHECK_INTERVAL", overrideEnv); ok {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed != "" {
-			d, err := time.ParseDuration(trimmed)
-			if err != nil {
-				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_HEALTH_CHECK_INTERVAL: %q (%v)", trimmed, err))
-			} else {
-				cfg.HealthCheckInterval = d
-			}
-		}
+	if raw, ok := envLookup("DIR2MCP_HEALTH_CHECK_INTERVAL", env); ok {
+		applyDurationEnvField(cfg, raw, "DIR2MCP_HEALTH_CHECK_INTERVAL", &cfg.HealthCheckInterval)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_MODE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+}
+
+func applyDurationEnvField(cfg *Config, raw, varName string, target *time.Duration) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil {
+		cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for %s: %q (%v)", varName, trimmed, err))
+		return
+	}
+	*target = d
+}
+
+func applyX402EnvOverrides(cfg *Config, env map[string]string) {
+	applyX402BasicEnvOverrides(cfg, env)
+	applyX402RouteEnvOverrides(cfg, env)
+}
+
+func applyX402BasicEnvOverrides(cfg *Config, env map[string]string) {
+	applyX402EndpointEnvOverrides(cfg, env)
+	applyX402PricingEnvOverrides(cfg, env)
+}
+
+func applyX402EndpointEnvOverrides(cfg *Config, env map[string]string) {
+	if raw, ok := envLookup("DIR2MCP_X402_MODE", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Mode = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_URL", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_URL", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.FacilitatorURL = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_TOKEN", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_TOKEN", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.FacilitatorToken = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_RESOURCE_BASE_URL", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	if raw, ok := envLookup("DIR2MCP_X402_RESOURCE_BASE_URL", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.ResourceBaseURL = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_TOOLS_CALL_ENABLED", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+}
+
+func applyX402PricingEnvOverrides(cfg *Config, env map[string]string) {
+	if raw, ok := envLookup("DIR2MCP_X402_TOOLS_CALL_ENABLED", env); ok && strings.TrimSpace(raw) != "" {
 		trimmed := strings.TrimSpace(raw)
 		if enabled, err := strconv.ParseBool(trimmed); err == nil {
 			cfg.X402.ToolsCallEnabled = enabled
@@ -1515,21 +1564,24 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 		}
 	}
 	// prefer the atomic env var name matching the YAML key; fall back for compatibility
-	if raw, ok := envLookup("DIR2MCP_X402_PRICE_ATOMIC", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	if raw, ok := envLookup("DIR2MCP_X402_PRICE_ATOMIC", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.PriceAtomic = strings.TrimSpace(raw)
-	} else if raw, ok := envLookup("DIR2MCP_X402_PRICE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	} else if raw, ok := envLookup("DIR2MCP_X402_PRICE", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.PriceAtomic = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_NETWORK", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+}
+
+func applyX402RouteEnvOverrides(cfg *Config, env map[string]string) {
+	if raw, ok := envLookup("DIR2MCP_X402_NETWORK", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Network = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_SCHEME", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	if raw, ok := envLookup("DIR2MCP_X402_SCHEME", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Scheme = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_ASSET", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	if raw, ok := envLookup("DIR2MCP_X402_ASSET", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Asset = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_PAY_TO", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	if raw, ok := envLookup("DIR2MCP_X402_PAY_TO", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.PayTo = strings.TrimSpace(raw)
 	}
 }
@@ -1636,38 +1688,15 @@ func (c *Config) ValidateX402(strict bool) error {
 		return nil
 	}
 
-	if rawURL := strings.TrimSpace(c.X402.FacilitatorURL); rawURL != "" {
-		parsed, err := url.Parse(rawURL)
-		if err != nil {
-			return fmt.Errorf("invalid x402 facilitator URL %q: %w", rawURL, err)
-		}
-		if parsed.Scheme == "" || parsed.Host == "" {
-			return fmt.Errorf("invalid x402 facilitator URL: %q", rawURL)
-		}
-		// normalize: strip trailing slash from path so callers can safely
-		// append segments.  collapse a bare "/" path to empty.
-		if parsed.Path == "/" {
-			parsed.Path = ""
-		} else {
-			parsed.Path = strings.TrimRight(parsed.Path, "/")
-		}
-		c.X402.FacilitatorURL = parsed.String()
+	if normalized, err := normalizeX402URL(c.X402.FacilitatorURL, "facilitator"); err != nil {
+		return err
+	} else if normalized != "" {
+		c.X402.FacilitatorURL = normalized
 	}
-	if rawURL := strings.TrimSpace(c.X402.ResourceBaseURL); rawURL != "" {
-		parsed, err := url.Parse(rawURL)
-		if err != nil {
-			return fmt.Errorf("invalid x402 resource base URL %q: %w", rawURL, err)
-		}
-		if parsed.Scheme == "" || parsed.Host == "" {
-			return fmt.Errorf("invalid x402 resource base URL: %q", rawURL)
-		}
-		// normalize as above
-		if parsed.Path == "/" {
-			parsed.Path = ""
-		} else {
-			parsed.Path = strings.TrimRight(parsed.Path, "/")
-		}
-		c.X402.ResourceBaseURL = parsed.String()
+	if normalized, err := normalizeX402URL(c.X402.ResourceBaseURL, "resource base"); err != nil {
+		return err
+	} else if normalized != "" {
+		c.X402.ResourceBaseURL = normalized
 	}
 
 	// network is validated later when strict mode is enabled; no need to duplicate
@@ -1675,6 +1704,10 @@ func (c *Config) ValidateX402(strict bool) error {
 	if !strict {
 		return nil
 	}
+	return c.validateX402Strict()
+}
+
+func (c *Config) validateX402Strict() error {
 	if strings.TrimSpace(c.X402.FacilitatorURL) == "" {
 		return fmt.Errorf("x402 facilitator URL is required")
 	}
@@ -1702,7 +1735,6 @@ func (c *Config) ValidateX402(strict bool) error {
 	default:
 		return fmt.Errorf("x402 scheme must be one of: exact, upto")
 	}
-
 	// ensure network string is trimmed before we validate and store it
 	net := strings.TrimSpace(c.X402.Network)
 	c.X402.Network = net
@@ -1721,6 +1753,26 @@ func (c *Config) ValidateX402(strict bool) error {
 	return nil
 }
 
+func normalizeX402URL(rawURL, label string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid x402 %s URL %q: %w", label, rawURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid x402 %s URL: %q", label, rawURL)
+	}
+	if parsed.Path == "/" {
+		parsed.Path = ""
+	} else {
+		parsed.Path = strings.TrimRight(parsed.Path, "/")
+	}
+	return parsed.String(), nil
+}
+
 func isCAIP2Network(value string) bool {
 	parts := strings.Split(strings.TrimSpace(value), ":")
 	if len(parts) != 2 {
@@ -1731,11 +1783,19 @@ func isCAIP2Network(value string) bool {
 	if len(ns) == 0 || len(ns) > 32 || len(ref) == 0 || len(ref) > 128 {
 		return false
 	}
+	return isCAIP2Namespace(ns) && isCAIP2Reference(ref)
+}
+
+func isCAIP2Namespace(ns string) bool {
 	for _, r := range ns {
 		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
 			return false
 		}
 	}
+	return true
+}
+
+func isCAIP2Reference(ref string) bool {
 	for _, r := range ref {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 			continue
