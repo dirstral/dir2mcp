@@ -130,9 +130,9 @@ func (t *SDKTransport) serveHTTPRequest(w http.ResponseWriter, req *http.Request
 	if !ok {
 		return
 	}
-	if !t.checkSDKSession(w, req, parsedReq, id) {
-		return
-	}
+	// Session validation is performed inside dispatchSDKRequest, immediately
+	// before the handler is invoked, to close the TOCTOU window that would
+	// exist if we checked here and then dispatched separately.
 	t.dispatchSDKRequest(w, req, parsedReq, id, hasID, sdkHandler)
 }
 
@@ -169,11 +169,11 @@ func (t *SDKTransport) checkPreRequest(w http.ResponseWriter, req *http.Request)
 func readSDKBody(w http.ResponseWriter, req *http.Request) ([]byte, bool) {
 	body, err := io.ReadAll(io.LimitReader(req.Body, maxRequestBody+1))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, nil, -32600, err.Error(), "INVALID_FIELD", false)
+		writeError(w, http.StatusBadRequest, nil, -32600, "failed to read request body", "INVALID_FIELD", false)
 		return nil, false
 	}
 	if len(body) > maxRequestBody {
-		writeError(w, http.StatusRequestEntityTooLarge, nil, -32600, "request body too large", "INVALID_FIELD", false)
+		writeError(w, http.StatusBadRequest, nil, -32600, "request body too large", "INVALID_FIELD", false)
 		return nil, false
 	}
 	return body, true
@@ -197,26 +197,24 @@ func (t *SDKTransport) parseSDKRequestAndID(w http.ResponseWriter, body []byte) 
 	return parsedReq, id, hasID, true
 }
 
-func (t *SDKTransport) checkSDKSession(w http.ResponseWriter, req *http.Request, parsedReq rpcRequest, id interface{}) bool {
-	if parsedReq.Method == protocol.RPCMethodInitialize {
-		return true
-	}
-	sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
-	if sessionID == "" {
-		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-		return false
-	}
-	if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
-		if reason != "" {
-			w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
-		}
-		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-		return false
-	}
-	return true
-}
-
 func (t *SDKTransport) dispatchSDKRequest(w http.ResponseWriter, req *http.Request, parsedReq rpcRequest, id interface{}, hasID bool, sdkHandler http.Handler) {
+	// Validate session immediately before dispatch to eliminate the TOCTOU
+	// window between a prior check and handler invocation. initialize does not
+	// require a pre-existing session — it creates one.
+	if parsedReq.Method != protocol.RPCMethodInitialize {
+		sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
+		if sessionID == "" {
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+			return
+		}
+		if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
+			if reason != "" {
+				w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+			}
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+			return
+		}
+	}
 	switch parsedReq.Method {
 	case protocol.RPCMethodInitialize:
 		if !hasID {

@@ -982,7 +982,10 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		content, truncated, openErr = withMeta.OpenFileWithMeta(ctx, relPath, span, maxChars)
 	} else {
 		content, openErr = s.retriever.OpenFile(ctx, relPath, span, maxChars)
-		truncated = len([]rune(content)) > maxChars
+		// OpenFile already truncates to maxChars internally and does not
+		// return a truncation flag, so we cannot know the pre-truncation
+		// length here. Accurate truncation info requires OpenFileWithMeta.
+		truncated = false
 	}
 	if openErr != nil {
 		return toolCallResult{}, mapOpenFileError(openErr)

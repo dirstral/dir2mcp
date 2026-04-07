@@ -596,7 +596,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
-	if isMetaSpanKind(kind) {
+	if isMetaSpanKind(kind) && (kind != "time" || span.EndMS > 0) {
 		if fromMeta, ok := s.sliceFromMetadata(normalizedRel, span); ok {
 			if hasSecretMatch(secretPatterns, fromMeta) {
 				return "", false, model.ErrForbidden
@@ -668,7 +668,11 @@ func (s *Service) resolveFilePath(relPath, rootDir string, pathExcludes []string
 		return "", "", "", absErr
 	}
 	realRoot = rootAbs
-	if resolvedRoot, rootErr := filepath.EvalSymlinks(rootAbs); rootErr == nil {
+	if resolvedRoot, rootErr := filepath.EvalSymlinks(rootAbs); rootErr != nil {
+		if !errors.Is(rootErr, os.ErrNotExist) {
+			return "", "", "", model.ErrForbidden
+		}
+	} else {
 		realRoot = resolvedRoot
 	}
 
@@ -688,8 +692,9 @@ func resolveSymlinkInRoot(targetAbs, realRoot string, pathExcludes []string, s *
 		if errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
-		// if eval fails for other reasons, continue with the direct target
-		resolvedAbs = targetAbs
+		// fail closed: any error other than not-exist means we cannot
+		// confirm the path stays within root, so deny the request.
+		return "", model.ErrForbidden
 	}
 	resolvedRel, relErr := filepath.Rel(realRoot, resolvedAbs)
 	if relErr != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(os.PathSeparator)) {
