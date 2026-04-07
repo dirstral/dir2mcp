@@ -1394,11 +1394,11 @@ func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel st
 func mapPathError(err error) *toolExecutionError {
 	switch {
 	case errors.Is(err, model.ErrPathOutsideRoot):
-		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	default:
-		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "permission denied", Retryable: false}
 	}
 }
 
@@ -1406,7 +1406,7 @@ func mapFileAccessError(err error) *toolExecutionError {
 	if errors.Is(err, os.ErrNotExist) {
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	}
-	return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
+	return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "permission denied", Retryable: false}
 }
 
 func mapReadDocumentError(err error) *toolExecutionError {
@@ -1414,9 +1414,9 @@ func mapReadDocumentError(err error) *toolExecutionError {
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
-		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	default:
-		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "permission denied", Retryable: false}
 	}
 }
 
