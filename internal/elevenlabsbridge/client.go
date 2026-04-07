@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	bridgeProtocolVersion = "2025-11-25"
+	bridgeProtocolVersion = protocol.ProtocolDefaultVersion
 	bridgeClientName      = "elevenlabs-bridge"
 	bridgeClientVersion   = "1.0.0"
 )
