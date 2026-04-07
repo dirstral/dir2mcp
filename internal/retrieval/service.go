@@ -612,7 +612,9 @@ func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, ma
 	if !isMetaSpanKind(kind) || (kind == "time" && span.EndMS <= 0) {
 		return "", false, false, nil
 	}
-	fromMeta, ok := s.sliceFromMetadata(normalizedRel, span)
+	normalizedSpan := span
+	normalizedSpan.Kind = kind
+	fromMeta, ok := s.sliceFromMetadata(normalizedRel, normalizedSpan)
 	if !ok {
 		return "", false, false, nil
 	}
