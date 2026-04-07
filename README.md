@@ -11,7 +11,7 @@
 
 # dir2mcp
 
-Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations, built to maximize use of Mistral models across embedding, OCR, transcription, and generation. Optional layers include ElevenLabs voice output and x402 request gating (payment/request‑gating protocol).
+Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations, built to maximize use of Mistral models across embedding, OCR, transcription, and generation. Optional layers include ElevenLabs voice output via a dedicated bridge binary and x402 request gating (payment/request-gating protocol).
 
 ## Why dir2mcp
 
@@ -21,13 +21,15 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
   - STT default: `voxtral-mini-latest`
   - RAG generation: Mistral chat models
 - Single Go binary (`dir2mcp`) with local-first state in `.dir2mcp/`
+- Companion bridge binary (`elevenlabs-bridge`) for ElevenLabs webhook tools
 - MCP Streamable HTTP server with a stable tool surface
 - Multimodal ingestion: text/code, OCR, transcripts, structured annotations
 - Citation-aware retrieval and RAG-style answering
 - Optional facilitator-backed x402 payment gating for `tools/call`
-- Monorepo layout with two binaries:
+- Monorepo layout with three binaries:
   - `dir2mcp`: MCP server and indexing/runtime host
   - `dirstral`: terminal client (Chat/Voice/Start/Stop MCP Server/Settings)
+  - `elevenlabs-bridge`: HTTP helper for ElevenLabs webhook tools
 
 ## Installation
 
@@ -90,6 +92,7 @@ Or build each binary directly:
 
 - `go build -o dir2mcp ./cmd/dir2mcp/`
 - `go build -o dirstral ./cmd/dirstral/`
+- `go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/`
 
 The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
 Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`.
@@ -218,7 +221,35 @@ vary by deployment. The commonly used variables are:
 Operational guidance:
 - Do not pass bearer tokens directly on command lines in shared environments.
 - Prefer token files (`--auth file:<path>`) or environment variables.
-- In public mode, do not run `--auth none` unless you intentionally set `--force-insecure`.
+
+### ElevenLabs bridge
+
+`elevenlabs-bridge` is a separate Go helper that forwards ElevenLabs webhook
+calls to a running `dir2mcp` MCP endpoint. It reads its configuration from the
+current environment and falls back to sensible defaults:
+
+| Variable | Required | Description |
+|---|---|---|
+| `MCP_URL` | No | `dir2mcp` MCP endpoint URL. Default: `http://127.0.0.1:8087/mcp` |
+| `MCP_TOKEN` | No | Explicit bearer token for `dir2mcp`. When unset, the bridge tries `$STATE_DIR/secret.token` and otherwise connects without auth |
+| `STATE_DIR` | No | `dir2mcp` state directory used to locate `secret.token` when `MCP_TOKEN` is unset. Default: `.dir2mcp` in the bridge working directory |
+| `PORT` | No | Bridge listen port. Default: `8088` |
+
+Usage:
+
+```bash
+go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/
+
+# If the bridge runs in the same corpus checkout as dir2mcp, the default
+# STATE_DIR (.dir2mcp relative to the current working directory) usually works.
+MCP_URL="http://127.0.0.1:8087/mcp" \
+STATE_DIR="/path/to/corpus/.dir2mcp" \
+PORT=8088 \
+./elevenlabs-bridge
+```
+
+If your `dir2mcp` server already uses `--auth none`, you can omit `MCP_TOKEN`
+and `STATE_DIR`.
 
 ## Security Defaults
 
