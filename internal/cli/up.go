@@ -321,10 +321,11 @@ func (a *App) resolveX402Token(cfg *config.Config, opts upOptions) (source strin
 // validateUpConfig runs all post-override config validations (public mode,
 // MCP path prefix, x402, root/state directories).
 func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
-	if opts.public {
+	if cfg.Public || opts.public {
 		if code := a.applyPublicMode(cfg, opts); code != exitSuccess {
 			return code
 		}
+	}
 	}
 	if !strings.HasPrefix(cfg.MCPPath, "/") {
 		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
