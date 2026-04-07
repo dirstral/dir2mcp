@@ -4,8 +4,9 @@ build: build-dir2mcp
 
 DIR2MCP_VERSION ?= 0.0.0-dev
 DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
+GOCYCLO_FALLBACK_BIN := $(shell sh -c 'gobin=$$(go env GOBIN); if [ -n "$$gobin" ]; then echo "$$gobin/gocyclo"; else gopath=$$(go env GOPATH | cut -d: -f1); echo "$$gopath/bin/gocyclo"; fi')
 ifndef GOCYCLO_BIN
-GOCYCLO_BIN := $(shell command -v gocyclo 2>/dev/null || echo "$$(go env GOPATH)/bin/gocyclo")
+GOCYCLO_BIN := $(shell command -v gocyclo 2>/dev/null || echo "$(GOCYCLO_FALLBACK_BIN)")
 endif
 
 build-dir2mcp:
