@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,7 @@ import (
 
 func (a *App) runReindex(ctx context.Context, global globalOptions, args []string) int {
 	if len(args) > 0 {
-		writef(a.stderr, "reindex command does not accept arguments: %s\n", strings.Join(args, " "))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("reindex command does not accept arguments: %s", strings.Join(args, " ")))
 		return exitConfigInvalid
 	}
 
@@ -22,7 +23,7 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	// proceeding with defaults as was previously the case.
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
-		writef(a.stderr, "load config: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
 
@@ -35,7 +36,7 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	textIndexPath := filepath.Join(baseDir, "vectors_text.hnsw")
 	codeIndexPath := filepath.Join(baseDir, "vectors_code.hnsw")
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
-		writef(a.stderr, "create state dir: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitRootInaccessible, fmt.Sprintf("create state dir: %v", err))
 		return exitRootInaccessible
 	}
 	// update cfg so that the store factory uses the same baseDir
@@ -43,15 +44,15 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	st := a.storeForConfig(cfg)
 	defer a.closeStoreWithLog(st)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		writef(a.stderr, "initialize metadata store: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
 		return exitIndexLoadFailure
 	}
-	if exitCode := clearContentHashesIfSupported(ctx, st, a.stderr); exitCode != exitSuccess {
+	if exitCode := clearContentHashesIfSupported(ctx, st, a.stderr, global.jsonOutput); exitCode != exitSuccess {
 		return exitCode
 	}
 	for _, indexPath := range []string{textIndexPath, codeIndexPath} {
 		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			writef(a.stderr, "remove stale index file %s: %v\n", indexPath, err)
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("remove stale index file %s: %v", indexPath, err))
 			return exitGeneric
 		}
 	}
@@ -59,7 +60,7 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	// use the factory hook (same as runUp) to allow tests to intercept
 	ing, err := a.newIngestor(cfg, st)
 	if err != nil {
-		writef(a.stderr, "initialize ingestor: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
 		return exitConfigInvalid
 	}
 
@@ -71,7 +72,7 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitSuccess
 	}
 	if err != nil {
-		writef(a.stderr, "reindex failed: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("reindex failed: %v", err))
 		return exitGeneric
 	}
 	return exitSuccess

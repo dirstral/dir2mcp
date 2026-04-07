@@ -645,8 +645,21 @@ func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 	if code != 3 {
 		t.Fatalf("unexpected exit code: got=%d want=3 stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "ingestion failed") {
-		t.Fatalf("expected ingestion error in stderr, got: %s", stderr.String())
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal ingestion stderr payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "INGESTION_FATAL" || payload.ExitCode != 3 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "ingestion failed") {
+		t.Fatalf("expected ingestion error message in payload, got: %q", payload.Error.Message)
 	}
 }
 

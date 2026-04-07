@@ -674,6 +674,126 @@ func TestAskMissingQuestionFails(t *testing.T) {
 	}
 }
 
+func TestStatusJSONErrorOutputWhenStateMissing(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
+		if code != 1 {
+			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal status error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "GENERIC_ERROR" || payload.ExitCode != 1 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "no state found") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
+func TestAskMissingQuestionJSONErrorOutput(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "ask", "--k", "2"})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal ask error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "requires a question argument") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
+func TestReindexJSONErrorOutputForUnexpectedArgs(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "reindex", "extra"})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal reindex error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "reindex command does not accept arguments") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
+func TestConfigUnknownSubcommandJSONErrorOutput(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "config", "unknown"})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal config error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "unknown config subcommand") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
 func TestVersionUsesBuildInfo(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)

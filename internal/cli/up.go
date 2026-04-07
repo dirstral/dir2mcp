@@ -27,7 +27,7 @@ import (
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
 	if err != nil {
-		writef(a.stderr, "load config: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
 
@@ -52,14 +52,14 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	auth, err := prepareAuthMaterial(cfg)
 	if err != nil {
-		writef(a.stderr, "auth setup: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("auth setup: %v", err))
 		return exitAuthOrPayment
 	}
 	cfg.AuthMode = auth.mode
 	cfg.ResolvedAuthToken = auth.token
 	warnConfigSnapshotErr(a.stderr, opts.quiet, saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource))
 
-	st, textIx, codeIx, code := a.initStoreAndIndices(ctx, &cfg)
+	st, textIx, codeIx, code := a.initStoreAndIndices(ctx, &cfg, opts.jsonOutput)
 	if code != exitSuccess {
 		return code
 	}
@@ -96,7 +96,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
 	ing, err := a.newIngestor(cfg, st)
 	if err != nil {
-		writef(a.stderr, "initialize ingestor: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
 		return exitConfigInvalid
 	}
 	wireIngestorHooks(ing, indexingState, ret.EvictDocuments)
@@ -107,7 +107,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		writef(a.stderr, "bind server: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitServerBindFailure, fmt.Sprintf("bind server: %v", err))
 		return exitServerBindFailure
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -137,7 +137,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	mcpTransportMode := strings.TrimSpace(os.Getenv("MCP_TRANSPORT"))
 	transport, err := mcp.NewTransport(mcpTransportMode, mcpServer, ln, tlsCertFile, tlsKeyFile)
 	if err != nil {
-		writef(a.stderr, "transport init: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("transport init: %v", err))
 		return exitConfigInvalid
 	}
 
@@ -154,7 +154,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	connection := buildConnectionPayload(cfg, mcpURL, auth)
 	if err := writeConnectionFile(filepath.Join(cfg.StateDir, connectionFileName), connection); err != nil {
-		writef(a.stderr, "write %s: %v\n", connectionFileName, err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("write %s: %v", connectionFileName, err))
 		return exitGeneric
 	}
 
@@ -197,7 +197,7 @@ func (a *App) applyTLSConfig(cfg *config.Config, opts upOptions) (tlsCertFile, t
 		tlsKeyFile = strings.TrimSpace(cfg.ServerTLSKeyFile)
 	}
 	if err := validateTLSFlags(tlsCertFile, tlsKeyFile); err != nil {
-		writef(a.stderr, "CONFIG_INVALID: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("CONFIG_INVALID: %v", err))
 		return "", "", exitConfigInvalid
 	}
 	cfg.ServerTLSCertFile = tlsCertFile
@@ -293,12 +293,12 @@ func (a *App) resolveX402Token(cfg *config.Config, opts upOptions) (source strin
 	if opts.x402FacilitatorTokenFile != "" {
 		data, err := os.ReadFile(filepath.Clean(opts.x402FacilitatorTokenFile))
 		if err != nil {
-			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
+			writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("failed to read x402 facilitator token file: %v", err))
 			return "", exitAuthOrPayment
 		}
 		token := strings.TrimSpace(string(data))
 		if token == "" {
-			writef(a.stderr, "x402 facilitator token file is empty\n")
+			writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, "x402 facilitator token file is empty")
 			return "", exitAuthOrPayment
 		}
 		cfg.X402.FacilitatorToken = token
@@ -327,20 +327,20 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 		}
 	}
 	if !strings.HasPrefix(cfg.MCPPath, "/") {
-		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: --mcp-path must start with '/'")
 		return exitConfigInvalid
 	}
 	strictX402 := strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "required")
 	if err := cfg.ValidateX402(strictX402); err != nil {
-		writef(a.stderr, "CONFIG_INVALID: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("x402 configuration invalid: %v", err))
 		return exitAuthOrPayment
 	}
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
-		writef(a.stderr, "root inaccessible: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("root inaccessible: %v", err))
 		return exitRootInaccessible
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
-		writef(a.stderr, "create state dir: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("create state dir: %v", err))
 		return exitRootInaccessible
 	}
 	// create payments subdirectory while x402 configuration has been
@@ -350,7 +350,7 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 	// because it's done after x402 validation, a valid config (including
 	// mode="off") won't leave an inconsistent state.
 	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
-		writef(a.stderr, "create payments dir: %v\n", err)
+		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("create payments dir: %v", err))
 		return exitRootInaccessible
 	}
 	return exitSuccess
@@ -369,8 +369,12 @@ func (a *App) applyPublicMode(cfg *config.Config, opts upOptions) int {
 	}
 	authMode := strings.TrimSpace(cfg.AuthMode)
 	if strings.EqualFold(authMode, "none") && !opts.forceInsecure {
-		se := a.sty(opts.jsonOutput)
-		writef(a.stderr, "%s --public requires auth. Use --auth auto or --force-insecure to override (unsafe).\n", se.errPrefix())
+		writeCLIError(
+			a.stderr,
+			opts.jsonOutput,
+			exitConfigInvalid,
+			"--public requires auth. Use --auth auto or --force-insecure to override (unsafe).",
+		)
 		return exitConfigInvalid
 	}
 	return exitSuccess
@@ -380,6 +384,17 @@ func (a *App) applyPublicMode(cfg *config.Config, opts upOptions) int {
 func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteractiveMode bool) int {
 	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
 		return exitSuccess
+	}
+	if opts.jsonOutput {
+		writeCLIError(
+			a.stderr,
+			true,
+			exitConfigInvalid,
+			"CONFIG_INVALID: Missing MISTRAL_API_KEY",
+			"Set env: MISTRAL_API_KEY=...",
+			"Or run: dir2mcp config init",
+		)
+		return exitConfigInvalid
 	}
 	se := a.sty(opts.jsonOutput)
 	if nonInteractiveMode {
@@ -395,10 +410,10 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 
 // initStoreAndIndices initialises the metadata store and both HNSW indices.
 // On success the caller is responsible for closing all three.
-func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config) (model.Store, model.Index, model.Index, int) {
+func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, model.Index, model.Index, int) {
 	st := a.storeForConfig(*cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		writef(a.stderr, "initialize metadata store: %v\n", err)
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
 		return nil, nil, nil, exitIndexLoadFailure
 	}
 
@@ -407,7 +422,7 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config) (mode
 	if err := textIx.Load(textIndexPath); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
-		writef(a.stderr, "load text index: %v\n", err)
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load text index: %v", err))
 		_ = st.Close()
 		_ = textIx.Close()
 		return nil, nil, nil, exitIndexLoadFailure
@@ -418,7 +433,7 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config) (mode
 	if err := codeIx.Load(codeIndexPath); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
-		writef(a.stderr, "load code index: %v\n", err)
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load code index: %v", err))
 		_ = st.Close()
 		_ = textIx.Close()
 		_ = codeIx.Close()
@@ -522,7 +537,7 @@ func (a *App) runEventLoop(
 			return exitSuccess
 		case serverErr := <-serverErrCh:
 			if serverErr != nil {
-				writef(a.stderr, "server failed: %v\n", serverErr)
+				writeCLIError(a.stderr, emitter.enabled, exitGeneric, fmt.Sprintf("server failed: %v", serverErr))
 				emitter.Emit("error", "fatal", map[string]interface{}{
 					"code":    "SERVER_FAILURE",
 					"message": serverErr.Error(),
@@ -540,7 +555,7 @@ func (a *App) runEventLoop(
 				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 				continue
 			}
-			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
+			writeCLIError(a.stderr, emitter.enabled, exitIngestionFatal, fmt.Sprintf("ingestion failed: %v", ingestErr))
 			emitter.Emit("error", "file_error", map[string]interface{}{
 				"message": ingestErr.Error(),
 			})
@@ -553,7 +568,7 @@ func (a *App) runEventLoop(
 			if embedErr == nil {
 				continue
 			}
-			writef(a.stderr, "embedding worker warning: %v\n", embedErr)
+			writeCLIError(a.stderr, emitter.enabled, exitGeneric, fmt.Sprintf("embedding worker warning: %v", embedErr))
 			emitter.Emit("error", "embed_error", map[string]interface{}{
 				"message": embedErr.Error(),
 			})

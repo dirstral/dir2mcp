@@ -222,6 +222,17 @@ type ndjsonEmitter struct {
 	out     io.Writer
 }
 
+type cliErrorPayload struct {
+	Error    cliError `json:"error"`
+	ExitCode int      `json:"exit_code"`
+}
+
+type cliError struct {
+	Code    string   `json:"code"`
+	Message string   `json:"message"`
+	Hints   []string `json:"hints,omitempty"`
+}
+
 // corpusSnapshot is a point-in-time summary of the indexed corpus written to
 // corpus.json in the state directory. See corpusIndexing for field semantics,
 // including the sentinel value used for unavailable counters.
@@ -342,7 +353,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 
 	globalOpts, remaining, err := parseGlobalOptions(args)
 	if err != nil {
-		writef(a.stderr, "%v\n", err)
+		writeCLIError(a.stderr, argsContainJSONFlag(args), exitConfigInvalid, err.Error())
 		return exitConfigInvalid
 	}
 	if len(remaining) == 0 {
@@ -354,7 +365,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "up":
 		upOpts, parseErr := parseUpOptions(globalOpts, remaining[1:])
 		if parseErr != nil {
-			writef(a.stderr, "invalid up flags: %v\n", parseErr)
+			writeCLIError(a.stderr, globalOpts.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid up flags: %v", parseErr))
 			return exitConfigInvalid
 		}
 		return a.runUp(ctx, upOpts)
@@ -372,8 +383,10 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		}
 		return exitSuccess
 	default:
-		writef(a.stderr, "unknown command: %s\n", remaining[0])
-		a.printUsage()
+		writeCLIError(a.stderr, globalOpts.jsonOutput, exitGeneric, fmt.Sprintf("unknown command: %s", remaining[0]))
+		if !globalOpts.jsonOutput {
+			a.printUsage()
+		}
 		return exitGeneric
 	}
 }
@@ -607,8 +620,68 @@ func readCorpusSnapshot(path string) (corpusSnapshot, error) {
 
 func emitJSON(out io.Writer, payload interface{}) error {
 	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
 	return enc.Encode(payload)
+}
+
+func argsContainJSONFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" {
+			return true
+		}
+		if arg == "--json=true" {
+			return true
+		}
+	}
+	return false
+}
+
+func exitCodeLabel(exitCode int) string {
+	switch exitCode {
+	case exitConfigInvalid:
+		return "CONFIG_INVALID"
+	case exitIngestionFatal:
+		return "INGESTION_FATAL"
+	case exitServerBindFailure:
+		return "SERVER_BIND_FAILURE"
+	case exitAuthOrPayment:
+		return "AUTH_OR_PAYMENT"
+	case exitSignalInterrupt:
+		return "INTERRUPTED"
+	default:
+		return "GENERIC_ERROR"
+	}
+}
+
+func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message string, hints ...string) {
+	if jsonOutput {
+		filteredHints := make([]string, 0, len(hints))
+		for _, hint := range hints {
+			trimmed := strings.TrimSpace(hint)
+			if trimmed != "" {
+				filteredHints = append(filteredHints, trimmed)
+			}
+		}
+		payload := cliErrorPayload{
+			Error: cliError{
+				Code:    exitCodeLabel(exitCode),
+				Message: strings.TrimSpace(message),
+				Hints:   filteredHints,
+			},
+			ExitCode: exitCode,
+		}
+		if err := emitJSON(stderr, payload); err != nil {
+			writef(stderr, "{\"error\":{\"code\":\"GENERIC_ERROR\",\"message\":\"failed to encode error payload\"},\"exit_code\":1}\n")
+		}
+		return
+	}
+	writef(stderr, "%s\n", strings.TrimSpace(message))
+	for _, hint := range hints {
+		trimmed := strings.TrimSpace(hint)
+		if trimmed != "" {
+			writef(stderr, "%s\n", trimmed)
+		}
+	}
 }
 
 func serializeHits(hits []model.SearchHit) []map[string]interface{} {
@@ -906,13 +979,13 @@ func (a *App) closeStoreWithLog(st model.Store) {
 	}
 }
 
-func clearContentHashesIfSupported(ctx context.Context, st model.Store, stderr io.Writer) int {
+func clearContentHashesIfSupported(ctx context.Context, st model.Store, stderr io.Writer, jsonOutput bool) int {
 	resetter, ok := interface{}(st).(contentHashResetter)
 	if !ok {
 		return exitSuccess
 	}
 	if err := resetter.ClearDocumentContentHashes(ctx); err != nil {
-		writef(stderr, "clear content hashes: %v\n", err)
+		writeCLIError(stderr, jsonOutput, exitGeneric, fmt.Sprintf("clear content hashes: %v", err))
 		return exitGeneric
 	}
 	return exitSuccess
