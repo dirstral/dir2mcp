@@ -332,8 +332,8 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 	}
 	strictX402 := strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "required")
 	if err := cfg.ValidateX402(strictX402); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("x402 configuration invalid: %v", err))
-		return exitAuthOrPayment
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("x402 configuration invalid: %v", err))
+		return exitConfigInvalid
 	}
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("root inaccessible: %v", err))
