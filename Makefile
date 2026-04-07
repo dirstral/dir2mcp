@@ -4,7 +4,9 @@ build: build-dir2mcp
 
 DIR2MCP_VERSION ?= 0.0.0-dev
 DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
-GOCYCLO_BIN ?= $(shell command -v gocyclo 2>/dev/null || echo "$$(go env GOPATH)/bin/gocyclo")
+ifndef GOCYCLO_BIN
+GOCYCLO_BIN := $(shell command -v gocyclo 2>/dev/null || echo "$$(go env GOPATH)/bin/gocyclo")
+endif
 
 build-dir2mcp:
 	go build -ldflags "$(DIR2MCP_LDFLAGS)" -o dir2mcp ./cmd/dir2mcp/
