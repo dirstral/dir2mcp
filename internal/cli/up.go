@@ -326,7 +326,6 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 			return code
 		}
 	}
-	}
 	if !strings.HasPrefix(cfg.MCPPath, "/") {
 		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
 		return exitConfigInvalid
