@@ -282,7 +282,7 @@ Core server, ingestion pipeline, retrieval, citations, and x402 gating are imple
 ## Development
 
 ```bash
-make check        # fmt + vet + lint + cyclo + test
+make check        # fmt + vet + lint + cyclo + test + build
 make cyclo        # gocyclo -over 15 ./internal/ (install: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0)
 make build        # build binary
 make benchmark    # run retrieval benchmarks
