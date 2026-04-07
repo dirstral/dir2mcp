@@ -927,7 +927,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		return nil
 	}
 
-	transcriptText, err := s.readOrComputeTranscript(ctx, doc, content)
+	transcriptText, err := s.readOrComputeTranscript(ctx, doc, content, "")
 	if err != nil {
 		return err
 	}
@@ -1219,7 +1219,27 @@ func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, cont
 	return s.readOrComputeOCR(ctx, doc, content)
 }
 
-func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
+// TranscriptLangSuffix returns a safe filename suffix for the given language,
+// used to key the transcript cache by content+language. Empty language returns
+// an empty suffix so language-unaware callers share the same cache file.
+func TranscriptLangSuffix(language string) string {
+	l := strings.TrimSpace(language)
+	if l == "" {
+		return ""
+	}
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, strings.ToLower(l))
+	if safe == "" {
+		safe = "unknown"
+	}
+	return "-" + safe
+}
+
+func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
 	if s.transcriber == nil {
 		return "", errors.New("transcriber not configured")
 	}
@@ -1229,7 +1249,7 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 		return "", fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
-	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".txt")
+	cachePath := filepath.Join(cacheDir, computeContentHash(content)+TranscriptLangSuffix(language)+".txt")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
@@ -1264,8 +1284,8 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 }
 
 // ReadOrComputeTranscript exposes transcript cache lookup/computation for tests.
-func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
-	return s.readOrComputeTranscript(ctx, doc, content)
+func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
+	return s.readOrComputeTranscript(ctx, doc, content, language)
 }
 
 // flattenJSONForIndexing walks an arbitrary JSON-like structure and

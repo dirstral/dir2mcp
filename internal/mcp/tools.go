@@ -1420,30 +1420,12 @@ func mapReadDocumentError(err error) *toolExecutionError {
 	}
 }
 
-// transcriptLangSuffix returns a safe filename suffix for the given language.
-func transcriptLangSuffix(language string) string {
-	l := strings.TrimSpace(language)
-	if l == "" {
-		return ""
-	}
-	safe := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		return -1
-	}, strings.ToLower(l))
-	if safe == "" {
-		safe = "unknown"
-	}
-	return "-" + safe
-}
-
 func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, bool, *toolExecutionError) {
 	content, err := s.readDocumentContent(doc.RelPath)
 	if err != nil {
 		return "", false, false, mapReadDocumentError(err)
 	}
-	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+transcriptLangSuffix(language)+".txt")
+	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+ingest.TranscriptLangSuffix(language)+".txt")
 	// Determine whether we already have a usable cache file. We initially
 	// consider the cache "valid" if it exists on disk. When a retranscribe is
 	// requested we treat the cached file as stale regardless of whether it
@@ -1476,7 +1458,7 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 
 	// generate transcript text first so we can accurately determine whether
 	// there is anything worth indexing.
-	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content)
+	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content, language)
 	if readErr != nil {
 		return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
 	}
