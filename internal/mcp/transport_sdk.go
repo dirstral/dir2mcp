@@ -198,64 +198,92 @@ func (t *SDKTransport) parseSDKRequestAndID(w http.ResponseWriter, body []byte) 
 }
 
 func (t *SDKTransport) dispatchSDKRequest(w http.ResponseWriter, req *http.Request, parsedReq rpcRequest, id interface{}, hasID bool, sdkHandler http.Handler) {
-	// Validate session immediately before dispatch to eliminate the TOCTOU
-	// window between a prior check and handler invocation. initialize does not
-	// require a pre-existing session — it creates one.
-	if parsedReq.Method != protocol.RPCMethodInitialize {
-		sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
-		if sessionID == "" {
-			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-			return
-		}
-		if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
-			if reason != "" {
-				w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
-			}
-			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-			return
-		}
+	if !t.validateSDKSession(w, req, parsedReq.Method, id) {
+		return
 	}
 	switch parsedReq.Method {
 	case protocol.RPCMethodInitialize:
-		if !hasID {
-			writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
-			return
-		}
-		rec := newBufferedResponseWriter()
-		sdkHandler.ServeHTTP(rec, req)
-		if sessionID := strings.TrimSpace(rec.header.Get(protocol.MCPSessionHeader)); sessionID != "" {
-			t.server.storeSession(sessionID)
-		}
-		copyBufferedResponse(w, rec)
+		t.handleSDKInitialize(w, req, id, hasID, sdkHandler)
 	case protocol.RPCMethodNotificationsInitialized:
-		if !hasID {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		writeResult(w, http.StatusOK, id, map[string]interface{}{})
+		t.handleSDKNotificationsInitialized(w, id, hasID)
 	case protocol.RPCMethodToolsList:
-		if !hasID {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		sdkHandler.ServeHTTP(w, req)
+		t.handleSDKToolsList(w, req, hasID, sdkHandler)
 	case protocol.RPCMethodToolsCall:
-		if !hasID {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		if t.server.x402Enabled {
-			t.server.handleToolsCallRequest(req.Context(), w, req, parsedReq.Params, id)
-			return
-		}
-		sdkHandler.ServeHTTP(w, req)
+		t.handleSDKToolsCall(w, req, parsedReq.Params, id, hasID, sdkHandler)
 	default:
-		if !hasID {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		writeError(w, http.StatusOK, id, -32601, "method not found", "METHOD_NOT_FOUND", false)
+		t.handleSDKUnknownMethod(w, id, hasID)
 	}
+}
+
+func (t *SDKTransport) validateSDKSession(w http.ResponseWriter, req *http.Request, method string, id interface{}) bool {
+	// Validate session immediately before dispatch to eliminate the TOCTOU
+	// window between a prior check and handler invocation. initialize does not
+	// require a pre-existing session — it creates one.
+	if method == protocol.RPCMethodInitialize {
+		return true
+	}
+	sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
+	if sessionID == "" {
+		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+		return false
+	}
+	if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
+		if reason != "" {
+			w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+		}
+		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+		return false
+	}
+	return true
+}
+
+func (t *SDKTransport) handleSDKInitialize(w http.ResponseWriter, req *http.Request, id interface{}, hasID bool, sdkHandler http.Handler) {
+	if !hasID {
+		writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
+		return
+	}
+	rec := newBufferedResponseWriter()
+	sdkHandler.ServeHTTP(rec, req)
+	if sessionID := strings.TrimSpace(rec.header.Get(protocol.MCPSessionHeader)); sessionID != "" {
+		t.server.storeSession(sessionID)
+	}
+	copyBufferedResponse(w, rec)
+}
+
+func (t *SDKTransport) handleSDKNotificationsInitialized(w http.ResponseWriter, id interface{}, hasID bool) {
+	if !hasID {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	writeResult(w, http.StatusOK, id, map[string]interface{}{})
+}
+
+func (t *SDKTransport) handleSDKToolsList(w http.ResponseWriter, req *http.Request, hasID bool, sdkHandler http.Handler) {
+	if !hasID {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	sdkHandler.ServeHTTP(w, req)
+}
+
+func (t *SDKTransport) handleSDKToolsCall(w http.ResponseWriter, req *http.Request, rawParams json.RawMessage, id interface{}, hasID bool, sdkHandler http.Handler) {
+	if !hasID {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if t.server.x402Enabled {
+		t.server.handleToolsCallRequest(req.Context(), w, req, rawParams, id)
+		return
+	}
+	sdkHandler.ServeHTTP(w, req)
+}
+
+func (t *SDKTransport) handleSDKUnknownMethod(w http.ResponseWriter, id interface{}, hasID bool) {
+	if !hasID {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	writeError(w, http.StatusOK, id, -32601, "method not found", "METHOD_NOT_FOUND", false)
 }
 
 type bufferedResponseWriter struct {

@@ -4,6 +4,7 @@ build: build-dir2mcp
 
 DIR2MCP_VERSION ?= 0.0.0-dev
 DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
+GOCYCLO_BIN ?= $(shell command -v gocyclo 2>/dev/null || echo "$$(go env GOPATH)/bin/gocyclo")
 
 build-dir2mcp:
 	go build -ldflags "$(DIR2MCP_LDFLAGS)" -o dir2mcp ./cmd/dir2mcp/
@@ -13,7 +14,7 @@ build-dir2mcp:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt vet lint test check ci benchmark inspector-smoke conformance
+.PHONY: all clean clean-all help fmt vet lint cyclo test check ci benchmark inspector-smoke conformance
 
 all: check
 
@@ -25,9 +26,10 @@ help:
 	@echo "  fmt       - format Go code"
 	@echo "  vet    - run go vet"
 	@echo "  lint   - run golangci-lint"
+	@echo "  cyclo  - run gocyclo -over 15 ./internal/"
 	@echo "  test   - run go test"
-	@echo "  check  - fmt + vet + lint + test + build"
-	@echo "  ci     - vet + test (CI-safe default)"
+	@echo "  check  - fmt + vet + lint + cyclo + test + build"
+	@echo "  ci     - vet + cyclo + test (CI-safe default)"
 	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
 	@echo "  inspector-smoke  - build and run MCP inspector headless smoke test"
@@ -42,15 +44,19 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || (echo "golangci-lint is required. Install: https://golangci-lint.run/welcome/install/" && exit 1)
 	golangci-lint run
 
+cyclo:
+	@test -x "$(GOCYCLO_BIN)" || (echo "gocyclo is required. Install: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0" && exit 1)
+	"$(GOCYCLO_BIN)" -over 15 ./internal/
+
 test:
 	go test ./...
 
 conformance:
 	go test ./tests/conformance/...
 
-check: fmt vet lint test build
+check: fmt vet lint cyclo test build
 
-ci: vet test
+ci: vet cyclo test
 
 benchmark:
 	# run the large-corpus retrieval benchmark only

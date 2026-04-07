@@ -596,14 +596,8 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
-	if isMetaSpanKind(kind) && (kind != "time" || span.EndMS > 0) {
-		if fromMeta, ok := s.sliceFromMetadata(normalizedRel, span); ok {
-			if hasSecretMatch(secretPatterns, fromMeta) {
-				return "", false, model.ErrForbidden
-			}
-			out, truncated := truncateRunesWithFlag(fromMeta, maxChars)
-			return out, truncated, nil
-		}
+	if content, truncated, handled, err := s.openFileFromMetadata(normalizedRel, span, maxChars, secretPatterns, kind); handled {
+		return content, truncated, err
 	}
 
 	resolvedAbs, err := resolveSymlinkInRoot(targetAbs, realRoot, pathExcludes, s)
@@ -611,6 +605,25 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return "", false, err
 	}
 
+	return s.openFileFromResolvedPath(resolvedAbs, secretPatterns, kind, span, maxChars)
+}
+
+func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
+	if !isMetaSpanKind(kind) || (kind == "time" && span.EndMS <= 0) {
+		return "", false, false, nil
+	}
+	fromMeta, ok := s.sliceFromMetadata(normalizedRel, span)
+	if !ok {
+		return "", false, false, nil
+	}
+	if hasSecretMatch(secretPatterns, fromMeta) {
+		return "", false, true, model.ErrForbidden
+	}
+	out, truncated := truncateRunesWithFlag(fromMeta, maxChars)
+	return out, truncated, true, nil
+}
+
+func (s *Service) openFileFromResolvedPath(resolvedAbs string, secretPatterns []*regexp.Regexp, kind string, span model.Span, maxChars int) (string, bool, error) {
 	info, err := os.Stat(resolvedAbs)
 	if err != nil {
 		return "", false, err
