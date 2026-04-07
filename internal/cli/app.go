@@ -365,7 +365,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "up":
 		upOpts, parseErr := parseUpOptions(globalOpts, remaining[1:])
 		if parseErr != nil {
-			writeCLIError(a.stderr, globalOpts.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid up flags: %v", parseErr))
+			writeCLIError(a.stderr, globalOpts.jsonOutput || argsContainJSONFlag(remaining[1:]), exitConfigInvalid, fmt.Sprintf("invalid up flags: %v", parseErr))
 			return exitConfigInvalid
 		}
 		return a.runUp(ctx, upOpts)
