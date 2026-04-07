@@ -835,8 +835,8 @@ func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
 		})
 	})
 
-	if code != 5 {
-		t.Fatalf("unexpected exit code: got=%d want=5 stderr=%s", code, stderr.String())
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "x402 facilitator URL is required") {
 		t.Fatalf("expected x402 validation error, got: %s", stderr.String())
