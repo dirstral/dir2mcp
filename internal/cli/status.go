@@ -14,13 +14,13 @@ import (
 
 func (a *App) runStatus(ctx context.Context, global globalOptions, args []string) int {
 	if len(args) > 0 {
-		writef(a.stderr, "status command does not accept arguments: %s\n", strings.Join(args, " "))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("status command does not accept arguments: %s", strings.Join(args, " ")))
 		return exitConfigInvalid
 	}
 
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
-		writef(a.stderr, "load config: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
 	if strings.TrimSpace(cfg.StateDir) == "" {
@@ -34,23 +34,25 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
 		if _, statErr := os.Stat(metaPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
-				writef(a.stderr, "no state found in %s; run: dir2mcp up\n", cfg.StateDir)
+				writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("no state found in %s; run: dir2mcp up", cfg.StateDir))
 				return exitGeneric
 			}
-			writef(a.stderr, "read state: %v\n", statErr)
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("read state: %v", statErr))
 			return exitGeneric
 		}
 
 		st := a.storeForConfig(cfg)
 		defer func() { _ = st.Close() }()
 		if initErr := st.Init(ctx); initErr != nil && !errors.Is(initErr, model.ErrNotImplemented) {
-			writef(a.stderr, "initialize metadata store: %v\n", initErr)
+			writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", initErr))
 			return exitIndexLoadFailure
 		}
-		emitter := newNDJSONEmitter(a.stdout, global.jsonOutput)
+		// status --json must emit a single JSON object, not an NDJSON stream.
+		// Keep the emitter disabled so computed-snapshot warnings go to stderr.
+		emitter := newNDJSONEmitter(a.stdout, false)
 		snapshot, err = buildCorpusSnapshot(ctx, st, nil, a.stderr, emitter)
 		if err != nil {
-			writef(a.stderr, "build status snapshot: %v\n", err)
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("build status snapshot: %v", err))
 			return exitGeneric
 		}
 		source = "computed"
@@ -67,7 +69,7 @@ func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot
 			"snapshot":  snapshot,
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
-			writef(a.stderr, "encode status json: %v\n", err)
+			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode status json: %v", err))
 			return exitGeneric
 		}
 		return exitSuccess

@@ -14,13 +14,13 @@ import (
 func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) int {
 	opts, err := parseAskOptions(args)
 	if err != nil {
-		writef(a.stderr, "invalid ask flags: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid ask flags: %v", err))
 		return exitConfigInvalid
 	}
 
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
-		writef(a.stderr, "load config: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
 	if strings.TrimSpace(cfg.StateDir) == "" {
@@ -28,6 +28,17 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	}
 
 	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+		if global.jsonOutput {
+			writeCLIError(
+				a.stderr,
+				true,
+				exitConfigInvalid,
+				"CONFIG_INVALID: Missing MISTRAL_API_KEY",
+				"Set env: MISTRAL_API_KEY=...",
+				"Or run: dir2mcp config init",
+			)
+			return exitConfigInvalid
+		}
 		se := a.sty(global.jsonOutput)
 		nonInteractiveMode := global.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
 		if nonInteractiveMode {
@@ -44,13 +55,13 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	st := a.storeForConfig(cfg)
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		writef(a.stderr, "initialize metadata store: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
 		return exitIndexLoadFailure
 	}
 
 	retriever, cleanup, err := a.buildRetrieverForAsk(ctx, cfg, st)
 	if err != nil {
-		writef(a.stderr, "initialize retriever: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize retriever: %v", err))
 		return exitIndexLoadFailure
 	}
 	if cleanup != nil {
@@ -72,7 +83,7 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 
 	askResult, askErr := retriever.Ask(ctx, opts.question, query)
 	if askErr != nil {
-		writef(a.stderr, "ask failed: %v\n", askErr)
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("ask failed: %v", askErr))
 		return exitGeneric
 	}
 	return a.renderAskResult(global, askResult)
@@ -81,7 +92,7 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 func (a *App) runAskSearchOnly(ctx context.Context, global globalOptions, question string, retriever model.Retriever, query model.SearchQuery) int {
 	hits, searchErr := retriever.Search(ctx, query)
 	if searchErr != nil {
-		writef(a.stderr, "ask failed: %v\n", searchErr)
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("search failed: %v", searchErr))
 		return exitGeneric
 	}
 	if global.jsonOutput {
@@ -97,7 +108,7 @@ func (a *App) runAskSearchOnly(ctx context.Context, global globalOptions, questi
 			"indexing_complete": indexingComplete,
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
-			writef(a.stderr, "encode ask json: %v\n", err)
+			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode ask json: %v", err))
 			return exitGeneric
 		}
 		return exitSuccess
@@ -130,7 +141,7 @@ func (a *App) renderAskResult(global globalOptions, askResult model.AskResult) i
 			"indexing_complete": askResult.IndexingComplete,
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
-			writef(a.stderr, "encode ask json: %v\n", err)
+			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode ask json: %v", err))
 			return exitGeneric
 		}
 		return exitSuccess

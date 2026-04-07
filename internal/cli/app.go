@@ -222,6 +222,17 @@ type ndjsonEmitter struct {
 	out     io.Writer
 }
 
+type cliErrorPayload struct {
+	Error    cliError `json:"error"`
+	ExitCode int      `json:"exit_code"`
+}
+
+type cliError struct {
+	Code    string   `json:"code"`
+	Message string   `json:"message"`
+	Hints   []string `json:"hints,omitempty"`
+}
+
 // corpusSnapshot is a point-in-time summary of the indexed corpus written to
 // corpus.json in the state directory. See corpusIndexing for field semantics,
 // including the sentinel value used for unavailable counters.
@@ -339,10 +350,11 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		a.printUsage()
 		return exitSuccess
 	}
+	jsonRequested := argsContainJSONFlag(args)
 
 	globalOpts, remaining, err := parseGlobalOptions(args)
 	if err != nil {
-		writef(a.stderr, "%v\n", err)
+		writeCLIError(a.stderr, jsonRequested, exitConfigInvalid, err.Error())
 		return exitConfigInvalid
 	}
 	if len(remaining) == 0 {
@@ -354,7 +366,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "up":
 		upOpts, parseErr := parseUpOptions(globalOpts, remaining[1:])
 		if parseErr != nil {
-			writef(a.stderr, "invalid up flags: %v\n", parseErr)
+			writeCLIError(a.stderr, globalOpts.jsonOutput || argsContainJSONFlag(remaining[1:]), exitConfigInvalid, fmt.Sprintf("invalid up flags: %v", parseErr))
 			return exitConfigInvalid
 		}
 		return a.runUp(ctx, upOpts)
@@ -372,8 +384,11 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		}
 		return exitSuccess
 	default:
-		writef(a.stderr, "unknown command: %s\n", remaining[0])
-		a.printUsage()
+		effectiveJSON := globalOpts.jsonOutput || jsonRequested
+		writeCLIError(a.stderr, effectiveJSON, exitGeneric, fmt.Sprintf("unknown command: %s", remaining[0]))
+		if !effectiveJSON {
+			a.printUsage()
+		}
 		return exitGeneric
 	}
 }
@@ -607,8 +622,100 @@ func readCorpusSnapshot(path string) (corpusSnapshot, error) {
 
 func emitJSON(out io.Writer, payload interface{}) error {
 	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
 	return enc.Encode(payload)
+}
+
+func isJSONFlagEnabled(arg string) bool {
+	if arg == "--json" || arg == "-json" {
+		return true
+	}
+
+	var raw string
+	switch {
+	case strings.HasPrefix(arg, "--json="):
+		raw = strings.TrimPrefix(arg, "--json=")
+	case strings.HasPrefix(arg, "-json="):
+		raw = strings.TrimPrefix(arg, "-json=")
+	default:
+		return false
+	}
+
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	return err == nil && enabled
+}
+
+func argsContainJSONFlag(args []string) bool {
+	for _, arg := range args {
+		if isJSONFlagEnabled(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func exitCodeLabel(exitCode int) string {
+	switch exitCode {
+	case exitConfigInvalid:
+		return "CONFIG_INVALID"
+	case exitIngestionFatal:
+		return "INGESTION_FATAL"
+	case exitServerBindFailure:
+		return "SERVER_BIND_FAILURE"
+	case exitAuthOrPayment:
+		return "AUTH_OR_PAYMENT"
+	case exitSignalInterrupt:
+		return "INTERRUPTED"
+	default:
+		return "GENERIC_ERROR"
+	}
+}
+
+func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message string, hints ...string) {
+	if jsonOutput {
+		filteredHints := make([]string, 0, len(hints))
+		for _, hint := range hints {
+			trimmed := strings.TrimSpace(hint)
+			if trimmed != "" {
+				filteredHints = append(filteredHints, trimmed)
+			}
+		}
+		payload := cliErrorPayload{
+			Error: cliError{
+				Code:    exitCodeLabel(exitCode),
+				Message: strings.TrimSpace(message),
+				Hints:   filteredHints,
+			},
+			ExitCode: exitCode,
+		}
+		if err := emitJSON(stderr, payload); err != nil {
+			fallback := strings.TrimSpace(message)
+			if fallback == "" {
+				fallback = "failed to encode error payload"
+			} else {
+				fallback = fmt.Sprintf("%s (failed to encode error payload: %v)", fallback, err)
+			}
+			escapedMessage, marshalErr := json.Marshal(fallback)
+			if marshalErr != nil {
+				escapedMessage = []byte("\"failed to encode error payload\"")
+			}
+			writef(
+				stderr,
+				"{\"error\":{\"code\":%q,\"message\":%s},\"exit_code\":%d}\n",
+				exitCodeLabel(exitCode),
+				escapedMessage,
+				exitCode,
+			)
+		}
+		return
+	}
+	writef(stderr, "%s\n", strings.TrimSpace(message))
+	for _, hint := range hints {
+		trimmed := strings.TrimSpace(hint)
+		if trimmed != "" {
+			writef(stderr, "%s\n", trimmed)
+		}
+	}
 }
 
 func serializeHits(hits []model.SearchHit) []map[string]interface{} {
@@ -718,9 +825,15 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 			remaining = newRem
 			continue
 		}
+		if enabled, matched, err := parseJSONFlagValue(arg); matched {
+			if err != nil {
+				return globalOptions{}, nil, err
+			}
+			opts.jsonOutput = enabled
+			remaining = remaining[1:]
+			continue
+		}
 		switch arg {
-		case "--json":
-			opts.jsonOutput = true
 		case "--non-interactive":
 			opts.nonInteractive = true
 		case "--quiet":
@@ -735,6 +848,29 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	}
 
 	return opts, remaining, nil
+}
+
+func parseJSONFlagValue(arg string) (enabled bool, matched bool, err error) {
+	if arg == "--json" || arg == "-json" {
+		return true, true, nil
+	}
+	if strings.HasPrefix(arg, "--json=") {
+		raw := strings.TrimSpace(strings.TrimPrefix(arg, "--json="))
+		parsed, parseErr := strconv.ParseBool(raw)
+		if parseErr != nil {
+			return false, true, fmt.Errorf("invalid value for --json: %q", raw)
+		}
+		return parsed, true, nil
+	}
+	if strings.HasPrefix(arg, "-json=") {
+		raw := strings.TrimSpace(strings.TrimPrefix(arg, "-json="))
+		parsed, parseErr := strconv.ParseBool(raw)
+		if parseErr != nil {
+			return false, true, fmt.Errorf("invalid value for -json: %q", raw)
+		}
+		return parsed, true, nil
+	}
+	return false, false, nil
 }
 
 func consumeGlobalFlagValue(flagName string, args []string) (string, int, error) {
@@ -906,13 +1042,13 @@ func (a *App) closeStoreWithLog(st model.Store) {
 	}
 }
 
-func clearContentHashesIfSupported(ctx context.Context, st model.Store, stderr io.Writer) int {
+func clearContentHashesIfSupported(ctx context.Context, st model.Store, stderr io.Writer, jsonOutput bool) int {
 	resetter, ok := interface{}(st).(contentHashResetter)
 	if !ok {
 		return exitSuccess
 	}
 	if err := resetter.ClearDocumentContentHashes(ctx); err != nil {
-		writef(stderr, "clear content hashes: %v\n", err)
+		writeCLIError(stderr, jsonOutput, exitGeneric, fmt.Sprintf("clear content hashes: %v", err))
 		return exitGeneric
 	}
 	return exitSuccess

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,7 @@ func (a *App) promptAndSaveMistralAPIKey(global globalOptions, configPath string
 	}
 	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
 	if err := saveEnvLocalKey(envPath, "MISTRAL_API_KEY", key); err != nil {
-		writef(a.stderr, "save .env.local: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
 		return false
 	}
 	if !global.quiet {
@@ -60,7 +61,7 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 	case "print":
 		cfg, err := loadConfigWithGlobalOptions(global)
 		if err != nil {
-			writef(a.stderr, "load config: %v\n", err)
+			writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 			return exitConfigInvalid
 		}
 		if global.quiet {
@@ -77,7 +78,7 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 			cfg.MistralAPIKey != "",
 		)
 	default:
-		writef(a.stderr, "unknown config subcommand: %s\n", args[0])
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("unknown config subcommand: %s", args[0]))
 		return exitConfigInvalid
 	}
 	return exitSuccess
@@ -85,7 +86,7 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 
 func (a *App) runConfigInit(global globalOptions, args []string) int {
 	if len(args) > 0 {
-		writef(a.stderr, "config init does not accept arguments: %s\n", strings.Join(args, " "))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("config init does not accept arguments: %s", strings.Join(args, " ")))
 		return exitConfigInvalid
 	}
 
@@ -96,14 +97,14 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 
 	if _, err := os.Stat(configPath); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			writef(a.stderr, "stat config: %v\n", err)
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("stat config: %v", err))
 			return exitGeneric
 		}
 		created = true
 	} else {
 		existing, err := config.LoadFile(configPath)
 		if err != nil {
-			writef(a.stderr, "load config file: %v\n", err)
+			writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config file: %v", err))
 			return exitConfigInvalid
 		}
 		cfg = existing
@@ -111,7 +112,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	cfg = applyGlobalPathOverrides(cfg, global)
 
 	if err := config.SaveFile(configPath, cfg); err != nil {
-		writef(a.stderr, "save config file: %v\n", err)
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
 		return exitGeneric
 	}
 
@@ -139,7 +140,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 			"next_steps":    nextSteps,
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
-			writef(a.stderr, "encode config init json: %v\n", err)
+			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode config init json: %v", err))
 			return exitGeneric
 		}
 		return exitSuccess

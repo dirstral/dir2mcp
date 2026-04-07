@@ -270,6 +270,52 @@ func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
 	}
 }
 
+func TestStatusJSONComputedSnapshotDoesNotEmitExtraNDJSONEvents(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init sqlite store: %v", err)
+	}
+	if err := st.UpsertDocument(context.Background(), model.Document{
+		RelPath:     "docs/weird.md",
+		DocType:     "md",
+		SourceType:  "file",
+		SizeBytes:   10,
+		MTimeUnix:   1,
+		ContentHash: "h1",
+		Status:      "mystery",
+	}); err != nil {
+		t.Fatalf("upsert document: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close sqlite store: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("expected single JSON payload on stdout: %v raw=%s", err, stdout.String())
+	}
+	if payload.Source != "computed" {
+		t.Fatalf("Source=%q want=%q", payload.Source, "computed")
+	}
+}
+
 func TestStatusNoStateReturnsExitCode1(t *testing.T) {
 	tmp := t.TempDir()
 	var stdout, stderr bytes.Buffer
@@ -671,6 +717,182 @@ func TestAskMissingQuestionFails(t *testing.T) {
 	})
 	if !strings.Contains(stderr.String(), "requires a question argument") {
 		t.Fatalf("expected missing-question message, got: %s", stderr.String())
+	}
+}
+
+func TestStatusJSONErrorOutputWhenStateMissing(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
+		if code != 1 {
+			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal status error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "GENERIC_ERROR" || payload.ExitCode != 1 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "no state found") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
+func TestAskMissingQuestionJSONErrorOutput(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "ask", "--k", "2"})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal ask error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "requires a question argument") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
+func TestReindexJSONErrorOutputForUnexpectedArgs(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "reindex", "extra"})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal reindex error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "reindex command does not accept arguments") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
+func TestConfigUnknownSubcommandJSONErrorOutput(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "config", "unknown"})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal config error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "unknown config subcommand") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
+func TestStatusJSONTrueGlobalFlagUsesJSONEnvelope(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json=true", "status"})
+		if code != 1 {
+			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal status error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "GENERIC_ERROR" || payload.ExitCode != 1 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestUnknownCommandTrailingJSONFlagUsesJSONEnvelope(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"bogus", "--json"})
+		if code != 1 {
+			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal unknown-command error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "GENERIC_ERROR" || payload.ExitCode != 1 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "unknown command: bogus") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
 	}
 }
 
