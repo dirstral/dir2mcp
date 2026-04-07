@@ -625,25 +625,22 @@ func emitJSON(out io.Writer, payload interface{}) error {
 }
 
 func isJSONFlagEnabled(arg string) bool {
-	if arg == "-json" || arg == "--json" {
+	if arg == "--json" || arg == "-json" {
 		return true
 	}
 
-	var value string
+	var raw string
 	switch {
-	case strings.HasPrefix(arg, "-json="):
-		value = strings.TrimPrefix(arg, "-json=")
 	case strings.HasPrefix(arg, "--json="):
-		value = strings.TrimPrefix(arg, "--json=")
+		raw = strings.TrimPrefix(arg, "--json=")
+	case strings.HasPrefix(arg, "-json="):
+		raw = strings.TrimPrefix(arg, "-json=")
 	default:
 		return false
 	}
 
-	enabled, err := strconv.ParseBool(value)
-	if err != nil {
-		return false
-	}
-	return enabled
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	return err == nil && enabled
 }
 
 func argsContainJSONFlag(args []string) bool {
@@ -690,13 +687,13 @@ func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message stri
 			ExitCode: exitCode,
 		}
 		if err := emitJSON(stderr, payload); err != nil {
-			fallbackMessage := strings.TrimSpace(message)
-			if fallbackMessage == "" {
-				fallbackMessage = "failed to encode error payload"
+			fallback := strings.TrimSpace(message)
+			if fallback == "" {
+				fallback = "failed to encode error payload"
 			} else {
-				fallbackMessage = fmt.Sprintf("%s (failed to encode error payload: %v)", fallbackMessage, err)
+				fallback = fmt.Sprintf("%s (failed to encode error payload: %v)", fallback, err)
 			}
-			escapedMessage, marshalErr := json.Marshal(fallbackMessage)
+			escapedMessage, marshalErr := json.Marshal(fallback)
 			if marshalErr != nil {
 				escapedMessage = []byte("\"failed to encode error payload\"")
 			}
@@ -826,9 +823,15 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 			remaining = newRem
 			continue
 		}
+		if enabled, matched, err := parseJSONFlagValue(arg); matched {
+			if err != nil {
+				return globalOptions{}, nil, err
+			}
+			opts.jsonOutput = enabled
+			remaining = remaining[1:]
+			continue
+		}
 		switch arg {
-		case "--json":
-			opts.jsonOutput = true
 		case "--non-interactive":
 			opts.nonInteractive = true
 		case "--quiet":
@@ -843,6 +846,29 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	}
 
 	return opts, remaining, nil
+}
+
+func parseJSONFlagValue(arg string) (enabled bool, matched bool, err error) {
+	if arg == "--json" || arg == "-json" {
+		return true, true, nil
+	}
+	if strings.HasPrefix(arg, "--json=") {
+		raw := strings.TrimSpace(strings.TrimPrefix(arg, "--json="))
+		parsed, parseErr := strconv.ParseBool(raw)
+		if parseErr != nil {
+			return false, true, fmt.Errorf("invalid value for --json: %q", raw)
+		}
+		return parsed, true, nil
+	}
+	if strings.HasPrefix(arg, "-json=") {
+		raw := strings.TrimSpace(strings.TrimPrefix(arg, "-json="))
+		parsed, parseErr := strconv.ParseBool(raw)
+		if parseErr != nil {
+			return false, true, fmt.Errorf("invalid value for -json: %q", raw)
+		}
+		return parsed, true, nil
+	}
+	return false, false, nil
 }
 
 func consumeGlobalFlagValue(flagName string, args []string) (string, int, error) {

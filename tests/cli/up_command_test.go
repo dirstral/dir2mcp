@@ -203,6 +203,36 @@ func TestUpTLSRequiresCertAndKeyTogether(t *testing.T) {
 	}
 }
 
+func TestUpInvalidFlagWithJSONEmitsJSONError(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"up", "--json", "--badflag"})
+		if code != 2 {
+			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal up parse error payload: %v raw=%s", err, stderr.String())
+	}
+	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Error.Message, "invalid up flags") {
+		t.Fatalf("unexpected message: %q", payload.Error.Message)
+	}
+}
+
 func TestUpTLSConnectionURLUsesHTTPS(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
