@@ -350,10 +350,11 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		a.printUsage()
 		return exitSuccess
 	}
+	jsonRequested := argsContainJSONFlag(args)
 
 	globalOpts, remaining, err := parseGlobalOptions(args)
 	if err != nil {
-		writeCLIError(a.stderr, argsContainJSONFlag(args), exitConfigInvalid, err.Error())
+		writeCLIError(a.stderr, jsonRequested, exitConfigInvalid, err.Error())
 		return exitConfigInvalid
 	}
 	if len(remaining) == 0 {
@@ -383,8 +384,9 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		}
 		return exitSuccess
 	default:
-		writeCLIError(a.stderr, globalOpts.jsonOutput, exitGeneric, fmt.Sprintf("unknown command: %s", remaining[0]))
-		if !globalOpts.jsonOutput {
+		effectiveJSON := globalOpts.jsonOutput || jsonRequested
+		writeCLIError(a.stderr, effectiveJSON, exitGeneric, fmt.Sprintf("unknown command: %s", remaining[0]))
+		if !effectiveJSON {
 			a.printUsage()
 		}
 		return exitGeneric
