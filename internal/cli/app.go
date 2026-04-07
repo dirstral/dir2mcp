@@ -624,12 +624,31 @@ func emitJSON(out io.Writer, payload interface{}) error {
 	return enc.Encode(payload)
 }
 
+func isJSONFlagEnabled(arg string) bool {
+	if arg == "-json" || arg == "--json" {
+		return true
+	}
+
+	var value string
+	switch {
+	case strings.HasPrefix(arg, "-json="):
+		value = strings.TrimPrefix(arg, "-json=")
+	case strings.HasPrefix(arg, "--json="):
+		value = strings.TrimPrefix(arg, "--json=")
+	default:
+		return false
+	}
+
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false
+	}
+	return enabled
+}
+
 func argsContainJSONFlag(args []string) bool {
 	for _, arg := range args {
-		if arg == "--json" {
-			return true
-		}
-		if arg == "--json=true" {
+		if isJSONFlagEnabled(arg) {
 			return true
 		}
 	}
