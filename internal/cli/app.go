@@ -671,7 +671,23 @@ func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message stri
 			ExitCode: exitCode,
 		}
 		if err := emitJSON(stderr, payload); err != nil {
-			writef(stderr, "{\"error\":{\"code\":\"GENERIC_ERROR\",\"message\":\"failed to encode error payload\"},\"exit_code\":1}\n")
+			fallbackMessage := strings.TrimSpace(message)
+			if fallbackMessage == "" {
+				fallbackMessage = "failed to encode error payload"
+			} else {
+				fallbackMessage = fmt.Sprintf("%s (failed to encode error payload: %v)", fallbackMessage, err)
+			}
+			escapedMessage, marshalErr := json.Marshal(fallbackMessage)
+			if marshalErr != nil {
+				escapedMessage = []byte("\"failed to encode error payload\"")
+			}
+			writef(
+				stderr,
+				"{\"error\":{\"code\":%q,\"message\":%s},\"exit_code\":%d}\n",
+				exitCodeLabel(exitCode),
+				escapedMessage,
+				exitCode,
+			)
 		}
 		return
 	}
