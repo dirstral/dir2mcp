@@ -270,6 +270,52 @@ func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
 	}
 }
 
+func TestStatusJSONComputedSnapshotDoesNotEmitExtraNDJSONEvents(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init sqlite store: %v", err)
+	}
+	if err := st.UpsertDocument(context.Background(), model.Document{
+		RelPath:     "docs/weird.md",
+		DocType:     "md",
+		SourceType:  "file",
+		SizeBytes:   10,
+		MTimeUnix:   1,
+		ContentHash: "h1",
+		Status:      "mystery",
+	}); err != nil {
+		t.Fatalf("upsert document: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close sqlite store: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("expected single JSON payload on stdout: %v raw=%s", err, stdout.String())
+	}
+	if payload.Source != "computed" {
+		t.Fatalf("Source=%q want=%q", payload.Source, "computed")
+	}
+}
+
 func TestStatusNoStateReturnsExitCode1(t *testing.T) {
 	tmp := t.TempDir()
 	var stdout, stderr bytes.Buffer

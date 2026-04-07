@@ -47,7 +47,9 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 			writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", initErr))
 			return exitIndexLoadFailure
 		}
-		emitter := newNDJSONEmitter(a.stdout, global.jsonOutput)
+		// status --json must emit a single JSON object, not an NDJSON stream.
+		// Keep the emitter disabled so computed-snapshot warnings go to stderr.
+		emitter := newNDJSONEmitter(a.stdout, false)
 		snapshot, err = buildCorpusSnapshot(ctx, st, nil, a.stderr, emitter)
 		if err != nil {
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("build status snapshot: %v", err))
