@@ -81,27 +81,9 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 		effective.RootDir = "."
 	}
 
-	metadataStore := store.NewSQLiteStore(filepath.Join(effective.StateDir, "meta.sqlite"))
-	if err := metadataStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		_ = metadataStore.Close()
-		return nil, fmt.Errorf("initialize metadata store: %w", err)
-	}
-
-	textIndexPath := filepath.Join(effective.StateDir, "vectors_text.hnsw")
-	textIndex := index.NewHNSWIndex(textIndexPath)
-	if err := textIndex.Load(textIndexPath); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
-		_ = metadataStore.Close()
-		_ = textIndex.Close()
-		return nil, fmt.Errorf("load text index: %w", err)
-	}
-
-	codeIndexPath := filepath.Join(effective.StateDir, "vectors_code.hnsw")
-	codeIndex := index.NewHNSWIndex(codeIndexPath)
-	if err := codeIndex.Load(codeIndexPath); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
-		_ = metadataStore.Close()
-		_ = textIndex.Close()
-		_ = codeIndex.Close()
-		return nil, fmt.Errorf("load code index: %w", err)
+	metadataStore, textIndex, codeIndex, err := openEngineStorage(ctx, effective.StateDir)
+	if err != nil {
+		return nil, err
 	}
 
 	client := mistral.NewClient(effective.MistralBaseURL, effective.MistralAPIKey)
@@ -148,8 +130,14 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	if override == nil {
 		return base
 	}
-
 	merged := base
+	mergeEngineConfigServer(&merged, override)
+	mergeEngineConfigModels(&merged, override)
+	return merged
+}
+
+// mergeEngineConfigServer merges server/network/auth fields from override into merged.
+func mergeEngineConfigServer(merged *config.Config, override *config.Config) {
 	if v := strings.TrimSpace(override.RootDir); v != "" {
 		merged.RootDir = v
 	}
@@ -189,6 +177,13 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	if v := strings.TrimSpace(override.ResolvedAuthToken); v != "" {
 		merged.ResolvedAuthToken = v
 	}
+	if len(override.AllowedOrigins) > 0 {
+		merged.AllowedOrigins = append([]string(nil), override.AllowedOrigins...)
+	}
+}
+
+// mergeEngineConfigModels merges provider/model/RAG fields from override into merged.
+func mergeEngineConfigModels(merged *config.Config, override *config.Config) {
 	if v := strings.TrimSpace(override.MistralAPIKey); v != "" {
 		merged.MistralAPIKey = v
 	}
@@ -203,9 +198,6 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	}
 	if v := strings.TrimSpace(override.ElevenLabsTTSVoiceID); v != "" {
 		merged.ElevenLabsTTSVoiceID = v
-	}
-	if len(override.AllowedOrigins) > 0 {
-		merged.AllowedOrigins = append([]string(nil), override.AllowedOrigins...)
 	}
 	if v := strings.TrimSpace(override.EmbedModelText); v != "" {
 		merged.EmbedModelText = v
@@ -225,8 +217,6 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	if override.RAGOversampleFactor > 0 {
 		merged.RAGOversampleFactor = override.RAGOversampleFactor
 	}
-
-	return merged
 }
 
 // Close releases resources.
@@ -356,6 +346,34 @@ func (e *Engine) SetOversampleFactor(factor int) {
 		return
 	}
 	e.retriever.SetOversampleFactor(factor)
+}
+
+// openEngineStorage opens the SQLite metadata store and both HNSW indices
+// found under stateDir. On error all already-opened resources are closed.
+func openEngineStorage(ctx context.Context, stateDir string) (metaStore *store.SQLiteStore, textIdx, codeIdx *index.HNSWIndex, err error) {
+	metaStore = store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if initErr := metaStore.Init(ctx); initErr != nil && !errors.Is(initErr, model.ErrNotImplemented) {
+		_ = metaStore.Close()
+		return nil, nil, nil, fmt.Errorf("initialize metadata store: %w", initErr)
+	}
+
+	textIndexPath := filepath.Join(stateDir, "vectors_text.hnsw")
+	textIdx = index.NewHNSWIndex(textIndexPath)
+	if loadErr := textIdx.Load(textIndexPath); loadErr != nil && !errors.Is(loadErr, model.ErrNotImplemented) && !errors.Is(loadErr, os.ErrNotExist) {
+		_ = metaStore.Close()
+		_ = textIdx.Close()
+		return nil, nil, nil, fmt.Errorf("load text index: %w", loadErr)
+	}
+
+	codeIndexPath := filepath.Join(stateDir, "vectors_code.hnsw")
+	codeIdx = index.NewHNSWIndex(codeIndexPath)
+	if loadErr := codeIdx.Load(codeIndexPath); loadErr != nil && !errors.Is(loadErr, model.ErrNotImplemented) && !errors.Is(loadErr, os.ErrNotExist) {
+		_ = metaStore.Close()
+		_ = textIdx.Close()
+		_ = codeIdx.Close()
+		return nil, nil, nil, fmt.Errorf("load code index: %w", loadErr)
+	}
+	return metaStore, textIdx, codeIdx, nil
 }
 
 func preloadEngineChunkMetadata(ctx context.Context, source embeddedChunkMetadataSource, ret *Service) (int, error) {

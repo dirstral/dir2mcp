@@ -56,10 +56,14 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		source = "computed"
 	}
 
+	return a.renderStatusOutput(global, cfg.StateDir, snapshot, source)
+}
+
+func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot corpusSnapshot, source string) int {
 	if global.jsonOutput {
 		payload := map[string]interface{}{
 			"source":    source,
-			"state_dir": cfg.StateDir,
+			"state_dir": stateDir,
 			"snapshot":  snapshot,
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
@@ -74,7 +78,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 	}
 	s := a.sty(false)
 	writeln(a.stdout)
-	writeln(a.stdout, s.kv("State", cfg.StateDir))
+	writeln(a.stdout, s.kv("State", stateDir))
 	writeln(a.stdout, s.kv("Source", source))
 	writeln(a.stdout, s.kv("Timestamp", snapshot.Timestamp))
 	writeln(a.stdout)

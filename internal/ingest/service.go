@@ -199,6 +199,28 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 }
 
 // TranscriberFromConfig resolves the configured STT provider instance.
+func newMistralTranscriber(cfg config.Config) model.Transcriber {
+	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+	if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
+		client.DefaultTranscribeModel = modelName
+	}
+	return client
+}
+
+func newElevenLabsTranscriber(cfg config.Config) model.Transcriber {
+	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
+	if baseURL := strings.TrimSpace(cfg.ElevenLabsBaseURL); baseURL != "" {
+		client.BaseURL = strings.TrimRight(baseURL, "/")
+	}
+	if modelName := strings.TrimSpace(cfg.STTElevenLabsModel); modelName != "" {
+		client.TranscribeModel = modelName
+	}
+	if languageCode := strings.TrimSpace(cfg.STTElevenLabsLanguageCode); languageCode != "" {
+		client.TranscribeLanguageCode = languageCode
+	}
+	return client
+}
+
 func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 	provider := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
 	if provider == "" {
@@ -212,23 +234,15 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		if strings.TrimSpace(cfg.MistralAPIKey) == "" {
 			return nil, fmt.Errorf("stt provider %q requires MISTRAL_API_KEY", transcriberProviderMistral)
 		}
-		client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-		if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
-			client.DefaultTranscribeModel = modelName
-		}
-		return client, nil
+		return newMistralTranscriber(cfg), nil
 	case transcriberProviderAuto:
 		if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-			client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-			if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
-				client.DefaultTranscribeModel = modelName
-			}
-			return client, nil
+			return newMistralTranscriber(cfg), nil
 		}
 		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
 			return nil, nil
 		}
-		provider = transcriberProviderElevenLabs
+		// auto-selected ElevenLabs; fall through to the shared build path below.
 	case transcriberProviderElevenLabs:
 		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
 			return nil, fmt.Errorf("stt provider %q requires ELEVENLABS_API_KEY", transcriberProviderElevenLabs)
@@ -237,21 +251,7 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		return nil, fmt.Errorf("unsupported transcriber provider %q", provider)
 	}
 
-	if provider != transcriberProviderElevenLabs {
-		return nil, nil
-	}
-
-	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
-	if baseURL := strings.TrimSpace(cfg.ElevenLabsBaseURL); baseURL != "" {
-		client.BaseURL = strings.TrimRight(baseURL, "/")
-	}
-	if modelName := strings.TrimSpace(cfg.STTElevenLabsModel); modelName != "" {
-		client.TranscribeModel = modelName
-	}
-	if languageCode := strings.TrimSpace(cfg.STTElevenLabsLanguageCode); languageCode != "" {
-		client.TranscribeLanguageCode = languageCode
-	}
-	return client, nil
+	return newElevenLabsTranscriber(cfg), nil
 }
 
 // healthCheckInterval returns the configured base poll interval for connector
@@ -452,7 +452,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	}
 
 	existingDoc, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
-	if err != nil && !isNotFoundError(err) {
+	if isUnexpectedStoreErr(err) {
 		return fmt.Errorf("get existing document: %w", err)
 	}
 
@@ -497,15 +497,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// Archive containers: extract and ingest each member as its own document.
 	// The archive document itself remains "skipped" (no direct text content).
 	if doc.DocType == "archive" {
-		if needsProcessing {
-			if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
-				return fmt.Errorf("process archive members: %w", err)
-			}
-		} else if seen != nil {
-			// Archive content unchanged: retain existing members in seen.
-			s.retainArchiveMembers(ctx, f.RelPath, seen)
-		}
-		return nil
+		return s.handleArchiveDocument(ctx, f, secretPatterns, forceReindex, seen, needsProcessing)
 	}
 
 	if !needsProcessing || doc.Status != "ok" {
@@ -519,6 +511,22 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		doc.Status = "error"
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
+	}
+	return nil
+}
+
+// handleArchiveDocument handles an archive-type document: if the archive
+// content changed (or a full reindex was requested) it extracts and processes
+// the members; otherwise it retains the existing member paths in seen so that
+// markMissingAsDeleted does not tombstone them.
+func (s *Service) handleArchiveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool) error {
+	if needsProcessing {
+		if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
+			return fmt.Errorf("process archive members: %w", err)
+		}
+	} else if seen != nil {
+		// Archive content unchanged: retain existing members in seen.
+		s.retainArchiveMembers(ctx, f.RelPath, seen)
 	}
 	return nil
 }
@@ -844,6 +852,13 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	return nil
 }
 
+// isUnexpectedStoreErr returns true when err is non-nil and is not a
+// "not found" sentinel.  It is the idiomatic guard used throughout the ingest
+// package to distinguish missing-record results from genuine store failures.
+func isUnexpectedStoreErr(err error) bool {
+	return err != nil && !isNotFoundError(err)
+}
+
 func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -912,7 +927,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		return nil
 	}
 
-	transcriptText, err := s.readOrComputeTranscript(ctx, doc, content)
+	transcriptText, err := s.readOrComputeTranscript(ctx, doc, content, "")
 	if err != nil {
 		return err
 	}
@@ -1032,6 +1047,47 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 // enforceCachePolicy scans cacheDir and removes entries that violate
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
+// cacheFileInfo records path and stat info for a single cache entry used by
+// enforceCachePolicy and its eviction helpers.
+type cacheFileInfo struct {
+	path string
+	info os.FileInfo
+}
+
+// evictOldCacheEntries removes entries whose modification time is before
+// cutoff, returning the surviving entries and the updated total size.
+func evictOldCacheEntries(files []cacheFileInfo, total int64, cutoff time.Time, cacheDir string) ([]cacheFileInfo, int64, error) {
+	kept := make([]cacheFileInfo, 0, len(files))
+	for _, f := range files {
+		if f.info.ModTime().Before(cutoff) {
+			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+				return nil, 0, fmt.Errorf("prune cache ttl: remove %s in %s: %w", f.path, cacheDir, err)
+			}
+			total -= f.info.Size()
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept, total, nil
+}
+
+// evictBySizeLimit removes the oldest cache entries until total ≤ maxBytes.
+func evictBySizeLimit(files []cacheFileInfo, total, maxBytes int64, cacheDir string) error {
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].info.ModTime().Before(files[j].info.ModTime())
+	})
+	for _, f := range files {
+		if total <= maxBytes {
+			break
+		}
+		if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("prune cache size: remove %s in %s: %w", f.path, cacheDir, err)
+		}
+		total -= f.info.Size()
+	}
+	return nil
+}
+
 func (s *Service) enforceCachePolicy(cacheDir string) error {
 	// read the limits and any associated hooks under a read lock. we copy them
 	// to locals so the rest of the logic can run without holding the lock for
@@ -1052,11 +1108,7 @@ func (s *Service) enforceCachePolicy(cacheDir string) error {
 		return fmt.Errorf("read cache dir %s: %w", cacheDir, err)
 	}
 
-	type fileInfo struct {
-		path string
-		info os.FileInfo
-	}
-	var files []fileInfo
+	var files []cacheFileInfo
 	var total int64
 	now := time.Now()
 	for _, e := range entries {
@@ -1090,41 +1142,21 @@ func (s *Service) enforceCachePolicy(cacheDir string) error {
 			}
 			continue
 		}
-		files = append(files, fileInfo{path: p, info: info})
+		files = append(files, cacheFileInfo{path: p, info: info})
 		total += info.Size()
 	}
 
 	// age-based eviction first
 	if ttl > 0 {
-		cutoff := now.Add(-ttl)
-		kept := make([]fileInfo, 0, len(files))
-		for _, f := range files {
-			if f.info.ModTime().Before(cutoff) {
-				if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-					return fmt.Errorf("prune cache ttl: remove %s in %s: %w", f.path, cacheDir, err)
-				}
-				total -= f.info.Size()
-				continue
-			}
-			kept = append(kept, f)
+		files, total, err = evictOldCacheEntries(files, total, now.Add(-ttl), cacheDir)
+		if err != nil {
+			return err
 		}
-		files = kept
 	}
 
 	// size-based eviction
 	if maxBytes > 0 && total > maxBytes {
-		sort.Slice(files, func(i, j int) bool {
-			return files[i].info.ModTime().Before(files[j].info.ModTime())
-		})
-		for _, f := range files {
-			if total <= maxBytes {
-				break
-			}
-			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("prune cache size: remove %s in %s: %w", f.path, cacheDir, err)
-			}
-			total -= f.info.Size()
-		}
+		return evictBySizeLimit(files, total, maxBytes, cacheDir)
 	}
 
 	return nil
@@ -1187,7 +1219,27 @@ func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, cont
 	return s.readOrComputeOCR(ctx, doc, content)
 }
 
-func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
+// TranscriptLangSuffix returns a safe filename suffix for the given language,
+// used to key the transcript cache by content+language. Empty language returns
+// an empty suffix so language-unaware callers share the same cache file.
+func TranscriptLangSuffix(language string) string {
+	l := strings.TrimSpace(language)
+	if l == "" {
+		return ""
+	}
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, strings.ToLower(l))
+	if safe == "" {
+		safe = "unknown"
+	}
+	return "-" + safe
+}
+
+func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
 	if s.transcriber == nil {
 		return "", errors.New("transcriber not configured")
 	}
@@ -1197,7 +1249,7 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 		return "", fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
-	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".txt")
+	cachePath := filepath.Join(cacheDir, computeContentHash(content)+TranscriptLangSuffix(language)+".txt")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
@@ -1232,8 +1284,8 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 }
 
 // ReadOrComputeTranscript exposes transcript cache lookup/computation for tests.
-func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
-	return s.readOrComputeTranscript(ctx, doc, content)
+func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
+	return s.readOrComputeTranscript(ctx, doc, content, language)
 }
 
 // flattenJSONForIndexing walks an arbitrary JSON-like structure and

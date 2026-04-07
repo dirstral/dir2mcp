@@ -67,50 +67,7 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	}
 
 	if opts.mode == "search_only" {
-		hits, searchErr := retriever.Search(ctx, query)
-		if searchErr != nil {
-			writef(a.stderr, "ask failed: %v\n", searchErr)
-			return exitGeneric
-		}
-		if global.jsonOutput {
-			// JSON output now uses a dedicated accessor instead of running Ask
-			// again.  this avoids the extra search/generation work while still
-			// providing the same boolean value returned by AskResult.IndexingComplete.
-			indexingComplete := true
-			if ic, err := retriever.IndexingComplete(ctx); err == nil {
-				indexingComplete = ic
-			}
-
-			payload := map[string]interface{}{
-				"question":          opts.question,
-				"answer":            "",
-				"citations":         []interface{}{},
-				"hits":              serializeHits(hits),
-				"indexing_complete": indexingComplete,
-			}
-			if err := emitJSON(a.stdout, payload); err != nil {
-				writef(a.stderr, "encode ask json: %v\n", err)
-				return exitGeneric
-			}
-			return exitSuccess
-		}
-
-		if global.quiet {
-			return exitSuccess
-		}
-		s := a.sty(false)
-		writeln(a.stdout)
-		writef(a.stdout, "  %s %s\n\n", s.sectionHeader("Search results"), s.dim(fmt.Sprintf("(%d hits)", len(hits))))
-		for i, hit := range hits {
-			snippet := strings.TrimSpace(hit.Snippet)
-			if snippet == "" {
-				snippet = "(no snippet)"
-			}
-			writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Cyan.Render(hit.RelPath), s.dim(fmt.Sprintf("score=%.4f", hit.Score)))
-			writef(a.stdout, "      %s\n", s.dim(snippet))
-		}
-		writeln(a.stdout)
-		return exitSuccess
+		return a.runAskSearchOnly(ctx, global, opts.question, retriever, query)
 	}
 
 	askResult, askErr := retriever.Ask(ctx, opts.question, query)
@@ -118,7 +75,52 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		writef(a.stderr, "ask failed: %v\n", askErr)
 		return exitGeneric
 	}
+	return a.renderAskResult(global, askResult)
+}
 
+func (a *App) runAskSearchOnly(ctx context.Context, global globalOptions, question string, retriever model.Retriever, query model.SearchQuery) int {
+	hits, searchErr := retriever.Search(ctx, query)
+	if searchErr != nil {
+		writef(a.stderr, "ask failed: %v\n", searchErr)
+		return exitGeneric
+	}
+	if global.jsonOutput {
+		indexingComplete := true
+		if ic, err := retriever.IndexingComplete(ctx); err == nil {
+			indexingComplete = ic
+		}
+		payload := map[string]interface{}{
+			"question":          question,
+			"answer":            "",
+			"citations":         []interface{}{},
+			"hits":              serializeHits(hits),
+			"indexing_complete": indexingComplete,
+		}
+		if err := emitJSON(a.stdout, payload); err != nil {
+			writef(a.stderr, "encode ask json: %v\n", err)
+			return exitGeneric
+		}
+		return exitSuccess
+	}
+	if global.quiet {
+		return exitSuccess
+	}
+	s := a.sty(false)
+	writeln(a.stdout)
+	writef(a.stdout, "  %s %s\n\n", s.sectionHeader("Search results"), s.dim(fmt.Sprintf("(%d hits)", len(hits))))
+	for i, hit := range hits {
+		snippet := strings.TrimSpace(hit.Snippet)
+		if snippet == "" {
+			snippet = "(no snippet)"
+		}
+		writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Cyan.Render(hit.RelPath), s.dim(fmt.Sprintf("score=%.4f", hit.Score)))
+		writef(a.stdout, "      %s\n", s.dim(snippet))
+	}
+	writeln(a.stdout)
+	return exitSuccess
+}
+
+func (a *App) renderAskResult(global globalOptions, askResult model.AskResult) int {
 	if global.jsonOutput {
 		payload := map[string]interface{}{
 			"question":          askResult.Question,
@@ -133,7 +135,6 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		}
 		return exitSuccess
 	}
-
 	if global.quiet {
 		return exitSuccess
 	}

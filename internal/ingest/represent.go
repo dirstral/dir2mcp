@@ -424,6 +424,42 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 	return out
 }
 
+func parseMMSSComponents(m []string) (minutes, seconds int, ok bool) {
+	var err error
+	minutes, err = strconv.Atoi(m[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	seconds, err = strconv.Atoi(m[2])
+	if err != nil {
+		return 0, 0, false
+	}
+	if minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+		return 0, 0, false
+	}
+	return minutes, seconds, true
+}
+
+func parseHHMMSSComponents(m []string) (hours, minutes, seconds int, ok bool) {
+	var err error
+	hours, err = strconv.Atoi(m[1])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	minutes, err = strconv.Atoi(m[2])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	seconds, err = strconv.Atoi(m[3])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	if hours < 0 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+		return 0, 0, 0, false
+	}
+	return hours, minutes, seconds, true
+}
+
 func parseTranscriptTimestamp(line string) (int, string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -438,38 +474,19 @@ func parseTranscriptTimestamp(line string) (int, string, bool) {
 		return 0, "", false
 	}
 
-	hours := 0
-	minutes := 0
-	seconds := 0
-	var err error
+	var hours, minutes, seconds int
 	if m[3] == "" {
 		// format was mm:ss
-		minutes, err = strconv.Atoi(m[1])
-		if err != nil {
-			return 0, "", false
-		}
-		seconds, err = strconv.Atoi(m[2])
-		if err != nil {
-			return 0, "", false
-		}
-		if minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+		var ok bool
+		minutes, seconds, ok = parseMMSSComponents(m)
+		if !ok {
 			return 0, "", false
 		}
 	} else {
 		// format was hh:mm:ss
-		hours, err = strconv.Atoi(m[1])
-		if err != nil {
-			return 0, "", false
-		}
-		minutes, err = strconv.Atoi(m[2])
-		if err != nil {
-			return 0, "", false
-		}
-		seconds, err = strconv.Atoi(m[3])
-		if err != nil {
-			return 0, "", false
-		}
-		if hours < 0 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+		var ok bool
+		hours, minutes, seconds, ok = parseHHMMSSComponents(m)
+		if !ok {
 			return 0, "", false
 		}
 	}
@@ -538,7 +555,7 @@ func ChunkCodeByLines(content string, maxLines, overlapLines int) []ChunkSegment
 	return out
 }
 
-func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []chunkSegment {
+func normalizeTextChunkParams(maxChars, overlapChars, minChars int) (int, int, int) {
 	if maxChars <= 0 {
 		maxChars = 2500
 	}
@@ -551,6 +568,11 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 	if minChars <= 0 {
 		minChars = 1
 	}
+	return maxChars, overlapChars, minChars
+}
+
+func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []chunkSegment {
+	maxChars, overlapChars, minChars = normalizeTextChunkParams(maxChars, overlapChars, minChars)
 
 	runes := []rune(content)
 	if len(runes) == 0 {

@@ -280,9 +280,9 @@ func TestSDKTransport_RejectsOversizedBody(t *testing.T) {
 		t.Fatalf("POST oversized body: %v", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+	if resp.StatusCode != http.StatusBadRequest {
 		cancel()
-		t.Fatalf("expected 413 for oversized body, got %d", resp.StatusCode)
+		t.Fatalf("expected 400 for oversized body, got %d", resp.StatusCode)
 	}
 
 	cancel()

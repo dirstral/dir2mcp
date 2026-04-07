@@ -94,7 +94,7 @@ func TestReadOrComputeTranscript_UsesCache(t *testing.T) {
 	svc.SetTranscriber(transcriber)
 
 	doc := model.Document{RelPath: "audio/cached.mp3", DocType: "audio"}
-	got, err := svc.ReadOrComputeTranscript(context.Background(), doc, content)
+	got, err := svc.ReadOrComputeTranscript(context.Background(), doc, content, "")
 	if err != nil {
 		t.Fatalf("ReadOrComputeTranscript failed: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestReadOrComputeTranscript_PrunesCacheByTTL(t *testing.T) {
 	}
 
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] fresh transcript"})
-	if _, err := svc.ReadOrComputeTranscript(context.Background(), model.Document{RelPath: "audio/new.mp3", DocType: "audio"}, []byte("new-audio")); err != nil {
+	if _, err := svc.ReadOrComputeTranscript(context.Background(), model.Document{RelPath: "audio/new.mp3", DocType: "audio"}, []byte("new-audio"), ""); err != nil {
 		t.Fatalf("ReadOrComputeTranscript failed: %v", err)
 	}
 

@@ -48,9 +48,94 @@ type EmbeddingWorker struct {
 	RunOnceFunc func(ctx context.Context, indexKind string) (int, error)
 }
 
-func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, error) {
+// validate checks that the worker is properly configured before use.
+func (w *EmbeddingWorker) validate() error {
 	if w.Source == nil || w.Index == nil || w.Embedder == nil {
-		return 0, errors.New("source, index, and embedder are required")
+		return errors.New("source, index, and embedder are required")
+	}
+	return nil
+}
+
+// validateChunkTasks checks that every task in the slice passes Validate().
+func validateChunkTasks(tasks []model.ChunkTask) error {
+	for _, t := range tasks {
+		if err := t.Validate(); err != nil {
+			return fmt.Errorf("%w: invalid chunk task: %v", ErrFatal, err)
+		}
+	}
+	return nil
+}
+
+// buildEmbedBatch converts raw tasks into the parallel slices consumed by
+// Embed.  Returns an ErrFatal-wrapped error when any task has a zero ChunkID.
+func buildEmbedBatch(tasks []model.ChunkTask) (validTasks []model.ChunkTask, inputs []string, labels []uint64, err error) {
+	validTasks = make([]model.ChunkTask, 0, len(tasks))
+	inputs = make([]string, 0, len(tasks))
+	labels = make([]uint64, 0, len(tasks))
+	for _, task := range tasks {
+		chunkID := task.Metadata.ChunkID
+		if chunkID == 0 {
+			return nil, nil, nil, fmt.Errorf("%w: zero label not supported", ErrFatal)
+		}
+		validTasks = append(validTasks, task)
+		inputs = append(inputs, task.Text)
+		labels = append(labels, chunkID)
+	}
+	return validTasks, inputs, labels, nil
+}
+
+// indexChunks adds each vector to the index and fires the OnIndexedChunk hook.
+// On an index error it marks the failed chunk and, if any chunks were already
+// added, marks those as embedded first.
+func (w *EmbeddingWorker) indexChunks(ctx context.Context, validTasks []model.ChunkTask, labels []uint64, vectors [][]float32) (int, error) {
+	for idx := range validTasks {
+		if addErr := w.Index.Add(validTasks[idx].Metadata.ChunkID, vectors[idx]); addErr != nil {
+			if idx > 0 {
+				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
+					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])
+				}
+			}
+			if mfErr := w.Source.MarkFailed(ctx, labels[idx:idx+1], addErr.Error()); mfErr != nil {
+				w.logf("mark failed update error: %v (index error: %v) labels=%v", mfErr, addErr, labels[idx:idx+1])
+			}
+			return idx, addErr
+		}
+		if w.OnIndexedChunk != nil {
+			w.OnIndexedChunk(validTasks[idx].Metadata.ChunkID, validTasks[idx].Metadata)
+		}
+	}
+	return len(labels), nil
+}
+
+// markEmbeddedWithRetry calls MarkEmbedded with exponential-backoff retries
+// so that a transient DB hiccup does not cause already-indexed vectors to be
+// re-indexed on the next cycle.
+func (w *EmbeddingWorker) markEmbeddedWithRetry(ctx context.Context, labels []uint64) error {
+	const maxRetries = 3
+	retryDelay := 100 * time.Millisecond
+	var meErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		meErr = w.Source.MarkEmbedded(ctx, labels)
+		if meErr == nil {
+			return nil
+		}
+		w.logf("mark embedded attempt %d/%d failed: %v labels=%v", attempt+1, maxRetries, meErr, labels)
+		if attempt < maxRetries-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+			}
+			retryDelay *= 2
+		}
+	}
+	w.logf("mark embedded final failure after %d attempts: %v labels=%v", maxRetries, meErr, labels)
+	return meErr
+}
+
+func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, error) {
+	if err := w.validate(); err != nil {
+		return 0, err
 	}
 
 	batchSize := w.BatchSize
@@ -68,29 +153,14 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	// sanity-check tasks returned by the source.  they should already be
 	// consistent, but validating here guards against misbehaving or
 	// hand‑constructed implementations.
-	for _, t := range tasks {
-		if err := t.Validate(); err != nil {
-			return 0, fmt.Errorf("%w: invalid chunk task: %v", ErrFatal, err)
-		}
+	if err := validateChunkTasks(tasks); err != nil {
+		return 0, err
 	}
 
 	modelName := w.modelForKind(indexKind)
-	validTasks := make([]model.ChunkTask, 0, len(tasks))
-	inputs := make([]string, 0, len(tasks))
-	labels := make([]uint64, 0, len(tasks))
-	for _, task := range tasks {
-		// always prefer the metadata value; Label exists only for API
-		// compatibility and must mirror Metadata.ChunkID.  The prior
-		// validation loop already checked this invariant, but using the
-		// metadata field directly removes the need to reference Label at
-		// every call site.
-		chunkID := task.Metadata.ChunkID
-		if chunkID == 0 {
-			return 0, fmt.Errorf("%w: zero label not supported", ErrFatal)
-		}
-		validTasks = append(validTasks, task)
-		inputs = append(inputs, task.Text)
-		labels = append(labels, chunkID)
+	validTasks, inputs, labels, err := buildEmbedBatch(tasks)
+	if err != nil {
+		return 0, err
 	}
 
 	vectors, err := w.Embedder.Embed(ctx, modelName, inputs)
@@ -119,50 +189,17 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		return 0, errors.New(reason)
 	}
 
-	for idx := range validTasks {
-		if addErr := w.Index.Add(validTasks[idx].Metadata.ChunkID, vectors[idx]); addErr != nil {
-			if idx > 0 {
-				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
-					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])
-				}
-			}
-			if mfErr := w.Source.MarkFailed(ctx, labels[idx:idx+1], addErr.Error()); mfErr != nil {
-				w.logf("mark failed update error: %v (index error: %v) labels=%v", mfErr, addErr, labels[idx:idx+1])
-			}
-			return idx, addErr
-		}
-		if w.OnIndexedChunk != nil {
-			w.OnIndexedChunk(validTasks[idx].Metadata.ChunkID, validTasks[idx].Metadata)
-		}
+	n, err := w.indexChunks(ctx, validTasks, labels, vectors)
+	if err != nil {
+		return n, err
 	}
 
 	// Attempt to mark all successfully indexed chunks as embedded.
 	// Because the vectors are already in the index, a transient DB hiccup
 	// should not cause them to be re-indexed on the next cycle – so retry
 	// with exponential backoff before giving up.
-	{
-		const maxRetries = 3
-		retryDelay := 100 * time.Millisecond
-		var meErr error
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			meErr = w.Source.MarkEmbedded(ctx, labels)
-			if meErr == nil {
-				break
-			}
-			w.logf("mark embedded attempt %d/%d failed: %v labels=%v", attempt+1, maxRetries, meErr, labels)
-			if attempt < maxRetries-1 {
-				select {
-				case <-ctx.Done():
-					return len(labels), ctx.Err()
-				case <-time.After(retryDelay):
-				}
-				retryDelay *= 2
-			}
-		}
-		if meErr != nil {
-			w.logf("mark embedded final failure after %d attempts: %v labels=%v", maxRetries, meErr, labels)
-			return len(labels), meErr
-		}
+	if err := w.markEmbeddedWithRetry(ctx, labels); err != nil {
+		return len(labels), err
 	}
 
 	return len(labels), nil

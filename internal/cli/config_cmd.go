@@ -11,6 +11,44 @@ import (
 	"dir2mcp/internal/config"
 )
 
+func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, created bool) {
+	if global.quiet || global.jsonOutput {
+		return
+	}
+	s := a.sty(false)
+	if created {
+		writef(a.stdout, "%s created %s with baseline settings\n", s.Success.Render("✓"), configPath)
+	} else {
+		writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
+	}
+}
+
+func (a *App) promptAndSaveMistralAPIKey(global globalOptions, configPath string, apiKeySet bool) (saved bool) {
+	if global.nonInteractive || global.jsonOutput || apiKeySet ||
+		!isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
+		return false
+	}
+	s := a.sty(false)
+	writef(a.stdout, "\n%s\n", s.sectionHeader("Mistral API Key"))
+	writef(a.stdout, "  Get one free at https://console.mistral.ai/api-keys\n\n")
+	writef(a.stdout, "  MISTRAL_API_KEY (leave blank to skip): ")
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	key := strings.TrimSpace(line)
+	if key == "" {
+		return false
+	}
+	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
+	if err := saveEnvLocalKey(envPath, "MISTRAL_API_KEY", key); err != nil {
+		writef(a.stderr, "save .env.local: %v\n", err)
+		return false
+	}
+	if !global.quiet {
+		writef(a.stdout, "%s saved MISTRAL_API_KEY to %s\n", s.Success.Render("✓"), envPath)
+	}
+	return true
+}
+
 func (a *App) runConfig(ctx context.Context, global globalOptions, args []string) int {
 	if len(args) == 0 {
 		writeln(a.stdout, "config command: supported subcommands are init and print")
@@ -78,39 +116,12 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	}
 
 	// Print config file result immediately so it appears before any prompt.
-	if !global.quiet && !global.jsonOutput {
-		s := a.sty(false)
-		if created {
-			writef(a.stdout, "%s created %s with baseline settings\n", s.Success.Render("✓"), configPath)
-		} else {
-			writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
-		}
-	}
+	a.emitConfigCreatedMessage(global, configPath, created)
 
 	// Prompt for the Mistral API key when running interactively and the key is
 	// not already present in the environment.
 	apiKeySet := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != ""
-	apiKeySaved := false
-	if !global.nonInteractive && !global.jsonOutput && !apiKeySet &&
-		isTerminal(os.Stdin) && isTerminal(os.Stdout) {
-		s := a.sty(false)
-		writef(a.stdout, "\n%s\n", s.sectionHeader("Mistral API Key"))
-		writef(a.stdout, "  Get one free at https://console.mistral.ai/api-keys\n\n")
-		writef(a.stdout, "  MISTRAL_API_KEY (leave blank to skip): ")
-		reader := bufio.NewReader(os.Stdin)
-		line, _ := reader.ReadString('\n')
-		if key := strings.TrimSpace(line); key != "" {
-			envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
-			if err := saveEnvLocalKey(envPath, "MISTRAL_API_KEY", key); err != nil {
-				writef(a.stderr, "save .env.local: %v\n", err)
-			} else {
-				apiKeySaved = true
-				if !global.quiet {
-					writef(a.stdout, "%s saved MISTRAL_API_KEY to %s\n", s.Success.Render("✓"), envPath)
-				}
-			}
-		}
-	}
+	apiKeySaved := a.promptAndSaveMistralAPIKey(global, configPath, apiKeySet)
 
 	nextSteps := []string{}
 	if !apiKeySet && !apiKeySaved {

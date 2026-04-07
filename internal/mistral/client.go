@@ -301,42 +301,7 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		errMsg := strings.TrimSpace(string(bodyBytes))
-		if errMsg == "" {
-			errMsg = "upstream returned non-200 response"
-		}
-
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-			return nil, &model.ProviderError{
-				Code:       "MISTRAL_AUTH",
-				Message:    errMsg,
-				Retryable:  false,
-				StatusCode: resp.StatusCode,
-			}
-		case resp.StatusCode == http.StatusTooManyRequests:
-			return nil, &model.ProviderError{
-				Code:       "MISTRAL_RATE_LIMIT",
-				Message:    errMsg,
-				Retryable:  true,
-				StatusCode: resp.StatusCode,
-			}
-		case resp.StatusCode >= http.StatusInternalServerError:
-			return nil, &model.ProviderError{
-				Code:       "MISTRAL_FAILED",
-				Message:    errMsg,
-				Retryable:  true,
-				StatusCode: resp.StatusCode,
-			}
-		default:
-			return nil, &model.ProviderError{
-				Code:       "MISTRAL_FAILED",
-				Message:    errMsg,
-				Retryable:  false,
-				StatusCode: resp.StatusCode,
-			}
-		}
+		return nil, mistralHTTPError(resp)
 	}
 
 	var parsed embedResponse
@@ -398,6 +363,31 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 	}
 
 	return vectors, nil
+}
+
+// mistralHTTPError reads the response body and returns a *model.ProviderError
+// appropriate for the HTTP status code. It is a shared helper used by all
+// single-attempt functions (embedBatch, extractOnce, transcribeOnce,
+// generateOnce) to avoid duplicating the status-code switch.
+func mistralHTTPError(resp *http.Response) error {
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	errMsg := strings.TrimSpace(string(bodyBytes))
+	if errMsg == "" {
+		errMsg = "upstream returned non-200 response"
+	}
+	isAuthError := resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
+	isRateLimit := resp.StatusCode == http.StatusTooManyRequests
+	isServerError := resp.StatusCode >= http.StatusInternalServerError
+	switch {
+	case isAuthError:
+		return &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+	case isRateLimit:
+		return &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+	case isServerError:
+		return &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+	default:
+		return &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+	}
 }
 
 func (c *Client) backoffForAttempt(attempt int) time.Duration {
@@ -479,6 +469,52 @@ func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []by
 // extractOnce contains the previous implementation of Extract and performs a
 // single attempt without any retry behaviour.  The logic is kept separate so
 // that extractWithRetry can invoke it repeatedly.
+// ocrMIMEType returns the MIME type for the given file extension, or ("", false)
+// if the extension is not supported for OCR.
+func ocrMIMEType(ext string) (string, bool) {
+	switch ext {
+	case ".pdf":
+		return "application/pdf", true
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".webp":
+		return "image/webp", true
+	default:
+		return "", false
+	}
+}
+
+// extractOCRText assembles the text content from an OCR response, preferring
+// page-level markdown when available.  Returns ("", false) when no text was
+// found.
+func extractOCRText(parsed ocrResponse) (string, bool) {
+	if len(parsed.Pages) > 0 {
+		parts := make([]string, 0, len(parsed.Pages))
+		for _, p := range parsed.Pages {
+			pageText := strings.TrimSpace(p.Markdown)
+			if pageText == "" {
+				pageText = strings.TrimSpace(p.Text)
+			}
+			if pageText == "" {
+				continue
+			}
+			parts = append(parts, pageText)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\f"), true
+		}
+	}
+	if text := strings.TrimSpace(parsed.Markdown); text != "" {
+		return text, true
+	}
+	if text := strings.TrimSpace(parsed.Text); text != "" {
+		return text, true
+	}
+	return "", false
+}
+
 func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (string, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return "", &model.ProviderError{
@@ -496,17 +532,8 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 	}
 
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
-	var mimeType string
-	switch ext {
-	case ".pdf":
-		mimeType = "application/pdf"
-	case ".png":
-		mimeType = "image/png"
-	case ".jpg", ".jpeg":
-		mimeType = "image/jpeg"
-	case ".webp":
-		mimeType = "image/webp"
-	default:
+	mimeType, ok := ocrMIMEType(ext)
+	if !ok {
 		// report supported file types explicitly; falling back to a generic MIME
 		// value risks the upstream API rejecting the request and makes debugging
 		// harder.
@@ -581,21 +608,7 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		errMsg := strings.TrimSpace(string(bodyBytes))
-		if errMsg == "" {
-			errMsg = "upstream returned non-200 response"
-		}
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-			return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
-		case resp.StatusCode == http.StatusTooManyRequests:
-			return "", &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
-		case resp.StatusCode >= http.StatusInternalServerError:
-			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
-		default:
-			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
-		}
+		return "", mistralHTTPError(resp)
 	}
 
 	var parsed ocrResponse
@@ -608,35 +621,15 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 		}
 	}
 
-	if len(parsed.Pages) > 0 {
-		parts := make([]string, 0, len(parsed.Pages))
-		for _, p := range parsed.Pages {
-			pageText := strings.TrimSpace(p.Markdown)
-			if pageText == "" {
-				pageText = strings.TrimSpace(p.Text)
-			}
-			if pageText == "" {
-				continue
-			}
-			parts = append(parts, pageText)
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\f"), nil
+	text, ok := extractOCRText(parsed)
+	if !ok {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "ocr response had no text content",
+			Retryable: false,
 		}
 	}
-
-	if text := strings.TrimSpace(parsed.Markdown); text != "" {
-		return text, nil
-	}
-	if text := strings.TrimSpace(parsed.Text); text != "" {
-		return text, nil
-	}
-
-	return "", &model.ProviderError{
-		Code:      "MISTRAL_FAILED",
-		Message:   "ocr response had no text content",
-		Retryable: false,
-	}
+	return text, nil
 }
 
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -676,20 +669,74 @@ func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data [
 	return "", lastErr
 }
 
-func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (string, error) {
-	if strings.TrimSpace(c.APIKey) == "" {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_AUTH",
-			Message:   "missing Mistral API key",
-			Retryable: false,
+// buildTranscribeBody builds the multipart form body for a transcription
+// request. Returns the raw body bytes and the writer (for the Content-Type
+// boundary), or a ProviderError on failure.
+func (c *Client) buildTranscribeBody(relPath string, data []byte) ([]byte, *multipart.Writer, error) {
+	fileName := strings.TrimSpace(filepath.Base(relPath))
+	if fileName == "" || fileName == "." || fileName == string(filepath.Separator) {
+		fileName = "audio.wav"
+	}
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	fileField, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		return nil, nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to build transcription request body", Retryable: false, Cause: err}
+	}
+	if _, err := fileField.Write(data); err != nil {
+		return nil, nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to write transcription input", Retryable: false, Cause: err}
+	}
+	// model selection mirrors OCR logic: prefer the client-configured value
+	// and only fall back to the package constant if the field is empty.
+	modelName := strings.TrimSpace(c.DefaultTranscribeModel)
+	if modelName == "" {
+		modelName = DefaultTranscribeModel
+	}
+	if err := writer.WriteField("model", modelName); err != nil {
+		return nil, nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to write transcription model", Retryable: false, Cause: err}
+	}
+	if language := strings.TrimSpace(c.DefaultTranscribeLanguage); language != "" {
+		if err := writer.WriteField("language", language); err != nil {
+			return nil, nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to write transcription language", Retryable: false, Cause: err}
 		}
 	}
-	if len(data) == 0 {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_FAILED",
-			Message:   "transcription input is empty",
-			Retryable: false,
+	if err := writer.Close(); err != nil {
+		return nil, nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to finalize transcription request body", Retryable: false, Cause: err}
+	}
+	return buf.Bytes(), writer, nil
+}
+
+// parseMistralTranscriptSegments converts timed segments in a transcription
+// response into timestamped lines.  Returns ("", false) when no non-empty
+// segments are present.
+func parseMistralTranscriptSegments(parsed transcribeResponse) (string, bool) {
+	if len(parsed.Segments) == 0 {
+		return "", false
+	}
+	lines := make([]string, 0, len(parsed.Segments))
+	for _, seg := range parsed.Segments {
+		text := strings.TrimSpace(seg.Text)
+		if text == "" {
+			continue
 		}
+		startSec := int(seg.Start)
+		mm := startSec / 60
+		ss := startSec % 60
+		lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
+	}
+	if len(lines) > 0 {
+		return strings.Join(lines, "\n"), true
+	}
+	return "", false
+}
+
+func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (string, error) {
+	if strings.TrimSpace(c.APIKey) == "" {
+		return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: "missing Mistral API key", Retryable: false}
+	}
+	if len(data) == 0 {
+		return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: "transcription input is empty", Retryable: false}
 	}
 	// enforce a maximum payload size mirroring the OCR check so callers can
 	// avoid sending absurdly large audio blobs.  use the same configuration
@@ -706,107 +753,31 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		}
 	}
 
-	fileName := strings.TrimSpace(filepath.Base(relPath))
-	if fileName == "" || fileName == "." || fileName == string(filepath.Separator) {
-		fileName = "audio.wav"
+	body, writer, err := c.buildTranscribeBody(relPath, data)
+	if err != nil {
+		return "", err
 	}
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	fileField, err := writer.CreateFormFile("file", fileName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/audio/transcriptions", bytes.NewReader(body))
 	if err != nil {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_FAILED",
-			Message:   "failed to build transcription request body",
-			Retryable: false,
-			Cause:     err,
-		}
-	}
-	if _, err := fileField.Write(data); err != nil {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_FAILED",
-			Message:   "failed to write transcription input",
-			Retryable: false,
-			Cause:     err,
-		}
-	}
-	// model selection mirrors OCR logic: prefer the client-configured value
-	// and only fall back to the package constant if the field is empty.
-	modelName := strings.TrimSpace(c.DefaultTranscribeModel)
-	if modelName == "" {
-		modelName = DefaultTranscribeModel
-	}
-	if err := writer.WriteField("model", modelName); err != nil {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_FAILED",
-			Message:   "failed to write transcription model",
-			Retryable: false,
-			Cause:     err,
-		}
-	}
-	if language := strings.TrimSpace(c.DefaultTranscribeLanguage); language != "" {
-		if err := writer.WriteField("language", language); err != nil {
-			return "", &model.ProviderError{
-				Code:      "MISTRAL_FAILED",
-				Message:   "failed to write transcription language",
-				Retryable: false,
-				Cause:     err,
-			}
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_FAILED",
-			Message:   "failed to finalize transcription request body",
-			Retryable: false,
-			Cause:     err,
-		}
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/audio/transcriptions", bytes.NewReader(body.Bytes()))
-	if err != nil {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_FAILED",
-			Message:   "failed to build transcription request",
-			Retryable: false,
-			Cause:     err,
-		}
+		return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to build transcription request", Retryable: false, Cause: err}
 	}
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: defaultRequestTimeout}
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: defaultRequestTimeout}
 	}
 
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", &model.ProviderError{
-			Code:      "MISTRAL_FAILED",
-			Message:   "transcription request failed",
-			Retryable: true,
-			Cause:     err,
-		}
+		return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		errMsg := strings.TrimSpace(string(bodyBytes))
-		if errMsg == "" {
-			errMsg = "upstream returned non-200 response"
-		}
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-			return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
-		case resp.StatusCode == http.StatusTooManyRequests:
-			return "", &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
-		case resp.StatusCode >= http.StatusInternalServerError:
-			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
-		default:
-			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
-		}
+		return "", mistralHTTPError(resp)
 	}
 
 	var parsed transcribeResponse
@@ -819,21 +790,8 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		}
 	}
 
-	if len(parsed.Segments) > 0 {
-		lines := make([]string, 0, len(parsed.Segments))
-		for _, seg := range parsed.Segments {
-			text := strings.TrimSpace(seg.Text)
-			if text == "" {
-				continue
-			}
-			startSec := int(seg.Start)
-			mm := startSec / 60
-			ss := startSec % 60
-			lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
-		}
-		if len(lines) > 0 {
-			return strings.Join(lines, "\n"), nil
-		}
+	if segText, ok := parseMistralTranscriptSegments(parsed); ok {
+		return segText, nil
 	}
 
 	text := strings.TrimSpace(parsed.Text)
@@ -957,21 +915,7 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		errMsg := strings.TrimSpace(string(bodyBytes))
-		if errMsg == "" {
-			errMsg = "upstream returned non-200 response"
-		}
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-			return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
-		case resp.StatusCode == http.StatusTooManyRequests:
-			return "", &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
-		case resp.StatusCode >= http.StatusInternalServerError:
-			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
-		default:
-			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
-		}
+		return "", mistralHTTPError(resp)
 	}
 
 	var parsed generateResponse

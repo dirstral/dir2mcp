@@ -354,6 +354,14 @@ func (s *Server) runOnListener(ctx context.Context, ln net.Listener, certFile, k
 	}
 }
 
+func parseCanonicalCode(err error) string {
+	var vErr validationError
+	if errors.As(err, &vErr) && vErr.canonicalCode != "" {
+		return vErr.canonicalCode
+	}
+	return "INVALID_FIELD"
+}
+
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	rc, ok := r.Context().Value(requestContextKey{}).(requestContext)
 	if !ok {
@@ -756,6 +764,22 @@ func loadAuthToken(cfg config.Config) string {
 	return strings.TrimSpace(string(content))
 }
 
+func matchSchemeBasedOrigin(allowed string, parsedOrigin *url.URL, normalizedOrigin string) bool {
+	parsedAllowed, err := url.Parse(allowed)
+	if err != nil || parsedAllowed.Scheme == "" || parsedAllowed.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(parsedAllowed.Scheme, parsedOrigin.Scheme) {
+		return false
+	}
+	// Allow entries without an explicit port (e.g. http://localhost) to match any origin port.
+	if parsedAllowed.Port() == "" {
+		return strings.EqualFold(parsedAllowed.Hostname(), parsedOrigin.Hostname())
+	}
+	normalizedAllowed := parsedAllowed.Scheme + "://" + strings.ToLower(parsedAllowed.Host)
+	return strings.EqualFold(normalizedAllowed, normalizedOrigin)
+}
+
 func isOriginAllowed(origin string, allowlist []string) bool {
 	parsedOrigin, err := url.Parse(origin)
 	if err != nil || parsedOrigin.Scheme == "" || parsedOrigin.Host == "" {
@@ -772,24 +796,7 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 		}
 
 		if strings.Contains(allowed, "://") {
-			parsedAllowed, err := url.Parse(allowed)
-			if err != nil || parsedAllowed.Scheme == "" || parsedAllowed.Host == "" {
-				continue
-			}
-			if !strings.EqualFold(parsedAllowed.Scheme, parsedOrigin.Scheme) {
-				continue
-			}
-
-			// Allow entries without an explicit port (e.g. http://localhost) to match any origin port.
-			if parsedAllowed.Port() == "" {
-				if strings.EqualFold(parsedAllowed.Hostname(), parsedOrigin.Hostname()) {
-					return true
-				}
-				continue
-			}
-
-			normalizedAllowed := parsedAllowed.Scheme + "://" + strings.ToLower(parsedAllowed.Host)
-			if strings.EqualFold(normalizedAllowed, normalizedOrigin) {
+			if matchSchemeBasedOrigin(allowed, parsedOrigin, normalizedOrigin) {
 				return true
 			}
 			continue

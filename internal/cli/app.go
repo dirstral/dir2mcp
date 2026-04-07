@@ -672,6 +672,36 @@ func formatSpan(span model.Span) string {
 	}
 }
 
+// tryConsumeGlobalFlag checks if arg matches --flagName or --flagName=value,
+// consumes the value from remaining, and sets *target. Returns ok=true when
+// matched. Returns an error when the flag is present but the value is missing.
+func tryConsumeGlobalFlag(arg string, remaining []string, flagName string, target *string) (newRemaining []string, ok bool, err error) {
+	fullFlag := "--" + flagName
+	if arg == fullFlag || strings.HasPrefix(arg, fullFlag+"=") {
+		value, consumed, err := consumeGlobalFlagValue(fullFlag, remaining)
+		if err != nil {
+			return nil, false, err
+		}
+		*target = value
+		return remaining[consumed:], true, nil
+	}
+	return remaining, false, nil
+}
+
+// tryConsumeGlobalFlagSet attempts --dir, --config, and --state-dir in turn.
+func tryConsumeGlobalFlagSet(arg string, remaining []string, opts *globalOptions) (newRemaining []string, ok bool, err error) {
+	if newRem, matched, err := tryConsumeGlobalFlag(arg, remaining, "dir", &opts.rootDir); matched || err != nil {
+		return newRem, matched, err
+	}
+	if newRem, matched, err := tryConsumeGlobalFlag(arg, remaining, "config", &opts.configPath); matched || err != nil {
+		return newRem, matched, err
+	}
+	if newRem, matched, err := tryConsumeGlobalFlag(arg, remaining, "state-dir", &opts.stateDir); matched || err != nil {
+		return newRem, matched, err
+	}
+	return remaining, false, nil
+}
+
 func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	opts := globalOptions{}
 	remaining := args
@@ -681,71 +711,27 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 		if _, ok := commands[arg]; ok {
 			break
 		}
-
+		if newRem, ok, err := tryConsumeGlobalFlagSet(arg, remaining, &opts); ok || err != nil {
+			if err != nil {
+				return globalOptions{}, nil, err
+			}
+			remaining = newRem
+			continue
+		}
 		switch arg {
-		case "--dir":
-			value, consumed, err := consumeGlobalFlagValue(arg, remaining)
-			if err != nil {
-				return globalOptions{}, nil, err
-			}
-			opts.rootDir = value
-			remaining = remaining[consumed:]
-		case "--config":
-			value, consumed, err := consumeGlobalFlagValue(arg, remaining)
-			if err != nil {
-				return globalOptions{}, nil, err
-			}
-			opts.configPath = value
-			remaining = remaining[consumed:]
-		case "--state-dir":
-			value, consumed, err := consumeGlobalFlagValue(arg, remaining)
-			if err != nil {
-				return globalOptions{}, nil, err
-			}
-			opts.stateDir = value
-			remaining = remaining[consumed:]
 		case "--json":
 			opts.jsonOutput = true
-			remaining = remaining[1:]
 		case "--non-interactive":
 			opts.nonInteractive = true
-			remaining = remaining[1:]
 		case "--quiet":
 			opts.quiet = true
-			remaining = remaining[1:]
 		default:
-			if strings.HasPrefix(arg, "--dir=") {
-				value, consumed, err := consumeGlobalFlagValue("--dir", remaining)
-				if err != nil {
-					return globalOptions{}, nil, err
-				}
-				opts.rootDir = value
-				remaining = remaining[consumed:]
-				continue
-			}
-			if strings.HasPrefix(arg, "--config=") {
-				value, consumed, err := consumeGlobalFlagValue("--config", remaining)
-				if err != nil {
-					return globalOptions{}, nil, err
-				}
-				opts.configPath = value
-				remaining = remaining[consumed:]
-				continue
-			}
-			if strings.HasPrefix(arg, "--state-dir=") {
-				value, consumed, err := consumeGlobalFlagValue("--state-dir", remaining)
-				if err != nil {
-					return globalOptions{}, nil, err
-				}
-				opts.stateDir = value
-				remaining = remaining[consumed:]
-				continue
-			}
 			if strings.HasPrefix(arg, "-") {
 				return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
 			}
 			return opts, remaining, nil
 		}
+		remaining = remaining[1:]
 	}
 
 	return opts, remaining, nil
@@ -914,6 +900,24 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	return opts, nil
 }
 
+func (a *App) closeStoreWithLog(st model.Store) {
+	if closeErr := st.Close(); closeErr != nil {
+		writef(a.stderr, "close store: %v\n", closeErr)
+	}
+}
+
+func clearContentHashesIfSupported(ctx context.Context, st model.Store, stderr io.Writer) int {
+	resetter, ok := interface{}(st).(contentHashResetter)
+	if !ok {
+		return exitSuccess
+	}
+	if err := resetter.ClearDocumentContentHashes(ctx); err != nil {
+		writef(stderr, "clear content hashes: %v\n", err)
+		return exitGeneric
+	}
+	return exitSuccess
+}
+
 func ensureRootAccessible(root string) error {
 	info, err := os.Stat(root)
 	if err != nil {
@@ -939,41 +943,7 @@ func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
 	}
 
 	if strings.EqualFold(mode, "auto") {
-		if token := strings.TrimSpace(os.Getenv(authTokenEnvVar)); token != "" {
-			return authMaterial{
-				mode:              "auto",
-				token:             token,
-				tokenSource:       "env",
-				authorizationHint: "Bearer <token-from-env>",
-			}, nil
-		}
-
-		tokenPath := filepath.Join(cfg.StateDir, secretTokenName)
-		token, err := readToken(tokenPath, true)
-		if err != nil {
-			return authMaterial{}, err
-		}
-		if token == "" {
-			token, err = generateTokenHex()
-			if err != nil {
-				return authMaterial{}, err
-			}
-			if err := writeSecretToken(tokenPath, token); err != nil {
-				return authMaterial{}, err
-			}
-		}
-
-		absPath := tokenPath
-		if abs, err := filepath.Abs(tokenPath); err == nil {
-			absPath = abs
-		}
-		return authMaterial{
-			mode:              "auto",
-			token:             token,
-			tokenSource:       "secret.token",
-			tokenFile:         absPath,
-			authorizationHint: "Bearer <token-from-secret.token>",
-		}, nil
+		return prepareAutoAuthMaterial(cfg)
 	}
 
 	if len(mode) >= len("file:") && strings.EqualFold(mode[:len("file:")], "file:") {
@@ -1004,6 +974,42 @@ func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
 	}
 
 	return authMaterial{}, fmt.Errorf("unsupported auth mode: %s", mode)
+}
+
+func prepareAutoAuthMaterial(cfg config.Config) (authMaterial, error) {
+	if token := strings.TrimSpace(os.Getenv(authTokenEnvVar)); token != "" {
+		return authMaterial{
+			mode:              "auto",
+			token:             token,
+			tokenSource:       "env",
+			authorizationHint: "Bearer <token-from-env>",
+		}, nil
+	}
+	tokenPath := filepath.Join(cfg.StateDir, secretTokenName)
+	token, err := readToken(tokenPath, true)
+	if err != nil {
+		return authMaterial{}, err
+	}
+	if token == "" {
+		token, err = generateTokenHex()
+		if err != nil {
+			return authMaterial{}, err
+		}
+		if err := writeSecretToken(tokenPath, token); err != nil {
+			return authMaterial{}, err
+		}
+	}
+	absPath := tokenPath
+	if abs, err := filepath.Abs(tokenPath); err == nil {
+		absPath = abs
+	}
+	return authMaterial{
+		mode:              "auto",
+		token:             token,
+		tokenSource:       "secret.token",
+		tokenFile:         absPath,
+		authorizationHint: "Bearer <token-from-secret.token>",
+	}, nil
 }
 
 func readToken(path string, allowMissing bool) (string, error) {
@@ -1435,25 +1441,29 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.
 	}
 
 	if len(unexpectedStatusCounts) > 0 {
-		parts := make([]string, 0, len(unexpectedStatusCounts))
-		for statusVal, count := range unexpectedStatusCounts {
-			example := unexpectedStatusExample[statusVal]
-			parts = append(parts, fmt.Sprintf("%s=%d (example rel_path=%q)", statusVal, count, example))
-		}
-		sort.Strings(parts)
-		msg := fmt.Sprintf("unexpected document statuses encountered during scan: %s", strings.Join(parts, ", "))
-		if emitter != nil && emitter.enabled {
-			emitter.Emit("warning", "unexpected_document_statuses", map[string]interface{}{
-				"message":  msg,
-				"counts":   unexpectedStatusCounts,
-				"examples": unexpectedStatusExample,
-			})
-		} else {
-			writef(stderr, "warning: %s\n", msg)
-		}
+		reportUnexpectedDocStatuses(unexpectedStatusCounts, unexpectedStatusExample, stderr, emitter)
 	}
 
 	return counts, nil
+}
+
+func reportUnexpectedDocStatuses(statusCounts map[string]int64, examples map[string]string, stderr io.Writer, emitter *ndjsonEmitter) {
+	parts := make([]string, 0, len(statusCounts))
+	for statusVal, count := range statusCounts {
+		example := examples[statusVal]
+		parts = append(parts, fmt.Sprintf("%s=%d (example rel_path=%q)", statusVal, count, example))
+	}
+	sort.Strings(parts)
+	msg := fmt.Sprintf("unexpected document statuses encountered during scan: %s", strings.Join(parts, ", "))
+	if emitter != nil && emitter.enabled {
+		emitter.Emit("warning", "unexpected_document_statuses", map[string]interface{}{
+			"message":  msg,
+			"counts":   statusCounts,
+			"examples": examples,
+		})
+	} else {
+		writef(stderr, "warning: %s\n", msg)
+	}
 }
 
 func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {

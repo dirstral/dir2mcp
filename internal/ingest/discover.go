@@ -121,19 +121,61 @@ type gitIgnoreRule struct {
 	anchored bool
 }
 
+// loadEffectiveRules returns the gitignore rules to apply in absDir.  When
+// UseGitIgnore is false the parent rules are returned unchanged.
+func loadEffectiveRules(absDir, relDir string, parentRules []gitIgnoreRule, useGitIgnore bool) ([]gitIgnoreRule, error) {
+	if !useGitIgnore {
+		return parentRules, nil
+	}
+	rules := append([]gitIgnoreRule(nil), parentRules...)
+	localRules, err := parseGitIgnoreRules(absDir, relDir)
+	if err != nil {
+		return nil, err
+	}
+	return append(rules, localRules...), nil
+}
+
+// shouldAddFile reports whether a regular file should be included in the
+// discovered file set.
+func (w *discoverWalker) shouldAddFile(lstat os.FileInfo, relPath string, rules []gitIgnoreRule) bool {
+	if !lstat.Mode().IsRegular() {
+		return false
+	}
+	if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, false) {
+		return false
+	}
+	return lstat.Size() <= w.options.MaxSizeBytes
+}
+
+// visitDir processes a single directory entry that is known to be a directory.
+func (w *discoverWalker) visitDir(ctx context.Context, fullPath, relPath, name string, rules []gitIgnoreRule) error {
+	if shouldSkipDirectory(name) {
+		return nil
+	}
+	if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, true) {
+		return nil
+	}
+	nextDir := filepath.Clean(fullPath)
+	if w.options.FollowSymlinks {
+		if resolved, err := filepath.EvalSymlinks(nextDir); err == nil {
+			nextDir = filepath.Clean(resolved)
+		}
+	}
+	if _, ok := w.visitedDirs[nextDir]; ok {
+		return nil
+	}
+	w.visitedDirs[nextDir] = struct{}{}
+	return w.walkDir(ctx, nextDir, relPath, rules)
+}
+
 func (w *discoverWalker) walkDir(ctx context.Context, absDir, relDir string, parentRules []gitIgnoreRule) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	rules := parentRules
-	if w.options.UseGitIgnore {
-		rules = append([]gitIgnoreRule(nil), parentRules...)
-		localRules, err := parseGitIgnoreRules(absDir, relDir)
-		if err != nil {
-			return err
-		}
-		rules = append(rules, localRules...)
+	rules, err := loadEffectiveRules(absDir, relDir, parentRules, w.options.UseGitIgnore)
+	if err != nil {
+		return err
 	}
 
 	entries, err := os.ReadDir(absDir)
@@ -172,35 +214,13 @@ func (w *discoverWalker) walkDir(ctx context.Context, absDir, relDir string, par
 		}
 
 		if lstat.IsDir() {
-			if shouldSkipDirectory(name) {
-				continue
-			}
-			if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, true) {
-				continue
-			}
-			nextDir := filepath.Clean(fullPath)
-			if w.options.FollowSymlinks {
-				if resolved, err := filepath.EvalSymlinks(nextDir); err == nil {
-					nextDir = filepath.Clean(resolved)
-				}
-			}
-			if _, ok := w.visitedDirs[nextDir]; ok {
-				continue
-			}
-			w.visitedDirs[nextDir] = struct{}{}
-			if err := w.walkDir(ctx, nextDir, relPath, rules); err != nil {
+			if err := w.visitDir(ctx, fullPath, relPath, name, rules); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if !lstat.Mode().IsRegular() {
-			continue
-		}
-		if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, false) {
-			continue
-		}
-		if lstat.Size() > w.options.MaxSizeBytes {
+		if !w.shouldAddFile(lstat, relPath, rules) {
 			continue
 		}
 		*w.files = append(*w.files, DiscoveredFile{

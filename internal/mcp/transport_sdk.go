@@ -81,133 +81,7 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	}()
 
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if t.server.rateLimiter != nil {
-			if !t.server.rateLimiter.allow(realIP(req, t.server.rateLimiter)) {
-				w.Header().Set("Retry-After", "1")
-				writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimitExceeded, true)
-				return
-			}
-		}
-
-		if req.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-
-		ct := req.Header.Get("Content-Type")
-		if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
-			writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
-			return
-		}
-
-		if !t.server.authorize(w, req) {
-			return
-		}
-		if !t.server.allowOrigin(w, req) {
-			return
-		}
-		if strings.TrimSpace(req.Header.Get("Accept")) == "" {
-			req.Header.Set("Accept", "application/json, text/event-stream")
-		}
-
-		body, err := io.ReadAll(io.LimitReader(req.Body, maxRequestBody+1))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, nil, -32600, err.Error(), "INVALID_FIELD", false)
-			return
-		}
-		if len(body) > maxRequestBody {
-			writeError(w, http.StatusRequestEntityTooLarge, nil, -32600, "request body too large", "INVALID_FIELD", false)
-			return
-		}
-		req.Body = io.NopCloser(bytes.NewReader(body))
-
-		// Probe the request so we can preserve the legacy request-level
-		// validation behavior while still delegating successful requests to the
-		// official SDK transport.
-		parsedReq, parseErr := parseRequest(io.NopCloser(bytes.NewReader(body)))
-		if parseErr != nil {
-			canonicalCode := "INVALID_FIELD"
-			var vErr validationError
-			if errors.As(parseErr, &vErr) && vErr.canonicalCode != "" {
-				canonicalCode = vErr.canonicalCode
-			}
-			writeError(w, http.StatusBadRequest, nil, -32600, parseErr.Error(), canonicalCode, false)
-			return
-		}
-
-		id, hasID, idErr := parseID(parsedReq.ID)
-		if idErr != nil {
-			canonicalCode := "INVALID_FIELD"
-			var vErr validationError
-			if errors.As(idErr, &vErr) && vErr.canonicalCode != "" {
-				canonicalCode = vErr.canonicalCode
-			}
-			writeError(w, http.StatusBadRequest, nil, -32600, idErr.Error(), canonicalCode, false)
-			return
-		}
-
-		if parsedReq.Method == "" {
-			writeError(w, http.StatusBadRequest, id, -32600, "method is required", "MISSING_FIELD", false)
-			return
-		}
-
-		if parsedReq.Method != protocol.RPCMethodInitialize {
-			sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
-			if sessionID == "" {
-				writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-				return
-			}
-			if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
-				if reason != "" {
-					w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
-				}
-				writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-				return
-			}
-		}
-
-		switch parsedReq.Method {
-		case protocol.RPCMethodInitialize:
-			if !hasID {
-				writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
-				return
-			}
-			rec := newBufferedResponseWriter()
-			sdkHandler.ServeHTTP(rec, req)
-			if sessionID := strings.TrimSpace(rec.header.Get(protocol.MCPSessionHeader)); sessionID != "" {
-				t.server.storeSession(sessionID)
-			}
-			copyBufferedResponse(w, rec)
-		case protocol.RPCMethodNotificationsInitialized:
-			if !hasID {
-				w.WriteHeader(http.StatusAccepted)
-				return
-			}
-			writeResult(w, http.StatusOK, id, map[string]interface{}{})
-		case protocol.RPCMethodToolsList:
-			if !hasID {
-				w.WriteHeader(http.StatusAccepted)
-				return
-			}
-			sdkHandler.ServeHTTP(w, req)
-		case protocol.RPCMethodToolsCall:
-			if !hasID {
-				w.WriteHeader(http.StatusAccepted)
-				return
-			}
-			if t.server.x402Enabled {
-				t.server.handleToolsCallRequest(req.Context(), w, req, parsedReq.Params, id)
-				return
-			}
-			sdkHandler.ServeHTTP(w, req)
-		default:
-			if !hasID {
-				w.WriteHeader(http.StatusAccepted)
-				return
-			}
-			writeError(w, http.StatusOK, id, -32601, "method not found", "METHOD_NOT_FOUND", false)
-		}
+		t.serveHTTPRequest(w, req, sdkHandler)
 	})
 
 	server := &http.Server{
@@ -240,6 +114,147 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 		return server.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+func (t *SDKTransport) serveHTTPRequest(w http.ResponseWriter, req *http.Request, sdkHandler http.Handler) {
+	if !t.checkPreRequest(w, req) {
+		return
+	}
+	body, ok := readSDKBody(w, req)
+	if !ok {
+		return
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	parsedReq, id, hasID, ok := t.parseSDKRequestAndID(w, body)
+	if !ok {
+		return
+	}
+	// Session validation is performed inside dispatchSDKRequest, immediately
+	// before the handler is invoked, to close the TOCTOU window that would
+	// exist if we checked here and then dispatched separately.
+	t.dispatchSDKRequest(w, req, parsedReq, id, hasID, sdkHandler)
+}
+
+func (t *SDKTransport) checkPreRequest(w http.ResponseWriter, req *http.Request) bool {
+	if t.server.rateLimiter != nil {
+		if !t.server.rateLimiter.allow(realIP(req, t.server.rateLimiter)) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimitExceeded, true)
+			return false
+		}
+	}
+	if req.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return false
+	}
+	ct := req.Header.Get("Content-Type")
+	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
+		return false
+	}
+	if !t.server.authorize(w, req) {
+		return false
+	}
+	if !t.server.allowOrigin(w, req) {
+		return false
+	}
+	if strings.TrimSpace(req.Header.Get("Accept")) == "" {
+		req.Header.Set("Accept", "application/json, text/event-stream")
+	}
+	return true
+}
+
+func readSDKBody(w http.ResponseWriter, req *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(req.Body, maxRequestBody+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, nil, -32600, "failed to read request body", "INVALID_FIELD", false)
+		return nil, false
+	}
+	if len(body) > maxRequestBody {
+		writeError(w, http.StatusBadRequest, nil, -32600, "request body too large", "INVALID_FIELD", false)
+		return nil, false
+	}
+	return body, true
+}
+
+func (t *SDKTransport) parseSDKRequestAndID(w http.ResponseWriter, body []byte) (rpcRequest, interface{}, bool, bool) {
+	parsedReq, parseErr := parseRequest(io.NopCloser(bytes.NewReader(body)))
+	if parseErr != nil {
+		writeError(w, http.StatusBadRequest, nil, -32600, parseErr.Error(), parseCanonicalCode(parseErr), false)
+		return rpcRequest{}, nil, false, false
+	}
+	id, hasID, idErr := parseID(parsedReq.ID)
+	if idErr != nil {
+		writeError(w, http.StatusBadRequest, nil, -32600, idErr.Error(), parseCanonicalCode(idErr), false)
+		return rpcRequest{}, nil, false, false
+	}
+	if parsedReq.Method == "" {
+		writeError(w, http.StatusBadRequest, id, -32600, "method is required", "MISSING_FIELD", false)
+		return rpcRequest{}, nil, false, false
+	}
+	return parsedReq, id, hasID, true
+}
+
+func (t *SDKTransport) dispatchSDKRequest(w http.ResponseWriter, req *http.Request, parsedReq rpcRequest, id interface{}, hasID bool, sdkHandler http.Handler) {
+	// Validate session immediately before dispatch to eliminate the TOCTOU
+	// window between a prior check and handler invocation. initialize does not
+	// require a pre-existing session — it creates one.
+	if parsedReq.Method != protocol.RPCMethodInitialize {
+		sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
+		if sessionID == "" {
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+			return
+		}
+		if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
+			if reason != "" {
+				w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+			}
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+			return
+		}
+	}
+	switch parsedReq.Method {
+	case protocol.RPCMethodInitialize:
+		if !hasID {
+			writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
+			return
+		}
+		rec := newBufferedResponseWriter()
+		sdkHandler.ServeHTTP(rec, req)
+		if sessionID := strings.TrimSpace(rec.header.Get(protocol.MCPSessionHeader)); sessionID != "" {
+			t.server.storeSession(sessionID)
+		}
+		copyBufferedResponse(w, rec)
+	case protocol.RPCMethodNotificationsInitialized:
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeResult(w, http.StatusOK, id, map[string]interface{}{})
+	case protocol.RPCMethodToolsList:
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		sdkHandler.ServeHTTP(w, req)
+	case protocol.RPCMethodToolsCall:
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		if t.server.x402Enabled {
+			t.server.handleToolsCallRequest(req.Context(), w, req, parsedReq.Params, id)
+			return
+		}
+		sdkHandler.ServeHTTP(w, req)
+	default:
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeError(w, http.StatusOK, id, -32601, "method not found", "METHOD_NOT_FOUND", false)
 	}
 }
 
