@@ -95,6 +95,7 @@ type Client struct {
 	httpClient *http.Client
 
 	mu        sync.Mutex
+	initMu    sync.Mutex
 	sessionID string
 	nextID    atomic.Int64
 }
@@ -185,11 +186,17 @@ func (c *Client) ensureSession(ctx context.Context) error {
 	if strings.TrimSpace(c.sessionHeader()) != "" {
 		return nil
 	}
+	// Serialize initialize so concurrent calls don't race on session creation.
+	c.initMu.Lock()
+	defer c.initMu.Unlock()
+	if strings.TrimSpace(c.sessionHeader()) != "" {
+		return nil
+	}
 
 	resp, body, err := c.doRPC(ctx, rpcRequest{
 		JSONRPC: "2.0",
 		ID:      c.nextRequestID(),
-		Method:  "initialize",
+		Method:  protocol.RPCMethodInitialize,
 		Params: map[string]interface{}{
 			"protocolVersion": bridgeProtocolVersion,
 			"capabilities":    map[string]interface{}{},
@@ -231,7 +238,7 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 	call := rpcRequest{
 		JSONRPC: "2.0",
 		ID:      c.nextRequestID(),
-		Method:  "tools/call",
+		Method:  protocol.RPCMethodToolsCall,
 		Params: map[string]interface{}{
 			"name":      name,
 			"arguments": arguments,
@@ -242,7 +249,7 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 	if err != nil {
 		return ToolResult{}, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || isSessionExpired(resp, body) {
 		c.clearSession()
 		return ToolResult{}, &HTTPError{StatusCode: resp.StatusCode, Body: body}
 	}
@@ -266,4 +273,19 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 		return ToolResult{}, fmt.Errorf("decode tool result: %w", err)
 	}
 	return result, nil
+}
+
+func isSessionExpired(resp *http.Response, body []byte) bool {
+	if resp == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get(protocol.MCPSessionExpiredHeader)), "true") {
+		return true
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "session not found") ||
+		strings.Contains(lower, strings.ToLower(protocol.ErrorCodeSessionNotFound))
 }

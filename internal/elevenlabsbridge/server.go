@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
+
+	"dir2mcp/internal/protocol"
 )
 
 const defaultAskK = 3
+const maxBridgeRequestBodyBytes int64 = 1 << 20
 
 type bridge struct {
 	cfg         Config
@@ -83,8 +87,10 @@ func (b *bridge) methodGuard(allowed string, fn http.HandlerFunc, extra ...strin
 	for _, method := range extra {
 		allowedMethods[method] = struct{}{}
 	}
+	allowHeader := buildAllowHeader(allowedMethods)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := allowedMethods[r.Method]; !ok {
+			w.Header().Set("Allow", allowHeader)
 			writeJSONError(w, http.StatusMethodNotAllowed, fmt.Sprintf("%s not allowed", r.Method))
 			return
 		}
@@ -97,12 +103,20 @@ func (b *bridge) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (b *bridge) handleAsk(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBridgeRequestBodyBytes)
 	var req struct {
 		Question string `json:"question"`
 		Query    string `json:"query"`
 		K        int    `json:"k"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -119,7 +133,7 @@ func (b *bridge) handleAsk(w http.ResponseWriter, r *http.Request) {
 		k = defaultAskK
 	}
 
-	result, err := b.client.CallTool(r.Context(), "dir2mcp.ask", map[string]interface{}{
+	result, err := b.client.CallTool(r.Context(), protocol.ToolNameAsk, map[string]interface{}{
 		"question": question,
 		"k":        k,
 	})
@@ -134,12 +148,20 @@ func (b *bridge) handleAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *bridge) handleSearch(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBridgeRequestBodyBytes)
 	var req struct {
 		Query    string `json:"query"`
 		Question string `json:"question"`
 		K        int    `json:"k"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -156,7 +178,7 @@ func (b *bridge) handleSearch(w http.ResponseWriter, r *http.Request) {
 		k = defaultAskK
 	}
 
-	result, err := b.client.CallTool(r.Context(), "dir2mcp.search", map[string]interface{}{
+	result, err := b.client.CallTool(r.Context(), protocol.ToolNameSearch, map[string]interface{}{
 		"query": query,
 		"k":     k,
 	})
@@ -171,7 +193,7 @@ func (b *bridge) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *bridge) handleListFiles(w http.ResponseWriter, r *http.Request) {
-	result, err := b.client.CallTool(r.Context(), "dir2mcp.list_files", map[string]interface{}{})
+	result, err := b.client.CallTool(r.Context(), protocol.ToolNameListFiles, map[string]interface{}{})
 	if err != nil {
 		b.writeError(w, err)
 		return
@@ -183,7 +205,7 @@ func (b *bridge) handleListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *bridge) handleStats(w http.ResponseWriter, r *http.Request) {
-	result, err := b.client.CallTool(r.Context(), "dir2mcp.stats", map[string]interface{}{})
+	result, err := b.client.CallTool(r.Context(), protocol.ToolNameStats, map[string]interface{}{})
 	if err != nil {
 		b.writeError(w, err)
 		return
@@ -239,8 +261,12 @@ func Run(ctx context.Context, cfg Config, listenAddr string) error {
 		return err
 	}
 	server := &http.Server{
-		Addr:    strings.TrimSpace(listenAddr),
-		Handler: b.Handler(),
+		Addr:              strings.TrimSpace(listenAddr),
+		Handler:           b.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -260,4 +286,13 @@ func Run(ctx context.Context, cfg Config, listenAddr string) error {
 		}
 		return err
 	}
+}
+
+func buildAllowHeader(allowedMethods map[string]struct{}) string {
+	methods := make([]string, 0, len(allowedMethods))
+	for method := range allowedMethods {
+		methods = append(methods, method)
+	}
+	sort.Strings(methods)
+	return strings.Join(methods, ", ")
 }

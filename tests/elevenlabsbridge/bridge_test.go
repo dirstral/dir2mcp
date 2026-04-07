@@ -3,6 +3,7 @@ package elevenlabsbridge_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -107,6 +108,7 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 		mu       sync.Mutex
 		requests []recordedMCPRequest
 	)
+	handlerErrCh := make(chan error, 4)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -116,7 +118,9 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 			Params  map[string]interface{} `json:"params"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("decode request: %v", err)
+			handlerErrCh <- fmt.Errorf("decode request: %w", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		rec := recordedMCPRequest{
 			Method:        payload.Method,
@@ -140,12 +144,16 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 				rec.K = int(k)
 			}
 			if rec.ToolName != "dir2mcp.ask" {
-				t.Fatalf("tool=%q want dir2mcp.ask", rec.ToolName)
+				handlerErrCh <- fmt.Errorf("tool=%q want dir2mcp.ask", rec.ToolName)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"isError":false,"content":[{"type":"text","text":"bridge answer"}],"structuredContent":{"question":"what is alpha?","answer":"bridge answer","citations":[{"chunk_id":1,"rel_path":"docs/a.md","span":{"kind":"lines","start_line":1,"end_line":2}}],"hits":[],"indexing_complete":true}}}`))
 		default:
-			t.Fatalf("unexpected MCP method %q", payload.Method)
+			handlerErrCh <- fmt.Errorf("unexpected MCP method %q", payload.Method)
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 
 		mu.Lock()
@@ -214,5 +222,68 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 	}
 	if requests[1].K != 7 {
 		t.Fatalf("k=%d", requests[1].K)
+	}
+	close(handlerErrCh)
+	for err := range handlerErrCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMethodGuardSetsAllowHeader(t *testing.T) {
+	cfg := elevenlabsbridge.DefaultConfig()
+	cfg.MCPURL = "http://127.0.0.1:1/mcp"
+	cfg.MCPToken = "token"
+
+	bridge, err := elevenlabsbridge.New(cfg)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	srv := httptest.NewServer(bridge.Handler())
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/ask", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+	if allow := resp.Header.Get("Allow"); allow != http.MethodPost {
+		t.Fatalf("Allow=%q want=%q", allow, http.MethodPost)
+	}
+}
+
+func TestAskRejectsOversizedBody(t *testing.T) {
+	cfg := elevenlabsbridge.DefaultConfig()
+	cfg.MCPURL = "http://127.0.0.1:1/mcp"
+	cfg.MCPToken = "token"
+
+	bridge, err := elevenlabsbridge.New(cfg)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	srv := httptest.NewServer(bridge.Handler())
+	defer srv.Close()
+
+	// 1 MiB max; this body exceeds that limit.
+	oversized := strings.Repeat("a", (1<<20)+64)
+	body := fmt.Sprintf("{\"question\":\"%s\"}", oversized)
+	resp, err := http.Post(srv.URL+"/ask", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post ask: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusRequestEntityTooLarge, raw)
 	}
 }
