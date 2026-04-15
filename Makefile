@@ -1,6 +1,6 @@
 # Build binaries. Requires Go 1.24+.
 .PHONY: build build-dir2mcp build-elevenlabs-bridge
-build: build-dir2mcp build-elevenlabs-bridge
+build: build-dir2mcp
 
 DIR2MCP_VERSION ?= 0.0.0-dev
 DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
@@ -36,6 +36,7 @@ help:
 	@echo "  test   - run go test"
 	@echo "  check  - fmt + vet + lint + cyclo + test + build"
 	@echo "  ci     - vet + cyclo + test (CI-safe default)"
+	@echo "  build-elevenlabs-bridge - build the ElevenLabs webhook bridge binary"
 	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
 	@echo "  inspector-smoke  - build and run MCP inspector headless smoke test"

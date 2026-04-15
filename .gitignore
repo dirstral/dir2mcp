@@ -16,6 +16,7 @@ bin/
 dist/
 /dir2mcp
 /dirstral
+/elevenlabs-bridge
 .gocache/
 .gomodcache/
 .golangci-lint-cache/

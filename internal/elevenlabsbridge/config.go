@@ -1,6 +1,8 @@
 package elevenlabsbridge
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +15,13 @@ const (
 	DefaultPort         = 8088
 	DefaultStateDirName = ".dir2mcp"
 	secretTokenName     = "secret.token"
+	connectionFileName  = "connection.json"
 )
+
+type connectionPayload struct {
+	URL       string `json:"url"`
+	TokenFile string `json:"token_file,omitempty"`
+}
 
 // Config captures the bridge runtime configuration.
 type Config struct {
@@ -39,9 +47,6 @@ func DefaultConfig() Config {
 func LoadConfigFromEnv(env map[string]string) (Config, error) {
 	cfg := DefaultConfig()
 
-	if v := strings.TrimSpace(env["MCP_URL"]); v != "" {
-		cfg.MCPURL = v
-	}
 	if v := strings.TrimSpace(env["MCP_TOKEN"]); v != "" {
 		cfg.MCPToken = v
 	}
@@ -64,6 +69,21 @@ func LoadConfigFromEnv(env map[string]string) (Config, error) {
 	}
 	if cfg.Port == 0 {
 		cfg.Port = DefaultPort
+	}
+
+	if v := strings.TrimSpace(env["MCP_URL"]); v != "" {
+		cfg.MCPURL = v
+		return cfg, nil
+	}
+
+	// Prefer the current dir2mcp connection metadata when available, then
+	// fall back to the static default URL.
+	conn, err := readConnectionPayload(cfg.StateDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Config{}, err
+	}
+	if strings.TrimSpace(conn.URL) != "" {
+		cfg.MCPURL = strings.TrimSpace(conn.URL)
 	}
 
 	return cfg, nil
@@ -90,16 +110,32 @@ func ResolveToken(cfg Config) (token, source, tokenPath string, err error) {
 	if stateDir == "" {
 		stateDir = DefaultStateDirName
 	}
-	tokenPath = filepath.Join(stateDir, secretTokenName)
 
-	content, readErr := os.ReadFile(tokenPath)
-	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			return "", "none", "", nil
-		}
-		return "", "", "", fmt.Errorf("read MCP token file %q: %w", tokenPath, readErr)
+	// If dir2mcp uses --auth file:<path>, connection.json includes token_file.
+	conn, connErr := readConnectionPayload(stateDir)
+	if connErr != nil && !errors.Is(connErr, os.ErrNotExist) {
+		return "", "", "", connErr
+	}
+	if tokenFromConn := strings.TrimSpace(conn.TokenFile); tokenFromConn != "" {
+		return readTokenFromFile(tokenFromConn)
 	}
 
+	tokenPath = filepath.Join(stateDir, secretTokenName)
+	token, source, tokenPath, err = readTokenFromFile(tokenPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "none", "", nil
+		}
+		return "", "", "", err
+	}
+	return token, source, tokenPath, nil
+}
+
+func readTokenFromFile(tokenPath string) (token, source, absPath string, err error) {
+	content, readErr := os.ReadFile(tokenPath)
+	if readErr != nil {
+		return "", "", "", readErr
+	}
 	token = strings.TrimSpace(string(content))
 	if token == "" {
 		return "", "", "", fmt.Errorf("MCP token file %q is empty", tokenPath)
@@ -115,4 +151,17 @@ func ResolveToken(cfg Config) (token, source, tokenPath string, err error) {
 // port. The bridge intentionally binds to loopback by default.
 func (cfg Config) EffectiveListenAddr() string {
 	return fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+}
+
+func readConnectionPayload(stateDir string) (connectionPayload, error) {
+	path := filepath.Join(stateDir, connectionFileName)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return connectionPayload{}, err
+	}
+	var payload connectionPayload
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return connectionPayload{}, fmt.Errorf("parse connection file %q: %w", path, err)
+	}
+	return payload, nil
 }
