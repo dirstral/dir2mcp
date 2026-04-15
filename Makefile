@@ -1,6 +1,6 @@
 # Build binaries. Requires Go 1.24+.
-.PHONY: build build-dir2mcp
-build: build-dir2mcp
+.PHONY: build build-dir2mcp build-elevenlabs-bridge
+build: build-dir2mcp build-elevenlabs-bridge
 
 DIR2MCP_VERSION ?= 0.0.0-dev
 DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
@@ -11,6 +11,9 @@ endif
 
 build-dir2mcp:
 	go build -ldflags "$(DIR2MCP_LDFLAGS)" -o dir2mcp ./cmd/dir2mcp/
+
+build-elevenlabs-bridge:
+	go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/
 
 # Run dir2mcp up (set MISTRAL_API_KEY first)
 .PHONY: up
