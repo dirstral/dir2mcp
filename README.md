@@ -282,7 +282,8 @@ Core server, ingestion pipeline, retrieval, citations, and x402 gating are imple
 ## Development
 
 ```bash
-make check        # fmt + vet + lint + test
+make check        # fmt + vet + lint + cyclo + test + build
+make cyclo        # gocyclo -over 15 ./internal/ (install: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0)
 make build        # build binary
 make benchmark    # run retrieval benchmarks
 ```
@@ -298,6 +299,7 @@ API notes:
   original `Ask` continues to exist as a thin wrapper for compatibility.
 
 `make check` includes `make lint`, which requires [`golangci-lint`](https://golangci-lint.run/welcome/install/) installed locally.
+`make cyclo` runs the cyclomatic-complexity gate used by CI. Go Report Card updates externally after the CI run; if the badge lags, refresh it from the goreportcard.com report page for this repository.
 
 Contributor and agent guides: [AGENTS.md](AGENTS.md) · [CLAUDE.md](CLAUDE.md)
 

@@ -24,6 +24,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install gocyclo
+        run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+
+      - name: Add Go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: Run checks
         run: make ci
 

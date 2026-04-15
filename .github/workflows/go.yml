@@ -22,6 +22,9 @@ jobs:
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
+      - name: Install gocyclo
+        run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
@@ -62,4 +65,3 @@ jobs:
 
       - name: Run inspector smoke test
         run: make inspector-smoke
-
