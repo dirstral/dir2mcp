@@ -157,6 +157,30 @@ func TestLoadConfigFromEnvAndTokenResolution(t *testing.T) {
 			t.Fatalf("tokenPath=%q want=%q", tokenPath, customTokenFile)
 		}
 	})
+
+	t.Run("token_file in connection.json errors when file missing", func(t *testing.T) {
+		tmp := t.TempDir()
+		stateDir := filepath.Join(tmp, ".dir2mcp")
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			t.Fatalf("mkdir state dir: %v", err)
+		}
+
+		nonExistentTokenFile := filepath.Join(tmp, "does-not-exist.token")
+		payload := fmt.Sprintf(`{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp","token_file":%q}`, nonExistentTokenFile)
+		if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
+			t.Fatalf("write connection.json: %v", err)
+		}
+
+		cfg := elevenlabsbridge.DefaultConfig()
+		cfg.StateDir = stateDir
+		_, _, _, err := elevenlabsbridge.ResolveToken(cfg)
+		if err == nil {
+			t.Fatalf("expected error when token_file references non-existent file, got nil")
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("expected IsNotExist error, got %v", err)
+		}
+	})
 }
 
 func TestAskEndpointCallsDir2McpAsk(t *testing.T) {

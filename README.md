@@ -231,7 +231,7 @@ current environment and falls back to sensible defaults:
 | Variable | Required | Description |
 |---|---|---|
 | `MCP_URL` | No | `dir2mcp` MCP endpoint URL. When unset, the bridge first tries `$STATE_DIR/connection.json`, then falls back to `http://127.0.0.1:8087/mcp` |
-| `MCP_TOKEN` | No | Explicit bearer token for `dir2mcp`. When unset, the bridge tries `$STATE_DIR/secret.token` and otherwise connects without auth |
+| `MCP_TOKEN` | No | Explicit bearer token for `dir2mcp`. When set, overrides all other token sources. When unset, the bridge resolves credentials in order: first checks `connection.json.token_file` (inside `$STATE_DIR/connection.json` written by `dir2mcp` when using `--auth file:<path>`), then `$STATE_DIR/secret.token`, and finally falls back to no-auth if none exist |
 | `STATE_DIR` | No | `dir2mcp` state directory used to locate `connection.json` and token files. Default: `.dir2mcp` in the bridge working directory |
 | `PORT` | No | Bridge listen port. Default: `8088` |
 
