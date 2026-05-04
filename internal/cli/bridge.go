@@ -106,7 +106,7 @@ func (a *App) parseBridgeElevenLabsFlags(global globalOptions, defaultCfg eleven
 			portProvided = true
 		}
 	})
-	if portProvided {
+	if portProvided && *port != 0 {
 		cfg.Port = *port
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {
