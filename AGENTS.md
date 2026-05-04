@@ -33,6 +33,7 @@ dir2mcp is a single-binary Go service that indexes local directory content and s
 - Pull latest `main` before starting implementation work.
 - Create an issue branch if one does not already exist (e.g. `issue-<number>-<short-slug>`).
 - Keep commits scoped and atomic; use separate commit messages per logical change.
+- Use Conventional Commits for all commit messages: <https://www.conventionalcommits.org/>.
 - Do not mention yourself in commit messages.
 - Include the issue number in the pull request title.
 - Do not push directly to `main`.
