@@ -220,6 +220,9 @@ func mergeEngineConfigModels(merged *config.Config, override *config.Config) {
 	if override.RAGOversampleFactor > 0 {
 		merged.RAGOversampleFactor = override.RAGOversampleFactor
 	}
+	if override.MistralMaxOCRPayloadBytes > 0 {
+		merged.MistralMaxOCRPayloadBytes = override.MistralMaxOCRPayloadBytes
+	}
 }
 
 // Close releases resources.
