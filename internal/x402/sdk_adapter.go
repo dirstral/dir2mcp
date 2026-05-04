@@ -54,8 +54,12 @@ func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Clien
 		}
 	}
 
+	url := strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(url, "/v2/x402") {
+		url += "/v2/x402"
+	}
 	cfg := &sdkhttp.FacilitatorConfig{
-		URL:        strings.TrimRight(baseURL, "/") + "/v2/x402",
+		URL:        url,
 		HTTPClient: httpClient,
 		Timeout:    defaultHTTPTimeout,
 	}
