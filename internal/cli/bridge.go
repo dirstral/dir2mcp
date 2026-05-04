@@ -60,7 +60,7 @@ func (a *App) runBridgeElevenLabs(ctx context.Context, global globalOptions, arg
 		_, _ = fmt.Fprintf(a.stdout, "MCP token source=%s\n", bridge.TokenSource())
 	}
 
-	if err := elevenlabsbridge.Run(ctx, cfg, listen); err != nil && ctx.Err() == nil {
+	if err := elevenlabsbridge.RunWithBridge(ctx, bridge, listen); err != nil && ctx.Err() == nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, err.Error())
 		return exitGeneric
 	}

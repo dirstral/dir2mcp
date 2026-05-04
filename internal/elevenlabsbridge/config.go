@@ -41,9 +41,10 @@ func DefaultConfig() Config {
 	}
 }
 
-// LoadConfigFromEnv resolves the bridge config from environment variables.
-// Explicit MCP_TOKEN takes precedence; STATE_DIR is used to discover
-// <state-dir>/secret.token when MCP_TOKEN is not set.
+// LoadConfigFromEnv resolves bridge config from environment variables and
+// state metadata. MCP_URL from env takes precedence; when unset, the bridge
+// falls back to <state-dir>/connection.json URL discovery and then defaults.
+// Token resolution precedence is handled by ResolveToken.
 func LoadConfigFromEnv(env map[string]string) (Config, error) {
 	cfg := DefaultConfig()
 
