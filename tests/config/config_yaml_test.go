@@ -56,11 +56,13 @@ func TestLoad_FileThenEnvOverridesYAML(t *testing.T) {
 	path := filepath.Join(tmp, ".dir2mcp.yaml")
 	writeFile(t, path, ""+
 		"mistral_base_url: https://yaml.example\n"+
+		"mistral_max_ocr_payload_bytes: 111\n"+
 		"embed_model_text: yaml-embed\n")
 
-	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_BASE_URL", "https://env.example")
-		t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "env-embed")
+		testutil.WithWorkingDir(t, tmp, func() {
+			t.Setenv("MISTRAL_BASE_URL", "https://env.example")
+			t.Setenv("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", "222")
+			t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "env-embed")
 
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
@@ -69,10 +71,13 @@ func TestLoad_FileThenEnvOverridesYAML(t *testing.T) {
 		if cfg.MistralBaseURL != "https://env.example" {
 			t.Fatalf("MistralBaseURL=%q want=%q", cfg.MistralBaseURL, "https://env.example")
 		}
-		if cfg.EmbedModelText != "env-embed" {
-			t.Fatalf("EmbedModelText=%q want=%q", cfg.EmbedModelText, "env-embed")
-		}
-	})
+			if cfg.EmbedModelText != "env-embed" {
+				t.Fatalf("EmbedModelText=%q want=%q", cfg.EmbedModelText, "env-embed")
+			}
+			if cfg.MistralMaxOCRPayloadBytes != 222 {
+				t.Fatalf("MistralMaxOCRPayloadBytes=%d want=%d", cfg.MistralMaxOCRPayloadBytes, 222)
+			}
+		})
 }
 
 func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
@@ -82,6 +87,7 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	cfg := config.Default()
 	cfg.RootDir = "/tmp/repo"
 	cfg.StateDir = "/tmp/repo/.dir2mcp"
+	cfg.MistralMaxOCRPayloadBytes = 26214400
 	cfg.MistralAPIKey = "super-secret"
 	cfg.ElevenLabsAPIKey = "another-secret"
 	cfg.AllowedOrigins = []string{"http://localhost", "https://example.com"}
@@ -97,6 +103,9 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	text := string(raw)
 	if !strings.Contains(text, "root_dir: /tmp/repo") {
 		t.Fatalf("saved yaml missing root_dir, got:\n%s", text)
+	}
+	if !strings.Contains(text, "mistral_max_ocr_payload_bytes: 26214400") {
+		t.Fatalf("saved yaml missing mistral_max_ocr_payload_bytes, got:\n%s", text)
 	}
 	if strings.Contains(strings.ToLower(text), "mistral_api_key") {
 		t.Fatalf("saved yaml must not include MISTRAL_API_KEY key, got:\n%s", text)

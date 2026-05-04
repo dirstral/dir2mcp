@@ -149,6 +149,7 @@ type upOptions struct {
 	embedModelText string
 	embedModelCode string
 	chatModel      string
+	mistralMaxOCRPayloadBytes int
 }
 
 type optionalBoolFlag struct {
@@ -277,10 +278,13 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 			if err != nil {
 				return nil, err
 			}
-			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-				client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-				svc.SetOCR(client)
-			}
+				if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+					client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+					if cfg.MistralMaxOCRPayloadBytes > 0 {
+						client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
+					}
+					svc.SetOCR(client)
+				}
 			return svc, nil
 		},
 		// default store constructor uses sqlite in the configured state
@@ -527,6 +531,9 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	}
 
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+	if cfg.MistralMaxOCRPayloadBytes > 0 {
+		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
+	}
 	ret := retrieval.NewService(st, textIx, client, client)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
@@ -1019,6 +1026,7 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.embedModelText, "embed-model-text", "", "override embedding model used for text chunks")
 	fs.StringVar(&opts.embedModelCode, "embed-model-code", "", "override embedding model used for code chunks")
 	fs.StringVar(&opts.chatModel, "chat-model", "", "override model used for chat/completions")
+	fs.IntVar(&opts.mistralMaxOCRPayloadBytes, "mistral-max-ocr-payload-bytes", 0, "override max encoded OCR payload size in bytes (0 = config/default)")
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}
@@ -1040,6 +1048,9 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 
 	if fs.NArg() > 0 {
 		return upOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if opts.mistralMaxOCRPayloadBytes < 0 {
+		return upOptions{}, fmt.Errorf("invalid --mistral-max-ocr-payload-bytes: must be >= 0")
 	}
 	return opts, nil
 }

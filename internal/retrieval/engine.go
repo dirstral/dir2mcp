@@ -87,6 +87,9 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 	}
 
 	client := mistral.NewClient(effective.MistralBaseURL, effective.MistralAPIKey)
+	if effective.MistralMaxOCRPayloadBytes > 0 {
+		client.MaxOCRPayloadBytes = effective.MistralMaxOCRPayloadBytes
+	}
 	if strings.TrimSpace(effective.ChatModel) != "" {
 		client.DefaultChatModel = strings.TrimSpace(effective.ChatModel)
 	}

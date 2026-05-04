@@ -1577,6 +1577,9 @@ func (s *Server) newMistralClient() (*mistral.Client, *toolExecutionError) {
 		return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: "MISTRAL_API_KEY is required", Retryable: false}
 	}
 	client := mistral.NewClient(s.cfg.MistralBaseURL, apiKey)
+	if s.cfg.MistralMaxOCRPayloadBytes > 0 {
+		client.MaxOCRPayloadBytes = s.cfg.MistralMaxOCRPayloadBytes
+	}
 	if modelName := strings.TrimSpace(s.cfg.ChatModel); modelName != "" {
 		client.DefaultChatModel = modelName
 	}

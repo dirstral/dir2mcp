@@ -201,6 +201,9 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 // TranscriberFromConfig resolves the configured STT provider instance.
 func newMistralTranscriber(cfg config.Config) model.Transcriber {
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+	if cfg.MistralMaxOCRPayloadBytes > 0 {
+		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
+	}
 	if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
 		client.DefaultTranscribeModel = modelName
 	}
