@@ -72,8 +72,9 @@ type Config struct {
 	ResolvedAuthToken string
 	MistralAPIKey     string
 	MistralBaseURL    string
-	// MistralMaxOCRPayloadBytes optionally overrides the maximum encoded OCR
-	// payload size accepted by the Mistral client. Values <= 0 use client defaults.
+	// MistralMaxOCRPayloadBytes optionally overrides the maximum encoded
+	// payload size accepted by the Mistral client for OCR/image processing
+	// and audio transcription requests. Values <= 0 use client defaults.
 	MistralMaxOCRPayloadBytes int
 	ElevenLabsAPIKey          string
 	ElevenLabsBaseURL         string
