@@ -150,8 +150,8 @@ func TestX402_ModeRequired_MissingConfigReturns503(t *testing.T) {
 func TestX402_ModeRequired_ValidPaymentAccepted(t *testing.T) {
 	t.Parallel()
 	fac := newMockFacilitator()
-	fac.verifyBody = `{"ok":true}`
-	fac.settleBody = `{"ok":true,"txHash":"abc"}`
+	fac.verifyBody = `{"isValid":true}`
+	fac.settleBody = `{"success":true,"transaction":"abc","network":"eip155:8453"}`
 	facSrv := httptest.NewServer(fac)
 	defer facSrv.Close()
 

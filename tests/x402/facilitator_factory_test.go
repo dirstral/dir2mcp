@@ -23,31 +23,13 @@ func validRequirement() x402.Requirement {
 	}
 }
 
-func TestNewFacilitatorClient_DefaultsToLegacy(t *testing.T) {
-	t.Setenv(x402.X402ClientEnvVar, "")
-	client := x402.NewFacilitatorClient("https://facilitator.test", "token", nil)
-	if _, ok := client.(*x402.HTTPClient); !ok {
-		t.Fatalf("expected *x402.HTTPClient, got %T", client)
-	}
-}
-
-func TestNewFacilitatorClient_UnknownFallsBackToLegacy(t *testing.T) {
-	t.Setenv(x402.X402ClientEnvVar, "mystery")
-	client := x402.NewFacilitatorClient("https://facilitator.test", "token", nil)
-	if _, ok := client.(*x402.HTTPClient); !ok {
-		t.Fatalf("expected *x402.HTTPClient fallback, got %T", client)
-	}
-}
-
-func TestNewFacilitatorClient_SDKUsesSDKFacilitatorClient(t *testing.T) {
-	t.Setenv(x402.X402ClientEnvVar, x402.X402ClientSDK)
-
+func TestNewFacilitatorClient_UsesSDKFacilitatorClient(t *testing.T) {
 	var verifyCalls, settleCalls int
 	var verifyAuthorization, settleAuthorization string
 	facServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/verify":
+		case "/v2/x402/verify":
 			verifyCalls++
 			verifyAuthorization = r.Header.Get("Authorization")
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -56,7 +38,7 @@ func TestNewFacilitatorClient_SDKUsesSDKFacilitatorClient(t *testing.T) {
 				"isValid": true,
 				"payer":   "payer-1",
 			})
-		case "/settle":
+		case "/v2/x402/settle":
 			settleCalls++
 			settleAuthorization = r.Header.Get("Authorization")
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -73,10 +55,6 @@ func TestNewFacilitatorClient_SDKUsesSDKFacilitatorClient(t *testing.T) {
 	defer facServer.Close()
 
 	client := x402.NewFacilitatorClient(facServer.URL, "token", nil)
-	if _, ok := client.(*x402.HTTPClient); ok {
-		t.Fatalf("expected sdk-backed client, got legacy %T", client)
-	}
-
 	paymentPayload := `{"x402Version":2,"payload":{"paymentSignature":"sig"}}`
 
 	verifyRaw, err := client.Verify(context.Background(), paymentPayload, validRequirement())

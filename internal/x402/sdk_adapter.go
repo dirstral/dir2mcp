@@ -9,39 +9,19 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
+	"time"
 
 	sdkhttp "github.com/coinbase/x402/go/http"
 )
 
-const (
-	// X402ClientEnvVar selects the facilitator client implementation.
-	// Accepted values are "legacy" (default) and "sdk".
-	X402ClientEnvVar = "X402_CLIENT"
+const defaultHTTPTimeout = 10 * time.Second
 
-	// X402ClientLegacy selects the hand-rolled HTTPClient (default).
-	X402ClientLegacy = "legacy"
-
-	// X402ClientSDK selects the Coinbase x402 SDK-backed facilitator client.
-	X402ClientSDK = "sdk"
-)
-
-// NewFacilitatorClient constructs a FacilitatorClient according to the
-// X402_CLIENT environment variable.
-//
-//   - "legacy" or unset -> HTTPClient (existing hand-rolled client)
-//   - "sdk"             -> SDK-backed facilitator client
-//   - any other value    -> HTTPClient (falls back to legacy with no error)
-//
-// The httpClient argument is forwarded to the selected implementation; pass nil
-// to use the package default timeout.
+// NewFacilitatorClient constructs the Coinbase x402 SDK-backed facilitator
+// client. The httpClient argument is forwarded to the SDK client; pass nil to
+// use the package default timeout.
 func NewFacilitatorClient(baseURL, bearerToken string, httpClient *http.Client) FacilitatorClient {
-	raw := strings.ToLower(strings.TrimSpace(os.Getenv(X402ClientEnvVar)))
-	if raw == X402ClientSDK {
-		return newSDKFacilitatorClient(baseURL, bearerToken, httpClient)
-	}
-	return NewHTTPClient(baseURL, bearerToken, httpClient)
+	return newSDKFacilitatorClient(baseURL, bearerToken, httpClient)
 }
 
 type sdkAdapterClient struct {
@@ -75,7 +55,7 @@ func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Clien
 	}
 
 	cfg := &sdkhttp.FacilitatorConfig{
-		URL:        baseURL,
+		URL:        strings.TrimRight(baseURL, "/") + "/v2/x402",
 		HTTPClient: httpClient,
 		Timeout:    defaultHTTPTimeout,
 	}

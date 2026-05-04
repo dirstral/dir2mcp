@@ -137,12 +137,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	mcpURL := buildMCPURL(mcpAddr, cfg.MCPPath, tlsCertFile != "")
 
-	mcpTransportMode := strings.TrimSpace(os.Getenv("MCP_TRANSPORT"))
-	transport, err := mcp.NewTransport(mcpTransportMode, mcpServer, ln, tlsCertFile, tlsKeyFile)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("transport init: %v", err))
-		return exitConfigInvalid
-	}
+	transport := mcp.NewSDKTransport(mcpServer, ln, tlsCertFile, tlsKeyFile)
 
 	serverErrCh := make(chan error, 1)
 	go func() {

@@ -43,8 +43,8 @@ func newMockFacilitator() *mockFacilitator {
 	return &mockFacilitator{
 		verifyStatus: http.StatusOK,
 		settleStatus: http.StatusOK,
-		verifyBody:   `{"ok":true}`,
-		settleBody:   `{"ok":true}`,
+		verifyBody:   `{"isValid":true}`,
+		settleBody:   `{"success":true,"transaction":"tx-1","network":"eip155:8453"}`,
 	}
 }
 

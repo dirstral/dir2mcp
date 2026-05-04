@@ -30,9 +30,8 @@ type SDKTransport struct {
 	keyFile  string
 }
 
-// NewSDKTransport constructs an SDKTransport.  certFile and keyFile are
-// optional; both must be non-empty to enable TLS, matching the contract of
-// LegacyTransport / Server.RunOnListenerTLS.
+// NewSDKTransport constructs an SDKTransport. certFile and keyFile are
+// optional; both must be non-empty to enable TLS.
 func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile string) *SDKTransport {
 	return &SDKTransport{
 		server:   server,
