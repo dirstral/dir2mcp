@@ -126,14 +126,14 @@ What it verifies:
 Cloudflare quick tunnel (no account-required quick mode):
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:8092 --no-autoupdate
+cloudflared tunnel --url http://127.0.0.1:8087 --no-autoupdate
 ```
 
 ngrok (requires verified account + authtoken):
 
 ```bash
 ngrok config add-authtoken <YOUR_NGROK_TOKEN>
-ngrok http http://127.0.0.1:8092
+ngrok http http://127.0.0.1:8087
 ```
 
 Get ngrok public URL from local API:
@@ -254,7 +254,7 @@ Usage:
 dir2mcp bridge elevenlabs
 
 # Override defaults when needed.
-MCP_URL="http://127.0.0.1:8092/mcp" \
+MCP_URL="http://127.0.0.1:8087/mcp" \
 STATE_DIR="/path/to/corpus/.dir2mcp" \
 PORT=8088 \
 dir2mcp bridge elevenlabs

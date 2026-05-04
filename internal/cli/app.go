@@ -146,9 +146,9 @@ type upOptions struct {
 	tlsKey                        string
 	allowedOrigins                string
 	// overrideable models, set via flags or env/config
-	embedModelText string
-	embedModelCode string
-	chatModel      string
+	embedModelText            string
+	embedModelCode            string
+	chatModel                 string
 	mistralMaxOCRPayloadBytes int
 }
 
@@ -278,13 +278,13 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 			if err != nil {
 				return nil, err
 			}
-				if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-					client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-					if cfg.MistralMaxOCRPayloadBytes > 0 {
-						client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
-					}
-					svc.SetOCR(client)
+			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+				client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+				if cfg.MistralMaxOCRPayloadBytes > 0 {
+					client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
 				}
+				svc.SetOCR(client)
+			}
 			return svc, nil
 		},
 		// default store constructor uses sqlite in the configured state

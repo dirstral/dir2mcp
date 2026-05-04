@@ -59,10 +59,10 @@ func TestLoad_FileThenEnvOverridesYAML(t *testing.T) {
 		"mistral_max_ocr_payload_bytes: 111\n"+
 		"embed_model_text: yaml-embed\n")
 
-		testutil.WithWorkingDir(t, tmp, func() {
-			t.Setenv("MISTRAL_BASE_URL", "https://env.example")
-			t.Setenv("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", "222")
-			t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "env-embed")
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("MISTRAL_BASE_URL", "https://env.example")
+		t.Setenv("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", "222")
+		t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "env-embed")
 
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
@@ -71,13 +71,13 @@ func TestLoad_FileThenEnvOverridesYAML(t *testing.T) {
 		if cfg.MistralBaseURL != "https://env.example" {
 			t.Fatalf("MistralBaseURL=%q want=%q", cfg.MistralBaseURL, "https://env.example")
 		}
-			if cfg.EmbedModelText != "env-embed" {
-				t.Fatalf("EmbedModelText=%q want=%q", cfg.EmbedModelText, "env-embed")
-			}
-			if cfg.MistralMaxOCRPayloadBytes != 222 {
-				t.Fatalf("MistralMaxOCRPayloadBytes=%d want=%d", cfg.MistralMaxOCRPayloadBytes, 222)
-			}
-		})
+		if cfg.EmbedModelText != "env-embed" {
+			t.Fatalf("EmbedModelText=%q want=%q", cfg.EmbedModelText, "env-embed")
+		}
+		if cfg.MistralMaxOCRPayloadBytes != 222 {
+			t.Fatalf("MistralMaxOCRPayloadBytes=%d want=%d", cfg.MistralMaxOCRPayloadBytes, 222)
+		}
+	})
 }
 
 func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
