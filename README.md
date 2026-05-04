@@ -126,14 +126,14 @@ What it verifies:
 Cloudflare quick tunnel (no account-required quick mode):
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:8092 --no-autoupdate
+cloudflared tunnel --url http://127.0.0.1:8087 --no-autoupdate
 ```
 
 ngrok (requires verified account + authtoken):
 
 ```bash
 ngrok config add-authtoken <YOUR_NGROK_TOKEN>
-ngrok http http://127.0.0.1:8092
+ngrok http http://127.0.0.1:8087
 ```
 
 Get ngrok public URL from local API:
@@ -200,6 +200,7 @@ vary by deployment. The commonly used variables are:
 |---|---|---|
 | `MISTRAL_API_KEY` | Yes | Primary API key used across embeddings, OCR, default STT, and generation |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
+| `DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES` | No | Max encoded Mistral upload payload size in bytes for OCR and transcription requests (default: `20971520`); increase for large PDFs or audio files |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
 | `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` | No | Session inactivity timeout (default: `24h`) |
 | `DIR2MCP_SESSION_TIMEOUT` | No | Deprecated alias for `DIR2MCP_SESSION_INACTIVITY_TIMEOUT`; still supported but deprecated |
@@ -209,6 +210,18 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_X402_FACILITATOR_TOKEN` | No | x402 facilitator bearer token |
 | `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
 | `ELEVENLABS_BASE_URL` | No | ElevenLabs base URL (default: `https://api.elevenlabs.io`) |
+
+For Homebrew and other installed workflows, you can persist this in `.dir2mcp.yaml`:
+
+```yaml
+mistral_max_ocr_payload_bytes: 26214400
+```
+
+Or override for a single run:
+
+```bash
+dir2mcp up --mistral-max-ocr-payload-bytes 26214400
+```
 
 ### Auth token behavior
 
@@ -241,7 +254,7 @@ Usage:
 dir2mcp bridge elevenlabs
 
 # Override defaults when needed.
-MCP_URL="http://127.0.0.1:8092/mcp" \
+MCP_URL="http://127.0.0.1:8087/mcp" \
 STATE_DIR="/path/to/corpus/.dir2mcp" \
 PORT=8088 \
 dir2mcp bridge elevenlabs

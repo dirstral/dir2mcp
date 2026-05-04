@@ -70,6 +70,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() { _ = codeIx.Close() }()
 
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+	if cfg.MistralMaxOCRPayloadBytes > 0 {
+		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
+	}
 	if strings.TrimSpace(cfg.ChatModel) != "" {
 		client.DefaultChatModel = strings.TrimSpace(cfg.ChatModel)
 	}
@@ -251,6 +254,9 @@ func applyScalarOverrides(cfg *config.Config, opts upOptions) {
 	}
 	if strings.TrimSpace(opts.chatModel) != "" {
 		cfg.ChatModel = strings.TrimSpace(opts.chatModel)
+	}
+	if opts.mistralMaxOCRPayloadBytes > 0 {
+		cfg.MistralMaxOCRPayloadBytes = opts.mistralMaxOCRPayloadBytes
 	}
 	applyX402Overrides(cfg, opts)
 }

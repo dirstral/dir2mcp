@@ -100,7 +100,13 @@ func (a *App) parseBridgeElevenLabsFlags(global globalOptions, defaultCfg eleven
 	cfg.MCPURL = strings.TrimSpace(*mcpURL)
 	cfg.MCPToken = strings.TrimSpace(*mcpToken)
 	cfg.StateDir = strings.TrimSpace(*stateDir)
-	if *port > 0 {
+	portProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "port" {
+			portProvided = true
+		}
+	})
+	if portProvided && *port != 0 {
 		cfg.Port = *port
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {

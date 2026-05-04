@@ -69,12 +69,16 @@ type Config struct {
 	SecretPatterns []string
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
 	// It is not loaded from disk and should not be persisted.
-	ResolvedAuthToken    string
-	MistralAPIKey        string
-	MistralBaseURL       string
-	ElevenLabsAPIKey     string
-	ElevenLabsBaseURL    string
-	ElevenLabsTTSVoiceID string
+	ResolvedAuthToken string
+	MistralAPIKey     string
+	MistralBaseURL    string
+	// MistralMaxOCRPayloadBytes optionally overrides the maximum encoded
+	// payload size accepted by the Mistral client for OCR/image processing
+	// and audio transcription requests. Values <= 0 use client defaults.
+	MistralMaxOCRPayloadBytes int
+	ElevenLabsAPIKey          string
+	ElevenLabsBaseURL         string
+	ElevenLabsTTSVoiceID      string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -138,20 +142,21 @@ type Config struct {
 }
 
 type fileConfig struct {
-	RootDir         *string
-	StateDir        *string
-	ListenAddr      *string
-	MCPPath         *string
-	ProtocolVersion *string
-	Public          *bool
-	AuthMode        *string
-	RateLimitRPS    *int
-	RateLimitBurst  *int
-	TrustedProxies  []string
-	PathExcludes    []string
-	SecretPatterns  []string
-	MistralAPIKey   *string
-	MistralBaseURL  *string
+	RootDir                   *string
+	StateDir                  *string
+	ListenAddr                *string
+	MCPPath                   *string
+	ProtocolVersion           *string
+	Public                    *bool
+	AuthMode                  *string
+	RateLimitRPS              *int
+	RateLimitBurst            *int
+	TrustedProxies            []string
+	PathExcludes              []string
+	SecretPatterns            []string
+	MistralAPIKey             *string
+	MistralBaseURL            *string
+	MistralMaxOCRPayloadBytes *int
 
 	ElevenLabsBaseURL         *string
 	ElevenLabsTTSVoiceID      *string
@@ -201,19 +206,20 @@ type fileConfig struct {
 }
 
 type persistedConfig struct {
-	RootDir         string   `yaml:"root_dir"`
-	StateDir        string   `yaml:"state_dir"`
-	ListenAddr      string   `yaml:"listen_addr"`
-	MCPPath         string   `yaml:"mcp_path"`
-	ProtocolVersion string   `yaml:"protocol_version"`
-	Public          bool     `yaml:"public"`
-	AuthMode        string   `yaml:"auth_mode"`
-	RateLimitRPS    int      `yaml:"rate_limit_rps"`
-	RateLimitBurst  int      `yaml:"rate_limit_burst"`
-	TrustedProxies  []string `yaml:"trusted_proxies"`
-	PathExcludes    []string `yaml:"path_excludes"`
-	SecretPatterns  []string `yaml:"secret_patterns"`
-	MistralBaseURL  string   `yaml:"mistral_base_url"`
+	RootDir                   string   `yaml:"root_dir"`
+	StateDir                  string   `yaml:"state_dir"`
+	ListenAddr                string   `yaml:"listen_addr"`
+	MCPPath                   string   `yaml:"mcp_path"`
+	ProtocolVersion           string   `yaml:"protocol_version"`
+	Public                    bool     `yaml:"public"`
+	AuthMode                  string   `yaml:"auth_mode"`
+	RateLimitRPS              int      `yaml:"rate_limit_rps"`
+	RateLimitBurst            int      `yaml:"rate_limit_burst"`
+	TrustedProxies            []string `yaml:"trusted_proxies"`
+	PathExcludes              []string `yaml:"path_excludes"`
+	SecretPatterns            []string `yaml:"secret_patterns"`
+	MistralBaseURL            string   `yaml:"mistral_base_url"`
+	MistralMaxOCRPayloadBytes int      `yaml:"mistral_max_ocr_payload_bytes"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -382,6 +388,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		PathExcludes:              append([]string(nil), cfg.PathExcludes...),
 		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
 		MistralBaseURL:            cfg.MistralBaseURL,
+		MistralMaxOCRPayloadBytes: cfg.MistralMaxOCRPayloadBytes,
 		SessionInactivityTimeout:  cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:        cfg.SessionMaxLifetime,
 		HealthCheckInterval:       cfg.HealthCheckInterval,
@@ -730,6 +737,9 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MistralBaseURL != nil {
 		cfg.MistralBaseURL = *fc.MistralBaseURL
 	}
+	if fc.MistralMaxOCRPayloadBytes != nil {
+		cfg.MistralMaxOCRPayloadBytes = *fc.MistralMaxOCRPayloadBytes
+	}
 	if fc.MistralAPIKey != nil {
 		cfg.MistralAPIKey = *fc.MistralAPIKey
 	}
@@ -1019,6 +1029,7 @@ var configKeyAliases = map[string]string{
 	"mistral.embed_text_model":             "embed_model_text",
 	"mistral.embed_code_model":             "embed_model_code",
 	"mistral.chat_model":                   "chat_model",
+	"mistral.max_ocr_payload_bytes":        "mistral_max_ocr_payload_bytes",
 	"mistral.api_key":                      "mistral_api_key",
 	"stt.mistral.api_key":                  "mistral_api_key",
 	"secrets.mistral_api_key":              "mistral_api_key",
@@ -1153,6 +1164,8 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.ChunkingOverlapTokens
 	case "ingest.max_file_mb":
 		target = &cfg.IngestMaxFileMB
+	case "mistral_max_ocr_payload_bytes":
+		target = &cfg.MistralMaxOCRPayloadBytes
 	default:
 		return nil
 	}
@@ -1361,6 +1374,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("path_excludes", cfg.PathExcludes)
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("mistral_base_url", cfg.MistralBaseURL)
+	writeInt("mistral_max_ocr_payload_bytes", cfg.MistralMaxOCRPayloadBytes)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
@@ -1442,6 +1456,11 @@ func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
 	}
 	if baseURL, ok := envLookup("MISTRAL_BASE_URL", env); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
+	}
+	if raw, ok := envLookup("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", env); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
+			cfg.MistralMaxOCRPayloadBytes = n
+		}
 	}
 	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", env); ok && strings.TrimSpace(m) != "" {
 		cfg.EmbedModelText = strings.TrimSpace(m)

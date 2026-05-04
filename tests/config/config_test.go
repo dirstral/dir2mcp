@@ -51,6 +51,20 @@ func TestLoad_EnvOverridesDotEnv(t *testing.T) {
 	})
 }
 
+func TestLoad_MistralMaxOCRPayloadBytes_FromEnv(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", "26214400")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.MistralMaxOCRPayloadBytes != 26214400 {
+			t.Fatalf("unexpected mistral max ocr payload bytes: %d", cfg.MistralMaxOCRPayloadBytes)
+		}
+	})
+}
+
 func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\nMISTRAL_BASE_URL=https://env-file.local\n")
