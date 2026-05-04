@@ -1026,6 +1026,7 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.embedModelText, "embed-model-text", "", "override embedding model used for text chunks")
 	fs.StringVar(&opts.embedModelCode, "embed-model-code", "", "override embedding model used for code chunks")
 	fs.StringVar(&opts.chatModel, "chat-model", "", "override model used for chat/completions")
+	fs.IntVar(&opts.mistralMaxOCRPayloadBytes, "mistral-max-ocr-payload-bytes", 0, "override max encoded OCR payload size in bytes (0 = config/default)")
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}
