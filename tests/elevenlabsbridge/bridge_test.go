@@ -101,6 +101,86 @@ func TestLoadConfigFromEnvAndTokenResolution(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("MCP_URL auto-discovers from connection.json", func(t *testing.T) {
+		tmp := t.TempDir()
+		stateDir := filepath.Join(tmp, ".dir2mcp")
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			t.Fatalf("mkdir state dir: %v", err)
+		}
+		payload := `{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp"}`
+		if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
+			t.Fatalf("write connection.json: %v", err)
+		}
+
+		cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{
+			"STATE_DIR": stateDir,
+		})
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		if cfg.MCPURL != "http://127.0.0.1:9099/mcp" {
+			t.Fatalf("MCPURL=%q", cfg.MCPURL)
+		}
+	})
+
+	t.Run("token_file in connection.json takes precedence", func(t *testing.T) {
+		tmp := t.TempDir()
+		stateDir := filepath.Join(tmp, ".dir2mcp")
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			t.Fatalf("mkdir state dir: %v", err)
+		}
+
+		customTokenFile := filepath.Join(tmp, "custom.token")
+		if err := os.WriteFile(customTokenFile, []byte("custom-token\n"), 0o600); err != nil {
+			t.Fatalf("write custom token: %v", err)
+		}
+		// Also create secret.token to verify connection token_file wins.
+		if err := os.WriteFile(filepath.Join(stateDir, "secret.token"), []byte("state-token\n"), 0o600); err != nil {
+			t.Fatalf("write secret token: %v", err)
+		}
+		payload := fmt.Sprintf(`{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp","token_file":%q}`, customTokenFile)
+		if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
+			t.Fatalf("write connection.json: %v", err)
+		}
+
+		cfg := elevenlabsbridge.DefaultConfig()
+		cfg.StateDir = stateDir
+		token, source, tokenPath, err := elevenlabsbridge.ResolveToken(cfg)
+		if err != nil {
+			t.Fatalf("resolve token: %v", err)
+		}
+		if token != "custom-token" || source != "file" {
+			t.Fatalf("unexpected token resolution: token=%q source=%q", token, source)
+		}
+		if tokenPath != customTokenFile {
+			t.Fatalf("tokenPath=%q want=%q", tokenPath, customTokenFile)
+		}
+	})
+
+	t.Run("token_file in connection.json errors when file missing", func(t *testing.T) {
+		tmp := t.TempDir()
+		stateDir := filepath.Join(tmp, ".dir2mcp")
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			t.Fatalf("mkdir state dir: %v", err)
+		}
+
+		nonExistentTokenFile := filepath.Join(tmp, "does-not-exist.token")
+		payload := fmt.Sprintf(`{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp","token_file":%q}`, nonExistentTokenFile)
+		if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
+			t.Fatalf("write connection.json: %v", err)
+		}
+
+		cfg := elevenlabsbridge.DefaultConfig()
+		cfg.StateDir = stateDir
+		_, _, _, err := elevenlabsbridge.ResolveToken(cfg)
+		if err == nil {
+			t.Fatalf("expected error when token_file references non-existent file, got nil")
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("expected IsNotExist error, got %v", err)
+		}
+	})
 }
 
 func TestAskEndpointCallsDir2McpAsk(t *testing.T) {

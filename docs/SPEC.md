@@ -42,7 +42,7 @@ When `x402` mode is enabled, implementations SHOULD align with these references:
 - Network and facilitator support (CAIP-2 identifiers): <https://docs.cdp.coinbase.com/x402/network-support>
 - Bazaar discovery extension model: <https://docs.cdp.coinbase.com/x402/bazaar>
 
-### 0.2 Implementation status notes (March 2026)
+### 0.2 Implementation status notes (April 2026)
 
 Status tags used in this spec:
 
@@ -55,8 +55,8 @@ Current high-level status:
 
 - CLI + MCP server lifecycle, indexing pipeline, and core tool surface: **Implemented**
 - Multimodal ingestion (OCR/transcription/annotation) and retrieval workflows: **Implemented** (with ongoing quality/perf hardening)
-- Retrieval `Stats()` service contract: **Planned** (see issue #71)
-- Advanced retrieval answer quality/completion work: **In progress** (see issue #70)
+- Retrieval `Stats()` service contract: **Implemented** (issue #71 closed)
+- Retrieval answer generation path (`Engine.Ask()` / `AskWithContext`): **Implemented** (issue #70 closed)
 - Native x402 tools/call gating path: **Implemented** (optional and facilitator-backed)
 - Hosted smoke/runbook guidance: **Implemented** (see issue #19)
 - Release-completion checklist hardening: **In progress** (see issue #12)

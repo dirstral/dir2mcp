@@ -62,6 +62,7 @@ var commands = map[string]struct{}{
 	"status":  {},
 	"ask":     {},
 	"reindex": {},
+	"bridge":  {},
 	"config":  {},
 	"version": {},
 }
@@ -362,6 +363,10 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		return exitSuccess
 	}
 
+	return a.runCommand(ctx, globalOpts, remaining, jsonRequested)
+}
+
+func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remaining []string, jsonRequested bool) int {
 	switch remaining[0] {
 	case "up":
 		upOpts, parseErr := parseUpOptions(globalOpts, remaining[1:])
@@ -378,6 +383,8 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		return a.runReindex(ctx, globalOpts, remaining[1:])
 	case "config":
 		return a.runConfig(ctx, globalOpts, remaining[1:])
+	case "bridge":
+		return a.runBridge(ctx, globalOpts, remaining[1:])
 	case "version":
 		if !globalOpts.quiet {
 			writeln(a.stdout, "dir2mcp v"+strings.TrimPrefix(buildinfo.Version, "v"))
@@ -410,6 +417,7 @@ func (a *App) printUsage() {
 		{"status", "show server health and corpus stats"},
 		{"ask", "query the knowledge base from the CLI"},
 		{"reindex", "force a full re-index of all documents"},
+		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
 		{"version", "print build version"},
 	}

@@ -260,6 +260,12 @@ func Run(ctx context.Context, cfg Config, listenAddr string) error {
 	if err != nil {
 		return err
 	}
+	return RunWithBridge(ctx, b, listenAddr)
+}
+
+// RunWithBridge starts the bridge HTTP server with a pre-constructed bridge and
+// blocks until the context is canceled or the server fails to start.
+func RunWithBridge(ctx context.Context, b *bridge, listenAddr string) error {
 	server := &http.Server{
 		Addr:              strings.TrimSpace(listenAddr),
 		Handler:           b.Handler(),

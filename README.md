@@ -230,22 +230,25 @@ current environment and falls back to sensible defaults:
 
 | Variable | Required | Description |
 |---|---|---|
-| `MCP_URL` | No | `dir2mcp` MCP endpoint URL. Default: `http://127.0.0.1:8087/mcp` |
-| `MCP_TOKEN` | No | Explicit bearer token for `dir2mcp`. When unset, the bridge tries `$STATE_DIR/secret.token` and otherwise connects without auth |
-| `STATE_DIR` | No | `dir2mcp` state directory used to locate `secret.token` when `MCP_TOKEN` is unset. Default: `.dir2mcp` in the bridge working directory |
+| `MCP_URL` | No | `dir2mcp` MCP endpoint URL. When unset, the bridge first tries `$STATE_DIR/connection.json`, then falls back to `http://127.0.0.1:8087/mcp` |
+| `MCP_TOKEN` | No | Explicit bearer token for `dir2mcp`. When set, overrides all other token sources. When unset, the bridge resolves credentials in order: first checks `connection.json.token_file` (inside `$STATE_DIR/connection.json` written by `dir2mcp` when using `--auth file:<path>`), then `$STATE_DIR/secret.token`, and finally falls back to no-auth if none exist |
+| `STATE_DIR` | No | `dir2mcp` state directory used to locate `connection.json` and token files. Default: `.dir2mcp` in the bridge working directory |
 | `PORT` | No | Bridge listen port. Default: `8088` |
 
 Usage:
 
 ```bash
-go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/
+dir2mcp bridge elevenlabs
 
-# If the bridge runs in the same corpus checkout as dir2mcp, the default
-# STATE_DIR (.dir2mcp relative to the current working directory) usually works.
-MCP_URL="http://127.0.0.1:8087/mcp" \
+# Override defaults when needed.
+MCP_URL="http://127.0.0.1:8092/mcp" \
 STATE_DIR="/path/to/corpus/.dir2mcp" \
 PORT=8088 \
-./elevenlabs-bridge
+dir2mcp bridge elevenlabs
+
+# Legacy wrapper binary still works and forwards to the same integrated command.
+make build-elevenlabs-bridge
+./elevenlabs-bridge --state-dir /path/to/corpus/.dir2mcp
 ```
 
 If your `dir2mcp` server already uses `--auth none`, you can omit `MCP_TOKEN`
@@ -315,7 +318,8 @@ Core server, ingestion pipeline, retrieval, citations, and x402 gating are imple
 ```bash
 make check        # fmt + vet + lint + cyclo + test + build
 make cyclo        # gocyclo -over 15 ./internal/ (install: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0)
-make build        # build binary
+make build        # build dir2mcp binary
+make build-elevenlabs-bridge  # build ElevenLabs bridge wrapper binary
 make benchmark    # run retrieval benchmarks
 ```
 

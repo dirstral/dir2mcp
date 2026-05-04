@@ -33,6 +33,7 @@ dir2mcp is a single-binary Go service that indexes local directory content and s
 - Pull latest `main` before starting implementation work.
 - Create an issue branch if one does not already exist (e.g. `issue-<number>-<short-slug>`).
 - Keep commits scoped and atomic; use separate commit messages per logical change.
+- Use Conventional Commits for all commit messages: <https://www.conventionalcommits.org/>.
 - Do not mention yourself in commit messages.
 - Include the issue number in the pull request title.
 - Do not push directly to `main`.
@@ -121,5 +122,6 @@ codex mcp add context7 -- npx -y @upstash/context7-mcp
   - `off` = disabled
   - `on` = fail-open on incomplete payment config
   - `required` = strict gating/validation
-- `internal/retrieval/engine.go` `Ask()` is a stub — tracked in #70. Use `retrieval.Service` for retrieval work.
-- `retrieval.Service.Stats()` returns `ErrNotImplemented` — tracked in #71.
+- Retrieval status:
+  - `internal/retrieval/engine.go` `Ask()` is implemented (issue #70 closed).
+  - `retrieval.Service.Stats()` is implemented (issue #71 closed).
