@@ -68,6 +68,10 @@ Pick the row that matches how you run `dir2mcp`:
 | Public MCP via ngrok | Local MCP requirements + `ngrok` installed + verified ngrok account + authtoken |
 | x402-gated MCP | Public MCP requirements + facilitator URL + facilitator token + full x402 route policy fields |
 
+## Rollout Drafts
+
+- Issue #146 rollout draft (install tracks + planned provider modes): [docs/rollout-146-provider-modes.md](docs/rollout-146-provider-modes.md)
+
 ## Quickstart
 
 **Build prerequisites (source build only):** Go 1.22+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
