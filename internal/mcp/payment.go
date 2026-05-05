@@ -311,9 +311,14 @@ func (s *Server) getPaymentExecutionOutcome(key string) (paymentExecutionOutcome
 		return paymentExecutionOutcome{}, false
 	}
 	s.paymentMu.Lock()
-	defer s.paymentMu.Unlock()
-	s.prunePaymentOutcomesLocked(time.Now().UTC())
+	keysToDelete := s.prunePaymentOutcomesLocked(time.Now().UTC())
 	outcome, ok := s.paymentOutcomes[key]
+	s.paymentMu.Unlock()
+
+	// Perform store deletions outside the mutex
+	for _, k := range keysToDelete {
+		s.deletePersistedPaymentOutcome(k)
+	}
 	return outcome, ok
 }
 
@@ -322,20 +327,30 @@ func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecution
 		return
 	}
 	s.paymentMu.Lock()
-	defer s.paymentMu.Unlock()
 	now := time.Now().UTC()
-	s.prunePaymentOutcomesLocked(now)
+	keysToDelete := s.prunePaymentOutcomesLocked(now)
 
 	// compare-and-swap: only write if there is no existing outcome.  Any
 	// stored outcome has a non-zero UpdatedAt, so we only need to check for
 	// existence rather than inspect the timestamp.
 	if _, ok := s.paymentOutcomes[key]; ok {
 		// already completed by another goroutine; skip overwrite.
+		s.paymentMu.Unlock()
+		// Perform store deletions outside the mutex
+		for _, k := range keysToDelete {
+			s.deletePersistedPaymentOutcome(k)
+		}
 		return
 	}
 
 	s.paymentOutcomes[key] = outcome
+	s.paymentMu.Unlock()
+
+	// Perform store operations outside the mutex
 	s.persistPaymentOutcome(key, outcome)
+	for _, k := range keysToDelete {
+		s.deletePersistedPaymentOutcome(k)
+	}
 }
 
 func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) (paymentExecutionOutcome, bool) {

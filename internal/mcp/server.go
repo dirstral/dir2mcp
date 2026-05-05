@@ -694,23 +694,34 @@ func (s *Server) restorePaymentOutcomes(ctx context.Context) {
 		return
 	}
 	s.paymentMu.Lock()
+	var keysToDelete []string
 	for _, rec := range records {
 		outcome, ok := paymentOutcomeFromRecord(rec)
 		if !ok {
-			_ = store.DeleteMCPPaymentOutcome(ctx, rec.ExecutionKey)
+			keysToDelete = append(keysToDelete, rec.ExecutionKey)
 			continue
 		}
 		s.paymentOutcomes[rec.ExecutionKey] = outcome
 	}
-	s.prunePaymentOutcomesLocked(time.Now().UTC())
+	prunedKeys := s.prunePaymentOutcomesLocked(time.Now().UTC())
+	keysToDelete = append(keysToDelete, prunedKeys...)
 	kept := make(map[string]struct{}, len(s.paymentOutcomes))
 	for key := range s.paymentOutcomes {
 		kept[key] = struct{}{}
 	}
 	s.paymentMu.Unlock()
+
+	// Perform store deletions outside the mutex
+	for _, key := range keysToDelete {
+		if err := store.DeleteMCPPaymentOutcome(ctx, key); err != nil {
+			log.Printf("warning: failed deleting invalid payment outcome %s: %v", key, err)
+		}
+	}
 	for _, rec := range records {
 		if _, ok := kept[rec.ExecutionKey]; !ok {
-			_ = store.DeleteMCPPaymentOutcome(ctx, rec.ExecutionKey)
+			if err := store.DeleteMCPPaymentOutcome(ctx, rec.ExecutionKey); err != nil {
+				log.Printf("warning: failed deleting pruned payment outcome %s: %v", rec.ExecutionKey, err)
+			}
 		}
 	}
 }
@@ -751,11 +762,18 @@ func (s *Server) runPaymentOutcomeCleanup(ctx context.Context) {
 
 func (s *Server) cleanupPaymentOutcomes(now time.Time) {
 	s.paymentMu.Lock()
-	defer s.paymentMu.Unlock()
-	s.prunePaymentOutcomesLocked(now)
+	keysToDelete := s.prunePaymentOutcomesLocked(now)
+	s.paymentMu.Unlock()
+
+	// Perform store deletions outside the mutex
+	for _, key := range keysToDelete {
+		s.deletePersistedPaymentOutcome(key)
+	}
 }
 
-func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
+func (s *Server) prunePaymentOutcomesLocked(now time.Time) []string {
+	var keysToDelete []string
+
 	ttl := s.paymentTTL
 	if ttl <= 0 {
 		ttl = paymentOutcomeTTL
@@ -765,7 +783,7 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 	for key, outcome := range s.paymentOutcomes {
 		if outcome.UpdatedAt.IsZero() || outcome.UpdatedAt.Before(cutoff) {
 			delete(s.paymentOutcomes, key)
-			s.deletePersistedPaymentOutcome(key)
+			keysToDelete = append(keysToDelete, key)
 		}
 	}
 
@@ -774,7 +792,7 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 		maxItems = paymentOutcomeMaxEntries
 	}
 	if len(s.paymentOutcomes) <= maxItems {
-		return
+		return keysToDelete
 	}
 
 	type entry struct {
@@ -797,8 +815,9 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 	toDrop := len(entries) - maxItems
 	for i := 0; i < toDrop; i++ {
 		delete(s.paymentOutcomes, entries[i].key)
-		s.deletePersistedPaymentOutcome(entries[i].key)
+		keysToDelete = append(keysToDelete, entries[i].key)
 	}
+	return keysToDelete
 }
 
 func generateSessionID() (string, error) {
