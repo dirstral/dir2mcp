@@ -163,7 +163,7 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `version` | Print version |
 
 Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.
-`search`, `open-file`, and `list-files` are also available as legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
+`ask`, `search`, `open-file`, and `list-files` are legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
 
 ## MCP Tools
 
