@@ -32,9 +32,10 @@ type SQLiteStore struct {
 }
 
 type MCPSessionRecord struct {
-	ID       string
-	Created  time.Time
-	LastSeen time.Time
+	ID        string
+	Created   time.Time
+	LastSeen  time.Time
+	AuthScope string
 }
 
 type MCPPaymentOutcomeRecord struct {
@@ -307,7 +308,8 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS mcp_sessions (
   session_id TEXT PRIMARY KEY,
   created_unix INTEGER NOT NULL,
-  last_seen_unix INTEGER NOT NULL
+  last_seen_unix INTEGER NOT NULL,
+  auth_scope TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS mcp_payment_outcomes (
@@ -337,6 +339,10 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE documents ADD COLUMN source_type TEXT NOT NULL DEFAULT 'filesystem'`); err != nil && !isDuplicateColumnError(err) {
+		_ = db.Close()
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE mcp_sessions ADD COLUMN auth_scope TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnError(err) {
 		_ = db.Close()
 		return err
 	}
@@ -1092,7 +1098,7 @@ func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason st
 	return s.markEmbeddingStatus(ctx, labels, "error", reason)
 }
 
-func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time) error {
+func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time, authScope string) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return errors.New("session_id is required")
@@ -1103,6 +1109,7 @@ func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, cr
 	if lastSeen.IsZero() {
 		lastSeen = created
 	}
+	authScope = strings.TrimSpace(authScope)
 
 	db, err := s.ensureDB(ctx)
 	if err != nil {
@@ -1112,14 +1119,15 @@ func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, cr
 
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO mcp_sessions(session_id, created_unix, last_seen_unix)
-		 VALUES(?, ?, ?)
+		`INSERT INTO mcp_sessions(session_id, created_unix, last_seen_unix, auth_scope)
+		 VALUES(?, ?, ?, ?)
 		 ON CONFLICT(session_id) DO UPDATE SET
-		   created_unix=excluded.created_unix,
-		   last_seen_unix=excluded.last_seen_unix`,
+		   last_seen_unix=excluded.last_seen_unix,
+		   auth_scope=excluded.auth_scope`,
 		sessionID,
 		created.UTC().Unix(),
 		lastSeen.UTC().Unix(),
+		authScope,
 	)
 	return err
 }
@@ -1149,7 +1157,7 @@ func (s *SQLiteStore) ListMCPSessions(ctx context.Context) ([]MCPSessionRecord, 
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT session_id, created_unix, last_seen_unix
+		`SELECT session_id, created_unix, last_seen_unix, COALESCE(auth_scope, '')
 		 FROM mcp_sessions
 		 ORDER BY last_seen_unix DESC, created_unix DESC, session_id ASC`,
 	)
@@ -1164,7 +1172,7 @@ func (s *SQLiteStore) ListMCPSessions(ctx context.Context) ([]MCPSessionRecord, 
 			rec                   MCPSessionRecord
 			createdUnix, lastUnix int64
 		)
-		if err := rows.Scan(&rec.ID, &createdUnix, &lastUnix); err != nil {
+		if err := rows.Scan(&rec.ID, &createdUnix, &lastUnix, &rec.AuthScope); err != nil {
 			return nil, err
 		}
 		rec.Created = time.Unix(createdUnix, 0).UTC()

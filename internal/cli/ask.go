@@ -22,7 +22,12 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	if remoteErr == nil {
 		return a.runAskRemote(ctx, global, opts, remoteClient)
 	}
-	if remoteErr != nil && !errors.Is(remoteErr, os.ErrNotExist) {
+	// Only fall back to local if the connection.json file specifically is missing
+	if remoteErr != nil {
+		var pathErr *os.PathError
+		if errors.As(remoteErr, &pathErr) && errors.Is(pathErr.Err, os.ErrNotExist) && filepath.Base(pathErr.Path) == connectionFileName {
+			return a.runAskLocal(ctx, global, opts)
+		}
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("resolve server connection: %v", remoteErr))
 		return exitGeneric
 	}

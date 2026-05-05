@@ -794,7 +794,7 @@ func TestSQLiteStore_MCPSessionPersistenceRoundTrip(t *testing.T) {
 
 	created := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
 	lastSeen := created.Add(30 * time.Second)
-	if err := st.UpsertMCPSession(ctx, "sess_1", created, lastSeen); err != nil {
+	if err := st.UpsertMCPSession(ctx, "sess_1", created, lastSeen, "test-scope"); err != nil {
 		t.Fatalf("UpsertMCPSession failed: %v", err)
 	}
 

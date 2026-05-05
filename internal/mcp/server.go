@@ -63,7 +63,7 @@ type sessionInfo struct {
 }
 
 type sessionPersistenceStore interface {
-	UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time) error
+	UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time, authScope string) error
 	DeleteMCPSession(ctx context.Context, sessionID string) error
 	ListMCPSessions(ctx context.Context) ([]storepkg.MCPSessionRecord, error)
 }
@@ -701,7 +701,7 @@ func (s *Server) persistSession(id string, si sessionInfo) {
 	if !ok || store == nil {
 		return
 	}
-	if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC()); err != nil {
+	if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC(), ""); err != nil {
 		log.Printf("warning: failed persisting session %s: %v", maskSessionID(id), err)
 	}
 }

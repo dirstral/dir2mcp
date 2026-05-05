@@ -286,7 +286,12 @@ func resolveRemoteConnection(global globalOptions) (remoteConnection, error) {
 
 func authHeaderFromConnection(conn remoteConnection) (string, error) {
 	auth := strings.TrimSpace(conn.Headers["Authorization"])
-	if auth != "" && !strings.Contains(auth, "<") {
+	// Clear placeholder Authorization headers (containing template markers like "<")
+	if auth == "" || strings.Contains(auth, "<") {
+		delete(conn.Headers, "Authorization")
+		auth = ""
+	}
+	if auth != "" {
 		return auth, nil
 	}
 	if conn.TokenFile == "" {
@@ -429,13 +434,15 @@ func (a *App) runAskRemote(ctx context.Context, global globalOptions, opts askOp
 }
 
 type openFileOptions struct {
-	relPath   string
-	startLine int
-	endLine   int
-	page      int
-	startMS   int
-	endMS     int
-	maxChars  int
+	relPath     string
+	startLine   int
+	endLine     int
+	page        int
+	startMS     int
+	endMS       int
+	maxChars    int
+	startMSSet  bool
+	endMSSet    bool
 }
 
 func parseOpenFileOptions(args []string) (openFileOptions, error) {
@@ -451,6 +458,15 @@ func parseOpenFileOptions(args []string) (openFileOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return openFileOptions{}, err
 	}
+	// Track which flags were explicitly set
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "start-ms" {
+			opts.startMSSet = true
+		}
+		if f.Name == "end-ms" {
+			opts.endMSSet = true
+		}
+	})
 	if fs.NArg() != 1 {
 		return openFileOptions{}, errors.New("open-file command requires exactly one <rel-path> argument")
 	}
@@ -487,10 +503,10 @@ func (a *App) runOpenFileRemote(ctx context.Context, global globalOptions, args 
 	if opts.page > 0 {
 		toolArgs["page"] = opts.page
 	}
-	if opts.startMS > 0 {
+	if opts.startMSSet {
 		toolArgs["start_ms"] = opts.startMS
 	}
-	if opts.endMS > 0 {
+	if opts.endMSSet {
 		toolArgs["end_ms"] = opts.endMS
 	}
 
