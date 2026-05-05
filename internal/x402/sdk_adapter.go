@@ -54,12 +54,10 @@ func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Clien
 		}
 	}
 
-<<<<<<< HEAD
 	sdkURL, ok := normalizeSDKFacilitatorURL(baseURL)
 	if !ok {
 		return &sdkAdapterClient{baseURL: ""}
 	}
-
 	cfg := &sdkhttp.FacilitatorConfig{
 		URL:        sdkURL,
 		HTTPClient: httpClient,
