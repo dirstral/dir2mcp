@@ -153,13 +153,14 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 |---|---|
 | `up` | Start the MCP server and begin indexing |
 | `status` | Show corpus and indexing state |
-| `ask "<question>"` | Run a local RAG query |
+| `ask "<question>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `reindex` | Force full re-ingestion |
 | `config init` | Create a baseline `.dir2mcp.yaml` |
 | `config print` | Print effective config |
 | `version` | Print version |
 
 Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.
+`search`, `open-file`, and `list-files` are also available as legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
 
 ## MCP Tools
 
@@ -331,6 +332,16 @@ Pre-split audit summary:
   - `docs/SPEC.md` -> `dirstral-spec/docs/SPEC.md`
   - `docs/ECOSYSTEM.md` -> `dirstral-spec/docs/ECOSYSTEM.md`
   - `docs/x402-payment-adapter-spec.md` -> `dirstral-spec/docs/x402-payment-adapter-spec.md`
+
+CLI ownership/disposition matrix:
+
+| Path group | Ownership | Disposition |
+|---|---|---|
+| `internal/cli/up.go`, `internal/cli/reindex.go`, `internal/cli/status.go` | `dir2mcp` | keep |
+| `internal/cli/config_cmd.go`, `internal/cli/bridge.go` | `dir2mcp` | keep |
+| `internal/cli/ask.go`, `internal/cli/remote_commands.go` | `dirstral-cli` UX concern | keep as protocol-facing compatibility shims (legacy) |
+| `tests/cli/*` for server/bootstrap commands | `dir2mcp` | keep |
+| `tests/cli/*` for legacy remote/client-style commands | transition coverage | keep until full extraction is complete |
 
 ## Documentation
 
