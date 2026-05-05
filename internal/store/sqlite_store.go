@@ -1137,7 +1137,7 @@ func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, cr
 		`INSERT INTO mcp_sessions(session_id, created_unix, last_seen_unix, auth_scope)
 		 VALUES(?, ?, ?, ?)
 		 ON CONFLICT(session_id) DO UPDATE SET
-		   last_seen_unix=excluded.last_seen_unix,
+		   last_seen_unix=MAX(mcp_sessions.last_seen_unix, excluded.last_seen_unix),
 		   auth_scope=COALESCE(NULLIF(excluded.auth_scope, ''), mcp_sessions.auth_scope)`,
 		sessionID,
 		created.UTC().Unix(),
