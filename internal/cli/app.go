@@ -403,9 +403,26 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 }
 
 func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
+	if code, handled := a.runLegacyShimCommand(ctx, globalOpts, command, args); handled {
+		return code, true
+	}
+
 	switch command {
 	case "status":
 		return a.runStatus(ctx, globalOpts, args), true
+	case "reindex":
+		return a.runReindex(ctx, globalOpts, args), true
+	case "config":
+		return a.runConfig(ctx, globalOpts, args), true
+	case "bridge":
+		return a.runBridge(ctx, globalOpts, args), true
+	default:
+		return 0, false
+	}
+}
+
+func (a *App) runLegacyShimCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
+	switch command {
 	case "ask":
 		return a.runAsk(ctx, globalOpts, args), true
 	case "search":
@@ -414,12 +431,6 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runOpenFileRemote(ctx, globalOpts, args), true
 	case "list-files":
 		return a.runListFilesRemote(ctx, globalOpts, args), true
-	case "reindex":
-		return a.runReindex(ctx, globalOpts, args), true
-	case "config":
-		return a.runConfig(ctx, globalOpts, args), true
-	case "bridge":
-		return a.runBridge(ctx, globalOpts, args), true
 	default:
 		return 0, false
 	}

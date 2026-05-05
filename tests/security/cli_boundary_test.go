@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -119,6 +120,46 @@ func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 		if !strings.Contains(app, want) {
 			t.Fatalf("usage text must mark %q command as legacy compatibility shim", cmd)
 		}
+	}
+}
+
+func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
+	root := repoRoot(t)
+	cliDir := filepath.Join(root, "internal", "cli")
+	entries, err := os.ReadDir(cliDir)
+	if err != nil {
+		t.Fatalf("read internal/cli: %v", err)
+	}
+
+	allowed := map[string]struct{}{
+		"app.go":                  {},
+		"ask.go":                  {},
+		"bridge.go":               {},
+		"config_cmd.go":           {},
+		"corpus_snapshot_test.go": {},
+		"corpus_writer_test.go":   {},
+		"embed_options_test.go":   {},
+		"reindex.go":              {},
+		"remote_commands.go":      {},
+		"status.go":               {},
+		"style.go":                {},
+		"up.go":                   {},
+		"version.go":              {},
+	}
+
+	var unexpected []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			unexpected = append(unexpected, entry.Name()+"/")
+			continue
+		}
+		if _, ok := allowed[entry.Name()]; !ok {
+			unexpected = append(unexpected, entry.Name())
+		}
+	}
+	if len(unexpected) > 0 {
+		sort.Strings(unexpected)
+		t.Fatalf("unexpected internal/cli files (possible boundary drift): %v", unexpected)
 	}
 }
 
