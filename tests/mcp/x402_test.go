@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/model"
 	"dir2mcp/internal/protocol"
+	"dir2mcp/internal/store"
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
@@ -319,6 +321,62 @@ func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *test
 	}
 	if fac.settleCalls.Load() != 2 {
 		t.Fatalf("settle calls=%d want=2", fac.settleCalls.Load())
+	}
+}
+
+func TestX402ToolsCall_CachedOutcomePersistsAcrossRestart(t *testing.T) {
+	t.Parallel()
+	fac := newFacilitatorStub(t)
+	fac.verifyStatus = http.StatusOK
+	fac.settleStatuses = []int{http.StatusServiceUnavailable, http.StatusOK}
+	fac.settleBodies = []string{
+		`{"message":"settlement unavailable"}`,
+		`{"ok":true,"success":true,"transaction":"abc123","txHash":"abc123","network":"eip155:8453"}`,
+	}
+	facServer := httptest.NewServer(fac)
+	defer facServer.Close()
+
+	cfg := x402EnabledTestConfig("https://resource.example.com")
+	cfg.AuthMode = "none"
+	cfg.X402.FacilitatorURL = facServer.URL
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("Init store failed: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	retriever := &countingSearchRetriever{}
+	server1 := httptest.NewServer(mcp.NewServer(cfg, retriever, mcp.WithStore(st)).Handler())
+	sessionID := initializeSession(t, server1.URL+cfg.MCPPath)
+	body := `{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"foo"}}}`
+
+	first := postRPCWithHeaders(t, server1.URL+cfg.MCPPath, sessionID, body, map[string]string{
+		"PAYMENT-SIGNATURE": "restart-stable-signature",
+	})
+	assertRPCErrorCodeAndRetryable(t, first, http.StatusServiceUnavailable, "PAYMENT_SETTLEMENT_UNAVAILABLE", true)
+	_ = first.Body.Close()
+	if retriever.searchCalls.Load() != 1 {
+		t.Fatalf("search calls after first request=%d want=1", retriever.searchCalls.Load())
+	}
+	server1.Close()
+
+	server2 := httptest.NewServer(mcp.NewServer(cfg, retriever, mcp.WithStore(st)).Handler())
+	defer server2.Close()
+
+	second := postRPCWithHeaders(t, server2.URL+cfg.MCPPath, sessionID, body, map[string]string{
+		"PAYMENT-SIGNATURE": "restart-stable-signature",
+	})
+	defer func() { _ = second.Body.Close() }()
+	if second.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(second.Body)
+		t.Fatalf("status=%d want=%d body=%s", second.StatusCode, http.StatusOK, string(payload))
+	}
+	if strings.TrimSpace(second.Header.Get("PAYMENT-RESPONSE")) == "" {
+		t.Fatal("expected PAYMENT-RESPONSE header after restart retry settlement")
+	}
+	if retriever.searchCalls.Load() != 1 {
+		t.Fatalf("search calls after restart retry=%d want=1 (must replay persisted outcome)", retriever.searchCalls.Load())
 	}
 }
 

@@ -31,6 +31,23 @@ type SQLiteStore struct {
 	cond      *sync.Cond
 }
 
+type MCPSessionRecord struct {
+	ID       string
+	Created  time.Time
+	LastSeen time.Time
+}
+
+type MCPPaymentOutcomeRecord struct {
+	ExecutionKey    string
+	StatusCode      int
+	ResultJSON      string
+	RPCErrorJSON    string
+	RequiresSettle  bool
+	Settled         bool
+	PaymentResponse string
+	UpdatedAt       time.Time
+}
+
 // dbExecutor abstracts the methods needed to run SQL statements in either a
 // *sql.DB or *sql.Tx.  Upserts on representations share the same logic and the
 // two store types can both supply an executor implementing this interface.
@@ -287,6 +304,23 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS mcp_sessions (
+  session_id TEXT PRIMARY KEY,
+  created_unix INTEGER NOT NULL,
+  last_seen_unix INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_payment_outcomes (
+  execution_key TEXT PRIMARY KEY,
+  status_code INTEGER NOT NULL,
+  result_json TEXT NOT NULL DEFAULT '',
+  rpc_error_json TEXT NOT NULL DEFAULT '',
+  requires_settle INTEGER NOT NULL DEFAULT 0,
+  settled INTEGER NOT NULL DEFAULT 0,
+  payment_response TEXT NOT NULL DEFAULT '',
+  updated_unix INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_documents_rel_path ON documents(rel_path);
 CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted);
 CREATE INDEX IF NOT EXISTS idx_representations_doc_id ON representations(doc_id);
@@ -295,6 +329,8 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_statu
 CREATE INDEX IF NOT EXISTS idx_chunks_index_kind ON chunks(index_kind);
 CREATE INDEX IF NOT EXISTS idx_chunks_rel_path_deleted ON chunks(rel_path, deleted);
 CREATE INDEX IF NOT EXISTS idx_spans_chunk_id_span_id ON spans(chunk_id, span_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_sessions_last_seen ON mcp_sessions(last_seen_unix);
+CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outcomes(updated_unix);
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		_ = db.Close()
@@ -1054,6 +1090,183 @@ func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
 
 func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason string) error {
 	return s.markEmbeddingStatus(ctx, labels, "error", reason)
+}
+
+func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return errors.New("session_id is required")
+	}
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	if lastSeen.IsZero() {
+		lastSeen = created
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(
+		ctx,
+		`INSERT INTO mcp_sessions(session_id, created_unix, last_seen_unix)
+		 VALUES(?, ?, ?)
+		 ON CONFLICT(session_id) DO UPDATE SET
+		   created_unix=excluded.created_unix,
+		   last_seen_unix=excluded.last_seen_unix`,
+		sessionID,
+		created.UTC().Unix(),
+		lastSeen.UTC().Unix(),
+	)
+	return err
+}
+
+func (s *SQLiteStore) DeleteMCPSession(ctx context.Context, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(ctx, `DELETE FROM mcp_sessions WHERE session_id = ?`, sessionID)
+	return err
+}
+
+func (s *SQLiteStore) ListMCPSessions(ctx context.Context) ([]MCPSessionRecord, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(ctx, `SELECT session_id, created_unix, last_seen_unix FROM mcp_sessions`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]MCPSessionRecord, 0)
+	for rows.Next() {
+		var (
+			rec                   MCPSessionRecord
+			createdUnix, lastUnix int64
+		)
+		if err := rows.Scan(&rec.ID, &createdUnix, &lastUnix); err != nil {
+			return nil, err
+		}
+		rec.Created = time.Unix(createdUnix, 0).UTC()
+		rec.LastSeen = time.Unix(lastUnix, 0).UTC()
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) UpsertMCPPaymentOutcome(ctx context.Context, rec MCPPaymentOutcomeRecord) error {
+	rec.ExecutionKey = strings.TrimSpace(rec.ExecutionKey)
+	if rec.ExecutionKey == "" {
+		return errors.New("execution_key is required")
+	}
+	if rec.UpdatedAt.IsZero() {
+		rec.UpdatedAt = time.Now().UTC()
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(
+		ctx,
+		`INSERT INTO mcp_payment_outcomes(
+			execution_key, status_code, result_json, rpc_error_json,
+			requires_settle, settled, payment_response, updated_unix
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(execution_key) DO UPDATE SET
+			status_code=excluded.status_code,
+			result_json=excluded.result_json,
+			rpc_error_json=excluded.rpc_error_json,
+			requires_settle=excluded.requires_settle,
+			settled=excluded.settled,
+			payment_response=excluded.payment_response,
+			updated_unix=excluded.updated_unix`,
+		rec.ExecutionKey,
+		rec.StatusCode,
+		strings.TrimSpace(rec.ResultJSON),
+		strings.TrimSpace(rec.RPCErrorJSON),
+		boolToInt(rec.RequiresSettle),
+		boolToInt(rec.Settled),
+		strings.TrimSpace(rec.PaymentResponse),
+		rec.UpdatedAt.UTC().Unix(),
+	)
+	return err
+}
+
+func (s *SQLiteStore) DeleteMCPPaymentOutcome(ctx context.Context, executionKey string) error {
+	executionKey = strings.TrimSpace(executionKey)
+	if executionKey == "" {
+		return nil
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(ctx, `DELETE FROM mcp_payment_outcomes WHERE execution_key = ?`, executionKey)
+	return err
+}
+
+func (s *SQLiteStore) ListMCPPaymentOutcomes(ctx context.Context) ([]MCPPaymentOutcomeRecord, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT execution_key, status_code, result_json, rpc_error_json, requires_settle, settled, payment_response, updated_unix
+		 FROM mcp_payment_outcomes`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]MCPPaymentOutcomeRecord, 0)
+	for rows.Next() {
+		var (
+			rec                     MCPPaymentOutcomeRecord
+			requiresSettle, settled int
+			updatedUnix             int64
+		)
+		if err := rows.Scan(
+			&rec.ExecutionKey,
+			&rec.StatusCode,
+			&rec.ResultJSON,
+			&rec.RPCErrorJSON,
+			&requiresSettle,
+			&settled,
+			&rec.PaymentResponse,
+			&updatedUnix,
+		); err != nil {
+			return nil, err
+		}
+		rec.RequiresSettle = requiresSettle == 1
+		rec.Settled = settled == 1
+		rec.UpdatedAt = time.Unix(updatedUnix, 0).UTC()
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, status, reason string) error {

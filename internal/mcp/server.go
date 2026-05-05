@@ -28,6 +28,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
 	"dir2mcp/internal/protocol"
+	storepkg "dir2mcp/internal/store"
 	"dir2mcp/internal/x402"
 )
 
@@ -59,6 +60,18 @@ const MaxSearchK = 50
 type sessionInfo struct {
 	created  time.Time
 	lastSeen time.Time
+}
+
+type sessionPersistenceStore interface {
+	UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time) error
+	DeleteMCPSession(ctx context.Context, sessionID string) error
+	ListMCPSessions(ctx context.Context) ([]storepkg.MCPSessionRecord, error)
+}
+
+type paymentOutcomePersistenceStore interface {
+	UpsertMCPPaymentOutcome(ctx context.Context, rec storepkg.MCPPaymentOutcomeRecord) error
+	DeleteMCPPaymentOutcome(ctx context.Context, executionKey string) error
+	ListMCPPaymentOutcomes(ctx context.Context) ([]storepkg.MCPPaymentOutcomeRecord, error)
 }
 
 type Server struct {
@@ -209,6 +222,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
 		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
 	}
+	s.restoreRuntimeState(context.Background())
 	s.initPaymentConfig()
 	s.tools = s.buildToolRegistry()
 	return s
@@ -518,11 +532,13 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	}
 	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
+		s.deletePersistedSession(id)
 		log.Printf("session %s expired due to inactivity", maskSessionID(id))
 		return false, "inactivity"
 	}
 	if maxLife > 0 && now.Sub(si.created) > maxLife {
 		delete(s.sessions, id)
+		s.deletePersistedSession(id)
 		log.Printf("session %s expired due to max lifetime", maskSessionID(id))
 		return false, "max-lifetime"
 	}
@@ -530,6 +546,7 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	// update lastSeen
 	si.lastSeen = now
 	s.sessions[id] = si
+	s.persistSession(id, si)
 	return true, ""
 }
 
@@ -538,6 +555,7 @@ func (s *Server) storeSession(id string) {
 	defer s.sessionMu.Unlock()
 	now := time.Now()
 	s.sessions[id] = sessionInfo{created: now, lastSeen: now}
+	s.persistSession(id, s.sessions[id])
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
@@ -605,11 +623,96 @@ func (s *Server) cleanupExpiredSessions(now time.Time) {
 	for id, si := range s.sessions {
 		if now.Sub(si.lastSeen) > inactivity {
 			delete(s.sessions, id)
+			s.deletePersistedSession(id)
 			continue
 		}
 		if maxLife > 0 && now.Sub(si.created) > maxLife {
 			delete(s.sessions, id)
+			s.deletePersistedSession(id)
 		}
+	}
+}
+
+func (s *Server) restoreRuntimeState(ctx context.Context) {
+	s.restoreSessions(ctx)
+	s.restorePaymentOutcomes(ctx)
+}
+
+func (s *Server) restoreSessions(ctx context.Context) {
+	store, ok := s.store.(sessionPersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	records, err := store.ListMCPSessions(ctx)
+	if err != nil {
+		log.Printf("warning: failed loading persisted sessions: %v", err)
+		return
+	}
+	now := time.Now()
+	inactivity, maxLife := s.resolveSessionTimeouts()
+	for _, rec := range records {
+		id := strings.TrimSpace(rec.ID)
+		if id == "" || rec.Created.IsZero() || rec.LastSeen.IsZero() {
+			_ = store.DeleteMCPSession(ctx, id)
+			continue
+		}
+		if now.Sub(rec.LastSeen) > inactivity || (maxLife > 0 && now.Sub(rec.Created) > maxLife) {
+			_ = store.DeleteMCPSession(ctx, id)
+			continue
+		}
+		s.sessions[id] = sessionInfo{created: rec.Created, lastSeen: rec.LastSeen}
+	}
+}
+
+func (s *Server) restorePaymentOutcomes(ctx context.Context) {
+	store, ok := s.store.(paymentOutcomePersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	records, err := store.ListMCPPaymentOutcomes(ctx)
+	if err != nil {
+		log.Printf("warning: failed loading persisted payment outcomes: %v", err)
+		return
+	}
+	s.paymentMu.Lock()
+	for _, rec := range records {
+		outcome, ok := paymentOutcomeFromRecord(rec)
+		if !ok {
+			_ = store.DeleteMCPPaymentOutcome(ctx, rec.ExecutionKey)
+			continue
+		}
+		s.paymentOutcomes[rec.ExecutionKey] = outcome
+	}
+	s.prunePaymentOutcomesLocked(time.Now().UTC())
+	kept := make(map[string]struct{}, len(s.paymentOutcomes))
+	for key := range s.paymentOutcomes {
+		kept[key] = struct{}{}
+	}
+	s.paymentMu.Unlock()
+	for _, rec := range records {
+		if _, ok := kept[rec.ExecutionKey]; !ok {
+			_ = store.DeleteMCPPaymentOutcome(ctx, rec.ExecutionKey)
+		}
+	}
+}
+
+func (s *Server) persistSession(id string, si sessionInfo) {
+	store, ok := s.store.(sessionPersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC()); err != nil {
+		log.Printf("warning: failed persisting session %s: %v", maskSessionID(id), err)
+	}
+}
+
+func (s *Server) deletePersistedSession(id string) {
+	store, ok := s.store.(sessionPersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	if err := store.DeleteMCPSession(context.Background(), id); err != nil {
+		log.Printf("warning: failed deleting persisted session %s: %v", maskSessionID(id), err)
 	}
 }
 
@@ -643,6 +746,7 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 	for key, outcome := range s.paymentOutcomes {
 		if outcome.UpdatedAt.IsZero() || outcome.UpdatedAt.Before(cutoff) {
 			delete(s.paymentOutcomes, key)
+			s.deletePersistedPaymentOutcome(key)
 		}
 	}
 
@@ -674,6 +778,7 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 	toDrop := len(entries) - maxItems
 	for i := 0; i < toDrop; i++ {
 		delete(s.paymentOutcomes, entries[i].key)
+		s.deletePersistedPaymentOutcome(entries[i].key)
 	}
 }
 

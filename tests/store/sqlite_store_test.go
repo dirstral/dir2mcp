@@ -783,3 +783,86 @@ func TestSQLiteStoreConcurrentReadWriteWithWAL(t *testing.T) {
 		t.Fatalf("unexpected final listing size total=%d len=%d", total, len(got))
 	}
 }
+
+func TestSQLiteStore_MCPSessionPersistenceRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	created := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	lastSeen := created.Add(30 * time.Second)
+	if err := st.UpsertMCPSession(ctx, "sess_1", created, lastSeen); err != nil {
+		t.Fatalf("UpsertMCPSession failed: %v", err)
+	}
+
+	sessions, err := st.ListMCPSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListMCPSessions failed: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].ID != "sess_1" || !sessions[0].Created.Equal(created) || !sessions[0].LastSeen.Equal(lastSeen) {
+		t.Fatalf("unexpected session: %+v", sessions[0])
+	}
+
+	if err := st.DeleteMCPSession(ctx, "sess_1"); err != nil {
+		t.Fatalf("DeleteMCPSession failed: %v", err)
+	}
+	sessions, err = st.ListMCPSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListMCPSessions failed: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("expected 0 sessions, got %d", len(sessions))
+	}
+}
+
+func TestSQLiteStore_MCPPaymentOutcomePersistenceRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC().Truncate(time.Second)
+	in := store.MCPPaymentOutcomeRecord{
+		ExecutionKey:    "sig:params",
+		StatusCode:      200,
+		ResultJSON:      `{"ok":true}`,
+		RPCErrorJSON:    "",
+		RequiresSettle:  true,
+		Settled:         false,
+		PaymentResponse: "",
+		UpdatedAt:       now,
+	}
+	if err := st.UpsertMCPPaymentOutcome(ctx, in); err != nil {
+		t.Fatalf("UpsertMCPPaymentOutcome failed: %v", err)
+	}
+
+	got, err := st.ListMCPPaymentOutcomes(ctx)
+	if err != nil {
+		t.Fatalf("ListMCPPaymentOutcomes failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 outcome, got %d", len(got))
+	}
+	if got[0] != in {
+		t.Fatalf("unexpected outcome: got=%+v want=%+v", got[0], in)
+	}
+
+	if err := st.DeleteMCPPaymentOutcome(ctx, "sig:params"); err != nil {
+		t.Fatalf("DeleteMCPPaymentOutcome failed: %v", err)
+	}
+	got, err = st.ListMCPPaymentOutcomes(ctx)
+	if err != nil {
+		t.Fatalf("ListMCPPaymentOutcomes failed: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 outcomes, got %d", len(got))
+	}
+}
