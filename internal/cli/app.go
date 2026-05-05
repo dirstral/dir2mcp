@@ -58,13 +58,16 @@ const (
 )
 
 var commands = map[string]struct{}{
-	"up":      {},
-	"status":  {},
-	"ask":     {},
-	"reindex": {},
-	"bridge":  {},
-	"config":  {},
-	"version": {},
+	"up":         {},
+	"status":     {},
+	"ask":        {},
+	"search":     {},
+	"open-file":  {},
+	"list-files": {},
+	"reindex":    {},
+	"bridge":     {},
+	"config":     {},
+	"version":    {},
 }
 
 type App struct {
@@ -383,6 +386,12 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 		return a.runStatus(ctx, globalOpts, remaining[1:])
 	case "ask":
 		return a.runAsk(ctx, globalOpts, remaining[1:])
+	case "search":
+		return a.runSearchRemote(ctx, globalOpts, remaining[1:])
+	case "open-file":
+		return a.runOpenFileRemote(ctx, globalOpts, remaining[1:])
+	case "list-files":
+		return a.runListFilesRemote(ctx, globalOpts, remaining[1:])
 	case "reindex":
 		return a.runReindex(ctx, globalOpts, remaining[1:])
 	case "config":
@@ -420,6 +429,9 @@ func (a *App) printUsage() {
 		{"up", "start the MCP server and begin indexing"},
 		{"status", "show server health and corpus stats"},
 		{"ask", "query the knowledge base from the CLI"},
+		{"search", "query a running server and emit NDJSON"},
+		{"open-file", "open file content from a running server"},
+		{"list-files", "stream indexed files from a running server"},
 		{"reindex", "force a full re-index of all documents"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
