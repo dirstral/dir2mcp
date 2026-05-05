@@ -104,6 +104,16 @@ func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 	if !strings.Contains(readme, "new client/orchestrator UX belongs in `dirstral-cli`") {
 		t.Fatalf("README must direct new client/orchestrator UX to dirstral-cli")
 	}
+	for _, row := range []string{
+		"| `ask \"<question>\"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
+		"| `search \"<query>\"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
+		"| `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
+		"| `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
+	} {
+		if !strings.Contains(readme, row) {
+			t.Fatalf("README CLI command table must include legacy shim row: %s", row)
+		}
+	}
 	for _, cmd := range []string{"ask", "search", "open-file", "list-files"} {
 		want := "legacy compatibility shim; prefer dirstral-cli for client UX"
 		if !strings.Contains(app, want) {
@@ -119,4 +129,3 @@ func mapKeys(m map[string]struct{}) []string {
 	}
 	return out
 }
-

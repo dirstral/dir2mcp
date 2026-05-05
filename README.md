@@ -154,6 +154,9 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `up` | Start the MCP server and begin indexing |
 | `status` | Show corpus and indexing state |
 | `ask "<question>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
+| `search "<query>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
+| `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
+| `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `reindex` | Force full re-ingestion |
 | `config init` | Create a baseline `.dir2mcp.yaml` |
 | `config print` | Print effective config |
