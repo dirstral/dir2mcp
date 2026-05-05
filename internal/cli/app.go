@@ -403,9 +403,26 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 }
 
 func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
+	if code, handled := a.runLegacyShimCommand(ctx, globalOpts, command, args); handled {
+		return code, true
+	}
+
 	switch command {
 	case "status":
 		return a.runStatus(ctx, globalOpts, args), true
+	case "reindex":
+		return a.runReindex(ctx, globalOpts, args), true
+	case "config":
+		return a.runConfig(ctx, globalOpts, args), true
+	case "bridge":
+		return a.runBridge(ctx, globalOpts, args), true
+	default:
+		return 0, false
+	}
+}
+
+func (a *App) runLegacyShimCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
+	switch command {
 	case "ask":
 		return a.runAsk(ctx, globalOpts, args), true
 	case "search":
@@ -414,12 +431,6 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runOpenFileRemote(ctx, globalOpts, args), true
 	case "list-files":
 		return a.runListFilesRemote(ctx, globalOpts, args), true
-	case "reindex":
-		return a.runReindex(ctx, globalOpts, args), true
-	case "config":
-		return a.runConfig(ctx, globalOpts, args), true
-	case "bridge":
-		return a.runBridge(ctx, globalOpts, args), true
 	default:
 		return 0, false
 	}
@@ -440,10 +451,10 @@ func (a *App) printUsage() {
 	cmds := [][2]string{
 		{"up", "start the MCP server and begin indexing"},
 		{"status", "show server health and corpus stats"},
-		{"ask", "query the knowledge base from the CLI"},
-		{"search", "query a running server and emit NDJSON"},
-		{"open-file", "open file content from a running server"},
-		{"list-files", "stream indexed files from a running server"},
+		{"ask", "legacy compatibility shim; prefer dirstral-cli for client UX"},
+		{"search", "legacy compatibility shim; prefer dirstral-cli for client UX"},
+		{"open-file", "legacy compatibility shim; prefer dirstral-cli for client UX"},
+		{"list-files", "legacy compatibility shim; prefer dirstral-cli for client UX"},
 		{"reindex", "force a full re-index of all documents"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
