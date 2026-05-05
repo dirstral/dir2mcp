@@ -88,7 +88,11 @@ echo "[smoke] server ready after ${elapsed}s"
 run_inspector() {
   local label="$1"; shift
   echo "[smoke] ${label}"
-  npx --yes @modelcontextprotocol/inspector --cli "$MCP_URL" "$@"
+  if ! command -v bunx >/dev/null 2>&1; then
+    echo "[smoke] ERROR: bunx is required for inspector-smoke" >&2
+    exit 1
+  fi
+  bunx --bun @modelcontextprotocol/inspector --cli "$MCP_URL" "$@"
 }
 
 run_inspector "tools/list"      --method tools/list
