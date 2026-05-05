@@ -244,24 +244,13 @@ func (s *SQLiteStore) initLocked(ctx context.Context) error {
 		return fmt.Errorf("create database directory: %w", err)
 	}
 
-	// Check if database file already exists
-	dbExists := false
-	if _, err := os.Stat(s.path); err == nil {
-		dbExists = true
+	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open database file: %w", err)
 	}
-
-	// If database doesn't exist, create it with restrictive permissions (0600)
-	if !dbExists {
-		f, err := os.OpenFile(s.path, os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
-			return fmt.Errorf("create database file: %w", err)
-		}
-		_ = f.Close()
-	} else {
-		// If database exists, ensure it has restrictive permissions
-		if err := os.Chmod(s.path, 0o600); err != nil {
-			return fmt.Errorf("set database file permissions: %w", err)
-		}
+	_ = f.Close()
+	if err := os.Chmod(s.path, 0o600); err != nil {
+		return fmt.Errorf("set database file permissions: %w", err)
 	}
 
 	db, err := sql.Open("sqlite", s.path)
