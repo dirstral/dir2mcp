@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -1209,38 +1208,6 @@ func (s *SQLiteStore) ListMCPSessions(ctx context.Context) ([]MCPSessionRecord, 
 	return out, rows.Err()
 }
 
-// sanitizePaymentJSON filters a JSON string to retain only allowlisted fields.
-// This prevents sensitive or unexpected fields from being persisted to disk.
-func sanitizePaymentJSON(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	allowed := []string{"ok", "txHash", "status", "network", "amount"}
-	var parsed map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return ""
-	}
-	filtered := make(map[string]interface{}, len(allowed))
-	for _, key := range allowed {
-		if v, ok := parsed[key]; ok {
-			// Only keep primitives to avoid nested sensitive data
-			switch v.(type) {
-			case string, float64, bool, nil:
-				filtered[key] = v
-			}
-		}
-	}
-	if len(filtered) == 0 {
-		return ""
-	}
-	b, err := json.Marshal(filtered)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
 func (s *SQLiteStore) UpsertMCPPaymentOutcome(ctx context.Context, rec MCPPaymentOutcomeRecord) error {
 	rec.ExecutionKey = strings.TrimSpace(rec.ExecutionKey)
 	if rec.ExecutionKey == "" {
@@ -1255,11 +1222,6 @@ func (s *SQLiteStore) UpsertMCPPaymentOutcome(ctx context.Context, rec MCPPaymen
 		return err
 	}
 	defer s.ReleaseDB()
-
-	// Sanitize sensitive fields before persisting
-	sanitizedResultJSON := sanitizePaymentJSON(rec.ResultJSON)
-	sanitizedRPCErrorJSON := sanitizePaymentJSON(rec.RPCErrorJSON)
-	sanitizedPaymentResponse := sanitizePaymentJSON(rec.PaymentResponse)
 
 	_, err = db.ExecContext(
 		ctx,
@@ -1277,11 +1239,11 @@ func (s *SQLiteStore) UpsertMCPPaymentOutcome(ctx context.Context, rec MCPPaymen
 			updated_unix=excluded.updated_unix`,
 		rec.ExecutionKey,
 		rec.StatusCode,
-		sanitizedResultJSON,
-		sanitizedRPCErrorJSON,
+		strings.TrimSpace(rec.ResultJSON),
+		strings.TrimSpace(rec.RPCErrorJSON),
 		boolToInt(rec.RequiresSettle),
 		boolToInt(rec.Settled),
-		sanitizedPaymentResponse,
+		strings.TrimSpace(rec.PaymentResponse),
 		rec.UpdatedAt.UTC().Unix(),
 	)
 	return err

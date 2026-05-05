@@ -434,15 +434,15 @@ func (a *App) runAskRemote(ctx context.Context, global globalOptions, opts askOp
 }
 
 type openFileOptions struct {
-	relPath     string
-	startLine   int
-	endLine     int
-	page        int
-	startMS     int
-	endMS       int
-	maxChars    int
-	startMSSet  bool
-	endMSSet    bool
+	relPath    string
+	startLine  int
+	endLine    int
+	page       int
+	startMS    int
+	endMS      int
+	maxChars   int
+	startMSSet bool
+	endMSSet   bool
 }
 
 func parseOpenFileOptions(args []string) (openFileOptions, error) {
