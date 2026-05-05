@@ -364,6 +364,25 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			}(),
 		},
 	}
+	s.sessionMu.RLock()
+	sessionItems := make([]map[string]interface{}, 0, len(s.sessions))
+	for id, si := range s.sessions {
+		sessionItems = append(sessionItems, map[string]interface{}{
+			"id":             maskSessionID(id),
+			"created_unix":   si.created.Unix(),
+			"last_seen_unix": si.lastSeen.Unix(),
+		})
+	}
+	s.sessionMu.RUnlock()
+	sort.Slice(sessionItems, func(i, j int) bool {
+		left, _ := sessionItems[i]["id"].(string)
+		right, _ := sessionItems[j]["id"].(string)
+		return left < right
+	})
+	structured["sessions"] = map[string]interface{}{
+		"active": len(sessionItems),
+		"items":  sessionItems,
+	}
 
 	text := fmt.Sprintf(
 		"indexing running=%t scanned=%d indexed=%d errors=%d",
@@ -2319,7 +2338,28 @@ func statsOutputSchema() map[string]interface{} {
 				},
 				"required": []string{"embed_text", "embed_code", "ocr", "stt_provider", "stt_model", "chat"},
 			},
+			"sessions": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"active": map[string]interface{}{"type": "integer"},
+					"items": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type":                 "object",
+							"additionalProperties": false,
+							"properties": map[string]interface{}{
+								"id":             map[string]interface{}{"type": "string"},
+								"created_unix":   map[string]interface{}{"type": "integer"},
+								"last_seen_unix": map[string]interface{}{"type": "integer"},
+							},
+							"required": []string{"id", "created_unix", "last_seen_unix"},
+						},
+					},
+				},
+				"required": []string{"active", "items"},
+			},
 		},
-		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models"},
+		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models", "sessions"},
 	}
 }

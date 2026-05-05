@@ -792,6 +792,17 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	if !ok || sttProvider == "" {
 		t.Fatalf("expected non-empty string models.stt_provider, got %#v", modelsRaw["stt_provider"])
 	}
+	sessionsRaw, ok := envelope.Result.StructuredContent["sessions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected sessions object, got %#v", envelope.Result.StructuredContent["sessions"])
+	}
+	if active, ok := sessionsRaw["active"].(float64); !ok || active < 1 {
+		t.Fatalf("expected sessions.active >= 1, got %#v", sessionsRaw["active"])
+	}
+	items, ok := sessionsRaw["items"].([]interface{})
+	if !ok || len(items) == 0 {
+		t.Fatalf("expected non-empty sessions.items, got %#v", sessionsRaw["items"])
+	}
 }
 
 func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
@@ -874,6 +885,13 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 	}
 	if !retriever.statsCalled.Load() {
 		t.Fatal("expected retriever.Stats to be called")
+	}
+	sessionsRaw, ok := envelope.Result.StructuredContent["sessions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected sessions object, got %#v", envelope.Result.StructuredContent["sessions"])
+	}
+	if active, ok := sessionsRaw["active"].(float64); !ok || active < 1 {
+		t.Fatalf("expected sessions.active >= 1, got %#v", sessionsRaw["active"])
 	}
 }
 

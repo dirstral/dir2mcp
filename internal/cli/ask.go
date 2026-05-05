@@ -18,6 +18,23 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		return exitConfigInvalid
 	}
 
+	remoteClient, remoteErr := a.remoteToolClient(global)
+	if remoteErr == nil {
+		return a.runAskRemote(ctx, global, opts, remoteClient)
+	}
+	// Only fall back to local if the connection.json file specifically is missing
+	if remoteErr != nil {
+		var pathErr *os.PathError
+		if errors.As(remoteErr, &pathErr) && errors.Is(pathErr.Err, os.ErrNotExist) && filepath.Base(pathErr.Path) == connectionFileName {
+			return a.runAskLocal(ctx, global, opts)
+		}
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("resolve server connection: %v", remoteErr))
+		return exitGeneric
+	}
+	return a.runAskLocal(ctx, global, opts)
+}
+
+func (a *App) runAskLocal(ctx context.Context, global globalOptions, opts askOptions) int {
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
@@ -51,7 +68,6 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		}
 		return exitConfigInvalid
 	}
-
 	st := a.storeForConfig(cfg)
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {

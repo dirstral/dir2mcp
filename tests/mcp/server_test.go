@@ -1,10 +1,12 @@
 package tests
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/protocol"
+	"dir2mcp/internal/store"
 )
 
 func postToolsListWithSession(serverURL, mcpPath, sessionID string) (*http.Response, error) {
@@ -171,6 +174,33 @@ func TestSessionExpiration_MaxLifetimeHeader(t *testing.T) {
 	// "max-lifetime" X-MCP-Session-Expired header, so additional
 	// checks here would be redundant. Keep the call above for its
 	// built-in validation.
+}
+
+func TestSessionPersistsAcrossServerRestart(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.SessionInactivityTimeout = time.Hour
+	cfg.SessionMaxLifetime = 0
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("Init store failed: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	server1 := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	sessionID := initializeSession(t, server1.URL+cfg.MCPPath)
+	server1.Close()
+
+	server2 := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server2.Close()
+
+	resp := postRPC(t, server2.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":44,"method":"tools/list","params":{}}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected persisted session to remain valid, status=%d body=%s", resp.StatusCode, string(body))
+	}
 }
 
 func TestMCPInitialize_RejectsMissingJSONRPCVersion(t *testing.T) {

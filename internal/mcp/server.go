@@ -28,6 +28,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
 	"dir2mcp/internal/protocol"
+	storepkg "dir2mcp/internal/store"
 	"dir2mcp/internal/x402"
 )
 
@@ -55,10 +56,24 @@ const MaxSearchK = 50
 // sessionInfo holds metadata tracked for each active session.  `created` is the
 // time the session was started; `lastSeen` is updated on each successful
 // request.  The server uses both values to enforce inactivity timeouts and
-// optional absolute lifetimes.
+// optional absolute lifetimes.  `authScope` records the authenticated identity
+// for the session.
 type sessionInfo struct {
-	created  time.Time
-	lastSeen time.Time
+	created   time.Time
+	lastSeen  time.Time
+	authScope string
+}
+
+type sessionPersistenceStore interface {
+	UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time, authScope string) error
+	DeleteMCPSession(ctx context.Context, sessionID string) error
+	ListMCPSessions(ctx context.Context) ([]storepkg.MCPSessionRecord, error)
+}
+
+type paymentOutcomePersistenceStore interface {
+	UpsertMCPPaymentOutcome(ctx context.Context, rec storepkg.MCPPaymentOutcomeRecord) error
+	DeleteMCPPaymentOutcome(ctx context.Context, executionKey string) error
+	ListMCPPaymentOutcomes(ctx context.Context) ([]storepkg.MCPPaymentOutcomeRecord, error)
 }
 
 type Server struct {
@@ -210,6 +225,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
 	}
 	s.initPaymentConfig()
+	s.restoreRuntimeState(context.Background())
 	s.tools = s.buildToolRegistry()
 	return s
 }
@@ -309,7 +325,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	switch rc.req.Method {
 	case protocol.RPCMethodInitialize:
-		s.handleInitialize(w, rc.id, rc.hasID)
+		s.handleInitialize(w, r, rc.id, rc.hasID)
 	case protocol.RPCMethodNotificationsInitialized:
 		if !rc.hasID {
 			w.WriteHeader(http.StatusAccepted)
@@ -335,7 +351,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID bool) {
+func (s *Server) handleInitialize(w http.ResponseWriter, r *http.Request, id interface{}, hasID bool) {
 	if !hasID {
 		writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
 		return
@@ -346,7 +362,13 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 		writeError(w, http.StatusInternalServerError, id, -32603, "failed to initialize session", "", false)
 		return
 	}
-	s.storeSession(sessionID)
+
+	// Extract authScope from request context
+	var authScope string
+	if rc, ok := r.Context().Value(requestContextKey{}).(requestContext); ok {
+		authScope = rc.authScope
+	}
+	s.storeSession(sessionID, authScope)
 
 	w.Header().Set(protocol.MCPSessionHeader, sessionID)
 	writeResult(w, http.StatusOK, id, map[string]interface{}{
@@ -365,9 +387,9 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 	})
 }
 
-func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (bool, string) {
 	if strings.EqualFold(s.cfg.AuthMode, "none") {
-		return true
+		return true, ""
 	}
 
 	expectedToken := s.authToken
@@ -376,21 +398,24 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 
 	if len(authHeader) < len(bearerPrefix) || strings.ToLower(authHeader[:len(bearerPrefix)]) != bearerPrefix {
 		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
-		return false
+		return false, ""
 	}
 
 	providedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])
 	if expectedToken == "" || providedToken == "" {
 		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
-		return false
+		return false, ""
 	}
 
 	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
 		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
-		return false
+		return false, ""
 	}
 
-	return true
+	// For successful auth, compute a hash of the token as the auth scope identifier
+	sum := sha256.Sum256([]byte(providedToken))
+	authScope := "token:" + hex.EncodeToString(sum[:8])
+	return true, authScope
 }
 
 func (s *Server) allowOrigin(w http.ResponseWriter, r *http.Request) bool {
@@ -510,19 +535,22 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	inactivity, maxLife := s.resolveSessionTimeouts()
 
 	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
-
 	si, ok := s.sessions[id]
 	if !ok {
+		s.sessionMu.Unlock()
 		return false, ""
 	}
 	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
+		s.sessionMu.Unlock()
+		s.deletePersistedSession(id)
 		log.Printf("session %s expired due to inactivity", maskSessionID(id))
 		return false, "inactivity"
 	}
 	if maxLife > 0 && now.Sub(si.created) > maxLife {
 		delete(s.sessions, id)
+		s.sessionMu.Unlock()
+		s.deletePersistedSession(id)
 		log.Printf("session %s expired due to max lifetime", maskSessionID(id))
 		return false, "max-lifetime"
 	}
@@ -530,14 +558,18 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	// update lastSeen
 	si.lastSeen = now
 	s.sessions[id] = si
+	s.sessionMu.Unlock()
+	s.persistSession(id, si)
 	return true, ""
 }
 
-func (s *Server) storeSession(id string) {
-	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
+func (s *Server) storeSession(id string, authScope string) {
 	now := time.Now()
-	s.sessions[id] = sessionInfo{created: now, lastSeen: now}
+	si := sessionInfo{created: now, lastSeen: now, authScope: authScope}
+	s.sessionMu.Lock()
+	s.sessions[id] = si
+	s.sessionMu.Unlock()
+	s.persistSession(id, si)
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
@@ -600,16 +632,117 @@ func (s *Server) cleanupExpiredSessions(now time.Time) {
 	inactivity, maxLife := s.resolveSessionTimeouts()
 
 	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
-
+	var toDelete []string
 	for id, si := range s.sessions {
 		if now.Sub(si.lastSeen) > inactivity {
+			toDelete = append(toDelete, id)
 			delete(s.sessions, id)
 			continue
 		}
 		if maxLife > 0 && now.Sub(si.created) > maxLife {
+			toDelete = append(toDelete, id)
 			delete(s.sessions, id)
 		}
+	}
+	s.sessionMu.Unlock()
+
+	// Perform I/O outside the lock
+	for _, id := range toDelete {
+		s.deletePersistedSession(id)
+	}
+}
+
+func (s *Server) restoreRuntimeState(ctx context.Context) {
+	s.restoreSessions(ctx)
+	s.restorePaymentOutcomes(ctx)
+}
+
+func (s *Server) restoreSessions(ctx context.Context) {
+	store, ok := s.store.(sessionPersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	records, err := store.ListMCPSessions(ctx)
+	if err != nil {
+		log.Printf("warning: failed loading persisted sessions: %v", err)
+		return
+	}
+	now := time.Now()
+	inactivity, maxLife := s.resolveSessionTimeouts()
+	for _, rec := range records {
+		id := strings.TrimSpace(rec.ID)
+		if id == "" || rec.Created.IsZero() || rec.LastSeen.IsZero() {
+			_ = store.DeleteMCPSession(ctx, id)
+			continue
+		}
+		if now.Sub(rec.LastSeen) > inactivity || (maxLife > 0 && now.Sub(rec.Created) > maxLife) {
+			_ = store.DeleteMCPSession(ctx, id)
+			continue
+		}
+		s.sessions[id] = sessionInfo{created: rec.Created, lastSeen: rec.LastSeen, authScope: rec.AuthScope}
+	}
+}
+
+func (s *Server) restorePaymentOutcomes(ctx context.Context) {
+	store, ok := s.store.(paymentOutcomePersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	records, err := store.ListMCPPaymentOutcomes(ctx)
+	if err != nil {
+		log.Printf("warning: failed loading persisted payment outcomes: %v", err)
+		return
+	}
+	s.paymentMu.Lock()
+	var keysToDelete []string
+	for _, rec := range records {
+		outcome, ok := paymentOutcomeFromRecord(rec)
+		if !ok {
+			keysToDelete = append(keysToDelete, rec.ExecutionKey)
+			continue
+		}
+		s.paymentOutcomes[rec.ExecutionKey] = outcome
+	}
+	prunedKeys := s.prunePaymentOutcomesLocked(time.Now().UTC())
+	keysToDelete = append(keysToDelete, prunedKeys...)
+	kept := make(map[string]struct{}, len(s.paymentOutcomes))
+	for key := range s.paymentOutcomes {
+		kept[key] = struct{}{}
+	}
+	s.paymentMu.Unlock()
+
+	// Perform store deletions outside the mutex
+	for _, key := range keysToDelete {
+		if err := store.DeleteMCPPaymentOutcome(ctx, key); err != nil {
+			log.Printf("warning: failed deleting invalid payment outcome %s: %v", key, err)
+		}
+	}
+	for _, rec := range records {
+		if _, ok := kept[rec.ExecutionKey]; !ok {
+			if err := store.DeleteMCPPaymentOutcome(ctx, rec.ExecutionKey); err != nil {
+				log.Printf("warning: failed deleting pruned payment outcome %s: %v", rec.ExecutionKey, err)
+			}
+		}
+	}
+}
+
+func (s *Server) persistSession(id string, si sessionInfo) {
+	store, ok := s.store.(sessionPersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC(), si.authScope); err != nil {
+		log.Printf("warning: failed persisting session %s: %v", maskSessionID(id), err)
+	}
+}
+
+func (s *Server) deletePersistedSession(id string) {
+	store, ok := s.store.(sessionPersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	if err := store.DeleteMCPSession(context.Background(), id); err != nil {
+		log.Printf("warning: failed deleting persisted session %s: %v", maskSessionID(id), err)
 	}
 }
 
@@ -629,11 +762,18 @@ func (s *Server) runPaymentOutcomeCleanup(ctx context.Context) {
 
 func (s *Server) cleanupPaymentOutcomes(now time.Time) {
 	s.paymentMu.Lock()
-	defer s.paymentMu.Unlock()
-	s.prunePaymentOutcomesLocked(now)
+	keysToDelete := s.prunePaymentOutcomesLocked(now)
+	s.paymentMu.Unlock()
+
+	// Perform store deletions outside the mutex
+	for _, key := range keysToDelete {
+		s.deletePersistedPaymentOutcome(key)
+	}
 }
 
-func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
+func (s *Server) prunePaymentOutcomesLocked(now time.Time) []string {
+	var keysToDelete []string
+
 	ttl := s.paymentTTL
 	if ttl <= 0 {
 		ttl = paymentOutcomeTTL
@@ -643,6 +783,7 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 	for key, outcome := range s.paymentOutcomes {
 		if outcome.UpdatedAt.IsZero() || outcome.UpdatedAt.Before(cutoff) {
 			delete(s.paymentOutcomes, key)
+			keysToDelete = append(keysToDelete, key)
 		}
 	}
 
@@ -651,7 +792,7 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 		maxItems = paymentOutcomeMaxEntries
 	}
 	if len(s.paymentOutcomes) <= maxItems {
-		return
+		return keysToDelete
 	}
 
 	type entry struct {
@@ -674,7 +815,9 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 	toDrop := len(entries) - maxItems
 	for i := 0; i < toDrop; i++ {
 		delete(s.paymentOutcomes, entries[i].key)
+		keysToDelete = append(keysToDelete, entries[i].key)
 	}
+	return keysToDelete
 }
 
 func generateSessionID() (string, error) {

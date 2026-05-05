@@ -164,7 +164,7 @@ func (t *SDKTransport) checkPreRequest(w http.ResponseWriter, req *http.Request)
 		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
 		return false
 	}
-	if !t.server.authorize(w, req) {
+	if ok, _ := t.server.authorize(w, req); !ok {
 		return false
 	}
 	if !t.server.allowOrigin(w, req) {
@@ -255,7 +255,9 @@ func (t *SDKTransport) handleSDKInitialize(w http.ResponseWriter, req *http.Requ
 	rec := newBufferedResponseWriter()
 	sdkHandler.ServeHTTP(rec, req)
 	if sessionID := strings.TrimSpace(rec.header.Get(protocol.MCPSessionHeader)); sessionID != "" {
-		t.server.storeSession(sessionID)
+		// Extract authScope from the authorize call result
+		_, authScope := t.server.authorize(nil, req)
+		t.server.storeSession(sessionID, authScope)
 	}
 	copyBufferedResponse(w, rec)
 }

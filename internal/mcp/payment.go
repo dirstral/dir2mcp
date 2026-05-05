@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	storepkg "dir2mcp/internal/store"
 	"dir2mcp/internal/x402"
 )
 
@@ -310,9 +311,14 @@ func (s *Server) getPaymentExecutionOutcome(key string) (paymentExecutionOutcome
 		return paymentExecutionOutcome{}, false
 	}
 	s.paymentMu.Lock()
-	defer s.paymentMu.Unlock()
-	s.prunePaymentOutcomesLocked(time.Now().UTC())
+	keysToDelete := s.prunePaymentOutcomesLocked(time.Now().UTC())
 	outcome, ok := s.paymentOutcomes[key]
+	s.paymentMu.Unlock()
+
+	// Perform store deletions outside the mutex
+	for _, k := range keysToDelete {
+		s.deletePersistedPaymentOutcome(k)
+	}
 	return outcome, ok
 }
 
@@ -321,19 +327,30 @@ func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecution
 		return
 	}
 	s.paymentMu.Lock()
-	defer s.paymentMu.Unlock()
 	now := time.Now().UTC()
-	s.prunePaymentOutcomesLocked(now)
+	keysToDelete := s.prunePaymentOutcomesLocked(now)
 
 	// compare-and-swap: only write if there is no existing outcome.  Any
 	// stored outcome has a non-zero UpdatedAt, so we only need to check for
 	// existence rather than inspect the timestamp.
 	if _, ok := s.paymentOutcomes[key]; ok {
 		// already completed by another goroutine; skip overwrite.
+		s.paymentMu.Unlock()
+		// Perform store deletions outside the mutex
+		for _, k := range keysToDelete {
+			s.deletePersistedPaymentOutcome(k)
+		}
 		return
 	}
 
 	s.paymentOutcomes[key] = outcome
+	s.paymentMu.Unlock()
+
+	// Perform store operations outside the mutex
+	s.persistPaymentOutcome(key, outcome)
+	for _, k := range keysToDelete {
+		s.deletePersistedPaymentOutcome(k)
+	}
 }
 
 func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) (paymentExecutionOutcome, bool) {
@@ -348,6 +365,7 @@ func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) (payme
 		outcome.PaymentResponse = strings.TrimSpace(paymentResponse)
 		outcome.UpdatedAt = time.Now().UTC()
 		s.paymentOutcomes[key] = outcome
+		s.persistPaymentOutcome(key, outcome)
 	}
 	s.paymentMu.Unlock()
 
@@ -359,6 +377,102 @@ func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) (payme
 		return paymentExecutionOutcome{}, false
 	}
 	return outcome, true
+}
+
+func paymentOutcomeToRecord(key string, outcome paymentExecutionOutcome) (storepkg.MCPPaymentOutcomeRecord, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return storepkg.MCPPaymentOutcomeRecord{}, false
+	}
+	var (
+		resultJSON string
+		rpcErrJSON string
+	)
+	if outcome.Result != nil {
+		b, err := json.Marshal(outcome.Result)
+		if err != nil {
+			return storepkg.MCPPaymentOutcomeRecord{}, false
+		}
+		resultJSON = string(b)
+	}
+	if outcome.RPCError != nil {
+		b, err := json.Marshal(outcome.RPCError)
+		if err != nil {
+			return storepkg.MCPPaymentOutcomeRecord{}, false
+		}
+		rpcErrJSON = string(b)
+	}
+	updatedAt := outcome.UpdatedAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	return storepkg.MCPPaymentOutcomeRecord{
+		ExecutionKey:    key,
+		StatusCode:      outcome.StatusCode,
+		ResultJSON:      resultJSON,
+		RPCErrorJSON:    rpcErrJSON,
+		RequiresSettle:  outcome.RequiresSettle,
+		Settled:         outcome.Settled,
+		PaymentResponse: strings.TrimSpace(outcome.PaymentResponse),
+		UpdatedAt:       updatedAt,
+	}, true
+}
+
+func paymentOutcomeFromRecord(rec storepkg.MCPPaymentOutcomeRecord) (paymentExecutionOutcome, bool) {
+	if strings.TrimSpace(rec.ExecutionKey) == "" || rec.UpdatedAt.IsZero() {
+		return paymentExecutionOutcome{}, false
+	}
+	var outcome paymentExecutionOutcome
+	outcome.StatusCode = rec.StatusCode
+	outcome.RequiresSettle = rec.RequiresSettle
+	outcome.Settled = rec.Settled
+	outcome.PaymentResponse = strings.TrimSpace(rec.PaymentResponse)
+	outcome.UpdatedAt = rec.UpdatedAt.UTC()
+	if strings.TrimSpace(rec.ResultJSON) != "" {
+		var result toolCallResult
+		if err := json.Unmarshal([]byte(rec.ResultJSON), &result); err != nil {
+			return paymentExecutionOutcome{}, false
+		}
+		outcome.Result = &result
+	}
+	if strings.TrimSpace(rec.RPCErrorJSON) != "" {
+		var rpcErr rpcError
+		if err := json.Unmarshal([]byte(rec.RPCErrorJSON), &rpcErr); err != nil {
+			return paymentExecutionOutcome{}, false
+		}
+		outcome.RPCError = &rpcErr
+	}
+	return outcome, true
+}
+
+func (s *Server) persistPaymentOutcome(key string, outcome paymentExecutionOutcome) {
+	store, ok := s.store.(paymentOutcomePersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	rec, ok := paymentOutcomeToRecord(key, outcome)
+	if !ok {
+		return
+	}
+	if err := store.UpsertMCPPaymentOutcome(context.Background(), rec); err != nil {
+		s.emitPaymentEvent("warning", "payment_outcome_persist_failed", map[string]interface{}{
+			"key": key,
+			"err": err.Error(),
+		})
+	}
+}
+
+func (s *Server) deletePersistedPaymentOutcome(key string) {
+	store, ok := s.store.(paymentOutcomePersistenceStore)
+	if !ok || store == nil {
+		return
+	}
+	if err := store.DeleteMCPPaymentOutcome(context.Background(), key); err != nil {
+		s.emitPaymentEvent("warning", "payment_outcome_delete_failed", map[string]interface{}{
+			"key": key,
+			"err": err.Error(),
+		})
+	}
 }
 
 // cloneRPCError returns a copy of the supplied rpcError.  callers may

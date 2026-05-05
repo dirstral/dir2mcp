@@ -15,9 +15,10 @@ type middleware func(http.Handler) http.Handler
 type requestContextKey struct{}
 
 type requestContext struct {
-	req   rpcRequest
-	id    interface{}
-	hasID bool
+	req       rpcRequest
+	id        interface{}
+	hasID     bool
+	authScope string
 }
 
 func (s *Server) withMiddlewares(h http.Handler, mws ...middleware) http.Handler {
@@ -63,8 +64,16 @@ func (s *Server) protocolValidationMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.authorize(w, r) {
+		ok, authScope := s.authorize(w, r)
+		if !ok {
 			return
+		}
+		// Store authScope in context for later use
+		ctx := r.Context()
+		if rc, exists := ctx.Value(requestContextKey{}).(requestContext); exists {
+			rc.authScope = authScope
+			ctx = context.WithValue(ctx, requestContextKey{}, rc)
+			r = r.WithContext(ctx)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -125,10 +134,17 @@ func (s *Server) rpcEnvelopeMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
+		// Preserve authScope from existing context if present
+		var authScope string
+		if existingRC, ok := r.Context().Value(requestContextKey{}).(requestContext); ok {
+			authScope = existingRC.authScope
+		}
+
 		ctx := context.WithValue(r.Context(), requestContextKey{}, requestContext{
-			req:   req,
-			id:    id,
-			hasID: hasID,
+			req:       req,
+			id:        id,
+			hasID:     hasID,
+			authScope: authScope,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
