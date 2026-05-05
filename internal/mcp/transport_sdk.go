@@ -43,17 +43,8 @@ func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile st
 
 // Serve implements Transport.
 func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
-	if t == nil {
-		return errors.New("sdk transport: nil transport")
-	}
-	if t.server == nil {
-		return errors.New("sdk transport: nil server")
-	}
-	if t.listener == nil {
-		return errors.New("nil listener passed to SDKTransport.Serve")
-	}
-	if handler == nil {
-		return errors.New("sdk transport: nil handler")
+	if err := t.validateServeInputs(handler); err != nil {
+		return err
 	}
 
 	sdkServer := t.server.buildSDKServer()
@@ -118,6 +109,22 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func (t *SDKTransport) validateServeInputs(handler Handler) error {
+	if t == nil {
+		return errors.New("sdk transport: nil transport")
+	}
+	if t.server == nil {
+		return errors.New("sdk transport: nil server")
+	}
+	if t.listener == nil {
+		return errors.New("nil listener passed to SDKTransport.Serve")
+	}
+	if handler == nil {
+		return errors.New("sdk transport: nil handler")
+	}
+	return nil
 }
 
 func (t *SDKTransport) serveHTTPRequest(w http.ResponseWriter, req *http.Request, sdkHandler http.Handler) {
