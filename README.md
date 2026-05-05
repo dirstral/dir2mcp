@@ -26,10 +26,10 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
 - Multimodal ingestion: text/code, OCR, transcripts, structured annotations
 - Citation-aware retrieval and RAG-style answering
 - Optional facilitator-backed x402 payment gating for `tools/call`
-- Monorepo layout with three binaries:
+- Repo layout with two binaries:
   - `dir2mcp`: MCP server and indexing/runtime host
-  - `dirstral`: terminal client (Chat/Voice/Start/Stop MCP Server/Settings)
   - `elevenlabs-bridge`: HTTP helper for ElevenLabs webhook tools
+- `dirstral` terminal client is maintained in the separate `dirstral-cli` repo.
 
 ## Installation
 
@@ -81,17 +81,11 @@ cp .env.example .env        # add your API keys
 # cp .env.example .env.local
 make build
 ./dir2mcp up
-./dirstral chat
 ```
-
-`DIRSTRAL_MCP_URL` controls where Chat/Voice connect (local or remote).
-Server process management (`server start|status|stop`) is local-only. Use
-`dirstral server remote` to probe a remote MCP endpoint without process control.
 
 Or build each binary directly:
 
 - `go build -o dir2mcp ./cmd/dir2mcp/`
-- `go build -o dirstral ./cmd/dirstral/`
 - `go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/`
 
 The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
@@ -318,6 +312,25 @@ See [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) for t
 ## Project Status
 
 Core server, ingestion pipeline, retrieval, citations, and x402 gating are implemented. See [open issues](https://github.com/Dirstral/dir2mcp/issues) for in-progress work.
+
+## Ecosystem Split Status
+
+Issue [#113](https://github.com/Dirstral/dir2mcp/issues/113) tracks the repo split.
+
+- `dir2mcp` (this repo): MCP server implementation + bridge binary
+- `dirstral-spec`: canonical specs/schemas/versioning
+- `dirstral-conformance`: black-box conformance harness
+- `dirstral-cli`: client/orchestrator UX
+- `landfall`: code-navigation MCP server product stub
+
+Pre-split audit summary:
+- Cross-product imports: none in `dir2mcp` implementation (composition boundary is MCP).
+- CLI boundary: `internal/cli` here is server/bootstrap CLI; client UX belongs to `dirstral-cli`.
+- Landfall source: product scope comes from issue [#112](https://github.com/Dirstral/dir2mcp/issues/112), now represented by a separate stub repo.
+- Docs destination mapping:
+  - `docs/SPEC.md` -> `dirstral-spec/docs/SPEC.md`
+  - `docs/ECOSYSTEM.md` -> `dirstral-spec/docs/ECOSYSTEM.md`
+  - `docs/x402-payment-adapter-spec.md` -> `dirstral-spec/docs/x402-payment-adapter-spec.md`
 
 ## Documentation
 
