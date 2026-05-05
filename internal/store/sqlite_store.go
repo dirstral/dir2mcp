@@ -1240,7 +1240,8 @@ func (s *SQLiteStore) ListMCPPaymentOutcomes(ctx context.Context) ([]MCPPaymentO
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT execution_key, status_code, result_json, rpc_error_json, requires_settle, settled, payment_response, updated_unix
-		 FROM mcp_payment_outcomes`,
+		 FROM mcp_payment_outcomes
+		 ORDER BY updated_unix DESC`,
 	)
 	if err != nil {
 		return nil, err
