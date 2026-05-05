@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 )
 
@@ -58,15 +60,18 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		source = "computed"
 	}
 
-	return a.renderStatusOutput(global, cfg.StateDir, snapshot, source)
+	return a.renderStatusOutput(global, cfg, cfg.StateDir, snapshot, source)
 }
 
-func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot corpusSnapshot, source string) int {
+func (a *App) renderStatusOutput(global globalOptions, cfg config.Config, stateDir string, snapshot corpusSnapshot, source string) int {
+	providerSelection := ingest.ResolveProvider(cfg)
+
 	if global.jsonOutput {
 		payload := map[string]interface{}{
-			"source":    source,
-			"state_dir": stateDir,
-			"snapshot":  snapshot,
+			"source":          source,
+			"state_dir":       stateDir,
+			"snapshot":        snapshot,
+			"ingest_provider": providerSelection,
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
 			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode status json: %v", err))
@@ -83,6 +88,10 @@ func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot
 	writeln(a.stdout, s.kv("State", stateDir))
 	writeln(a.stdout, s.kv("Source", source))
 	writeln(a.stdout, s.kv("Timestamp", snapshot.Timestamp))
+	writeln(a.stdout, s.kv("Ingest provider", providerSelection.Selected))
+	if providerSelection.FallbackReason != "" {
+		writeln(a.stdout, s.kv("Ingest fallback", providerSelection.FallbackReason))
+	}
 	writeln(a.stdout)
 
 	runningLabel := s.dim("stopped")

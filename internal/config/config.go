@@ -117,6 +117,9 @@ type Config struct {
 	IngestImagesMode     string
 	IngestAudioMode      string
 	IngestArchivesMode   string
+	IngestProvider       string
+	IngestDoclingCommand string
+	IngestDoclingTimeout time.Duration
 
 	STTProvider               string
 	STTMistralModel           string
@@ -179,6 +182,9 @@ type fileConfig struct {
 	IngestImagesMode          *string
 	IngestAudioMode           *string
 	IngestArchivesMode        *string
+	IngestProvider            *string
+	IngestDoclingCommand      *string
+	IngestDoclingTimeout      *time.Duration
 	STTProvider               *string
 	STTMistralModel           *string
 	STTElevenLabsModel        *string
@@ -225,33 +231,36 @@ type persistedConfig struct {
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
 	HealthCheckInterval      time.Duration `yaml:"health_check_interval"`
 
-	ElevenLabsBaseURL         string   `yaml:"elevenlabs_base_url"`
-	ElevenLabsTTSVoiceID      string   `yaml:"elevenlabs_tts_voice_id"`
-	AllowedOrigins            []string `yaml:"allowed_origins"`
-	EmbedModelText            string   `yaml:"embed_model_text"`
-	EmbedModelCode            string   `yaml:"embed_model_code"`
-	ChatModel                 string   `yaml:"chat_model"`
-	RAGSystemPrompt           string   `yaml:"rag_system_prompt"`
-	RAGGenerateAnswer         bool     `yaml:"rag_generate_answer"`
-	RAGKDefault               int      `yaml:"rag_k_default"`
-	RAGMaxContextChars        int      `yaml:"rag_max_context_chars"`
-	RAGOversampleFactor       int      `yaml:"rag_oversample_factor"`
-	ChunkingStrategy          string   `yaml:"chunking_strategy"`
-	ChunkingMaxTokens         int      `yaml:"chunking_max_tokens"`
-	ChunkingOverlapTokens     int      `yaml:"chunking_overlap_tokens"`
-	IngestGitignore           bool     `yaml:"ingest_gitignore"`
-	IngestFollowSymlinks      bool     `yaml:"ingest_follow_symlinks"`
-	IngestMaxFileMB           int      `yaml:"ingest_max_file_mb"`
-	IngestPDFMode             string   `yaml:"ingest_pdf_mode"`
-	IngestImagesMode          string   `yaml:"ingest_images_mode"`
-	IngestAudioMode           string   `yaml:"ingest_audio_mode"`
-	IngestArchivesMode        string   `yaml:"ingest_archives_mode"`
-	STTProvider               string   `yaml:"stt_provider"`
-	STTMistralModel           string   `yaml:"stt_mistral_model"`
-	STTElevenLabsModel        string   `yaml:"stt_elevenlabs_model"`
-	STTElevenLabsLanguageCode string   `yaml:"stt_elevenlabs_language_code"`
-	ServerTLSCertFile         string   `yaml:"server_tls_cert_file"`
-	ServerTLSKeyFile          string   `yaml:"server_tls_key_file"`
+	ElevenLabsBaseURL         string        `yaml:"elevenlabs_base_url"`
+	ElevenLabsTTSVoiceID      string        `yaml:"elevenlabs_tts_voice_id"`
+	AllowedOrigins            []string      `yaml:"allowed_origins"`
+	EmbedModelText            string        `yaml:"embed_model_text"`
+	EmbedModelCode            string        `yaml:"embed_model_code"`
+	ChatModel                 string        `yaml:"chat_model"`
+	RAGSystemPrompt           string        `yaml:"rag_system_prompt"`
+	RAGGenerateAnswer         bool          `yaml:"rag_generate_answer"`
+	RAGKDefault               int           `yaml:"rag_k_default"`
+	RAGMaxContextChars        int           `yaml:"rag_max_context_chars"`
+	RAGOversampleFactor       int           `yaml:"rag_oversample_factor"`
+	ChunkingStrategy          string        `yaml:"chunking_strategy"`
+	ChunkingMaxTokens         int           `yaml:"chunking_max_tokens"`
+	ChunkingOverlapTokens     int           `yaml:"chunking_overlap_tokens"`
+	IngestGitignore           bool          `yaml:"ingest_gitignore"`
+	IngestFollowSymlinks      bool          `yaml:"ingest_follow_symlinks"`
+	IngestMaxFileMB           int           `yaml:"ingest_max_file_mb"`
+	IngestPDFMode             string        `yaml:"ingest_pdf_mode"`
+	IngestImagesMode          string        `yaml:"ingest_images_mode"`
+	IngestAudioMode           string        `yaml:"ingest_audio_mode"`
+	IngestArchivesMode        string        `yaml:"ingest_archives_mode"`
+	IngestProvider            string        `yaml:"ingest_provider"`
+	IngestDoclingCommand      string        `yaml:"ingest_docling_command"`
+	IngestDoclingTimeout      time.Duration `yaml:"ingest_docling_timeout"`
+	STTProvider               string        `yaml:"stt_provider"`
+	STTMistralModel           string        `yaml:"stt_mistral_model"`
+	STTElevenLabsModel        string        `yaml:"stt_elevenlabs_model"`
+	STTElevenLabsLanguageCode string        `yaml:"stt_elevenlabs_language_code"`
+	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
+	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
 	// The following fields configure optional x402 payment gating.  The
 	// facilitator token itself is treated like any other sensitive API key:
@@ -338,6 +347,9 @@ func Default() Config {
 		IngestImagesMode:          "ocr_auto",
 		IngestAudioMode:           "auto",
 		IngestArchivesMode:        "deep",
+		IngestProvider:            "auto",
+		IngestDoclingCommand:      "docling",
+		IngestDoclingTimeout:      90 * time.Second,
 		STTProvider:               "mistral",
 		STTMistralModel:           "voxtral-mini-latest",
 		STTElevenLabsModel:        "scribe_v1",
@@ -413,6 +425,9 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestImagesMode:          cfg.IngestImagesMode,
 		IngestAudioMode:           cfg.IngestAudioMode,
 		IngestArchivesMode:        cfg.IngestArchivesMode,
+		IngestProvider:            cfg.IngestProvider,
+		IngestDoclingCommand:      cfg.IngestDoclingCommand,
+		IngestDoclingTimeout:      cfg.IngestDoclingTimeout,
 		STTProvider:               cfg.STTProvider,
 		STTMistralModel:           cfg.STTMistralModel,
 		STTElevenLabsModel:        cfg.STTElevenLabsModel,
@@ -821,6 +836,15 @@ func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestArchivesMode != nil {
 		cfg.IngestArchivesMode = *fc.IngestArchivesMode
 	}
+	if fc.IngestProvider != nil {
+		cfg.IngestProvider = *fc.IngestProvider
+	}
+	if fc.IngestDoclingCommand != nil {
+		cfg.IngestDoclingCommand = *fc.IngestDoclingCommand
+	}
+	if fc.IngestDoclingTimeout != nil {
+		cfg.IngestDoclingTimeout = *fc.IngestDoclingTimeout
+	}
 	if fc.STTProvider != nil {
 		cfg.STTProvider = *fc.STTProvider
 	}
@@ -1063,6 +1087,9 @@ var configKeyAliases = map[string]string{
 	"audio_mode":                           "ingest.audio.mode",
 	"ingest_archives_mode":                 "ingest.archives.mode",
 	"archives_mode":                        "ingest.archives.mode",
+	"ingest_provider":                      "ingest.provider",
+	"ingest_docling_command":               "ingest.docling.command",
+	"ingest_docling_timeout":               "ingest.docling.timeout",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1100,7 +1127,7 @@ func isMapSectionKey(key string) bool {
 	switch key {
 	case "rag", "ingest", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking":
 		return true
-	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
+	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "ingest.docling", "secrets":
 		return true
 	default:
 		return false
@@ -1186,6 +1213,8 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.SessionMaxLifetime
 	case "health_check_interval":
 		target = &cfg.HealthCheckInterval
+	case "ingest.docling.timeout":
+		target = &cfg.IngestDoclingTimeout
 	default:
 		return nil
 	}
@@ -1263,6 +1292,10 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestAudioMode = strPtr(value)
 	case "ingest.archives.mode":
 		cfg.IngestArchivesMode = strPtr(value)
+	case "ingest.provider":
+		cfg.IngestProvider = strPtr(value)
+	case "ingest.docling.command":
+		cfg.IngestDoclingCommand = strPtr(value)
 	case "stt.provider":
 		cfg.STTProvider = strPtr(value)
 	case "stt.mistral.model":
@@ -1399,6 +1432,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_images_mode", cfg.IngestImagesMode)
 	writeScalar("ingest_audio_mode", cfg.IngestAudioMode)
 	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
+	writeScalar("ingest_provider", cfg.IngestProvider)
+	writeScalar("ingest_docling_command", cfg.IngestDoclingCommand)
+	writeScalar("ingest_docling_timeout", cfg.IngestDoclingTimeout.String())
 	writeScalar("stt_provider", cfg.STTProvider)
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
@@ -1445,9 +1481,22 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	applyMistralEnvOverrides(cfg, overrideEnv)
 	applyElevenLabsEnvOverrides(cfg, overrideEnv)
+	applyIngestEnvOverrides(cfg, overrideEnv)
 	applyNetworkEnvOverrides(cfg, overrideEnv)
 	applySessionEnvOverrides(cfg, overrideEnv)
 	applyX402EnvOverrides(cfg, overrideEnv)
+}
+
+func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
+	if raw, ok := envLookup("DIR2MCP_INGEST_PROVIDER", env); ok && strings.TrimSpace(raw) != "" {
+		cfg.IngestProvider = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_INGEST_DOCLING_COMMAND", env); ok && strings.TrimSpace(raw) != "" {
+		cfg.IngestDoclingCommand = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_INGEST_DOCLING_TIMEOUT", env); ok {
+		applyDurationEnvField(cfg, raw, "DIR2MCP_INGEST_DOCLING_TIMEOUT", &cfg.IngestDoclingTimeout)
+	}
 }
 
 func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
@@ -1644,6 +1693,24 @@ func (c *Config) Validate() error {
 	}
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
+	}
+	if c.IngestDoclingTimeout < 0 {
+		return fmt.Errorf("ingest.docling.timeout must be non-negative: %v", c.IngestDoclingTimeout)
+	}
+	if strings.TrimSpace(c.IngestProvider) == "" {
+		c.IngestProvider = Default().IngestProvider
+	}
+	if strings.TrimSpace(c.IngestDoclingCommand) == "" {
+		c.IngestDoclingCommand = Default().IngestDoclingCommand
+	}
+	if c.IngestDoclingTimeout == 0 {
+		c.IngestDoclingTimeout = Default().IngestDoclingTimeout
+	}
+	switch strings.ToLower(strings.TrimSpace(c.IngestProvider)) {
+	case "auto", "native", "docling":
+		c.IngestProvider = strings.ToLower(strings.TrimSpace(c.IngestProvider))
+	default:
+		return fmt.Errorf("ingest.provider must be one of auto|native|docling: %q", c.IngestProvider)
 	}
 	if c.SessionInactivityTimeout == 0 {
 		// zero is shorthand for the default

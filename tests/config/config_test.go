@@ -703,6 +703,9 @@ func TestDefault_NestedConfigFieldDefaults(t *testing.T) {
 	if cfg.IngestPDFMode != "ocr" || cfg.IngestImagesMode != "ocr_auto" || cfg.IngestAudioMode != "auto" || cfg.IngestArchivesMode != "deep" {
 		t.Fatalf("unexpected ingest mode defaults: pdf=%q images=%q audio=%q archives=%q", cfg.IngestPDFMode, cfg.IngestImagesMode, cfg.IngestAudioMode, cfg.IngestArchivesMode)
 	}
+	if cfg.IngestProvider != "auto" || cfg.IngestDoclingCommand != "docling" || cfg.IngestDoclingTimeout <= 0 {
+		t.Fatalf("unexpected ingest provider defaults: provider=%q command=%q timeout=%v", cfg.IngestProvider, cfg.IngestDoclingCommand, cfg.IngestDoclingTimeout)
+	}
 	if cfg.STTProvider != "mistral" || cfg.STTMistralModel == "" || cfg.STTElevenLabsModel == "" {
 		t.Fatalf("unexpected stt defaults: provider=%q mistral=%q eleven=%q", cfg.STTProvider, cfg.STTMistralModel, cfg.STTElevenLabsModel)
 	}
@@ -764,6 +767,29 @@ func TestLoad_EnvOverridesChatModel(t *testing.T) {
 		}
 		if cfg.ChatModel != "new-chat" {
 			t.Fatalf("unexpected chat model: %q", cfg.ChatModel)
+		}
+	})
+}
+
+func TestLoad_EnvOverridesIngestProviderDocling(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_INGEST_PROVIDER", "docling")
+		t.Setenv("DIR2MCP_INGEST_DOCLING_COMMAND", "/opt/custom/docling")
+		t.Setenv("DIR2MCP_INGEST_DOCLING_TIMEOUT", "45s")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.IngestProvider != "docling" {
+			t.Fatalf("IngestProvider=%q want=docling", cfg.IngestProvider)
+		}
+		if cfg.IngestDoclingCommand != "/opt/custom/docling" {
+			t.Fatalf("IngestDoclingCommand=%q", cfg.IngestDoclingCommand)
+		}
+		if cfg.IngestDoclingTimeout != 45*time.Second {
+			t.Fatalf("IngestDoclingTimeout=%v want=%v", cfg.IngestDoclingTimeout, 45*time.Second)
 		}
 	})
 }
