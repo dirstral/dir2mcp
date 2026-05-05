@@ -48,7 +48,7 @@ func TestRepoSplitBoundary_NoDirstralCLIImports(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		if rel == filepath.ToSlash("tests/security/repo_split_boundary_test.go") {
+		if filepath.ToSlash(rel) == "tests/security/repo_split_boundary_test.go" {
 			return nil
 		}
 
