@@ -56,10 +56,12 @@ const MaxSearchK = 50
 // sessionInfo holds metadata tracked for each active session.  `created` is the
 // time the session was started; `lastSeen` is updated on each successful
 // request.  The server uses both values to enforce inactivity timeouts and
-// optional absolute lifetimes.
+// optional absolute lifetimes.  `authScope` records the authenticated identity
+// for the session.
 type sessionInfo struct {
-	created  time.Time
-	lastSeen time.Time
+	created   time.Time
+	lastSeen  time.Time
+	authScope string
 }
 
 type sessionPersistenceStore interface {
@@ -222,8 +224,8 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
 		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
 	}
-	s.restoreRuntimeState(context.Background())
 	s.initPaymentConfig()
+	s.restoreRuntimeState(context.Background())
 	s.tools = s.buildToolRegistry()
 	return s
 }
@@ -323,7 +325,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	switch rc.req.Method {
 	case protocol.RPCMethodInitialize:
-		s.handleInitialize(w, rc.id, rc.hasID)
+		s.handleInitialize(w, r, rc.id, rc.hasID)
 	case protocol.RPCMethodNotificationsInitialized:
 		if !rc.hasID {
 			w.WriteHeader(http.StatusAccepted)
@@ -349,7 +351,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID bool) {
+func (s *Server) handleInitialize(w http.ResponseWriter, r *http.Request, id interface{}, hasID bool) {
 	if !hasID {
 		writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
 		return
@@ -360,7 +362,13 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 		writeError(w, http.StatusInternalServerError, id, -32603, "failed to initialize session", "", false)
 		return
 	}
-	s.storeSession(sessionID)
+
+	// Extract authScope from request context
+	var authScope string
+	if rc, ok := r.Context().Value(requestContextKey{}).(requestContext); ok {
+		authScope = rc.authScope
+	}
+	s.storeSession(sessionID, authScope)
 
 	w.Header().Set(protocol.MCPSessionHeader, sessionID)
 	writeResult(w, http.StatusOK, id, map[string]interface{}{
@@ -379,9 +387,9 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 	})
 }
 
-func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (bool, string) {
 	if strings.EqualFold(s.cfg.AuthMode, "none") {
-		return true
+		return true, ""
 	}
 
 	expectedToken := s.authToken
@@ -390,21 +398,24 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 
 	if len(authHeader) < len(bearerPrefix) || strings.ToLower(authHeader[:len(bearerPrefix)]) != bearerPrefix {
 		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
-		return false
+		return false, ""
 	}
 
 	providedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])
 	if expectedToken == "" || providedToken == "" {
 		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
-		return false
+		return false, ""
 	}
 
 	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
 		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
-		return false
+		return false, ""
 	}
 
-	return true
+	// For successful auth, compute a hash of the token as the auth scope identifier
+	sum := sha256.Sum256([]byte(providedToken))
+	authScope := "token:" + hex.EncodeToString(sum[:8])
+	return true, authScope
 }
 
 func (s *Server) allowOrigin(w http.ResponseWriter, r *http.Request) bool {
@@ -550,11 +561,11 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	return true, ""
 }
 
-func (s *Server) storeSession(id string) {
+func (s *Server) storeSession(id string, authScope string) {
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 	now := time.Now()
-	s.sessions[id] = sessionInfo{created: now, lastSeen: now}
+	s.sessions[id] = sessionInfo{created: now, lastSeen: now, authScope: authScope}
 	s.persistSession(id, s.sessions[id])
 }
 
@@ -660,7 +671,7 @@ func (s *Server) restoreSessions(ctx context.Context) {
 			_ = store.DeleteMCPSession(ctx, id)
 			continue
 		}
-		s.sessions[id] = sessionInfo{created: rec.Created, lastSeen: rec.LastSeen}
+		s.sessions[id] = sessionInfo{created: rec.Created, lastSeen: rec.LastSeen, authScope: rec.AuthScope}
 	}
 }
 
@@ -701,7 +712,7 @@ func (s *Server) persistSession(id string, si sessionInfo) {
 	if !ok || store == nil {
 		return
 	}
-	if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC(), ""); err != nil {
+	if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC(), si.authScope); err != nil {
 		log.Printf("warning: failed persisting session %s: %v", maskSessionID(id), err)
 	}
 }
