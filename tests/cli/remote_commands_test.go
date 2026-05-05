@@ -209,7 +209,7 @@ func newMCPTestServer(t *testing.T, onToolCall func(name string, args map[string
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 
 		var req struct {
 			Method string `json:"method"`
@@ -293,7 +293,7 @@ func mustUnusedPort(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	addr := l.Addr().String()
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {

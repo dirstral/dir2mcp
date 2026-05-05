@@ -26,7 +26,10 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("resolve server connection: %v", remoteErr))
 		return exitGeneric
 	}
+	return a.runAskLocal(ctx, global, opts)
+}
 
+func (a *App) runAskLocal(ctx context.Context, global globalOptions, opts askOptions) int {
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
@@ -60,7 +63,6 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		}
 		return exitConfigInvalid
 	}
-
 	st := a.storeForConfig(cfg)
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {

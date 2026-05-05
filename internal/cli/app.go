@@ -374,7 +374,12 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 }
 
 func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remaining []string, jsonRequested bool) int {
-	switch remaining[0] {
+	command := remaining[0]
+	if code, handled := a.runSimpleCommand(ctx, globalOpts, command, remaining[1:]); handled {
+		return code
+	}
+
+	switch command {
 	case "up":
 		upOpts, parseErr := parseUpOptions(globalOpts, remaining[1:])
 		if parseErr != nil {
@@ -382,22 +387,6 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 			return exitConfigInvalid
 		}
 		return a.runUp(ctx, upOpts)
-	case "status":
-		return a.runStatus(ctx, globalOpts, remaining[1:])
-	case "ask":
-		return a.runAsk(ctx, globalOpts, remaining[1:])
-	case "search":
-		return a.runSearchRemote(ctx, globalOpts, remaining[1:])
-	case "open-file":
-		return a.runOpenFileRemote(ctx, globalOpts, remaining[1:])
-	case "list-files":
-		return a.runListFilesRemote(ctx, globalOpts, remaining[1:])
-	case "reindex":
-		return a.runReindex(ctx, globalOpts, remaining[1:])
-	case "config":
-		return a.runConfig(ctx, globalOpts, remaining[1:])
-	case "bridge":
-		return a.runBridge(ctx, globalOpts, remaining[1:])
 	case "version":
 		if !globalOpts.quiet {
 			writeln(a.stdout, "dir2mcp v"+strings.TrimPrefix(buildinfo.Version, "v"))
@@ -410,6 +399,29 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 			a.printUsage()
 		}
 		return exitGeneric
+	}
+}
+
+func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
+	switch command {
+	case "status":
+		return a.runStatus(ctx, globalOpts, args), true
+	case "ask":
+		return a.runAsk(ctx, globalOpts, args), true
+	case "search":
+		return a.runSearchRemote(ctx, globalOpts, args), true
+	case "open-file":
+		return a.runOpenFileRemote(ctx, globalOpts, args), true
+	case "list-files":
+		return a.runListFilesRemote(ctx, globalOpts, args), true
+	case "reindex":
+		return a.runReindex(ctx, globalOpts, args), true
+	case "config":
+		return a.runConfig(ctx, globalOpts, args), true
+	case "bridge":
+		return a.runBridge(ctx, globalOpts, args), true
+	default:
+		return 0, false
 	}
 }
 

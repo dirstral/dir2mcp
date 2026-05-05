@@ -207,39 +207,54 @@ func (c *remoteMCPClient) CallTool(ctx context.Context, name string, arguments m
 		return nil, fmt.Errorf("tools/call failed with HTTP %d: %s", resp.StatusCode, rpcErrorSummary(body))
 	}
 
-	var envelope rpcResponse
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("decode tools/call response: %w", err)
-	}
-	if envelope.Error != nil {
-		return nil, fmt.Errorf("tools/call failed: %s", strings.TrimSpace(envelope.Error.Message))
-	}
-	if len(envelope.Result) == 0 {
-		return nil, errors.New("tools/call response missing result")
-	}
-
-	var result mcpToolCallResult
-	if err := json.Unmarshal(envelope.Result, &result); err != nil {
-		return nil, fmt.Errorf("decode tool result: %w", err)
+	result, err := decodeToolCallResult(body)
+	if err != nil {
+		return nil, err
 	}
 	if result.IsError {
-		errBody := "tool returned error"
-		if result.StructuredContent != nil {
-			if errorNode, ok := result.StructuredContent["error"].(map[string]interface{}); ok {
-				if msg, ok := errorNode["message"].(string); ok && strings.TrimSpace(msg) != "" {
-					errBody = strings.TrimSpace(msg)
-				}
-				if code, ok := errorNode["code"].(string); ok && strings.TrimSpace(code) != "" {
-					errBody = strings.TrimSpace(code) + ": " + errBody
-				}
-			}
-		}
-		return nil, errors.New(errBody)
+		return nil, errors.New(toolCallErrorMessage(result.StructuredContent))
 	}
 	if result.StructuredContent == nil {
 		return nil, errors.New("tool response missing structuredContent")
 	}
 	return result.StructuredContent, nil
+}
+
+func decodeToolCallResult(body []byte) (mcpToolCallResult, error) {
+	var envelope rpcResponse
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return mcpToolCallResult{}, fmt.Errorf("decode tools/call response: %w", err)
+	}
+	if envelope.Error != nil {
+		return mcpToolCallResult{}, fmt.Errorf("tools/call failed: %s", strings.TrimSpace(envelope.Error.Message))
+	}
+	if len(envelope.Result) == 0 {
+		return mcpToolCallResult{}, errors.New("tools/call response missing result")
+	}
+
+	var result mcpToolCallResult
+	if err := json.Unmarshal(envelope.Result, &result); err != nil {
+		return mcpToolCallResult{}, fmt.Errorf("decode tool result: %w", err)
+	}
+	return result, nil
+}
+
+func toolCallErrorMessage(structured map[string]interface{}) string {
+	errBody := "tool returned error"
+	if structured == nil {
+		return errBody
+	}
+	errorNode, ok := structured["error"].(map[string]interface{})
+	if !ok {
+		return errBody
+	}
+	if msg, ok := errorNode["message"].(string); ok && strings.TrimSpace(msg) != "" {
+		errBody = strings.TrimSpace(msg)
+	}
+	if code, ok := errorNode["code"].(string); ok && strings.TrimSpace(code) != "" {
+		errBody = strings.TrimSpace(code) + ": " + errBody
+	}
+	return errBody
 }
 
 func resolveRemoteConnection(global globalOptions) (remoteConnection, error) {
