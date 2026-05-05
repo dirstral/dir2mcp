@@ -134,10 +134,17 @@ func (s *Server) rpcEnvelopeMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
+		// Preserve authScope from existing context if present
+		var authScope string
+		if existingRC, ok := r.Context().Value(requestContextKey{}).(requestContext); ok {
+			authScope = existingRC.authScope
+		}
+
 		ctx := context.WithValue(r.Context(), requestContextKey{}, requestContext{
-			req:   req,
-			id:    id,
-			hasID: hasID,
+			req:       req,
+			id:        id,
+			hasID:     hasID,
+			authScope: authScope,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

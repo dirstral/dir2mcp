@@ -535,20 +535,21 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	inactivity, maxLife := s.resolveSessionTimeouts()
 
 	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
-
 	si, ok := s.sessions[id]
 	if !ok {
+		s.sessionMu.Unlock()
 		return false, ""
 	}
 	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
+		s.sessionMu.Unlock()
 		s.deletePersistedSession(id)
 		log.Printf("session %s expired due to inactivity", maskSessionID(id))
 		return false, "inactivity"
 	}
 	if maxLife > 0 && now.Sub(si.created) > maxLife {
 		delete(s.sessions, id)
+		s.sessionMu.Unlock()
 		s.deletePersistedSession(id)
 		log.Printf("session %s expired due to max lifetime", maskSessionID(id))
 		return false, "max-lifetime"
@@ -557,16 +558,18 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	// update lastSeen
 	si.lastSeen = now
 	s.sessions[id] = si
+	s.sessionMu.Unlock()
 	s.persistSession(id, si)
 	return true, ""
 }
 
 func (s *Server) storeSession(id string, authScope string) {
-	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
 	now := time.Now()
-	s.sessions[id] = sessionInfo{created: now, lastSeen: now, authScope: authScope}
-	s.persistSession(id, s.sessions[id])
+	si := sessionInfo{created: now, lastSeen: now, authScope: authScope}
+	s.sessionMu.Lock()
+	s.sessions[id] = si
+	s.sessionMu.Unlock()
+	s.persistSession(id, si)
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
@@ -629,18 +632,23 @@ func (s *Server) cleanupExpiredSessions(now time.Time) {
 	inactivity, maxLife := s.resolveSessionTimeouts()
 
 	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
-
+	var toDelete []string
 	for id, si := range s.sessions {
 		if now.Sub(si.lastSeen) > inactivity {
+			toDelete = append(toDelete, id)
 			delete(s.sessions, id)
-			s.deletePersistedSession(id)
 			continue
 		}
 		if maxLife > 0 && now.Sub(si.created) > maxLife {
+			toDelete = append(toDelete, id)
 			delete(s.sessions, id)
-			s.deletePersistedSession(id)
 		}
+	}
+	s.sessionMu.Unlock()
+
+	// Perform I/O outside the lock
+	for _, id := range toDelete {
+		s.deletePersistedSession(id)
 	}
 }
 
