@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,7 +46,10 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 				if !ok || key.Kind != token.STRING {
 					continue
 				}
-				name := strings.Trim(key.Value, "\"")
+				name, err := strconv.Unquote(key.Value)
+				if err != nil {
+					t.Fatalf("decode command key literal %q: %v", key.Value, err)
+				}
 				commands[name] = struct{}{}
 			}
 		}
@@ -116,9 +120,9 @@ func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 		}
 	}
 	for _, cmd := range []string{"ask", "search", "open-file", "list-files"} {
-		want := "legacy compatibility shim; prefer dirstral-cli for client UX"
+		want := "{\"" + cmd + "\", \"legacy compatibility shim; prefer dirstral-cli for client UX\"}"
 		if !strings.Contains(app, want) {
-			t.Fatalf("usage text must mark %q command as legacy compatibility shim", cmd)
+			t.Fatalf("usage text must mark %q command as legacy compatibility shim with explicit command entry", cmd)
 		}
 	}
 }
