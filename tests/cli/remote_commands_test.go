@@ -4,13 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -142,9 +139,8 @@ func TestListFilesCommandPrintsOneJSONLinePerFile(t *testing.T) {
 }
 
 func TestRemoteCommandsReturnNonZeroWhenServerIsUnavailable(t *testing.T) {
-	unused := mustUnusedPort(t)
 	tmp := t.TempDir()
-	writeConnectionMetadata(t, tmp, fmt.Sprintf("http://127.0.0.1:%d/mcp", unused), "")
+	writeConnectionMetadata(t, tmp, "http://127.0.0.1:0/mcp", "")
 
 	commands := [][]string{{"ask", "q"}, {"search", "q"}, {"open-file", "docs/a.md"}, {"list-files"}}
 	for _, cmdArgs := range commands {
@@ -285,23 +281,4 @@ func writeConnectionMetadata(t *testing.T, root, url, tokenFile string) {
 	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), append(raw, '\n'), 0o644); err != nil {
 		t.Fatalf("write connection.json: %v", err)
 	}
-}
-
-func mustUnusedPort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer func() { _ = l.Close() }()
-	addr := l.Addr().String()
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("split host port: %v", err)
-	}
-	p, err := strconv.Atoi(port)
-	if err != nil {
-		t.Fatalf("atoi port: %v", err)
-	}
-	return p
 }
