@@ -14,15 +14,58 @@ import (
 )
 
 func TestNewTransport_IsSDK(t *testing.T) {
+	srv := mcp.NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer func() { _ = ln.Close() }()
-	srv := mcp.NewServer(config.Config{}, nil)
-	var tr mcp.Transport = mcp.NewSDKTransport(srv, ln, "", "")
-	if _, ok := tr.(*mcp.SDKTransport); !ok {
-		t.Fatalf("expected *mcp.SDKTransport, got %T", tr)
+
+	tr := mcp.NewSDKTransport(srv, ln, "", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.Serve(ctx, http.NotFoundHandler())
+	}()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	notFoundResp, err := client.Post("http://"+ln.Addr().String()+"/not-mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /not-mcp: %v", err)
+	}
+	_ = notFoundResp.Body.Close()
+	if notFoundResp.StatusCode != http.StatusNotFound {
+		cancel()
+		t.Fatalf("expected 404 for non-MCP path, got %d", notFoundResp.StatusCode)
+	}
+
+	mcpResp, err := client.Post("http://"+ln.Addr().String()+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}`))
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /mcp: %v", err)
+	}
+	_ = mcpResp.Body.Close()
+	if mcpResp.StatusCode < 200 || mcpResp.StatusCode >= 300 {
+		cancel()
+		t.Fatalf("unexpected /mcp status: %d", mcpResp.StatusCode)
+	}
+	if strings.TrimSpace(mcpResp.Header.Get("MCP-Session-Id")) == "" {
+		cancel()
+		t.Fatal("expected MCP-Session-Id header on initialize")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Serve to exit")
 	}
 }
 

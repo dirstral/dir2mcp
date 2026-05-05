@@ -80,6 +80,10 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	}()
 
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodOptions || req.URL.Path != t.server.cfg.MCPPath {
+			handler.ServeHTTP(w, req)
+			return
+		}
 		t.serveHTTPRequest(w, req, sdkHandler)
 	})
 

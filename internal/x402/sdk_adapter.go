@@ -54,12 +54,14 @@ func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Clien
 		}
 	}
 
-	url := strings.TrimRight(baseURL, "/")
-	if !strings.HasSuffix(url, "/v2/x402") {
-		url += "/v2/x402"
+<<<<<<< HEAD
+	sdkURL, ok := normalizeSDKFacilitatorURL(baseURL)
+	if !ok {
+		return &sdkAdapterClient{baseURL: ""}
 	}
+
 	cfg := &sdkhttp.FacilitatorConfig{
-		URL:        url,
+		URL:        sdkURL,
 		HTTPClient: httpClient,
 		Timeout:    defaultHTTPTimeout,
 	}
@@ -71,6 +73,22 @@ func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Clien
 		baseURL:     baseURL,
 		facilitator: sdkhttp.NewFacilitatorClient(cfg),
 	}
+}
+
+func normalizeSDKFacilitatorURL(baseURL string) (string, bool) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", false
+	}
+	trimmedPath := strings.TrimSuffix(parsed.Path, "/")
+	if !strings.HasSuffix(trimmedPath, "/v2/x402") {
+		joined, joinErr := url.JoinPath(trimmedPath, "/v2/x402")
+		if joinErr != nil {
+			return "", false
+		}
+		parsed.Path = joined
+	}
+	return strings.TrimRight(parsed.String(), "/"), true
 }
 
 func (c *sdkAdapterClient) Verify(ctx context.Context, paymentSignature string, req Requirement) (json.RawMessage, error) {
