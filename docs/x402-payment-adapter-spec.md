@@ -16,7 +16,7 @@ Provide a clear, versioned contract so that:
 
 When x402 gating is enabled (`--x402` flag in the CLI or `x402.mode` in config), dir2mcp invokes the adapter at the MCP request boundary (typically `POST /mcp` for `tools/call`, or selected tool names). Depending on the facilitator's response, the server either allows the request to proceed or returns `402 Payment Required` with `PAYMENT-REQUIRED` header data. Clients must then obtain and attach `PAYMENT-SIGNATURE` before retrying.
 
-The facilitator client implementation is selected at startup via `X402_CLIENT=legacy|sdk`; the default remains `legacy` for rollback safety. `legacy` keeps the current hand-rolled HTTP compatibility path, while `sdk` routes facilitator calls through the Coinbase x402 Go SDK.
+The facilitator integration currently defaults to the Coinbase x402 Go SDK client.
 ### Example configuration snippet
 
 ```yaml
@@ -27,8 +27,6 @@ x402:
   facilitator:
     api_key: "..."         # credentials for the external service
 
-# Environment:
-# X402_CLIENT=legacy|sdk
 ```
 
 > **Security note:** never commit API keys or sensitive credentials (such as

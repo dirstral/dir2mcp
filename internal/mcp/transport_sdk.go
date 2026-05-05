@@ -30,9 +30,8 @@ type SDKTransport struct {
 	keyFile  string
 }
 
-// NewSDKTransport constructs an SDKTransport.  certFile and keyFile are
-// optional; both must be non-empty to enable TLS, matching the contract of
-// LegacyTransport / Server.RunOnListenerTLS.
+// NewSDKTransport constructs an SDKTransport. certFile and keyFile are
+// optional; both must be non-empty to enable TLS.
 func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile string) *SDKTransport {
 	return &SDKTransport{
 		server:   server,
@@ -44,17 +43,8 @@ func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile st
 
 // Serve implements Transport.
 func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
-	if t == nil {
-		return errors.New("sdk transport: nil transport")
-	}
-	if t.server == nil {
-		return errors.New("sdk transport: nil server")
-	}
-	if t.listener == nil {
-		return errors.New("nil listener passed to SDKTransport.Serve")
-	}
-	if handler == nil {
-		return errors.New("sdk transport: nil handler")
+	if err := t.validateServeInputs(handler); err != nil {
+		return err
 	}
 
 	sdkServer := t.server.buildSDKServer()
@@ -81,6 +71,10 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	}()
 
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodOptions || req.URL.Path != t.server.cfg.MCPPath {
+			handler.ServeHTTP(w, req)
+			return
+		}
 		t.serveHTTPRequest(w, req, sdkHandler)
 	})
 
@@ -115,6 +109,22 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func (t *SDKTransport) validateServeInputs(handler Handler) error {
+	if t == nil {
+		return errors.New("sdk transport: nil transport")
+	}
+	if t.server == nil {
+		return errors.New("sdk transport: nil server")
+	}
+	if t.listener == nil {
+		return errors.New("nil listener passed to SDKTransport.Serve")
+	}
+	if handler == nil {
+		return errors.New("sdk transport: nil handler")
+	}
+	return nil
 }
 
 func (t *SDKTransport) serveHTTPRequest(w http.ResponseWriter, req *http.Request, sdkHandler http.Handler) {
