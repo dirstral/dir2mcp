@@ -52,6 +52,7 @@ type mcpToolCallResult struct {
 type remoteMCPClient struct {
 	endpoint   string
 	authHeader string
+	connection remoteConnection
 	httpClient *http.Client
 
 	mu        sync.Mutex
@@ -60,15 +61,24 @@ type remoteMCPClient struct {
 	nextID    atomic.Int64
 }
 
-func newRemoteMCPClient(endpoint, authHeader string) *remoteMCPClient {
+func newRemoteMCPClient(endpoint, authHeader string, connection remoteConnection) *remoteMCPClient {
 	return &remoteMCPClient{
 		endpoint:   strings.TrimSpace(endpoint),
 		authHeader: strings.TrimSpace(authHeader),
+		connection: connection,
 		httpClient: &http.Client{Timeout: 45 * time.Second},
 	}
 }
 
 func (c *remoteMCPClient) nextRequestID() int64 { return c.nextID.Add(1) }
+
+func rpcErrorSummary(body []byte) string {
+	var envelope rpcResponse
+	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error != nil && strings.TrimSpace(envelope.Error.Message) != "" {
+		return strings.TrimSpace(envelope.Error.Message)
+	}
+	return "upstream request failed"
+}
 
 func (c *remoteMCPClient) getSessionID() string {
 	c.mu.Lock()
@@ -96,8 +106,18 @@ func (c *remoteMCPClient) doRPC(ctx context.Context, reqBody rpcRequest, include
 	if err != nil {
 		return nil, nil, fmt.Errorf("create rpc request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(protocol.MCPProtocolVersionHeader, protocol.ProtocolDefaultVersion)
+	// Apply persisted connection headers first
+	for key, value := range c.connection.Headers {
+		req.Header.Set(key, value)
+	}
+	// Set default headers if not already present
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if req.Header.Get(protocol.MCPProtocolVersionHeader) == "" {
+		req.Header.Set(protocol.MCPProtocolVersionHeader, protocol.ProtocolDefaultVersion)
+	}
+	// Override with auth header if provided (takes precedence)
 	if c.authHeader != "" {
 		req.Header.Set("Authorization", c.authHeader)
 	}
@@ -147,7 +167,7 @@ func (c *remoteMCPClient) ensureSession(ctx context.Context) error {
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("initialize failed with HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("initialize failed with HTTP %d: %s", resp.StatusCode, rpcErrorSummary(body))
 	}
 
 	var envelope rpcResponse
@@ -184,7 +204,7 @@ func (c *remoteMCPClient) CallTool(ctx context.Context, name string, arguments m
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("tools/call failed with HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("tools/call failed with HTTP %d: %s", resp.StatusCode, rpcErrorSummary(body))
 	}
 
 	var envelope rpcResponse
@@ -277,7 +297,7 @@ func (a *App) remoteToolClient(global globalOptions) (*remoteMCPClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newRemoteMCPClient(conn.URL, authHeader), nil
+	return newRemoteMCPClient(conn.URL, authHeader, conn), nil
 }
 
 func (a *App) runSearchRemote(ctx context.Context, global globalOptions, args []string) int {
