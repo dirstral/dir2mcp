@@ -312,6 +312,87 @@ func (a *App) runSearchRemote(ctx context.Context, global globalOptions, args []
 	return exitSuccess
 }
 
+func (a *App) runAskRemote(ctx context.Context, global globalOptions, opts askOptions, client *remoteMCPClient) int {
+	payload, err := client.CallTool(ctx, protocol.ToolNameAsk, map[string]interface{}{
+		"question":    opts.question,
+		"mode":        opts.mode,
+		"k":           opts.k,
+		"index":       opts.index,
+		"path_prefix": opts.pathPrefix,
+		"file_glob":   opts.fileGlob,
+		"doc_types":   opts.docTypes,
+	})
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("ask failed: %v", err))
+		return exitGeneric
+	}
+
+	if global.jsonOutput {
+		if err := emitJSON(a.stdout, payload); err != nil {
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("encode ask json: %v", err))
+			return exitGeneric
+		}
+		return exitSuccess
+	}
+	if global.quiet {
+		return exitSuccess
+	}
+
+	answer, _ := payload["answer"].(string)
+	citations, _ := payload["citations"].([]interface{})
+	hits, _ := payload["hits"].([]interface{})
+
+	writeln(a.stdout)
+	if strings.TrimSpace(answer) != "" {
+		writeln(a.stdout, answer)
+	}
+	if len(citations) > 0 {
+		s := a.sty(false)
+		writeln(a.stdout)
+		writef(a.stdout, "  %s\n", s.sectionHeader("Citations"))
+		for i, item := range citations {
+			citation, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			relPath, _ := citation["rel_path"].(string)
+			chunkID, _ := citation["chunk_id"].(float64)
+			spanText := "?"
+			if span, ok := citation["span"].(map[string]interface{}); ok {
+				startLine, _ := span["start_line"].(float64)
+				endLine, _ := span["end_line"].(float64)
+				spanText = fmt.Sprintf("L%d-L%d", int64(startLine), int64(endLine))
+			}
+			writef(a.stdout, "  %s %s  %s\n",
+				s.Brand.Render(fmt.Sprintf("[%d]", i+1)),
+				s.Cyan.Render(relPath),
+				s.dim(fmt.Sprintf("chunk=%d span=%s", int64(chunkID), spanText)),
+			)
+		}
+	}
+	if opts.mode == "search_only" && len(hits) > 0 {
+		s := a.sty(false)
+		writeln(a.stdout)
+		writef(a.stdout, "  %s %s\n\n", s.sectionHeader("Search results"), s.dim(fmt.Sprintf("(%d hits)", len(hits))))
+		for i, item := range hits {
+			hit, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			relPath, _ := hit["rel_path"].(string)
+			score, _ := hit["score"].(float64)
+			snippet, _ := hit["snippet"].(string)
+			if strings.TrimSpace(snippet) == "" {
+				snippet = "(no snippet)"
+			}
+			writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Cyan.Render(relPath), s.dim(fmt.Sprintf("score=%.4f", score)))
+			writef(a.stdout, "      %s\n", s.dim(snippet))
+		}
+	}
+	writeln(a.stdout)
+	return exitSuccess
+}
+
 type openFileOptions struct {
 	relPath   string
 	startLine int

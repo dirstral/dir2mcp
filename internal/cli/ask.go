@@ -18,6 +18,15 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 		return exitConfigInvalid
 	}
 
+	remoteClient, remoteErr := a.remoteToolClient(global)
+	if remoteErr == nil {
+		return a.runAskRemote(ctx, global, opts, remoteClient)
+	}
+	if remoteErr != nil && !errors.Is(remoteErr, os.ErrNotExist) {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("resolve server connection: %v", remoteErr))
+		return exitGeneric
+	}
+
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))

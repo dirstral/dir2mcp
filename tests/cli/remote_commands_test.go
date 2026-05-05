@@ -146,7 +146,7 @@ func TestRemoteCommandsReturnNonZeroWhenServerIsUnavailable(t *testing.T) {
 	tmp := t.TempDir()
 	writeConnectionMetadata(t, tmp, fmt.Sprintf("http://127.0.0.1:%d/mcp", unused), "")
 
-	commands := [][]string{{"search", "q"}, {"open-file", "docs/a.md"}, {"list-files"}}
+	commands := [][]string{{"ask", "q"}, {"search", "q"}, {"open-file", "docs/a.md"}, {"list-files"}}
 	for _, cmdArgs := range commands {
 		t.Run(strings.Join(cmdArgs, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -161,6 +161,45 @@ func TestRemoteCommandsReturnNonZeroWhenServerIsUnavailable(t *testing.T) {
 				t.Fatalf("expected error output for %v", cmdArgs)
 			}
 		})
+	}
+}
+
+func TestAskCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
+	ts := newMCPTestServer(t, func(name string, args map[string]interface{}) map[string]interface{} {
+		if name != protocol.ToolNameAsk {
+			t.Fatalf("unexpected tool name: %s", name)
+		}
+		if question, _ := args["question"].(string); question != "what is indexed?" {
+			t.Fatalf("unexpected question: %#v", args["question"])
+		}
+		return map[string]interface{}{
+			"question":          "what is indexed?",
+			"answer":            "Indexed docs are available.",
+			"citations":         []interface{}{},
+			"hits":              []interface{}{},
+			"indexing_complete": true,
+		}
+	})
+	defer ts.Close()
+
+	tmp := t.TempDir()
+	writeConnectionMetadata(t, tmp, ts.URL, "")
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "ask", "what is indexed?"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal ask output: %v raw=%s", err, stdout.String())
+	}
+	if payload["answer"] != "Indexed docs are available." {
+		t.Fatalf("unexpected answer in payload: %#v", payload["answer"])
 	}
 }
 
