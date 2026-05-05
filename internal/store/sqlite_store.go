@@ -1147,7 +1147,12 @@ func (s *SQLiteStore) ListMCPSessions(ctx context.Context) ([]MCPSessionRecord, 
 	}
 	defer s.ReleaseDB()
 
-	rows, err := db.QueryContext(ctx, `SELECT session_id, created_unix, last_seen_unix FROM mcp_sessions`)
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT session_id, created_unix, last_seen_unix
+		 FROM mcp_sessions
+		 ORDER BY last_seen_unix DESC, created_unix DESC, session_id ASC`,
+	)
 	if err != nil {
 		return nil, err
 	}
