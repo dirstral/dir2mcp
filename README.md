@@ -23,7 +23,7 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
 - Single Go binary (`dir2mcp`) with local-first state in `.dir2mcp/`
 - Companion bridge binary (`elevenlabs-bridge`) for ElevenLabs webhook tools
 - MCP Streamable HTTP server with a stable tool surface
-- Multimodal ingestion: text/code, OCR, transcripts, structured annotations
+- Multimodal ingestion: text/code, document extraction (docling or OCR), transcripts, structured annotations
 - Citation-aware retrieval and RAG-style answering
 - Optional facilitator-backed x402 payment gating for `tools/call`
 - Repo layout with two binaries:
@@ -197,6 +197,7 @@ vary by deployment. The commonly used variables are:
 | Variable | Required | Description |
 |---|---|---|
 | `MISTRAL_API_KEY` | Yes | Primary API key used across embeddings, OCR, default STT, and generation |
+| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to md --output - {input}`); when set/available, it is preferred for PDF/image extraction |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES` | No | Max encoded Mistral upload payload size in bytes for OCR and transcription requests (default: `20971520`); increase for large PDFs or audio files |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |

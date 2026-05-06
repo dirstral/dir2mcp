@@ -281,12 +281,8 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 			if err != nil {
 				return nil, err
 			}
-			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-				client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-				if cfg.MistralMaxOCRPayloadBytes > 0 {
-					client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
-				}
-				svc.SetOCR(client)
+			if extractor := ingest.DocumentExtractorFromConfig(cfg); extractor != nil {
+				svc.SetDocumentExtractor(extractor)
 			}
 			return svc, nil
 		},

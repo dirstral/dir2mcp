@@ -1516,15 +1516,19 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 			}
 		}
-		client, toolErr := s.newMistralClient()
-		if toolErr != nil {
-			return "", "", toolErr
+		extractor := ingest.DocumentExtractorFromConfig(s.cfg)
+		if extractor == nil {
+			return "", "", &toolExecutionError{
+				Code:      "CONFIG_INVALID",
+				Message:   "document extraction is not configured (set DIR2MCP_DOCLING_COMMAND or MISTRAL_API_KEY)",
+				Retryable: false,
+			}
 		}
 		ing, err := ingest.NewService(s.cfg, s.store)
 		if err != nil {
 			return "", "", &toolExecutionError{Code: "CONFIG_INVALID", Message: err.Error(), Retryable: false}
 		}
-		ing.SetOCR(client)
+		ing.SetDocumentExtractor(extractor)
 		text, ocrErr := ing.ReadOrComputeOCR(ctx, doc, content)
 		if ocrErr != nil {
 			return "", "", s.mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)

@@ -45,7 +45,7 @@ type Service struct {
 	store         model.Store
 	indexingState *appstate.IndexingState
 	repGen        *RepresentationGenerator
-	ocr           model.OCR
+	extractor     model.DocumentExtractor
 	transcriber   model.Transcriber
 
 	// optional logger for diagnostics; defaults to log.Default() when nil.
@@ -210,6 +210,14 @@ func newMistralTranscriber(cfg config.Config) model.Transcriber {
 	return client
 }
 
+func newMistralExtractor(cfg config.Config) model.DocumentExtractor {
+	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+	if cfg.MistralMaxOCRPayloadBytes > 0 {
+		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
+	}
+	return client
+}
+
 func newElevenLabsTranscriber(cfg config.Config) model.Transcriber {
 	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
 	if baseURL := strings.TrimSpace(cfg.ElevenLabsBaseURL); baseURL != "" {
@@ -222,6 +230,18 @@ func newElevenLabsTranscriber(cfg config.Config) model.Transcriber {
 		client.TranscribeLanguageCode = languageCode
 	}
 	return client
+}
+
+// DocumentExtractorFromConfig resolves document extraction provider selection.
+// Priority: docling command (when configured/available), then Mistral OCR.
+func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
+	if extractor := NewDoclingExtractor(strings.TrimSpace(os.Getenv("DIR2MCP_DOCLING_COMMAND"))); extractor != nil {
+		return extractor
+	}
+	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+		return newMistralExtractor(cfg)
+	}
+	return nil
 }
 
 func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
@@ -299,8 +319,12 @@ func (s *Service) SetIndexingState(state *appstate.IndexingState) {
 	s.indexingState = state
 }
 
+func (s *Service) SetDocumentExtractor(extractor model.DocumentExtractor) {
+	s.extractor = extractor
+}
+
 func (s *Service) SetOCR(ocr model.OCR) {
-	s.ocr = ocr
+	s.extractor = ocr
 }
 
 func (s *Service) SetTranscriber(transcriber model.Transcriber) {
@@ -833,7 +857,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return nil
 	}
 
-	if (doc.DocType == "pdf" || doc.DocType == "image") && s.ocr != nil {
+	if (doc.DocType == "pdf" || doc.DocType == "image") && s.extractor != nil {
 		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
 			return err
 		}
@@ -884,7 +908,7 @@ func isNotFoundError(err error) bool {
 }
 
 func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
-	if s.repGen == nil || s.ocr == nil {
+	if s.repGen == nil || s.extractor == nil {
 		return nil
 	}
 
@@ -1185,7 +1209,7 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	// can be expensive, so we only run it on a configurable write interval.
 	// The counter increments only when we are about to perform a real write
 	// (cache miss), not for cache hits.
-	ocrText, err := s.ocr.Extract(ctx, doc.RelPath, content)
+	ocrText, err := s.extractor.Extract(ctx, doc.RelPath, content)
 	if err != nil {
 		return "", fmt.Errorf("ocr extract %s: %w", doc.RelPath, err)
 	}
