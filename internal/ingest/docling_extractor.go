@@ -61,7 +61,9 @@ func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []b
 		return "", fmt.Errorf("create temp doc file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
 	if _, err := tmpFile.Write(data); err != nil {
 		_ = tmpFile.Close()
 		return "", fmt.Errorf("write temp doc file: %w", err)
