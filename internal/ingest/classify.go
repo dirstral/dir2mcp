@@ -5,31 +5,22 @@ import (
 	"strings"
 )
 
-// ClassifyDocType maps a path to an ingestion document type.
-func ClassifyDocType(relPath string) string {
-	base := strings.ToLower(filepath.Base(relPath))
+var classifyBaseNames = map[string]string{
+	"dockerfile":        "code",
+	"makefile":          "code",
+	"jenkinsfile":       "code",
+	"readme":            "text",
+	"license":           "text",
+	"changelog":         "text",
+	"go.mod":            "data",
+	"go.sum":            "data",
+	"package.json":      "data",
+	"package-lock.json": "data",
+	"yarn.lock":         "data",
+	"pnpm-lock.yaml":    "data",
+}
 
-	// treat plain ".env" and dot-separated variants as sensitive and
-	// skip them during ingestion. these often contain secrets/credentials
-	// so we classify them as "ignore". previously they were marked as
-	// "data" which risked accidental indexing; other variants would fall
-	// through to extension-based logic yielding "binary_ignored".
-	// note: the exact filename ".env" is caught by the equality check
-	// (base == ".env"), whereas names like ".env.local" use HasPrefix.
-	if base == ".env" || strings.HasPrefix(base, ".env.") {
-		return "ignore"
-	}
-
-	switch base {
-	case "dockerfile", "makefile", "jenkinsfile":
-		return "code"
-	case "readme", "license", "changelog":
-		return "text"
-	case "go.mod", "go.sum", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml":
-		return "data"
-	}
-
-	ext := strings.ToLower(filepath.Ext(base))
+func classifyByExtension(ext string) string {
 	switch ext {
 	case ".go", ".rs", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt", ".kts", ".scala", ".sh", ".bash", ".zsh", ".sql":
 		return "code"
@@ -54,4 +45,26 @@ func ClassifyDocType(relPath string) string {
 	default:
 		return "binary_ignored"
 	}
+}
+
+// ClassifyDocType maps a path to an ingestion document type.
+func ClassifyDocType(relPath string) string {
+	base := strings.ToLower(filepath.Base(relPath))
+
+	// treat plain ".env" and dot-separated variants as sensitive and
+	// skip them during ingestion. these often contain secrets/credentials
+	// so we classify them as "ignore". previously they were marked as
+	// "data" which risked accidental indexing; other variants would fall
+	// through to extension-based logic yielding "binary_ignored".
+	// note: the exact filename ".env" is caught by the equality check
+	// (base == ".env"), whereas names like ".env.local" use HasPrefix.
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return "ignore"
+	}
+
+	if t, ok := classifyBaseNames[base]; ok {
+		return t
+	}
+
+	return classifyByExtension(strings.ToLower(filepath.Ext(base)))
 }

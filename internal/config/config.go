@@ -805,6 +805,12 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 }
 
 func applyIngestFileParsed(cfg *Config, fc fileConfig) {
+	applyChunkingFileParsed(cfg, fc)
+	applyIngestModesFileParsed(cfg, fc)
+	applySTTFileParsed(cfg, fc)
+}
+
+func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
 	if fc.ChunkingStrategy != nil {
 		cfg.ChunkingStrategy = *fc.ChunkingStrategy
 	}
@@ -814,6 +820,9 @@ func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 	if fc.ChunkingOverlapTokens != nil {
 		cfg.ChunkingOverlapTokens = *fc.ChunkingOverlapTokens
 	}
+}
+
+func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestGitignore != nil {
 		cfg.IngestGitignore = *fc.IngestGitignore
 	}
@@ -838,6 +847,9 @@ func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestExtractor != nil {
 		cfg.IngestExtractor = *fc.IngestExtractor
 	}
+}
+
+func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.STTProvider != nil {
 		cfg.STTProvider = *fc.STTProvider
 	}
@@ -1486,6 +1498,11 @@ func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
 	if baseURL, ok := envLookup("MISTRAL_BASE_URL", env); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
 	}
+	applyMistralNumericEnvOverrides(cfg, env)
+	applyMistralModelEnvOverrides(cfg, env)
+}
+
+func applyMistralNumericEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", env); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
 			cfg.MistralMaxOCRPayloadBytes = n
@@ -1497,6 +1514,9 @@ func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_INGEST_EXTRACTOR", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.IngestExtractor = strings.TrimSpace(raw)
 	}
+}
+
+func applyMistralModelEnvOverrides(cfg *Config, env map[string]string) {
 	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", env); ok && strings.TrimSpace(m) != "" {
 		cfg.EmbedModelText = strings.TrimSpace(m)
 	}
@@ -1653,6 +1673,22 @@ func applyX402RouteEnvOverrides(cfg *Config, env map[string]string) {
 // ValidateX402, this method operates on a pointer receiver so that it can
 // modify the receiver in-place.
 func (c *Config) Validate() error {
+	if err := c.validateIngestExtractor(); err != nil {
+		return err
+	}
+
+	if err := c.validateNumericBounds(); err != nil {
+		return err
+	}
+	c.applyValidationDefaults()
+	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
+		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
+			c.SessionMaxLifetime, c.SessionInactivityTimeout)
+	}
+	return nil
+}
+
+func (c *Config) validateIngestExtractor() error {
 	extractorMode := strings.ToLower(strings.TrimSpace(c.IngestExtractor))
 	if extractorMode == "" {
 		extractorMode = Default().IngestExtractor
@@ -1663,7 +1699,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ingest.extractor must be one of auto, docling, mistral, off: %q", c.IngestExtractor)
 	}
 	c.IngestExtractor = extractorMode
+	return nil
+}
 
+func (c *Config) validateNumericBounds() error {
 	if c.SessionInactivityTimeout < 0 {
 		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
 	}
@@ -1691,6 +1730,10 @@ func (c *Config) Validate() error {
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
 	}
+	return nil
+}
+
+func (c *Config) applyValidationDefaults() {
 	if c.SessionInactivityTimeout == 0 {
 		// zero is shorthand for the default
 		c.SessionInactivityTimeout = Default().SessionInactivityTimeout
@@ -1698,14 +1741,6 @@ func (c *Config) Validate() error {
 	if c.HealthCheckInterval == 0 {
 		c.HealthCheckInterval = Default().HealthCheckInterval
 	}
-	// if both timeouts are set, the max lifetime must not be shorter than
-	// the inactivity timeout; otherwise the session would expire before
-	// inactivity checks could ever trigger.
-	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
-		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
-			c.SessionMaxLifetime, c.SessionInactivityTimeout)
-	}
-	return nil
 }
 
 // ValidateX402 performs consistency checks on the embedded X402Config
