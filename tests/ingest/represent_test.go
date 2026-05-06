@@ -98,6 +98,7 @@ func TestShouldGenerateRawText(t *testing.T) {
 		{"pdf", "pdf", false},
 		{"image", "image", false},
 		{"audio", "audio", false},
+		{"document", "document", false},
 		{"archive", "archive", false},
 		{"binary_ignored", "binary_ignored", false},
 		{"unknown", "unknown", false},
@@ -108,6 +109,29 @@ func TestShouldGenerateRawText(t *testing.T) {
 			result := ingest.ShouldGenerateRawText(tt.docType)
 			if result != tt.expected {
 				t.Errorf("ingest.ShouldGenerateRawText(%q) = %v, want %v", tt.docType, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestShouldGenerateExtractedMarkdown(t *testing.T) {
+	tests := []struct {
+		name     string
+		docType  string
+		expected bool
+	}{
+		{"pdf", "pdf", true},
+		{"image", "image", true},
+		{"document", "document", true},
+		{"text", "text", false},
+		{"code", "code", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ingest.ShouldGenerateExtractedMarkdown(tt.docType)
+			if got != tt.expected {
+				t.Fatalf("ShouldGenerateExtractedMarkdown(%q)=%v want=%v", tt.docType, got, tt.expected)
 			}
 		})
 	}

@@ -43,6 +43,8 @@ func ClassifyDocType(relPath string) string {
 		return "html"
 	case ".pdf":
 		return "pdf"
+	case ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".odp", ".ods", ".rtf":
+		return "document"
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg":
 		return "image"
 	case ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus":

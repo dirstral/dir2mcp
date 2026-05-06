@@ -63,6 +63,7 @@ func TestLoad_FileThenEnvOverridesYAML(t *testing.T) {
 		t.Setenv("MISTRAL_BASE_URL", "https://env.example")
 		t.Setenv("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", "222")
 		t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "env-embed")
+		t.Setenv("DIR2MCP_DOCLING_COMMAND", "docling --to md --output - {input}")
 
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
@@ -76,6 +77,9 @@ func TestLoad_FileThenEnvOverridesYAML(t *testing.T) {
 		}
 		if cfg.MistralMaxOCRPayloadBytes != 222 {
 			t.Fatalf("MistralMaxOCRPayloadBytes=%d want=%d", cfg.MistralMaxOCRPayloadBytes, 222)
+		}
+		if cfg.DoclingCommand != "docling --to md --output - {input}" {
+			t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)
 		}
 	})
 }
@@ -106,6 +110,9 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	}
 	if !strings.Contains(text, "mistral_max_ocr_payload_bytes: 26214400") {
 		t.Fatalf("saved yaml missing mistral_max_ocr_payload_bytes, got:\n%s", text)
+	}
+	if !strings.Contains(text, "docling_command:") {
+		t.Fatalf("saved yaml missing docling_command, got:\n%s", text)
 	}
 	if strings.Contains(strings.ToLower(text), "mistral_api_key") {
 		t.Fatalf("saved yaml must not include MISTRAL_API_KEY key, got:\n%s", text)
@@ -177,6 +184,8 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"  oversample_factor: 7\n"+
 		"ingest:\n"+
 		"  gitignore: false\n"+
+		"  docling:\n"+
+		"    command: docling --to md --output - {input}\n"+
 		"  pdf:\n"+
 		"    mode: ocr\n"+
 		"  images:\n"+
@@ -227,6 +236,9 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	}
 	if cfg.IngestPDFMode != "ocr" || cfg.IngestImagesMode != "ocr_auto" || cfg.IngestAudioMode != "auto" || cfg.IngestArchivesMode != "deep" {
 		t.Fatalf("unexpected ingest mode values: pdf=%q images=%q audio=%q archives=%q", cfg.IngestPDFMode, cfg.IngestImagesMode, cfg.IngestAudioMode, cfg.IngestArchivesMode)
+	}
+	if cfg.DoclingCommand != "docling --to md --output - {input}" {
+		t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)
 	}
 	if cfg.STTProvider != "elevenlabs" {
 		t.Fatalf("STTProvider=%q", cfg.STTProvider)

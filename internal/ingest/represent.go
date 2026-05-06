@@ -208,6 +208,17 @@ func ShouldGenerateRawText(docType string) bool {
 	}
 }
 
+// ShouldGenerateExtractedMarkdown determines if a document type should use the
+// configured document extractor to generate markdown-like text.
+func ShouldGenerateExtractedMarkdown(docType string) bool {
+	switch docType {
+	case "pdf", "image", "document":
+		return true
+	default:
+		return false
+	}
+}
+
 // Ingest package chunking parameters.  These constants are the values used
 // internally when breaking up transcripts and text into smaller pieces for
 // indexing.  They are exported so that tests (and potentially other packages)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -233,10 +234,14 @@ func newElevenLabsTranscriber(cfg config.Config) model.Transcriber {
 }
 
 // DocumentExtractorFromConfig resolves document extraction provider selection.
-// Priority: docling command (when configured/available), then Mistral OCR.
+// Priority: configured docling command, auto-detected docling binary, then
+// Mistral OCR.
 func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
-	if extractor := NewDoclingExtractor(strings.TrimSpace(os.Getenv("DIR2MCP_DOCLING_COMMAND"))); extractor != nil {
+	if extractor := NewDoclingExtractor(strings.TrimSpace(cfg.DoclingCommand)); extractor != nil {
 		return extractor
+	}
+	if _, err := exec.LookPath("docling"); err == nil {
+		return NewDoclingExtractor("")
 	}
 	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
 		return newMistralExtractor(cfg)
@@ -857,7 +862,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return nil
 	}
 
-	if (doc.DocType == "pdf" || doc.DocType == "image") && s.extractor != nil {
+	if ShouldGenerateExtractedMarkdown(doc.DocType) && s.extractor != nil {
 		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
 			return err
 		}

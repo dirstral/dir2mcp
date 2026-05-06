@@ -76,9 +76,12 @@ type Config struct {
 	// payload size accepted by the Mistral client for OCR/image processing
 	// and audio transcription requests. Values <= 0 use client defaults.
 	MistralMaxOCRPayloadBytes int
-	ElevenLabsAPIKey          string
-	ElevenLabsBaseURL         string
-	ElevenLabsTTSVoiceID      string
+	// DoclingCommand optionally configures a local docling CLI command
+	// template used for rich document extraction.
+	DoclingCommand       string
+	ElevenLabsAPIKey     string
+	ElevenLabsBaseURL    string
+	ElevenLabsTTSVoiceID string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -157,6 +160,7 @@ type fileConfig struct {
 	MistralAPIKey             *string
 	MistralBaseURL            *string
 	MistralMaxOCRPayloadBytes *int
+	DoclingCommand            *string
 
 	ElevenLabsBaseURL         *string
 	ElevenLabsTTSVoiceID      *string
@@ -220,6 +224,7 @@ type persistedConfig struct {
 	SecretPatterns            []string `yaml:"secret_patterns"`
 	MistralBaseURL            string   `yaml:"mistral_base_url"`
 	MistralMaxOCRPayloadBytes int      `yaml:"mistral_max_ocr_payload_bytes"`
+	DoclingCommand            string   `yaml:"docling_command"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -389,6 +394,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
 		MistralBaseURL:            cfg.MistralBaseURL,
 		MistralMaxOCRPayloadBytes: cfg.MistralMaxOCRPayloadBytes,
+		DoclingCommand:            cfg.DoclingCommand,
 		SessionInactivityTimeout:  cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:        cfg.SessionMaxLifetime,
 		HealthCheckInterval:       cfg.HealthCheckInterval,
@@ -740,6 +746,9 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MistralMaxOCRPayloadBytes != nil {
 		cfg.MistralMaxOCRPayloadBytes = *fc.MistralMaxOCRPayloadBytes
 	}
+	if fc.DoclingCommand != nil {
+		cfg.DoclingCommand = *fc.DoclingCommand
+	}
 	if fc.MistralAPIKey != nil {
 		cfg.MistralAPIKey = *fc.MistralAPIKey
 	}
@@ -1030,6 +1039,8 @@ var configKeyAliases = map[string]string{
 	"mistral.embed_code_model":             "embed_model_code",
 	"mistral.chat_model":                   "chat_model",
 	"mistral.max_ocr_payload_bytes":        "mistral_max_ocr_payload_bytes",
+	"docling.command":                      "docling_command",
+	"ingest.docling.command":               "docling_command",
 	"mistral.api_key":                      "mistral_api_key",
 	"stt.mistral.api_key":                  "mistral_api_key",
 	"secrets.mistral_api_key":              "mistral_api_key",
@@ -1098,7 +1109,7 @@ func canonicalizeConfigKey(key string) string {
 
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
 		return true
@@ -1246,6 +1257,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.EmbedModelCode = strPtr(value)
 	case "chat_model":
 		cfg.ChatModel = strPtr(value)
+	case "docling_command":
+		cfg.DoclingCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "chunking.strategy":
@@ -1375,6 +1388,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("mistral_base_url", cfg.MistralBaseURL)
 	writeInt("mistral_max_ocr_payload_bytes", cfg.MistralMaxOCRPayloadBytes)
+	writeScalar("docling_command", cfg.DoclingCommand)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
@@ -1461,6 +1475,9 @@ func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
 		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
 			cfg.MistralMaxOCRPayloadBytes = n
 		}
+	}
+	if raw, ok := envLookup("DIR2MCP_DOCLING_COMMAND", env); ok && strings.TrimSpace(raw) != "" {
+		cfg.DoclingCommand = strings.TrimSpace(raw)
 	}
 	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", env); ok && strings.TrimSpace(m) != "" {
 		cfg.EmbedModelText = strings.TrimSpace(m)
