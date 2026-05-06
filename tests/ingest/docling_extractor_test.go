@@ -21,10 +21,8 @@ func TestDoclingExtractor_Extract_UsesConfiguredCommand(t *testing.T) {
 }
 
 func TestDocumentExtractorFromConfig_PrefersDoclingCommand(t *testing.T) {
-	cfg := config.Config{
-		MistralAPIKey:  "test-key",
-		DoclingCommand: "cat {input}",
-	}
+	t.Setenv("DIR2MCP_DOCLING_COMMAND", "cat {input}")
+	cfg := config.Config{MistralAPIKey: "test-key"}
 
 	extractor := ingest.DocumentExtractorFromConfig(cfg)
 	if extractor == nil {

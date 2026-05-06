@@ -1504,7 +1504,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 			return "", "", toolErr
 		}
 		return text, ingest.RepTypeTranscript, nil
-	case "pdf", "image", "document":
+	case "pdf", "image":
 		content, err := s.readDocumentContent(doc.RelPath)
 		if err != nil {
 			switch {
@@ -1520,7 +1520,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if extractor == nil {
 			return "", "", &toolExecutionError{
 				Code:      "CONFIG_INVALID",
-				Message:   "document extraction is not configured (install docling, set DIR2MCP_DOCLING_COMMAND, or set MISTRAL_API_KEY)",
+				Message:   "document extraction is not configured (set DIR2MCP_DOCLING_COMMAND or MISTRAL_API_KEY)",
 				Retryable: false,
 			}
 		}
