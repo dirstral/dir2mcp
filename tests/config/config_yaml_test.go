@@ -184,7 +184,6 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"  oversample_factor: 7\n"+
 		"ingest:\n"+
 		"  gitignore: false\n"+
-		"  extractor: docling\n"+
 		"  docling:\n"+
 		"    command: docling --to md --output - {input}\n"+
 		"  pdf:\n"+
@@ -237,9 +236,6 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	}
 	if cfg.IngestPDFMode != "ocr" || cfg.IngestImagesMode != "ocr_auto" || cfg.IngestAudioMode != "auto" || cfg.IngestArchivesMode != "deep" {
 		t.Fatalf("unexpected ingest mode values: pdf=%q images=%q audio=%q archives=%q", cfg.IngestPDFMode, cfg.IngestImagesMode, cfg.IngestAudioMode, cfg.IngestArchivesMode)
-	}
-	if cfg.IngestExtractor != "docling" {
-		t.Fatalf("IngestExtractor=%q", cfg.IngestExtractor)
 	}
 	if cfg.DoclingCommand != "docling --to md --output - {input}" {
 		t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)

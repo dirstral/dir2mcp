@@ -197,7 +197,7 @@ vary by deployment. The commonly used variables are:
 | Variable | Required | Description |
 |---|---|---|
 | `MISTRAL_API_KEY` | Yes | Primary API key used across embeddings, OCR, default STT, and generation |
-| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to md --output - {input}`); when set/available, it is preferred for PDF/image extraction |
+| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to md --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES` | No | Max encoded Mistral upload payload size in bytes for OCR and transcription requests (default: `20971520`); increase for large PDFs or audio files |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
@@ -214,6 +214,7 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 
 ```yaml
 mistral_max_ocr_payload_bytes: 26214400
+docling_command: docling --to md --output - {input}
 ```
 
 Or override for a single run:
