@@ -365,7 +365,7 @@ make benchmark    # run retrieval benchmarks
 
 Release automation:
 - Pushing a `v*` tag triggers `.github/workflows/release.yml` and publishes artifacts via GoReleaser.
-- Homebrew formula updates require `HOMEBREW_TAP_GITHUB_TOKEN` with write access to `Dirstral/homebrew-tap`.
+- Homebrew formula updates require `HOMEBREW_TAP_GITHUB_TOKEN` with write access to `dirstral/homebrew-tap`.
 
 API notes:
 - `retrieval.NewEngine` now requires a context as its first parameter:

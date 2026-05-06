@@ -31,7 +31,7 @@ checksum:
 
 release:
   github:
-    owner: Dirstral
+    owner: dirstral
     name: dir2mcp
   name_template: "{{.ProjectName}} {{.Tag}}"
 
@@ -40,11 +40,11 @@ brews:
     ids:
       - dir2mcp-archive
     repository:
-      owner: Dirstral
+      owner: dirstral
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
-    homepage: https://github.com/Dirstral/dir2mcp
+    homepage: https://github.com/dirstral/dir2mcp
     description: Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations.
     license: MIT
     install: |
