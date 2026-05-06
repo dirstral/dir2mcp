@@ -26,8 +26,10 @@ var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d
 const (
 	// RepTypeRawText is the representation type for raw text content
 	RepTypeRawText = "raw_text"
-	// RepTypeOCRMarkdown is the representation type for OCR-generated markdown
-	RepTypeOCRMarkdown = "ocr_markdown"
+	// RepTypeExtractedMarkdown is the representation type for extractor-generated markdown
+	RepTypeExtractedMarkdown = "extracted_markdown"
+	// RepTypeOCRMarkdown is retained as a backward-compatible alias.
+	RepTypeOCRMarkdown = RepTypeExtractedMarkdown
 	// RepTypeTranscript is the representation type for audio transcripts
 	RepTypeTranscript = "transcript"
 	// RepTypeAnnotationJSON is the representation type for structured annotations

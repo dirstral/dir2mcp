@@ -22,6 +22,7 @@ type Representation struct {
 	DocID       int64
 	RepType     string
 	RepHash     string
+	MetaJSON    string
 	CreatedUnix int64
 	Deleted     bool
 }

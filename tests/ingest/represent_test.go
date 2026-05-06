@@ -145,7 +145,7 @@ func TestRepTypeConstants(t *testing.T) {
 		expected string
 	}{
 		{"raw_text", ingest.RepTypeRawText, "raw_text"},
-		{"ocr_markdown", ingest.RepTypeOCRMarkdown, "ocr_markdown"},
+		{"extracted_markdown", ingest.RepTypeExtractedMarkdown, "extracted_markdown"},
 		{"transcript", ingest.RepTypeTranscript, "transcript"},
 		{"annotation_json", ingest.RepTypeAnnotationJSON, "annotation_json"},
 		{"annotation_text", ingest.RepTypeAnnotationText, "annotation_text"},

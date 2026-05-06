@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,8 +13,27 @@ import (
 
 const defaultDoclingCommand = "docling --to md --output - {input}"
 
+const (
+	maxDoclingStdoutBytes = 100 * 1024 * 1024
+	maxDoclingStderrBytes = 1 * 1024 * 1024
+)
+
+var errDoclingOutputTooLarge = errors.New("docling output exceeded configured limit")
+
 type doclingExtractor struct {
 	commandTemplate string
+}
+
+type limitedBuffer struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (w *limitedBuffer) Write(p []byte) (int, error) {
+	if w.limit > 0 && w.buf.Len()+len(p) > w.limit {
+		return 0, errDoclingOutputTooLarge
+	}
+	return w.buf.Write(p)
 }
 
 // NewDoclingExtractor returns a document extractor backed by a local docling
@@ -60,9 +80,12 @@ func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []b
 
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", cmdline)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: maxDoclingStdoutBytes}
+	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
 	if err := cmd.Run(); err != nil {
+		if errors.Is(err, errDoclingOutputTooLarge) {
+			return "", fmt.Errorf("docling command output exceeded limit")
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
