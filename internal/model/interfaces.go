@@ -45,6 +45,12 @@ type OCR interface {
 	Extract(ctx context.Context, relPath string, data []byte) (string, error)
 }
 
+// DocumentExtractor converts rich or binary document content into markdown-like
+// text suitable for downstream chunking/indexing.
+type DocumentExtractor interface {
+	Extract(ctx context.Context, relPath string, data []byte) (string, error)
+}
+
 type Transcriber interface {
 	Transcribe(ctx context.Context, relPath string, data []byte) (string, error)
 }

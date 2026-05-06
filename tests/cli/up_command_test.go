@@ -333,6 +333,41 @@ func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
 	}
 }
 
+func TestUpNonInteractiveReadOnlyDoclingModeDoesNotRequireMistralKey(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	cfgPath := filepath.Join(tmp, ".dir2mcp.yaml")
+	if err := os.WriteFile(cfgPath, []byte(strings.Join([]string{
+		"root_dir: .",
+		"state_dir: .dir2mcp",
+		"ingest_extractor: docling",
+		"docling_command: cat {input}",
+		"ingest_audio_mode: off",
+		"stt_provider: off",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"--non-interactive", "up", "--read-only"})
+		if code == 2 {
+			t.Fatalf("unexpected config-invalid exit code: stderr=%s", stderr.String())
+		}
+		if strings.Contains(stderr.String(), "MISTRAL_API_KEY") {
+			t.Fatalf("unexpected MISTRAL_API_KEY requirement: stderr=%s", stderr.String())
+		}
+	})
+}
+
 // Reindex command should also load configuration early and surface any
 // errors from config.Load.  The config loader only returns an error when
 // statting the path fails for some unexpected reason (for example permission

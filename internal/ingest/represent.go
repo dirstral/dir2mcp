@@ -26,8 +26,10 @@ var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d
 const (
 	// RepTypeRawText is the representation type for raw text content
 	RepTypeRawText = "raw_text"
-	// RepTypeOCRMarkdown is the representation type for OCR-generated markdown
-	RepTypeOCRMarkdown = "ocr_markdown"
+	// RepTypeExtractedMarkdown is the representation type for extractor-generated markdown
+	RepTypeExtractedMarkdown = "extracted_markdown"
+	// RepTypeOCRMarkdown is retained as a backward-compatible alias.
+	RepTypeOCRMarkdown = RepTypeExtractedMarkdown
 	// RepTypeTranscript is the representation type for audio transcripts
 	RepTypeTranscript = "transcript"
 	// RepTypeAnnotationJSON is the representation type for structured annotations
@@ -202,6 +204,17 @@ func NormalizeUTF8(content []byte) []byte {
 func ShouldGenerateRawText(docType string) bool {
 	switch docType {
 	case "code", "text", "md", "data", "html":
+		return true
+	default:
+		return false
+	}
+}
+
+// ShouldGenerateExtractedMarkdown determines if a document type should use the
+// configured document extractor to generate markdown-like text.
+func ShouldGenerateExtractedMarkdown(docType string) bool {
+	switch docType {
+	case "pdf", "image", "document":
 		return true
 	default:
 		return false

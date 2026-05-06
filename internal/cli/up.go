@@ -17,6 +17,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/elevenlabs"
 	"dir2mcp/internal/index"
+	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
@@ -336,6 +337,10 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("x402 configuration invalid: %v", err))
 		return exitConfigInvalid
 	}
+	if strings.EqualFold(strings.TrimSpace(cfg.IngestExtractor), "docling") && ingest.DocumentExtractorFromConfig(*cfg) == nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: ingest.extractor=docling but docling command is unavailable")
+		return exitConfigInvalid
+	}
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("root inaccessible: %v", err))
 		return exitRootInaccessible
@@ -386,6 +391,9 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
 		return exitSuccess
 	}
+	if !requiresMistralAPIKey(*cfg, opts) {
+		return exitSuccess
+	}
 	if opts.jsonOutput {
 		writeCLIError(
 			a.stderr,
@@ -407,6 +415,27 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 		writeln(a.stderr, "Run: dir2mcp config init")
 	}
 	return exitConfigInvalid
+}
+
+func requiresMistralAPIKey(cfg config.Config, opts upOptions) bool {
+	// Embedding workers require Mistral credentials unless running read-only.
+	if !opts.readOnly {
+		return true
+	}
+
+	// In read-only mode, require a key only when an enabled ingest path still
+	// depends on Mistral providers.
+	if strings.EqualFold(strings.TrimSpace(cfg.STTProvider), "mistral") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.STTProvider), "auto") &&
+		!strings.EqualFold(strings.TrimSpace(cfg.IngestAudioMode), "off") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.IngestExtractor), "mistral") {
+		return true
+	}
+	return false
 }
 
 // initStoreAndIndices initialises the metadata store and both HNSW indices.

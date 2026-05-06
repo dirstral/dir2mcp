@@ -65,6 +65,14 @@ func TestLoad_MistralMaxOCRPayloadBytes_FromEnv(t *testing.T) {
 	})
 }
 
+func TestConfigValidateRejectsInvalidIngestExtractor(t *testing.T) {
+	cfg := config.Default()
+	cfg.IngestExtractor = "invalid-mode"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for ingest extractor mode")
+	}
+}
+
 func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\nMISTRAL_BASE_URL=https://env-file.local\n")

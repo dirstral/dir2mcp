@@ -76,9 +76,12 @@ type Config struct {
 	// payload size accepted by the Mistral client for OCR/image processing
 	// and audio transcription requests. Values <= 0 use client defaults.
 	MistralMaxOCRPayloadBytes int
-	ElevenLabsAPIKey          string
-	ElevenLabsBaseURL         string
-	ElevenLabsTTSVoiceID      string
+	// DoclingCommand optionally configures a local docling CLI command
+	// template used for rich document extraction.
+	DoclingCommand       string
+	ElevenLabsAPIKey     string
+	ElevenLabsBaseURL    string
+	ElevenLabsTTSVoiceID string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -117,6 +120,7 @@ type Config struct {
 	IngestImagesMode     string
 	IngestAudioMode      string
 	IngestArchivesMode   string
+	IngestExtractor      string
 
 	STTProvider               string
 	STTMistralModel           string
@@ -157,6 +161,7 @@ type fileConfig struct {
 	MistralAPIKey             *string
 	MistralBaseURL            *string
 	MistralMaxOCRPayloadBytes *int
+	DoclingCommand            *string
 
 	ElevenLabsBaseURL         *string
 	ElevenLabsTTSVoiceID      *string
@@ -179,6 +184,7 @@ type fileConfig struct {
 	IngestImagesMode          *string
 	IngestAudioMode           *string
 	IngestArchivesMode        *string
+	IngestExtractor           *string
 	STTProvider               *string
 	STTMistralModel           *string
 	STTElevenLabsModel        *string
@@ -220,6 +226,7 @@ type persistedConfig struct {
 	SecretPatterns            []string `yaml:"secret_patterns"`
 	MistralBaseURL            string   `yaml:"mistral_base_url"`
 	MistralMaxOCRPayloadBytes int      `yaml:"mistral_max_ocr_payload_bytes"`
+	DoclingCommand            string   `yaml:"docling_command"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -246,6 +253,7 @@ type persistedConfig struct {
 	IngestImagesMode          string   `yaml:"ingest_images_mode"`
 	IngestAudioMode           string   `yaml:"ingest_audio_mode"`
 	IngestArchivesMode        string   `yaml:"ingest_archives_mode"`
+	IngestExtractor           string   `yaml:"ingest_extractor"`
 	STTProvider               string   `yaml:"stt_provider"`
 	STTMistralModel           string   `yaml:"stt_mistral_model"`
 	STTElevenLabsModel        string   `yaml:"stt_elevenlabs_model"`
@@ -338,6 +346,7 @@ func Default() Config {
 		IngestImagesMode:          "ocr_auto",
 		IngestAudioMode:           "auto",
 		IngestArchivesMode:        "deep",
+		IngestExtractor:           "auto",
 		STTProvider:               "mistral",
 		STTMistralModel:           "voxtral-mini-latest",
 		STTElevenLabsModel:        "scribe_v1",
@@ -389,6 +398,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
 		MistralBaseURL:            cfg.MistralBaseURL,
 		MistralMaxOCRPayloadBytes: cfg.MistralMaxOCRPayloadBytes,
+		DoclingCommand:            cfg.DoclingCommand,
 		SessionInactivityTimeout:  cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:        cfg.SessionMaxLifetime,
 		HealthCheckInterval:       cfg.HealthCheckInterval,
@@ -413,6 +423,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestImagesMode:          cfg.IngestImagesMode,
 		IngestAudioMode:           cfg.IngestAudioMode,
 		IngestArchivesMode:        cfg.IngestArchivesMode,
+		IngestExtractor:           cfg.IngestExtractor,
 		STTProvider:               cfg.STTProvider,
 		STTMistralModel:           cfg.STTMistralModel,
 		STTElevenLabsModel:        cfg.STTElevenLabsModel,
@@ -740,6 +751,9 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MistralMaxOCRPayloadBytes != nil {
 		cfg.MistralMaxOCRPayloadBytes = *fc.MistralMaxOCRPayloadBytes
 	}
+	if fc.DoclingCommand != nil {
+		cfg.DoclingCommand = *fc.DoclingCommand
+	}
 	if fc.MistralAPIKey != nil {
 		cfg.MistralAPIKey = *fc.MistralAPIKey
 	}
@@ -791,6 +805,12 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 }
 
 func applyIngestFileParsed(cfg *Config, fc fileConfig) {
+	applyChunkingFileParsed(cfg, fc)
+	applyIngestModesFileParsed(cfg, fc)
+	applySTTFileParsed(cfg, fc)
+}
+
+func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
 	if fc.ChunkingStrategy != nil {
 		cfg.ChunkingStrategy = *fc.ChunkingStrategy
 	}
@@ -800,6 +820,9 @@ func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 	if fc.ChunkingOverlapTokens != nil {
 		cfg.ChunkingOverlapTokens = *fc.ChunkingOverlapTokens
 	}
+}
+
+func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestGitignore != nil {
 		cfg.IngestGitignore = *fc.IngestGitignore
 	}
@@ -821,6 +844,12 @@ func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestArchivesMode != nil {
 		cfg.IngestArchivesMode = *fc.IngestArchivesMode
 	}
+	if fc.IngestExtractor != nil {
+		cfg.IngestExtractor = *fc.IngestExtractor
+	}
+}
+
+func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.STTProvider != nil {
 		cfg.STTProvider = *fc.STTProvider
 	}
@@ -1030,6 +1059,8 @@ var configKeyAliases = map[string]string{
 	"mistral.embed_code_model":             "embed_model_code",
 	"mistral.chat_model":                   "chat_model",
 	"mistral.max_ocr_payload_bytes":        "mistral_max_ocr_payload_bytes",
+	"docling.command":                      "docling_command",
+	"ingest.docling.command":               "docling_command",
 	"mistral.api_key":                      "mistral_api_key",
 	"stt.mistral.api_key":                  "mistral_api_key",
 	"secrets.mistral_api_key":              "mistral_api_key",
@@ -1063,6 +1094,8 @@ var configKeyAliases = map[string]string{
 	"audio_mode":                           "ingest.audio.mode",
 	"ingest_archives_mode":                 "ingest.archives.mode",
 	"archives_mode":                        "ingest.archives.mode",
+	"ingest_extractor":                     "ingest.extractor",
+	"extractor":                            "ingest.extractor",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1098,10 +1131,12 @@ func canonicalizeConfigKey(key string) string {
 
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
 		return true
+	case "ingest.extractor":
+		return false
 	default:
 		return false
 	}
@@ -1246,6 +1281,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.EmbedModelCode = strPtr(value)
 	case "chat_model":
 		cfg.ChatModel = strPtr(value)
+	case "docling_command":
+		cfg.DoclingCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "chunking.strategy":
@@ -1263,6 +1300,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestAudioMode = strPtr(value)
 	case "ingest.archives.mode":
 		cfg.IngestArchivesMode = strPtr(value)
+	case "ingest.extractor":
+		cfg.IngestExtractor = strPtr(value)
 	case "stt.provider":
 		cfg.STTProvider = strPtr(value)
 	case "stt.mistral.model":
@@ -1375,6 +1414,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("mistral_base_url", cfg.MistralBaseURL)
 	writeInt("mistral_max_ocr_payload_bytes", cfg.MistralMaxOCRPayloadBytes)
+	writeScalar("docling_command", cfg.DoclingCommand)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
@@ -1399,6 +1439,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_images_mode", cfg.IngestImagesMode)
 	writeScalar("ingest_audio_mode", cfg.IngestAudioMode)
 	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
+	writeScalar("ingest_extractor", cfg.IngestExtractor)
 	writeScalar("stt_provider", cfg.STTProvider)
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
@@ -1457,11 +1498,25 @@ func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
 	if baseURL, ok := envLookup("MISTRAL_BASE_URL", env); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
 	}
+	applyMistralNumericEnvOverrides(cfg, env)
+	applyMistralModelEnvOverrides(cfg, env)
+}
+
+func applyMistralNumericEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", env); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
 			cfg.MistralMaxOCRPayloadBytes = n
 		}
 	}
+	if raw, ok := envLookup("DIR2MCP_DOCLING_COMMAND", env); ok && strings.TrimSpace(raw) != "" {
+		cfg.DoclingCommand = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_INGEST_EXTRACTOR", env); ok && strings.TrimSpace(raw) != "" {
+		cfg.IngestExtractor = strings.TrimSpace(raw)
+	}
+}
+
+func applyMistralModelEnvOverrides(cfg *Config, env map[string]string) {
 	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", env); ok && strings.TrimSpace(m) != "" {
 		cfg.EmbedModelText = strings.TrimSpace(m)
 	}
@@ -1618,6 +1673,36 @@ func applyX402RouteEnvOverrides(cfg *Config, env map[string]string) {
 // ValidateX402, this method operates on a pointer receiver so that it can
 // modify the receiver in-place.
 func (c *Config) Validate() error {
+	if err := c.validateIngestExtractor(); err != nil {
+		return err
+	}
+
+	if err := c.validateNumericBounds(); err != nil {
+		return err
+	}
+	c.applyValidationDefaults()
+	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
+		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
+			c.SessionMaxLifetime, c.SessionInactivityTimeout)
+	}
+	return nil
+}
+
+func (c *Config) validateIngestExtractor() error {
+	extractorMode := strings.ToLower(strings.TrimSpace(c.IngestExtractor))
+	if extractorMode == "" {
+		extractorMode = Default().IngestExtractor
+	}
+	switch extractorMode {
+	case "auto", "docling", "mistral", "off":
+	default:
+		return fmt.Errorf("ingest.extractor must be one of auto, docling, mistral, off: %q", c.IngestExtractor)
+	}
+	c.IngestExtractor = extractorMode
+	return nil
+}
+
+func (c *Config) validateNumericBounds() error {
 	if c.SessionInactivityTimeout < 0 {
 		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
 	}
@@ -1645,6 +1730,10 @@ func (c *Config) Validate() error {
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
 	}
+	return nil
+}
+
+func (c *Config) applyValidationDefaults() {
 	if c.SessionInactivityTimeout == 0 {
 		// zero is shorthand for the default
 		c.SessionInactivityTimeout = Default().SessionInactivityTimeout
@@ -1652,14 +1741,6 @@ func (c *Config) Validate() error {
 	if c.HealthCheckInterval == 0 {
 		c.HealthCheckInterval = Default().HealthCheckInterval
 	}
-	// if both timeouts are set, the max lifetime must not be shorter than
-	// the inactivity timeout; otherwise the session would expire before
-	// inactivity checks could ever trigger.
-	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
-		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
-			c.SessionMaxLifetime, c.SessionInactivityTimeout)
-	}
-	return nil
 }
 
 // ValidateX402 performs consistency checks on the embedded X402Config

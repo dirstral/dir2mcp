@@ -71,7 +71,7 @@ Current high-level status:
 - **Document**: ingestible unit (file or archive member).
 - **Representation (rep)**: a text view derived from a document:
   - `raw_text` (code/text/md/data/html converted to text)
-  - `ocr_markdown` (OCR output for PDFs/images)
+  - `extracted_markdown` (extractor output for PDFs/images/documents; formerly `ocr_markdown`)
   - `transcript` (STT output for audio)
   - `annotation_json` (structured JSON result)
   - `annotation_text` (flattened `key: value` text derived from annotation_json)
@@ -421,7 +421,7 @@ The exact SQL types may vary; semantics must match.
 
 * `rep_id` (PK)
 * `doc_id` (FK)
-* `rep_type` (`raw_text|ocr_markdown|transcript|annotation_text|annotation_json`)
+* `rep_type` (`raw_text|extracted_markdown|transcript|annotation_text|annotation_json`)
 * `rep_hash` (stable; changes when rep changes)
 * `created_unix`
 * `meta_json` (must include provider/model for OCR/transcription/annotations when applicable)
@@ -580,15 +580,19 @@ Use extension + MIME sniff + binary heuristics to classify:
   * code → `index_kind=code`
   * others → `index_kind=text`
 
-#### B) PDF/image
+#### B) PDF/image/document
 
-* Default: generate `ocr_markdown` via **Mistral OCR**.
-* OCR is page-aware:
+* Generate `extracted_markdown` via configured extractor (`ingest.extractor`):
+  * `auto` (default): prefer docling, fallback to Mistral OCR
+  * `docling`: require docling command/binary
+  * `mistral`: require Mistral OCR key/config
+  * `off`: skip extracted representation
+* OCR-like/page-aware behavior applies when provider emits page-separated output:
 
   * store page numbers as spans
   * chunk per page first
 * Route to `index_kind=text`.
-* Cache OCR output if enabled.
+* Cache extracted output if enabled.
 
 #### C) Audio (STT provider is configurable)
 

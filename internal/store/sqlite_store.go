@@ -113,15 +113,17 @@ func upsertRepresentationWith(ctx context.Context, exec dbExecutor, rep model.Re
 
 	_, err := exec.ExecContext(
 		ctx,
-		`INSERT INTO representations(doc_id, rep_type, rep_hash, created_unix, deleted)
-		 VALUES(?, ?, ?, ?, ?)
+		`INSERT INTO representations(doc_id, rep_type, rep_hash, meta_json, created_unix, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(doc_id, rep_type) DO UPDATE SET
 		   rep_hash=excluded.rep_hash,
+		   meta_json=excluded.meta_json,
 		   created_unix=excluded.created_unix,
 		   deleted=excluded.deleted`,
 		rep.DocID,
 		repType,
 		repHash,
+		strings.TrimSpace(rep.MetaJSON),
 		createdUnix,
 		boolToInt(rep.Deleted),
 	)
@@ -281,6 +283,7 @@ CREATE TABLE IF NOT EXISTS representations (
   doc_id INTEGER NOT NULL,
   rep_type TEXT NOT NULL,
   rep_hash TEXT NOT NULL,
+  meta_json TEXT NOT NULL DEFAULT '',
   created_unix INTEGER NOT NULL,
   deleted INTEGER NOT NULL DEFAULT 0,
   UNIQUE(doc_id, rep_type),
@@ -358,6 +361,10 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE mcp_sessions ADD COLUMN auth_scope TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnError(err) {
+		_ = db.Close()
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE representations ADD COLUMN meta_json TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnError(err) {
 		_ = db.Close()
 		return err
 	}

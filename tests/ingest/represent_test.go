@@ -98,6 +98,7 @@ func TestShouldGenerateRawText(t *testing.T) {
 		{"pdf", "pdf", false},
 		{"image", "image", false},
 		{"audio", "audio", false},
+		{"document", "document", false},
 		{"archive", "archive", false},
 		{"binary_ignored", "binary_ignored", false},
 		{"unknown", "unknown", false},
@@ -113,6 +114,29 @@ func TestShouldGenerateRawText(t *testing.T) {
 	}
 }
 
+func TestShouldGenerateExtractedMarkdown(t *testing.T) {
+	tests := []struct {
+		name     string
+		docType  string
+		expected bool
+	}{
+		{"pdf", "pdf", true},
+		{"image", "image", true},
+		{"document", "document", true},
+		{"text", "text", false},
+		{"code", "code", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ingest.ShouldGenerateExtractedMarkdown(tt.docType)
+			if got != tt.expected {
+				t.Fatalf("ShouldGenerateExtractedMarkdown(%q)=%v want=%v", tt.docType, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestRepTypeConstants(t *testing.T) {
 	// Verify constants are defined with expected values per SPEC
 	tests := []struct {
@@ -121,7 +145,7 @@ func TestRepTypeConstants(t *testing.T) {
 		expected string
 	}{
 		{"raw_text", ingest.RepTypeRawText, "raw_text"},
-		{"ocr_markdown", ingest.RepTypeOCRMarkdown, "ocr_markdown"},
+		{"extracted_markdown", ingest.RepTypeExtractedMarkdown, "extracted_markdown"},
 		{"transcript", ingest.RepTypeTranscript, "transcript"},
 		{"annotation_json", ingest.RepTypeAnnotationJSON, "annotation_json"},
 		{"annotation_text", ingest.RepTypeAnnotationText, "annotation_text"},
