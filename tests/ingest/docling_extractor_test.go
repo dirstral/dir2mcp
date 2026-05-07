@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -10,6 +11,9 @@ import (
 )
 
 func TestDoclingExtractor_Extract_UsesConfiguredCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping POSIX-only command test on Windows")
+	}
 	extractor := ingest.NewDoclingExtractor("cat {input}")
 	out, err := extractor.Extract(context.Background(), "sample.txt", []byte("hello docling"))
 	if err != nil {
@@ -21,6 +25,9 @@ func TestDoclingExtractor_Extract_UsesConfiguredCommand(t *testing.T) {
 }
 
 func TestDocumentExtractorFromConfig_PrefersDoclingCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping POSIX-only command test on Windows")
+	}
 	cfg := config.Config{
 		MistralAPIKey:  "test-key",
 		DoclingCommand: "cat {input}",

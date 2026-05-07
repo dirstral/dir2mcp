@@ -65,6 +65,7 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 		"reindex":    {},
 		"bridge":     {},
 		"config":     {},
+		"claude":     {},
 		"version":    {},
 	}
 
@@ -139,6 +140,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"app.go":                  {},
 		"ask.go":                  {},
 		"bridge.go":               {},
+		"claude_cmd.go":           {},
 		"config_cmd.go":           {},
 		"corpus_snapshot_test.go": {},
 		"corpus_writer_test.go":   {},

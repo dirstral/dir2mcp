@@ -67,6 +67,7 @@ var commands = map[string]struct{}{
 	"reindex":    {},
 	"bridge":     {},
 	"config":     {},
+	"claude":     {},
 	"version":    {},
 }
 
@@ -412,6 +413,8 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runConfig(ctx, globalOpts, args), true
 	case "bridge":
 		return a.runBridge(ctx, globalOpts, args), true
+	case "claude":
+		return a.runClaude(ctx, globalOpts, args), true
 	default:
 		return 0, false
 	}
@@ -454,6 +457,7 @@ func (a *App) printUsage() {
 		{"reindex", "force a full re-index of all documents"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
+		{"claude", "configure Claude Desktop MCP connection"},
 		{"version", "print build version"},
 	}
 	for _, c := range cmds {

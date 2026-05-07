@@ -245,8 +245,8 @@ func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
 	case "off":
 		return nil
 	case "docling":
-		if extractor := NewDoclingExtractor(strings.TrimSpace(cfg.DoclingCommand)); extractor != nil {
-			return extractor
+		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
+			return NewDoclingExtractor(tpl)
 		}
 		if _, err := exec.LookPath("docling"); err == nil {
 			return NewDoclingExtractor("")
@@ -258,8 +258,8 @@ func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
 		}
 		return nil
 	default: // auto
-		if extractor := NewDoclingExtractor(strings.TrimSpace(cfg.DoclingCommand)); extractor != nil {
-			return extractor
+		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
+			return NewDoclingExtractor(tpl)
 		}
 		if _, err := exec.LookPath("docling"); err == nil {
 			return NewDoclingExtractor("")
@@ -1262,7 +1262,7 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	// (cache miss), not for cache hits.
 	ocrText, err := s.extractor.Extract(ctx, doc.RelPath, content)
 	if err != nil {
-		return "", fmt.Errorf("ocr extract %s: %w", doc.RelPath, err)
+		return "", fmt.Errorf("document extract %s: %w", doc.RelPath, err)
 	}
 
 	ocrBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(ocrText, "\r\n", "\n"), "\r", "\n"))
