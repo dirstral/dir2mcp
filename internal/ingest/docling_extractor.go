@@ -47,10 +47,6 @@ func NewDoclingExtractor(commandTemplate string) *doclingExtractor {
 	return &doclingExtractor{commandTemplate: tpl}
 }
 
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
-
 func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
 	ext := filepath.Ext(relPath)
 	if ext == "" {
@@ -72,15 +68,11 @@ func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []b
 		return "", fmt.Errorf("close temp doc file: %w", err)
 	}
 
-	quoted := shellQuote(tmpPath)
-	cmdline := d.commandTemplate
-	if strings.Contains(cmdline, "{input}") {
-		cmdline = strings.ReplaceAll(cmdline, "{input}", quoted)
-	} else {
-		cmdline = cmdline + " " + quoted
+	args, err := buildDoclingCommandArgs(d.commandTemplate, tmpPath)
+	if err != nil {
+		return "", err
 	}
-
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", cmdline)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: maxDoclingStdoutBytes}
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
@@ -100,4 +92,22 @@ func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []b
 		return "", fmt.Errorf("docling command produced empty output")
 	}
 	return out, nil
+}
+
+func buildDoclingCommandArgs(template, inputPath string) ([]string, error) {
+	parts := strings.Fields(strings.TrimSpace(template))
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("docling command is empty")
+	}
+	replaced := false
+	for i := range parts {
+		if strings.Contains(parts[i], "{input}") {
+			parts[i] = strings.ReplaceAll(parts[i], "{input}", inputPath)
+			replaced = true
+		}
+	}
+	if !replaced {
+		parts = append(parts, inputPath)
+	}
+	return parts, nil
 }
