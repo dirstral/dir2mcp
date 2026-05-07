@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dir2mcp/internal/cli"
@@ -126,4 +127,110 @@ func TestClaudeInstallUpdatesConfigFile(t *testing.T) {
 	if _, ok := mcpServers["stas-legal-dir2mcp"]; !ok {
 		t.Fatalf("named server not written: %+v", mcpServers)
 	}
+}
+
+func TestClaudeDoctorPassesWithValidState(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-doctor")
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	code := app.RunWithContext(context.Background(), []string{
+		"--state-dir", stateDir,
+		"claude", "doctor",
+	})
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); !containsAll(got, "bridge check: ok", "url check: ok", "token file check: ok") {
+		t.Fatalf("unexpected doctor output: %s", got)
+	}
+}
+
+func TestClaudeDoctorFailsMissingToken(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-missing")
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("remove token: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	code := app.RunWithContext(context.Background(), []string{
+		"--state-dir", stateDir,
+		"claude", "doctor",
+	})
+	if code == 0 {
+		t.Fatalf("expected non-zero exit code, got stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "read token file") {
+		t.Fatalf("expected missing token diagnostic, got: %s", got)
+	}
+}
+
+func TestClaudeInstallFailsMissingBridge(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-install")
+	configPath := filepath.Join(tmp, "claude_desktop_config.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", "")
+	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	code := app.RunWithContext(context.Background(), []string{
+		"--state-dir", stateDir,
+		"claude", "install",
+		"--config-path", configPath,
+	})
+	if code == 0 {
+		t.Fatalf("expected non-zero exit code with missing bridge, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "could not find bunx or npx in PATH") {
+		t.Fatalf("expected missing bridge error, got: %s", got)
+	}
+}
+
+func writeClaudeStateFixture(t *testing.T, root, token string) (stateDir string, tokenPath string) {
+	t.Helper()
+	stateDir = filepath.Join(root, "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	tokenPath = filepath.Join(stateDir, "secret.token")
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	connection := map[string]interface{}{
+		"transport":    "mcp_streamable_http",
+		"url":          "http://127.0.0.1:9882/mcp",
+		"headers":      map[string]string{"MCP-Protocol-Version": "2025-11-25"},
+		"session":      map[string]interface{}{"uses_mcp_session_id": true, "header_name": "MCP-Session-Id", "assigned_on_initialize": true},
+		"public":       false,
+		"token_source": "secret.token",
+		"token_file":   tokenPath,
+	}
+	raw, err := json.Marshal(connection)
+	if err != nil {
+		t.Fatalf("marshal connection fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), raw, 0o644); err != nil {
+		t.Fatalf("write connection fixture: %v", err)
+	}
+	return stateDir, tokenPath
+}
+
+func containsAll(s string, needles ...string) bool {
+	for _, n := range needles {
+		if !strings.Contains(s, n) {
+			return false
+		}
+	}
+	return true
 }
