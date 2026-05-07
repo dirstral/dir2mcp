@@ -67,7 +67,7 @@ func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, err.Error())
 		return exitGeneric
 	}
-	entry := buildClaudeMCPRemoteEntry(connection.URL, token)
+	entry := buildClaudeMCPRemoteEntry(connection.URL, token, connection.Headers["MCP-Protocol-Version"])
 
 	payload := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
@@ -128,7 +128,7 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 		return exitGeneric
 	}
 
-	entry := buildClaudeMCPRemoteEntry(connection.URL, token)
+	entry := buildClaudeMCPRemoteEntry(connection.URL, token, connection.Headers["MCP-Protocol-Version"])
 	entry.Command = commandPath
 
 	root, err := loadJSONFileOrEmpty(*configPath)
@@ -159,12 +159,15 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 	}
 
 	if global.jsonOutput {
-		_ = emitJSON(a.stdout, map[string]interface{}{
+		if err := emitJSON(a.stdout, map[string]interface{}{
 			"path":        *configPath,
 			"server_name": *serverName,
 			"command":     commandPath,
 			"updated":     true,
-		})
+		}); err != nil {
+			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode claude install json: %v", err))
+			return exitGeneric
+		}
 		return exitSuccess
 	}
 	writef(a.stdout, "updated %s with MCP server %q\n", *configPath, *serverName)
@@ -210,7 +213,7 @@ func (a *App) runClaudeDoctor(ctx context.Context, global globalOptions, args []
 
 	ok := bridgeErr == nil && urlErr == nil && reachErr == nil && tokenErr == nil
 	if global.jsonOutput {
-		_ = emitJSON(a.stdout, map[string]interface{}{
+		if err := emitJSON(a.stdout, map[string]interface{}{
 			"ok":               ok,
 			"bridge_command":   bridgeCommand,
 			"bridge_error":     errString(bridgeErr),
@@ -218,7 +221,10 @@ func (a *App) runClaudeDoctor(ctx context.Context, global globalOptions, args []
 			"url_error":        errString(urlErr),
 			"endpoint_error":   errString(reachErr),
 			"token_file_error": errString(tokenErr),
-		})
+		}); err != nil {
+			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode claude doctor json: %v", err))
+			return exitGeneric
+		}
 		if ok {
 			return exitSuccess
 		}
@@ -237,14 +243,17 @@ func (a *App) runClaudeDoctor(ctx context.Context, global globalOptions, args []
 	return exitGeneric
 }
 
-func buildClaudeMCPRemoteEntry(mcpURL, token string) claudeServerConfig {
+func buildClaudeMCPRemoteEntry(mcpURL, token, protocolVersion string) claudeServerConfig {
+	if strings.TrimSpace(protocolVersion) == "" {
+		protocolVersion = "2025-11-25"
+	}
 	return claudeServerConfig{
 		Command: "bunx",
 		Args: []string{
 			"mcp-remote",
 			mcpURL,
 			"--header",
-			"MCP-Protocol-Version:2025-11-25",
+			"MCP-Protocol-Version:" + protocolVersion,
 			"--header",
 			"Authorization:Bearer " + token,
 		},
