@@ -138,13 +138,34 @@ func TestClaudeDoctorPassesWithValidState(t *testing.T) {
 
 	code := app.RunWithContext(context.Background(), []string{
 		"--state-dir", stateDir,
+		"--json",
 		"claude", "doctor",
 	})
-	if code != 0 {
-		t.Fatalf("unexpected exit code: %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	var payload map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal doctor output: %v raw=%s", err, stdout.String())
 	}
-	if got := stdout.String(); !containsAll(got, "bridge check: ok", "url check: ok", "token file check: ok") {
-		t.Fatalf("unexpected doctor output: %s", got)
+	if payload["bridge_error"] != "" {
+		t.Fatalf("expected bridge_error empty, got=%v payload=%v", payload["bridge_error"], payload)
+	}
+	if payload["url_error"] != "" {
+		t.Fatalf("expected url_error empty, got=%v payload=%v", payload["url_error"], payload)
+	}
+	if payload["token_file_error"] != "" {
+		t.Fatalf("expected token_file_error empty, got=%v payload=%v", payload["token_file_error"], payload)
+	}
+	endpointErr, _ := payload["endpoint_error"].(string)
+	switch code {
+	case 0:
+		if endpointErr != "" {
+			t.Fatalf("expected empty endpoint_error on success, got=%q payload=%v", endpointErr, payload)
+		}
+	case 1:
+		if endpointErr == "" {
+			t.Fatalf("expected endpoint_error on failure, payload=%v", payload)
+		}
+	default:
+		t.Fatalf("unexpected exit code: %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -224,13 +245,4 @@ func writeClaudeStateFixture(t *testing.T, root, token string) (stateDir string,
 		t.Fatalf("write connection fixture: %v", err)
 	}
 	return stateDir, tokenPath
-}
-
-func containsAll(s string, needles ...string) bool {
-	for _, n := range needles {
-		if !strings.Contains(s, n) {
-			return false
-		}
-	}
-	return true
 }
