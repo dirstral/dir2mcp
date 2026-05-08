@@ -22,7 +22,7 @@ type claudeServerConfig struct {
 
 func (a *App) runClaude(ctx context.Context, global globalOptions, args []string) int {
 	if len(args) == 0 {
-		writeln(a.stdout, "claude command: supported subcommands are print-config, install, and doctor")
+		writeln(a.stdout, "claude command: supported subcommands are print-config, install, uninstall, and doctor")
 		return exitSuccess
 	}
 	switch args[0] {
@@ -30,6 +30,8 @@ func (a *App) runClaude(ctx context.Context, global globalOptions, args []string
 		return a.runClaudePrintConfig(global, args[1:])
 	case "install":
 		return a.runClaudeInstall(global, args[1:])
+	case "uninstall":
+		return a.runClaudeUninstall(global, args[1:])
 	case "doctor":
 		return a.runClaudeDoctor(ctx, global, args[1:])
 	default:
@@ -172,6 +174,80 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 	}
 	writef(a.stdout, "updated %s with MCP server %q\n", *configPath, *serverName)
 	writef(a.stdout, "restart Claude Desktop to load the updated MCP server entry\n")
+	return exitSuccess
+}
+
+func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
+	fs := flag.NewFlagSet("claude uninstall", flag.ContinueOnError)
+	fs.SetOutput(ioDiscard{})
+	serverName := fs.String("name", "dir2mcp", "server name to remove from Claude config")
+	configPath := fs.String("config-path", defaultClaudeDesktopConfigPath(), "Claude Desktop config path")
+	if err := fs.Parse(args); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid claude uninstall flags: %v", err))
+		return exitConfigInvalid
+	}
+	if len(fs.Args()) > 0 {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("claude uninstall does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
+		return exitConfigInvalid
+	}
+
+	// Loading the file into a map preserves any unrelated mcpServers entries
+	// the user may have configured for other tools — we only touch our own.
+	root, err := loadJSONFileOrEmpty(*configPath)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("read Claude config: %v", err))
+		return exitGeneric
+	}
+
+	mcpServers, _ := root["mcpServers"].(map[string]interface{})
+	_, present := mcpServers[*serverName]
+	if !present {
+		// Idempotent no-op: it's not an error to uninstall something that
+		// isn't installed. Report and exit clean so scripts can run this
+		// unconditionally during teardown.
+		if global.jsonOutput {
+			if err := emitJSON(a.stdout, map[string]interface{}{
+				"path":        *configPath,
+				"server_name": *serverName,
+				"removed":     false,
+				"reason":      "entry_not_present",
+			}); err != nil {
+				writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode claude uninstall json: %v", err))
+				return exitGeneric
+			}
+			return exitSuccess
+		}
+		writef(a.stdout, "no MCP server %q in %s; nothing to remove\n", *serverName, *configPath)
+		return exitSuccess
+	}
+
+	delete(mcpServers, *serverName)
+	if len(mcpServers) == 0 {
+		// Drop the now-empty mcpServers key entirely so the resulting file
+		// matches a never-installed state byte-for-byte (modulo other keys).
+		delete(root, "mcpServers")
+	} else {
+		root["mcpServers"] = mcpServers
+	}
+
+	if err := writeJSONFile(*configPath, root); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("write Claude config: %v", err))
+		return exitGeneric
+	}
+
+	if global.jsonOutput {
+		if err := emitJSON(a.stdout, map[string]interface{}{
+			"path":        *configPath,
+			"server_name": *serverName,
+			"removed":     true,
+		}); err != nil {
+			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode claude uninstall json: %v", err))
+			return exitGeneric
+		}
+		return exitSuccess
+	}
+	writef(a.stdout, "removed MCP server %q from %s\n", *serverName, *configPath)
+	writef(a.stdout, "restart Claude Desktop to drop the server entry\n")
 	return exitSuccess
 }
 

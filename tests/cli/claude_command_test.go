@@ -246,3 +246,111 @@ func writeClaudeStateFixture(t *testing.T, root, token string) (stateDir string,
 	}
 	return stateDir, tokenPath
 }
+
+func TestClaudeUninstallRemovesEntryAndPreservesUnrelatedKeys(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "claude_desktop_config.json")
+	initial := map[string]interface{}{
+		"preferences": map[string]interface{}{"coworkWebSearchEnabled": true},
+		"mcpServers": map[string]interface{}{
+			"dir2mcp": map[string]interface{}{
+				"command": "bunx",
+				"args":    []string{"mcp-remote", "http://127.0.0.1:9882/mcp"},
+			},
+			"some-other-tool": map[string]interface{}{
+				"command": "node",
+				"args":    []string{"/opt/other/server.js"},
+			},
+		},
+	}
+	raw, _ := json.Marshal(initial)
+	if err := os.WriteFile(configPath, raw, 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	code := app.RunWithContext(context.Background(), []string{
+		"claude", "uninstall",
+		"--config-path", configPath,
+	})
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	updatedRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	var updated map[string]interface{}
+	if err := json.Unmarshal(updatedRaw, &updated); err != nil {
+		t.Fatalf("unmarshal updated config: %v raw=%s", err, string(updatedRaw))
+	}
+	if _, ok := updated["preferences"].(map[string]interface{}); !ok {
+		t.Errorf("preferences must survive uninstall: %+v", updated)
+	}
+	mcpServers, ok := updated["mcpServers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcpServers should still exist (other entries remain): %+v", updated)
+	}
+	if _, removed := mcpServers["dir2mcp"]; removed {
+		t.Errorf("dir2mcp entry should have been removed: %+v", mcpServers)
+	}
+	if _, kept := mcpServers["some-other-tool"]; !kept {
+		t.Errorf("unrelated MCP server entry should survive: %+v", mcpServers)
+	}
+}
+
+func TestClaudeUninstallDropsEmptyMCPServersBlock(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "claude_desktop_config.json")
+	initial := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"dir2mcp": map[string]interface{}{"command": "bunx"},
+		},
+	}
+	raw, _ := json.Marshal(initial)
+	if err := os.WriteFile(configPath, raw, 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	code := app.RunWithContext(context.Background(), []string{
+		"claude", "uninstall",
+		"--config-path", configPath,
+	})
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	var updated map[string]interface{}
+	updatedRaw, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(updatedRaw, &updated); err != nil {
+		t.Fatalf("unmarshal updated config: %v raw=%s", err, string(updatedRaw))
+	}
+	if _, present := updated["mcpServers"]; present {
+		t.Errorf("mcpServers should be dropped when uninstall empties it: %+v", updated)
+	}
+}
+
+func TestClaudeUninstallIsIdempotentWhenEntryAbsent(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "claude_desktop_config.json")
+	if err := os.WriteFile(configPath, []byte("{\"preferences\":{\"x\":1}}\n"), 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	code := app.RunWithContext(context.Background(), []string{
+		"claude", "uninstall",
+		"--config-path", configPath,
+	})
+	if code != 0 {
+		t.Fatalf("unexpected exit code on no-op uninstall: %d stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "nothing to remove") {
+		t.Errorf("expected informational stdout about nothing to remove, got: %q", got)
+	}
+}
