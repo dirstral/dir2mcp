@@ -38,9 +38,11 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 
 	args := []any{matchExpr}
 	stmt := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text,
+	                COALESCE(d.title, ''),
 	                bm25(chunks_fts) AS score
 	         FROM chunks_fts
 	         JOIN chunks c ON c.chunk_id = chunks_fts.rowid
+	         LEFT JOIN documents d ON d.rel_path = c.rel_path
 	         WHERE chunks_fts MATCH ? AND c.deleted = 0`
 	if kind := strings.TrimSpace(indexKind); kind != "" {
 		stmt += ` AND c.index_kind = ?`
@@ -63,9 +65,10 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 			docType string
 			repType string
 			text    string
+			title   string
 			score   float64
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &score); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &title, &score); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -74,6 +77,7 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 		hits = append(hits, model.SearchHit{
 			ChunkID: uint64(chunkID),
 			RelPath: relPath,
+			Title:   title,
 			DocType: docType,
 			RepType: repType,
 			Score:   -score,
