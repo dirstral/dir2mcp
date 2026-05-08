@@ -2163,7 +2163,7 @@ func transcribeAndAskInputSchema() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
 			"question": map[string]interface{}{"type": "string", "minLength": 1},
-			"k":        map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
+			"k":        map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
 		},
 		"required": []string{"rel_path", "question"},
 	}
