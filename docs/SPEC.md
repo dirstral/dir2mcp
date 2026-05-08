@@ -1081,7 +1081,7 @@ All schemas are JSON Schema (draft-agnostic, compatible with common validators).
   "additionalProperties": false,
   "properties": {
     "query": { "type": "string", "minLength": 1 },
-    "k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
+    "k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 15 },
     "index": { "type": "string", "enum": ["auto", "text", "code", "both"], "default": "auto" },
     "path_prefix": { "type": "string" },
     "file_glob": { "type": "string" },
@@ -1129,7 +1129,7 @@ All schemas are JSON Schema (draft-agnostic, compatible with common validators).
   "additionalProperties": false,
   "properties": {
     "question": { "type": "string", "minLength": 1 },
-    "k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
+    "k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 15 },
     "mode": { "type": "string", "enum": ["answer", "search_only"], "default": "answer" },
     "index": { "type": "string", "enum": ["auto", "text", "code", "both"], "default": "auto" },
     "path_prefix": { "type": "string" },
@@ -1462,7 +1462,7 @@ filters is impossible.
   "properties": {
     "rel_path": { "type": "string", "minLength": 1 },
     "question": { "type": "string", "minLength": 1 },
-    "k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
+    "k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 15 }
   },
   "required": ["rel_path", "question"]
 }
@@ -1534,7 +1534,7 @@ mistral:
 
 rag:
   generate_answer: true
-  k_default: 10
+  k_default: 15
   system_prompt: |
     You are a retrieval-augmented assistant.
     Use citations and never invent sources.

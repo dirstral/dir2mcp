@@ -1983,7 +1983,7 @@ func searchInputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"query":       map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
 			"file_glob":   map[string]interface{}{"type": "string"},
@@ -2015,7 +2015,7 @@ func askInputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"question":    map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
 			"mode":        map[string]interface{}{"type": "string", "enum": []string{"answer", "search_only"}, "default": "answer"},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
@@ -2163,7 +2163,7 @@ func transcribeAndAskInputSchema() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
 			"question": map[string]interface{}{"type": "string", "minLength": 1},
-			"k":        map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+			"k":        map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
 		},
 		"required": []string{"rel_path", "question"},
 	}

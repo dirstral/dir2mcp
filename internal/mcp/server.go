@@ -48,7 +48,7 @@ const (
 
 // DefaultSearchK is used when tools/call search arguments omit k or provide
 // a non-positive value.
-const DefaultSearchK = 10
+const DefaultSearchK = 15
 
 // MaxSearchK is the highest allowed k value for search/ask requests.
 const MaxSearchK = 50
