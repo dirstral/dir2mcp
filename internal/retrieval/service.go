@@ -971,14 +971,43 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 		return []model.SearchHit{}, nil
 	}
 
-	filtered, err := s.collectVectorCandidates(ctx, vectors[0], idx, indexName, filters, k)
+	vectorCandidateLimit := s.hybridVectorCandidateLimit(k, idx)
+	filtered, err := s.collectVectorCandidates(ctx, vectors[0], idx, indexName, filters, vectorCandidateLimit)
 	if err != nil {
 		return nil, err
 	}
 	if fused, ok := s.runHybridSearch(ctx, query, k, indexName, filtered); ok {
-		return fused, nil
+		return truncateSearchHits(fused, k), nil
 	}
-	return filtered, nil
+	return truncateSearchHits(filtered, k), nil
+}
+
+func (s *Service) hybridVectorCandidateLimit(k int, idx model.Index) int {
+	if k <= 0 || idx == nil {
+		return k
+	}
+	if _, ok := idx.(model.LexicalSearcher); !ok {
+		return k
+	}
+
+	s.metaMu.RLock()
+	hybridCandidatePoolSize := s.hybridCandidatePoolSize
+	s.metaMu.RUnlock()
+
+	if hybridCandidatePoolSize > k {
+		return hybridCandidatePoolSize
+	}
+	return k
+}
+
+func truncateSearchHits(hits []model.SearchHit, k int) []model.SearchHit {
+	if k < 0 {
+		k = 0
+	}
+	if len(hits) <= k {
+		return hits
+	}
+	return hits[:k]
 }
 
 // collectVectorCandidates runs the dense-vector search loop with overfetch and
