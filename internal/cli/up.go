@@ -26,39 +26,19 @@ import (
 )
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
-	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
-		return exitConfigInvalid
+	// When this is the launching parent (not the daemon child) and the
+	// caller hasn't asked for foreground/JSON behavior, fork a detached
+	// child to run the server and exit the parent once the child is
+	// ready. The child re-enters runUp with daemonChildEnv set and falls
+	// through to the in-process body below.
+	if shouldDaemonize(a, opts) {
+		return a.runUpAsDaemonParent(ctx, opts)
 	}
 
-	tlsCertFile, tlsKeyFile, code := a.applyTLSConfig(&cfg, opts)
+	cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, code := a.prepareUpConfig(opts)
 	if code != exitSuccess {
 		return code
 	}
-
-	x402TokenSource, code := a.applyUpFlagOverrides(&cfg, opts)
-	if code != exitSuccess {
-		return code
-	}
-
-	if code := a.validateUpConfig(&cfg, opts); code != exitSuccess {
-		return code
-	}
-
-	nonInteractiveMode := upNonInteractiveMode(opts)
-	if code := a.checkMistralAPIKey(&cfg, opts, nonInteractiveMode); code != exitSuccess {
-		return code
-	}
-
-	auth, err := prepareAuthMaterial(cfg)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("auth setup: %v", err))
-		return exitAuthOrPayment
-	}
-	cfg.AuthMode = auth.mode
-	cfg.ResolvedAuthToken = auth.token
-	warnConfigSnapshotErr(a.stderr, opts.quiet, saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource))
 
 	st, textIx, codeIx, code := a.initStoreAndIndices(ctx, &cfg, opts.jsonOutput)
 	if code != exitSuccess {
@@ -118,6 +98,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer cancel()
 	defer func() { _ = ln.Close() }()
 
+	cleanupPIDFile, code := a.setupDaemonChildIfApplicable(cfg.StateDir, opts, cancel)
+	if code != exitSuccess {
+		return code
+	}
+	defer cleanupPIDFile()
+
 	persistence := index.NewPersistenceManager(
 		[]index.IndexedFile{
 			{Path: textIndexPath, Index: textIx},
@@ -151,31 +137,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		"public":      cfg.Public,
 	})
 
-	connection := buildConnectionPayload(cfg, mcpURL, auth)
-	if err := writeConnectionFile(filepath.Join(cfg.StateDir, connectionFileName), connection); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("write %s: %v", connectionFileName, err))
-		return exitGeneric
+	connection, code := a.publishConnection(cfg, mcpURL, auth, emitter, opts)
+	if code != exitSuccess {
+		return code
 	}
 
-	emitter.Emit("info", "connection", connection)
-	emitter.Emit("info", "scan_progress", map[string]interface{}{
-		"scanned": 0,
-		"indexed": 0,
-		"skipped": 0,
-		"deleted": 0,
-		"reps":    0,
-		"chunks":  0,
-		"errors":  0,
-	})
-	emitter.Emit("info", "embed_progress", map[string]interface{}{
-		"embedded": 0,
-		"chunks":   0,
-		"errors":   0,
-	})
-
-	a.printHumanConnectionIfVerbose(cfg, connection, auth, opts)
-
-	stdinQuitCh := startStdinQuitListener(nonInteractiveMode, opts.jsonOutput)
+	stdinQuitCh := a.installInteractionForUp(cancel, cfg, connection, auth, opts, nonInteractiveMode)
 
 	ingestErrCh := make(chan error, 1)
 	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
@@ -782,3 +749,185 @@ func (a *App) printHumanConnectionIfVerbose(cfg config.Config, connection connec
 		a.printHumanConnection(cfg, connection, auth, opts.readOnly)
 	}
 }
+
+// prepareUpConfig runs the full config-load + validation pipeline that
+// must succeed before runUp can bind a listener: loadConfigWithGlobalOptions,
+// TLS resolution, flag overrides, validateUpConfig, Mistral key check,
+// auth material prep, and the effective-config snapshot write. Returns
+// the resolved cfg, auth material, TLS file paths, the derived
+// non-interactive flag, and an exit code; runUp returns immediately
+// when the code is non-zero (the helper has already written the error
+// to stderr).
+//
+// Extracted from runUp to keep that function under the
+// cyclomatic-complexity budget after PR #174's daemon-setup branches
+// landed; the exit-code-or-fall-through pattern collected enough `if`
+// guards in runUp to push it over.
+func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, string, string, bool, int) {
+	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
+		return config.Config{}, authMaterial{}, "", "", false, exitConfigInvalid
+	}
+	tlsCertFile, tlsKeyFile, code := a.applyTLSConfig(&cfg, opts)
+	if code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	x402TokenSource, code := a.applyUpFlagOverrides(&cfg, opts)
+	if code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	if code := a.validateUpConfig(&cfg, opts); code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	nonInteractiveMode := upNonInteractiveMode(opts)
+	if code := a.checkMistralAPIKey(&cfg, opts, nonInteractiveMode); code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	auth, err := prepareAuthMaterial(cfg)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("auth setup: %v", err))
+		return config.Config{}, authMaterial{}, "", "", false, exitAuthOrPayment
+	}
+	cfg.AuthMode = auth.mode
+	cfg.ResolvedAuthToken = auth.token
+	warnConfigSnapshotErr(a.stderr, opts.quiet, saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource))
+	return cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, exitSuccess
+}
+
+// publishConnection writes connection.json and emits the standard
+// "connection / scan_progress / embed_progress" startup events. Split
+// from runUp purely to keep that function under the cyclomatic budget
+// after PR #174's daemon-setup branches landed.
+func (a *App) publishConnection(cfg config.Config, mcpURL string, auth authMaterial, emitter *ndjsonEmitter, opts upOptions) (connectionPayload, int) {
+	connection := buildConnectionPayload(cfg, mcpURL, auth)
+	if err := writeConnectionFile(filepath.Join(cfg.StateDir, connectionFileName), connection); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("write %s: %v", connectionFileName, err))
+		return connectionPayload{}, exitGeneric
+	}
+	emitter.Emit("info", "connection", connection)
+	emitter.Emit("info", "scan_progress", map[string]interface{}{
+		"scanned": 0,
+		"indexed": 0,
+		"skipped": 0,
+		"deleted": 0,
+		"reps":    0,
+		"chunks":  0,
+		"errors":  0,
+	})
+	emitter.Emit("info", "embed_progress", map[string]interface{}{
+		"embedded": 0,
+		"chunks":   0,
+		"errors":   0,
+	})
+	return connection, exitSuccess
+}
+
+// setupDaemonChildIfApplicable performs the two daemon-child-only
+// preconditions that have to happen BEFORE writing connection.json: the
+// SIGTERM handler install and the O_EXCL pid-file claim. The handler is
+// installed first so a SIGTERM that arrives during the window between
+// here and the event loop is converted into a graceful cancel rather
+// than killing the child abruptly. The pid-file claim must come before
+// connection.json so a second daemon racing for the same state dir
+// loses deterministically and exits before touching anything else.
+//
+// Returns the deferred cleanup closure (a no-op when not running as
+// daemon child) and an exit code; runUp returns immediately when the
+// code is non-zero (the helper has already written the error).
+//
+// Extracted from runUp to keep that function under the
+// cyclomatic-complexity budget after PR #174's daemon-child setup grew.
+func (a *App) setupDaemonChildIfApplicable(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
+	cleanup = func() {}
+	if !isRunningAsDaemonChild() {
+		return cleanup, exitSuccess
+	}
+	installDaemonChildSignalHandler(cancel)
+	pidPath := pidFilePath(stateDir)
+	if err := claimPIDFile(pidPath, os.Getpid()); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
+			fmt.Sprintf("claim pid file %s: %v", pidPath, err),
+			"another dir2mcp daemon is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
+		)
+		return cleanup, exitGeneric
+	}
+	return func() { _ = removePIDFile(pidPath) }, exitSuccess
+}
+
+// installInteractionForUp picks the right termination interaction for
+// the current run mode and returns the channel runEventLoop watches.
+//
+// - Daemon child: skip the foreground banner (the parent printed a
+//   daemon-ready summary on the user's terminal) and translate
+//   SIGTERM/SIGINT into cancel() so `dir2mcp down` can stop us cleanly
+//   through the existing event-loop shutdown path. The stdin listener
+//   is suppressed because the child has no terminal.
+// - Foreground: print the banner and start the q+Enter stdin listener
+//   the way the pre-daemonization code did.
+//
+// Extracted from runUp purely to keep that function under the
+// cyclomatic-complexity budget after daemon mode was added.
+func (a *App) installInteractionForUp(
+	cancel context.CancelFunc,
+	cfg config.Config,
+	connection connectionPayload,
+	auth authMaterial,
+	opts upOptions,
+	nonInteractiveMode bool,
+) <-chan struct{} {
+	if isRunningAsDaemonChild() {
+		installDaemonChildSignalHandler(cancel)
+		return startStdinQuitListener(true, opts.jsonOutput)
+	}
+	a.printHumanConnectionIfVerbose(cfg, connection, auth, opts)
+	return startStdinQuitListener(nonInteractiveMode, opts.jsonOutput)
+}
+
+// shouldDaemonize decides whether `dir2mcp up` should fork a detached
+// daemon child instead of running the server in the foreground.
+//
+// Daemon mode is the default for an interactive shell — `dir2mcp up`
+// returns control once the server is bound and ready. The opt-outs:
+//   - --foreground / -f: explicit caller request
+//   - --json: NDJSON event stream callers (smoke tests, automation) need
+//     events on stdout in real time, which detaching breaks
+//   - daemon child: we're already inside the forked process; fall through
+//     to the in-process server body
+//   - non-unix platforms: setsid isn't available, so degrade gracefully
+//   - stdout not a TTY: piped, redirected, or being scraped by a test
+//     harness — the caller wants to see real-time output (and any
+//     startup errors) on the same stream the parent would have used.
+//     Daemon mode hides the child's stderr inside the server log, which
+//     is unhelpful for non-interactive callers.
+//
+// The TTY check is the gate that keeps existing CLI/integration tests
+// (which shell out and expect synchronous up/down semantics) working
+// without changes.
+func shouldDaemonize(a *App, opts upOptions) bool {
+	if opts.foreground || opts.jsonOutput {
+		return false
+	}
+	if isRunningAsDaemonChild() {
+		return false
+	}
+	if !isDaemonSupported() {
+		return false
+	}
+	if !writerIsTerminal(a.stdout) && !opts.daemon {
+		return false
+	}
+	return true
+}
+
+// writerIsTerminal reports whether w corresponds to a terminal file
+// descriptor. Anything that isn't an *os.File (a bytes.Buffer in tests,
+// a pipe in CI) is treated as non-terminal.
+func writerIsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return isTerminal(f)
+}
+
