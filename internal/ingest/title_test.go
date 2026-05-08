@@ -19,8 +19,13 @@ func TestExtractTitle(t *testing.T) {
 			want: "Subtitle Heading",
 		},
 		{
-			name: "uppercase act title typical of OCR'd legal PDF",
+			name: "OCR'd legal PDF: heading wins over earlier all-caps jurisdiction header",
 			body: "VIRGIN ISLANDS\n\n# PROLIFERATION FINANCING (PROHIBITION) ACT, 2021\n\narrangement of sections...",
+			want: "PROLIFERATION FINANCING (PROHIBITION) ACT, 2021",
+		},
+		{
+			name: "uppercase fallback when no heading is present",
+			body: "VIRGIN ISLANDS\n\nsome body text that follows\n",
 			want: "VIRGIN ISLANDS",
 		},
 		{

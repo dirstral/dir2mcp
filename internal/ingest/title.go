@@ -3,6 +3,7 @@ package ingest
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // titleScanLimit caps how much of the document body the title heuristic
@@ -18,7 +19,8 @@ const titleMaxLen = 200
 // beginning of a text/markdown/OCR body. Used to humanize citations whose
 // rel_path is opaque (e.g. Windows 8.3-truncated PDF filenames).
 //
-// Heuristic, in order of preference:
+// Heuristic, in order of preference (markdown headings always win, even when
+// they appear after an earlier uppercase-line candidate):
 //  1. The first markdown heading line (`# Title`, `## Title`, ...).
 //  2. The first line that is mostly uppercase and looks title-like.
 //
@@ -28,9 +30,8 @@ func ExtractTitle(body string) string {
 	if body == "" {
 		return ""
 	}
-	if len(body) > titleScanLimit {
-		body = body[:titleScanLimit]
-	}
+	body = truncateOnRuneBoundary(body, titleScanLimit)
+	var uppercaseFallback string
 	for _, raw := range strings.Split(body, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
@@ -39,11 +40,29 @@ func ExtractTitle(body string) string {
 		if title := titleFromMarkdownHeading(line); title != "" {
 			return title
 		}
-		if title := titleFromUppercaseLine(line); title != "" {
-			return title
+		if uppercaseFallback == "" {
+			if title := titleFromUppercaseLine(line); title != "" {
+				uppercaseFallback = title
+			}
 		}
 	}
-	return ""
+	return uppercaseFallback
+}
+
+// truncateOnRuneBoundary returns s truncated to at most maxBytes bytes, but
+// never splits a UTF-8 rune. Slicing by raw byte offset can produce invalid
+// UTF-8 (e.g. cutting a multi-byte rune in half), which would break later
+// rune-aware passes. Walk back from the cut point until we find a valid
+// rune boundary.
+func truncateOnRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func titleFromMarkdownHeading(line string) string {
