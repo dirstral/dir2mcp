@@ -85,8 +85,9 @@ func titleFromUppercaseLine(line string) string {
 
 func clampTitle(s string) string {
 	s = strings.TrimSpace(s)
-	if len(s) > titleMaxLen {
-		s = strings.TrimSpace(s[:titleMaxLen])
+	runes := []rune(s)
+	if len(runes) > titleMaxLen {
+		s = strings.TrimSpace(string(runes[:titleMaxLen]))
 	}
 	return s
 }
