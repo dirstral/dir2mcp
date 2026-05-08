@@ -58,12 +58,15 @@ cyclo:
 test:
 	go test ./...
 
+test-release-tools:
+	cd scripts && python3 -m unittest discover -p 'test_*.py'
+
 conformance:
 	go test ./tests/conformance/...
 
-check: fmt vet lint cyclo test build
+check: fmt vet lint cyclo test test-release-tools build
 
-ci: vet cyclo test
+ci: vet cyclo test test-release-tools
 
 benchmark:
 	# run the large-corpus retrieval benchmark only
