@@ -51,14 +51,22 @@ def parse_checksums(checksums_path: Path) -> dict[str, str]:
     GoReleaser writes ``<sha256>  <filename>`` per line.
     """
     checksums: dict[str, str] = {}
-    for raw in checksums_path.read_text().splitlines():
+    for lineno, raw in enumerate(checksums_path.read_text().splitlines(), start=1):
         line = raw.strip()
         if not line:
             continue
         parts = line.split()
         if len(parts) < 2:
-            continue
+            raise SystemExit(
+                f"{checksums_path}:{lineno}: malformed checksum line; "
+                f"expected '<sha256>  <filename>', got: {raw!r}"
+            )
         sha, filename = parts[0], parts[-1]
+        if re.fullmatch(r"[0-9a-fA-F]{64}", sha) is None:
+            raise SystemExit(
+                f"{checksums_path}:{lineno}: invalid sha256 {sha!r} for {filename!r}; "
+                "expected exactly 64 hexadecimal characters"
+            )
         checksums[filename] = sha
     return checksums
 
