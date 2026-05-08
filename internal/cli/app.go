@@ -372,6 +372,20 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 
 func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remaining []string, jsonRequested bool) int {
 	command := remaining[0]
+	// Validate against the canonical command surface before dispatch. The
+	// commands map is the single source of truth that the repo-split
+	// boundary test (tests/security) AST-parses to verify the surface stays
+	// intact; the explicit lookup here keeps it referenced so go vet / the
+	// unused-variable lint stays happy after parseGlobalOptions stopped
+	// consulting it directly.
+	if _, known := commands[command]; !known {
+		effectiveJSON := globalOpts.jsonOutput || jsonRequested
+		writeCLIError(a.stderr, effectiveJSON, exitGeneric, fmt.Sprintf("unknown command: %s", command))
+		if !effectiveJSON {
+			a.printUsage()
+		}
+		return exitGeneric
+	}
 	if code, handled := a.runSimpleCommand(ctx, globalOpts, command, remaining[1:]); handled {
 		return code
 	}
