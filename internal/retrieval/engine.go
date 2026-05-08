@@ -102,6 +102,7 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 	svc.SetRAGSystemPrompt(effective.RAGSystemPrompt)
 	svc.SetMaxContextChars(effective.RAGMaxContextChars)
 	svc.SetOversampleFactor(effective.RAGOversampleFactor)
+	svc.SetHybridEnabled(effective.RetrievalHybridEnabled)
 
 	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
 		preloadCtx, cancel := context.WithTimeout(ctx, defaultEnginePreloadTimeout)
@@ -220,6 +221,10 @@ func mergeEngineConfigModels(merged *config.Config, override *config.Config) {
 	if override.RAGOversampleFactor > 0 {
 		merged.RAGOversampleFactor = override.RAGOversampleFactor
 	}
+	// RetrievalHybridEnabled is unconditionally adopted from the override:
+	// the bool zero value (false) is a meaningful setting (user wants
+	// vector-only), so a "if override.X" guard would silently lose disables.
+	merged.RetrievalHybridEnabled = override.RetrievalHybridEnabled
 	if override.MistralMaxOCRPayloadBytes > 0 {
 		merged.MistralMaxOCRPayloadBytes = override.MistralMaxOCRPayloadBytes
 	}

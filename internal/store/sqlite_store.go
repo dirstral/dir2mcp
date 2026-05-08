@@ -395,6 +395,24 @@ CREATE TABLE IF NOT EXISTS mcp_payment_outcomes (
   updated_unix INTEGER NOT NULL
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+  text,
+  content='chunks',
+  content_rowid='chunk_id',
+  tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+  INSERT INTO chunks_fts(rowid, text) VALUES (new.chunk_id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.chunk_id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.chunk_id, old.text);
+  INSERT INTO chunks_fts(rowid, text) VALUES (new.chunk_id, new.text);
+END;
+
 CREATE INDEX IF NOT EXISTS idx_documents_rel_path ON documents(rel_path);
 CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted);
 CREATE INDEX IF NOT EXISTS idx_representations_doc_id ON representations(doc_id);
@@ -414,6 +432,10 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 		_ = db.Close()
 		return err
 	}
+	if err := backfillFTSIfEmpty(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
 
 	if err := bootstrapSettingsLocked(ctx, db); err != nil {
 		_ = db.Close()
@@ -421,6 +443,50 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 	}
 
 	s.db = db
+	return nil
+}
+
+// applyAdditiveColumnMigrations runs ALTER TABLE ADD COLUMN statements that
+// extend existing tables with new optional columns. Each statement is wrapped
+// with isDuplicateColumnError so that the migration is idempotent on
+// already-upgraded databases. Add new entries here when introducing additive
+// schema changes; do not modify existing entries (they are now historical).
+func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
+	migrations := []string{
+		`ALTER TABLE documents ADD COLUMN source_type TEXT NOT NULL DEFAULT 'filesystem'`,
+		`ALTER TABLE mcp_sessions ADD COLUMN auth_scope TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE representations ADD COLUMN meta_json TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillFTSIfEmpty handles the upgrade path where chunks_fts is created
+// fresh against an existing chunks table. Without this, FTS searches on a
+// pre-existing index return zero hits until each chunk is reprocessed by
+// ingest. The 'rebuild' command re-derives FTS content from the
+// content='chunks' external-content reference.
+func backfillFTSIfEmpty(ctx context.Context, db *sql.DB) error {
+	var ftsCount, chunkCount int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts`).Scan(&ftsCount); err != nil {
+		return fmt.Errorf("count chunks_fts: %w", err)
+	}
+	if ftsCount > 0 {
+		return nil
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE deleted = 0`).Scan(&chunkCount); err != nil {
+		return fmt.Errorf("count chunks: %w", err)
+	}
+	if chunkCount == 0 {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
+		return fmt.Errorf("rebuild chunks_fts: %w", err)
+	}
 	return nil
 }
 

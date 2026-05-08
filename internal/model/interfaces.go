@@ -10,6 +10,20 @@ type Store interface {
 	Close() error
 }
 
+// LexicalSearcher is an optional capability stores may implement to support
+// BM25 lexical search alongside the vector index. The retrieval service
+// type-asserts against this interface to enable hybrid retrieval; stores that
+// do not implement it transparently fall back to vector-only search.
+//
+// The indexKind argument filters by chunk index_kind ("text" or "code"); pass
+// an empty string to search across both. The returned hits are ordered best
+// first; Score is the BM25 score (lower magnitude is better in raw BM25, but
+// implementations may negate to keep "higher is better" semantics — callers
+// must rely on rank order, not score sign).
+type LexicalSearcher interface {
+	SearchBM25(ctx context.Context, query string, k int, indexKind string) ([]SearchHit, error)
+}
+
 type Index interface {
 	Add(label uint64, vector []float32) error
 	Search(vector []float32, k int) ([]uint64, []float32, error)
