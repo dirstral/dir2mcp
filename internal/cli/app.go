@@ -896,16 +896,14 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 			cursor = cursor[1:]
 			continue
 		}
-		// Strict unknown-flag check applies only before the command name is
+		// Strict unknown-flag check applies only before the command position is
 		// observed; subcommand FlagSets are responsible for their own flags
-		// once the command has been seen.
+		// once the first non-flag token has been seen.
 		if !seenCommand && strings.HasPrefix(arg, "-") {
 			return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
 		}
 		if !seenCommand {
-			if _, isCmd := commands[arg]; isCmd {
-				seenCommand = true
-			}
+			seenCommand = true
 		}
 		remaining = append(remaining, arg)
 		cursor = cursor[1:]
