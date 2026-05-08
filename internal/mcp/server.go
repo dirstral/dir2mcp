@@ -381,7 +381,7 @@ func (s *Server) handleInitialize(w http.ResponseWriter, r *http.Request, id int
 		"serverInfo": map[string]interface{}{
 			"name":    "dir2mcp",
 			"title":   "dir2mcp: Directory RAG MCP Server",
-			"version": buildinfo.Version,
+			"version": buildinfo.String(),
 		},
 		"instructions": "Use tools/list then tools/call. Results include citations.",
 	})
