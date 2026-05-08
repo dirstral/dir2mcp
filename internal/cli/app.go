@@ -400,7 +400,7 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 		return a.runUp(ctx, upOpts)
 	case "version":
 		if !globalOpts.quiet {
-			writeln(a.stdout, "dir2mcp v"+strings.TrimPrefix(buildinfo.String(), "v"))
+			writeln(a.stdout, "dir2mcp "+buildinfo.Display())
 		}
 		return exitSuccess
 	default:
@@ -1712,7 +1712,7 @@ func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool) {
 	s := a.sty(false)
 	writeln(a.stdout)
-	writef(a.stdout, "  %s %s\n", s.banner(), s.dim("v"+strings.TrimPrefix(buildinfo.String(), "v")))
+	writef(a.stdout, "  %s %s\n", s.banner(), s.dim(buildinfo.Display()))
 	writeln(a.stdout, s.separator(44))
 	writeln(a.stdout)
 

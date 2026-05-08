@@ -19,7 +19,7 @@ func TestDir2MCPVersionCommand_UsesBuildVersion(t *testing.T) {
 	}
 
 	got := strings.TrimSpace(stdout.String())
-	want := "dir2mcp v" + strings.TrimPrefix(buildinfo.Version, "v")
+	want := "dir2mcp " + buildinfo.Display()
 	if got != want {
 		t.Fatalf("unexpected version output: %q", got)
 	}

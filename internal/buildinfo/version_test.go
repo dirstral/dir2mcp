@@ -2,6 +2,7 @@ package buildinfo
 
 import (
 	"runtime/debug"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +69,69 @@ func TestResolveVersion_EmptyInjectedFallsThrough(t *testing.T) {
 	got := resolveVersion("", info)
 	if got != "v0.5.2" {
 		t.Errorf("empty injected (test/edge case) should fall through to debug info; got %q", got)
+	}
+}
+
+func TestResolveVersion_NonHexVCSRevisionRejected(t *testing.T) {
+	// A toolchain that plants a non-SHA value in vcs.revision must not
+	// produce a "dev-<7 garbage chars>" string — fall through to the
+	// placeholder instead.
+	info := &debug.BuildInfo{
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "not-a-hex-revision-string"},
+		},
+	}
+	got := resolveVersion(defaultVersion, info)
+	if got != defaultVersion {
+		t.Errorf("non-hex vcs.revision should fall through to placeholder; got %q", got)
+	}
+}
+
+func TestResolveVersion_DirtyTreeAppendsMarker(t *testing.T) {
+	info := &debug.BuildInfo{
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "0123456789abcdef"},
+			{Key: "vcs.modified", Value: "true"},
+		},
+	}
+	got := resolveVersion(defaultVersion, info)
+	if got != "dev-0123456+dirty" {
+		t.Errorf("dirty-tree build should append +dirty marker; got %q want %q", got, "dev-0123456+dirty")
+	}
+}
+
+func TestResolveVersion_NonNilInfoButEmptyEverything(t *testing.T) {
+	got := resolveVersion(defaultVersion, &debug.BuildInfo{})
+	if got != defaultVersion {
+		t.Errorf("non-nil but empty BuildInfo should yield placeholder; got %q", got)
+	}
+}
+
+func TestDisplay_AlwaysHasSingleVPrefix(t *testing.T) {
+	d := Display()
+	if !strings.HasPrefix(d, "v") {
+		t.Errorf("Display must start with v; got %q", d)
+	}
+	if strings.HasPrefix(d, "vv") {
+		t.Errorf("Display must not double-prefix v; got %q", d)
+	}
+}
+
+func TestIsHex(t *testing.T) {
+	cases := map[string]bool{
+		"":                       false,
+		"abc":                    true,
+		"ABC":                    true,
+		"0123456789abcdef":       true,
+		"0123456789ABCDEF":       true,
+		"0123456789ABCDEFabcdef": true,
+		"abcg":                   false,
+		"hello":                  false,
+		"a-b":                    false,
+	}
+	for in, want := range cases {
+		if got := isHex(in); got != want {
+			t.Errorf("isHex(%q): got %v want %v", in, got, want)
+		}
 	}
 }

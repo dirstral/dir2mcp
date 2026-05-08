@@ -280,7 +280,7 @@ func TestMCPInitialize_UsesBuildInfoVersion(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if envelope.Result.ServerInfo.Version != buildinfo.Version {
-		t.Fatalf("server version=%q want=%q", envelope.Result.ServerInfo.Version, buildinfo.Version)
+	if envelope.Result.ServerInfo.Version != buildinfo.String() {
+		t.Fatalf("server version=%q want=%q", envelope.Result.ServerInfo.Version, buildinfo.String())
 	}
 }

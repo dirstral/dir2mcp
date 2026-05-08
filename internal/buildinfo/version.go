@@ -2,6 +2,7 @@ package buildinfo
 
 import (
 	"runtime/debug"
+	"strings"
 	"sync"
 )
 
@@ -26,12 +27,27 @@ var (
 
 // String returns the user-facing build version. See resolveVersion for the
 // fallback chain.
+//
+// The result is memoized for the process lifetime via sync.Once so the
+// resolution work runs at most once. Tests that want to exercise the
+// resolution branches under different inputs should call resolveVersion
+// directly with synthetic BuildInfo rather than mutating the Version
+// package var and re-calling String — the second call always returns
+// the cached result and the new Version value is never observed.
 func String() string {
 	resolveOnce.Do(func() {
 		info, _ := debug.ReadBuildInfo()
 		resolved = resolveVersion(Version, info)
 	})
 	return resolved
+}
+
+// Display returns the version with a "v" prefix, suitable for direct
+// rendering to users. Centralized to avoid the
+// "v" + strings.TrimPrefix(buildinfo.String(), "v") dance at every call
+// site (see internal/cli/app.go for prior copies).
+func Display() string {
+	return "v" + strings.TrimPrefix(String(), "v")
 }
 
 // resolveVersion is split out from String for testability — it takes the
@@ -49,7 +65,11 @@ func String() string {
 //     "v0.0.0-20260508195411-8869f0aabbcc" instead of the placeholder.
 //  3. info.Settings vcs.revision (short), wrapped as "dev-<sha>", so even
 //     an in-tree `go build` from a clean checkout shows the commit it was
-//     built from.
+//     built from. We require at least 7 hex digits to guard against
+//     toolchain quirks that could plant a non-SHA value in vcs.revision
+//     and produce a meaningless "dev-<7 garbage chars>" string.
+//     If the build was made on a dirty tree (vcs.modified=true), append
+//     "+dirty" so the rendered version flags local changes.
 //  4. The "0.0.0-dev" placeholder as a final fallback.
 func resolveVersion(injected string, info *debug.BuildInfo) string {
 	if injected != "" && injected != defaultVersion {
@@ -59,11 +79,43 @@ func resolveVersion(injected string, info *debug.BuildInfo) string {
 		if v := info.Main.Version; v != "" && v != "(devel)" {
 			return v
 		}
+		var revision string
+		var dirty bool
 		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" && len(s.Value) >= 7 {
-				return "dev-" + s.Value[:7]
+			switch s.Key {
+			case "vcs.revision":
+				if len(s.Value) >= 7 && isHex(s.Value) {
+					revision = s.Value[:7]
+				}
+			case "vcs.modified":
+				dirty = s.Value == "true"
 			}
+		}
+		if revision != "" {
+			out := "dev-" + revision
+			if dirty {
+				out += "+dirty"
+			}
+			return out
 		}
 	}
 	return defaultVersion
+}
+
+// isHex reports whether s is composed entirely of hexadecimal digits.
+// Used to validate vcs.revision before we treat its prefix as a Git SHA.
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
