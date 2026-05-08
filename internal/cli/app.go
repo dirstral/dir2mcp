@@ -861,18 +861,21 @@ func tryConsumeGlobalFlagSet(arg string, remaining []string, opts *globalOptions
 
 func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	opts := globalOptions{}
-	remaining := args
+	var remaining []string
+	cursor := args
+	seenCommand := false
 
-	for len(remaining) > 0 {
-		arg := remaining[0]
-		if _, ok := commands[arg]; ok {
+	for len(cursor) > 0 {
+		arg := cursor[0]
+		if arg == "--" {
+			remaining = append(remaining, cursor...)
 			break
 		}
-		if newRem, ok, err := tryConsumeGlobalFlagSet(arg, remaining, &opts); ok || err != nil {
+		if newRem, ok, err := tryConsumeGlobalFlagSet(arg, cursor, &opts); ok || err != nil {
 			if err != nil {
 				return globalOptions{}, nil, err
 			}
-			remaining = newRem
+			cursor = newRem
 			continue
 		}
 		if enabled, matched, err := parseJSONFlagValue(arg); matched {
@@ -880,21 +883,32 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 				return globalOptions{}, nil, err
 			}
 			opts.jsonOutput = enabled
-			remaining = remaining[1:]
+			cursor = cursor[1:]
 			continue
 		}
-		switch arg {
-		case "--non-interactive":
+		if arg == "--non-interactive" {
 			opts.nonInteractive = true
-		case "--quiet":
-			opts.quiet = true
-		default:
-			if strings.HasPrefix(arg, "-") {
-				return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
-			}
-			return opts, remaining, nil
+			cursor = cursor[1:]
+			continue
 		}
-		remaining = remaining[1:]
+		if arg == "--quiet" {
+			opts.quiet = true
+			cursor = cursor[1:]
+			continue
+		}
+		// Strict unknown-flag check applies only before the command name is
+		// observed; subcommand FlagSets are responsible for their own flags
+		// once the command has been seen.
+		if !seenCommand && strings.HasPrefix(arg, "-") {
+			return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
+		}
+		if !seenCommand {
+			if _, isCmd := commands[arg]; isCmd {
+				seenCommand = true
+			}
+		}
+		remaining = append(remaining, arg)
+		cursor = cursor[1:]
 	}
 
 	return opts, remaining, nil
