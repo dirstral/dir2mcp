@@ -223,7 +223,7 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 			if k, ok := args["k"].(float64); ok {
 				rec.K = int(k)
 			}
-			if rec.ToolName != "dir2mcp.ask" {
+			if rec.ToolName != "dir2mcp_ask" {
 				handlerErrCh <- fmt.Errorf("tool=%q want dir2mcp.ask", rec.ToolName)
 				w.WriteHeader(http.StatusBadRequest)
 				return
@@ -294,7 +294,7 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 	if requests[1].SessionID != "session-123" {
 		t.Fatalf("expected session id to be forwarded, got %#v", requests[1].SessionID)
 	}
-	if requests[1].ToolName != "dir2mcp.ask" {
+	if requests[1].ToolName != "dir2mcp_ask" {
 		t.Fatalf("tool=%q", requests[1].ToolName)
 	}
 	if requests[1].Question != "what is alpha?" {

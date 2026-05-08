@@ -176,14 +176,14 @@ func decodeRPCError(t *testing.T, body []byte) (code int, message string) {
 
 // statsCallBody returns a JSON-RPC tools/call body for dir2mcp.stats.
 func statsCallBody(id int) string {
-	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`
+	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`
 }
 
 // listFilesCallBody returns a JSON-RPC tools/call body for dir2mcp.list_files
 // targeting the given directory.
 func listFilesCallBody(id int, dir string) string {
 	b, _ := json.Marshal(dir)
-	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"path_prefix":` + string(b) + `}}}`
+	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"path_prefix":` + string(b) + `}}}`
 }
 
 // headerPresent returns true if the named header is set and non-empty.

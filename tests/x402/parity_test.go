@@ -134,7 +134,7 @@ func paritySendRPC(t *testing.T, mcpURL, sessionID, body string, extraHeaders ma
 
 // toolsCallBody returns a JSON-RPC tools/call body for dir2mcp.stats.
 func toolsCallBody(id int) string {
-	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`
+	return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`
 }
 
 // decodeErrorCode extracts the canonical error code from a JSON-RPC error

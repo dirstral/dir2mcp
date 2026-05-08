@@ -268,7 +268,7 @@ Expected pass conditions:
 
 * `initialize` returns HTTP `200` and includes `MCP-Session-Id`.
 * `tools/list` returns HTTP `200` and includes tool metadata.
-* `tools/call` against `dir2mcp.list_files` returns either:
+* `tools/call` against `dir2mcp_list_files` returns either:
   * HTTP `200` with JSON-RPC body, or
   * HTTP `402` with `PAYMENT-REQUIRED` when x402 route gating is enabled.
 
@@ -899,7 +899,7 @@ Request:
   "jsonrpc": "2.0",
   "id": 3,
   "method": "tools/call",
-  "params": { "name": "dir2mcp.search", "arguments": { "query": "..." } }
+  "params": { "name": "dir2mcp_search", "arguments": { "query": "..." } }
 }
 ```
 
@@ -946,21 +946,21 @@ Example tool execution error:
 
 ### 13.1 Core tool set
 
-* `dir2mcp.search`
-* `dir2mcp.ask`
-* `dir2mcp.open_file`
-* `dir2mcp.list_files`
-* `dir2mcp.stats`
+* `dir2mcp_search`
+* `dir2mcp_ask`
+* `dir2mcp_open_file`
+* `dir2mcp_list_files`
+* `dir2mcp_stats`
 
 ### 13.2 Recommended extended tools
 
-* `dir2mcp.transcribe` (audio → transcript, uses configured provider)
-* `dir2mcp.annotate` (document → structured JSON + flattened text)
-* `dir2mcp.transcribe_and_ask` (audio → transcript → ask)
+* `dir2mcp_transcribe` (audio → transcript, uses configured provider)
+* `dir2mcp_annotate` (document → structured JSON + flattened text)
+* `dir2mcp_transcribe_and_ask` (audio → transcript → ask)
 
 ### 13.3 Optional extension
 
-* `dir2mcp.ask_audio` (answer → audio via ElevenLabs TTS)
+* `dir2mcp_ask_audio` (answer → audio via ElevenLabs TTS)
 
 ---
 
@@ -1069,7 +1069,7 @@ All schemas are JSON Schema (draft-agnostic, compatible with common validators).
 
 ---
 
-### 15.2 `dir2mcp.search`
+### 15.2 `dir2mcp_search`
 
 **Description:** semantic retrieval across indexed content.
 
@@ -1117,7 +1117,7 @@ All schemas are JSON Schema (draft-agnostic, compatible with common validators).
 
 ---
 
-### 15.3 `dir2mcp.ask`
+### 15.3 `dir2mcp_ask`
 
 **Description:** RAG answer with citations; can run search-only.
 
@@ -1175,7 +1175,7 @@ All schemas are JSON Schema (draft-agnostic, compatible with common validators).
 
 ---
 
-### 15.4 `dir2mcp.open_file`
+### 15.4 `dir2mcp_open_file`
 
 **Description:** open an exact source slice for verification (lines/page/time).
 
@@ -1235,7 +1235,7 @@ filters is impossible.
 
 ---
 
-### 15.5 `dir2mcp.list_files`
+### 15.5 `dir2mcp_list_files`
 
 **Description:** list files under root for navigation and filter selection.
 
@@ -1287,7 +1287,7 @@ filters is impossible.
 
 ---
 
-### 15.6 `dir2mcp.stats`
+### 15.6 `dir2mcp_stats`
 
 **Description:** status/progress/health for indexing and models.
 
@@ -1360,7 +1360,7 @@ filters is impossible.
 
 ---
 
-### 15.7 `dir2mcp.transcribe` (recommended)
+### 15.7 `dir2mcp_transcribe` (recommended)
 
 **Description:** force transcription for an audio file, persist transcript representation, and (optionally) return segments.
 
@@ -1411,7 +1411,7 @@ filters is impossible.
 
 ---
 
-### 15.8 `dir2mcp.annotate` (recommended)
+### 15.8 `dir2mcp_annotate` (recommended)
 
 **Description:** run structured extraction on a document with provided JSON schema; store JSON; optionally index flattened text.
 
@@ -1449,7 +1449,7 @@ filters is impossible.
 
 ---
 
-### 15.9 `dir2mcp.transcribe_and_ask` (recommended)
+### 15.9 `dir2mcp_transcribe_and_ask` (recommended)
 
 **Description:** ensure transcript exists (transcribe if missing/stale), then answer a question using transcript (and optionally whole corpus if configured).
 
@@ -1468,17 +1468,17 @@ filters is impossible.
 }
 ```
 
-**Output schema:** same as `dir2mcp.ask` output schema, plus:
+**Output schema:** same as `dir2mcp_ask` output schema, plus:
 
 * `transcript_provider`, `transcript_model`, and `transcribed` boolean.
 
 ---
 
-### 15.10 `dir2mcp.ask_audio` (optional extension)
+### 15.10 `dir2mcp_ask_audio` (optional extension)
 
-**Description:** same as `ask` but includes audio output (TTS). Optional and additive. The input schema inherits all fields of `dir2mcp.ask` (`question`, `k`, `mode`, `index`, `path_prefix`, `file_glob`, `doc_types`) plus the audio-specific fields shown below.
+**Description:** same as `ask` but includes audio output (TTS). Optional and additive. The input schema inherits all fields of `dir2mcp_ask` (`question`, `k`, `mode`, `index`, `path_prefix`, `file_glob`, `doc_types`) plus the audio-specific fields shown below.
 
-Input schema (audio-specific fields; the rest mirror `dir2mcp.ask`):
+Input schema (audio-specific fields; the rest mirror `dir2mcp_ask`):
 
 ```json
 {
