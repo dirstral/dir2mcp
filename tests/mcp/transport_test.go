@@ -221,7 +221,7 @@ func TestSDKTransport_X402MissingPaymentSignature(t *testing.T) {
 		t.Fatal("expected session id from initialize")
 	}
 
-	callReq, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`))
+	callReq, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`))
 	if err != nil {
 		cancel()
 		t.Fatalf("create tools/call request: %v", err)

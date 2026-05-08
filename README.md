@@ -113,7 +113,7 @@ Notes:
 What it verifies:
 - `initialize` returns HTTP 200 and a valid `MCP-Session-Id`
 - `tools/list` returns HTTP 200 with tool metadata
-- `tools/call` for `dir2mcp.list_files` returns HTTP 200, or HTTP 402 with `PAYMENT-REQUIRED` when x402 is enabled
+- `tools/call` for `dir2mcp_list_files` returns HTTP 200, or HTTP 402 with `PAYMENT-REQUIRED` when x402 is enabled
 
 ### Tunnel setup (copy/paste)
 
@@ -169,15 +169,15 @@ Running `dir2mcp` with no arguments prints usage, which you can consult anytime 
 
 | Tool | Description |
 |---|---|
-| `dir2mcp.search` | Semantic search over indexed content |
-| `dir2mcp.ask` | RAG-style question answering with citations |
-| `dir2mcp.ask_audio` | Ask with TTS audio response |
-| `dir2mcp.transcribe` | Transcribe an audio file from the corpus |
-| `dir2mcp.annotate` | Structured annotation of a document |
-| `dir2mcp.transcribe_and_ask` | Transcribe then ask over the result |
-| `dir2mcp.open_file` | Retrieve a file by path with span context |
-| `dir2mcp.list_files` | List indexed files with metadata |
-| `dir2mcp.stats` | Corpus statistics |
+| `dir2mcp_search` | Semantic search over indexed content |
+| `dir2mcp_ask` | RAG-style question answering with citations |
+| `dir2mcp_ask_audio` | Ask with TTS audio response |
+| `dir2mcp_transcribe` | Transcribe an audio file from the corpus |
+| `dir2mcp_annotate` | Structured annotation of a document |
+| `dir2mcp_transcribe_and_ask` | Transcribe then ask over the result |
+| `dir2mcp_open_file` | Retrieve a file by path with span context |
+| `dir2mcp_list_files` | List indexed files with metadata |
+| `dir2mcp_stats` | Corpus statistics |
 
 ## Configuration
 

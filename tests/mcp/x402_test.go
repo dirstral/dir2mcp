@@ -29,7 +29,7 @@ func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, nil)
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`, nil)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusPaymentRequired {
@@ -56,7 +56,7 @@ func TestX402ToolsCall_ModeOnIncompleteConfigFailOpen(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":1001,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, nil)
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":1001,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`, nil)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -86,7 +86,7 @@ func TestX402ToolsCall_PaidRetrySucceedsAndReturnsPaymentResponse(t *testing.T) 
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, map[string]string{
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`, map[string]string{
 		"PAYMENT-SIGNATURE": "signed-payment-payload",
 	})
 	defer func() { _ = resp.Body.Close() }()
@@ -122,7 +122,7 @@ func TestX402ToolsCall_VerifyTransientFailureIsRetryable503(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":103,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, map[string]string{
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":103,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`, map[string]string{
 		"PAYMENT-SIGNATURE": "signed-payment-payload",
 	})
 	defer func() { _ = resp.Body.Close() }()
@@ -146,7 +146,7 @@ func TestX402ToolsCall_VerifyInvalidReturns402WithChallenge(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":104,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, map[string]string{
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":104,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`, map[string]string{
 		"PAYMENT-SIGNATURE": "signed-payment-payload",
 	})
 	defer func() { _ = resp.Body.Close() }()
@@ -176,7 +176,7 @@ func TestX402ToolsCall_ToolErrorDoesNotSettle(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":105,"method":"tools/call","params":{"name":"dir2mcp.unknown","arguments":{}}}`, map[string]string{
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":105,"method":"tools/call","params":{"name":"dir2mcp_unknown","arguments":{}}}`, map[string]string{
 		"PAYMENT-SIGNATURE": "signed-payment-payload",
 	})
 	defer func() { _ = resp.Body.Close() }()
@@ -207,7 +207,7 @@ func TestX402ToolsCall_SettleTransientFailureIsRetryable503(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":108,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, map[string]string{
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":108,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`, map[string]string{
 		"PAYMENT-SIGNATURE": "signed-payment-payload",
 	})
 	defer func() { _ = resp.Body.Close() }()
@@ -259,7 +259,7 @@ func TestX402ToolsCall_FacilitatorBearerTokenForwarded(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":107,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, map[string]string{
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":107,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`, map[string]string{
 		"PAYMENT-SIGNATURE": "signed-payment-payload",
 	})
 	defer func() { _ = resp.Body.Close() }()
@@ -294,7 +294,7 @@ func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *test
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	body := `{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"foo"}}}`
+	body := `{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"foo"}}}`
 
 	first := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, body, map[string]string{
 		"PAYMENT-SIGNATURE": "stable-payment-signature",
@@ -349,7 +349,7 @@ func TestX402ToolsCall_CachedOutcomePersistsAcrossRestart(t *testing.T) {
 	retriever := &countingSearchRetriever{}
 	server1 := httptest.NewServer(mcp.NewServer(cfg, retriever, mcp.WithStore(st)).Handler())
 	sessionID := initializeSession(t, server1.URL+cfg.MCPPath)
-	body := `{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"foo"}}}`
+	body := `{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"foo"}}}`
 
 	first := postRPCWithHeaders(t, server1.URL+cfg.MCPPath, sessionID, body, map[string]string{
 		"PAYMENT-SIGNATURE": "restart-stable-signature",

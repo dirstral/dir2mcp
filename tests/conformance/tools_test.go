@@ -44,10 +44,10 @@ func TestTools_ListContainsExpectedTools(t *testing.T) {
 	}
 
 	required := []string{
-		"dir2mcp.list_files",
-		"dir2mcp.search",
-		"dir2mcp.open_file",
-		"dir2mcp.ask",
+		"dir2mcp_list_files",
+		"dir2mcp_search",
+		"dir2mcp_open_file",
+		"dir2mcp_ask",
 	}
 	for _, name := range required {
 		if !nameSet[name] {
@@ -123,7 +123,7 @@ func TestTools_CallUnknownToolReturnsError(t *testing.T) {
 	sid := initSession(t, srv.URL+cfg.MCPPath)
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, sid,
-		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"dir2mcp.does_not_exist","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"dir2mcp_does_not_exist","arguments":{}}}`,
 		nil,
 	)
 	body := readBody(t, resp)
@@ -147,7 +147,7 @@ func TestTools_CallMissingRequiredParamReturnsError(t *testing.T) {
 	sid := initSession(t, srv.URL+cfg.MCPPath)
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, sid,
-		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{}}}`,
 		nil,
 	)
 	body := readBody(t, resp)

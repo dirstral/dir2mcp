@@ -96,7 +96,7 @@ func TestMCPToolsCallTranscribe_MissingRelPath(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -162,7 +162,7 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"voice.wav"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{"rel_path":"voice.wav"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -202,7 +202,7 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"voice.wav","timestamps":true,"language":"fr"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{"rel_path":"voice.wav","timestamps":true,"language":"fr"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	// check if the upstream handler encountered an error
 	select {
@@ -291,7 +291,7 @@ func TestMCPToolsCallTranscribe_CreatesAudioDocWhenNotYetIndexed(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":320,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"audio/voice.wav"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":320,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{"rel_path":"audio/voice.wav"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
@@ -326,7 +326,7 @@ func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"dir2mcp_annotate","arguments":{"rel_path":"note.txt"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	assertToolCallErrorCode(t, resp, "MISSING_FIELD")
 }
@@ -349,7 +349,7 @@ func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt","schema_json":{"type":"object"}}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"dir2mcp_annotate","arguments":{"rel_path":"note.txt","schema_json":{"type":"object"}}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	assertToolCallErrorCode(t, resp, "ANNOTATE_FAILED")
 }
@@ -375,7 +375,7 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt","schema_json":{"type":"object","properties":{"summary":{"type":"string"}}},"index_flattened_text":true}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"dir2mcp_annotate","arguments":{"rel_path":"note.txt","schema_json":{"type":"object","properties":{"summary":{"type":"string"}}},"index_flattened_text":true}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
@@ -417,7 +417,7 @@ func TestMCPToolsCallAnnotate_PromptTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal schema: %v", err)
 	}
-	rpc := fmt.Sprintf(`{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt","schema_json":%s}}}`, string(schemaBytes))
+	rpc := fmt.Sprintf(`{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"dir2mcp_annotate","arguments":{"rel_path":"note.txt","schema_json":%s}}}`, string(schemaBytes))
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, rpc)
 	defer func() { _ = resp.Body.Close() }()
 	assertToolCallErrorCode(t, resp, "ANNOTATE_FAILED")
@@ -431,7 +431,7 @@ func TestMCPToolsCallTranscribeAndAsk_MissingQuestion(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"dir2mcp.transcribe_and_ask","arguments":{"rel_path":"voice.wav"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"dir2mcp_transcribe_and_ask","arguments":{"rel_path":"voice.wav"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	assertToolCallErrorCode(t, resp, "MISSING_FIELD")
 }
@@ -468,7 +468,7 @@ func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":37,"method":"tools/call","params":{"name":"dir2mcp.transcribe_and_ask","arguments":{"rel_path":"voice.wav","question":"what is alpha?","k":5}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":37,"method":"tools/call","params":{"name":"dir2mcp_transcribe_and_ask","arguments":{"rel_path":"voice.wav","question":"what is alpha?","k":5}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
@@ -545,7 +545,7 @@ func TestMCPToolsCallAskAudio_NilRetrieverReturnsIndexNotReady(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"dir2mcp_ask_audio","arguments":{"question":"What is indexed?"}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -564,7 +564,7 @@ func TestMCPToolsCallAskAudio_AskNotImplementedReturnsGracefulSuccess(t *testing
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"dir2mcp_ask_audio","arguments":{"question":"What is indexed?"}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -614,7 +614,7 @@ func TestMCPToolsCallAskAudio_WithoutTTSReturnsTextOnly(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"dir2mcp_ask_audio","arguments":{"question":"What is indexed?"}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -670,7 +670,7 @@ func TestMCPToolsCallAskAudio_WithTTSReturnsTextAndAudio(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"dir2mcp_ask_audio","arguments":{"question":"What is indexed?"}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -737,7 +737,7 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -834,7 +834,7 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
@@ -906,7 +906,7 @@ func TestMCPToolsCallListFiles_GracefulWithoutSQLiteStore(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":10,"offset":0}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -955,7 +955,7 @@ func TestMCPToolsCallStats_RejectsUnknownArgument(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{"unexpected":true}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{"unexpected":true}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -974,7 +974,7 @@ func TestMCPToolsCallListFiles_RejectsUnknownArgument(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0,"foo":"bar"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":10,"offset":0,"foo":"bar"}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -993,7 +993,7 @@ func TestMCPToolsCallListFiles_RejectsLimitWrongType(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":"10","offset":0}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":"10","offset":0}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -1019,12 +1019,12 @@ func TestMCPToolsCallListFiles_RejectsLimitOutOfRange(t *testing.T) {
 	}{
 		{
 			name: "limit_zero",
-			body: `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":0,"offset":0}}}`,
+			body: `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":0,"offset":0}}}`,
 			code: "INVALID_RANGE",
 		},
 		{
 			name: "limit_too_large",
-			body: `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":5001,"offset":0}}}`,
+			body: `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":5001,"offset":0}}}`,
 			code: "INVALID_RANGE",
 		},
 	} {
@@ -1049,7 +1049,7 @@ func TestMCPToolsCallListFiles_RejectsOffsetWrongType(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":"0"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":10,"offset":"0"}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -1068,7 +1068,7 @@ func TestMCPToolsCallListFiles_RejectsNegativeOffset(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":-1}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":10,"offset":-1}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -1089,7 +1089,7 @@ func TestMCPToolsCallListFiles_StoreFailureReturnsStoreCorrupt(t *testing.T) {
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":10,"offset":0}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -1117,7 +1117,7 @@ func TestMCPToolsCallAsk_ReturnsStructuredAnswerAndCitations(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"dir2mcp.ask","arguments":{"question":"what is alpha?","k":3,"index":"both"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"dir2mcp_ask","arguments":{"question":"what is alpha?","k":3,"index":"both"}}}`)
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -1167,7 +1167,7 @@ func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"dir2mcp.ask","arguments":{"question":"q?","mode":"search_only","k":5}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"dir2mcp_ask","arguments":{"question":"q?","mode":"search_only","k":5}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -1237,7 +1237,7 @@ func TestMCPToolsCallSearch_StructuredHitsSchemaShape(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"payment flow","k":5}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"payment flow","k":5}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -1287,7 +1287,7 @@ func TestMCPToolsCallSearch_RequiredOutputFieldsPresent(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":94,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"anything"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":94,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"anything"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	var envelope struct {
@@ -1326,7 +1326,7 @@ func TestMCPToolsCallAsk_RequiredOutputFieldsPresent(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":95,"method":"tools/call","params":{"name":"dir2mcp.ask","arguments":{"question":"anything"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":95,"method":"tools/call","params":{"name":"dir2mcp_ask","arguments":{"question":"anything"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	var envelope struct {
@@ -1400,7 +1400,7 @@ func TestMCPToolsCallListFiles_TotalReflectsHiddenFilter(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":10,"offset":0}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -1451,7 +1451,7 @@ func TestMCPToolsCallListFiles_IncludeHiddenTrue(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0,"include_hidden":true}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":10,"offset":0,"include_hidden":true}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -1495,7 +1495,7 @@ func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":93,"method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"recording.mp3"}}}`)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":93,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"recording.mp3"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
 	assertToolCallErrorCode(t, resp, "DOC_TYPE_UNSUPPORTED")
