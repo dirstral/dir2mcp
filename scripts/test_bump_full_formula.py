@@ -1,7 +1,13 @@
 """Tests for ``bump_full_formula.bump_formula``.
 
-Run with ``python3 -m unittest scripts.test_bump_full_formula`` from the
-repo root, or via ``make test-release-tools``.
+Run via ``make test-release-tools`` (preferred), or directly:
+
+    cd scripts && python3 -m unittest test_bump_full_formula
+
+The ``cd`` is required because this file imports ``bump_full_formula``
+as a sibling module, not as a package — ``scripts/`` does not have an
+``__init__.py``. Adding one is intentionally avoided so the patcher
+script stays runnable as a plain executable from the release workflow.
 """
 
 from __future__ import annotations
@@ -103,6 +109,41 @@ class BumpFormulaTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             bump_formula(formula, "0.5.0", _NEW_CHECKSUMS)
         self.assertIn("no dir2mcp release-tarball URLs", str(cm.exception))
+
+    def test_missing_version_line_is_fatal(self) -> None:
+        # The patcher must not silently rewrite URLs/SHA256s while leaving
+        # the declared version stale; that would ship a mismatched formula.
+        formula = textwrap.dedent(
+            """\
+            class Dir2mcpFull < Formula
+              homepage "https://github.com/dirstral/dir2mcp"
+              # version line removed on purpose
+              url "https://github.com/dirstral/dir2mcp/releases/download/v0.4.4/dir2mcp_0.4.4_darwin_arm64.tar.gz"
+              sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            end
+            """
+        )
+        with self.assertRaises(SystemExit) as cm:
+            bump_formula(formula, "0.5.0", _NEW_CHECKSUMS)
+        self.assertIn("no top-level version", str(cm.exception))
+
+    def test_url_without_expected_segment_is_fatal(self) -> None:
+        # Tarball name matches our regex but the URL path doesn't contain
+        # the /v<version>/<filename> segment we'd rewrite. Must fail rather
+        # than leave the URL stale while updating the SHA below it.
+        formula = textwrap.dedent(
+            """\
+            class Dir2mcpFull < Formula
+              version "0.4.4"
+              url "https://example.com/odd-layout/dir2mcp_0.4.4_darwin_arm64.tar.gz"
+              sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            end
+            """
+        )
+        with self.assertRaises(SystemExit) as cm:
+            bump_formula(formula, "0.5.0", _NEW_CHECKSUMS)
+        self.assertIn("expected", str(cm.exception))
+        self.assertIn("segment", str(cm.exception))
 
     def test_does_not_touch_non_tarball_urls(self) -> None:
         formula = textwrap.dedent(

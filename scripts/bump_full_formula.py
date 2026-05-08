@@ -83,12 +83,14 @@ def bump_formula(formula_text: str, new_version: str, checksums: dict[str, str])
     out_lines: list[str] = []
     pending_sha_for: str | None = None  # filename whose SHA must update next
     seen_keys: set[str] = set()
+    version_line_seen = False
 
     for line in formula_text.splitlines(keepends=False):
         # Top-level version field — there is exactly one in the formula.
         m_version = VERSION_LINE_RE.match(line)
         if m_version:
             out_lines.append(f'{m_version.group(1)}"{new_version}"')
+            version_line_seen = True
             continue
 
         m_url = URL_LINE_RE.match(line)
@@ -96,13 +98,25 @@ def bump_formula(formula_text: str, new_version: str, checksums: dict[str, str])
             url = m_url.group("url")
             tar_match = TARBALL_RE.search(url)
             if tar_match:
+                old_version = tar_match.group("version")
                 old_filename = tar_match.group(0)
                 new_filename = (
                     f"dir2mcp_{new_version}_{tar_match.group('os')}_{tar_match.group('arch')}.tar.gz"
                 )
                 # Rewrite both the version path segment and the filename.
+                # Validate the substring was actually present so a future
+                # url shape change can't silently leave the URL pointing at
+                # the old tarball while the SHA below it gets bumped.
+                expected_segment = f"/v{old_version}/{old_filename}"
+                if expected_segment not in url:
+                    raise SystemExit(
+                        f"url {url!r} does not contain the expected "
+                        f"{expected_segment!r} segment; refusing to rewrite "
+                        f"because the SHA256 line below it would otherwise be "
+                        f"updated to a mismatched filename"
+                    )
                 new_url = url.replace(
-                    f"/v{tar_match.group('version')}/{old_filename}",
+                    expected_segment,
                     f"/v{new_version}/{new_filename}",
                 )
                 out_lines.append(f'{m_url.group(1)}"{new_url}"')
@@ -131,6 +145,16 @@ def bump_formula(formula_text: str, new_version: str, checksums: dict[str, str])
 
     if not seen_keys:
         raise SystemExit("no dir2mcp release-tarball URLs found in formula; nothing to bump")
+
+    if not version_line_seen:
+        # If the formula ever loses the top-level version field, just
+        # bumping URLs/SHA256s would produce an inconsistent file (the
+        # declared version would lag the artefacts). Fail rather than
+        # silently ship a mismatch.
+        raise SystemExit(
+            'no top-level version "..." line found in formula; refusing to '
+            "rewrite URLs/SHA256s without also bumping the declared version"
+        )
 
     # Trailing newline preservation.
     suffix = "\n" if formula_text.endswith("\n") else ""

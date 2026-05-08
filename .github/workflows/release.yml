@@ -60,6 +60,13 @@ jobs:
       # dir2mcp-full.rb (it carries hand-written docling install logic).
       # Open a PR on the tap that bumps version + tarball URLs + SHA256s
       # in dir2mcp-full.rb so the two formulas stay in lockstep.
+      #
+      # The step is idempotent so the workflow can be re-run for the same
+      # tag (re-run from the Actions UI, retried after a transient
+      # failure, or invoked twice while a tap CI re-run is pending):
+      #   - if the bump branch already exists on the tap, we fetch and
+      #     reset it to the new content rather than aborting on push;
+      #   - if a PR for that branch is already open, we skip pr-create.
       - name: Bump dir2mcp-full formula on tap
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
@@ -74,7 +81,7 @@ jobs:
           fi
 
           tap_dir="$RUNNER_TEMP/homebrew-tap"
-          git clone --depth 1 \
+          git clone \
             "https://x-access-token:${GH_TOKEN}@github.com/dirstral/homebrew-tap.git" \
             "$tap_dir"
 
@@ -82,7 +89,18 @@ jobs:
           # commit so both updates show up under the same author.
           git -C "$tap_dir" config user.name "goreleaserbot"
           git -C "$tap_dir" config user.email "bot@goreleaser.com"
-          git -C "$tap_dir" checkout -b "$BRANCH"
+
+          # Re-use the existing remote branch when present so a re-run
+          # updates it instead of failing on `git push` for a non-fast-
+          # forward. The tap PR keeps the same head, so review history is
+          # preserved.
+          if git -C "$tap_dir" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "branch $BRANCH already exists on tap; will update it"
+            git -C "$tap_dir" fetch origin "$BRANCH":"$BRANCH"
+            git -C "$tap_dir" checkout "$BRANCH"
+          else
+            git -C "$tap_dir" checkout -b "$BRANCH"
+          fi
 
           python3 scripts/bump_full_formula.py \
             --version "$VERSION" \
@@ -90,13 +108,29 @@ jobs:
             --formula "$tap_dir/Formula/dir2mcp-full.rb"
 
           if git -C "$tap_dir" diff --quiet -- Formula/dir2mcp-full.rb; then
-            echo "no formula changes — likely an idempotent re-run; skipping PR" >&2
+            echo "no formula changes — branch already matches target state" >&2
             exit 0
           fi
 
           git -C "$tap_dir" add Formula/dir2mcp-full.rb
           git -C "$tap_dir" commit -m "Bump dir2mcp-full to v${VERSION} (automated)"
-          git -C "$tap_dir" push origin "$BRANCH"
+          # --force-with-lease is safe because we just fetched origin/$BRANCH
+          # above (or just created the branch); it protects against pushing
+          # over a concurrent human edit on the same branch.
+          git -C "$tap_dir" push --force-with-lease origin "$BRANCH"
+
+          # Skip pr-create when an open PR already exists for this branch.
+          # gh pr list --json number returns "[]" when none match.
+          existing_pr="$(gh pr list \
+            --repo dirstral/homebrew-tap \
+            --head "$BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [ -n "$existing_pr" ]; then
+            echo "PR #$existing_pr already open for $BRANCH; commit pushed, skipping pr-create"
+            exit 0
+          fi
 
           gh pr create \
             --repo dirstral/homebrew-tap \
