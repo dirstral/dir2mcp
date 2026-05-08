@@ -199,7 +199,16 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 		return exitGeneric
 	}
 
-	mcpServers, _ := root["mcpServers"].(map[string]interface{})
+	var mcpServers map[string]interface{}
+	if rawMCPServers, ok := root["mcpServers"]; ok {
+		var typeOK bool
+		mcpServers, typeOK = rawMCPServers.(map[string]interface{})
+		if !typeOK {
+			writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid Claude config: mcpServers must be an object in %s", *configPath))
+			return exitConfigInvalid
+		}
+	}
+
 	_, present := mcpServers[*serverName]
 	if !present {
 		// Idempotent no-op: it's not an error to uninstall something that
