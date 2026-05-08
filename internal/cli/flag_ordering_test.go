@@ -64,6 +64,19 @@ func TestParseGlobalOptions_UnknownFlagBeforeCommandStillErrors(t *testing.T) {
 	}
 }
 
+func TestParseGlobalOptions_UnknownCommandFollowedByNonGlobalFlagDoesNotErrorAsGlobal(t *testing.T) {
+	opts, remaining, err := parseGlobalOptions([]string{"bogus", "--listen", "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("parseGlobalOptions should leave unknown command handling to the caller, got error: %v", err)
+	}
+	if opts.rootDir != "" {
+		t.Errorf("rootDir should remain empty, got %q", opts.rootDir)
+	}
+	if len(remaining) != 3 || remaining[0] != "bogus" || remaining[1] != "--listen" || remaining[2] != "127.0.0.1:0" {
+		t.Fatalf("remaining: want [bogus --listen 127.0.0.1:0], got %#v", remaining)
+	}
+}
+
 func TestParseGlobalOptions_DoubleDashStopsParsing(t *testing.T) {
 	opts, remaining, err := parseGlobalOptions([]string{"up", "--", "--dir", "/should/be/ignored"})
 	if err != nil {
