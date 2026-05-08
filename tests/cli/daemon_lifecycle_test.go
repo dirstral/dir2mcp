@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,10 +29,8 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	if os.Getenv("RUN_INTEGRATION_TESTS") != "1" {
 		t.Skip("set RUN_INTEGRATION_TESTS=1 to exercise the daemon lifecycle")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("daemon mode is unix-only")
-	}
-
+	// File is gated by //go:build unix so a Windows skip would be dead
+	// code (staticcheck SA4032). The build tag handles it.
 	bin := buildDir2mcpBinary(t)
 	root := t.TempDir()
 	stateDir := filepath.Join(root, ".dir2mcp")
@@ -179,10 +176,7 @@ func TestDaemonLifecycle_BindBusyReportsClearError(t *testing.T) {
 	if os.Getenv("RUN_INTEGRATION_TESTS") != "1" {
 		t.Skip("set RUN_INTEGRATION_TESTS=1 to exercise the daemon lifecycle")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("daemon mode is unix-only")
-	}
-
+	// File is gated by //go:build unix; no Windows skip needed.
 	holder, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("hold port: %v", err)
