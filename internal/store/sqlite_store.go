@@ -251,9 +251,13 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	// Order matters: busy_timeout MUST come before journal_mode. Switching to
+	// WAL itself can fail with SQLITE_BUSY if another process holds the
+	// database lock; without busy_timeout already in effect, that PRAGMA
+	// returns immediately rather than waiting.
 	for _, pragma := range []string{
-		`PRAGMA journal_mode=WAL;`,
 		`PRAGMA busy_timeout=5000;`,
+		`PRAGMA journal_mode=WAL;`,
 	} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()

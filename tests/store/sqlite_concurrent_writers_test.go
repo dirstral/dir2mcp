@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/model"
 	"dir2mcp/internal/store"
@@ -31,7 +32,12 @@ func TestSQLiteStore_ConcurrentWritersNoBusy(t *testing.T) {
 		marksPerMarker   = 50
 	)
 
-	ctx := context.Background()
+	// Bound the test so a regression that re-introduces lock contention or
+	// blocking causes a fast, descriptive failure rather than an unbounded
+	// CI hang. 30s is generous for the workload below on cold cache.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
