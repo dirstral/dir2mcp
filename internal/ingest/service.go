@@ -881,7 +881,13 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 			return err
 		}
 		s.addRepresentations(1)
-		s.persistTitleIfFound(ctx, doc, string(content))
+
+		const titleScanLimit = 4096
+		titleContent := content
+		if len(titleContent) > titleScanLimit {
+			titleContent = titleContent[:titleScanLimit]
+		}
+		s.persistTitleIfFound(ctx, doc, string(titleContent))
 		return nil
 	}
 
