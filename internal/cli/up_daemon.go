@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,7 +35,7 @@ import (
 //     the user's terminal, and return exitSuccess. The child keeps
 //     running.
 func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
-	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
+	cfg, err := loadConfigForDaemonParent(opts.globalOptions)
 	if err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
@@ -56,8 +59,23 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 		// clear field to write into when the child becomes ready.
 		_ = removePIDFile(pidPath)
 	}
+	// Also remove a stale connection.json from a previous run. Without
+	// this, the parent's waitForConnectionFile would observe the old
+	// file the instant we start polling and return success before the
+	// new child has bound or claimed the pid file — producing a
+	// confusing "daemon ready but pid file missing" race window.
+	connPath := connectionFilePath(stateDir)
+	if err := os.Remove(connPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writef(a.stderr, "warning: clean stale %s: %v\n", connPath, err)
+	}
 
 	logPath := serverLogPath(stateDir)
+	if err := rotateLogIfLarge(logPath); err != nil {
+		// Non-fatal: a failed rotation just means the new daemon keeps
+		// appending to the existing log. Surface it so an unbounded
+		// log can't sneak past us silently.
+		writef(a.stderr, "warning: rotate %s: %v\n", logPath, err)
+	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("open server log %s: %v", logPath, err))
@@ -74,8 +92,16 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 	// Pass the original argv through verbatim. The child re-enters
 	// runUp; the daemonChildEnv marker (set on Env below) takes the
 	// in-process branch instead of recursing into the daemon parent.
+	// The marker value is a per-spawn random nonce rather than a
+	// constant "1" so a manually-exported env var in the user's shell
+	// can't accidentally trip the daemon-child code paths.
+	nonce, err := generateDaemonNonce()
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("generate daemon nonce: %v", err))
+		return exitGeneric
+	}
 	cmd := exec.Command(selfPath, os.Args[1:]...)
-	cmd.Env = append(os.Environ(), daemonChildEnv+"=1")
+	cmd.Env = append(os.Environ(), daemonChildEnv+"="+nonce)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -88,8 +114,13 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 	childPid := cmd.Process.Pid
 
 	// Release the child's process handle so the parent doesn't keep a
-	// pointer to a process it'll never wait on. The OS reparents the
-	// child to init/launchd; we relinquish ownership cleanly here.
+	// pointer to a process it'll never wait on. Note: it's the Setsid
+	// in detachFromTerminal (above) that actually allows the child to
+	// outlive the parent — Setsid puts the child in a new session so
+	// the parent's exit doesn't deliver SIGHUP. Process.Release just
+	// cleans up the Go-side handle so we don't carry around a wait()
+	// debt for a process we don't manage. The OS reparents the child
+	// to init/launchd as a normal consequence of the parent exiting.
 	if err := cmd.Process.Release(); err != nil {
 		writef(a.stderr, "warning: release child process: %v\n", err)
 	}
@@ -103,12 +134,23 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 		return exitServerBindFailure
 	}
 
-	if err := writePIDFile(pidPath, childPid); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("write pid file: %v", err))
+	// Pid file is written by the child (claimPIDFile with O_EXCL) so
+	// the file always reflects a process the OS confirmed existed at
+	// the moment of registration, even if the parent crashes between
+	// cmd.Start and here. Read it back to surface the actual pid the
+	// child registered — useful when a concurrent `up` race causes our
+	// child to lose the O_EXCL claim and the file points at the
+	// winning sibling instead of cmd.Process.Pid.
+	registeredPid, err := readPIDFile(pidPath)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
+			fmt.Sprintf("daemon ready but pid file %s missing or unreadable: %v", pidPath, err),
+			fmt.Sprintf("Inspect %s for startup errors.", logPath),
+		)
 		return exitGeneric
 	}
 
-	a.printDaemonReady(cfg.StateDir, logPath, childPid, connection, opts)
+	a.printDaemonReady(cfg.StateDir, logPath, registeredPid, connection, opts)
 	return exitSuccess
 }
 
@@ -136,4 +178,15 @@ func (a *App) printDaemonReady(stateDir, logPath string, pid int, connection con
 	writeln(a.stdout)
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
 	writef(a.stdout, "  %s\n\n", s.dim("Stop with: dir2mcp down"))
+}
+
+// generateDaemonNonce returns a 32-character hex string drawn from the
+// system CSPRNG. Used as the daemonChildEnv value so isRunningAsDaemonChild
+// can distinguish a parent-spawned child from a manually-exported env var.
+func generateDaemonNonce() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("read CSPRNG: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
 }

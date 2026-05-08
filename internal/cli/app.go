@@ -1017,6 +1017,20 @@ func loadConfigWithGlobalOptions(global globalOptions) (config.Config, error) {
 	return cfg, nil
 }
 
+// loadConfigForDaemonParent resolves the config without writing the
+// effective-config snapshot. The daemon parent only needs the state
+// directory and auth material to spawn + monitor the child; the child's
+// own loadConfigWithGlobalOptions call writes the snapshot once. This
+// avoids the duplicate disk write the reviewer flagged on PR #174.
+func loadConfigForDaemonParent(global globalOptions) (config.Config, error) {
+	cfg, err := config.Load(resolveConfigPath(global))
+	if err != nil {
+		return config.Config{}, err
+	}
+	cfg = applyGlobalPathOverrides(cfg, global)
+	return cfg, nil
+}
+
 func saveEffectiveConfigSnapshot(cfg config.Config, auth authMaterial, x402TokenSource string) error {
 	sources := config.SecretSourceMetadata{}
 	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
@@ -1081,7 +1095,7 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.BoolVar(&opts.forceInsecure, "force-insecure", false, "allow public mode without auth (unsafe)")
 	fs.BoolVar(&opts.foreground, "foreground", false, "run in the foreground (do not daemonize); implied by --json or non-TTY stdout")
 	fs.BoolVar(&opts.foreground, "f", false, "alias for --foreground")
-	fs.BoolVar(&opts.daemon, "daemon", false, "force daemon mode even when stdout is not a TTY (rare; for scripts that want fire-and-forget)")
+	fs.BoolVar(&opts.daemon, "daemon", false, "force daemon mode even when stdout is not a TTY (use this with `nohup` or in scripts that want fire-and-forget)")
 	fs.StringVar(&opts.x402Mode, "x402", "", "x402 mode: off|on|required")
 	fs.StringVar(&opts.x402FacilitatorURL, "x402-facilitator-url", "", "x402 facilitator base URL")
 	fs.StringVar(&opts.x402FacilitatorToken, "x402-facilitator-token", "", "x402 facilitator bearer token (insecure; token may also be provided via env or file)")
@@ -1128,6 +1142,17 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	}
 	if opts.mistralMaxOCRPayloadBytes < 0 {
 		return upOptions{}, fmt.Errorf("invalid --mistral-max-ocr-payload-bytes: must be >= 0")
+	}
+	// --daemon and --foreground are mutually exclusive — one forces
+	// daemon mode regardless of TTY, the other forces foreground.
+	// --json is incompatible with daemon mode because the parent exits
+	// before the NDJSON event stream completes; surface the conflict
+	// instead of silently dropping --daemon at runtime.
+	if opts.daemon && opts.foreground {
+		return upOptions{}, fmt.Errorf("--daemon and --foreground are mutually exclusive")
+	}
+	if opts.daemon && opts.jsonOutput {
+		return upOptions{}, fmt.Errorf("--daemon is incompatible with --json (NDJSON event stream requires the foreground process to remain attached)")
 	}
 	return opts, nil
 }
@@ -1391,7 +1416,12 @@ func writeConnectionFile(path string, payload connectionPayload) error {
 		return err
 	}
 	content = append(content, '\n')
-	return os.WriteFile(path, content, 0o644)
+	// 0o600 — connection.json carries the bearer-token file path and the
+	// MCP URL; on shared dev machines (think /Users/<me>/Development/...
+	// readable by other accounts) those are credential-adjacent. The
+	// state directory is 0o700 already, but defending in depth keeps a
+	// permissive parent directory from leaking the file's contents.
+	return os.WriteFile(path, content, 0o600)
 }
 
 func newNDJSONEmitter(out io.Writer, enabled bool) *ndjsonEmitter {

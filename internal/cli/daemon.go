@@ -12,17 +12,33 @@ import (
 	"time"
 )
 
-// daemonChildEnv is set on the child process so it knows it was spawned by
-// the parent in daemon mode and should suppress the foreground banner +
-// install signal handlers instead of the stdin quit listener.
+// daemonChildEnv carries a per-spawn nonce that the parent sets on the
+// child's environment. The child treats itself as a daemon body only if
+// the env value is non-empty AND matches the value the parent's process
+// memory still holds, so a manually-exported `DIR2MCP_DAEMON_CHILD=1`
+// in a user's shell can't accidentally trip the daemon-child code paths
+// (which would silently drop the banner, the stdin quit listener, and
+// the parent's pid-file write — confusing footgun, no security boundary
+// crossed but worth eliminating).
 const daemonChildEnv = "DIR2MCP_DAEMON_CHILD"
 
+// minDaemonChildNonceLen is the floor we require on the daemonChildEnv
+// value before accepting it as proof that this process was spawned by a
+// matching parent. Our parent sets a 32-character hex nonce; we accept
+// 16+ chars to give us slack for future format changes while still
+// rejecting "1" / "true" / other shell-exported values.
+const minDaemonChildNonceLen = 16
+
 // isRunningAsDaemonChild reports whether the current process was spawned
-// by an earlier dir2mcp invocation as the daemon body (not the launching
-// parent). Detected via the daemonChildEnv marker that the parent sets
-// on exec.Cmd.Env.
+// by an earlier dir2mcp invocation as the daemon body. We require the
+// env var to look like the parent-generated nonce rather than treating
+// any presence as truthy, so a manually-exported `DIR2MCP_DAEMON_CHILD=1`
+// can't accidentally trip the daemon code paths (which would silently
+// drop the banner, the stdin quit listener, and the pid-file write —
+// confusing footgun, no security boundary crossed).
 func isRunningAsDaemonChild() bool {
-	return os.Getenv(daemonChildEnv) == "1"
+	v := os.Getenv(daemonChildEnv)
+	return len(v) >= minDaemonChildNonceLen
 }
 
 // pidFileName is the canonical filename for the dir2mcp daemon pid file
@@ -52,6 +68,14 @@ const daemonShutdownPoll = 200 * time.Millisecond
 // process to exit before escalating to SIGKILL.
 const daemonShutdownGrace = 5 * time.Second
 
+// serverLogRotateBytes is the size threshold at which the parent rotates
+// the existing server.log to server.log.1 when opening a new daemon.
+// Single previous file is enough for "what happened on the last run"
+// without committing to a real rotation library or risking unbounded
+// disk use on a long-running daemon. 10 MB picked as the cheapest size
+// that still captures a typical day of NDJSON traffic.
+const serverLogRotateBytes int64 = 10 * 1024 * 1024
+
 // pidFilePath returns the canonical pid file location for a given state dir.
 func pidFilePath(stateDir string) string {
 	return filepath.Join(stateDir, pidFileName)
@@ -67,33 +91,63 @@ func connectionFilePath(stateDir string) string {
 	return filepath.Join(stateDir, connectionFileName)
 }
 
-// writePIDFile writes pid to path atomically via temp+rename so a crash
-// mid-write can never leave a partially-written file that readPIDFile would
-// reject as "invalid pid".
-func writePIDFile(path string, pid int) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, pidFileName+".*")
+// rotateLogIfLarge renames an oversized log file to "<path>.1" so the
+// next daemon start has a fresh file to append to. Idempotent; missing
+// file or undersized file are no-ops. The single rolled-over file
+// preserves "what happened on the previous run" without a real rotation
+// dependency.
+func rotateLogIfLarge(path string) error {
+	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("create temp pid file: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat log file: %w", err)
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-	if _, err := fmt.Fprintf(tmp, "%d\n", pid); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("write temp pid file: %w", err)
+	if info.Size() < serverLogRotateBytes {
+		return nil
 	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("close temp pid file: %w", err)
+	rolled := path + ".1"
+	if err := os.Rename(path, rolled); err != nil {
+		return fmt.Errorf("rotate log file: %w", err)
 	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		cleanup()
-		return fmt.Errorf("chmod temp pid file: %w", err)
+	return nil
+}
+
+// claimPIDFile creates the pid file at path with O_EXCL so that two
+// daemons racing to start in the same state directory cannot both
+// succeed — only the kernel-level "create-if-not-exists" winner ends up
+// owning the file. Returns an error wrapping os.ErrExist when another
+// process has already claimed it.
+//
+// The child (not the parent) calls this once it has bound its listener.
+// Doing the claim in the child rather than the parent fixes two
+// reliability bugs raised in PR review:
+//
+//   - Parent crash between cmd.Start() and pid-file write would leak the
+//     child if the parent owned the file. With the child as the writer,
+//     the child registers itself and `dir2mcp down` can find it later
+//     even when the parent never returned.
+//   - Two `dir2mcp up` invocations racing in the same state dir both
+//     pass the parent's already-running check and both spawn children;
+//     with O_EXCL on the file, the second child loses deterministically
+//     and exits without touching the first one's listener or files.
+func claimPIDFile(path string, pid int) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create pid file directory: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		cleanup()
-		return fmt.Errorf("rename pid file: %w", err)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err // pass through os.ErrExist for callers to type-check
+	}
+	if _, err := fmt.Fprintf(f, "%d\n", pid); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("write pid file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("close pid file: %w", err)
 	}
 	return nil
 }

@@ -66,6 +66,13 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 		// the user-facing exit code over a leftover file.
 		writef(a.stderr, "warning: remove pid file %s: %v\n", pidPath, err)
 	}
+	// Also remove the connection.json the daemon wrote so a subsequent
+	// `dir2mcp up` doesn't observe a stale "daemon ready" file from the
+	// now-stopped server. See the same cleanup in runUpAsDaemonParent.
+	connPath := connectionFilePath(cfg.StateDir)
+	if err := os.Remove(connPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writef(a.stderr, "warning: remove %s: %v\n", connPath, err)
+	}
 	writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, true, "stopped")
 	return exitSuccess
 }

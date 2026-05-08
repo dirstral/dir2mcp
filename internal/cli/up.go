@@ -35,39 +35,10 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return a.runUpAsDaemonParent(ctx, opts)
 	}
 
-	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
-		return exitConfigInvalid
-	}
-
-	tlsCertFile, tlsKeyFile, code := a.applyTLSConfig(&cfg, opts)
+	cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, code := a.prepareUpConfig(opts)
 	if code != exitSuccess {
 		return code
 	}
-
-	x402TokenSource, code := a.applyUpFlagOverrides(&cfg, opts)
-	if code != exitSuccess {
-		return code
-	}
-
-	if code := a.validateUpConfig(&cfg, opts); code != exitSuccess {
-		return code
-	}
-
-	nonInteractiveMode := upNonInteractiveMode(opts)
-	if code := a.checkMistralAPIKey(&cfg, opts, nonInteractiveMode); code != exitSuccess {
-		return code
-	}
-
-	auth, err := prepareAuthMaterial(cfg)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("auth setup: %v", err))
-		return exitAuthOrPayment
-	}
-	cfg.AuthMode = auth.mode
-	cfg.ResolvedAuthToken = auth.token
-	warnConfigSnapshotErr(a.stderr, opts.quiet, saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource))
 
 	st, textIx, codeIx, code := a.initStoreAndIndices(ctx, &cfg, opts.jsonOutput)
 	if code != exitSuccess {
@@ -127,6 +98,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer cancel()
 	defer func() { _ = ln.Close() }()
 
+	cleanupPIDFile, code := a.setupDaemonChildIfApplicable(cfg.StateDir, opts, cancel)
+	if code != exitSuccess {
+		return code
+	}
+	defer cleanupPIDFile()
+
 	persistence := index.NewPersistenceManager(
 		[]index.IndexedFile{
 			{Path: textIndexPath, Index: textIx},
@@ -160,27 +137,10 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		"public":      cfg.Public,
 	})
 
-	connection := buildConnectionPayload(cfg, mcpURL, auth)
-	if err := writeConnectionFile(filepath.Join(cfg.StateDir, connectionFileName), connection); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("write %s: %v", connectionFileName, err))
-		return exitGeneric
+	connection, code := a.publishConnection(cfg, mcpURL, auth, emitter, opts)
+	if code != exitSuccess {
+		return code
 	}
-
-	emitter.Emit("info", "connection", connection)
-	emitter.Emit("info", "scan_progress", map[string]interface{}{
-		"scanned": 0,
-		"indexed": 0,
-		"skipped": 0,
-		"deleted": 0,
-		"reps":    0,
-		"chunks":  0,
-		"errors":  0,
-	})
-	emitter.Emit("info", "embed_progress", map[string]interface{}{
-		"embedded": 0,
-		"chunks":   0,
-		"errors":   0,
-	})
 
 	stdinQuitCh := a.installInteractionForUp(cancel, cfg, connection, auth, opts, nonInteractiveMode)
 
@@ -788,6 +748,111 @@ func (a *App) printHumanConnectionIfVerbose(cfg config.Config, connection connec
 	if !opts.jsonOutput && !opts.quiet {
 		a.printHumanConnection(cfg, connection, auth, opts.readOnly)
 	}
+}
+
+// prepareUpConfig runs the full config-load + validation pipeline that
+// must succeed before runUp can bind a listener: loadConfigWithGlobalOptions,
+// TLS resolution, flag overrides, validateUpConfig, Mistral key check,
+// auth material prep, and the effective-config snapshot write. Returns
+// the resolved cfg, auth material, TLS file paths, the derived
+// non-interactive flag, and an exit code; runUp returns immediately
+// when the code is non-zero (the helper has already written the error
+// to stderr).
+//
+// Extracted from runUp to keep that function under the
+// cyclomatic-complexity budget after PR #174's daemon-setup branches
+// landed; the exit-code-or-fall-through pattern collected enough `if`
+// guards in runUp to push it over.
+func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, string, string, bool, int) {
+	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
+		return config.Config{}, authMaterial{}, "", "", false, exitConfigInvalid
+	}
+	tlsCertFile, tlsKeyFile, code := a.applyTLSConfig(&cfg, opts)
+	if code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	x402TokenSource, code := a.applyUpFlagOverrides(&cfg, opts)
+	if code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	if code := a.validateUpConfig(&cfg, opts); code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	nonInteractiveMode := upNonInteractiveMode(opts)
+	if code := a.checkMistralAPIKey(&cfg, opts, nonInteractiveMode); code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
+	auth, err := prepareAuthMaterial(cfg)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("auth setup: %v", err))
+		return config.Config{}, authMaterial{}, "", "", false, exitAuthOrPayment
+	}
+	cfg.AuthMode = auth.mode
+	cfg.ResolvedAuthToken = auth.token
+	warnConfigSnapshotErr(a.stderr, opts.quiet, saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource))
+	return cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, exitSuccess
+}
+
+// publishConnection writes connection.json and emits the standard
+// "connection / scan_progress / embed_progress" startup events. Split
+// from runUp purely to keep that function under the cyclomatic budget
+// after PR #174's daemon-setup branches landed.
+func (a *App) publishConnection(cfg config.Config, mcpURL string, auth authMaterial, emitter *ndjsonEmitter, opts upOptions) (connectionPayload, int) {
+	connection := buildConnectionPayload(cfg, mcpURL, auth)
+	if err := writeConnectionFile(filepath.Join(cfg.StateDir, connectionFileName), connection); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("write %s: %v", connectionFileName, err))
+		return connectionPayload{}, exitGeneric
+	}
+	emitter.Emit("info", "connection", connection)
+	emitter.Emit("info", "scan_progress", map[string]interface{}{
+		"scanned": 0,
+		"indexed": 0,
+		"skipped": 0,
+		"deleted": 0,
+		"reps":    0,
+		"chunks":  0,
+		"errors":  0,
+	})
+	emitter.Emit("info", "embed_progress", map[string]interface{}{
+		"embedded": 0,
+		"chunks":   0,
+		"errors":   0,
+	})
+	return connection, exitSuccess
+}
+
+// setupDaemonChildIfApplicable performs the two daemon-child-only
+// preconditions that have to happen BEFORE writing connection.json: the
+// SIGTERM handler install and the O_EXCL pid-file claim. The handler is
+// installed first so a SIGTERM that arrives during the window between
+// here and the event loop is converted into a graceful cancel rather
+// than killing the child abruptly. The pid-file claim must come before
+// connection.json so a second daemon racing for the same state dir
+// loses deterministically and exits before touching anything else.
+//
+// Returns the deferred cleanup closure (a no-op when not running as
+// daemon child) and an exit code; runUp returns immediately when the
+// code is non-zero (the helper has already written the error).
+//
+// Extracted from runUp to keep that function under the
+// cyclomatic-complexity budget after PR #174's daemon-child setup grew.
+func (a *App) setupDaemonChildIfApplicable(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
+	cleanup = func() {}
+	if !isRunningAsDaemonChild() {
+		return cleanup, exitSuccess
+	}
+	installDaemonChildSignalHandler(cancel)
+	pidPath := pidFilePath(stateDir)
+	if err := claimPIDFile(pidPath, os.Getpid()); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
+			fmt.Sprintf("claim pid file %s: %v", pidPath, err),
+			"another dir2mcp daemon is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
+		)
+		return cleanup, exitGeneric
+	}
+	return func() { _ = removePIDFile(pidPath) }, exitSuccess
 }
 
 // installInteractionForUp picks the right termination interaction for

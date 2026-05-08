@@ -5,6 +5,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -166,4 +167,47 @@ func pidAlive(pid int) bool {
 		return true
 	}
 	return errors.Is(err, syscall.EPERM)
+}
+
+// TestDaemonLifecycle_BindBusyReportsClearError covers the most common
+// real-world startup failure for the daemon path: another process is
+// holding the port we asked for. The child fails fast inside its
+// net.Listen, never writes connection.json or claims the pid file, and
+// the parent must surface a "did not become ready" error pointing at
+// the log rather than hanging until the readiness timeout.
+func TestDaemonLifecycle_BindBusyReportsClearError(t *testing.T) {
+	if os.Getenv("RUN_INTEGRATION_TESTS") != "1" {
+		t.Skip("set RUN_INTEGRATION_TESTS=1 to exercise the daemon lifecycle")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("daemon mode is unix-only")
+	}
+
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold port: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	addr := holder.Addr().String()
+
+	bin := buildDir2mcpBinary(t)
+	root := t.TempDir()
+	env := append(os.Environ(),
+		"MISTRAL_API_KEY=test-key",
+		"DIR2MCP_AUTH_TOKEN=",
+	)
+
+	cmd := exec.Command(bin, "up", "--daemon", "--listen", addr)
+	cmd.Dir = root
+	cmd.Env = env
+	out, err := runWithDeadline(cmd, 30*time.Second)
+	if err == nil {
+		t.Fatalf("expected non-zero exit when port is busy; output=%s", out)
+	}
+	if !strings.Contains(out, "did not become ready") && !strings.Contains(out, "bind") {
+		t.Errorf("expected bind/readiness failure in output, got: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".dir2mcp", "server.pid")); !os.IsNotExist(err) {
+		t.Errorf("pid file should not exist after failed bind; stat err=%v", err)
+	}
 }
