@@ -14,8 +14,14 @@ builds:
       - arm64
     main: ./cmd/dir2mcp
     binary: dir2mcp
+    # Inject the version into the symbol the runtime actually reads
+    # (internal/buildinfo.Version). The earlier `internal/cli.Version`
+    # path targeted a declared-but-unused variable, so released
+    # binaries always printed v0.0.0-dev. Commit/Date were similarly
+    # injected into unused symbols and have been dropped — re-add when
+    # the runtime actually reads them.
     ldflags:
-      - -s -w -X dir2mcp/internal/cli.Version={{.Version}} -X dir2mcp/internal/cli.Commit={{.Commit}} -X dir2mcp/internal/cli.Date={{.Date}}
+      - -s -w -X dir2mcp/internal/buildinfo.Version={{.Version}}
 
 
 archives:

@@ -45,3 +45,6 @@ coverage.out
 *.swo
 # include hidden Vim swap variants
 .*.sw*
+
+# Python bytecode caches
+__pycache__/

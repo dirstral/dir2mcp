@@ -151,7 +151,6 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"status.go":               {},
 		"style.go":                {},
 		"up.go":                   {},
-		"version.go":              {},
 	}
 
 	var unexpected []string
