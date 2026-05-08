@@ -46,7 +46,7 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 		stmt += ` AND c.index_kind = ?`
 		args = append(args, kind)
 	}
-	stmt += ` ORDER BY score LIMIT ?`
+	stmt += ` ORDER BY score, c.chunk_id ASC LIMIT ?`
 	args = append(args, k)
 
 	rows, err := db.QueryContext(ctx, stmt, args...)
