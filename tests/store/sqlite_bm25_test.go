@@ -78,3 +78,78 @@ func TestSQLiteStore_SearchBM25_BasicAndBackfill(t *testing.T) {
 		t.Errorf("index_kind filter should have excluded text chunks, got %d hits", len(hits))
 	}
 }
+
+// TestSQLiteStore_SearchBM25_PopulatesTitle verifies BM25 hits carry the
+// document title (added in #166) via the LEFT JOIN in SearchBM25. Hits for a
+// document without a title still return successfully with an empty Title.
+func TestSQLiteStore_SearchBM25_PopulatesTitle(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := store.NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	titled := model.Document{
+		RelPath: "acts/proliferation.pdf",
+		DocType: "pdf",
+		Title:   "Proliferation Financing (Prohibition) Act, 2021",
+		Status:  "ok",
+	}
+	untitled := model.Document{
+		RelPath: "notes/raw.md",
+		DocType: "md",
+		Status:  "ok",
+	}
+	for _, d := range []model.Document{titled, untitled} {
+		if err := st.UpsertDocument(ctx, d); err != nil {
+			t.Fatalf("UpsertDocument(%s): %v", d.RelPath, err)
+		}
+	}
+
+	chunks := []struct {
+		label   uint64
+		relPath string
+		docType string
+		text    string
+	}{
+		{10, titled.RelPath, titled.DocType, "section 35 reporting suspicious transactions"},
+		{11, untitled.RelPath, untitled.DocType, "untitled note about reporting"},
+	}
+	for _, c := range chunks {
+		task := model.NewChunkTask(c.label, c.text, "text", model.ChunkMetadata{
+			ChunkID: c.label,
+			RelPath: c.relPath,
+			DocType: c.docType,
+			RepType: "raw_text",
+		})
+		if err := st.UpsertChunkTask(ctx, task); err != nil {
+			t.Fatalf("UpsertChunkTask(%d): %v", c.label, err)
+		}
+	}
+
+	ls, ok := interface{}(st).(model.LexicalSearcher)
+	if !ok {
+		t.Fatalf("store does not implement model.LexicalSearcher")
+	}
+	hits, err := ls.SearchBM25(ctx, "reporting", 5, "text")
+	if err != nil {
+		t.Fatalf("SearchBM25: %v", err)
+	}
+	if len(hits) < 2 {
+		t.Fatalf("expected at least two hits, got %d", len(hits))
+	}
+	for _, h := range hits {
+		switch h.RelPath {
+		case titled.RelPath:
+			if h.Title != titled.Title {
+				t.Errorf("titled hit should carry title; got %q want %q", h.Title, titled.Title)
+			}
+		case untitled.RelPath:
+			if h.Title != "" {
+				t.Errorf("untitled hit should have empty title, got %q", h.Title)
+			}
+		}
+	}
+}
