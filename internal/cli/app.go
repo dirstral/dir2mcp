@@ -372,6 +372,20 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 
 func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remaining []string, jsonRequested bool) int {
 	command := remaining[0]
+	// Validate against the canonical command surface before dispatch. The
+	// commands map is the single source of truth that the repo-split
+	// boundary test (tests/security) AST-parses to verify the surface stays
+	// intact; the explicit lookup here keeps it referenced so go vet / the
+	// unused-variable lint stays happy after parseGlobalOptions stopped
+	// consulting it directly.
+	if _, known := commands[command]; !known {
+		effectiveJSON := globalOpts.jsonOutput || jsonRequested
+		writeCLIError(a.stderr, effectiveJSON, exitGeneric, fmt.Sprintf("unknown command: %s", command))
+		if !effectiveJSON {
+			a.printUsage()
+		}
+		return exitGeneric
+	}
 	if code, handled := a.runSimpleCommand(ctx, globalOpts, command, remaining[1:]); handled {
 		return code
 	}
@@ -861,18 +875,21 @@ func tryConsumeGlobalFlagSet(arg string, remaining []string, opts *globalOptions
 
 func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	opts := globalOptions{}
-	remaining := args
+	var remaining []string
+	cursor := args
+	seenCommand := false
 
-	for len(remaining) > 0 {
-		arg := remaining[0]
-		if _, ok := commands[arg]; ok {
+	for len(cursor) > 0 {
+		arg := cursor[0]
+		if arg == "--" {
+			remaining = append(remaining, cursor...)
 			break
 		}
-		if newRem, ok, err := tryConsumeGlobalFlagSet(arg, remaining, &opts); ok || err != nil {
+		if newRem, ok, err := tryConsumeGlobalFlagSet(arg, cursor, &opts); ok || err != nil {
 			if err != nil {
 				return globalOptions{}, nil, err
 			}
-			remaining = newRem
+			cursor = newRem
 			continue
 		}
 		if enabled, matched, err := parseJSONFlagValue(arg); matched {
@@ -880,21 +897,30 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 				return globalOptions{}, nil, err
 			}
 			opts.jsonOutput = enabled
-			remaining = remaining[1:]
+			cursor = cursor[1:]
 			continue
 		}
-		switch arg {
-		case "--non-interactive":
+		if arg == "--non-interactive" {
 			opts.nonInteractive = true
-		case "--quiet":
-			opts.quiet = true
-		default:
-			if strings.HasPrefix(arg, "-") {
-				return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
-			}
-			return opts, remaining, nil
+			cursor = cursor[1:]
+			continue
 		}
-		remaining = remaining[1:]
+		if arg == "--quiet" {
+			opts.quiet = true
+			cursor = cursor[1:]
+			continue
+		}
+		// Strict unknown-flag check applies only before the command position is
+		// observed; subcommand FlagSets are responsible for their own flags
+		// once the first non-flag token has been seen.
+		if !seenCommand && strings.HasPrefix(arg, "-") {
+			return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
+		}
+		if !seenCommand {
+			seenCommand = true
+		}
+		remaining = append(remaining, arg)
+		cursor = cursor[1:]
 	}
 
 	return opts, remaining, nil
