@@ -53,6 +53,12 @@ brews:
     homepage: https://github.com/dirstral/dir2mcp
     description: Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations.
     license: MIT
+    # Symmetric conflict with dir2mcp-full (which already declares the
+    # reverse). brew audit on the tap requires conflicts to be declared
+    # on both sides; without this, every regenerated dir2mcp.rb fails
+    # audit until manually patched.
+    conflicts:
+      - dir2mcp-full
     install: |
       bin.install "dir2mcp"
     test: |
