@@ -325,7 +325,10 @@ func TestClaudeUninstallDropsEmptyMCPServersBlock(t *testing.T) {
 	}
 
 	var updated map[string]interface{}
-	updatedRaw, _ := os.ReadFile(configPath)
+	updatedRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
 	if err := json.Unmarshal(updatedRaw, &updated); err != nil {
 		t.Fatalf("unmarshal updated config: %v raw=%s", err, string(updatedRaw))
 	}
