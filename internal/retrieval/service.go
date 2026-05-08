@@ -100,6 +100,10 @@ type Service struct {
 	// cached compiled regexps for exclude patterns; keys are normalized patterns
 	excludeRegexps map[string]*regexp.Regexp
 	secretPatterns []*regexp.Regexp
+	// hybridEnabled toggles BM25+vector RRF fusion in Search. Defaults to
+	// true; the engine can disable it via SetHybridEnabled when the operator
+	// sets retrieval.hybrid.enabled=false.
+	hybridEnabled bool
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -141,7 +145,16 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		excludeRegexps:  make(map[string]*regexp.Regexp),
 		pathExcludes:    append([]string(nil), defaultPathExcludes...),
 		secretPatterns:  compiledPatterns,
+		hybridEnabled:   true,
 	}
+}
+
+// SetHybridEnabled toggles BM25+vector hybrid retrieval. The engine wires this
+// from config.RetrievalHybridEnabled at construction time.
+func (s *Service) SetHybridEnabled(enabled bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.hybridEnabled = enabled
 }
 
 func (s *Service) SetLogger(l *log.Logger) {
@@ -958,17 +971,70 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 		return []model.SearchHit{}, nil
 	}
 
-	// compute number of neighbors to request from index according to the
-	// current overfetch multiplier. Read under lock to avoid races with
-	// SetOverfetchMultiplier. The multiplier is initialized to 5 in the
-	// constructor and SetOverfetchMultiplier already clamps values to the
-	// [1,100] range, so it is guaranteed to be at least 1 and no further
-	// defensive adjustment is necessary.
+	vectorCandidateLimit := s.hybridVectorCandidateLimit(k, idx)
+	filtered, err := s.collectVectorCandidates(ctx, vectors[0], idx, indexName, filters, vectorCandidateLimit)
+	if err != nil {
+		return nil, err
+	}
+	if fused, ok := s.runHybridSearch(ctx, query, k, indexName, filtered); ok {
+		return truncateSearchHits(fused, k), nil
+	}
+	return truncateSearchHits(filtered, k), nil
+}
+
+// hybridVectorCandidateLimit returns the number of vector candidates to
+// request before fusion. When hybrid retrieval is active and the store
+// supports BM25, we widen the vector pool to match hybridCandidatePoolSize so
+// that vector candidates outside the top-k can still contribute via RRF.
+// Otherwise we request only k candidates (the legacy vector-only path).
+func (s *Service) hybridVectorCandidateLimit(k int, idx model.Index) int {
+	if k <= 0 || idx == nil {
+		return k
+	}
+	s.metaMu.RLock()
+	enabled := s.hybridEnabled
+	store := s.store
+	s.metaMu.RUnlock()
+	if !enabled {
+		return k
+	}
+	if _, ok := store.(model.LexicalSearcher); !ok {
+		return k
+	}
+	if hybridCandidatePoolSize > k {
+		return hybridCandidatePoolSize
+	}
+	return k
+}
+
+func truncateSearchHits(hits []model.SearchHit, k int) []model.SearchHit {
+	if k < 0 {
+		k = 0
+	}
+	if len(hits) <= k {
+		return hits
+	}
+	return hits[:k]
+}
+
+// collectVectorCandidates runs the dense-vector search loop with overfetch and
+// filter-aware re-fetch behavior. Extracted from searchSingleIndex so the
+// outer function stays under the cyclomatic-complexity budget after hybrid
+// fusion was layered on top.
+func (s *Service) collectVectorCandidates(
+	ctx context.Context,
+	vector []float32,
+	idx model.Index,
+	indexName string,
+	filters model.SearchQuery,
+	k int,
+) ([]model.SearchHit, error) {
+	// Read overfetch under lock to avoid races with SetOverfetchMultiplier.
+	// The multiplier is clamped to [1,100] at construction time so no further
+	// defensive checks are needed here.
 	s.metaMu.RLock()
 	overfetchMultiplier := s.overfetchMultiplier
 	s.metaMu.RUnlock()
-	// Avoid trying to preallocate a gigantic slice when k is absurdly large.
-	// This is only a capacity hint; appends can still grow the slice as needed.
 	cap := k
 	if cap > 1024 {
 		cap = 1024
@@ -979,36 +1045,47 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		labels, scores, err := idx.Search(vectors[0], n)
+		labels, scores, err := idx.Search(vector, n)
 		if err != nil {
 			return nil, err
 		}
-		for i, label := range labels {
-			if _, ok := seen[label]; ok {
-				continue
-			}
-			seen[label] = struct{}{}
-
-			hit := s.searchHitForLabel(indexName, label)
-			hit.Score = float64(scores[i])
-			if !matchFilters(hit, filters) {
-				continue
-			}
-			filtered = append(filtered, hit)
-			if len(filtered) >= k {
-				break
-			}
-		}
-
+		s.collectFilteredHits(labels, scores, indexName, filters, k, seen, &filtered)
 		if searchExhausted(len(filtered), k, len(labels), n) {
 			break
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
 		}
 		n = nextSearchFanout(n)
 	}
 	return filtered, nil
+}
+
+// collectFilteredHits walks one batch of (label, score) pairs returned by the
+// vector index and appends matching hits to dst until k results are gathered.
+// Hits already represented in `seen` are skipped to avoid duplicates across
+// fanout iterations.
+func (s *Service) collectFilteredHits(
+	labels []uint64,
+	scores []float32,
+	indexName string,
+	filters model.SearchQuery,
+	k int,
+	seen map[uint64]struct{},
+	dst *[]model.SearchHit,
+) {
+	for i, label := range labels {
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		hit := s.searchHitForLabel(indexName, label)
+		hit.Score = float64(scores[i])
+		if !matchFilters(hit, filters) {
+			continue
+		}
+		*dst = append(*dst, hit)
+		if len(*dst) >= k {
+			return
+		}
+	}
 }
 
 func initialSearchFanout(k, overfetchMultiplier int) int {

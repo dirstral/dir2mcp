@@ -109,6 +109,12 @@ type Config struct {
 	RAGKDefault           int
 	RAGMaxContextChars    int
 	RAGOversampleFactor   int
+	// RetrievalHybridEnabled controls whether the retrieval service combines
+	// BM25 (lexical) and vector (semantic) candidates via reciprocal-rank
+	// fusion. When false, search is vector-only (legacy behavior). Default
+	// is true for new deployments; existing indexes auto-backfill the FTS
+	// table on first start.
+	RetrievalHybridEnabled bool
 	ChunkingStrategy      string
 	ChunkingMaxTokens     int
 	ChunkingOverlapTokens int
@@ -174,6 +180,7 @@ type fileConfig struct {
 	RAGKDefault               *int
 	RAGMaxContextChars        *int
 	RAGOversampleFactor       *int
+	RetrievalHybridEnabled    *bool
 	ChunkingStrategy          *string
 	ChunkingMaxTokens         *int
 	ChunkingOverlapTokens     *int
@@ -243,6 +250,7 @@ type persistedConfig struct {
 	RAGKDefault               int      `yaml:"rag_k_default"`
 	RAGMaxContextChars        int      `yaml:"rag_max_context_chars"`
 	RAGOversampleFactor       int      `yaml:"rag_oversample_factor"`
+	RetrievalHybridEnabled    bool     `yaml:"retrieval_hybrid_enabled"`
 	ChunkingStrategy          string   `yaml:"chunking_strategy"`
 	ChunkingMaxTokens         int      `yaml:"chunking_max_tokens"`
 	ChunkingOverlapTokens     int      `yaml:"chunking_overlap_tokens"`
@@ -336,6 +344,7 @@ func Default() Config {
 		RAGKDefault:               10,
 		RAGMaxContextChars:        20000,
 		RAGOversampleFactor:       5,
+		RetrievalHybridEnabled:    true,
 		ChunkingStrategy:          "",
 		ChunkingMaxTokens:         0,
 		ChunkingOverlapTokens:     0,
@@ -413,6 +422,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RAGKDefault:               cfg.RAGKDefault,
 		RAGMaxContextChars:        cfg.RAGMaxContextChars,
 		RAGOversampleFactor:       cfg.RAGOversampleFactor,
+		RetrievalHybridEnabled:    cfg.RetrievalHybridEnabled,
 		ChunkingStrategy:          cfg.ChunkingStrategy,
 		ChunkingMaxTokens:         cfg.ChunkingMaxTokens,
 		ChunkingOverlapTokens:     cfg.ChunkingOverlapTokens,
@@ -793,6 +803,9 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RAGOversampleFactor != nil {
 		cfg.RAGOversampleFactor = *fc.RAGOversampleFactor
 	}
+	if fc.RetrievalHybridEnabled != nil {
+		cfg.RetrievalHybridEnabled = *fc.RetrievalHybridEnabled
+	}
 	if fc.SessionInactivityTimeout != nil {
 		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
 	}
@@ -1077,6 +1090,8 @@ var configKeyAliases = map[string]string{
 	"max_context_chars":                    "rag.max_context_chars",
 	"rag_oversample_factor":                "rag.oversample_factor",
 	"oversample_factor":                    "rag.oversample_factor",
+	"retrieval_hybrid_enabled":             "retrieval.hybrid.enabled",
+	"hybrid_enabled":                       "retrieval.hybrid.enabled",
 	"chunking_strategy":                    "chunking.strategy",
 	"chunking_max_tokens":                  "chunking.max_tokens",
 	"chunking_overlap_tokens":              "chunking.overlap_tokens",
@@ -1131,7 +1146,7 @@ func canonicalizeConfigKey(key string) string {
 
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
 		return true
@@ -1169,6 +1184,8 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.IngestFollowSymlinks
 	case "x402_tools_call_enabled":
 		target = &cfg.X402ToolsCallEnabled
+	case "retrieval.hybrid.enabled":
+		target = &cfg.RetrievalHybridEnabled
 	default:
 		return nil
 	}
@@ -1429,6 +1446,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("rag_system_prompt", cfg.RAGSystemPrompt)
 	writeInt("rag_max_context_chars", cfg.RAGMaxContextChars)
 	writeInt("rag_oversample_factor", cfg.RAGOversampleFactor)
+	writeBool("retrieval_hybrid_enabled", cfg.RetrievalHybridEnabled)
 	writeScalar("chunking_strategy", cfg.ChunkingStrategy)
 	writeInt("chunking_max_tokens", cfg.ChunkingMaxTokens)
 	writeInt("chunking_overlap_tokens", cfg.ChunkingOverlapTokens)
@@ -1513,6 +1531,11 @@ func applyMistralNumericEnvOverrides(cfg *Config, env map[string]string) {
 	}
 	if raw, ok := envLookup("DIR2MCP_INGEST_EXTRACTOR", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.IngestExtractor = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_HYBRID_ENABLED", env); ok && strings.TrimSpace(raw) != "" {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			cfg.RetrievalHybridEnabled = parsed
+		}
 	}
 }
 
