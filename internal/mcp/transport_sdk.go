@@ -341,7 +341,7 @@ func (s *Server) buildSDKServer() *sdkmcp.Server {
 	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    "dir2mcp",
 		Title:   "dir2mcp: Directory RAG MCP Server",
-		Version: buildinfo.Version,
+		Version: buildinfo.String(),
 	}, &sdkmcp.ServerOptions{
 		Instructions: "Use tools/list then tools/call. Results include citations.",
 	})

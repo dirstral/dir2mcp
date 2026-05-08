@@ -106,8 +106,8 @@ if ! grep -q '"tools"' "${list_body}"; then
   exit 1
 fi
 
-echo "[4/4] tools/call dir2mcp.list_files"
-call_payload='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":1}}}'
+echo "[4/4] tools/call dir2mcp_list_files"
+call_payload='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":1}}}'
 call_result="$(post_json "${call_payload}" "${session_id}")"
 call_code="$(extract_result_line "${call_result}" 1)"
 call_headers="$(extract_result_line "${call_result}" 2)"

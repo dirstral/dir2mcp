@@ -155,12 +155,14 @@ func (s styles) stat(label string, value interface{}) string {
 	return fmt.Sprintf("%s=%s", s.Dim.Render(label), s.Value.Render(fmt.Sprintf("%v", value)))
 }
 
-// subkv formats a nested key-value pair with a wider key column (for long header names).
+// subkv formats a key-value pair with the same 2-space indent as kv but a
+// wider key column to fit long MCP header names. Indent matches kv so the
+// "Required headers" rows align with "MCP endpoint" rows in the up banner.
 func (s styles) subkv(key, value string) string {
 	if !s.enabled {
-		return fmt.Sprintf("    %-24s %s", key+":", value)
+		return fmt.Sprintf("  %-24s %s", key+":", value)
 	}
-	return fmt.Sprintf("    %s %s",
+	return fmt.Sprintf("  %s %s",
 		s.Key.Render(fmt.Sprintf("%-24s", key+":")),
 		s.Value.Render(value),
 	)

@@ -904,7 +904,7 @@ func TestVersionUsesBuildInfo(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
 	}
-	want := "dir2mcp v" + strings.TrimPrefix(buildinfo.Version, "v")
+	want := "dir2mcp " + buildinfo.Display()
 	if strings.TrimSpace(stdout.String()) != want {
 		t.Fatalf("version output=%q want=%q", strings.TrimSpace(stdout.String()), want)
 	}

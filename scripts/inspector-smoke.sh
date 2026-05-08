@@ -101,6 +101,6 @@ run_inspector() {
 }
 
 run_inspector "tools/list"      --method tools/list
-run_inspector "list_files call" --method tools/call --tool-name dir2mcp.list_files
+run_inspector "list_files call" --method tools/call --tool-name dir2mcp_list_files
 
 echo "[smoke] all checks passed"
