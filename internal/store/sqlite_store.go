@@ -232,6 +232,41 @@ func NewSQLiteStore(path string) *SQLiteStore {
 	return s
 }
 
+// openDB opens the SQLite file and applies the connection-pool and pragma
+// settings that protect against in-process and cross-process write contention:
+//
+//   - SetMaxOpenConns(1) serializes all operations through this single
+//     *sql.DB handle. Without this, the database/sql pool can hand out
+//     multiple connections to concurrent goroutines (chunk writers and
+//     embedding-mark batches), each starting its own write transaction and
+//     producing SQLITE_BUSY.
+//   - PRAGMA journal_mode=WAL reduces SQLite-level read/write blocking for
+//     other connections and processes, even though operations through this
+//     handle are still serialized by the single-connection pool.
+//   - PRAGMA busy_timeout instructs SQLite to wait rather than return BUSY
+//     immediately when an external process holds the database lock.
+func openDB(ctx context.Context, path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	// Order matters: busy_timeout MUST come before journal_mode. Switching to
+	// WAL itself can fail with SQLITE_BUSY if another process holds the
+	// database lock; without busy_timeout already in effect, that PRAGMA
+	// returns immediately rather than waiting.
+	for _, pragma := range []string{
+		`PRAGMA busy_timeout=5000;`,
+		`PRAGMA journal_mode=WAL;`,
+	} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	return db, nil
+}
+
 // initLocked performs the same initialization work as Init but assumes
 // the caller already holds s.mu. This helper allows ensureDB to set up the
 // database under lock, closing a small race window against Close().
@@ -255,13 +290,8 @@ func (s *SQLiteStore) initLocked(ctx context.Context) error {
 		return fmt.Errorf("set database file permissions: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", s.path)
+	db, err := openDB(ctx, s.path)
 	if err != nil {
-		return err
-	}
-
-	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL;`); err != nil {
-		_ = db.Close()
 		return err
 	}
 
