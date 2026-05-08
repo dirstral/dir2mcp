@@ -235,12 +235,14 @@ func NewSQLiteStore(path string) *SQLiteStore {
 // openDB opens the SQLite file and applies the connection-pool and pragma
 // settings that protect against in-process and cross-process write contention:
 //
-//   - SetMaxOpenConns(1) serializes all writers through a single connection.
-//     Without this, the database/sql pool can hand out multiple connections to
-//     concurrent goroutines (chunk writers and embedding-mark batches), each
-//     starting its own write transaction, producing SQLITE_BUSY. Readers remain
-//     concurrent thanks to WAL mode (readers do not share the writer connection).
-//   - PRAGMA journal_mode=WAL keeps reads non-blocking against writes.
+//   - SetMaxOpenConns(1) serializes all operations through this single
+//     *sql.DB handle. Without this, the database/sql pool can hand out
+//     multiple connections to concurrent goroutines (chunk writers and
+//     embedding-mark batches), each starting its own write transaction and
+//     producing SQLITE_BUSY.
+//   - PRAGMA journal_mode=WAL reduces SQLite-level read/write blocking for
+//     other connections and processes, even though operations through this
+//     handle are still serialized by the single-connection pool.
 //   - PRAGMA busy_timeout instructs SQLite to wait rather than return BUSY
 //     immediately when an external process holds the database lock.
 func openDB(ctx context.Context, path string) (*sql.DB, error) {
