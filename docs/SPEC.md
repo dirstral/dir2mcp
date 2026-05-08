@@ -1476,9 +1476,9 @@ filters is impossible.
 
 ### 15.10 `dir2mcp.ask_audio` (optional extension)
 
-**Description:** same as `ask` but includes audio output (TTS). Optional and additive.
+**Description:** same as `ask` but includes audio output (TTS). Optional and additive. The input schema inherits all fields of `dir2mcp.ask` (`question`, `k`, `mode`, `index`, `path_prefix`, `file_glob`, `doc_types`) plus the audio-specific fields shown below.
 
-Input schema:
+Input schema (audio-specific fields; the rest mirror `dir2mcp.ask`):
 
 ```json
 {
@@ -1486,6 +1486,7 @@ Input schema:
   "additionalProperties": false,
   "properties": {
     "question": { "type": "string", "minLength": 1 },
+    "k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 15 },
     "voice_id": { "type": "string" },
     "format": { "type": "string", "enum": ["mp3", "wav"], "default": "mp3" }
   },
