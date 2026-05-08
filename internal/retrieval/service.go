@@ -480,6 +480,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		citations = append(citations, model.Citation{
 			ChunkID: hit.ChunkID,
 			RelPath: hit.RelPath,
+			Title:   hit.Title,
 			Span:    hit.Span,
 		})
 	}

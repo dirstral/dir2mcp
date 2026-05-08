@@ -256,6 +256,7 @@ type AskResult struct {
 // Citation references a source span.
 type Citation struct {
 	RelPath string
+	Title   string
 	Span    model.Span
 }
 
@@ -313,6 +314,7 @@ func (e *Engine) AskWithContext(ctx context.Context, question string, opts AskOp
 	for _, citation := range res.Citations {
 		citations = append(citations, Citation{
 			RelPath: citation.RelPath,
+			Title:   citation.Title,
 			Span:    citation.Span,
 		})
 	}
@@ -402,6 +404,7 @@ func preloadEngineChunkMetadata(ctx context.Context, source embeddedChunkMetadat
 				ret.SetChunkMetadataForIndex(kind, task.Metadata.ChunkID, model.SearchHit{
 					ChunkID: task.Metadata.ChunkID,
 					RelPath: task.Metadata.RelPath,
+					Title:   task.Metadata.Title,
 					DocType: task.Metadata.DocType,
 					RepType: task.Metadata.RepType,
 					Snippet: task.Metadata.Snippet,
