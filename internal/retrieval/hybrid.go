@@ -59,7 +59,10 @@ func fuseRRF(primary, secondary []model.SearchHit, k int) []model.SearchHit {
 		out = append(out, entry.hit)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].Score > out[j].Score
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		return out[i].ChunkID < out[j].ChunkID
 	})
 	if len(out) > k {
 		out = out[:k]
