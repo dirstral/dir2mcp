@@ -85,10 +85,14 @@ func (s *Service) runHybridSearch(
 	indexKind string,
 	vectorHits []model.SearchHit,
 ) ([]model.SearchHit, bool) {
-	if !s.hybridEnabled {
+	s.metaMu.RLock()
+	enabled := s.hybridEnabled
+	store := s.store
+	s.metaMu.RUnlock()
+	if !enabled {
 		return nil, false
 	}
-	ls, ok := s.store.(model.LexicalSearcher)
+	ls, ok := store.(model.LexicalSearcher)
 	if !ok {
 		return nil, false
 	}

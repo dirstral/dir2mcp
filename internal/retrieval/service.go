@@ -982,18 +982,25 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	return truncateSearchHits(filtered, k), nil
 }
 
+// hybridVectorCandidateLimit returns the number of vector candidates to
+// request before fusion. When hybrid retrieval is active and the store
+// supports BM25, we widen the vector pool to match hybridCandidatePoolSize so
+// that vector candidates outside the top-k can still contribute via RRF.
+// Otherwise we request only k candidates (the legacy vector-only path).
 func (s *Service) hybridVectorCandidateLimit(k int, idx model.Index) int {
 	if k <= 0 || idx == nil {
 		return k
 	}
-	if _, ok := idx.(model.LexicalSearcher); !ok {
+	s.metaMu.RLock()
+	enabled := s.hybridEnabled
+	store := s.store
+	s.metaMu.RUnlock()
+	if !enabled {
 		return k
 	}
-
-	s.metaMu.RLock()
-	hybridCandidatePoolSize := s.hybridCandidatePoolSize
-	s.metaMu.RUnlock()
-
+	if _, ok := store.(model.LexicalSearcher); !ok {
+		return k
+	}
 	if hybridCandidatePoolSize > k {
 		return hybridCandidatePoolSize
 	}
