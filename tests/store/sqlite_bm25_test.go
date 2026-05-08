@@ -129,7 +129,10 @@ func TestSQLiteStore_SearchBM25_PopulatesTitle(t *testing.T) {
 		}
 	}
 
-	ls := interface{}(st).(model.LexicalSearcher)
+	ls, ok := interface{}(st).(model.LexicalSearcher)
+	if !ok {
+		t.Fatalf("store does not implement model.LexicalSearcher")
+	}
 	hits, err := ls.SearchBM25(ctx, "reporting", 5, "text")
 	if err != nil {
 		t.Fatalf("SearchBM25: %v", err)
