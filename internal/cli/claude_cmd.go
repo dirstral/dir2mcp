@@ -232,8 +232,8 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 
 	delete(mcpServers, *serverName)
 	if len(mcpServers) == 0 {
-		// Drop the now-empty mcpServers key entirely so the resulting file
-		// matches a never-installed state byte-for-byte (modulo other keys).
+		// Drop the now-empty mcpServers key entirely so the resulting JSON
+		// matches the never-installed shape (modulo any unrelated keys).
 		delete(root, "mcpServers")
 	} else {
 		root["mcpServers"] = mcpServers
