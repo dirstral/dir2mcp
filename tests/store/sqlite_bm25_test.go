@@ -111,16 +111,17 @@ func TestSQLiteStore_SearchBM25_PopulatesTitle(t *testing.T) {
 	chunks := []struct {
 		label   uint64
 		relPath string
+		docType string
 		text    string
 	}{
-		{10, titled.RelPath, "section 35 reporting suspicious transactions"},
-		{11, untitled.RelPath, "untitled note about reporting"},
+		{10, titled.RelPath, titled.DocType, "section 35 reporting suspicious transactions"},
+		{11, untitled.RelPath, untitled.DocType, "untitled note about reporting"},
 	}
 	for _, c := range chunks {
 		task := model.NewChunkTask(c.label, c.text, "text", model.ChunkMetadata{
 			ChunkID: c.label,
 			RelPath: c.relPath,
-			DocType: "md",
+			DocType: c.docType,
 			RepType: "raw_text",
 		})
 		if err := st.UpsertChunkTask(ctx, task); err != nil {
