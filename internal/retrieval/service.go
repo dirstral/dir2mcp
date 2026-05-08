@@ -480,6 +480,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		citations = append(citations, model.Citation{
 			ChunkID: hit.ChunkID,
 			RelPath: hit.RelPath,
+			Title:   hit.Title,
 			Span:    hit.Span,
 		})
 	}
@@ -1193,7 +1194,16 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 	}
 	for i := 0; i < limit && remaining > 0; i++ {
 		h := hits[i]
-		line := "- [" + h.RelPath + "] "
+		// Keep the bracketed [rel_path] tag stable for the answering model
+		// (ensureAnswerAttributions relies on it for canonical citation
+		// matching). When a human-readable Title is available, surface it
+		// alongside the path as a parenthetical hint so the model has the
+		// document name in addition to its path.
+		line := "- [" + h.RelPath + "]"
+		if title := strings.TrimSpace(h.Title); title != "" {
+			line += " (" + title + ")"
+		}
+		line += " "
 		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
 		if snippet == "" {
 			snippet = "(no snippet)"
@@ -1247,7 +1257,11 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 		return answer
 	}
 
-	orderedSources := make([]string, 0, len(citations))
+	type sourceEntry struct {
+		rel   string
+		title string
+	}
+	ordered := make([]sourceEntry, 0, len(citations))
 	seen := make(map[string]struct{}, len(citations))
 	for _, c := range citations {
 		rel := strings.TrimSpace(c.RelPath)
@@ -1258,18 +1272,27 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 			continue
 		}
 		seen[rel] = struct{}{}
-		orderedSources = append(orderedSources, rel)
+		ordered = append(ordered, sourceEntry{rel: rel, title: strings.TrimSpace(c.Title)})
 	}
-	if len(orderedSources) == 0 {
+	if len(ordered) == 0 {
 		return answer
 	}
 
-	missing := make([]string, 0, len(orderedSources))
-	for _, rel := range orderedSources {
-		tag := "[" + rel + "]"
-		if !strings.Contains(answer, tag) {
-			missing = append(missing, tag)
+	missing := make([]string, 0, len(ordered))
+	for _, src := range ordered {
+		// The canonical [rel_path] tag is what the model emits inline; we
+		// only need to add a Sources line for paths it failed to mention.
+		// When a human-readable title is present we surface it next to the
+		// path so the appended block is more readable than bare paths.
+		tag := "[" + src.rel + "]"
+		if strings.Contains(answer, tag) {
+			continue
 		}
+		display := tag
+		if src.title != "" {
+			display = tag + " (" + src.title + ")"
+		}
+		missing = append(missing, display)
 	}
 	if len(missing) == 0 {
 		return answer

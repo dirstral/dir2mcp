@@ -8,6 +8,7 @@ import (
 type Document struct {
 	DocID       int64
 	RelPath     string
+	Title       string
 	DocType     string
 	SourceType  string
 	SizeBytes   int64
@@ -60,6 +61,7 @@ type SearchQuery struct {
 type SearchHit struct {
 	ChunkID uint64
 	RelPath string
+	Title   string
 	DocType string
 	RepType string
 	Score   float64
@@ -70,6 +72,7 @@ type SearchHit struct {
 type ChunkMetadata struct {
 	ChunkID uint64
 	RelPath string
+	Title   string
 	DocType string
 	RepType string
 	Snippet string
@@ -83,6 +86,7 @@ func (m ChunkMetadata) ToSearchHit() SearchHit {
 	return SearchHit{
 		ChunkID: m.ChunkID,
 		RelPath: m.RelPath,
+		Title:   m.Title,
 		DocType: m.DocType,
 		RepType: m.RepType,
 		Snippet: m.Snippet,
@@ -147,6 +151,7 @@ func (t ChunkTask) Validate() error {
 type Citation struct {
 	ChunkID uint64
 	RelPath string
+	Title   string
 	Span    Span
 }
 

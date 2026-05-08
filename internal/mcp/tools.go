@@ -445,14 +445,18 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 	files := make([]map[string]interface{}, 0, len(docs))
 	for _, doc := range docs {
 		status := normalizeFileStatus(doc.Status)
-		files = append(files, map[string]interface{}{
+		entry := map[string]interface{}{
 			"rel_path":   doc.RelPath,
 			"doc_type":   doc.DocType,
 			"size_bytes": doc.SizeBytes,
 			"mtime_unix": doc.MTimeUnix,
 			"status":     status,
 			"deleted":    doc.Deleted,
-		})
+		}
+		if title := strings.TrimSpace(doc.Title); title != "" {
+			entry["title"] = title
+		}
+		files = append(files, entry)
 	}
 
 	structured := map[string]interface{}{
@@ -1873,7 +1877,7 @@ func looksLikeBinaryContent(relPath, content string) bool {
 }
 
 func serializeHit(h model.SearchHit) map[string]interface{} {
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"chunk_id": h.ChunkID,
 		"rel_path": h.RelPath,
 		"doc_type": h.DocType,
@@ -1882,6 +1886,10 @@ func serializeHit(h model.SearchHit) map[string]interface{} {
 		"snippet":  h.Snippet,
 		"span":     buildOpenFileSpan(h.Span),
 	}
+	if title := strings.TrimSpace(h.Title); title != "" {
+		out["title"] = title
+	}
+	return out
 }
 
 func serializeSearchHits(hits []model.SearchHit) []map[string]interface{} {
@@ -1895,11 +1903,15 @@ func serializeSearchHits(hits []model.SearchHit) []map[string]interface{} {
 func buildAskStructuredContent(result model.AskResult) map[string]interface{} {
 	citations := make([]map[string]interface{}, 0, len(result.Citations))
 	for _, citation := range result.Citations {
-		citations = append(citations, map[string]interface{}{
+		entry := map[string]interface{}{
 			"chunk_id": citation.ChunkID,
 			"rel_path": citation.RelPath,
 			"span":     buildOpenFileSpan(citation.Span),
-		})
+		}
+		if title := strings.TrimSpace(citation.Title); title != "" {
+			entry["title"] = title
+		}
+		citations = append(citations, entry)
 	}
 
 	hits := make([]map[string]interface{}, 0, len(result.Hits))
@@ -1960,6 +1972,7 @@ func hitDefinitionSchema() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"chunk_id": map[string]interface{}{"type": "integer"},
 			"rel_path": map[string]interface{}{"type": "string"},
+			"title":    map[string]interface{}{"type": "string"},
 			"doc_type": map[string]interface{}{"type": "string"},
 			"rep_type": map[string]interface{}{"type": "string"},
 			"score":    map[string]interface{}{"type": "number"},
@@ -2041,6 +2054,7 @@ func askOutputSchema() map[string]interface{} {
 					"properties": map[string]interface{}{
 						"chunk_id": map[string]interface{}{"type": "integer"},
 						"rel_path": map[string]interface{}{"type": "string"},
+						"title":    map[string]interface{}{"type": "string"},
 						"span":     map[string]interface{}{"$ref": "#/definitions/Span"},
 					},
 					"required": []string{"chunk_id", "rel_path", "span"},
@@ -2276,6 +2290,7 @@ func listFilesOutputSchema() map[string]interface{} {
 					"additionalProperties": false,
 					"properties": map[string]interface{}{
 						"rel_path":   map[string]interface{}{"type": "string"},
+						"title":      map[string]interface{}{"type": "string"},
 						"doc_type":   map[string]interface{}{"type": "string"},
 						"size_bytes": map[string]interface{}{"type": "integer"},
 						"mtime_unix": map[string]interface{}{"type": "integer"},

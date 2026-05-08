@@ -267,6 +267,30 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// applyAdditiveColumnMigrations runs ALTER TABLE ADD COLUMN statements that
+// extend existing tables with new optional columns. Each statement is wrapped
+// with isDuplicateColumnError so that the migration is idempotent on
+// already-upgraded databases. Add new entries here when introducing additive
+// schema changes; do not modify existing entries (their effects are now
+// historical migrations).
+//
+// The 'title' column on documents was added for #159 — surface a
+// human-readable document title in citations alongside rel_path.
+func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
+	migrations := []string{
+		`ALTER TABLE documents ADD COLUMN source_type TEXT NOT NULL DEFAULT 'filesystem'`,
+		`ALTER TABLE mcp_sessions ADD COLUMN auth_scope TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE representations ADD COLUMN meta_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE documents ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // initLocked performs the same initialization work as Init but assumes
 // the caller already holds s.mu. This helper allows ensureDB to set up the
 // database under lock, closing a small race window against Close().
@@ -386,15 +410,7 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 		_ = db.Close()
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE documents ADD COLUMN source_type TEXT NOT NULL DEFAULT 'filesystem'`); err != nil && !isDuplicateColumnError(err) {
-		_ = db.Close()
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE mcp_sessions ADD COLUMN auth_scope TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnError(err) {
-		_ = db.Close()
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE representations ADD COLUMN meta_json TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnError(err) {
+	if err := applyAdditiveColumnMigrations(ctx, db); err != nil {
 		_ = db.Close()
 		return err
 	}
@@ -428,8 +444,8 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rel_path) DO UPDATE SET
 		   doc_type=excluded.doc_type,
 		   source_type=excluded.source_type,
@@ -437,7 +453,8 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		   mtime_unix=excluded.mtime_unix,
 		   content_hash=excluded.content_hash,
 		   status=excluded.status,
-		   deleted=excluded.deleted`,
+		   deleted=excluded.deleted,
+		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END`,
 		relPath,
 		normalizeDocType(doc.DocType),
 		normalizeSourceType(doc.SourceType),
@@ -446,6 +463,7 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		strings.TrimSpace(doc.ContentHash),
 		normalizeStatus(doc.Status),
 		boolToInt(doc.Deleted),
+		strings.TrimSpace(doc.Title),
 	)
 	return err
 }
@@ -805,7 +823,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	var deleted int
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title
 		 FROM documents WHERE rel_path = ?`,
 		normalizedPath,
 	)
@@ -819,6 +837,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 		&doc.ContentHash,
 		&doc.Status,
 		&deleted,
+		&doc.Title,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Document{}, os.ErrNotExist
@@ -845,7 +864,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 
 	normalizedPrefix := normalizePrefix(prefix)
 
-	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted FROM documents`
+	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title FROM documents`
 	where := []string{"deleted = 0"}
 	args := make([]any, 0, 4)
 	if normalizedPrefix != "" {
@@ -880,6 +899,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 			&doc.ContentHash,
 			&doc.Status,
 			&deleted,
+			&doc.Title,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1068,9 +1088,11 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
 	          )
 	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
-	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0),
+	                 COALESCE(d.title, '')
 	          FROM filtered_chunks fc
-	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
+	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1
+	          LEFT JOIN documents d ON d.rel_path = fc.rel_path`
 	if strings.TrimSpace(indexKind) != "" {
 		query += ` WHERE fc.index_kind = ?`
 		args = append(args, indexKind)
@@ -1096,8 +1118,9 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			spanK   string
 			spanS   int
 			spanE   int
+			title   string
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &title); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -1112,6 +1135,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			Metadata: model.ChunkMetadata{
 				ChunkID: uid,
 				RelPath: relPath,
+				Title:   title,
 				DocType: docType,
 				RepType: repType,
 				Snippet: snippet(text, 240),

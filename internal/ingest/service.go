@@ -881,6 +881,13 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 			return err
 		}
 		s.addRepresentations(1)
+
+		const titleScanLimit = 4096
+		titleContent := content
+		if len(titleContent) > titleScanLimit {
+			titleContent = titleContent[:titleScanLimit]
+		}
+		s.persistTitleIfFound(ctx, doc, string(titleContent))
 		return nil
 	}
 
@@ -904,6 +911,22 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		s.addRepresentations(1)
 	}
 	return nil
+}
+
+// persistTitleIfFound runs the title heuristic on the supplied text body and,
+// if a title is extracted, re-upserts the document so the title column is
+// populated. Failures here are non-fatal: an empty or unwritten title only
+// degrades citation display, so we log and continue rather than aborting the
+// ingest of an otherwise-successful document.
+func (s *Service) persistTitleIfFound(ctx context.Context, doc model.Document, body string) {
+	title := ExtractTitle(body)
+	if title == "" || title == doc.Title {
+		return
+	}
+	doc.Title = title
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		s.getLogger().Printf("persist title for %s: %v", doc.RelPath, err)
+	}
 }
 
 // isUnexpectedStoreErr returns true when err is non-nil and is not a
@@ -948,6 +971,8 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	if ocrText == "" {
 		return nil
 	}
+
+	s.persistTitleIfFound(ctx, doc, ocrText)
 
 	rep := model.Representation{
 		DocID:       doc.DocID,
