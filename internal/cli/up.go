@@ -26,6 +26,15 @@ import (
 )
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
+	// When this is the launching parent (not the daemon child) and the
+	// caller hasn't asked for foreground/JSON behavior, fork a detached
+	// child to run the server and exit the parent once the child is
+	// ready. The child re-enters runUp with daemonChildEnv set and falls
+	// through to the in-process body below.
+	if shouldDaemonize(a, opts) {
+		return a.runUpAsDaemonParent(ctx, opts)
+	}
+
 	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
 	if err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
@@ -173,9 +182,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		"errors":   0,
 	})
 
-	a.printHumanConnectionIfVerbose(cfg, connection, auth, opts)
-
-	stdinQuitCh := startStdinQuitListener(nonInteractiveMode, opts.jsonOutput)
+	stdinQuitCh := a.installInteractionForUp(cancel, cfg, connection, auth, opts, nonInteractiveMode)
 
 	ingestErrCh := make(chan error, 1)
 	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
@@ -782,3 +789,80 @@ func (a *App) printHumanConnectionIfVerbose(cfg config.Config, connection connec
 		a.printHumanConnection(cfg, connection, auth, opts.readOnly)
 	}
 }
+
+// installInteractionForUp picks the right termination interaction for
+// the current run mode and returns the channel runEventLoop watches.
+//
+// - Daemon child: skip the foreground banner (the parent printed a
+//   daemon-ready summary on the user's terminal) and translate
+//   SIGTERM/SIGINT into cancel() so `dir2mcp down` can stop us cleanly
+//   through the existing event-loop shutdown path. The stdin listener
+//   is suppressed because the child has no terminal.
+// - Foreground: print the banner and start the q+Enter stdin listener
+//   the way the pre-daemonization code did.
+//
+// Extracted from runUp purely to keep that function under the
+// cyclomatic-complexity budget after daemon mode was added.
+func (a *App) installInteractionForUp(
+	cancel context.CancelFunc,
+	cfg config.Config,
+	connection connectionPayload,
+	auth authMaterial,
+	opts upOptions,
+	nonInteractiveMode bool,
+) <-chan struct{} {
+	if isRunningAsDaemonChild() {
+		installDaemonChildSignalHandler(cancel)
+		return startStdinQuitListener(true, opts.jsonOutput)
+	}
+	a.printHumanConnectionIfVerbose(cfg, connection, auth, opts)
+	return startStdinQuitListener(nonInteractiveMode, opts.jsonOutput)
+}
+
+// shouldDaemonize decides whether `dir2mcp up` should fork a detached
+// daemon child instead of running the server in the foreground.
+//
+// Daemon mode is the default for an interactive shell — `dir2mcp up`
+// returns control once the server is bound and ready. The opt-outs:
+//   - --foreground / -f: explicit caller request
+//   - --json: NDJSON event stream callers (smoke tests, automation) need
+//     events on stdout in real time, which detaching breaks
+//   - daemon child: we're already inside the forked process; fall through
+//     to the in-process server body
+//   - non-unix platforms: setsid isn't available, so degrade gracefully
+//   - stdout not a TTY: piped, redirected, or being scraped by a test
+//     harness — the caller wants to see real-time output (and any
+//     startup errors) on the same stream the parent would have used.
+//     Daemon mode hides the child's stderr inside the server log, which
+//     is unhelpful for non-interactive callers.
+//
+// The TTY check is the gate that keeps existing CLI/integration tests
+// (which shell out and expect synchronous up/down semantics) working
+// without changes.
+func shouldDaemonize(a *App, opts upOptions) bool {
+	if opts.foreground || opts.jsonOutput {
+		return false
+	}
+	if isRunningAsDaemonChild() {
+		return false
+	}
+	if !isDaemonSupported() {
+		return false
+	}
+	if !writerIsTerminal(a.stdout) && !opts.daemon {
+		return false
+	}
+	return true
+}
+
+// writerIsTerminal reports whether w corresponds to a terminal file
+// descriptor. Anything that isn't an *os.File (a bytes.Buffer in tests,
+// a pipe in CI) is treated as non-terminal.
+func writerIsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return isTerminal(f)
+}
+

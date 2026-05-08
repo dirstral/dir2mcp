@@ -59,6 +59,7 @@ const (
 
 var commands = map[string]struct{}{
 	"up":         {},
+	"down":       {},
 	"status":     {},
 	"ask":        {},
 	"search":     {},
@@ -126,6 +127,15 @@ type upOptions struct {
 	readOnly           bool
 	public             bool
 	forceInsecure      bool
+	// foreground keeps the up process attached to the terminal — the
+	// existing pre-daemonization behavior. Implied by --json so NDJSON
+	// event streams keep flowing to the calling process.
+	foreground bool
+	// daemon forces daemon mode even when stdout is not a TTY. Without
+	// it, non-TTY callers (tests, CI scripts) get the foreground path so
+	// startup errors land on stderr inline instead of inside the daemon
+	// log file.
+	daemon bool
 	x402Mode           string
 	x402FacilitatorURL string
 	// token values may come from a flag, environment variable, or file path
@@ -398,6 +408,8 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 			return exitConfigInvalid
 		}
 		return a.runUp(ctx, upOpts)
+	case "down":
+		return a.runDown(ctx, globalOpts, remaining[1:])
 	case "version":
 		if !globalOpts.quiet {
 			writeln(a.stdout, "dir2mcp v"+strings.TrimPrefix(buildinfo.Version, "v"))
@@ -462,7 +474,8 @@ func (a *App) printUsage() {
 
 	writeln(o, s.sectionHeader("Commands"))
 	cmds := [][2]string{
-		{"up", "start the MCP server and begin indexing"},
+		{"up", "start the MCP server and begin indexing (daemonizes by default)"},
+		{"down", "stop the dir2mcp server running in this directory"},
 		{"status", "show server health and corpus stats"},
 		{"ask", "legacy compatibility shim; prefer dirstral-cli for client UX"},
 		{"search", "legacy compatibility shim; prefer dirstral-cli for client UX"},
@@ -1066,6 +1079,9 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.BoolVar(&opts.readOnly, "read-only", false, "run in read-only mode")
 	fs.BoolVar(&opts.public, "public", false, "bind to all interfaces for external access")
 	fs.BoolVar(&opts.forceInsecure, "force-insecure", false, "allow public mode without auth (unsafe)")
+	fs.BoolVar(&opts.foreground, "foreground", false, "run in the foreground (do not daemonize); implied by --json or non-TTY stdout")
+	fs.BoolVar(&opts.foreground, "f", false, "alias for --foreground")
+	fs.BoolVar(&opts.daemon, "daemon", false, "force daemon mode even when stdout is not a TTY (rare; for scripts that want fire-and-forget)")
 	fs.StringVar(&opts.x402Mode, "x402", "", "x402 mode: off|on|required")
 	fs.StringVar(&opts.x402FacilitatorURL, "x402-facilitator-url", "", "x402 facilitator base URL")
 	fs.StringVar(&opts.x402FacilitatorToken, "x402-facilitator-token", "", "x402 facilitator bearer token (insecure; token may also be provided via env or file)")
@@ -1753,7 +1769,11 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	writeln(a.stdout)
 	writeln(a.stdout, s.separator(44))
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
-	writef(a.stdout, "  %s\n\n", s.dim("(q + Enter to stop)"))
+	// In foreground mode the user can stop with q+Enter (the stdin
+	// listener) or Ctrl-C; either way we don't crowd the banner with
+	// terminal-control hints. Daemon mode prints its own one-line
+	// "Stop with: dir2mcp down" hint via printDaemonReady.
+	writeln(a.stdout)
 }
 
 func isTerminal(file *os.File) bool {

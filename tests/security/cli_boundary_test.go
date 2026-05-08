@@ -57,6 +57,7 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 
 	expected := map[string]struct{}{
 		"up":         {},
+		"down":       {},
 		"status":     {},
 		"ask":        {},
 		"search":     {},
@@ -144,6 +145,10 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"config_cmd.go":           {},
 		"corpus_snapshot_test.go": {},
 		"corpus_writer_test.go":   {},
+		"daemon.go":               {},
+		"daemon_other.go":         {},
+		"daemon_unix.go":          {},
+		"down.go":                 {},
 		"embed_options_test.go":   {},
 		"flag_ordering_test.go":   {},
 		"reindex.go":              {},
@@ -151,6 +156,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"status.go":               {},
 		"style.go":                {},
 		"up.go":                   {},
+		"up_daemon.go":            {},
 	}
 
 	var unexpected []string
