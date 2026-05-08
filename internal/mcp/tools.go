@@ -1983,7 +1983,7 @@ func searchInputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"query":       map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
+			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
 			"file_glob":   map[string]interface{}{"type": "string"},
