@@ -282,7 +282,7 @@ func (e *Engine) AskWithContext(ctx context.Context, question string, opts AskOp
 
 	k := opts.K
 	if k <= 0 {
-		k = 10
+		k = 15
 	}
 
 	timeout := e.askTimeout

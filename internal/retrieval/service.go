@@ -433,7 +433,7 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 
 	k := query.K
 	if k <= 0 {
-		k = 10
+		k = 15
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(query.Index))
@@ -467,7 +467,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		query.Query = question
 	}
 	if query.K <= 0 {
-		query.K = 10
+		query.K = 15
 	}
 
 	hits, err := s.Search(ctx, query)
