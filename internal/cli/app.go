@@ -1365,9 +1365,7 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 		interval = 5 * time.Second
 	}
 	// Emit an initial snapshot immediately, then refresh while indexing runs.
-	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
-		writef(stderr, "write corpus snapshot: %v\n", err)
-	}
+	logSnapshotErr(stderr, writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter))
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1379,11 +1377,23 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 			if indexingState != nil && !indexingState.Snapshot().Running {
 				continue
 			}
-			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
-				writef(stderr, "write corpus snapshot: %v\n", err)
-			}
+			logSnapshotErr(stderr, writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter))
 		}
 	}
+}
+
+// logSnapshotErr writes a corpus-snapshot error to stderr unless it is a
+// context cancellation. Cancellation is the normal shutdown signal — emitting
+// it as plaintext on stderr pollutes the JSON event stream the caller may be
+// consuming and provides no actionable information. Suppress it.
+func logSnapshotErr(stderr io.Writer, err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	writef(stderr, "write corpus snapshot: %v\n", err)
 }
 
 func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) error {
