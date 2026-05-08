@@ -471,12 +471,13 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 // ingest. The 'rebuild' command re-derives FTS content from the
 // content='chunks' external-content reference.
 func backfillFTSIfEmpty(ctx context.Context, db *sql.DB) error {
-	var ftsCount, chunkCount int64
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts`).Scan(&ftsCount); err != nil {
-		return fmt.Errorf("count chunks_fts: %w", err)
-	}
-	if ftsCount > 0 {
+	var exists, chunkCount int64
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM chunks_fts LIMIT 1`).Scan(&exists)
+	if err == nil {
 		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check chunks_fts empty: %w", err)
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE deleted = 0`).Scan(&chunkCount); err != nil {
 		return fmt.Errorf("count chunks: %w", err)
