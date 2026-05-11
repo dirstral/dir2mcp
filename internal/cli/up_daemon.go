@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"dir2mcp/internal/config"
 )
 
 // runUpAsDaemonParent spawns a detached child process that runs the
@@ -40,33 +42,19 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
+	// Re-run the fast, config-only preconditions the child would run, so
+	// a misconfig (missing MISTRAL_API_KEY, --public without auth) fails
+	// here instead of after a 15s readiness timeout the user has to debug
+	// from server.log. Listener-bind failures stay in the child — those
+	// genuinely need the OS to refuse the port — and the readiness-error
+	// path already points the user at the log for those.
+	if code := a.preflightDaemonParentConfig(&cfg, opts); code != exitSuccess {
+		return code
+	}
 	stateDir := cfg.StateDir
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", stateDir, err))
-		return exitGeneric
-	}
-
 	pidPath := pidFilePath(stateDir)
-	if existing, err := readPIDFile(pidPath); err == nil {
-		if processIsAlive(existing) {
-			writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
-				fmt.Sprintf("dir2mcp is already running for %s (pid %d)", stateDir, existing),
-				"Stop it with `dir2mcp down`, or pass --foreground to run a one-off in this terminal.",
-			)
-			return exitGeneric
-		}
-		// Stale pid file — silently clean it up so the spawn below has a
-		// clear field to write into when the child becomes ready.
-		_ = removePIDFile(pidPath)
-	}
-	// Also remove a stale connection.json from a previous run. Without
-	// this, the parent's waitForConnectionFile would observe the old
-	// file the instant we start polling and return success before the
-	// new child has bound or claimed the pid file — producing a
-	// confusing "daemon ready but pid file missing" race window.
-	connPath := connectionFilePath(stateDir)
-	if err := os.Remove(connPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		writef(a.stderr, "warning: clean stale %s: %v\n", connPath, err)
+	if code := a.prepareDaemonStateDir(stateDir, pidPath, opts); code != exitSuccess {
+		return code
 	}
 
 	logPath := serverLogPath(stateDir)
@@ -178,6 +166,71 @@ func (a *App) printDaemonReady(stateDir, logPath string, pid int, connection con
 	writeln(a.stdout)
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
 	writef(a.stdout, "  %s\n\n", s.dim("Stop with: dir2mcp down"))
+}
+
+// prepareDaemonStateDir ensures the state directory exists, refuses to
+// continue when an existing pid file points at a live process, and
+// clears stale state from a previous run that would confuse the parent's
+// readiness poll. Pulled out of runUpAsDaemonParent purely to keep that
+// function under the gocyclo=15 budget after the preflight check landed.
+//
+// Stale-state cleanup notes:
+//   - A pid file whose owner is dead is silently removed so the child's
+//     O_EXCL claim has a clear field.
+//   - A leftover connection.json from a previous run is removed because
+//     waitForConnectionFile would otherwise observe the old file the
+//     instant we start polling and return success before the new child
+//     has bound — producing a confusing "daemon ready but pid file
+//     missing" race window.
+func (a *App) prepareDaemonStateDir(stateDir, pidPath string, opts upOptions) int {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", stateDir, err))
+		return exitGeneric
+	}
+	if existing, err := readPIDFile(pidPath); err == nil {
+		if processIsAlive(existing) {
+			writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
+				fmt.Sprintf("dir2mcp is already running for %s (pid %d)", stateDir, existing),
+				"Stop it with `dir2mcp down`, or pass --foreground to run a one-off in this terminal.",
+			)
+			return exitGeneric
+		}
+		_ = removePIDFile(pidPath)
+	}
+	connPath := connectionFilePath(stateDir)
+	if err := os.Remove(connPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writef(a.stderr, "warning: clean stale %s: %v\n", connPath, err)
+	}
+	return exitSuccess
+}
+
+// preflightDaemonParentConfig runs the subset of config validation that
+// can fail in the child for purely config-level reasons — i.e. would
+// produce the same error regardless of whether the listener binds. By
+// running these in the parent before fork(), we trade a 15s readiness
+// timeout (and a misleading "did not become ready" message that frames
+// a config bug as a daemon/network bug) for the immediate, accurate
+// error the in-process body would have printed.
+//
+// Limited intentionally to the cfg-only checks: --public-requires-auth
+// and missing MISTRAL_API_KEY. Port-bind failures and other runtime
+// errors stay in the child — those need the OS state we can only
+// observe after the listener attempts to bind, and the existing
+// readiness-timeout path already directs the user to server.log for
+// them (see TestDaemonLifecycle_BindBusyReportsClearError).
+//
+// Mutates cfg with the flag overrides the checks read (--listen,
+// --auth, --public). That's safe because the spawned child re-loads
+// config from scratch via its own loadConfigWithGlobalOptions call;
+// the parent's mutations exist only for the duration of this preflight.
+func (a *App) preflightDaemonParentConfig(cfg *config.Config, opts upOptions) int {
+	applyScalarOverrides(cfg, opts)
+	if cfg.Public || opts.public {
+		if code := a.applyPublicMode(cfg, opts); code != exitSuccess {
+			return code
+		}
+	}
+	return a.checkMistralAPIKey(cfg, opts, upNonInteractiveMode(opts))
 }
 
 // generateDaemonNonce returns a 32-character hex string drawn from the
