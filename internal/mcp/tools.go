@@ -1013,19 +1013,39 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	if openErr != nil {
 		return toolCallResult{}, mapOpenFileError(openErr)
 	}
+	docType := inferDocType(relPath)
 	structured := map[string]interface{}{
-		"rel_path": relPath, "doc_type": inferDocType(relPath), "content": content, "truncated": truncated,
+		"rel_path": relPath, "doc_type": docType, "content": content, "truncated": truncated,
 	}
-	if looksLikeBinaryContent(relPath, content) {
+	if looksLikeBinaryContent(content) {
 		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "open_file does not support binary content; use transcribe for audio files", Retryable: false}
 	}
 	if strings.TrimSpace(span.Kind) != "" {
 		structured["span"] = buildOpenFileSpan(span)
+	} else if isBinaryDocTypeForOpenFile(docType) {
+		// For PDFs/audio with no requested span, the retriever has returned the
+		// cached OCR / transcript markdown. Surface this to the caller as
+		// span.kind=document so they can distinguish a full-document
+		// representation from a paged/timed slice.
+		structured["span"] = map[string]interface{}{"kind": "document"}
 	}
 	return toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: content}},
 		StructuredContent: structured,
 	}, nil
+}
+
+// isBinaryDocTypeForOpenFile reports whether docType is one whose default
+// open_file response is served from an OCR / transcript cache rather than raw
+// file bytes (see issue #177). Keeping this private to mcp avoids leaking the
+// retriever-side notion of "binary doc type" into the public API surface.
+func isBinaryDocTypeForOpenFile(docType string) bool {
+	switch strings.ToLower(strings.TrimSpace(docType)) {
+	case "pdf", "audio":
+		return true
+	default:
+		return false
+	}
 }
 
 // parseMaxCharsArg parses the "max_chars" argument with a default and range.
@@ -1172,6 +1192,8 @@ func mapOpenFileError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, model.ErrDocTypeUnsupported):
 		return &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+	case errors.Is(err, model.ErrOCRNotReady):
+		return &toolExecutionError{Code: "OCR_NOT_READY", Message: "ocr representation not yet available; retry once indexing completes or request a specific page/start_ms", Retryable: true}
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	default:
@@ -1869,11 +1891,13 @@ func isListFilesNoisePath(relPath string) bool {
 	return false
 }
 
-func looksLikeBinaryContent(relPath, content string) bool {
-	if strings.IndexByte(content, 0) >= 0 {
-		return true
-	}
-	return inferDocType(relPath) == "audio"
+// looksLikeBinaryContent reports whether the payload is unsafe to surface as
+// MCP `text` content. The historical behavior also flagged audio doc types,
+// but since #177 binary types are served from the OCR / transcript cache and
+// the resulting markdown is text — so we now rely on the NUL-byte heuristic
+// alone and let the retriever decide what to return per doc_type.
+func looksLikeBinaryContent(content string) bool {
+	return strings.IndexByte(content, 0) >= 0
 }
 
 func serializeHit(h model.SearchHit) map[string]interface{} {

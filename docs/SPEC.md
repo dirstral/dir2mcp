@@ -983,6 +983,7 @@ Example tool execution error:
 * `PATH_OUTSIDE_ROOT`
 * `FILE_NOT_FOUND`
 * `DOC_TYPE_UNSUPPORTED`
+* `OCR_NOT_READY` (returned by `dir2mcp_open_file` for binary doc types — PDF, audio — when no OCR/transcript representation is cached yet; retryable once ingestion completes)
 
 ### 14.3 Index/state
 
@@ -1041,10 +1042,21 @@ All schemas are JSON Schema (draft-agnostic, compatible with common validators).
       "additionalProperties": false,
       "properties": { "kind": { "const": "time" }, "start_ms": { "type": "integer" }, "end_ms": { "type": "integer" } },
       "required": ["kind", "start_ms", "end_ms"]
+    },
+    {
+      "additionalProperties": false,
+      "properties": { "kind": { "const": "document" } },
+      "required": ["kind"]
     }
   ]
 }
 ```
+
+The `document` variant is emitted by `dir2mcp_open_file` when the requested
+`rel_path` is a binary doc type (PDF, audio) and the caller did not supply
+`page`, `start_ms/end_ms`, or `start_line/end_line`. It signals that
+`content` is the full OCR / transcript representation rather than a paged or
+timed slice.
 
 #### 15.1.2 `Hit`
 
@@ -1212,9 +1224,13 @@ filters is impossible.
 * Else if `start_line/end_line` provided → return file lines.
 * Else default:
 
-  * return first `max_chars` (or first N lines) for text/code,
-  * return page 1 for PDF OCR if available,
-  * return transcript beginning for audio.
+  * for text/code/markdown/html: return first `max_chars` of the file with no `span` set,
+  * for PDF: return the cached full-document OCR markdown with `span.kind="document"`; if the OCR cache hasn't been populated yet (e.g. ingest is still running) the tool MUST return error `OCR_NOT_READY` rather than the raw bytes,
+  * for audio: return the cached full-document transcript with `span.kind="document"`; same `OCR_NOT_READY` semantics as PDF when no transcript exists yet.
+
+The handler MUST NOT emit raw binary bytes through `content[].text` — that
+field is documented as text. PDFs and audio without a span argument resolve
+through the OCR / transcript cache, never through a direct file read.
 
 **Output schema (structuredContent):**
 
