@@ -63,6 +63,14 @@ brews:
       bin.install "dir2mcp"
     test: |
       system "#{bin}/dir2mcp", "version"
+    # Surface the most common upgrade pitfall: zsh/bash cache the path to
+    # `dir2mcp` per shell session. After `brew upgrade dir2mcp`, an
+    # already-open terminal can keep running the previous binary until
+    # the cache is cleared.
+    caveats: |
+      If `dir2mcp version` reports an older version after upgrading,
+      run `hash -r` (bash/zsh) in any open shells to refresh the
+      command cache, or open a new terminal.
 
 
 changelog:
