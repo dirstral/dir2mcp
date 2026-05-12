@@ -666,12 +666,17 @@ func (s *Service) openFileFromOCRCache(stateDir, resolvedAbs, relPath string, se
 		stateDir = filepath.Join(".", ".dir2mcp")
 	}
 
-	raw, err := os.ReadFile(resolvedAbs)
+	sourceFile, err := os.Open(resolvedAbs)
 	if err != nil {
 		return "", false, err
 	}
-	sum := sha256.Sum256(raw)
-	hashHex := hex.EncodeToString(sum[:])
+	defer sourceFile.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, sourceFile); err != nil {
+		return "", false, err
+	}
+	hashHex := hex.EncodeToString(hasher.Sum(nil))
 
 	candidates := openFileOCRCacheCandidates(stateDir, hashHex, relPath)
 	for _, candidate := range candidates {
