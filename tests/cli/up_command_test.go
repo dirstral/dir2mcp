@@ -57,6 +57,20 @@ func (f *fakeErrorStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKin
 	return nil, f.err
 }
 
+type cliConnectionFile struct {
+	Transport string            `json:"transport"`
+	URL       string            `json:"url"`
+	Headers   map[string]string `json:"headers"`
+	Public    bool              `json:"public"`
+	Session   struct {
+		UsesMCPSessionID     bool   `json:"uses_mcp_session_id"`
+		HeaderName           string `json:"header_name"`
+		AssignedOnInitialize bool   `json:"assigned_on_initialize"`
+	} `json:"session"`
+	TokenSource string `json:"token_source"`
+	TokenFile   string `json:"token_file"`
+}
+
 func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
@@ -69,14 +83,19 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	withWorkingDir(t, tmp, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-
 		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
 	})
 
-	secretTokenPath := filepath.Join(tmp, ".dir2mcp", "secret.token")
+	assertSecretTokenWritten(t, filepath.Join(tmp, ".dir2mcp", "secret.token"))
+	connection := readConnectionFile(t, filepath.Join(tmp, ".dir2mcp", "connection.json"))
+	assertConnectionFile(t, connection)
+}
+
+func assertSecretTokenWritten(t *testing.T, secretTokenPath string) {
+	t.Helper()
 	tokenRaw, err := os.ReadFile(secretTokenPath)
 	if err != nil {
 		t.Fatalf("read secret token: %v", err)
@@ -85,7 +104,6 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	if len(token) != 64 {
 		t.Fatalf("unexpected token length: got=%d want=64", len(token))
 	}
-
 	tokenInfo, err := os.Stat(secretTokenPath)
 	if err != nil {
 		t.Fatalf("stat secret token: %v", err)
@@ -93,30 +111,23 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	if runtime.GOOS != "windows" && tokenInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("unexpected token permissions: got=%#o want=%#o", tokenInfo.Mode().Perm(), 0o600)
 	}
+}
 
-	connectionPath := filepath.Join(tmp, ".dir2mcp", "connection.json")
+func readConnectionFile(t *testing.T, connectionPath string) cliConnectionFile {
+	t.Helper()
 	connectionRaw, err := os.ReadFile(connectionPath)
 	if err != nil {
 		t.Fatalf("read connection.json: %v", err)
 	}
-
-	var connection struct {
-		Transport string            `json:"transport"`
-		URL       string            `json:"url"`
-		Headers   map[string]string `json:"headers"`
-		Public    bool              `json:"public"`
-		Session   struct {
-			UsesMCPSessionID     bool   `json:"uses_mcp_session_id"`
-			HeaderName           string `json:"header_name"`
-			AssignedOnInitialize bool   `json:"assigned_on_initialize"`
-		} `json:"session"`
-		TokenSource string `json:"token_source"`
-		TokenFile   string `json:"token_file"`
-	}
+	var connection cliConnectionFile
 	if err := json.Unmarshal(connectionRaw, &connection); err != nil {
 		t.Fatalf("unmarshal connection.json: %v", err)
 	}
+	return connection
+}
 
+func assertConnectionFile(t *testing.T, connection cliConnectionFile) {
+	t.Helper()
 	if connection.Transport != "mcp_streamable_http" {
 		t.Fatalf("unexpected transport: %q", connection.Transport)
 	}

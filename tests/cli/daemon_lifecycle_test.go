@@ -29,8 +29,6 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	if os.Getenv("RUN_INTEGRATION_TESTS") != "1" {
 		t.Skip("set RUN_INTEGRATION_TESTS=1 to exercise the daemon lifecycle")
 	}
-	// File is gated by //go:build unix so a Windows skip would be dead
-	// code (staticcheck SA4032). The build tag handles it.
 	bin := buildDir2mcpBinary(t)
 	root := t.TempDir()
 	stateDir := filepath.Join(root, ".dir2mcp")
@@ -39,16 +37,18 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	connPath := filepath.Join(stateDir, "connection.json")
 
 	env := append(os.Environ(),
-		"MISTRAL_API_KEY=test-key", // empty corpus → key is never exercised
-		"DIR2MCP_AUTH_TOKEN=",      // auto-generates a token
+		"MISTRAL_API_KEY=test-key",
+		"DIR2MCP_AUTH_TOKEN=",
 	)
 
-	// `up` should fork a daemon and return promptly (well under our 30s
-	// readiness timeout). We give it a generous wall-clock so a slow CI
-	// runner doesn't false-fail.
-	// --daemon forces daemon mode despite stdout being a pipe (tests
-	// don't get a TTY). Without it, exec'd `up` defaults to foreground
-	// and the test would never test what it claims to test.
+	pid := runDaemonUp(t, bin, root, env)
+	verifyDaemonArtifacts(t, pid, connPath, logPath)
+	runDaemonDown(t, bin, root, env, pid, pidPath)
+	verifyDownIsNoop(t, bin, root, env)
+}
+
+func runDaemonUp(t *testing.T, bin, root string, env []string) int {
+	t.Helper()
 	upCmd := exec.Command(bin, "up", "--daemon", "--listen", "127.0.0.1:0")
 	upCmd.Dir = root
 	upCmd.Env = env
@@ -59,9 +59,7 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	if !strings.Contains(upOut, "daemon") {
 		t.Errorf("up stdout should mention daemon mode, got: %s", upOut)
 	}
-
-	// Pid file should exist and point at a live process.
-	pidRaw, err := os.ReadFile(pidPath)
+	pidRaw, err := os.ReadFile(filepath.Join(root, ".dir2mcp", "server.pid"))
 	if err != nil {
 		t.Fatalf("read pid file: %v", err)
 	}
@@ -69,6 +67,11 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse pid file %q: %v", string(pidRaw), err)
 	}
+	return pid
+}
+
+func verifyDaemonArtifacts(t *testing.T, pid int, connPath, logPath string) {
+	t.Helper()
 	if !pidAlive(pid) {
 		t.Fatalf("daemon pid %d not alive after up", pid)
 	}
@@ -78,8 +81,10 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	if _, err := os.Stat(logPath); err != nil {
 		t.Errorf("server.log missing: %v", err)
 	}
+}
 
-	// `down` should signal the daemon and clean up the pid file.
+func runDaemonDown(t *testing.T, bin, root string, env []string, pid int, pidPath string) {
+	t.Helper()
 	downCmd := exec.Command(bin, "down")
 	downCmd.Dir = root
 	downCmd.Env = env
@@ -90,7 +95,6 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	if !strings.Contains(downOut, "stopped") {
 		t.Errorf("down stdout should report stopped, got: %s", downOut)
 	}
-	// Process should be gone within the daemonShutdownGrace window.
 	deadline := time.Now().Add(10 * time.Second)
 	for pidAlive(pid) && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
@@ -101,8 +105,10 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Errorf("pid file should be removed after down; stat err=%v", err)
 	}
+}
 
-	// Re-running down on a clean state must be a no-op.
+func verifyDownIsNoop(t *testing.T, bin, root string, env []string) {
+	t.Helper()
 	downAgain := exec.Command(bin, "down")
 	downAgain.Dir = root
 	downAgain.Env = env
