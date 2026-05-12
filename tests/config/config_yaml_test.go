@@ -217,6 +217,14 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile failed: %v", err)
 	}
+	assertNestedRAGFields(t, cfg)
+	assertNestedIngestFields(t, cfg)
+	assertNestedSTTFields(t, cfg)
+	assertNestedServerAndSecrets(t, cfg)
+}
+
+func assertNestedRAGFields(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.RAGSystemPrompt != "use citations\nline2" {
 		t.Fatalf("RAGSystemPrompt=%q", cfg.RAGSystemPrompt)
 	}
@@ -226,6 +234,10 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	if cfg.RAGOversampleFactor != 7 {
 		t.Fatalf("RAGOversampleFactor=%d", cfg.RAGOversampleFactor)
 	}
+}
+
+func assertNestedIngestFields(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.IngestGitignore {
 		t.Fatal("expected IngestGitignore=false")
 	}
@@ -244,6 +256,10 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	if cfg.DoclingCommand != "docling --to md --output - {input}" {
 		t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)
 	}
+}
+
+func assertNestedSTTFields(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.STTProvider != "elevenlabs" {
 		t.Fatalf("STTProvider=%q", cfg.STTProvider)
 	}
@@ -256,6 +272,10 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 	if cfg.STTElevenLabsLanguageCode != "tr" {
 		t.Fatalf("STTElevenLabsLanguageCode=%q", cfg.STTElevenLabsLanguageCode)
 	}
+}
+
+func assertNestedServerAndSecrets(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.ServerTLSCertFile != "/tmp/cert.pem" {
 		t.Fatalf("ServerTLSCertFile=%q", cfg.ServerTLSCertFile)
 	}
@@ -301,18 +321,43 @@ func TestLoadFile_FlatAliasesRemainSupportedForNestedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile failed: %v", err)
 	}
+	assertFlatAliasGroups(t, cfg)
+}
+
+func assertFlatAliasGroups(t *testing.T, cfg config.Config) {
+	t.Helper()
+	assertFlatRAGAliases(t, cfg)
+	assertFlatIngestAliases(t, cfg)
+	assertFlatSTTAliases(t, cfg)
+	assertFlatSecretsAndTLSAliases(t, cfg)
+}
+
+func assertFlatRAGAliases(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.RAGSystemPrompt != "flat prompt" || cfg.RAGMaxContextChars != 999 || cfg.RAGOversampleFactor != 3 {
 		t.Fatalf("rag aliases not applied: %+v", cfg)
 	}
+}
+
+func assertFlatIngestAliases(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.IngestGitignore || !cfg.IngestFollowSymlinks || cfg.IngestMaxFileMB != 10 {
 		t.Fatalf("ingest aliases not applied: gitignore=%v follow=%v max=%d", cfg.IngestGitignore, cfg.IngestFollowSymlinks, cfg.IngestMaxFileMB)
 	}
 	if cfg.IngestPDFMode != "auto" || cfg.IngestImagesMode != "ocr_on" || cfg.IngestAudioMode != "on" || cfg.IngestArchivesMode != "shallow" {
 		t.Fatalf("ingest mode aliases not applied: pdf=%q images=%q audio=%q archives=%q", cfg.IngestPDFMode, cfg.IngestImagesMode, cfg.IngestAudioMode, cfg.IngestArchivesMode)
 	}
+}
+
+func assertFlatSTTAliases(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.STTProvider != "mistral" || cfg.STTMistralModel != "voxtral-mini-latest" || cfg.STTElevenLabsModel != "scribe" || cfg.STTElevenLabsLanguageCode != "en" {
 		t.Fatalf("stt aliases not applied: %+v", cfg)
 	}
+}
+
+func assertFlatSecretsAndTLSAliases(t *testing.T, cfg config.Config) {
+	t.Helper()
 	if cfg.MistralAPIKey != "flat-mistral" || cfg.ElevenLabsAPIKey != "flat-eleven" {
 		t.Fatalf("secret aliases not applied: mistral=%q eleven=%q", cfg.MistralAPIKey, cfg.ElevenLabsAPIKey)
 	}

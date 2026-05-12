@@ -11,14 +11,7 @@ import (
 
 func TestSaveEffectiveSnapshot_RedactsSecretsAndPersistsSourceMetadata(t *testing.T) {
 	stateDir := t.TempDir()
-	cfg := config.Default()
-	cfg.StateDir = stateDir
-	cfg.MistralAPIKey = "mistral-secret"
-	cfg.ElevenLabsAPIKey = "elevenlabs-secret"
-	cfg.X402.FacilitatorToken = "x402-secret"
-	cfg.ResolvedAuthToken = "auth-secret"
-	cfg.RAGMaxContextChars = 777
-	cfg.ServerTLSCertFile = "/tls/cert.pem"
+	cfg := snapshotTestConfig(stateDir)
 
 	path, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{
 		MistralAPIKey:        "env",
@@ -34,6 +27,24 @@ func TestSaveEffectiveSnapshot_RedactsSecretsAndPersistsSourceMetadata(t *testin
 		t.Fatalf("snapshot path=%q", path)
 	}
 
+	assertSnapshotRedaction(t, path)
+	assertSnapshotRoundtrip(t, path)
+}
+
+func snapshotTestConfig(stateDir string) config.Config {
+	cfg := config.Default()
+	cfg.StateDir = stateDir
+	cfg.MistralAPIKey = "mistral-secret"
+	cfg.ElevenLabsAPIKey = "elevenlabs-secret"
+	cfg.X402.FacilitatorToken = "x402-secret"
+	cfg.ResolvedAuthToken = "auth-secret"
+	cfg.RAGMaxContextChars = 777
+	cfg.ServerTLSCertFile = "/tls/cert.pem"
+	return cfg
+}
+
+func assertSnapshotRedaction(t *testing.T, path string) {
+	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
@@ -49,7 +60,10 @@ func TestSaveEffectiveSnapshot_RedactsSecretsAndPersistsSourceMetadata(t *testin
 	if !strings.Contains(text, "mistral_api_key: env") || !strings.Contains(text, "auth_token: session") {
 		t.Fatalf("snapshot missing expected source metadata:\n%s", text)
 	}
+}
 
+func assertSnapshotRoundtrip(t *testing.T, path string) {
+	t.Helper()
 	loadedCfg, loadedSources, err := config.LoadEffectiveSnapshot(path)
 	if err != nil {
 		t.Fatalf("LoadEffectiveSnapshot failed: %v", err)
