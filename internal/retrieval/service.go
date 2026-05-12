@@ -666,6 +666,18 @@ func (s *Service) openFileFromOCRCache(stateDir, resolvedAbs, relPath string, se
 		stateDir = filepath.Join(".", ".dir2mcp")
 	}
 
+	// Reject directories explicitly, mirroring openFileFromResolvedPath. Without
+	// this guard os.Open succeeds on a directory and io.Copy on a directory file
+	// descriptor surfaces as an opaque OS error that the MCP layer would map to
+	// INTERNAL_ERROR; DOC_TYPE_UNSUPPORTED is the correct, actionable mapping.
+	info, err := os.Stat(resolvedAbs)
+	if err != nil {
+		return "", false, err
+	}
+	if info.IsDir() {
+		return "", false, model.ErrDocTypeUnsupported
+	}
+
 	sourceFile, err := os.Open(resolvedAbs)
 	if err != nil {
 		return "", false, err

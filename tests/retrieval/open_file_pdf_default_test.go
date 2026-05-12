@@ -162,6 +162,32 @@ func TestOpenFile_MarkdownDefault_UnchangedBehavior(t *testing.T) {
 	}
 }
 
+// TestOpenFile_PDFExtensionOnDirectory_ReturnsErrDocTypeUnsupported asserts
+// that open_file on a path with a binary extension that actually resolves to a
+// directory returns ErrDocTypeUnsupported (mapped to DOC_TYPE_UNSUPPORTED at
+// the MCP layer) rather than bubbling an opaque OS error up as an
+// INTERNAL_ERROR. This mirrors how openFileFromResolvedPath rejects directory
+// targets and prevents the OCR-cache fallback from leaking EISDIR.
+func TestOpenFile_PDFExtensionOnDirectory_ReturnsErrDocTypeUnsupported(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".dir2mcp")
+	// A directory whose name happens to end in .pdf — this would otherwise
+	// satisfy isBinaryDocType and route through openFileFromOCRCache.
+	dirPath := filepath.Join(root, "docs", "weird.pdf")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("mkdir directory target: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetStateDir(stateDir)
+
+	_, err := svc.OpenFile(context.Background(), "docs/weird.pdf", model.Span{}, 200)
+	if !errors.Is(err, model.ErrDocTypeUnsupported) {
+		t.Fatalf("expected ErrDocTypeUnsupported for a directory target, got %v", err)
+	}
+}
+
 // openFileWithMeta calls the *WithMeta variant via the interface assertion the
 // MCP handler uses, returning the truncation flag.
 func openFileWithMeta(t *testing.T, svc *retrieval.Service, relPath string, span model.Span, maxChars int) (string, bool, bool, error) {

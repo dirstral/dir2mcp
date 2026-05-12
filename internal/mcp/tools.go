@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mistral"
@@ -1018,7 +1019,7 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		"rel_path": relPath, "doc_type": docType, "content": content, "truncated": truncated,
 	}
 	if looksLikeBinaryContent(content) {
-		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "open_file does not support binary content; use transcribe for audio files", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: binaryContentMessageForDocType(docType), Retryable: false}
 	}
 	if strings.TrimSpace(span.Kind) != "" {
 		structured["span"] = buildOpenFileSpan(span)
@@ -1045,6 +1046,21 @@ func isBinaryDocTypeForOpenFile(docType string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// binaryContentMessageForDocType picks a DOC_TYPE_UNSUPPORTED message tailored
+// to the inferred doc_type. The historical message hardcoded "use transcribe
+// for audio files", which was misleading when the same path was reached for a
+// PDF (or anything else) whose payload tripped the binary-content guard.
+func binaryContentMessageForDocType(docType string) string {
+	switch strings.ToLower(strings.TrimSpace(docType)) {
+	case "audio":
+		return "open_file does not support binary content; use transcribe for audio files"
+	case "pdf":
+		return "open_file does not support binary content; pass page=N to read a specific page once OCR has run"
+	default:
+		return "open_file does not support binary content; the resolved payload is not text"
 	}
 }
 
@@ -1892,13 +1908,57 @@ func isListFilesNoisePath(relPath string) bool {
 }
 
 // looksLikeBinaryContent reports whether the payload is unsafe to surface as
-// MCP `text` content. The historical behavior also flagged audio doc types,
-// but since #177 binary types are served from the OCR / transcript cache and
-// the resulting markdown is text — so we now rely on the NUL-byte heuristic
-// alone and let the retriever decide what to return per doc_type.
+// MCP `text` content. Some binary formats (mp3 frames, certain pdf byte
+// ranges) can lack NUL bytes entirely, so the NUL-byte signal alone is not
+// enough; we additionally reject payloads that aren't valid UTF-8 or whose
+// non-whitespace control-character density exceeds binaryControlCharThreshold
+// (sampled over the first binaryDetectionSampleBytes bytes to bound cost on
+// large payloads). The threshold is intentionally permissive — well-formed
+// markdown / source code is well under it, while typical binary data sails
+// past it — and the goal is "this clearly isn't text the agent can use,"
+// not perfect format detection.
 func looksLikeBinaryContent(content string) bool {
-	return strings.IndexByte(content, 0) >= 0
+	if content == "" {
+		return false
+	}
+	if strings.IndexByte(content, 0) >= 0 {
+		return true
+	}
+	sample := content
+	if len(sample) > binaryDetectionSampleBytes {
+		sample = sample[:binaryDetectionSampleBytes]
+	}
+	if !utf8.ValidString(sample) {
+		return true
+	}
+	var controls, total int
+	for _, r := range sample {
+		total++
+		// Standard whitespace (\t \n \r) is text, not "binary noise".
+		if r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		// C0 controls and DEL.
+		if r < 0x20 || r == 0x7f {
+			controls++
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return float64(controls)/float64(total) > binaryControlCharThreshold
 }
+
+const (
+	// binaryDetectionSampleBytes bounds how many bytes looksLikeBinaryContent
+	// scans for the control-character heuristic so very large text payloads
+	// (large OCR markdown, code dumps) don't pay an O(N) walk of the whole body.
+	binaryDetectionSampleBytes = 4096
+	// binaryControlCharThreshold is the ratio of non-whitespace C0 control bytes
+	// (excluding \t \n \r) above which we treat content as binary. 0.30 is well
+	// above realistic text payloads and well below typical binary streams.
+	binaryControlCharThreshold = 0.30
+)
 
 func serializeHit(h model.SearchHit) map[string]interface{} {
 	out := map[string]interface{}{

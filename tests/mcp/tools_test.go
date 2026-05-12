@@ -1572,12 +1572,66 @@ func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":93,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"recording.mp3"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
-	assertToolCallErrorCode(t, resp, "DOC_TYPE_UNSUPPORTED")
+	assertToolCallErrorCodeAndMessage(t, resp, "DOC_TYPE_UNSUPPORTED", []string{"transcribe"}, nil)
+}
+
+// TestMCPToolsCallOpenFile_RejectsBinaryContent_PDFMessage asserts that when
+// open_file rejects a binary payload for a .pdf rel_path, the
+// DOC_TYPE_UNSUPPORTED message mentions paging (the actionable fix for PDFs)
+// and does *not* mention transcribe (which is the wrong suggestion for PDFs).
+// Regression test for the PR #180 review finding that the message hardcoded
+// "use transcribe for audio files" for every doc_type.
+func TestMCPToolsCallOpenFile_RejectsBinaryContent_PDFMessage(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		openFileConfigured: true,
+		openFileContent:    "%PDF-1.4\x00stream",
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":96,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"act.pdf"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	assertToolCallErrorCodeAndMessage(t, resp, "DOC_TYPE_UNSUPPORTED", []string{"page"}, []string{"transcribe"})
+}
+
+// TestMCPToolsCallOpenFile_RejectsBinaryContent_GenericMessage asserts the
+// fallback DOC_TYPE_UNSUPPORTED message for non-audio / non-pdf doc_types is
+// generic — no per-format suggestion that would be misleading.
+func TestMCPToolsCallOpenFile_RejectsBinaryContent_GenericMessage(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		openFileConfigured: true,
+		openFileContent:    "junk\x00bytes",
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	// .bin → inferDocType returns "unknown"; should hit the generic branch.
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":97,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"blob.bin"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	assertToolCallErrorCodeAndMessage(t, resp, "DOC_TYPE_UNSUPPORTED", nil, []string{"transcribe", "page"})
 }
 
 // assertToolCallErrorCode validates that a tools/call response returned a
 // tool-level error payload with the expected canonical error code.
 func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string) {
+	t.Helper()
+	assertToolCallErrorCodeAndMessage(t, resp, wantCode, nil, nil)
+}
+
+// assertToolCallErrorCodeAndMessage extends assertToolCallErrorCode with
+// optional substring assertions on structuredContent.error.message. Pass
+// mustHave/mustNotHave nil/empty to skip the message check.
+func assertToolCallErrorCodeAndMessage(t *testing.T, resp *http.Response, wantCode string, mustHave, mustNotHave []string) {
 	t.Helper()
 
 	if resp.StatusCode != http.StatusOK {
@@ -1617,6 +1671,20 @@ func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string)
 	}
 	if gotCode != wantCode {
 		t.Fatalf("unexpected error code: got=%q want=%q full_error=%#v", gotCode, wantCode, errObj)
+	}
+	if len(mustHave) == 0 && len(mustNotHave) == 0 {
+		return
+	}
+	gotMsg, _ := errObj["message"].(string)
+	for _, want := range mustHave {
+		if !strings.Contains(gotMsg, want) {
+			t.Fatalf("error message missing substring %q: got=%q full_error=%#v", want, gotMsg, errObj)
+		}
+	}
+	for _, bad := range mustNotHave {
+		if strings.Contains(gotMsg, bad) {
+			t.Fatalf("error message must not contain %q: got=%q full_error=%#v", bad, gotMsg, errObj)
+		}
 	}
 }
 
