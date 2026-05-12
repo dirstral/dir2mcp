@@ -769,32 +769,51 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	if envelope.Result.StructuredContent["protocol_version"] != cfg.ProtocolVersion {
 		t.Fatalf("unexpected protocol_version: %#v", envelope.Result.StructuredContent["protocol_version"])
 	}
+	assertStatsDocCountsUnavailable(t, envelope.Result.StructuredContent)
+	assertStatsIndexingHasMode(t, envelope.Result.StructuredContent)
+	assertStatsModelsSTTProvider(t, envelope.Result.StructuredContent)
+	assertStatsSessionsActiveAndItems(t, envelope.Result.StructuredContent)
+}
 
-	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
-		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
-	} else if got {
+func assertStatsDocCountsUnavailable(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	got, ok := sc["doc_counts_available"].(bool)
+	if !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", sc["doc_counts_available"])
+	}
+	if got {
 		t.Fatalf("expected doc_counts_available=false when retriever missing, got true")
 	}
+}
 
-	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
+func assertStatsIndexingHasMode(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	indexingRaw, ok := sc["indexing"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected indexing object, got %#v", envelope.Result.StructuredContent["indexing"])
+		t.Fatalf("expected indexing object, got %#v", sc["indexing"])
 	}
 	if _, ok := indexingRaw["mode"]; !ok {
 		t.Fatalf("expected indexing.mode in response: %#v", indexingRaw)
 	}
+}
 
-	modelsRaw, ok := envelope.Result.StructuredContent["models"].(map[string]interface{})
+func assertStatsModelsSTTProvider(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	modelsRaw, ok := sc["models"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected models object, got %#v", envelope.Result.StructuredContent["models"])
+		t.Fatalf("expected models object, got %#v", sc["models"])
 	}
 	sttProvider, ok := modelsRaw["stt_provider"].(string)
 	if !ok || sttProvider == "" {
 		t.Fatalf("expected non-empty string models.stt_provider, got %#v", modelsRaw["stt_provider"])
 	}
-	sessionsRaw, ok := envelope.Result.StructuredContent["sessions"].(map[string]interface{})
+}
+
+func assertStatsSessionsActiveAndItems(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	sessionsRaw, ok := sc["sessions"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected sessions object, got %#v", envelope.Result.StructuredContent["sessions"])
+		t.Fatalf("expected sessions object, got %#v", sc["sessions"])
 	}
 	if active, ok := sessionsRaw["active"].(float64); !ok || active < 1 {
 		t.Fatalf("expected sessions.active >= 1, got %#v", sessionsRaw["active"])
@@ -853,42 +872,62 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 	if envelope.Result.IsError {
 		t.Fatal("expected stats tool call to succeed")
 	}
-	if got := envelope.Result.StructuredContent["root"]; got != "/repo" {
+	assertRetrieverStatsTopLevel(t, envelope.Result.StructuredContent)
+	assertRetrieverStatsDocCounts(t, envelope.Result.StructuredContent)
+	assertRetrieverStatsIndexing(t, envelope.Result.StructuredContent)
+	if !retriever.statsCalled.Load() {
+		t.Fatal("expected retriever.Stats to be called")
+	}
+	assertRetrieverStatsSessionsActive(t, envelope.Result.StructuredContent)
+}
+
+func assertRetrieverStatsTopLevel(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	if got := sc["root"]; got != "/repo" {
 		t.Fatalf("unexpected root: %#v", got)
 	}
-	if got := envelope.Result.StructuredContent["state_dir"]; got != "/repo/.dir2mcp" {
+	if got := sc["state_dir"]; got != "/repo/.dir2mcp" {
 		t.Fatalf("unexpected state_dir: %#v", got)
 	}
-	if got := envelope.Result.StructuredContent["total_docs"]; got != float64(3) {
+	if got := sc["total_docs"]; got != float64(3) {
 		t.Fatalf("unexpected total_docs: %#v", got)
 	}
+}
 
-	docCounts, ok := envelope.Result.StructuredContent["doc_counts"].(map[string]interface{})
+func assertRetrieverStatsDocCounts(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	docCounts, ok := sc["doc_counts"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected doc_counts object, got %#v", envelope.Result.StructuredContent["doc_counts"])
+		t.Fatalf("expected doc_counts object, got %#v", sc["doc_counts"])
 	}
 	if docCounts["code"] != float64(2) || docCounts["md"] != float64(1) {
 		t.Fatalf("unexpected doc_counts payload: %#v", docCounts)
 	}
-	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
-		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
-	} else if !got {
+	got, ok := sc["doc_counts_available"].(bool)
+	if !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", sc["doc_counts_available"])
+	}
+	if !got {
 		t.Fatalf("expected doc_counts_available=true when retriever provided stats, got %v", got)
 	}
+}
 
-	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
+func assertRetrieverStatsIndexing(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	indexingRaw, ok := sc["indexing"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected indexing object, got %#v", envelope.Result.StructuredContent["indexing"])
+		t.Fatalf("expected indexing object, got %#v", sc["indexing"])
 	}
 	if indexingRaw["scanned"] != float64(4) || indexingRaw["representations"] != float64(6) || indexingRaw["chunks_total"] != float64(8) {
 		t.Fatalf("unexpected indexing payload: %#v", indexingRaw)
 	}
-	if !retriever.statsCalled.Load() {
-		t.Fatal("expected retriever.Stats to be called")
-	}
-	sessionsRaw, ok := envelope.Result.StructuredContent["sessions"].(map[string]interface{})
+}
+
+func assertRetrieverStatsSessionsActive(t *testing.T, sc map[string]interface{}) {
+	t.Helper()
+	sessionsRaw, ok := sc["sessions"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected sessions object, got %#v", envelope.Result.StructuredContent["sessions"])
+		t.Fatalf("expected sessions object, got %#v", sc["sessions"])
 	}
 	if active, ok := sessionsRaw["active"].(float64); !ok || active < 1 {
 		t.Fatalf("expected sessions.active >= 1, got %#v", sessionsRaw["active"])
@@ -1527,9 +1566,6 @@ func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
 
-	// Adversarial names exercising shapes seen in real corpora: double dashes,
-	// leading/trailing dashes, parens, spaces, and unicode. Each name is a real
-	// file on disk so the open_file round-trip must succeed.
 	adversarial := []string{
 		"normal.pdf",
 		"foo--bar.pdf",
@@ -1540,13 +1576,32 @@ func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
 		"with-单-unicode.pdf",
 		"SINo3of2025--AML(Amendment)Regulations2025.pdf",
 	}
+	stalePath := "-/SINo3of2025--AML(Amendment)Regulations2025.md"
+
+	st := setupAdversarialListFilesStore(t, rootDir, stateDir, adversarial, stalePath)
+
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.RootDir = rootDir
+	cfg.StateDir = stateDir
+	cfg.MCPPath = protocol.DefaultMCPPath
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	gotPaths := callListFilesAndExtractPaths(t, server.URL+cfg.MCPPath, sessionID)
+	assertAdversarialPaths(t, rootDir, gotPaths, adversarial, stalePath)
+}
+
+func setupAdversarialListFilesStore(t *testing.T, rootDir, stateDir string, adversarial []string, stalePath string) *store.SQLiteStore {
+	t.Helper()
 	body := []byte("hello world\n")
 	for _, name := range adversarial {
 		if err := os.WriteFile(filepath.Join(rootDir, name), body, 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init sqlite store: %v", err)
@@ -1566,12 +1621,6 @@ func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
 			t.Fatalf("upsert %s: %v", name, err)
 		}
 	}
-
-	// Stale row: the rel_path is well-formed but no such file exists on disk.
-	// This mirrors the malformed entry observed in the issue report (#176):
-	// `-/SINo3of2025--AML(Amendment)Regulations2025.md`. Without the resolvability
-	// gate this would slip through list_files and 404 on open_file.
-	stalePath := "-/SINo3of2025--AML(Amendment)Regulations2025.md"
 	if err := st.UpsertDocument(context.Background(), model.Document{
 		RelPath:     stalePath,
 		DocType:     "md",
@@ -1583,18 +1632,12 @@ func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert stale row: %v", err)
 	}
+	return st
+}
 
-	cfg := config.Default()
-	cfg.AuthMode = "none"
-	cfg.RootDir = rootDir
-	cfg.StateDir = stateDir
-	cfg.MCPPath = protocol.DefaultMCPPath
-
-	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
-	defer server.Close()
-	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
-
-	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID,
+func callListFilesAndExtractPaths(t *testing.T, url, sessionID string) map[string]bool {
+	t.Helper()
+	resp := postRPC(t, url, sessionID,
 		`{"jsonrpc":"2.0","id":176,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":50,"offset":0}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -1617,7 +1660,6 @@ func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected files array, got %#v", envelope.Result.StructuredContent["files"])
 	}
-
 	gotPaths := make(map[string]bool, len(filesRaw))
 	for _, raw := range filesRaw {
 		f, ok := raw.(map[string]interface{})
@@ -1627,21 +1669,19 @@ func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
 		rp, _ := f["rel_path"].(string)
 		gotPaths[rp] = true
 	}
+	return gotPaths
+}
+
+func assertAdversarialPaths(t *testing.T, rootDir string, gotPaths map[string]bool, adversarial []string, stalePath string) {
+	t.Helper()
 	if gotPaths[stalePath] {
-		t.Fatalf("stale rel_path %q must not surface from list_files; got %#v",
-			stalePath, gotPaths)
+		t.Fatalf("stale rel_path %q must not surface from list_files; got %#v", stalePath, gotPaths)
 	}
 	for _, name := range adversarial {
 		if !gotPaths[name] {
 			t.Fatalf("expected list_files to surface %q; got %#v", name, gotPaths)
 		}
 	}
-
-	// Round-trip: every rel_path returned by list_files must resolve to a real
-	// file under root — this is the precondition open_file relies on. Asserting
-	// the file-existence half here keeps the test focused on the list_files
-	// surface (open_file proper is exercised by retrieval-package tests with a
-	// retriever wired in).
 	for path := range gotPaths {
 		if _, err := os.Stat(filepath.Join(rootDir, path)); err != nil {
 			t.Fatalf("list_files returned non-resolvable rel_path %q: %v", path, err)
