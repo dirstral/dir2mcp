@@ -425,11 +425,7 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 			listedTotal int64
 			listErr     error
 		)
-		if includeHidden {
-			listedDocs, listedTotal, listErr = s.store.ListFiles(ctx, pathPrefix, glob, limit, offset)
-		} else {
-			listedDocs, listedTotal, listErr = s.listVisibleFiles(ctx, pathPrefix, glob, limit, offset)
-		}
+		listedDocs, listedTotal, listErr = s.listFilesFiltered(ctx, pathPrefix, glob, limit, offset, includeHidden)
 		if listErr != nil && !errors.Is(listErr, model.ErrNotImplemented) {
 			return toolCallResult{}, &toolExecutionError{
 				Code:      "STORE_CORRUPT",
@@ -476,12 +472,37 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 	}, nil
 }
 
-func (s *Server) listVisibleFiles(ctx context.Context, pathPrefix, glob string, limit, offset int) ([]model.Document, int64, error) {
+// listFilesFiltered paginates s.store.ListFiles and skips entries that violate
+// the list_files contract. Skipped entries are:
+//   - hidden paths (when includeHidden is false), so internal artifacts under
+//     dot-prefixed directories don't leak into the public listing.
+//   - filesystem-source documents whose rel_path no longer resolves to a real
+//     file under the configured root. Without this filter, stale rows left
+//     behind by older buggy ingest paths or manual edits would surface here
+//     and then 404 on the round-trip through open_file (issue #176).
+//
+// The total is the count of entries that survived filtering — the surviving
+// "real" total from the agent's perspective — not the raw store count.
+func (s *Server) listFilesFiltered(ctx context.Context, pathPrefix, glob string, limit, offset int, includeHidden bool) ([]model.Document, int64, error) {
 	const pageSize = 500
 	collected := make([]model.Document, 0, limit)
 	visibleSeen := 0
 	storeOffset := 0
 	var storeTotal int64
+
+	// Resolve root once up front. On large corpora the per-document gate would
+	// otherwise re-run filepath.Abs + EvalSymlinks(root) for every row, which
+	// is syscall-heavy enough to show up on `list_files`.
+	var (
+		rootResolvable bool
+		rootAbs        string
+		rootReal       string
+	)
+	if abs, resolved, ok := s.resolveRoot(); ok {
+		rootResolvable = true
+		rootAbs = abs
+		rootReal = resolved
+	}
 
 	for {
 		docs, total, err := s.store.ListFiles(ctx, pathPrefix, glob, pageSize, storeOffset)
@@ -493,7 +514,10 @@ func (s *Server) listVisibleFiles(ctx context.Context, pathPrefix, glob string, 
 			break
 		}
 		for _, doc := range docs {
-			if isListFilesNoisePath(doc.RelPath) {
+			if !includeHidden && isListFilesNoisePath(doc.RelPath) {
+				continue
+			}
+			if rootResolvable && !isResolvableSourceWithRoot(doc, rootAbs, rootReal) {
 				continue
 			}
 			if visibleSeen >= offset && len(collected) < limit {
@@ -508,6 +532,70 @@ func (s *Server) listVisibleFiles(ctx context.Context, pathPrefix, glob string, 
 	}
 
 	return collected, int64(visibleSeen), nil
+}
+
+// resolveRoot resolves the configured RootDir to its absolute and
+// symlink-evaluated forms. The bool return reports whether RootDir points to
+// a real directory on disk; when false, callers should skip any per-document
+// resolution check so that misconfigured deployments still return whatever
+// the store has rather than an empty list.
+func (s *Server) resolveRoot() (rootAbs, rootReal string, ok bool) {
+	rootDir := strings.TrimSpace(s.cfg.RootDir)
+	if rootDir == "" {
+		return "", "", false
+	}
+
+	abs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", "", false
+	}
+
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", "", false
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", "", false
+	}
+	if !info.IsDir() {
+		return "", "", false
+	}
+
+	return abs, resolved, true
+}
+
+// canResolveRoot is a thin wrapper over resolveRoot for callers that only
+// need the boolean signal.
+func (s *Server) canResolveRoot() bool {
+	_, _, ok := s.resolveRoot()
+	return ok
+}
+
+// isResolvableSourceWithRoot reports whether doc's rel_path can be opened via
+// the open_file contract, using caller-cached rootAbs/rootReal values to avoid
+// re-running filepath.Abs + EvalSymlinks(root) per document. Archive members
+// are virtual paths (the backing file is the archive itself) so they're always
+// considered resolvable; everything else must point to a real file under root.
+func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bool {
+	if strings.EqualFold(strings.TrimSpace(doc.SourceType), "archive_member") {
+		return true
+	}
+	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(doc.RelPath)))
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(doc.RelPath) {
+		return false
+	}
+	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
+	targetReal, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rootReal, targetReal)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
