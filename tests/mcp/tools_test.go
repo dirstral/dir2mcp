@@ -1666,7 +1666,10 @@ func callListFilesAndExtractPaths(t *testing.T, url, sessionID string) map[strin
 		if !ok {
 			t.Fatalf("expected file object, got %#v", raw)
 		}
-		rp, _ := f["rel_path"].(string)
+		rp, ok := f["rel_path"].(string)
+		if !ok || strings.TrimSpace(rp) == "" {
+			t.Fatalf("expected non-empty string rel_path, got %#v", f["rel_path"])
+		}
 		gotPaths[rp] = true
 	}
 	return gotPaths
@@ -1683,7 +1686,12 @@ func assertAdversarialPaths(t *testing.T, rootDir string, gotPaths map[string]bo
 		}
 	}
 	for path := range gotPaths {
-		if _, err := os.Stat(filepath.Join(rootDir, path)); err != nil {
+		joined := filepath.Join(rootDir, path)
+		rel, err := filepath.Rel(rootDir, joined)
+		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(path) {
+			t.Fatalf("list_files returned unsafe rel_path %q (rel=%q err=%v)", path, rel, err)
+		}
+		if _, err := os.Stat(joined); err != nil {
 			t.Fatalf("list_files returned non-resolvable rel_path %q: %v", path, err)
 		}
 	}

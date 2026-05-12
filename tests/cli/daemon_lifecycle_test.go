@@ -41,13 +41,13 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 		"DIR2MCP_AUTH_TOKEN=",
 	)
 
-	pid := runDaemonUp(t, bin, root, env)
+	pid := runDaemonUp(t, bin, root, env, pidPath)
 	verifyDaemonArtifacts(t, pid, connPath, logPath)
 	runDaemonDown(t, bin, root, env, pid, pidPath)
 	verifyDownIsNoop(t, bin, root, env)
 }
 
-func runDaemonUp(t *testing.T, bin, root string, env []string) int {
+func runDaemonUp(t *testing.T, bin, root string, env []string, pidPath string) int {
 	t.Helper()
 	upCmd := exec.Command(bin, "up", "--daemon", "--listen", "127.0.0.1:0")
 	upCmd.Dir = root
@@ -59,7 +59,7 @@ func runDaemonUp(t *testing.T, bin, root string, env []string) int {
 	if !strings.Contains(upOut, "daemon") {
 		t.Errorf("up stdout should mention daemon mode, got: %s", upOut)
 	}
-	pidRaw, err := os.ReadFile(filepath.Join(root, ".dir2mcp", "server.pid"))
+	pidRaw, err := os.ReadFile(pidPath)
 	if err != nil {
 		t.Fatalf("read pid file: %v", err)
 	}
