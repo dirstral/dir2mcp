@@ -415,39 +415,27 @@ func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 		_ = st.Close()
 	})
 
+	seedCRUDDocs(t, ctx, st)
+	assertCRUDGetByPath(t, ctx, st)
+	assertCRUDListFilters(t, ctx, st)
+}
+
+func seedCRUDDocs(t *testing.T, ctx context.Context, st *store.SQLiteStore) {
+	t.Helper()
 	docs := []model.Document{
-		{
-			RelPath:     "src/main.go",
-			DocType:     "code",
-			SizeBytes:   120,
-			MTimeUnix:   1700000000,
-			ContentHash: "hash-main",
-			Status:      "ok",
-		},
-		{
-			RelPath:     "src/lib/util.go",
-			DocType:     "code",
-			SizeBytes:   80,
-			MTimeUnix:   1700000001,
-			ContentHash: "hash-util",
-			Status:      "ok",
-		},
-		{
-			RelPath:     "docs/readme.md",
-			DocType:     "md",
-			SizeBytes:   64,
-			MTimeUnix:   1700000002,
-			ContentHash: "hash-readme",
-			Status:      "skipped",
-			Deleted:     true,
-		},
+		{RelPath: "src/main.go", DocType: "code", SizeBytes: 120, MTimeUnix: 1700000000, ContentHash: "hash-main", Status: "ok"},
+		{RelPath: "src/lib/util.go", DocType: "code", SizeBytes: 80, MTimeUnix: 1700000001, ContentHash: "hash-util", Status: "ok"},
+		{RelPath: "docs/readme.md", DocType: "md", SizeBytes: 64, MTimeUnix: 1700000002, ContentHash: "hash-readme", Status: "skipped", Deleted: true},
 	}
 	for _, doc := range docs {
 		if err := st.UpsertDocument(ctx, doc); err != nil {
 			t.Fatalf("UpsertDocument(%s) failed: %v", doc.RelPath, err)
 		}
 	}
+}
 
+func assertCRUDGetByPath(t *testing.T, ctx context.Context, st *store.SQLiteStore) {
+	t.Helper()
 	got, err := st.GetDocumentByPath(ctx, "./src/main.go")
 	if err != nil {
 		t.Fatalf("GetDocumentByPath failed: %v", err)
@@ -458,7 +446,10 @@ func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 	if got.DocType != "code" {
 		t.Fatalf("unexpected DocType: got=%q want=%q", got.DocType, "code")
 	}
+}
 
+func assertCRUDListFilters(t *testing.T, ctx context.Context, st *store.SQLiteStore) {
+	t.Helper()
 	srcDocs, total, err := st.ListFiles(ctx, "src", "", 100, 0)
 	if err != nil {
 		t.Fatalf("ListFiles(prefix) failed: %v", err)
@@ -470,7 +461,6 @@ func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 		t.Fatalf("unexpected prefix result count: got=%d want=2", len(srcDocs))
 	}
 
-	// deleted documents must not appear in ListFiles results
 	mdDocs, mdTotal, err := st.ListFiles(ctx, "", "docs/*.md", 100, 0)
 	if err != nil {
 		t.Fatalf("ListFiles(glob) failed: %v", err)
@@ -479,7 +469,6 @@ func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 		t.Fatalf("deleted doc must be excluded: total=%d len=%d", mdTotal, len(mdDocs))
 	}
 
-	// total across all docs excludes the deleted entry (3 upserted, 1 deleted = 2 live)
 	pageOne, totalWithPaging, err := st.ListFiles(ctx, "", "", 1, 1)
 	if err != nil {
 		t.Fatalf("ListFiles(paging) failed: %v", err)
@@ -546,6 +535,15 @@ func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 		_ = st.Close()
 	})
 
+	doc := seedRepCascadeDoc(t, ctx, st)
+	repID := seedRepCascadeRep(t, ctx, st, doc.DocID)
+	seedRepCascadeChunk(t, ctx, st, repID)
+	assertRepCascadeChunks(t, ctx, st, repID)
+	assertRepCascadeDelete(t, ctx, st, doc.RelPath, repID)
+}
+
+func seedRepCascadeDoc(t *testing.T, ctx context.Context, st *store.SQLiteStore) model.Document {
+	t.Helper()
 	if err := st.UpsertDocument(ctx, model.Document{
 		RelPath:     "notes/todo.txt",
 		DocType:     "text",
@@ -560,9 +558,13 @@ func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDocumentByPath failed: %v", err)
 	}
+	return doc
+}
 
+func seedRepCascadeRep(t *testing.T, ctx context.Context, st *store.SQLiteStore, docID int64) int64 {
+	t.Helper()
 	repID, err := st.UpsertRepresentation(ctx, model.Representation{
-		DocID:       doc.DocID,
+		DocID:       docID,
 		RepType:     "raw_text",
 		RepHash:     "rep-hash-v1",
 		CreatedUnix: 1700000101,
@@ -573,7 +575,11 @@ func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	if repID <= 0 {
 		t.Fatalf("invalid repID: %d", repID)
 	}
+	return repID
+}
 
+func seedRepCascadeChunk(t *testing.T, ctx context.Context, st *store.SQLiteStore, repID int64) {
+	t.Helper()
 	chunkID, err := st.InsertChunkWithSpans(ctx, model.Chunk{
 		RepID:           repID,
 		Ordinal:         0,
@@ -590,7 +596,10 @@ func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	if chunkID <= 0 {
 		t.Fatalf("invalid chunkID: %d", chunkID)
 	}
+}
 
+func assertRepCascadeChunks(t *testing.T, ctx context.Context, st *store.SQLiteStore, repID int64) {
+	t.Helper()
 	chunks, err := st.GetChunksByRepID(ctx, repID)
 	if err != nil {
 		t.Fatalf("GetChunksByRepID failed: %v", err)
@@ -601,12 +610,15 @@ func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	if chunks[0].Text != "hello world" {
 		t.Fatalf("unexpected chunk text: %q", chunks[0].Text)
 	}
+}
 
-	if err := st.MarkDocumentDeleted(ctx, doc.RelPath); err != nil {
+func assertRepCascadeDelete(t *testing.T, ctx context.Context, st *store.SQLiteStore, relPath string, repID int64) {
+	t.Helper()
+	if err := st.MarkDocumentDeleted(ctx, relPath); err != nil {
 		t.Fatalf("MarkDocumentDeleted failed: %v", err)
 	}
 
-	deletedDoc, err := st.GetDocumentByPath(ctx, doc.RelPath)
+	deletedDoc, err := st.GetDocumentByPath(ctx, relPath)
 	if err != nil {
 		t.Fatalf("GetDocumentByPath after delete failed: %v", err)
 	}
@@ -631,6 +643,19 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
+	seedCorpusStatsDocs(t, ctx, st)
+	mainRepID, readmeRepID := seedCorpusStatsRepresentations(t, ctx, st)
+	seedCorpusStatsChunks(t, ctx, st, mainRepID, readmeRepID)
+
+	stats, err := st.CorpusStats(ctx)
+	if err != nil {
+		t.Fatalf("CorpusStats failed: %v", err)
+	}
+	assertCorpusStatsPopulated(t, stats)
+}
+
+func seedCorpusStatsDocs(t *testing.T, ctx context.Context, st *store.SQLiteStore) {
+	t.Helper()
 	docs := []model.Document{
 		{RelPath: "src/main.go", DocType: "code", ContentHash: "h1", Status: "ok"},
 		{RelPath: "docs/readme.md", DocType: "md", ContentHash: "h2", Status: "skipped"},
@@ -643,7 +668,10 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 			t.Fatalf("UpsertDocument(%s) failed: %v", d.RelPath, err)
 		}
 	}
+}
 
+func seedCorpusStatsRepresentations(t *testing.T, ctx context.Context, st *store.SQLiteStore) (int64, int64) {
+	t.Helper()
 	mainDoc, err := st.GetDocumentByPath(ctx, "src/main.go")
 	if err != nil {
 		t.Fatalf("GetDocumentByPath(main) failed: %v", err)
@@ -661,7 +689,11 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertRepresentation(readme) failed: %v", err)
 	}
+	return mainRepID, readmeRepID
+}
 
+func seedCorpusStatsChunks(t *testing.T, ctx context.Context, st *store.SQLiteStore, mainRepID, readmeRepID int64) {
+	t.Helper()
 	if _, err := st.InsertChunkWithSpans(ctx, model.Chunk{
 		RepID:           mainRepID,
 		Ordinal:         0,
@@ -682,11 +714,10 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 	}, []model.Span{{Kind: "lines", StartLine: 1, EndLine: 1}}); err != nil {
 		t.Fatalf("InsertChunkWithSpans(readme) failed: %v", err)
 	}
+}
 
-	stats, err := st.CorpusStats(ctx)
-	if err != nil {
-		t.Fatalf("CorpusStats failed: %v", err)
-	}
+func assertCorpusStatsPopulated(t *testing.T, stats model.CorpusStats) {
+	t.Helper()
 	if stats.Scanned != 4 || stats.Indexed != 1 || stats.Skipped != 1 || stats.Deleted != 1 || stats.Errors != 1 {
 		t.Fatalf("unexpected lifecycle counts: %+v", stats)
 	}
