@@ -1483,13 +1483,87 @@ func TestMCPToolsCallListFiles_IncludeHiddenTrue(t *testing.T) {
 	}
 }
 
-func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
+// TestMCPToolsCallOpenFile_PDFNoSpan_DocumentSpan asserts that calling
+// open_file on a .pdf without span arguments returns the OCR text and tags
+// the structured content with span.kind=document so callers can distinguish
+// a full-document representation from a paged slice. Regression test for
+// issue #177 — without the fix the handler returned raw PDF bytes via the
+// content[].text field (an MCP spec violation) and emitted no span at all.
+func TestMCPToolsCallOpenFile_PDFNoSpan_DocumentSpan(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
 
 	retriever := &askAudioRetrieverStub{
 		openFileConfigured: true,
-		openFileContent:    "fake audio bytes",
+		openFileContent:    "# Act\n\nARRANGEMENT OF SECTIONS",
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":94,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"act.pdf"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			Content           []map[string]any       `json:"content"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected success, got isError=true: %#v", envelope.Result.StructuredContent)
+	}
+	span, ok := envelope.Result.StructuredContent["span"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structuredContent.span, got %#v", envelope.Result.StructuredContent)
+	}
+	if span["kind"] != "document" {
+		t.Fatalf("expected span.kind=document, got %#v", span)
+	}
+	if envelope.Result.StructuredContent["doc_type"] != "pdf" {
+		t.Fatalf("expected doc_type=pdf, got %#v", envelope.Result.StructuredContent["doc_type"])
+	}
+	if got, _ := envelope.Result.StructuredContent["content"].(string); !strings.Contains(got, "ARRANGEMENT OF SECTIONS") {
+		t.Fatalf("expected OCR markdown content, got %q", got)
+	}
+}
+
+// TestMCPToolsCallOpenFile_PDFOCRNotReady asserts that when the retriever
+// reports that the OCR cache hasn't been populated yet, the tool surfaces
+// OCR_NOT_READY rather than swallowing the error or returning raw bytes.
+func TestMCPToolsCallOpenFile_PDFOCRNotReady(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		openFileConfigured: true,
+		openFileErr:        model.ErrOCRNotReady,
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":95,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"missing.pdf"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	assertToolCallErrorCode(t, resp, "OCR_NOT_READY")
+}
+
+func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	// content with an embedded NUL byte is the canonical "actually binary"
+	// signal the handler must refuse, regardless of doc_type. Since #177 the
+	// audio-extension shortcut was dropped because audio is now expected to
+	// resolve to a transcript representation upstream.
+	retriever := &askAudioRetrieverStub{
+		openFileConfigured: true,
+		openFileContent:    "raw\x00bytes",
 	}
 	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
 	defer server.Close()
@@ -1498,12 +1572,66 @@ func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":93,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"recording.mp3"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
-	assertToolCallErrorCode(t, resp, "DOC_TYPE_UNSUPPORTED")
+	assertToolCallErrorCodeAndMessage(t, resp, "DOC_TYPE_UNSUPPORTED", []string{"transcribe"}, nil)
+}
+
+// TestMCPToolsCallOpenFile_RejectsBinaryContent_PDFMessage asserts that when
+// open_file rejects a binary payload for a .pdf rel_path, the
+// DOC_TYPE_UNSUPPORTED message mentions paging (the actionable fix for PDFs)
+// and does *not* mention transcribe (which is the wrong suggestion for PDFs).
+// Regression test for the PR #180 review finding that the message hardcoded
+// "use transcribe for audio files" for every doc_type.
+func TestMCPToolsCallOpenFile_RejectsBinaryContent_PDFMessage(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		openFileConfigured: true,
+		openFileContent:    "%PDF-1.4\x00stream",
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":96,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"act.pdf"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	assertToolCallErrorCodeAndMessage(t, resp, "DOC_TYPE_UNSUPPORTED", []string{"page"}, []string{"transcribe"})
+}
+
+// TestMCPToolsCallOpenFile_RejectsBinaryContent_GenericMessage asserts the
+// fallback DOC_TYPE_UNSUPPORTED message for non-audio / non-pdf doc_types is
+// generic — no per-format suggestion that would be misleading.
+func TestMCPToolsCallOpenFile_RejectsBinaryContent_GenericMessage(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		openFileConfigured: true,
+		openFileContent:    "junk\x00bytes",
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	// .bin → inferDocType returns "unknown"; should hit the generic branch.
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":97,"method":"tools/call","params":{"name":"dir2mcp_open_file","arguments":{"rel_path":"blob.bin"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	assertToolCallErrorCodeAndMessage(t, resp, "DOC_TYPE_UNSUPPORTED", nil, []string{"transcribe", "page"})
 }
 
 // assertToolCallErrorCode validates that a tools/call response returned a
 // tool-level error payload with the expected canonical error code.
 func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string) {
+	t.Helper()
+	assertToolCallErrorCodeAndMessage(t, resp, wantCode, nil, nil)
+}
+
+// assertToolCallErrorCodeAndMessage extends assertToolCallErrorCode with
+// optional substring assertions on structuredContent.error.message. Pass
+// mustHave/mustNotHave nil/empty to skip the message check.
+func assertToolCallErrorCodeAndMessage(t *testing.T, resp *http.Response, wantCode string, mustHave, mustNotHave []string) {
 	t.Helper()
 
 	if resp.StatusCode != http.StatusOK {
@@ -1543,6 +1671,20 @@ func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string)
 	}
 	if gotCode != wantCode {
 		t.Fatalf("unexpected error code: got=%q want=%q full_error=%#v", gotCode, wantCode, errObj)
+	}
+	if len(mustHave) == 0 && len(mustNotHave) == 0 {
+		return
+	}
+	gotMsg, _ := errObj["message"].(string)
+	for _, want := range mustHave {
+		if !strings.Contains(gotMsg, want) {
+			t.Fatalf("error message missing substring %q: got=%q full_error=%#v", want, gotMsg, errObj)
+		}
+	}
+	for _, bad := range mustNotHave {
+		if strings.Contains(gotMsg, bad) {
+			t.Fatalf("error message must not contain %q: got=%q full_error=%#v", bad, gotMsg, errObj)
+		}
 	}
 }
 

@@ -27,6 +27,11 @@ var (
 
 	// ErrDocTypeUnsupported indicates the requested span/doc mode isn't supported.
 	ErrDocTypeUnsupported = errors.New("doc type unsupported")
+
+	// ErrOCRNotReady indicates that an OCR/transcript representation has not
+	// yet been computed for a binary document (e.g. PDF, audio). Callers
+	// should retry once ingestion completes rather than fall back to raw bytes.
+	ErrOCRNotReady = errors.New("ocr not ready")
 )
 
 type ProviderError struct {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mistral"
@@ -1013,19 +1014,54 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	if openErr != nil {
 		return toolCallResult{}, mapOpenFileError(openErr)
 	}
+	docType := inferDocType(relPath)
 	structured := map[string]interface{}{
-		"rel_path": relPath, "doc_type": inferDocType(relPath), "content": content, "truncated": truncated,
+		"rel_path": relPath, "doc_type": docType, "content": content, "truncated": truncated,
 	}
-	if looksLikeBinaryContent(relPath, content) {
-		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "open_file does not support binary content; use transcribe for audio files", Retryable: false}
+	if looksLikeBinaryContent(content) {
+		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: binaryContentMessageForDocType(docType), Retryable: false}
 	}
 	if strings.TrimSpace(span.Kind) != "" {
 		structured["span"] = buildOpenFileSpan(span)
+	} else if isBinaryDocTypeForOpenFile(docType) {
+		// For PDFs/audio with no requested span, the retriever has returned the
+		// cached OCR / transcript markdown. Surface this to the caller as
+		// span.kind=document so they can distinguish a full-document
+		// representation from a paged/timed slice.
+		structured["span"] = map[string]interface{}{"kind": "document"}
 	}
 	return toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: content}},
 		StructuredContent: structured,
 	}, nil
+}
+
+// isBinaryDocTypeForOpenFile reports whether docType is one whose default
+// open_file response is served from an OCR / transcript cache rather than raw
+// file bytes (see issue #177). Keeping this private to mcp avoids leaking the
+// retriever-side notion of "binary doc type" into the public API surface.
+func isBinaryDocTypeForOpenFile(docType string) bool {
+	switch strings.ToLower(strings.TrimSpace(docType)) {
+	case "pdf", "audio":
+		return true
+	default:
+		return false
+	}
+}
+
+// binaryContentMessageForDocType picks a DOC_TYPE_UNSUPPORTED message tailored
+// to the inferred doc_type. The historical message hardcoded "use transcribe
+// for audio files", which was misleading when the same path was reached for a
+// PDF (or anything else) whose payload tripped the binary-content guard.
+func binaryContentMessageForDocType(docType string) string {
+	switch strings.ToLower(strings.TrimSpace(docType)) {
+	case "audio":
+		return "open_file does not support binary content; use transcribe for audio files"
+	case "pdf":
+		return "open_file does not support binary content; pass page=N to read a specific page once OCR has run"
+	default:
+		return "open_file does not support binary content; the resolved payload is not text"
+	}
 }
 
 // parseMaxCharsArg parses the "max_chars" argument with a default and range.
@@ -1172,6 +1208,8 @@ func mapOpenFileError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, model.ErrDocTypeUnsupported):
 		return &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+	case errors.Is(err, model.ErrOCRNotReady):
+		return &toolExecutionError{Code: "OCR_NOT_READY", Message: "ocr representation not yet available; retry once indexing completes or request a specific page/start_ms", Retryable: true}
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	default:
@@ -1869,12 +1907,58 @@ func isListFilesNoisePath(relPath string) bool {
 	return false
 }
 
-func looksLikeBinaryContent(relPath, content string) bool {
+// looksLikeBinaryContent reports whether the payload is unsafe to surface as
+// MCP `text` content. Some binary formats (mp3 frames, certain pdf byte
+// ranges) can lack NUL bytes entirely, so the NUL-byte signal alone is not
+// enough; we additionally reject payloads that aren't valid UTF-8 or whose
+// non-whitespace control-character density exceeds binaryControlCharThreshold
+// (sampled over the first binaryDetectionSampleBytes bytes to bound cost on
+// large payloads). The threshold is intentionally permissive — well-formed
+// markdown / source code is well under it, while typical binary data sails
+// past it — and the goal is "this clearly isn't text the agent can use,"
+// not perfect format detection.
+func looksLikeBinaryContent(content string) bool {
+	if content == "" {
+		return false
+	}
 	if strings.IndexByte(content, 0) >= 0 {
 		return true
 	}
-	return inferDocType(relPath) == "audio"
+	sample := content
+	if len(sample) > binaryDetectionSampleBytes {
+		sample = sample[:binaryDetectionSampleBytes]
+	}
+	if !utf8.ValidString(sample) {
+		return true
+	}
+	var controls, total int
+	for _, r := range sample {
+		total++
+		// Standard whitespace (\t \n \r) is text, not "binary noise".
+		if r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		// C0 controls and DEL.
+		if r < 0x20 || r == 0x7f {
+			controls++
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return float64(controls)/float64(total) > binaryControlCharThreshold
 }
+
+const (
+	// binaryDetectionSampleBytes bounds how many bytes looksLikeBinaryContent
+	// scans for the control-character heuristic so very large text payloads
+	// (large OCR markdown, code dumps) don't pay an O(N) walk of the whole body.
+	binaryDetectionSampleBytes = 4096
+	// binaryControlCharThreshold is the ratio of non-whitespace C0 control bytes
+	// (excluding \t \n \r) above which we treat content as binary. 0.30 is well
+	// above realistic text payloads and well below typical binary streams.
+	binaryControlCharThreshold = 0.30
+)
 
 func serializeHit(h model.SearchHit) map[string]interface{} {
 	out := map[string]interface{}{

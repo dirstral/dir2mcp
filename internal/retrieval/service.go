@@ -2,6 +2,8 @@ package retrieval
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -597,6 +599,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 
 	s.metaMu.RLock()
 	rootDir := s.rootDir
+	stateDir := s.stateDir
 	pathExcludes := append([]string(nil), s.pathExcludes...)
 	secretPatterns := append([]*regexp.Regexp(nil), s.secretPatterns...)
 	s.metaMu.RUnlock()
@@ -619,7 +622,114 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return "", false, err
 	}
 
+	// For binary documents (PDF, audio) with no explicit span, return the
+	// cached OCR/transcript markdown rather than the raw bytes. Without this,
+	// callers that don't pass page=N or start_ms/end_ms get an unusable text
+	// payload made of PDF stream bytes (see issue #177). Text-native types
+	// (md, txt, code, html) keep the existing default of returning file bytes.
+	if kind == "" && isBinaryDocType(normalizedRel) {
+		content, truncated, err := s.openFileFromOCRCache(stateDir, resolvedAbs, normalizedRel, secretPatterns, maxChars)
+		if err != nil {
+			return "", false, err
+		}
+		return content, truncated, nil
+	}
+
 	return s.openFileFromResolvedPath(resolvedAbs, secretPatterns, kind, span, maxChars)
+}
+
+// isBinaryDocType reports whether relPath has an extension whose contents are
+// not human-readable as raw bytes (PDF, audio formats). For these doc types
+// the default open_file response should serve the OCR / transcript cache.
+func isBinaryDocType(relPath string) bool {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
+	case ".pdf":
+		return true
+	case ".mp3", ".wav", ".m4a", ".flac":
+		return true
+	default:
+		return false
+	}
+}
+
+// openFileFromOCRCache reads the precomputed OCR (or transcript) representation
+// for a binary document. The cache layout mirrors what
+// internal/ingest.Service.readOrComputeOCR / readOrComputeTranscript write:
+// <stateDir>/cache/ocr/<sha256-of-source-bytes>.md for OCR, and
+// <stateDir>/cache/transcribe/<sha256-of-source-bytes>*.txt for transcripts.
+// When no cache file exists (e.g. ingest is still running), the function
+// returns model.ErrOCRNotReady so callers can surface an actionable error
+// rather than fall back to raw bytes.
+func (s *Service) openFileFromOCRCache(stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, maxChars int) (string, bool, error) {
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		stateDir = filepath.Join(".", ".dir2mcp")
+	}
+
+	// Reject directories explicitly, mirroring openFileFromResolvedPath. Without
+	// this guard os.Open succeeds on a directory and io.Copy on a directory file
+	// descriptor surfaces as an opaque OS error that the MCP layer would map to
+	// INTERNAL_ERROR; DOC_TYPE_UNSUPPORTED is the correct, actionable mapping.
+	info, err := os.Stat(resolvedAbs)
+	if err != nil {
+		return "", false, err
+	}
+	if info.IsDir() {
+		return "", false, model.ErrDocTypeUnsupported
+	}
+
+	sourceFile, err := os.Open(resolvedAbs)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = sourceFile.Close() }()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, sourceFile); err != nil {
+		return "", false, err
+	}
+	hashHex := hex.EncodeToString(hasher.Sum(nil))
+
+	candidates := openFileOCRCacheCandidates(stateDir, hashHex, relPath)
+	for _, candidate := range candidates {
+		data, readErr := os.ReadFile(candidate)
+		if readErr != nil {
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+			return "", false, readErr
+		}
+		text := string(data)
+		if hasSecretMatch(secretPatterns, text) {
+			return "", false, model.ErrForbidden
+		}
+		out, truncated := truncateRunesWithFlag(text, maxChars)
+		return out, truncated, nil
+	}
+	return "", false, model.ErrOCRNotReady
+}
+
+// openFileOCRCacheCandidates returns the set of cache paths to consult, in
+// preference order, for a given source document. Audio transcripts are stored
+// with an optional language suffix (or none), so we glob for any matching
+// file. PDFs use a single .md path.
+func openFileOCRCacheCandidates(stateDir, hashHex, relPath string) []string {
+	switch strings.ToLower(filepath.Ext(relPath)) {
+	case ".pdf":
+		return []string{filepath.Join(stateDir, "cache", "ocr", hashHex+".md")}
+	case ".mp3", ".wav", ".m4a", ".flac":
+		// transcripts are written as <hash>[<-lang>].txt; default-language
+		// transcripts have no suffix, so the unsuffixed file is preferred.
+		out := []string{filepath.Join(stateDir, "cache", "transcribe", hashHex+".txt")}
+		matches, err := filepath.Glob(filepath.Join(stateDir, "cache", "transcribe", hashHex+"-*.txt"))
+		if err == nil {
+			sort.Strings(matches)
+			out = append(out, matches...)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
