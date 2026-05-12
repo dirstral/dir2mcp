@@ -58,7 +58,12 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 		t.Fatalf("Run failed: %v", err)
 	}
 
-	snapshot := indexState.Snapshot()
+	assertServiceRunSnapshotCounts(t, indexState.Snapshot())
+	assertServiceRunDocStatuses(t, st)
+}
+
+func assertServiceRunSnapshotCounts(t *testing.T, snapshot appstate.IndexingSnapshot) {
+	t.Helper()
 	if snapshot.Scanned != 5 {
 		t.Fatalf("snapshot.Scanned=%d want=5", snapshot.Scanned)
 	}
@@ -74,7 +79,10 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 	if snapshot.Errors != 0 {
 		t.Fatalf("snapshot.Errors=%d want=0", snapshot.Errors)
 	}
+}
 
+func assertServiceRunDocStatuses(t *testing.T, st *memoryStore) {
+	t.Helper()
 	keep := st.docs["keep.txt"]
 	if keep.Status != "ok" {
 		t.Fatalf("keep.txt status=%q want=ok", keep.Status)
