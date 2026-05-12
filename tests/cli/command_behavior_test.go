@@ -189,6 +189,50 @@ func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
 
+	seedComputedSnapshotStore(t, stateDir)
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		Source   string `json:"source"`
+		Snapshot struct {
+			TotalDocs int64            `json:"total_docs"`
+			DocCounts map[string]int64 `json:"doc_counts"`
+			Indexing  struct {
+				Scanned         int64 `json:"scanned"`
+				Indexed         int64 `json:"indexed"`
+				Representations int64 `json:"representations"`
+				ChunksTotal     int64 `json:"chunks_total"`
+				EmbeddedOK      int64 `json:"embedded_ok"`
+			} `json:"indexing"`
+		} `json:"snapshot"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal status payload: %v\nraw=%s", err, stdout.String())
+	}
+	if payload.Source != "computed" {
+		t.Fatalf("Source=%q want=%q", payload.Source, "computed")
+	}
+	if payload.Snapshot.TotalDocs != 1 || payload.Snapshot.DocCounts["md"] != 1 {
+		t.Fatalf("unexpected computed snapshot: %+v", payload.Snapshot)
+	}
+	if payload.Snapshot.Indexing.Scanned != 1 || payload.Snapshot.Indexing.Indexed != 1 {
+		t.Fatalf("unexpected lifecycle counters: %+v", payload.Snapshot.Indexing)
+	}
+	if payload.Snapshot.Indexing.Representations != 1 || payload.Snapshot.Indexing.ChunksTotal != 1 || payload.Snapshot.Indexing.EmbeddedOK != 1 {
+		t.Fatalf("unexpected representation/chunk counters: %+v", payload.Snapshot.Indexing)
+	}
+}
+
+func seedComputedSnapshotStore(t *testing.T, stateDir string) {
+	t.Helper()
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init sqlite store: %v", err)
@@ -228,45 +272,6 @@ func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
 	}
 	if err := st.Close(); err != nil {
 		t.Fatalf("close sqlite store: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	app := cli.NewAppWithIO(&stdout, &stderr)
-	withWorkingDir(t, tmp, func() {
-		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
-		if code != 0 {
-			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
-		}
-	})
-
-	var payload struct {
-		Source   string `json:"source"`
-		Snapshot struct {
-			TotalDocs int64            `json:"total_docs"`
-			DocCounts map[string]int64 `json:"doc_counts"`
-			Indexing  struct {
-				Scanned         int64 `json:"scanned"`
-				Indexed         int64 `json:"indexed"`
-				Representations int64 `json:"representations"`
-				ChunksTotal     int64 `json:"chunks_total"`
-				EmbeddedOK      int64 `json:"embedded_ok"`
-			} `json:"indexing"`
-		} `json:"snapshot"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("unmarshal status payload: %v\nraw=%s", err, stdout.String())
-	}
-	if payload.Source != "computed" {
-		t.Fatalf("Source=%q want=%q", payload.Source, "computed")
-	}
-	if payload.Snapshot.TotalDocs != 1 || payload.Snapshot.DocCounts["md"] != 1 {
-		t.Fatalf("unexpected computed snapshot: %+v", payload.Snapshot)
-	}
-	if payload.Snapshot.Indexing.Scanned != 1 || payload.Snapshot.Indexing.Indexed != 1 {
-		t.Fatalf("unexpected lifecycle counters: %+v", payload.Snapshot.Indexing)
-	}
-	if payload.Snapshot.Indexing.Representations != 1 || payload.Snapshot.Indexing.ChunksTotal != 1 || payload.Snapshot.Indexing.EmbeddedOK != 1 {
-		t.Fatalf("unexpected representation/chunk counters: %+v", payload.Snapshot.Indexing)
 	}
 }
 

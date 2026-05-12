@@ -46,6 +46,17 @@ func TestGenerateTranscriptRepresentation_PersistsTimeChunks(t *testing.T) {
 		t.Fatalf("GenerateTranscriptRepresentation failed: %v", err)
 	}
 
+	assertTranscriptRepresentationCounts(t, st)
+	assertTranscriptSpanWindows(t, st)
+
+	cachePath := filepath.Join(stateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("expected transcript cache file at %s: %v", cachePath, err)
+	}
+}
+
+func assertTranscriptRepresentationCounts(t *testing.T, st *fakeIngestStore) {
+	t.Helper()
 	if len(st.reps) != 1 {
 		t.Fatalf("expected one transcript representation, got %d", len(st.reps))
 	}
@@ -58,22 +69,18 @@ func TestGenerateTranscriptRepresentation_PersistsTimeChunks(t *testing.T) {
 	if len(st.spans) != 3 {
 		t.Fatalf("expected three transcript spans, got %d", len(st.spans))
 	}
+}
+
+func assertTranscriptSpanWindows(t *testing.T, st *fakeIngestStore) {
+	t.Helper()
 	if st.spans[0].Kind != "time" || st.spans[0].StartMS != 0 || st.spans[0].EndMS != 2000 {
 		t.Fatalf("unexpected first transcript span: %+v", st.spans[0])
 	}
 	if st.spans[1].Kind != "time" || st.spans[1].StartMS != 2000 || st.spans[1].EndMS != 5000 {
 		t.Fatalf("unexpected second transcript span: %+v", st.spans[1])
 	}
-	// the last segment has no following timestamp, so endMS is computed as
-	// startMS + estimated duration. with two words the estimate is 1000ms
-	// (minimum), hence we expect exactly 6000.
 	if st.spans[2].Kind != "time" || st.spans[2].StartMS != 5000 || st.spans[2].EndMS != 6000 {
 		t.Fatalf("unexpected third transcript span (kind=%s start=%d end=%d); expect endMS==6000", st.spans[2].Kind, st.spans[2].StartMS, st.spans[2].EndMS)
-	}
-
-	cachePath := filepath.Join(stateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
-	if _, err := os.Stat(cachePath); err != nil {
-		t.Fatalf("expected transcript cache file at %s: %v", cachePath, err)
 	}
 }
 

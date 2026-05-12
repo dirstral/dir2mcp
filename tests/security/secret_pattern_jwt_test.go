@@ -125,7 +125,6 @@ func parseSecretPatternsFromSpec(t *testing.T) []string {
 	t.Helper()
 
 	root := repoRoot(t)
-	// SPEC.md lives under docs/ in the repository
 	specPath := filepath.Join(root, "docs", "SPEC.md")
 	file, err := os.Open(specPath)
 	if err != nil {
@@ -137,9 +136,20 @@ func parseSecretPatternsFromSpec(t *testing.T) []string {
 		}
 	}()
 
+	patterns, err := scanSecretPatterns(t, file)
+	if err != nil {
+		t.Fatalf("failed scanning SPEC.md: %v", err)
+	}
+	if len(patterns) == 0 {
+		t.Fatal("did not find secret_patterns entries in SPEC.md")
+	}
+	return patterns
+}
+
+func scanSecretPatterns(t *testing.T, file *os.File) ([]string, error) {
+	t.Helper()
 	var patterns []string
 	insideSecretPatterns := false
-
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -149,47 +159,36 @@ func parseSecretPatternsFromSpec(t *testing.T) []string {
 			insideSecretPatterns = true
 			continue
 		}
-
 		if !insideSecretPatterns {
 			continue
 		}
 
 		if strings.HasPrefix(trimmed, "- ") {
-			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-			if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") && len(value) >= 2 {
-				value = strings.TrimSuffix(strings.TrimPrefix(value, "'"), "'")
-				value = strings.ReplaceAll(value, "''", "'")
-				patterns = append(patterns, value)
-				continue
-			}
-
-			if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") {
-				unquoted, unquoteError := strconv.Unquote(value)
-				if unquoteError != nil {
-					t.Fatalf("failed to unquote pattern %q: %v", value, unquoteError)
-				}
-				patterns = append(patterns, unquoted)
-				continue
-			}
-
-			patterns = append(patterns, value)
+			patterns = append(patterns, parseSecretPatternListItem(t, trimmed))
 			continue
 		}
-
 		if trimmed == "```" || (!strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "  ")) {
 			break
 		}
 	}
+	return patterns, scanner.Err()
+}
 
-	if err := scanner.Err(); err != nil {
-		t.Fatalf("failed scanning SPEC.md: %v", err)
+func parseSecretPatternListItem(t *testing.T, trimmed string) string {
+	t.Helper()
+	value := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+	if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") && len(value) >= 2 {
+		inner := strings.TrimSuffix(strings.TrimPrefix(value, "'"), "'")
+		return strings.ReplaceAll(inner, "''", "'")
 	}
-
-	if len(patterns) == 0 {
-		t.Fatal("did not find secret_patterns entries in SPEC.md")
+	if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") {
+		unquoted, err := strconv.Unquote(value)
+		if err != nil {
+			t.Fatalf("failed to unquote pattern %q: %v", value, err)
+		}
+		return unquoted
 	}
-
-	return patterns
+	return value
 }
 
 func TestSpecYAMLSecretPatterns_Compile_JWTAndBearer(t *testing.T) {

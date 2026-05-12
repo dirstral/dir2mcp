@@ -710,6 +710,11 @@ func TestStats_UsesCorpusStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats failed: %v", err)
 	}
+	assertStatsFromCorpus(t, got)
+}
+
+func assertStatsFromCorpus(t *testing.T, got model.Stats) {
+	t.Helper()
 	if got.Root != "/repo" || got.StateDir != "/repo/.dir2mcp" || got.ProtocolVersion != "2025-11-25" {
 		t.Fatalf("unexpected metadata fields: %+v", got)
 	}

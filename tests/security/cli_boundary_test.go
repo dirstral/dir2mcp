@@ -22,38 +22,7 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 		t.Fatalf("parse %s: %v", appPath, err)
 	}
 
-	commands := map[string]struct{}{}
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.VAR {
-			continue
-		}
-		for _, spec := range gen.Specs {
-			valueSpec, ok := spec.(*ast.ValueSpec)
-			if !ok || len(valueSpec.Names) != 1 || valueSpec.Names[0].Name != "commands" || len(valueSpec.Values) != 1 {
-				continue
-			}
-			composite, ok := valueSpec.Values[0].(*ast.CompositeLit)
-			if !ok {
-				t.Fatalf("commands var is not a composite literal")
-			}
-			for _, elt := range composite.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
-					continue
-				}
-				key, ok := kv.Key.(*ast.BasicLit)
-				if !ok || key.Kind != token.STRING {
-					continue
-				}
-				name, err := strconv.Unquote(key.Value)
-				if err != nil {
-					t.Fatalf("decode command key literal %q: %v", key.Value, err)
-				}
-				commands[name] = struct{}{}
-			}
-		}
-	}
+	commands := extractCommandsMap(t, file)
 
 	expected := map[string]struct{}{
 		"up":         {},
@@ -70,6 +39,53 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 		"version":    {},
 	}
 
+	assertCommandSurface(t, commands, expected)
+}
+
+func extractCommandsMap(t *testing.T, file *ast.File) map[string]struct{} {
+	t.Helper()
+	commands := map[string]struct{}{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			collectCommandsFromSpec(t, spec, commands)
+		}
+	}
+	return commands
+}
+
+func collectCommandsFromSpec(t *testing.T, spec ast.Spec, commands map[string]struct{}) {
+	t.Helper()
+	valueSpec, ok := spec.(*ast.ValueSpec)
+	if !ok || len(valueSpec.Names) != 1 || valueSpec.Names[0].Name != "commands" || len(valueSpec.Values) != 1 {
+		return
+	}
+	composite, ok := valueSpec.Values[0].(*ast.CompositeLit)
+	if !ok {
+		t.Fatalf("commands var is not a composite literal")
+	}
+	for _, elt := range composite.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.BasicLit)
+		if !ok || key.Kind != token.STRING {
+			continue
+		}
+		name, err := strconv.Unquote(key.Value)
+		if err != nil {
+			t.Fatalf("decode command key literal %q: %v", key.Value, err)
+		}
+		commands[name] = struct{}{}
+	}
+}
+
+func assertCommandSurface(t *testing.T, commands, expected map[string]struct{}) {
+	t.Helper()
 	if len(commands) == 0 {
 		t.Fatalf("failed to locate commands map in internal/cli/app.go")
 	}

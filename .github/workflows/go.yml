@@ -35,6 +35,12 @@ jobs:
       - name: Install gocyclo
         run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
 
+      - name: Install ineffassign
+        run: go install github.com/gordonklaus/ineffassign@latest
+
+      - name: Install misspell
+        run: go install github.com/client9/misspell/cmd/misspell@v0.3.4
+
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 

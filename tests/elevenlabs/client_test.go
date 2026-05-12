@@ -154,48 +154,23 @@ func TestElevenLabsSynthesize_Maps5xxToRetryableFailure(t *testing.T) {
 	}
 }
 
+type elevenLabsTranscribeCapture struct {
+	path      string
+	method    string
+	auth      string
+	modelID   string
+	language  string
+	fileBytes []byte
+}
+
 func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
-	var (
-		gotPath      string
-		gotMethod    string
-		gotAuth      string
-		gotModelID   string
-		gotLanguage  string
-		gotFileBytes []byte
-	)
+	var got elevenLabsTranscribeCapture
 
 	rt := elevenLabsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		gotPath = r.URL.Path
-		gotMethod = r.Method
-		gotAuth = r.Header.Get("xi-api-key")
-
-		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		if err != nil {
-			t.Fatalf("parse content-type: %v", err)
-		}
-		if mediaType != "multipart/form-data" {
-			t.Fatalf("unexpected media type: %q", mediaType)
-		}
-		reader := multipart.NewReader(r.Body, params["boundary"])
-		for {
-			part, err := reader.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				t.Fatalf("read multipart part: %v", err)
-			}
-			body, _ := io.ReadAll(part)
-			switch part.FormName() {
-			case "model_id":
-				gotModelID = string(body)
-			case "language_code":
-				gotLanguage = string(body)
-			case "file":
-				gotFileBytes = body
-			}
-		}
-
+		got.path = r.URL.Path
+		got.method = r.Method
+		got.auth = r.Header.Get("xi-api-key")
+		parseTranscribeMultipart(t, r, &got)
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(bytes.NewBufferString(`{"segments":[{"start":0,"text":"hello"},{"start":2.4,"text":"world"}]}`)),
@@ -215,23 +190,58 @@ func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
 	if text != "[00:00] hello\n[00:02] world" {
 		t.Fatalf("unexpected transcript: %q", text)
 	}
-	if gotMethod != http.MethodPost {
-		t.Fatalf("unexpected method: %q", gotMethod)
+	assertTranscribeRequest(t, got)
+}
+
+func parseTranscribeMultipart(t *testing.T, r *http.Request, got *elevenLabsTranscribeCapture) {
+	t.Helper()
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("parse content-type: %v", err)
 	}
-	if gotPath != "/v1/speech-to-text" {
-		t.Fatalf("unexpected request path: %q", gotPath)
+	if mediaType != "multipart/form-data" {
+		t.Fatalf("unexpected media type: %q", mediaType)
 	}
-	if gotAuth != "test-api-key" {
-		t.Fatalf("unexpected xi-api-key header: %q", gotAuth)
+	reader := multipart.NewReader(r.Body, params["boundary"])
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read multipart part: %v", err)
+		}
+		body, _ := io.ReadAll(part)
+		switch part.FormName() {
+		case "model_id":
+			got.modelID = string(body)
+		case "language_code":
+			got.language = string(body)
+		case "file":
+			got.fileBytes = body
+		}
 	}
-	if gotModelID != "scribe_v1" {
-		t.Fatalf("unexpected model_id: %q", gotModelID)
+}
+
+func assertTranscribeRequest(t *testing.T, got elevenLabsTranscribeCapture) {
+	t.Helper()
+	if got.method != http.MethodPost {
+		t.Fatalf("unexpected method: %q", got.method)
 	}
-	if gotLanguage != "en-US" {
-		t.Fatalf("unexpected language_code: %q", gotLanguage)
+	if got.path != "/v1/speech-to-text" {
+		t.Fatalf("unexpected request path: %q", got.path)
 	}
-	if string(gotFileBytes) != "fake-audio" {
-		t.Fatalf("unexpected uploaded bytes: %q", string(gotFileBytes))
+	if got.auth != "test-api-key" {
+		t.Fatalf("unexpected xi-api-key header: %q", got.auth)
+	}
+	if got.modelID != "scribe_v1" {
+		t.Fatalf("unexpected model_id: %q", got.modelID)
+	}
+	if got.language != "en-US" {
+		t.Fatalf("unexpected language_code: %q", got.language)
+	}
+	if string(got.fileBytes) != "fake-audio" {
+		t.Fatalf("unexpected uploaded bytes: %q", string(got.fileBytes))
 	}
 }
 

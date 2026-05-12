@@ -28,159 +28,165 @@ type recordedMCPRequest struct {
 }
 
 func TestLoadConfigFromEnvAndTokenResolution(t *testing.T) {
-	t.Run("explicit env token wins", func(t *testing.T) {
-		cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{
-			"MCP_URL":   "https://example.test/mcp",
-			"MCP_TOKEN": "env-token",
-			"STATE_DIR": "/tmp/ignored",
-			"PORT":      "9090",
-		})
+	t.Run("explicit env token wins", subtestExplicitEnvTokenWins)
+	t.Run("state dir fallback uses cwd not script path", subtestStateDirFallback)
+	t.Run("missing token falls back to none", subtestMissingTokenNone)
+	t.Run("MCP_URL auto-discovers from connection.json", subtestAutoDiscoverMCPURL)
+	t.Run("token_file in connection.json takes precedence", subtestTokenFilePrecedence)
+	t.Run("token_file in connection.json errors when file missing", subtestTokenFileMissing)
+}
+
+func subtestExplicitEnvTokenWins(t *testing.T) {
+	cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{
+		"MCP_URL":   "https://example.test/mcp",
+		"MCP_TOKEN": "env-token",
+		"STATE_DIR": "/tmp/ignored",
+		"PORT":      "9090",
+	})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.MCPURL != "https://example.test/mcp" {
+		t.Fatalf("MCPURL=%q", cfg.MCPURL)
+	}
+	if cfg.Port != 9090 {
+		t.Fatalf("Port=%d", cfg.Port)
+	}
+
+	token, source, tokenPath, err := elevenlabsbridge.ResolveToken(cfg)
+	if err != nil {
+		t.Fatalf("resolve token: %v", err)
+	}
+	if token != "env-token" || source != "env" || tokenPath != "" {
+		t.Fatalf("unexpected token resolution: token=%q source=%q path=%q", token, source, tokenPath)
+	}
+}
+
+func subtestStateDirFallback(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "secret.token"), []byte("file-token\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{})
 		if err != nil {
 			t.Fatalf("load config: %v", err)
 		}
-		if cfg.MCPURL != "https://example.test/mcp" {
-			t.Fatalf("MCPURL=%q", cfg.MCPURL)
-		}
-		if cfg.Port != 9090 {
-			t.Fatalf("Port=%d", cfg.Port)
-		}
-
 		token, source, tokenPath, err := elevenlabsbridge.ResolveToken(cfg)
 		if err != nil {
 			t.Fatalf("resolve token: %v", err)
 		}
-		if token != "env-token" || source != "env" || tokenPath != "" {
-			t.Fatalf("unexpected token resolution: token=%q source=%q path=%q", token, source, tokenPath)
+		if token != "file-token" {
+			t.Fatalf("token=%q", token)
+		}
+		if source != "file" {
+			t.Fatalf("source=%q", source)
+		}
+		if !filepath.IsAbs(tokenPath) {
+			t.Fatalf("expected absolute token path, got %q", tokenPath)
 		}
 	})
+}
 
-	t.Run("state dir fallback uses cwd not script path", func(t *testing.T) {
-		tmp := t.TempDir()
-		stateDir := filepath.Join(tmp, ".dir2mcp")
-		if err := os.MkdirAll(stateDir, 0o755); err != nil {
-			t.Fatalf("mkdir state dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(stateDir, "secret.token"), []byte("file-token\n"), 0o600); err != nil {
-			t.Fatalf("write token: %v", err)
-		}
-
-		testutil.WithWorkingDir(t, tmp, func() {
-			cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{})
-			if err != nil {
-				t.Fatalf("load config: %v", err)
-			}
-			token, source, tokenPath, err := elevenlabsbridge.ResolveToken(cfg)
-			if err != nil {
-				t.Fatalf("resolve token: %v", err)
-			}
-			if token != "file-token" {
-				t.Fatalf("token=%q", token)
-			}
-			if source != "file" {
-				t.Fatalf("source=%q", source)
-			}
-			if !filepath.IsAbs(tokenPath) {
-				t.Fatalf("expected absolute token path, got %q", tokenPath)
-			}
-		})
-	})
-
-	t.Run("missing token falls back to none", func(t *testing.T) {
-		tmp := t.TempDir()
-		testutil.WithWorkingDir(t, tmp, func() {
-			cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{})
-			if err != nil {
-				t.Fatalf("load config: %v", err)
-			}
-			token, source, tokenPath, err := elevenlabsbridge.ResolveToken(cfg)
-			if err != nil {
-				t.Fatalf("resolve token: %v", err)
-			}
-			if token != "" || source != "none" || tokenPath != "" {
-				t.Fatalf("unexpected resolution: token=%q source=%q path=%q", token, source, tokenPath)
-			}
-		})
-	})
-
-	t.Run("MCP_URL auto-discovers from connection.json", func(t *testing.T) {
-		tmp := t.TempDir()
-		stateDir := filepath.Join(tmp, ".dir2mcp")
-		if err := os.MkdirAll(stateDir, 0o755); err != nil {
-			t.Fatalf("mkdir state dir: %v", err)
-		}
-		payload := `{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp"}`
-		if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
-			t.Fatalf("write connection.json: %v", err)
-		}
-
-		cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{
-			"STATE_DIR": stateDir,
-		})
+func subtestMissingTokenNone(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.WithWorkingDir(t, tmp, func() {
+		cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{})
 		if err != nil {
 			t.Fatalf("load config: %v", err)
 		}
-		if cfg.MCPURL != "http://127.0.0.1:9099/mcp" {
-			t.Fatalf("MCPURL=%q", cfg.MCPURL)
-		}
-	})
-
-	t.Run("token_file in connection.json takes precedence", func(t *testing.T) {
-		tmp := t.TempDir()
-		stateDir := filepath.Join(tmp, ".dir2mcp")
-		if err := os.MkdirAll(stateDir, 0o755); err != nil {
-			t.Fatalf("mkdir state dir: %v", err)
-		}
-
-		customTokenFile := filepath.Join(tmp, "custom.token")
-		if err := os.WriteFile(customTokenFile, []byte("custom-token\n"), 0o600); err != nil {
-			t.Fatalf("write custom token: %v", err)
-		}
-		// Also create secret.token to verify connection token_file wins.
-		if err := os.WriteFile(filepath.Join(stateDir, "secret.token"), []byte("state-token\n"), 0o600); err != nil {
-			t.Fatalf("write secret token: %v", err)
-		}
-		payload := fmt.Sprintf(`{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp","token_file":%q}`, customTokenFile)
-		if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
-			t.Fatalf("write connection.json: %v", err)
-		}
-
-		cfg := elevenlabsbridge.DefaultConfig()
-		cfg.StateDir = stateDir
 		token, source, tokenPath, err := elevenlabsbridge.ResolveToken(cfg)
 		if err != nil {
 			t.Fatalf("resolve token: %v", err)
 		}
-		if token != "custom-token" || source != "file" {
-			t.Fatalf("unexpected token resolution: token=%q source=%q", token, source)
-		}
-		if tokenPath != customTokenFile {
-			t.Fatalf("tokenPath=%q want=%q", tokenPath, customTokenFile)
+		if token != "" || source != "none" || tokenPath != "" {
+			t.Fatalf("unexpected resolution: token=%q source=%q path=%q", token, source, tokenPath)
 		}
 	})
+}
 
-	t.Run("token_file in connection.json errors when file missing", func(t *testing.T) {
-		tmp := t.TempDir()
-		stateDir := filepath.Join(tmp, ".dir2mcp")
-		if err := os.MkdirAll(stateDir, 0o755); err != nil {
-			t.Fatalf("mkdir state dir: %v", err)
-		}
+func subtestAutoDiscoverMCPURL(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	payload := `{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp"}`
+	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
+		t.Fatalf("write connection.json: %v", err)
+	}
 
-		nonExistentTokenFile := filepath.Join(tmp, "does-not-exist.token")
-		payload := fmt.Sprintf(`{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp","token_file":%q}`, nonExistentTokenFile)
-		if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
-			t.Fatalf("write connection.json: %v", err)
-		}
-
-		cfg := elevenlabsbridge.DefaultConfig()
-		cfg.StateDir = stateDir
-		_, _, _, err := elevenlabsbridge.ResolveToken(cfg)
-		if err == nil {
-			t.Fatalf("expected error when token_file references non-existent file, got nil")
-		}
-		if !os.IsNotExist(err) {
-			t.Fatalf("expected IsNotExist error, got %v", err)
-		}
+	cfg, err := elevenlabsbridge.LoadConfigFromEnv(map[string]string{
+		"STATE_DIR": stateDir,
 	})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.MCPURL != "http://127.0.0.1:9099/mcp" {
+		t.Fatalf("MCPURL=%q", cfg.MCPURL)
+	}
+}
+
+func subtestTokenFilePrecedence(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	customTokenFile := filepath.Join(tmp, "custom.token")
+	if err := os.WriteFile(customTokenFile, []byte("custom-token\n"), 0o600); err != nil {
+		t.Fatalf("write custom token: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "secret.token"), []byte("state-token\n"), 0o600); err != nil {
+		t.Fatalf("write secret token: %v", err)
+	}
+	payload := fmt.Sprintf(`{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp","token_file":%q}`, customTokenFile)
+	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
+		t.Fatalf("write connection.json: %v", err)
+	}
+
+	cfg := elevenlabsbridge.DefaultConfig()
+	cfg.StateDir = stateDir
+	token, source, tokenPath, err := elevenlabsbridge.ResolveToken(cfg)
+	if err != nil {
+		t.Fatalf("resolve token: %v", err)
+	}
+	if token != "custom-token" || source != "file" {
+		t.Fatalf("unexpected token resolution: token=%q source=%q", token, source)
+	}
+	if tokenPath != customTokenFile {
+		t.Fatalf("tokenPath=%q want=%q", tokenPath, customTokenFile)
+	}
+}
+
+func subtestTokenFileMissing(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	nonExistentTokenFile := filepath.Join(tmp, "does-not-exist.token")
+	payload := fmt.Sprintf(`{"transport":"mcp_streamable_http","url":"http://127.0.0.1:9099/mcp","token_file":%q}`, nonExistentTokenFile)
+	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), []byte(payload), 0o644); err != nil {
+		t.Fatalf("write connection.json: %v", err)
+	}
+
+	cfg := elevenlabsbridge.DefaultConfig()
+	cfg.StateDir = stateDir
+	_, _, _, err := elevenlabsbridge.ResolveToken(cfg)
+	if err == nil {
+		t.Fatalf("expected error when token_file references non-existent file, got nil")
+	}
+	if !os.IsNotExist(err) {
+		t.Fatalf("expected IsNotExist error, got %v", err)
+	}
 }
 
 func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
@@ -191,54 +197,7 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 	handlerErrCh := make(chan error, 4)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload struct {
-			JSONRPC string                 `json:"jsonrpc"`
-			ID      int64                  `json:"id"`
-			Method  string                 `json:"method"`
-			Params  map[string]interface{} `json:"params"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			handlerErrCh <- fmt.Errorf("decode request: %w", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		rec := recordedMCPRequest{
-			Method:        payload.Method,
-			Authorization: strings.TrimSpace(r.Header.Get("Authorization")),
-			SessionID:     strings.TrimSpace(r.Header.Get("MCP-Session-Id")),
-			Protocol:      strings.TrimSpace(r.Header.Get("MCP-Protocol-Version")),
-		}
-
-		switch payload.Method {
-		case "initialize":
-			w.Header().Set("MCP-Session-Id", "session-123")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"capabilities":{},"serverInfo":{"name":"dir2mcp","version":"test"}}}`))
-		case "tools/call":
-			rec.ToolName, _ = payload.Params["name"].(string)
-			args, _ := payload.Params["arguments"].(map[string]interface{})
-			if q, _ := args["question"].(string); q != "" {
-				rec.Question = q
-			}
-			if k, ok := args["k"].(float64); ok {
-				rec.K = int(k)
-			}
-			if rec.ToolName != "dir2mcp_ask" {
-				handlerErrCh <- fmt.Errorf("tool=%q want dir2mcp.ask", rec.ToolName)
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"isError":false,"content":[{"type":"text","text":"bridge answer"}],"structuredContent":{"question":"what is alpha?","answer":"bridge answer","citations":[{"chunk_id":1,"rel_path":"docs/a.md","span":{"kind":"lines","start_line":1,"end_line":2}}],"hits":[],"indexing_complete":true}}}`))
-		default:
-			handlerErrCh <- fmt.Errorf("unexpected MCP method %q", payload.Method)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		mu.Lock()
-		requests = append(requests, rec)
-		mu.Unlock()
+		handleMCPBackend(w, r, &mu, &requests, handlerErrCh)
 	}))
 	defer backend.Close()
 
@@ -282,6 +241,75 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	assertAskRequestSequence(t, requests)
+	close(handlerErrCh)
+	for err := range handlerErrCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func handleMCPBackend(w http.ResponseWriter, r *http.Request, mu *sync.Mutex, requests *[]recordedMCPRequest, errCh chan<- error) {
+	var payload struct {
+		JSONRPC string                 `json:"jsonrpc"`
+		ID      int64                  `json:"id"`
+		Method  string                 `json:"method"`
+		Params  map[string]interface{} `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		errCh <- fmt.Errorf("decode request: %w", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	rec := recordedMCPRequest{
+		Method:        payload.Method,
+		Authorization: strings.TrimSpace(r.Header.Get("Authorization")),
+		SessionID:     strings.TrimSpace(r.Header.Get("MCP-Session-Id")),
+		Protocol:      strings.TrimSpace(r.Header.Get("MCP-Protocol-Version")),
+	}
+
+	switch payload.Method {
+	case "initialize":
+		w.Header().Set("MCP-Session-Id", "session-123")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"capabilities":{},"serverInfo":{"name":"dir2mcp","version":"test"}}}`))
+	case "tools/call":
+		if !handleToolsCall(w, payload.Params, &rec, errCh) {
+			return
+		}
+	default:
+		errCh <- fmt.Errorf("unexpected MCP method %q", payload.Method)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	mu.Lock()
+	*requests = append(*requests, rec)
+	mu.Unlock()
+}
+
+func handleToolsCall(w http.ResponseWriter, params map[string]interface{}, rec *recordedMCPRequest, errCh chan<- error) bool {
+	rec.ToolName, _ = params["name"].(string)
+	args, _ := params["arguments"].(map[string]interface{})
+	if q, _ := args["question"].(string); q != "" {
+		rec.Question = q
+	}
+	if k, ok := args["k"].(float64); ok {
+		rec.K = int(k)
+	}
+	if rec.ToolName != "dir2mcp_ask" {
+		errCh <- fmt.Errorf("tool=%q want dir2mcp.ask", rec.ToolName)
+		w.WriteHeader(http.StatusBadRequest)
+		return false
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"isError":false,"content":[{"type":"text","text":"bridge answer"}],"structuredContent":{"question":"what is alpha?","answer":"bridge answer","citations":[{"chunk_id":1,"rel_path":"docs/a.md","span":{"kind":"lines","start_line":1,"end_line":2}}],"hits":[],"indexing_complete":true}}}`))
+	return true
+}
+
+func assertAskRequestSequence(t *testing.T, requests []recordedMCPRequest) {
+	t.Helper()
 	if len(requests) != 2 {
 		t.Fatalf("unexpected request count: %#v", requests)
 	}
@@ -302,12 +330,6 @@ func TestAskEndpointCallsDir2McpAsk(t *testing.T) {
 	}
 	if requests[1].K != 7 {
 		t.Fatalf("k=%d", requests[1].K)
-	}
-	close(handlerErrCh)
-	for err := range handlerErrCh {
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 

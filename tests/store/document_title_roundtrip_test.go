@@ -43,23 +43,25 @@ func TestSQLiteStore_DocumentTitleRoundtrip(t *testing.T) {
 		}
 	}
 
-	got, err := st.GetDocumentByPath(ctx, titled.RelPath)
-	if err != nil {
-		t.Fatalf("GetDocumentByPath(titled): %v", err)
-	}
-	if got.Title != titled.Title {
-		t.Errorf("titled doc: title roundtrip failed\n got: %q\nwant: %q", got.Title, titled.Title)
-	}
+	assertGetTitleByPath(t, ctx, st, titled.RelPath, titled.Title)
+	assertGetTitleByPath(t, ctx, st, untitled.RelPath, "")
+	assertListFilesTitles(t, ctx, st, titled, untitled)
+	assertUpsertEmptyTitlePreserves(t, ctx, st, titled)
+}
 
-	got, err = st.GetDocumentByPath(ctx, untitled.RelPath)
+func assertGetTitleByPath(t *testing.T, ctx context.Context, st *store.SQLiteStore, relPath, wantTitle string) {
+	t.Helper()
+	got, err := st.GetDocumentByPath(ctx, relPath)
 	if err != nil {
-		t.Fatalf("GetDocumentByPath(untitled): %v", err)
+		t.Fatalf("GetDocumentByPath(%s): %v", relPath, err)
 	}
-	if got.Title != "" {
-		t.Errorf("untitled doc: expected empty title, got %q", got.Title)
+	if got.Title != wantTitle {
+		t.Errorf("doc %s: title mismatch\n got: %q\nwant: %q", relPath, got.Title, wantTitle)
 	}
+}
 
-	// ListFiles should also return the title.
+func assertListFilesTitles(t *testing.T, ctx context.Context, st *store.SQLiteStore, titled, untitled model.Document) {
+	t.Helper()
 	docs, _, err := st.ListFiles(ctx, "", "", 10, 0)
 	if err != nil {
 		t.Fatalf("ListFiles: %v", err)
@@ -76,15 +78,17 @@ func TestSQLiteStore_DocumentTitleRoundtrip(t *testing.T) {
 			}
 		}
 	}
+}
 
-	// Re-upserting WITHOUT a title must not erase the previously-stored title.
+func assertUpsertEmptyTitlePreserves(t *testing.T, ctx context.Context, st *store.SQLiteStore, titled model.Document) {
+	t.Helper()
 	noTitleUpdate := titled
 	noTitleUpdate.Title = ""
 	noTitleUpdate.SizeBytes = 9999
 	if err := st.UpsertDocument(ctx, noTitleUpdate); err != nil {
 		t.Fatalf("UpsertDocument(noTitleUpdate): %v", err)
 	}
-	got, err = st.GetDocumentByPath(ctx, titled.RelPath)
+	got, err := st.GetDocumentByPath(ctx, titled.RelPath)
 	if err != nil {
 		t.Fatalf("GetDocumentByPath after empty-title update: %v", err)
 	}

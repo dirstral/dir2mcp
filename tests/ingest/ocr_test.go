@@ -243,6 +243,20 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
 
+	pathOldA, pathOldB := seedOCRCacheFiles(t, cacheDir)
+	triggerOCRCacheMissAndPrune(t, svc)
+
+	if _, err := os.Stat(pathOldA); !os.IsNotExist(err) {
+		t.Fatalf("expected old A removed by TTL, got %v", err)
+	}
+	if _, err := os.Stat(pathOldB); !os.IsNotExist(err) {
+		t.Fatalf("expected old B removed by TTL, got %v", err)
+	}
+	assertOCRCacheTotalUnderLimit(t, cacheDir, 10)
+}
+
+func seedOCRCacheFiles(t *testing.T, cacheDir string) (string, string) {
+	t.Helper()
 	contentOldA := []byte("old-A")
 	contentOldB := []byte("old-B")
 	contentNewA := []byte("new-A")
@@ -281,8 +295,11 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 	if err := os.Chtimes(pathNewB, newest, newest); err != nil {
 		t.Fatalf("chtimes new B: %v", err)
 	}
+	return pathOldA, pathOldB
+}
 
-	// Trigger a cache miss write so pruning runs on write-based policy.
+func triggerOCRCacheMissAndPrune(t *testing.T, svc *ingest.Service) {
+	t.Helper()
 	contentMiss := []byte("miss")
 	fake := &fakeOCR{text: "zz"}
 	svc.SetOCR(fake)
@@ -297,14 +314,10 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 	if got != "zz" {
 		t.Fatalf("expected OCR result for cache miss, got %q", got)
 	}
+}
 
-	if _, err := os.Stat(pathOldA); !os.IsNotExist(err) {
-		t.Fatalf("expected old A removed by TTL, got %v", err)
-	}
-	if _, err := os.Stat(pathOldB); !os.IsNotExist(err) {
-		t.Fatalf("expected old B removed by TTL, got %v", err)
-	}
-
+func assertOCRCacheTotalUnderLimit(t *testing.T, cacheDir string, limit int64) {
+	t.Helper()
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		t.Fatalf("readdir cache dir: %v", err)
@@ -320,8 +333,8 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 		}
 		total += info.Size()
 	}
-	if total > 10 {
-		t.Fatalf("expected cache total <= 10 after TTL+size prune, got %d", total)
+	if total > limit {
+		t.Fatalf("expected cache total <= %d after TTL+size prune, got %d", limit, total)
 	}
 }
 

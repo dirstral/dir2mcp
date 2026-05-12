@@ -4,9 +4,15 @@ build: build-dir2mcp
 
 DIR2MCP_VERSION ?= 0.0.0-dev
 DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
-GOCYCLO_FALLBACK_BIN := $(shell sh -c 'gobin=$$(go env GOBIN); if [ -n "$$gobin" ]; then echo "$$gobin/gocyclo"; else gopath=$$(go env GOPATH | cut -d: -f1); echo "$$gopath/bin/gocyclo"; fi')
+GOBIN_DIR := $(shell sh -c 'gobin=$$(go env GOBIN); if [ -n "$$gobin" ]; then echo "$$gobin"; else echo "$$(go env GOPATH | cut -d: -f1)/bin"; fi')
 ifndef GOCYCLO_BIN
-GOCYCLO_BIN := $(shell command -v gocyclo 2>/dev/null || echo "$(GOCYCLO_FALLBACK_BIN)")
+GOCYCLO_BIN := $(shell command -v gocyclo 2>/dev/null || echo "$(GOBIN_DIR)/gocyclo")
+endif
+ifndef INEFFASSIGN_BIN
+INEFFASSIGN_BIN := $(shell command -v ineffassign 2>/dev/null || echo "$(GOBIN_DIR)/ineffassign")
+endif
+ifndef MISSPELL_BIN
+MISSPELL_BIN := $(shell command -v misspell 2>/dev/null || echo "$(GOBIN_DIR)/misspell")
 endif
 
 build-dir2mcp:
@@ -20,7 +26,7 @@ build-elevenlabs-bridge:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt vet lint cyclo test check ci benchmark inspector-smoke conformance
+.PHONY: all clean clean-all help fmt vet lint cyclo ineffassign misspell test check ci benchmark inspector-smoke conformance
 
 all: check
 
@@ -32,10 +38,12 @@ help:
 	@echo "  fmt       - format Go code"
 	@echo "  vet    - run go vet"
 	@echo "  lint   - run golangci-lint"
-	@echo "  cyclo  - run gocyclo -over 15 ./internal/"
+	@echo "  cyclo  - run gocyclo -over 15 over the whole tree"
+	@echo "  ineffassign - run ineffassign over the whole tree"
+	@echo "  misspell    - run misspell over the whole tree"
 	@echo "  test   - run go test"
-	@echo "  check  - fmt + vet + lint + cyclo + test + build"
-	@echo "  ci     - vet + cyclo + test (CI-safe default)"
+	@echo "  check  - fmt + vet + lint + cyclo + ineffassign + misspell + test + build"
+	@echo "  ci     - vet + cyclo + ineffassign + misspell + test (CI-safe default)"
 	@echo "  build-elevenlabs-bridge - build the ElevenLabs webhook bridge binary"
 	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
@@ -53,7 +61,15 @@ lint:
 
 cyclo:
 	@test -x "$(GOCYCLO_BIN)" || (echo "gocyclo is required. Install: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0" && exit 1)
-	"$(GOCYCLO_BIN)" -over 15 ./internal/
+	"$(GOCYCLO_BIN)" -over 15 cmd internal tests
+
+ineffassign:
+	@test -x "$(INEFFASSIGN_BIN)" || (echo "ineffassign is required. Install: go install github.com/gordonklaus/ineffassign@latest" && exit 1)
+	"$(INEFFASSIGN_BIN)" ./...
+
+misspell:
+	@test -x "$(MISSPELL_BIN)" || (echo "misspell is required. Install: go install github.com/client9/misspell/cmd/misspell@latest" && exit 1)
+	"$(MISSPELL_BIN)" -error cmd internal tests docs README.md
 
 test:
 	go test ./...
@@ -64,9 +80,9 @@ test-release-tools:
 conformance:
 	go test ./tests/conformance/...
 
-check: fmt vet lint cyclo test test-release-tools build
+check: fmt vet lint cyclo ineffassign misspell test test-release-tools build
 
-ci: vet cyclo test test-release-tools
+ci: vet cyclo ineffassign misspell test test-release-tools
 
 benchmark:
 	# run the large-corpus retrieval benchmark only
