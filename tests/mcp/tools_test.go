@@ -1389,11 +1389,25 @@ func TestMCPToolsCallListFiles_TotalReflectsHiddenFilter(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
 
+	// Materialise the stubbed docs on disk so the listFilesFiltered
+	// resolvability gate (added for issue #176) treats them as real entries
+	// rather than dropping them as stale.
+	rootDir := t.TempDir()
+	cfg.RootDir = rootDir
+	if err := os.MkdirAll(filepath.Join(rootDir, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	for _, name := range []string{".DS_Store", ".claude/settings.local.json", "Gilles Deleuze.md"} {
+		if err := os.WriteFile(filepath.Join(rootDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
 	st := &failingListFilesStore{
 		docs: []model.Document{
-			{RelPath: ".DS_Store", DocType: "binary_ignored", SizeBytes: 1, MTimeUnix: 1, Status: "skipped"},
-			{RelPath: ".claude/settings.local.json", DocType: "data", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
-			{RelPath: "Gilles Deleuze.md", DocType: "md", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+			{RelPath: ".DS_Store", DocType: "binary_ignored", SourceType: "filesystem", SizeBytes: 1, MTimeUnix: 1, Status: "skipped"},
+			{RelPath: ".claude/settings.local.json", DocType: "data", SourceType: "filesystem", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+			{RelPath: "Gilles Deleuze.md", DocType: "md", SourceType: "filesystem", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
 		},
 	}
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
@@ -1440,11 +1454,25 @@ func TestMCPToolsCallListFiles_IncludeHiddenTrue(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
 
+	// See TestMCPToolsCallListFiles_TotalReflectsHiddenFilter for why these
+	// docs need to exist on disk under cfg.RootDir (issue #176 round-trip
+	// guarantee).
+	rootDir := t.TempDir()
+	cfg.RootDir = rootDir
+	if err := os.MkdirAll(filepath.Join(rootDir, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	for _, name := range []string{".DS_Store", ".claude/settings.local.json", "Gilles Deleuze.md"} {
+		if err := os.WriteFile(filepath.Join(rootDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
 	st := &failingListFilesStore{
 		docs: []model.Document{
-			{RelPath: ".DS_Store", DocType: "binary_ignored", SizeBytes: 1, MTimeUnix: 1, Status: "skipped"},
-			{RelPath: ".claude/settings.local.json", DocType: "data", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
-			{RelPath: "Gilles Deleuze.md", DocType: "md", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+			{RelPath: ".DS_Store", DocType: "binary_ignored", SourceType: "filesystem", SizeBytes: 1, MTimeUnix: 1, Status: "skipped"},
+			{RelPath: ".claude/settings.local.json", DocType: "data", SourceType: "filesystem", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
+			{RelPath: "Gilles Deleuze.md", DocType: "md", SourceType: "filesystem", SizeBytes: 1, MTimeUnix: 1, Status: "ok"},
 		},
 	}
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
@@ -1480,6 +1508,144 @@ func TestMCPToolsCallListFiles_IncludeHiddenTrue(t *testing.T) {
 	}
 	if len(files) != 3 {
 		t.Fatalf("expected 3 files with include_hidden=true, got %d", len(files))
+	}
+}
+
+// TestMCPToolsCallListFiles_RoundTripsAdversarialNames is the regression test
+// for issue #176: list_files must only emit rel_paths that round-trip through
+// open_file, even when the underlying store carries adversarial filenames or
+// stale rows whose source file no longer exists on disk.
+//
+// The "stale row" arm covers the original bug shape: a previous version of the
+// ingest pipeline (or manual SQL) had registered a phantom rel_path that no
+// longer corresponds to a real file. Without filtering, list_files would
+// surface that path and any agent driving open_file off it would 404.
+func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
+	rootDir := t.TempDir()
+	stateDir := filepath.Join(rootDir, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	// Adversarial names exercising shapes seen in real corpora: double dashes,
+	// leading/trailing dashes, parens, spaces, and unicode. Each name is a real
+	// file on disk so the open_file round-trip must succeed.
+	adversarial := []string{
+		"normal.pdf",
+		"foo--bar.pdf",
+		"--leading.pdf",
+		"trail--.pdf",
+		"with (parens).pdf",
+		"with spaces.pdf",
+		"with-单-unicode.pdf",
+		"SINo3of2025--AML(Amendment)Regulations2025.pdf",
+	}
+	body := []byte("hello world\n")
+	for _, name := range adversarial {
+		if err := os.WriteFile(filepath.Join(rootDir, name), body, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init sqlite store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	for _, name := range adversarial {
+		if err := st.UpsertDocument(context.Background(), model.Document{
+			RelPath:     name,
+			DocType:     "pdf",
+			SourceType:  "filesystem",
+			SizeBytes:   int64(len(body)),
+			MTimeUnix:   1,
+			ContentHash: "h",
+			Status:      "ok",
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", name, err)
+		}
+	}
+
+	// Stale row: the rel_path is well-formed but no such file exists on disk.
+	// This mirrors the malformed entry observed in the issue report (#176):
+	// `-/SINo3of2025--AML(Amendment)Regulations2025.md`. Without the resolvability
+	// gate this would slip through list_files and 404 on open_file.
+	stalePath := "-/SINo3of2025--AML(Amendment)Regulations2025.md"
+	if err := st.UpsertDocument(context.Background(), model.Document{
+		RelPath:     stalePath,
+		DocType:     "md",
+		SourceType:  "filesystem",
+		SizeBytes:   3140,
+		MTimeUnix:   1,
+		ContentHash: "stale",
+		Status:      "ok",
+	}); err != nil {
+		t.Fatalf("upsert stale row: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.RootDir = rootDir
+	cfg.StateDir = stateDir
+	cfg.MCPPath = protocol.DefaultMCPPath
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID,
+		`{"jsonrpc":"2.0","id":176,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":50,"offset":0}}}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected success, got %#v", envelope.Result.StructuredContent)
+	}
+	filesRaw, ok := envelope.Result.StructuredContent["files"].([]interface{})
+	if !ok {
+		t.Fatalf("expected files array, got %#v", envelope.Result.StructuredContent["files"])
+	}
+
+	gotPaths := make(map[string]bool, len(filesRaw))
+	for _, raw := range filesRaw {
+		f, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected file object, got %#v", raw)
+		}
+		rp, _ := f["rel_path"].(string)
+		gotPaths[rp] = true
+	}
+	if gotPaths[stalePath] {
+		t.Fatalf("stale rel_path %q must not surface from list_files; got %#v",
+			stalePath, gotPaths)
+	}
+	for _, name := range adversarial {
+		if !gotPaths[name] {
+			t.Fatalf("expected list_files to surface %q; got %#v", name, gotPaths)
+		}
+	}
+
+	// Round-trip: every rel_path returned by list_files must resolve to a real
+	// file under root — this is the precondition open_file relies on. Asserting
+	// the file-existence half here keeps the test focused on the list_files
+	// surface (open_file proper is exercised by retrieval-package tests with a
+	// retriever wired in).
+	for path := range gotPaths {
+		if _, err := os.Stat(filepath.Join(rootDir, path)); err != nil {
+			t.Fatalf("list_files returned non-resolvable rel_path %q: %v", path, err)
+		}
 	}
 }
 
@@ -1552,6 +1718,7 @@ func TestMCPToolsCallOpenFile_PDFOCRNotReady(t *testing.T) {
 
 	assertToolCallErrorCode(t, resp, "OCR_NOT_READY")
 }
+
 
 func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
 	cfg := config.Default()
