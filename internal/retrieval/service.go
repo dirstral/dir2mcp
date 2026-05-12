@@ -682,7 +682,7 @@ func (s *Service) openFileFromOCRCache(stateDir, resolvedAbs, relPath string, se
 	if err != nil {
 		return "", false, err
 	}
-	defer sourceFile.Close()
+	defer func() { _ = sourceFile.Close() }()
 
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, sourceFile); err != nil {
