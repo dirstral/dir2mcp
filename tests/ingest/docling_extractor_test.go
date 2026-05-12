@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 )
 
 func TestDoclingExtractor_Extract_UsesConfiguredCommand(t *testing.T) {

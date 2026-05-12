@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 func TestFlattenJSONForIndexing_MapAndArray(t *testing.T) {

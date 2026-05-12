@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/mistral"
 )
 
 const DefaultProtocolVersion = "2025-11-25"

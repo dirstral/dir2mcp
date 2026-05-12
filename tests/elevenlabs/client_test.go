@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/elevenlabs"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/elevenlabs"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 type elevenLabsRoundTripFunc func(*http.Request) (*http.Response, error)

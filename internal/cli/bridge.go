@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"dir2mcp/internal/elevenlabsbridge"
+	"github.com/dirstral/dir2mcp/internal/elevenlabsbridge"
 )
 
 func (a *App) runBridge(ctx context.Context, global globalOptions, args []string) int {

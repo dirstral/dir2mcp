@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/ingest"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 func TestNewRepresentationGeneratorNil(t *testing.T) {

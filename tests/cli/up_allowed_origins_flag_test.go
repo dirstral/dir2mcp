@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/cli"
-	"dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 func TestUpAllowedOriginsFlag_IsAcceptedByCLI(t *testing.T) {

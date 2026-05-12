@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // buildZip returns the bytes of a zip archive containing the provided files.

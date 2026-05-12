@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 type IndexedFile struct {

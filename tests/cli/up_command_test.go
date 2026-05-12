@@ -23,10 +23,10 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/cli"
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 var cwdMu sync.Mutex

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, created bool) {

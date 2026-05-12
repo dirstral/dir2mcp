@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/mcp"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
-	"dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {

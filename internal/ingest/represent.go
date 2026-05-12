@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // transcriptTimestampBracketedRe matches leading timestamps in [mm:ss] or

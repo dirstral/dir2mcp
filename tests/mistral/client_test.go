@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/mistral"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

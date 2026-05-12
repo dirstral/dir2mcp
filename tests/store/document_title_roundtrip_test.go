@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // TestSQLiteStore_DocumentTitleRoundtrip verifies that the title column

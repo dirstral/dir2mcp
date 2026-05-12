@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/cli"
 )
 
 func main() {

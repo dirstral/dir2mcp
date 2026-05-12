@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 // badWriter implements io.Writer but always returns an error. It is used to

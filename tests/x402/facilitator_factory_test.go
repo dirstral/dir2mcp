@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"dir2mcp/internal/x402"
+	"github.com/dirstral/dir2mcp/internal/x402"
 )
 
 func validRequirement() x402.Requirement {

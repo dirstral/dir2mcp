@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 // runUpAsDaemonParent spawns a detached child process that runs the

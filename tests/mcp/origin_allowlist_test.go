@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/mcp"
-	"dir2mcp/tests/testutil"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestOriginAllowlist_NoOriginHeaderPasses(t *testing.T) {

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"dir2mcp/internal/buildinfo"
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/buildinfo"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

@@ -21,7 +21,7 @@ builds:
     # injected into unused symbols and have been dropped — re-add when
     # the runtime actually reads them.
     ldflags:
-      - -s -w -X dir2mcp/internal/buildinfo.Version={{.Version}}
+      - -s -w -X github.com/dirstral/dir2mcp/internal/buildinfo.Version={{.Version}}
 
 
 archives:

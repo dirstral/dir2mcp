@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 type middleware func(http.Handler) http.Handler

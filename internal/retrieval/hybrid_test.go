@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 func TestFuseRRF_DisjointLists(t *testing.T) {

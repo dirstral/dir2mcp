@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/index"
 )
 
 type fakePersistIndex struct {

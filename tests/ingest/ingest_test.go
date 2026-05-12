@@ -3,7 +3,7 @@ package tests
 import (
 	"testing"
 
-	"dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 )
 
 // Test hash computation functions

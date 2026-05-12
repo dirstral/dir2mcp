@@ -3,7 +3,7 @@
 build: build-dir2mcp
 
 DIR2MCP_VERSION ?= 0.0.0-dev
-DIR2MCP_LDFLAGS ?= -X dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
+DIR2MCP_LDFLAGS ?= -X github.com/dirstral/dir2mcp/internal/buildinfo.Version=$(DIR2MCP_VERSION)
 GOBIN_DIR := $(shell sh -c 'gobin=$$(go env GOBIN); if [ -n "$$gobin" ]; then echo "$$gobin"; else echo "$$(go env GOPATH | cut -d: -f1)/bin"; fi')
 ifndef GOCYCLO_BIN
 GOCYCLO_BIN := $(shell command -v gocyclo 2>/dev/null || echo "$(GOBIN_DIR)/gocyclo")

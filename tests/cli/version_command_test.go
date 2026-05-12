@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/buildinfo"
-	"dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/buildinfo"
+	"github.com/dirstral/dir2mcp/internal/cli"
 )
 
 func TestDir2MCPVersionCommand_UsesBuildVersion(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // TestCanResolveRoot exercises the four shapes that should drive the

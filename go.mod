@@ -1,4 +1,4 @@
-module dir2mcp
+module github.com/dirstral/dir2mcp
 
 go 1.24.2
 

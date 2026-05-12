@@ -16,11 +16,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/mcp"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
-	"dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // TestMCPToolsList_RegistersDayOneToolsWithSchemas verifies that tools/list

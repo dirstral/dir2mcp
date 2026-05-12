@@ -13,8 +13,8 @@ import (
 	"sync"
 	"testing"
 
-	"dir2mcp/internal/elevenlabsbridge"
-	"dir2mcp/tests/testutil"
+	"github.com/dirstral/dir2mcp/internal/elevenlabsbridge"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 type recordedMCPRequest struct {

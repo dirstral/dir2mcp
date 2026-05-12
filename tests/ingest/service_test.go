@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/appstate"
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/elevenlabs"
-	"dir2mcp/internal/ingest"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/appstate"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/elevenlabs"
+	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
