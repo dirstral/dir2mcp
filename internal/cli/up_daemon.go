@@ -164,7 +164,8 @@ func (a *App) printDaemonReady(cfg config.Config, logPath string, pid int, conne
 	}
 	writeln(a.stdout, s.kv("Logs", logPath))
 	writeln(a.stdout)
-	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, !strings.EqualFold(cfg.AuthMode, "none"))
+	_, requiresAuth := connection.Headers["Authorization"]
+	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, requiresAuth)
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
 	writef(a.stdout, "  %s\n\n", s.dim("Stop with: dir2mcp down"))
 }
