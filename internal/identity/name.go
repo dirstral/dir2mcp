@@ -23,38 +23,51 @@ const (
 	// 1-in-16M collision pressure per pair, which is more than enough
 	// for hand-managed MCP server lists.
 	hashLen = 6
-	// prefix is the project-wide name prefix. Kept here (not in the
-	// caller) so the suffix logic can guarantee a known, parseable shape.
-	prefix = "dir2mcp"
+	// releasePrefix is the project-wide name prefix used by released
+	// (GoReleaser-built) binaries.
+	releasePrefix = "dir2mcp"
+	// devPrefix is used by source/dev builds so a developer running
+	// their in-tree binary alongside the brew-installed release sees
+	// two visibly distinct entries in `claude mcp list` instead of
+	// colliding on the same auto-derived name.
+	devPrefix = "dir2mcp-dev"
 )
 
 // Resolve returns override (after whitespace trim) when non-empty,
-// otherwise the auto-derived name for rootAbs. Callers that thread a
-// config value should prefer this over AutoServerName so the override
-// path is the same everywhere.
-func Resolve(rootAbs, override string) string {
+// otherwise the auto-derived name for rootAbs. The dev flag selects
+// the project prefix (release vs dev) for the auto-derivation path; an
+// explicit override is always used verbatim regardless of build type.
+// Callers that thread a config value should prefer this over
+// AutoServerName so the override semantics stay in one place.
+func Resolve(rootAbs, override string, dev bool) string {
 	if t := strings.TrimSpace(override); t != "" {
 		return t
 	}
-	return AutoServerName(rootAbs)
+	return AutoServerName(rootAbs, dev)
 }
 
 // AutoServerName returns a stable, terminal-friendly identifier for a
 // dir2mcp instance keyed off the absolute path of the indexed directory.
 //
-// Shape: `dir2mcp-<slug>-<6-hex>` where <slug> is the lowercased,
-// dash-normalized basename of rootAbs (capped at slugMaxLen) and <6-hex>
-// is the first hashLen hex chars of sha256(rootAbs).
+// Shape: `<prefix>-<slug>-<6-hex>` where <prefix> is `dir2mcp` for
+// released binaries and `dir2mcp-dev` for developer builds (see
+// buildinfo.IsDev), <slug> is the lowercased dash-normalized basename
+// of rootAbs (capped at slugMaxLen), and <6-hex> is the first hashLen
+// hex chars of sha256(rootAbs).
 //
 // rootAbs is expected to already be absolute (callers should run it
 // through filepath.Abs); if it is not absolute, the hash is computed
 // over whatever was passed and identity is therefore only as stable as
 // the caller's normalization.
-func AutoServerName(rootAbs string) string {
+func AutoServerName(rootAbs string, dev bool) string {
 	clean := filepath.Clean(rootAbs)
 	slug := slugify(filepath.Base(clean))
 	sum := sha256.Sum256([]byte(clean))
-	return prefix + "-" + slug + "-" + hex.EncodeToString(sum[:])[:hashLen]
+	p := releasePrefix
+	if dev {
+		p = devPrefix
+	}
+	return p + "-" + slug + "-" + hex.EncodeToString(sum[:])[:hashLen]
 }
 
 // slugify lowercases s, replaces every non-[a-z0-9] rune with a single

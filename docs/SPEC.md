@@ -837,8 +837,12 @@ HTTP response headers include:
 `serverInfo.name` is per-instance: by default it is auto-derived as
 `dir2mcp-<slug>-<6-hex>` from the absolute path of the indexed directory
 so that operators running many `dir2mcp` instances can distinguish them
-in their MCP client list. It can be overridden via the `server.name`
-YAML key or the `DIR2MCP_SERVER_NAME` env variable.
+in their MCP client list. Developer builds (no release ldflags
+injection) use a `dir2mcp-dev-<slug>-<6-hex>` prefix so a locally
+built binary coexists with brew-installed releases without identity
+collision. It can be overridden via the `server.name` YAML key or the
+`DIR2MCP_SERVER_NAME` env variable; overrides apply verbatim regardless
+of build type.
 
 Body:
 

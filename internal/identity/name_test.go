@@ -23,8 +23,8 @@ func TestAutoServerName(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := AutoServerName(tc.rootAbs)
-			wantPrefix := "dir2mcp-" + tc.wantSlug + "-"
+			got := AutoServerName(tc.rootAbs, false)
+			wantPrefix := releasePrefix + "-" + tc.wantSlug + "-"
 			if !strings.HasPrefix(got, wantPrefix) {
 				t.Fatalf("AutoServerName(%q) = %q, want prefix %q", tc.rootAbs, got, wantPrefix)
 			}
@@ -41,22 +41,47 @@ func TestAutoServerName(t *testing.T) {
 	}
 }
 
+func TestAutoServerNameDevPrefix(t *testing.T) {
+	const path = "/home/user/Stas Legal"
+	release := AutoServerName(path, false)
+	dev := AutoServerName(path, true)
+
+	if !strings.HasPrefix(release, releasePrefix+"-") {
+		t.Fatalf("release name %q lacks release prefix %q", release, releasePrefix)
+	}
+	if !strings.HasPrefix(dev, devPrefix+"-") {
+		t.Fatalf("dev name %q lacks dev prefix %q", dev, devPrefix)
+	}
+	if release == dev {
+		t.Fatalf("release and dev names should differ for the same path; got %q for both", release)
+	}
+	// Slug + hash suffix should be identical between release and dev —
+	// the only difference is the prefix segment.
+	releaseTail := strings.TrimPrefix(release, releasePrefix+"-")
+	devTail := strings.TrimPrefix(dev, devPrefix+"-")
+	if releaseTail != devTail {
+		t.Fatalf("dev and release should share slug+hash tail; got release=%q dev=%q", releaseTail, devTail)
+	}
+}
+
 func TestAutoServerNameDeterministic(t *testing.T) {
-	a := AutoServerName("/home/user/Stas Legal")
-	b := AutoServerName("/home/user/Stas Legal")
-	if a != b {
-		t.Fatalf("AutoServerName not deterministic: %q vs %q", a, b)
+	for _, dev := range []bool{false, true} {
+		a := AutoServerName("/home/user/Stas Legal", dev)
+		b := AutoServerName("/home/user/Stas Legal", dev)
+		if a != b {
+			t.Fatalf("AutoServerName not deterministic for dev=%v: %q vs %q", dev, a, b)
+		}
 	}
 }
 
 func TestAutoServerNameDistinctPathsDistinctNames(t *testing.T) {
-	a := AutoServerName("/home/user/Notes")
-	b := AutoServerName("/home/user/notes")
+	a := AutoServerName("/home/user/Notes", false)
+	b := AutoServerName("/home/user/notes", false)
 	if a == b {
 		t.Fatalf("AutoServerName should differ for case-distinct paths, got %q for both", a)
 	}
-	c := AutoServerName("/home/userA/notes")
-	d := AutoServerName("/home/userB/notes")
+	c := AutoServerName("/home/userA/notes", false)
+	d := AutoServerName("/home/userB/notes", false)
 	if c == d {
 		t.Fatalf("AutoServerName should differ for distinct parent dirs, got %q for both", c)
 	}
@@ -67,25 +92,28 @@ func TestResolve(t *testing.T) {
 		name     string
 		rootAbs  string
 		override string
+		dev      bool
 		want     string
 	}{
-		{"override wins", "/home/user/notes", "myalias", "myalias"},
-		{"override trimmed", "/home/user/notes", "  alias  ", "alias"},
-		{"empty override falls through", "/home/user/notes", "", AutoServerName("/home/user/notes")},
-		{"whitespace-only override falls through", "/home/user/notes", "   ", AutoServerName("/home/user/notes")},
+		{"override wins (release)", "/home/user/notes", "myalias", false, "myalias"},
+		{"override wins (dev)", "/home/user/notes", "myalias", true, "myalias"},
+		{"override trimmed", "/home/user/notes", "  alias  ", false, "alias"},
+		{"empty override falls through (release)", "/home/user/notes", "", false, AutoServerName("/home/user/notes", false)},
+		{"empty override falls through (dev)", "/home/user/notes", "", true, AutoServerName("/home/user/notes", true)},
+		{"whitespace-only override falls through", "/home/user/notes", "   ", false, AutoServerName("/home/user/notes", false)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := Resolve(tc.rootAbs, tc.override); got != tc.want {
-				t.Fatalf("Resolve(%q, %q) = %q, want %q", tc.rootAbs, tc.override, got, tc.want)
+			if got := Resolve(tc.rootAbs, tc.override, tc.dev); got != tc.want {
+				t.Fatalf("Resolve(%q, %q, dev=%v) = %q, want %q", tc.rootAbs, tc.override, tc.dev, got, tc.want)
 			}
 		})
 	}
 }
 
 func TestAutoServerNameTrailingSlashEqualsClean(t *testing.T) {
-	a := AutoServerName("/var/lib/foo")
-	b := AutoServerName("/var/lib/foo/")
+	a := AutoServerName("/var/lib/foo", false)
+	b := AutoServerName("/var/lib/foo/", false)
 	if a != b {
 		t.Fatalf("AutoServerName should normalize trailing slash; got %q vs %q", a, b)
 	}

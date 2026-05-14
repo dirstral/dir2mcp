@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
+	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/elevenlabs"
 	"github.com/dirstral/dir2mcp/internal/identity"
@@ -230,12 +231,17 @@ func applyScalarOverrides(cfg *config.Config, opts upOptions) {
 // server, banner) can read a non-empty value without re-deriving the
 // auto-name. The override (if any) wins; otherwise we hash the absolute
 // RootDir so the name is stable across cwd changes and reinstalls.
+//
+// Dev builds use a `dir2mcp-dev-` prefix so a developer running their
+// in-tree binary alongside the brew-installed release sees two visibly
+// distinct entries in `claude mcp list` instead of colliding on the
+// same auto-derived name.
 func resolveServerName(cfg *config.Config) {
 	abs, err := filepath.Abs(cfg.RootDir)
 	if err != nil {
 		abs = cfg.RootDir
 	}
-	cfg.ServerName = identity.Resolve(abs, cfg.ServerName)
+	cfg.ServerName = identity.Resolve(abs, cfg.ServerName, buildinfo.IsDev())
 }
 
 // applyX402Overrides applies x402-specific flag overrides to cfg.

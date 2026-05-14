@@ -117,6 +117,24 @@ func TestDisplay_AlwaysHasSingleVPrefix(t *testing.T) {
 	}
 }
 
+func TestIsDevVersion(t *testing.T) {
+	cases := map[string]bool{
+		defaultVersion:           true,
+		"dev-0123456":            true,
+		"dev-0123456+dirty":      true,
+		"0.5.3":                  false,
+		"v0.5.3":                 false,
+		"v0.0.0-20260508-abc123": false, // pseudo-version from `go install`
+		"":                       false,
+		"development":            false, // similar prefix but not "dev-"
+	}
+	for in, want := range cases {
+		if got := isDevVersion(in); got != want {
+			t.Errorf("isDevVersion(%q): got %v want %v", in, got, want)
+		}
+	}
+}
+
 func TestIsHex(t *testing.T) {
 	cases := map[string]bool{
 		"":                       false,

@@ -231,7 +231,8 @@ dir2mcp up --mistral-max-ocr-payload-bytes 26214400
 Each `dir2mcp up` instance reports a unique MCP server name derived from the indexed directory, so running multiple corpora side-by-side (e.g., `dir2mcp-stas-legal-a1b2c3` and `dir2mcp-research-notes-9f44ee`) keeps them distinguishable in your MCP client list.
 
 - Default shape: `dir2mcp-<slug>-<6-hex>`, where `<slug>` is the slugified basename of the indexed directory and `<6-hex>` hashes its absolute path (so the name is stable across re-runs from the same location).
-- Override via YAML (`server.name: my-alias`) or env (`DIR2MCP_SERVER_NAME=my-alias`).
+- Developer builds (binaries built locally without a release tag — `dir2mcp version` reports `0.0.0-dev` or `dev-<sha>`) use a `dir2mcp-dev-<slug>-<6-hex>` prefix instead, so a dev build run from your repo shows up as a distinct entry alongside the brew-installed release in `claude mcp list`.
+- Override via YAML (`server.name: my-alias`) or env (`DIR2MCP_SERVER_NAME=my-alias`). Overrides apply verbatim and are not affected by the dev-prefix logic.
 - The `dir2mcp up` banner prints a ready-to-paste `claude mcp add --transport http <name> <url> ...` line using this name; the client-side alias you register with is yours to choose.
 
 ### Auth token behavior
