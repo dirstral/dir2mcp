@@ -51,11 +51,12 @@ func Display() string {
 }
 
 // IsDev reports whether the running binary is a developer build —
-// either the bare "0.0.0-dev" placeholder (no link-time injection,
-// no debug info) or a "dev-<sha>" / "dev-<sha>+dirty" string produced
-// by resolveVersion's vcs.revision fallback. Released binaries (built
-// by GoReleaser with -ldflags injection) and `go install` snapshots
-// from a tagged or pseudo-version ref report false.
+// either the bare "0.0.0-dev" placeholder (meaning no injected,
+// module-derived, or vcs.revision-derived version was resolved) or a
+// "dev-<sha>" / "dev-<sha>+dirty" string produced by resolveVersion's
+// vcs.revision fallback. Released binaries (built by GoReleaser with
+// -ldflags injection) and `go install` snapshots from a tagged or
+// pseudo-version ref report false.
 //
 // Used by callers that want to make dev builds visibly distinct from
 // the brew-installed release at runtime — e.g., the auto-derived MCP
