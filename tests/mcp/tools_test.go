@@ -1767,7 +1767,6 @@ func TestMCPToolsCallOpenFile_PDFOCRNotReady(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "OCR_NOT_READY")
 }
 
-
 func TestMCPToolsCallOpenFile_RejectsBinaryContent(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"

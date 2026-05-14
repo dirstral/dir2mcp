@@ -16,7 +16,7 @@ func TestRepoSplitBoundary_CmdDirectories(t *testing.T) {
 	}
 
 	allowed := map[string]struct{}{
-		"dir2mcp":            {},
+		"dir2mcp":           {},
 		"elevenlabs-bridge": {},
 	}
 	for _, entry := range entries {

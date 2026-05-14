@@ -124,9 +124,9 @@ type globalOptions struct {
 
 type upOptions struct {
 	globalOptions
-	readOnly           bool
-	public             bool
-	forceInsecure      bool
+	readOnly      bool
+	public        bool
+	forceInsecure bool
 	// foreground keeps the up process attached to the terminal — the
 	// existing pre-daemonization behavior. Implied by --json so NDJSON
 	// event streams keep flowing to the calling process.
@@ -135,7 +135,7 @@ type upOptions struct {
 	// it, non-TTY callers (tests, CI scripts) get the foreground path so
 	// startup errors land on stderr inline instead of inside the daemon
 	// log file.
-	daemon bool
+	daemon             bool
 	x402Mode           string
 	x402FacilitatorURL string
 	// token values may come from a flag, environment variable, or file path
@@ -1797,6 +1797,7 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	}
 	writeln(a.stdout, s.subkv(protocol.MCPSessionHeader, s.dim("(assigned after initialize response)")))
 	writeln(a.stdout)
+	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, auth.mode != "none")
 	writeln(a.stdout, s.separator(44))
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
 	// In foreground mode the user can stop with q+Enter (the stdin

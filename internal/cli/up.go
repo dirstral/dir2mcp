@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/elevenlabs"
+	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/mcp"
@@ -222,6 +223,19 @@ func applyScalarOverrides(cfg *config.Config, opts upOptions) {
 		cfg.MistralMaxOCRPayloadBytes = opts.mistralMaxOCRPayloadBytes
 	}
 	applyX402Overrides(cfg, opts)
+	resolveServerName(cfg)
+}
+
+// resolveServerName finalizes cfg.ServerName so downstream code (mcp
+// server, banner) can read a non-empty value without re-deriving the
+// auto-name. The override (if any) wins; otherwise we hash the absolute
+// RootDir so the name is stable across cwd changes and reinstalls.
+func resolveServerName(cfg *config.Config) {
+	abs, err := filepath.Abs(cfg.RootDir)
+	if err != nil {
+		abs = cfg.RootDir
+	}
+	cfg.ServerName = identity.Resolve(abs, cfg.ServerName)
 }
 
 // applyX402Overrides applies x402-specific flag overrides to cfg.
@@ -858,13 +872,13 @@ func (a *App) setupDaemonChildIfApplicable(stateDir string, opts upOptions, canc
 // installInteractionForUp picks the right termination interaction for
 // the current run mode and returns the channel runEventLoop watches.
 //
-// - Daemon child: skip the foreground banner (the parent printed a
-//   daemon-ready summary on the user's terminal) and translate
-//   SIGTERM/SIGINT into cancel() so `dir2mcp down` can stop us cleanly
-//   through the existing event-loop shutdown path. The stdin listener
-//   is suppressed because the child has no terminal.
-// - Foreground: print the banner and start the q+Enter stdin listener
-//   the way the pre-daemonization code did.
+//   - Daemon child: skip the foreground banner (the parent printed a
+//     daemon-ready summary on the user's terminal) and translate
+//     SIGTERM/SIGINT into cancel() so `dir2mcp down` can stop us cleanly
+//     through the existing event-loop shutdown path. The stdin listener
+//     is suppressed because the child has no terminal.
+//   - Foreground: print the banner and start the q+Enter stdin listener
+//     the way the pre-daemonization code did.
 //
 // Extracted from runUp purely to keep that function under the
 // cyclomatic-complexity budget after daemon mode was added.
@@ -930,4 +944,3 @@ func writerIsTerminal(w io.Writer) bool {
 	}
 	return isTerminal(f)
 }
-

@@ -202,6 +202,7 @@ vary by deployment. The commonly used variables are:
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES` | No | Max encoded Mistral upload payload size in bytes for OCR and transcription requests (default: `20971520`); increase for large PDFs or audio files |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
+| `DIR2MCP_SERVER_NAME` | No | Override the MCP server name (and suggested `claude mcp add` alias). Defaults to a unique `dir2mcp-<slug>-<6-hex>` derived from the indexed directory |
 | `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` | No | Session inactivity timeout (default: `24h`) |
 | `DIR2MCP_SESSION_TIMEOUT` | No | Deprecated alias for `DIR2MCP_SESSION_INACTIVITY_TIMEOUT`; still supported but deprecated |
 | `DIR2MCP_SESSION_MAX_LIFETIME` | No | Maximum session lifetime |
@@ -224,6 +225,14 @@ Or override for a single run:
 ```bash
 dir2mcp up --mistral-max-ocr-payload-bytes 26214400
 ```
+
+### Server identity
+
+Each `dir2mcp up` instance reports a unique MCP server name derived from the indexed directory, so running multiple corpora side-by-side (e.g., `dir2mcp-stas-legal-a1b2c3` and `dir2mcp-research-notes-9f44ee`) keeps them distinguishable in your MCP client list.
+
+- Default shape: `dir2mcp-<slug>-<6-hex>`, where `<slug>` is the slugified basename of the indexed directory and `<6-hex>` hashes its absolute path (so the name is stable across re-runs from the same location).
+- Override via YAML (`server.name: my-alias`) or env (`DIR2MCP_SERVER_NAME=my-alias`).
+- The `dir2mcp up` banner prints a ready-to-paste `claude mcp add --transport http <name> <url> ...` line using this name; the client-side alias you register with is yours to choose.
 
 ### Auth token behavior
 

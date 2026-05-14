@@ -284,3 +284,66 @@ func TestMCPInitialize_UsesBuildInfoVersion(t *testing.T) {
 		t.Fatalf("server version=%q want=%q", envelope.Result.ServerInfo.Version, buildinfo.String())
 	}
 }
+
+func TestMCPInitialize_ServerNameRespectsOverride(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.ServerName = "my-explicit-alias"
+
+	if got := initializeServerInfoName(t, cfg); got != "my-explicit-alias" {
+		t.Fatalf("serverInfo.name=%q want=%q", got, "my-explicit-alias")
+	}
+}
+
+func TestMCPInitialize_ServerNameAutoDerivedWhenEmpty(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.RootDir = t.TempDir()
+	cfg.ServerName = ""
+
+	got := initializeServerInfoName(t, cfg)
+	if !strings.HasPrefix(got, "dir2mcp-") {
+		t.Fatalf("serverInfo.name=%q want auto-derived dir2mcp-* prefix", got)
+	}
+	parts := strings.Split(got, "-")
+	if len(parts) < 3 {
+		t.Fatalf("serverInfo.name=%q lacks slug+hash segments", got)
+	}
+	suffix := parts[len(parts)-1]
+	if len(suffix) != 6 {
+		t.Fatalf("serverInfo.name=%q hash suffix len=%d want 6", got, len(suffix))
+	}
+}
+
+func initializeServerInfoName(t *testing.T, cfg config.Config) string {
+	t.Helper()
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	t.Cleanup(server.Close)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+	req, err := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+	var envelope struct {
+		Result struct {
+			ServerInfo struct {
+				Name string `json:"name"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return envelope.Result.ServerInfo.Name
+}

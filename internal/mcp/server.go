@@ -26,6 +26,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	storepkg "github.com/dirstral/dir2mcp/internal/store"
@@ -201,6 +202,17 @@ func WithEventEmitter(fn func(level, event string, data interface{})) ServerOpti
 }
 
 func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOption) *Server {
+	// Belt-and-braces default: callers from production paths resolve the
+	// name in the CLI before we get here, but tests construct servers
+	// from minimal cfgs. Falling back to the auto-derived name keeps
+	// serverInfo.name non-empty no matter how the server is built.
+	if strings.TrimSpace(cfg.ServerName) == "" {
+		abs, absErr := filepath.Abs(cfg.RootDir)
+		if absErr != nil {
+			abs = cfg.RootDir
+		}
+		cfg.ServerName = identity.AutoServerName(abs)
+	}
 	s := &Server{
 		cfg:             cfg,
 		authToken:       loadAuthToken(cfg),
@@ -379,7 +391,7 @@ func (s *Server) handleInitialize(w http.ResponseWriter, r *http.Request, id int
 			},
 		},
 		"serverInfo": map[string]interface{}{
-			"name":    "dir2mcp",
+			"name":    s.cfg.ServerName,
 			"title":   "dir2mcp: Directory RAG MCP Server",
 			"version": buildinfo.String(),
 		},

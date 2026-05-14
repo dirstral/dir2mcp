@@ -25,6 +25,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -154,6 +155,52 @@ func assertConnectionFile(t *testing.T, connection cliConnectionFile) {
 	}
 	if !connection.Session.AssignedOnInitialize {
 		t.Fatal("expected session.assigned_on_initialize=true")
+	}
+}
+
+func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	out := stdout.String()
+	if !strings.Contains(out, "Register with Claude") {
+		t.Fatalf("banner missing registration section.\nstdout=%s", out)
+	}
+	if !strings.Contains(out, "claude mcp add --transport http dir2mcp-") {
+		t.Fatalf("banner missing claude mcp add hint with auto-derived name.\nstdout=%s", out)
+	}
+	// Auto-derived name keys off the absolute path of the indexed directory
+	// (RootDir defaults to "."), so it's the full identity.AutoServerName
+	// of tmp — including the slug *and* the 6-hex disambiguation suffix.
+	// We resolve symlinks because production reads cfg.RootDir="." → Abs(.)
+	// which on macOS returns the canonical path (/private/var/folders/...
+	// instead of /var/folders/...), so the hash must be computed against
+	// the same resolved path the runtime will see.
+	absTmp, err := filepath.Abs(tmp)
+	if err != nil {
+		t.Fatalf("abs tmp: %v", err)
+	}
+	resolvedTmp, err := filepath.EvalSymlinks(absTmp)
+	if err != nil {
+		t.Fatalf("evalsymlinks tmp: %v", err)
+	}
+	want := identity.AutoServerName(resolvedTmp)
+	if !strings.Contains(out, want) {
+		t.Fatalf("banner registration hint missing %q.\nstdout=%s", want, out)
 	}
 }
 
