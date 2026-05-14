@@ -160,6 +160,10 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `reindex` | Force full re-ingestion |
 | `config init` | Create a baseline `.dir2mcp.yaml` |
 | `config print` | Print effective config |
+| `install <client>` | Install dir2mcp into a supported MCP client (e.g. `dir2mcp install claude`) |
+| `uninstall <client>` | Remove dir2mcp from a supported MCP client |
+| `doctor <client>` | Run client-integration diagnostics |
+| `print-config <client>` | Print the MCP-server JSON snippet a client expects |
 | `version` | Print version |
 
 Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.

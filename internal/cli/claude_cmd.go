@@ -20,37 +20,17 @@ type claudeServerConfig struct {
 	Args    []string `json:"args,omitempty"`
 }
 
-func (a *App) runClaude(ctx context.Context, global globalOptions, args []string) int {
-	if len(args) == 0 {
-		writeln(a.stdout, "claude command: supported subcommands are print-config, install, uninstall, and doctor")
-		return exitSuccess
-	}
-	switch args[0] {
-	case "print-config":
-		return a.runClaudePrintConfig(global, args[1:])
-	case "install":
-		return a.runClaudeInstall(global, args[1:])
-	case "uninstall":
-		return a.runClaudeUninstall(global, args[1:])
-	case "doctor":
-		return a.runClaudeDoctor(ctx, global, args[1:])
-	default:
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("unknown claude subcommand: %s", args[0]))
-		return exitConfigInvalid
-	}
-}
-
 func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
-	fs := flag.NewFlagSet("claude print-config", flag.ContinueOnError)
+	fs := flag.NewFlagSet("print-config claude", flag.ContinueOnError)
 	fs.SetOutput(ioDiscard{})
 	serverName := fs.String("name", "dir2mcp", "server name")
 	stateDir := fs.String("state-dir", "", "state directory containing connection.json")
 	if err := fs.Parse(args); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid claude print-config flags: %v", err))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid print-config claude flags: %v", err))
 		return exitConfigInvalid
 	}
 	if len(fs.Args()) > 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("claude print-config does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("print-config claude does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
 		return exitConfigInvalid
 	}
 
@@ -94,17 +74,17 @@ func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
 }
 
 func (a *App) runClaudeInstall(global globalOptions, args []string) int {
-	fs := flag.NewFlagSet("claude install", flag.ContinueOnError)
+	fs := flag.NewFlagSet("install claude", flag.ContinueOnError)
 	fs.SetOutput(ioDiscard{})
 	serverName := fs.String("name", "dir2mcp", "server name")
 	stateDir := fs.String("state-dir", "", "state directory containing connection.json")
 	configPath := fs.String("config-path", defaultClaudeDesktopConfigPath(), "Claude Desktop config path")
 	if err := fs.Parse(args); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid claude install flags: %v", err))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid install claude flags: %v", err))
 		return exitConfigInvalid
 	}
 	if len(fs.Args()) > 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("claude install does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("install claude does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
 		return exitConfigInvalid
 	}
 
@@ -178,16 +158,16 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 }
 
 func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
-	fs := flag.NewFlagSet("claude uninstall", flag.ContinueOnError)
+	fs := flag.NewFlagSet("uninstall claude", flag.ContinueOnError)
 	fs.SetOutput(ioDiscard{})
 	serverName := fs.String("name", "dir2mcp", "server name to remove from Claude config")
 	configPath := fs.String("config-path", defaultClaudeDesktopConfigPath(), "Claude Desktop config path")
 	if err := fs.Parse(args); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid claude uninstall flags: %v", err))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid uninstall claude flags: %v", err))
 		return exitConfigInvalid
 	}
 	if len(fs.Args()) > 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("claude uninstall does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("uninstall claude does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
 		return exitConfigInvalid
 	}
 
@@ -261,15 +241,15 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 }
 
 func (a *App) runClaudeDoctor(ctx context.Context, global globalOptions, args []string) int {
-	fs := flag.NewFlagSet("claude doctor", flag.ContinueOnError)
+	fs := flag.NewFlagSet("doctor claude", flag.ContinueOnError)
 	fs.SetOutput(ioDiscard{})
 	stateDir := fs.String("state-dir", "", "state directory containing connection.json")
 	if err := fs.Parse(args); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid claude doctor flags: %v", err))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid doctor claude flags: %v", err))
 		return exitConfigInvalid
 	}
 	if len(fs.Args()) > 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("claude doctor does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("doctor claude does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
 		return exitConfigInvalid
 	}
 
