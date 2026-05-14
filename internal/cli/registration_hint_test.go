@@ -68,6 +68,45 @@ func TestBuildRegistrationCommand(t *testing.T) {
 	}
 }
 
+func TestBuildRegistrationCommand_QuotesUnsafeNames(t *testing.T) {
+	cases := []struct {
+		name       string
+		serverName string
+		url        string
+		want       string
+	}{
+		{
+			name:       "name with space",
+			serverName: "my alias",
+			url:        "http://127.0.0.1:1234/mcp",
+			want:       "claude mcp add --transport http 'my alias' http://127.0.0.1:1234/mcp",
+		},
+		{
+			name:       "name with single quote",
+			serverName: "joe's-alias",
+			url:        "http://127.0.0.1:1234/mcp",
+			want:       `claude mcp add --transport http 'joe'\''s-alias' http://127.0.0.1:1234/mcp`,
+		},
+		{
+			name:       "auto-derived names stay bare",
+			serverName: "dir2mcp-foo-abc123",
+			url:        "http://127.0.0.1:1234/mcp",
+			want:       "claude mcp add --transport http dir2mcp-foo-abc123 http://127.0.0.1:1234/mcp",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildRegistrationCommand(tc.serverName, tc.url, "", false)
+			if len(got) != 1 {
+				t.Fatalf("unexpected line count %d (%v)", len(got), got)
+			}
+			if got[0] != tc.want {
+				t.Fatalf("\n got  %q\n want %q", got[0], tc.want)
+			}
+		})
+	}
+}
+
 func TestPrintRegistrationHintSkipsWhenIncomplete(t *testing.T) {
 	var buf strings.Builder
 	s := newStyles(&buf, true)

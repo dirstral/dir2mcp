@@ -25,6 +25,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -183,9 +184,21 @@ func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
 		t.Fatalf("banner missing claude mcp add hint with auto-derived name.\nstdout=%s", out)
 	}
 	// Auto-derived name keys off the absolute path of the indexed directory
-	// (RootDir defaults to "."), so the slug is the basename of tmp and the
-	// suffix is a 6-char hex chunk of sha256(tmp).
-	want := "dir2mcp-" + filepath.Base(tmp)
+	// (RootDir defaults to "."), so it's the full identity.AutoServerName
+	// of tmp — including the slug *and* the 6-hex disambiguation suffix.
+	// We resolve symlinks because production reads cfg.RootDir="." → Abs(.)
+	// which on macOS returns the canonical path (/private/var/folders/...
+	// instead of /var/folders/...), so the hash must be computed against
+	// the same resolved path the runtime will see.
+	absTmp, err := filepath.Abs(tmp)
+	if err != nil {
+		t.Fatalf("abs tmp: %v", err)
+	}
+	resolvedTmp, err := filepath.EvalSymlinks(absTmp)
+	if err != nil {
+		t.Fatalf("evalsymlinks tmp: %v", err)
+	}
+	want := identity.AutoServerName(resolvedTmp)
 	if !strings.Contains(out, want) {
 		t.Fatalf("banner registration hint missing %q.\nstdout=%s", want, out)
 	}

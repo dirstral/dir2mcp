@@ -202,7 +202,7 @@ vary by deployment. The commonly used variables are:
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES` | No | Max encoded Mistral upload payload size in bytes for OCR and transcription requests (default: `20971520`); increase for large PDFs or audio files |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
-| `DIR2MCP_SERVER_NAME` | No | Override the MCP server name (and suggested `claude mcp add` alias). Defaults to a unique `dir2mcp-<folder>-<6-hex>` derived from the indexed directory |
+| `DIR2MCP_SERVER_NAME` | No | Override the MCP server name (and suggested `claude mcp add` alias). Defaults to a unique `dir2mcp-<slug>-<6-hex>` derived from the indexed directory |
 | `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` | No | Session inactivity timeout (default: `24h`) |
 | `DIR2MCP_SESSION_TIMEOUT` | No | Deprecated alias for `DIR2MCP_SESSION_INACTIVITY_TIMEOUT`; still supported but deprecated |
 | `DIR2MCP_SESSION_MAX_LIFETIME` | No | Maximum session lifetime |

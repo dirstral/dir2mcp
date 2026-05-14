@@ -1438,6 +1438,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("protocol_version", cfg.ProtocolVersion)
 	writeBool("public", cfg.Public)
 	writeScalar("auth_mode", cfg.AuthMode)
+	writeScalar("server_name", cfg.ServerName)
 	writeInt("rate_limit_rps", cfg.RateLimitRPS)
 	writeInt("rate_limit_burst", cfg.RateLimitBurst)
 	writeList("trusted_proxies", cfg.TrustedProxies)
@@ -1516,7 +1517,10 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if cfg == nil {
 		return
 	}
-	if raw, ok := envLookup("DIR2MCP_SERVER_NAME", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	// Env always wins when present so DIR2MCP_SERVER_NAME="" can clear a
+	// YAML-set server.name and fall through to the auto-derived name at
+	// resolution time. The trim happens later in identity.Resolve.
+	if raw, ok := envLookup("DIR2MCP_SERVER_NAME", overrideEnv); ok {
 		cfg.ServerName = strings.TrimSpace(raw)
 	}
 	applyMistralEnvOverrides(cfg, overrideEnv)
