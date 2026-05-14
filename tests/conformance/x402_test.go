@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"dir2mcp/internal/mcp"
-	"dir2mcp/internal/x402"
+	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/x402"
 )
 
 // TestX402_ModeOff_NoPaymentHeaders verifies that when mode=off, tools/call

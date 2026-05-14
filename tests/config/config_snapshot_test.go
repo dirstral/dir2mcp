@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 func TestSaveEffectiveSnapshot_RedactsSecretsAndPersistsSourceMetadata(t *testing.T) {

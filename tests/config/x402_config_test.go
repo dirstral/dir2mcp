@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/tests/testutil"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestLoad_EnvOverridesX402(t *testing.T) {

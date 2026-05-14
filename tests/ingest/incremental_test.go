@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/ingest"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 type fakeIncrementalStore struct {

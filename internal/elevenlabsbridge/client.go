@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 const (

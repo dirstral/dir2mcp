@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/cli"
 )
 
 // TestDown_NoPidFile_IsIdempotent: dir2mcp down on a directory with no

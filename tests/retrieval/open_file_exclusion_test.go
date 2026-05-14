@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
 func TestOpenFile_SecretsBlocked(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/index"
 )
 
 func TestHNSWIndex_AddAndSearch(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 func (a *App) runReindex(ctx context.Context, global globalOptions, args []string) int {

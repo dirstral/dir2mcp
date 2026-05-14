@@ -15,10 +15,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"dir2mcp/internal/ingest"
-	"dir2mcp/internal/mistral"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 const (

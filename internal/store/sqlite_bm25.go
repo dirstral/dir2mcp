@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // SearchBM25 implements model.LexicalSearcher. It runs an FTS5 MATCH query

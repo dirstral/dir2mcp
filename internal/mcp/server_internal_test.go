@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 // The six legacy tests below described various combinations of the

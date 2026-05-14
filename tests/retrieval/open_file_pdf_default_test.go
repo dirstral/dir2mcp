@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
 // writePDFAndOCRCache writes a fake PDF at relPath under root and seeds the

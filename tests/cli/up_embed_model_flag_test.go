@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/cli"
 )
 
 func TestUpModelFlags_IsAcceptedByCLI(t *testing.T) {

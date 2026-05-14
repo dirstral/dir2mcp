@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // rrfK is the reciprocal-rank-fusion smoothing constant. 60 is the value

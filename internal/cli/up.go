@@ -13,16 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"dir2mcp/internal/appstate"
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/elevenlabs"
-	"dir2mcp/internal/index"
-	"dir2mcp/internal/ingest"
-	"dir2mcp/internal/mcp"
-	"dir2mcp/internal/mistral"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
-	"dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/appstate"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/elevenlabs"
+	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {

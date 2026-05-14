@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/mistral"
 )
 
 func TestExtract_Integration_MistralOCR(t *testing.T) {

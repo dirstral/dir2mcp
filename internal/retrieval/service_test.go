@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/index"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 type fakeRetrievalEmbedder struct {

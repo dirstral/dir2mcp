@@ -23,13 +23,13 @@ import (
 	"sync"
 	"time"
 
-	"dir2mcp/internal/appstate"
-	"dir2mcp/internal/buildinfo"
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/protocol"
-	storepkg "dir2mcp/internal/store"
-	"dir2mcp/internal/x402"
+	"github.com/dirstral/dir2mcp/internal/appstate"
+	"github.com/dirstral/dir2mcp/internal/buildinfo"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
+	storepkg "github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/x402"
 )
 
 const (

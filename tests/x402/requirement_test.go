@@ -3,7 +3,7 @@ package x402_test
 import (
 	"testing"
 
-	"dir2mcp/internal/x402"
+	"github.com/dirstral/dir2mcp/internal/x402"
 )
 
 func TestRequirementNormalize(t *testing.T) {

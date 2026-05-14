@@ -13,9 +13,9 @@ import (
 	"sync"
 	"testing"
 
-	"dir2mcp/internal/index"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
 type fakeRetrievalEmbedder struct {

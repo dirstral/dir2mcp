@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 // TestLifecycle_Initialize verifies that an initialize request returns HTTP 200

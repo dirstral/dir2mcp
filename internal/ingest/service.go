@@ -17,11 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"dir2mcp/internal/appstate"
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/elevenlabs"
-	"dir2mcp/internal/mistral"
-	"dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/appstate"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/elevenlabs"
+	"github.com/dirstral/dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // annotationChunk* constants mirror the hardcoded parameters previously

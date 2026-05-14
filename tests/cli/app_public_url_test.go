@@ -3,7 +3,7 @@ package tests
 import (
 	"testing"
 
-	"dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/cli"
 )
 
 func TestPublicURLAddress_UsesConfiguredHostAndResolvedPort(t *testing.T) {

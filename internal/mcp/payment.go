@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	storepkg "dir2mcp/internal/store"
-	"dir2mcp/internal/x402"
+	storepkg "github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/x402"
 )
 
 type paymentExecutionOutcome struct {

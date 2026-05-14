@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/mistral"
 )
 
 func TestTranscribe_Integration_MistralAPI(t *testing.T) {

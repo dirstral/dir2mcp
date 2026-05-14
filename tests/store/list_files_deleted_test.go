@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // TestListFiles_ExcludesDeletedDocuments verifies that soft-deleted documents

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/cli"
 )
 
 // TestDaemonParent_MissingMistralAPIKeyFailsFast is the regression test

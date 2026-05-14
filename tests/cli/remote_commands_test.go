@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/cli"
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 func TestSearchCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {

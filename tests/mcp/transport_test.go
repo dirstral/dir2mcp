@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/mcp"
 )
 
 func TestNewTransport_IsSDK(t *testing.T) {

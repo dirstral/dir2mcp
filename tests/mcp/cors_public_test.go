@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/cli"
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/mcp"
-	"dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 // TestCORS_PreflightReturns204 verifies allowed-origin preflight requests return 204 with CORS headers.

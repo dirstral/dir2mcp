@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"dir2mcp/internal/config"
-	"dir2mcp/internal/index"
-	"dir2mcp/internal/mistral"
-	"dir2mcp/internal/model"
-	"dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 type engineRetriever interface {
