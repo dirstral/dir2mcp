@@ -837,12 +837,14 @@ HTTP response headers include:
 `serverInfo.name` is per-instance: by default it is auto-derived as
 `dir2mcp-<slug>-<6-hex>` from the absolute path of the indexed directory
 so that operators running many `dir2mcp` instances can distinguish them
-in their MCP client list. Developer builds (no release ldflags
-injection) use a `dir2mcp-dev-<slug>-<6-hex>` prefix so a locally
-built binary coexists with brew-installed releases without identity
-collision. It can be overridden via the `server.name` YAML key or the
-`DIR2MCP_SERVER_NAME` env variable; overrides apply verbatim regardless
-of build type.
+in their MCP client list. Builds whose embedded version is recognized
+as a dev version (specifically `0.0.0-dev` or `dev-<sha>[+dirty]`) use
+a `dir2mcp-dev-<slug>-<6-hex>` prefix so local dev binaries can coexist
+with brew-installed releases without identity collision. Other non-release
+builds, including `go install` snapshots or pseudo-versions, still use
+the normal `dir2mcp-<slug>-<6-hex>` prefix. It can be overridden via the
+`server.name` YAML key or the `DIR2MCP_SERVER_NAME` env variable;
+overrides apply verbatim regardless of build type.
 
 Body:
 
