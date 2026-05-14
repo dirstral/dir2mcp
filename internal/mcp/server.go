@@ -211,7 +211,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		if absErr != nil {
 			abs = cfg.RootDir
 		}
-		cfg.ServerName = identity.AutoServerName(abs)
+		cfg.ServerName = identity.AutoServerName(abs, buildinfo.IsDev())
 	}
 	s := &Server{
 		cfg:             cfg,

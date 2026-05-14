@@ -198,7 +198,9 @@ func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("evalsymlinks tmp: %v", err)
 	}
-	want := identity.AutoServerName(resolvedTmp)
+	// `go test`-built binaries are dev builds (no GoReleaser ldflags),
+	// so identity.AutoServerName uses the dir2mcp-dev- prefix here.
+	want := identity.AutoServerName(resolvedTmp, true)
 	if !strings.Contains(out, want) {
 		t.Fatalf("banner registration hint missing %q.\nstdout=%s", want, out)
 	}

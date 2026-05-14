@@ -302,11 +302,15 @@ func TestMCPInitialize_ServerNameAutoDerivedWhenEmpty(t *testing.T) {
 	cfg.ServerName = ""
 
 	got := initializeServerInfoName(t, cfg)
-	if !strings.HasPrefix(got, "dir2mcp-") {
-		t.Fatalf("serverInfo.name=%q want auto-derived dir2mcp-* prefix", got)
+	// `go test` binaries have no GoReleaser ldflags injection, so they
+	// are dev builds and the auto-derived name must use the dir2mcp-dev-
+	// prefix to coexist with brew-installed release binaries in
+	// `claude mcp list`.
+	if !strings.HasPrefix(got, "dir2mcp-dev-") {
+		t.Fatalf("serverInfo.name=%q want dev-build prefix dir2mcp-dev-*", got)
 	}
 	parts := strings.Split(got, "-")
-	if len(parts) < 3 {
+	if len(parts) < 4 {
 		t.Fatalf("serverInfo.name=%q lacks slug+hash segments", got)
 	}
 	suffix := parts[len(parts)-1]

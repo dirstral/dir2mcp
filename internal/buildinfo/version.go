@@ -50,6 +50,30 @@ func Display() string {
 	return "v" + strings.TrimPrefix(String(), "v")
 }
 
+// IsDev reports whether the running binary is a developer build —
+// either the bare "0.0.0-dev" placeholder (meaning no injected,
+// module-derived, or vcs.revision-derived version was resolved) or a
+// "dev-<sha>" / "dev-<sha>+dirty" string produced by resolveVersion's
+// vcs.revision fallback. Released binaries (built by GoReleaser with
+// -ldflags injection) and `go install` snapshots from a tagged or
+// pseudo-version ref report false.
+//
+// Used by callers that want to make dev builds visibly distinct from
+// the brew-installed release at runtime — e.g., the auto-derived MCP
+// server name uses a "dir2mcp-dev-" prefix when this returns true so
+// dev and release instances coexist in `claude mcp list` without
+// colliding.
+func IsDev() bool {
+	return isDevVersion(String())
+}
+
+// isDevVersion is the testable core of IsDev — it operates on a
+// pre-resolved version string so tests can exercise every branch
+// without going through the package-level sync.Once.
+func isDevVersion(v string) bool {
+	return v == defaultVersion || strings.HasPrefix(v, "dev-")
+}
+
 // resolveVersion is split out from String for testability — it takes the
 // inputs explicitly so tests can drive every branch without wrestling with
 // the package-level sync.Once or the real ReadBuildInfo result.
