@@ -157,6 +157,40 @@ func assertConnectionFile(t *testing.T, connection cliConnectionFile) {
 	}
 }
 
+func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	out := stdout.String()
+	if !strings.Contains(out, "Register with Claude") {
+		t.Fatalf("banner missing registration section.\nstdout=%s", out)
+	}
+	if !strings.Contains(out, "claude mcp add --transport http dir2mcp-") {
+		t.Fatalf("banner missing claude mcp add hint with auto-derived name.\nstdout=%s", out)
+	}
+	// Auto-derived name keys off the absolute path of the indexed directory
+	// (RootDir defaults to "."), so the slug is the basename of tmp and the
+	// suffix is a 6-char hex chunk of sha256(tmp).
+	want := "dir2mcp-" + filepath.Base(tmp)
+	if !strings.Contains(out, want) {
+		t.Fatalf("banner registration hint missing %q.\nstdout=%s", want, out)
+	}
+}
+
 func TestUpSupportsGlobalDirAndStateDirFlags(t *testing.T) {
 	tmp := t.TempDir()
 	rootDir := filepath.Join(tmp, "workspace")

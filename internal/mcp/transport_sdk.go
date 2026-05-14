@@ -339,7 +339,7 @@ func copyBufferedResponse(dst http.ResponseWriter, src *bufferedResponseWriter) 
 
 func (s *Server) buildSDKServer() *sdkmcp.Server {
 	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{
-		Name:    "dir2mcp",
+		Name:    s.cfg.ServerName,
 		Title:   "dir2mcp: Directory RAG MCP Server",
 		Version: buildinfo.String(),
 	}, &sdkmcp.ServerOptions{

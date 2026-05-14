@@ -138,7 +138,7 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 		return exitGeneric
 	}
 
-	a.printDaemonReady(cfg.StateDir, logPath, registeredPid, connection, opts)
+	a.printDaemonReady(cfg, logPath, registeredPid, connection, opts)
 	return exitSuccess
 }
 
@@ -146,7 +146,7 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 // when `dir2mcp up` returns control. The full ornate banner that the
 // in-process body would have produced lives in the server log; this is
 // the just-enough info to keep working from the shell.
-func (a *App) printDaemonReady(stateDir, logPath string, pid int, connection connectionPayload, opts upOptions) {
+func (a *App) printDaemonReady(cfg config.Config, logPath string, pid int, connection connectionPayload, opts upOptions) {
 	if opts.quiet {
 		return
 	}
@@ -164,6 +164,7 @@ func (a *App) printDaemonReady(stateDir, logPath string, pid int, connection con
 	}
 	writeln(a.stdout, s.kv("Logs", logPath))
 	writeln(a.stdout)
+	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, !strings.EqualFold(cfg.AuthMode, "none"))
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
 	writef(a.stdout, "  %s\n\n", s.dim("Stop with: dir2mcp down"))
 }

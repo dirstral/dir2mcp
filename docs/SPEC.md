@@ -834,6 +834,12 @@ HTTP response headers include:
 
 * `MCP-Session-Id: sess_...`
 
+`serverInfo.name` is per-instance: by default it is auto-derived as
+`dir2mcp-<slug>-<6-hex>` from the absolute path of the indexed directory
+so that operators running many `dir2mcp` instances can distinguish them
+in their MCP client list. It can be overridden via the `server.name`
+YAML key or the `DIR2MCP_SERVER_NAME` env variable.
+
 Body:
 
 ```json
@@ -846,7 +852,7 @@ Body:
       "tools": { "listChanged": false }
     },
     "serverInfo": {
-      "name": "dir2mcp",
+      "name": "dir2mcp-stas-legal-a1b2c3",
       "title": "dir2mcp: Directory RAG MCP Server",
       "version": "0.4.0"
     },

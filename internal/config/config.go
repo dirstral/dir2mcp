@@ -58,6 +58,11 @@ type Config struct {
 	ProtocolVersion string
 	Public          bool
 	AuthMode        string
+	// ServerName overrides the auto-derived MCP serverInfo.name and the
+	// suggested `claude mcp add` alias. When empty, identity.AutoServerName
+	// is used to produce a stable, unique-per-RootDir name so power users
+	// running many instances can distinguish them in their MCP client list.
+	ServerName string
 	// RateLimitRPS and RateLimitBurst define per-IP token bucket limits
 	// used by the MCP server when running in public mode.
 	RateLimitRPS   int
@@ -104,20 +109,20 @@ type Config struct {
 	// DIR2MCP_CHAT_MODEL also affects this value.
 	ChatModel string
 
-	RAGSystemPrompt       string
-	RAGGenerateAnswer     bool
-	RAGKDefault           int
-	RAGMaxContextChars    int
-	RAGOversampleFactor   int
+	RAGSystemPrompt     string
+	RAGGenerateAnswer   bool
+	RAGKDefault         int
+	RAGMaxContextChars  int
+	RAGOversampleFactor int
 	// RetrievalHybridEnabled controls whether the retrieval service combines
 	// BM25 (lexical) and vector (semantic) candidates via reciprocal-rank
 	// fusion. When false, search is vector-only (legacy behavior). Default
 	// is true for new deployments; existing indexes auto-backfill the FTS
 	// table on first start.
 	RetrievalHybridEnabled bool
-	ChunkingStrategy      string
-	ChunkingMaxTokens     int
-	ChunkingOverlapTokens int
+	ChunkingStrategy       string
+	ChunkingMaxTokens      int
+	ChunkingOverlapTokens  int
 
 	IngestGitignore      bool
 	IngestFollowSymlinks bool
@@ -159,6 +164,7 @@ type fileConfig struct {
 	ProtocolVersion           *string
 	Public                    *bool
 	AuthMode                  *string
+	ServerName                *string
 	RateLimitRPS              *int
 	RateLimitBurst            *int
 	TrustedProxies            []string
@@ -226,6 +232,7 @@ type persistedConfig struct {
 	ProtocolVersion           string   `yaml:"protocol_version"`
 	Public                    bool     `yaml:"public"`
 	AuthMode                  string   `yaml:"auth_mode"`
+	ServerName                string   `yaml:"server_name"`
 	RateLimitRPS              int      `yaml:"rate_limit_rps"`
 	RateLimitBurst            int      `yaml:"rate_limit_burst"`
 	TrustedProxies            []string `yaml:"trusted_proxies"`
@@ -400,6 +407,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		ProtocolVersion:           cfg.ProtocolVersion,
 		Public:                    cfg.Public,
 		AuthMode:                  cfg.AuthMode,
+		ServerName:                cfg.ServerName,
 		RateLimitRPS:              cfg.RateLimitRPS,
 		RateLimitBurst:            cfg.RateLimitBurst,
 		TrustedProxies:            append([]string(nil), cfg.TrustedProxies...),
@@ -719,6 +727,9 @@ func applyServerCoreFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.AuthMode != nil {
 		cfg.AuthMode = *fc.AuthMode
+	}
+	if fc.ServerName != nil {
+		cfg.ServerName = *fc.ServerName
 	}
 	if fc.RateLimitRPS != nil {
 		cfg.RateLimitRPS = *fc.RateLimitRPS
@@ -1062,6 +1073,7 @@ func nearestSectionPrefix(sectionByIndent map[int]string, indent int) string {
 var configKeyAliases = map[string]string{
 	"server.listen":                        "listen_addr",
 	"server.mcp_path":                      "mcp_path",
+	"server.name":                          "server_name",
 	"server.protocol_version":              "protocol_version",
 	"server.public":                        "public",
 	"security.auth.mode":                   "auth_mode",
@@ -1273,6 +1285,8 @@ func setServerStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.ProtocolVersion = strPtr(value)
 	case "auth_mode":
 		cfg.AuthMode = strPtr(value)
+	case "server_name":
+		cfg.ServerName = strPtr(value)
 	case "server.tls.cert_file":
 		cfg.ServerTLSCertFile = strPtr(value)
 	case "server.tls.key_file":
@@ -1501,6 +1515,9 @@ func intPtr(value int) *int       { return &value }
 func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if cfg == nil {
 		return
+	}
+	if raw, ok := envLookup("DIR2MCP_SERVER_NAME", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.ServerName = strings.TrimSpace(raw)
 	}
 	applyMistralEnvOverrides(cfg, overrideEnv)
 	applyElevenLabsEnvOverrides(cfg, overrideEnv)
