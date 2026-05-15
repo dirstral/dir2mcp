@@ -7,7 +7,7 @@ Operational guide for coding agents working in this repository.
 ## Before you start
 
 - Re-check whether the requested plan still matches the current codebase before making changes.
-- Review relevant context first: `README.md`, `docs/SPEC.md`, and the affected `cmd/`, `internal/`, and `tests/` paths.
+- Review relevant context first: `README.md`, `dirstral-spec/docs/SPEC.md` (canonical spec, vendored submodule), and the affected `cmd/`, `internal/`, and `tests/` paths.
 - Preserve existing architecture and conventions unless the issue explicitly requires a refactor.
 
 ## Project summary
@@ -111,7 +111,7 @@ codex mcp add context7 -- npx -y @upstash/context7-mcp
 - All relevant tests pass (`make check` green).
 - `README.md` and `docs/` are aligned with real behavior.
 - No unrelated refactors in issue PRs.
-- Implementation aligns with `docs/SPEC.md` and current code behavior, not stale assumptions.
+- Implementation aligns with `dirstral-spec/docs/SPEC.md` (canonical spec) and current code behavior, not stale assumptions.
 - Secure defaults and existing auth/public-mode safety behavior are preserved.
 
 ## Important behavior notes
