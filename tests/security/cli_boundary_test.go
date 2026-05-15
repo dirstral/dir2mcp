@@ -25,18 +25,21 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 	commands := extractCommandsMap(t, file)
 
 	expected := map[string]struct{}{
-		"up":         {},
-		"down":       {},
-		"status":     {},
-		"ask":        {},
-		"search":     {},
-		"open-file":  {},
-		"list-files": {},
-		"reindex":    {},
-		"bridge":     {},
-		"config":     {},
-		"claude":     {},
-		"version":    {},
+		"up":           {},
+		"down":         {},
+		"status":       {},
+		"ask":          {},
+		"search":       {},
+		"open-file":    {},
+		"list-files":   {},
+		"reindex":      {},
+		"bridge":       {},
+		"config":       {},
+		"install":      {},
+		"uninstall":    {},
+		"doctor":       {},
+		"print-config": {},
+		"version":      {},
 	}
 
 	assertCommandSurface(t, commands, expected)
@@ -158,6 +161,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"ask.go":                    {},
 		"bridge.go":                 {},
 		"claude_cmd.go":             {},
+		"client_cmds.go":            {},
 		"config_cmd.go":             {},
 		"corpus_snapshot_test.go":   {},
 		"corpus_writer_test.go":     {},

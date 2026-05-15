@@ -43,7 +43,7 @@ func TestClaudePrintConfigEmitsMCPServerBlock(t *testing.T) {
 	code := app.RunWithContext(context.Background(), []string{
 		"--state-dir", stateDir,
 		"--json",
-		"claude", "print-config",
+		"print-config", "claude",
 		"--name", "stas-legal-dir2mcp",
 	})
 	if code != 0 {
@@ -101,7 +101,7 @@ func TestClaudeInstallUpdatesConfigFile(t *testing.T) {
 
 	code := app.RunWithContext(context.Background(), []string{
 		"--state-dir", stateDir,
-		"claude", "install",
+		"install", "claude",
 		"--name", "stas-legal-dir2mcp",
 		"--config-path", configPath,
 	})
@@ -139,7 +139,7 @@ func TestClaudeDoctorPassesWithValidState(t *testing.T) {
 	code := app.RunWithContext(context.Background(), []string{
 		"--state-dir", stateDir,
 		"--json",
-		"claude", "doctor",
+		"doctor", "claude",
 	})
 	var payload map[string]interface{}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
@@ -181,7 +181,7 @@ func TestClaudeDoctorFailsMissingToken(t *testing.T) {
 
 	code := app.RunWithContext(context.Background(), []string{
 		"--state-dir", stateDir,
-		"claude", "doctor",
+		"doctor", "claude",
 	})
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code, got stdout=%s stderr=%s", stdout.String(), stderr.String())
@@ -207,7 +207,7 @@ func TestClaudeInstallFailsMissingBridge(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 	code := app.RunWithContext(context.Background(), []string{
 		"--state-dir", stateDir,
-		"claude", "install",
+		"install", "claude",
 		"--config-path", configPath,
 	})
 	if code == 0 {
@@ -271,7 +271,7 @@ func TestClaudeUninstallRemovesEntryAndPreservesUnrelatedKeys(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 	code := app.RunWithContext(context.Background(), []string{
-		"claude", "uninstall",
+		"uninstall", "claude",
 		"--config-path", configPath,
 	})
 	if code != 0 {
@@ -317,7 +317,7 @@ func TestClaudeUninstallDropsEmptyMCPServersBlock(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 	code := app.RunWithContext(context.Background(), []string{
-		"claude", "uninstall",
+		"uninstall", "claude",
 		"--config-path", configPath,
 	})
 	if code != 0 {
@@ -347,7 +347,7 @@ func TestClaudeUninstallIsIdempotentWhenEntryAbsent(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 	code := app.RunWithContext(context.Background(), []string{
-		"claude", "uninstall",
+		"uninstall", "claude",
 		"--config-path", configPath,
 	})
 	if code != 0 {

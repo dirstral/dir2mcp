@@ -58,18 +58,21 @@ const (
 )
 
 var commands = map[string]struct{}{
-	"up":         {},
-	"down":       {},
-	"status":     {},
-	"ask":        {},
-	"search":     {},
-	"open-file":  {},
-	"list-files": {},
-	"reindex":    {},
-	"bridge":     {},
-	"config":     {},
-	"claude":     {},
-	"version":    {},
+	"up":           {},
+	"down":         {},
+	"status":       {},
+	"ask":          {},
+	"search":       {},
+	"open-file":    {},
+	"list-files":   {},
+	"reindex":      {},
+	"bridge":       {},
+	"config":       {},
+	"install":      {},
+	"uninstall":    {},
+	"doctor":       {},
+	"print-config": {},
+	"version":      {},
 }
 
 type App struct {
@@ -439,8 +442,14 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runConfig(ctx, globalOpts, args), true
 	case "bridge":
 		return a.runBridge(ctx, globalOpts, args), true
-	case "claude":
-		return a.runClaude(ctx, globalOpts, args), true
+	case "install":
+		return a.runInstall(ctx, globalOpts, args), true
+	case "uninstall":
+		return a.runUninstall(ctx, globalOpts, args), true
+	case "doctor":
+		return a.runDoctor(ctx, globalOpts, args), true
+	case "print-config":
+		return a.runPrintConfig(ctx, globalOpts, args), true
 	default:
 		return 0, false
 	}
@@ -484,11 +493,14 @@ func (a *App) printUsage() {
 		{"reindex", "force a full re-index of all documents"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
-		{"claude", "configure Claude Desktop MCP connection"},
+		{"install", "install dir2mcp into a client (e.g. dir2mcp install claude)"},
+		{"uninstall", "remove dir2mcp from a client (e.g. dir2mcp uninstall claude)"},
+		{"doctor", "run client integration diagnostics (e.g. dir2mcp doctor claude)"},
+		{"print-config", "print the MCP-server JSON snippet for a client"},
 		{"version", "print build version"},
 	}
 	for _, c := range cmds {
-		writef(o, "  %-12s %s\n", s.Bold.Render(c[0]), s.Dim.Render(c[1]))
+		writef(o, "  %-13s %s\n", s.Bold.Render(c[0]), s.Dim.Render(c[1]))
 	}
 	writeln(o)
 
