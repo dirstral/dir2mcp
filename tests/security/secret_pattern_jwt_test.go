@@ -125,10 +125,10 @@ func parseSecretPatternsFromSpec(t *testing.T) []string {
 	t.Helper()
 
 	root := repoRoot(t)
-	specPath := filepath.Join(root, "docs", "SPEC.md")
+	specPath := filepath.Join(root, "dirstral-spec", "docs", "SPEC.md")
 	file, err := os.Open(specPath)
 	if err != nil {
-		t.Fatalf("failed to open docs/SPEC.md: %v", err)
+		t.Fatalf("failed to open dirstral-spec/docs/SPEC.md (run: git submodule update --init): %v", err)
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {

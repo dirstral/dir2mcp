@@ -329,7 +329,7 @@ dir2mcp up \
 
 If unpaid calls are blocked correctly, `tools/call` returns HTTP `402` plus `PAYMENT-REQUIRED`.
 
-See [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) for the full facilitator adapter contract.
+See [dirstral-spec/docs/x402-payment-adapter-spec.md](dirstral-spec/docs/x402-payment-adapter-spec.md) for the full facilitator adapter contract.
 
 ## Project Status
 
@@ -366,10 +366,13 @@ CLI ownership/disposition matrix:
 
 ## Documentation
 
-- [docs/VISION.md](docs/VISION.md) — product vision and strategic direction
-- [docs/SPEC.md](docs/SPEC.md) — normative behavior, schemas, and runtime contracts
-- [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) — ecosystem/market/discovery/payment context
-- [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) — facilitator adapter contract
+Normative docs are maintained in the [`dirstral-spec`](https://github.com/dirstral/dirstral-spec) submodule (single source of truth; the `docs/*.md` files here are pointer stubs):
+
+- [dirstral-spec/docs/VISION.md](dirstral-spec/docs/VISION.md) — product vision and strategic direction
+- [dirstral-spec/docs/SPEC.md](dirstral-spec/docs/SPEC.md) — normative behavior, schemas, and runtime contracts
+- [dirstral-spec/docs/ECOSYSTEM.md](dirstral-spec/docs/ECOSYSTEM.md) — ecosystem/market/discovery/payment context
+- [dirstral-spec/docs/x402-payment-adapter-spec.md](dirstral-spec/docs/x402-payment-adapter-spec.md) — facilitator adapter contract
+- dir2mcp implements spec version `0.5.x` ([versioning](dirstral-spec/spec/versioning.md))
 
 ## Development
 

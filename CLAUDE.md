@@ -2,7 +2,7 @@
 
 ## Project
 
-dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. It supports indexing, retrieval, citations, and optional x402 request gating (an HTTP 402‑based payment challenge system). See [x402 request gating docs](docs/x402-payment-adapter-spec.md) for details.
+dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. It supports indexing, retrieval, citations, and optional x402 request gating (an HTTP 402‑based payment challenge system). See [x402 request gating docs](dirstral-spec/docs/x402-payment-adapter-spec.md) for details (canonical spec lives in the `dirstral-spec` submodule; `docs/*.md` are pointer stubs).
 
 ## Repository layout
 
@@ -16,7 +16,7 @@ dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. I
 - `internal/x402`: x402 types + facilitator client
 - `internal/store`: sqlite-backed metadata persistence
 - `tests/*`: integration-style suites by subsystem
-- `docs/`: reference documentation (SPEC, VISION, ECOSYSTEM, x402 adapter spec)
+- `docs/`: pointer stubs only — canonical normative docs (SPEC, VISION, ECOSYSTEM, x402 adapter) live in the `dirstral-spec` git submodule (`dirstral-spec/docs/`)
 
 ## Build and test
 

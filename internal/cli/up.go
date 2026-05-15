@@ -70,7 +70,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
-	// bootstrap step as structured events (see SPEC.md for NDJSON schema).
+	// bootstrap step as structured events (see dirstral-spec/docs/SPEC.md for NDJSON schema).
 	emitter := newNDJSONEmitter(a.stdout, opts.jsonOutput)
 
 	indexingState := initIndexingState(ctx, st, ret, emitter, a.stderr)
