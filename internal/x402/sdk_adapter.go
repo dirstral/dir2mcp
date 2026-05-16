@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	sdkhttp "github.com/coinbase/x402/go/http"
+	sdkhttp "github.com/x402-foundation/x402/go/http"
 )
 
 const defaultHTTPTimeout = 10 * time.Second
@@ -39,7 +39,7 @@ func (p sdkBearerAuthProvider) GetAuthHeaders(context.Context) (sdkhttp.AuthHead
 		Verify:    headers,
 		Settle:    headers,
 		Supported: headers,
-		Discovery: headers,
+		Bazaar:    headers,
 	}, nil
 }
 
