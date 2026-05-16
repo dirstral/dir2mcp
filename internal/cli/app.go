@@ -618,7 +618,7 @@ func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
 		}
 		return
 	}
-	ret.SetReranker(cohere.NewClient("", cfg.CohereAPIKey), cfg.RerankModel, cfg.RerankCandidatePool)
+	ret.SetReranker(cohere.NewClient(cfg.CohereBaseURL, cfg.CohereAPIKey), cfg.RerankModel, cfg.RerankCandidatePool)
 	ret.SetRerankEnabled(true)
 }
 

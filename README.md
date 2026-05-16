@@ -244,7 +244,7 @@ Each `dir2mcp up` instance reports a unique MCP server name derived from the ind
 
 ### Reranking (optional)
 
-An optional post-fusion **reranking** stage can re-score retrieval candidates with a cross-encoder for higher answer quality. It is **capability-driven** — it activates automatically when a rerank provider credential is present (the same way the Mistral key gates embedding/OCR) — and **fail-open**: any provider error (missing key, network, rate limit) silently falls back to the normal fused order, so a query never fails because reranking failed. Spec: `dirstral-spec/docs/SPEC.md` §9.1.1.
+An optional post-fusion **reranking** stage can re-score retrieval candidates with a cross-encoder for higher answer quality. It is **capability-driven** — it activates automatically when a rerank provider credential is present (the same way the Mistral key gates embedding/OCR). A missing credential is a startup condition, not a query failure: in auto mode reranking simply stays off (silent); if you explicitly set `rerank.enabled: true` without a credential the server warns at startup and runs without reranking. Once active it is **fail-open** — any *runtime* provider error (network, rate limit, non-2xx) silently falls back to the normal fused order, so a query never fails because reranking failed. Spec: `dirstral-spec/docs/SPEC.md` §9.1.1.
 
 - Provider: **Cohere** (`POST /v2/rerank`, default model `rerank-v3.5`).
 - **Auto-enable**: just provide the credential — `COHERE_API_KEY=...` (or `rerank.cohere.api_key` in YAML). No enable flag required.

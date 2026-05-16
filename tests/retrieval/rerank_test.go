@@ -152,17 +152,66 @@ func TestRerank_CandidatePoolCapRespected(t *testing.T) {
 	}
 }
 
-func TestRerank_BothModeReranksOnceOnMergedPool(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	for id, vec := range map[uint64][]float32{1: {1, 0}, 2: {0, 1}} {
-		if err := idx.Add(id, vec); err != nil {
-			t.Fatalf("idx.Add: %v", err)
+func TestRerank_FailOpenReturnsFullFusedNotPoolWhenPoolBelowK(t *testing.T) {
+	svc := rerankTestService(t)
+	before := search(t, svc, 3) // 3 fused hits
+	if len(before) != 3 {
+		t.Fatalf("need 3 fused hits, got %d", len(before))
+	}
+	fr := &fakeReranker{err: errors.New("cohere down")}
+	svc.SetReranker(fr, "m", 2) // pool < k
+	svc.SetRerankEnabled(true)
+
+	after := search(t, svc, 3)
+	if len(after) != len(before) {
+		t.Fatalf("fail-open with pool<k must still return full fused k: got %d want %d", len(after), len(before))
+	}
+	for i := range before {
+		if after[i].ChunkID != before[i].ChunkID {
+			t.Fatalf("fail-open must preserve fused order at %d: %d vs %d", i, after[i].ChunkID, before[i].ChunkID)
 		}
 	}
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed":   {1, 0},
-		"codestral-embed": {0, 1},
+}
+
+func TestRerank_SuccessKeepsUnrerankedTailWhenPoolBelowK(t *testing.T) {
+	svc := rerankTestService(t)
+	before := search(t, svc, 3)
+	fr := &fakeReranker{order: []int{1, 0}} // invert the 2 pooled docs
+	svc.SetReranker(fr, "m", 2)             // pool < k=3
+	svc.SetRerankEnabled(true)
+
+	after := search(t, svc, 3)
+	if len(after) != 3 {
+		t.Fatalf("rerank must not drop results when pool<k: got %d want 3", len(after))
+	}
+	fr.mu.Lock()
+	seen := len(fr.lastDocs)
+	fr.mu.Unlock()
+	if seen != 2 {
+		t.Fatalf("pool cap not applied: reranker saw %d docs, want 2", seen)
+	}
+	if after[2].ChunkID != before[2].ChunkID {
+		t.Fatalf("un-reranked tail must be preserved last: got %d want %d", after[2].ChunkID, before[2].ChunkID)
+	}
+}
+
+func TestRerank_BothModeReranksOnceOnMergedPool(t *testing.T) {
+	// Distinct text and code indices so index=both genuinely merges two
+	// non-empty pools; without separate indices the assertion could pass
+	// on a single-index result.
+	textIdx := index.NewHNSWIndex("")
+	if err := textIdx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("textIdx.Add: %v", err)
+	}
+	codeIdx := index.NewHNSWIndex("")
+	if err := codeIdx.Add(2, []float32{0, 1}); err != nil {
+		t.Fatalf("codeIdx.Add: %v", err)
+	}
+	svc := retrieval.NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed":   {1, 0}, // text query -> matches id 1 in textIdx
+		"codestral-embed": {0, 1}, // code query -> matches id 2 in codeIdx
 	}}, nil)
+	svc.SetCodeIndex(codeIdx)
 	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: "alpha"})
 	svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.go", DocType: "code", Snippet: "beta"})
 
@@ -175,5 +224,17 @@ func TestRerank_BothModeReranksOnceOnMergedPool(t *testing.T) {
 	}
 	if fr.calls != 1 {
 		t.Fatalf("index=both must rerank exactly once on the merged pool; calls=%d", fr.calls)
+	}
+	// The single rerank call must see the merged pool: hits from both
+	// the text index (alpha) and the code index (beta).
+	fr.mu.Lock()
+	docs := append([]string(nil), fr.lastDocs...)
+	fr.mu.Unlock()
+	seen := map[string]bool{}
+	for _, d := range docs {
+		seen[d] = true
+	}
+	if !seen["alpha"] || !seen["beta"] {
+		t.Fatalf("reranker must see the merged two-index pool; saw docs=%v", docs)
 	}
 }

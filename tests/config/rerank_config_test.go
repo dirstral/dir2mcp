@@ -47,6 +47,49 @@ func TestRerank_NestedYAMLRoundTrips(t *testing.T) {
 	}
 }
 
+func TestRerank_CohereBaseURLRoundTrips(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, strings.Join([]string{
+		"rerank:",
+		"  cohere:",
+		"    base_url: https://cohere.internal.example",
+		"",
+	}, "\n"))
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if cfg.CohereBaseURL != "https://cohere.internal.example" {
+		t.Fatalf("CohereBaseURL=%q, want https://cohere.internal.example", cfg.CohereBaseURL)
+	}
+
+	// COHERE_BASE_URL env wins; base URL is NOT a secret -> persisted.
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("COHERE_BASE_URL", "https://env.cohere.example")
+		c, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.CohereBaseURL != "https://env.cohere.example" {
+			t.Fatalf("env override failed; got %q", c.CohereBaseURL)
+		}
+		c.StateDir = t.TempDir()
+		snap, err := config.SaveEffectiveSnapshot(c, config.SecretSourceMetadata{})
+		if err != nil {
+			t.Fatalf("SaveEffectiveSnapshot: %v", err)
+		}
+		raw, err := os.ReadFile(snap)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if !strings.Contains(string(raw), "cohere_base_url: https://env.cohere.example") {
+			t.Fatalf("base URL must persist (not a secret):\n%s", raw)
+		}
+	})
+}
+
 func TestRerank_DefaultsWhenUnset(t *testing.T) {
 	cfg := config.Default()
 	if cfg.RerankEnabled != nil {

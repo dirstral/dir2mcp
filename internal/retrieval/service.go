@@ -169,17 +169,18 @@ func (s *Service) SetHybridEnabled(enabled bool) {
 
 // SetReranker wires an optional rerank provider. modelName is the
 // provider model (empty = provider default); pool caps how many fused
-// candidates are re-scored (<=0 uses the default). Mirrors how the
+// candidates are re-scored. pool <= 0 keeps the currently-configured
+// value (default-initialized in NewService) so callers can swap the
+// reranker without resetting an operator-tuned pool. Mirrors how the
 // engine wires SetHybridEnabled from config.
 func (s *Service) SetReranker(r model.Reranker, modelName string, pool int) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.reranker = r
 	s.rerankModel = strings.TrimSpace(modelName)
-	if pool <= 0 {
-		pool = defaultRerankCandidatePool
+	if pool > 0 {
+		s.rerankCandidatePool = pool
 	}
-	s.rerankCandidatePool = pool
 }
 
 // SetRerankEnabled toggles the optional rerank stage. The engine wires
@@ -1180,11 +1181,18 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if pool <= 0 {
 		pool = defaultRerankCandidatePool
 	}
-	if len(hits) > pool {
-		hits = hits[:pool]
+	// fused keeps the full pre-rerank order for fail-open fallback;
+	// cand is the (capped) slice actually sent to the provider. Never
+	// shrink the fallback to the pool: a misconfigured pool < k must
+	// still return up to k results on a rerank failure (and on success
+	// the un-reranked tail is appended below).
+	fused := hits
+	cand := fused
+	if len(cand) > pool {
+		cand = cand[:pool]
 	}
-	docs := make([]string, len(hits))
-	for i, h := range hits {
+	docs := make([]string, len(cand))
+	for i, h := range cand {
 		docs[i] = h.Snippet
 	}
 	results, err := rr.Rerank(ctx, rmodel, query, docs, k)
@@ -1192,15 +1200,15 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		if err != nil {
 			s.logf("rerank: provider error, falling back to fused order: %v", err)
 		}
-		return truncateSearchHits(hits, k)
+		return truncateSearchHits(fused, k)
 	}
-	out := make([]model.SearchHit, 0, len(results))
+	out := make([]model.SearchHit, 0, len(fused))
 	for _, r := range results {
-		if r.Index < 0 || r.Index >= len(hits) {
+		if r.Index < 0 || r.Index >= len(cand) {
 			s.logf("rerank: out-of-range index %d, falling back to fused order", r.Index)
-			return truncateSearchHits(hits, k)
+			return truncateSearchHits(fused, k)
 		}
-		h := hits[r.Index]
+		h := cand[r.Index]
 		h.Score = r.RelevanceScore
 		out = append(out, h)
 	}
@@ -1210,6 +1218,11 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		}
 		return out[i].ChunkID < out[j].ChunkID
 	})
+	// Preserve fused candidates beyond the reranked pool so rerank only
+	// reorders and never returns fewer than k when more were available.
+	if len(fused) > len(cand) {
+		out = append(out, fused[len(cand):]...)
+	}
 	return truncateSearchHits(out, k)
 }
 

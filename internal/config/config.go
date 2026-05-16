@@ -131,9 +131,13 @@ type Config struct {
 	// credential is present; *false = force off even with a credential;
 	// *true = require it, warn+fail-open if no credential). Resolve the
 	// effective decision via rerankEnabledEffective / configureReranker.
-	RerankEnabled         *bool
-	RerankProvider        string
-	CohereAPIKey          string
+	RerankEnabled  *bool
+	RerankProvider string
+	CohereAPIKey   string
+	// CohereBaseURL overrides the Cohere API endpoint (self-hosted /
+	// proxied deployments and tests). Empty = provider default. Not a
+	// secret; persisted like MistralBaseURL.
+	CohereBaseURL         string
 	RerankModel           string
 	RerankCandidatePool   int
 	ChunkingStrategy      string
@@ -206,6 +210,7 @@ type fileConfig struct {
 	RerankEnabled             *bool
 	RerankProvider            *string
 	CohereAPIKey              *string
+	CohereBaseURL             *string
 	RerankModel               *string
 	RerankCandidatePool       *int
 	ChunkingStrategy          *string
@@ -281,6 +286,7 @@ type persistedConfig struct {
 	RetrievalHybridEnabled    bool     `yaml:"retrieval_hybrid_enabled"`
 	RerankEnabled             bool     `yaml:"rerank_enabled"`
 	RerankProvider            string   `yaml:"rerank_provider"`
+	CohereBaseURL             string   `yaml:"cohere_base_url"`
 	RerankModel               string   `yaml:"rerank_model"`
 	RerankCandidatePool       int      `yaml:"rerank_candidate_pool"`
 	ChunkingStrategy          string   `yaml:"chunking_strategy"`
@@ -381,6 +387,7 @@ func Default() Config {
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
 		CohereAPIKey:              "",
+		CohereBaseURL:             "",
 		RerankModel:               "rerank-v3.5",
 		RerankCandidatePool:       50,
 		ChunkingStrategy:          "",
@@ -464,6 +471,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalHybridEnabled:    cfg.RetrievalHybridEnabled,
 		RerankEnabled:             rerankEnabledEffective(cfg),
 		RerankProvider:            cfg.RerankProvider,
+		CohereBaseURL:             cfg.CohereBaseURL,
 		RerankModel:               cfg.RerankModel,
 		RerankCandidatePool:       cfg.RerankCandidatePool,
 		ChunkingStrategy:          cfg.ChunkingStrategy,
@@ -818,8 +826,8 @@ func rerankEnabledEffective(cfg *Config) bool {
 }
 
 // applyRerankFileParsed copies parsed rerank.* file values onto cfg.
-// Split out of applyModelClientsFileParsed to keep that function under
-// the gocyclo budget.
+// Split out of applyModelFileParsed (its only caller) to keep that
+// function under the gocyclo budget.
 func applyRerankFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RerankEnabled != nil {
 		cfg.RerankEnabled = boolPtr(*fc.RerankEnabled)
@@ -829,6 +837,9 @@ func applyRerankFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.CohereAPIKey != nil {
 		cfg.CohereAPIKey = *fc.CohereAPIKey
+	}
+	if fc.CohereBaseURL != nil {
+		cfg.CohereBaseURL = *fc.CohereBaseURL
 	}
 	if fc.RerankModel != nil {
 		cfg.RerankModel = *fc.RerankModel
@@ -1179,6 +1190,7 @@ var configKeyAliases = map[string]string{
 	"hybrid_enabled":                       "retrieval.hybrid.enabled",
 	"rerank_enabled":                       "rerank.enabled",
 	"rerank.cohere.api_key":                "cohere_api_key",
+	"rerank.cohere.base_url":               "cohere_base_url",
 	"rerank.cohere.model":                  "rerank_model",
 	"rerank.provider":                      "rerank_provider",
 	"rerank.model":                         "rerank_model",
@@ -1377,7 +1389,29 @@ func setServerStringFileScalar(cfg *fileConfig, key, value string) {
 	}
 }
 
+// setRerankStringFileScalar handles rerank.* string scalars. Split out
+// of setModelStringFileScalar to keep that function under the gocyclo
+// budget. Reports whether key was a rerank scalar.
+func setRerankStringFileScalar(cfg *fileConfig, key, value string) bool {
+	switch key {
+	case "rerank_provider":
+		cfg.RerankProvider = strPtr(value)
+	case "cohere_api_key":
+		cfg.CohereAPIKey = strPtr(value)
+	case "cohere_base_url":
+		cfg.CohereBaseURL = strPtr(value)
+	case "rerank_model":
+		cfg.RerankModel = strPtr(value)
+	default:
+		return false
+	}
+	return true
+}
+
 func setModelStringFileScalar(cfg *fileConfig, key, value string) {
+	if setRerankStringFileScalar(cfg, key, value) {
+		return
+	}
 	switch key {
 	case "mistral_base_url":
 		cfg.MistralBaseURL = strPtr(value)
@@ -1387,12 +1421,6 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.ElevenLabsBaseURL = strPtr(value)
 	case "elevenlabs_api_key":
 		cfg.ElevenLabsAPIKey = strPtr(value)
-	case "rerank_provider":
-		cfg.RerankProvider = strPtr(value)
-	case "cohere_api_key":
-		cfg.CohereAPIKey = strPtr(value)
-	case "rerank_model":
-		cfg.RerankModel = strPtr(value)
 	case "elevenlabs_tts_voice_id":
 		cfg.ElevenLabsTTSVoiceID = strPtr(value)
 	case "embed_model_text":
@@ -1553,6 +1581,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("retrieval_hybrid_enabled", cfg.RetrievalHybridEnabled)
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
+	writeScalar("cohere_base_url", cfg.CohereBaseURL)
 	writeScalar("rerank_model", cfg.RerankModel)
 	writeInt("rerank_candidate_pool", cfg.RerankCandidatePool)
 	writeScalar("chunking_strategy", cfg.ChunkingStrategy)
@@ -1631,6 +1660,9 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 func applyRerankEnvOverrides(cfg *Config, env map[string]string) {
 	if v, ok := envLookup("COHERE_API_KEY", env); ok && strings.TrimSpace(v) != "" {
 		cfg.CohereAPIKey = v
+	}
+	if v, ok := envLookup("COHERE_BASE_URL", env); ok && strings.TrimSpace(v) != "" {
+		cfg.CohereBaseURL = strings.TrimSpace(v)
 	}
 	if v, ok := envLookup("DIR2MCP_RERANK_ENABLED", env); ok && strings.TrimSpace(v) != "" {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
