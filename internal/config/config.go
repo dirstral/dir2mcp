@@ -122,9 +122,16 @@ type Config struct {
 	// table on first start.
 	RetrievalHybridEnabled bool
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
-	// 9.1.1). Off by default. CohereAPIKey is a secret: env-sourced,
-	// never persisted to the config snapshot (mirrors MistralAPIKey).
-	RerankEnabled         bool
+	// 9.1.1). Reranking auto-activates when a provider credential is
+	// present (mirrors how MistralAPIKey gates embedding/OCR).
+	// CohereAPIKey is a secret: env-sourced, never persisted to the
+	// config snapshot (mirrors MistralAPIKey).
+	//
+	// RerankEnabled is a tri-state override (nil = auto: on iff a
+	// credential is present; *false = force off even with a credential;
+	// *true = require it, warn+fail-open if no credential). Resolve the
+	// effective decision via rerankEnabledEffective / configureReranker.
+	RerankEnabled         *bool
 	RerankProvider        string
 	CohereAPIKey          string
 	RerankModel           string
@@ -361,16 +368,17 @@ func Default() Config {
 			"http://127.0.0.1",
 		},
 		// default embedding models
-		EmbedModelText:            "mistral-embed",
-		EmbedModelCode:            "codestral-embed",
-		ChatModel:                 mistral.DefaultChatModel,
-		RAGSystemPrompt:           "",
-		RAGGenerateAnswer:         true,
-		RAGKDefault:               10,
-		RAGMaxContextChars:        20000,
-		RAGOversampleFactor:       5,
-		RetrievalHybridEnabled:    true,
-		RerankEnabled:             false,
+		EmbedModelText:         "mistral-embed",
+		EmbedModelCode:         "codestral-embed",
+		ChatModel:              mistral.DefaultChatModel,
+		RAGSystemPrompt:        "",
+		RAGGenerateAnswer:      true,
+		RAGKDefault:            10,
+		RAGMaxContextChars:     20000,
+		RAGOversampleFactor:    5,
+		RetrievalHybridEnabled: true,
+		// RerankEnabled left nil: auto mode (activates iff a rerank
+		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
 		CohereAPIKey:              "",
 		RerankModel:               "rerank-v3.5",
@@ -454,7 +462,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RAGMaxContextChars:        cfg.RAGMaxContextChars,
 		RAGOversampleFactor:       cfg.RAGOversampleFactor,
 		RetrievalHybridEnabled:    cfg.RetrievalHybridEnabled,
-		RerankEnabled:             cfg.RerankEnabled,
+		RerankEnabled:             rerankEnabledEffective(cfg),
 		RerankProvider:            cfg.RerankProvider,
 		RerankModel:               cfg.RerankModel,
 		RerankCandidatePool:       cfg.RerankCandidatePool,
@@ -796,12 +804,25 @@ func applyModelFileParsed(cfg *Config, fc fileConfig) {
 	applyModelRAGFileParsed(cfg, fc)
 }
 
+// rerankEnabledEffective resolves the tri-state RerankEnabled override
+// into the effective on/off decision used for the persisted snapshot:
+// an explicit value wins; when unset (nil), reranking is on iff a
+// rerank provider credential is present. Runtime activation in
+// configureReranker applies the same rule plus provider validation and
+// the explicit-true-but-no-credential warning.
+func rerankEnabledEffective(cfg *Config) bool {
+	if cfg.RerankEnabled != nil {
+		return *cfg.RerankEnabled
+	}
+	return strings.TrimSpace(cfg.CohereAPIKey) != ""
+}
+
 // applyRerankFileParsed copies parsed rerank.* file values onto cfg.
 // Split out of applyModelClientsFileParsed to keep that function under
 // the gocyclo budget.
 func applyRerankFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RerankEnabled != nil {
-		cfg.RerankEnabled = *fc.RerankEnabled
+		cfg.RerankEnabled = boolPtr(*fc.RerankEnabled)
 	}
 	if fc.RerankProvider != nil {
 		cfg.RerankProvider = *fc.RerankProvider
@@ -1613,7 +1634,7 @@ func applyRerankEnvOverrides(cfg *Config, env map[string]string) {
 	}
 	if v, ok := envLookup("DIR2MCP_RERANK_ENABLED", env); ok && strings.TrimSpace(v) != "" {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
-			cfg.RerankEnabled = b
+			cfg.RerankEnabled = boolPtr(b)
 		}
 	}
 	if v, ok := envLookup("DIR2MCP_RERANK_MODEL", env); ok && strings.TrimSpace(v) != "" {

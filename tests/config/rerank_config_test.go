@@ -10,6 +10,8 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
+func rerankBoolPtr(b bool) *bool { return &b }
+
 func TestRerank_NestedYAMLRoundTrips(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".dir2mcp.yaml")
@@ -28,8 +30,8 @@ func TestRerank_NestedYAMLRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	if !cfg.RerankEnabled {
-		t.Fatalf("RerankEnabled=false, want true")
+	if cfg.RerankEnabled == nil || !*cfg.RerankEnabled {
+		t.Fatalf("RerankEnabled=%v, want explicit true", cfg.RerankEnabled)
 	}
 	if cfg.RerankProvider != "cohere" {
 		t.Fatalf("RerankProvider=%q, want cohere", cfg.RerankProvider)
@@ -47,8 +49,8 @@ func TestRerank_NestedYAMLRoundTrips(t *testing.T) {
 
 func TestRerank_DefaultsWhenUnset(t *testing.T) {
 	cfg := config.Default()
-	if cfg.RerankEnabled {
-		t.Fatal("rerank must be disabled by default")
+	if cfg.RerankEnabled != nil {
+		t.Fatalf("rerank.enabled must be unset (auto) by default, got %v", *cfg.RerankEnabled)
 	}
 	if cfg.RerankProvider != "cohere" {
 		t.Fatalf("default provider=%q, want cohere", cfg.RerankProvider)
@@ -77,8 +79,8 @@ func TestRerank_EnvOverrides(t *testing.T) {
 		if cfg.CohereAPIKey != "env-cohere-secret" {
 			t.Fatalf("env must win for key; got %q", cfg.CohereAPIKey)
 		}
-		if !cfg.RerankEnabled {
-			t.Fatal("DIR2MCP_RERANK_ENABLED=true must enable")
+		if cfg.RerankEnabled == nil || !*cfg.RerankEnabled {
+			t.Fatalf("DIR2MCP_RERANK_ENABLED=true must set explicit true, got %v", cfg.RerankEnabled)
 		}
 		if cfg.RerankModel != "rerank-english-v3.0" {
 			t.Fatalf("DIR2MCP_RERANK_MODEL override failed; got %q", cfg.RerankModel)
@@ -90,7 +92,7 @@ func TestRerank_CohereKeyNeverPersisted(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := config.Default()
 	cfg.StateDir = stateDir
-	cfg.RerankEnabled = true
+	cfg.RerankEnabled = rerankBoolPtr(true)
 	cfg.CohereAPIKey = "cohere-plaintext-secret"
 
 	path, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{
@@ -124,5 +126,42 @@ func TestRerank_CohereKeyNeverPersisted(t *testing.T) {
 	}
 	if sources.CohereAPIKey != "env" {
 		t.Fatalf("secret source metadata not round-tripped; got %q", sources.CohereAPIKey)
+	}
+}
+
+// TestRerank_EffectiveResolution pins the tri-state -> effective rule
+// used for the persisted snapshot: explicit value wins; when unset
+// (auto), reranking is on iff a credential is present.
+func TestRerank_EffectiveResolution(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled *bool
+		key     string
+		want    string
+	}{
+		{"auto+credential -> on", nil, "cohere-secret", "rerank_enabled: true"},
+		{"auto+no-credential -> off", nil, "", "rerank_enabled: false"},
+		{"explicit false beats credential", rerankBoolPtr(false), "cohere-secret", "rerank_enabled: false"},
+		{"explicit true without credential", rerankBoolPtr(true), "", "rerank_enabled: true"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.StateDir = t.TempDir()
+			cfg.RerankEnabled = tc.enabled
+			cfg.CohereAPIKey = tc.key
+
+			path, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{})
+			if err != nil {
+				t.Fatalf("SaveEffectiveSnapshot: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if !strings.Contains(string(raw), tc.want) {
+				t.Fatalf("want %q in snapshot, got:\n%s", tc.want, raw)
+			}
+		})
 	}
 }
