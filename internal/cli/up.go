@@ -67,6 +67,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
+	a.configureReranker(ret, cfg)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that

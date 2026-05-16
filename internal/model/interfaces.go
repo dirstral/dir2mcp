@@ -73,6 +73,22 @@ type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)
 }
 
+// Reranked is one rescored candidate: Index is the position in the
+// documents slice passed to Rerank; RelevanceScore is the provider's
+// relevance (higher = better). Results are returned best-first.
+type Reranked struct {
+	Index          int
+	RelevanceScore float64
+}
+
+// Reranker re-scores documents against a query (e.g. a cross-encoder
+// rerank API). Retrieval is fail-open: callers treat any error as
+// "skip rerank, keep the pre-rerank order". An empty documents slice
+// yields (nil, nil) with no provider call.
+type Reranker interface {
+	Rerank(ctx context.Context, model, query string, documents []string, topN int) ([]Reranked, error)
+}
+
 // RepresentationStore defines the subset of store operations used by the
 // ingest package for handling representations and their chunks.  It is
 // defined here in the model package to avoid cyclic dependencies between the

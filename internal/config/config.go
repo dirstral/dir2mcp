@@ -23,6 +23,7 @@ const EffectiveConfigSnapshotFile = ".dir2mcp.yaml.snapshot"
 type SecretSourceMetadata struct {
 	MistralAPIKey        string
 	ElevenLabsAPIKey     string
+	CohereAPIKey         string
 	X402FacilitatorToken string
 	AuthToken            string
 }
@@ -120,9 +121,17 @@ type Config struct {
 	// is true for new deployments; existing indexes auto-backfill the FTS
 	// table on first start.
 	RetrievalHybridEnabled bool
-	ChunkingStrategy       string
-	ChunkingMaxTokens      int
-	ChunkingOverlapTokens  int
+	// Rerank* configure the optional post-fusion rerank stage (SPEC
+	// 9.1.1). Off by default. CohereAPIKey is a secret: env-sourced,
+	// never persisted to the config snapshot (mirrors MistralAPIKey).
+	RerankEnabled         bool
+	RerankProvider        string
+	CohereAPIKey          string
+	RerankModel           string
+	RerankCandidatePool   int
+	ChunkingStrategy      string
+	ChunkingMaxTokens     int
+	ChunkingOverlapTokens int
 
 	IngestGitignore      bool
 	IngestFollowSymlinks bool
@@ -187,6 +196,11 @@ type fileConfig struct {
 	RAGMaxContextChars        *int
 	RAGOversampleFactor       *int
 	RetrievalHybridEnabled    *bool
+	RerankEnabled             *bool
+	RerankProvider            *string
+	CohereAPIKey              *string
+	RerankModel               *string
+	RerankCandidatePool       *int
 	ChunkingStrategy          *string
 	ChunkingMaxTokens         *int
 	ChunkingOverlapTokens     *int
@@ -258,6 +272,10 @@ type persistedConfig struct {
 	RAGMaxContextChars        int      `yaml:"rag_max_context_chars"`
 	RAGOversampleFactor       int      `yaml:"rag_oversample_factor"`
 	RetrievalHybridEnabled    bool     `yaml:"retrieval_hybrid_enabled"`
+	RerankEnabled             bool     `yaml:"rerank_enabled"`
+	RerankProvider            string   `yaml:"rerank_provider"`
+	RerankModel               string   `yaml:"rerank_model"`
+	RerankCandidatePool       int      `yaml:"rerank_candidate_pool"`
 	ChunkingStrategy          string   `yaml:"chunking_strategy"`
 	ChunkingMaxTokens         int      `yaml:"chunking_max_tokens"`
 	ChunkingOverlapTokens     int      `yaml:"chunking_overlap_tokens"`
@@ -352,6 +370,11 @@ func Default() Config {
 		RAGMaxContextChars:        20000,
 		RAGOversampleFactor:       5,
 		RetrievalHybridEnabled:    true,
+		RerankEnabled:             false,
+		RerankProvider:            "cohere",
+		CohereAPIKey:              "",
+		RerankModel:               "rerank-v3.5",
+		RerankCandidatePool:       50,
 		ChunkingStrategy:          "",
 		ChunkingMaxTokens:         0,
 		ChunkingOverlapTokens:     0,
@@ -431,6 +454,10 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RAGMaxContextChars:        cfg.RAGMaxContextChars,
 		RAGOversampleFactor:       cfg.RAGOversampleFactor,
 		RetrievalHybridEnabled:    cfg.RetrievalHybridEnabled,
+		RerankEnabled:             cfg.RerankEnabled,
+		RerankProvider:            cfg.RerankProvider,
+		RerankModel:               cfg.RerankModel,
+		RerankCandidatePool:       cfg.RerankCandidatePool,
 		ChunkingStrategy:          cfg.ChunkingStrategy,
 		ChunkingMaxTokens:         cfg.ChunkingMaxTokens,
 		ChunkingOverlapTokens:     cfg.ChunkingOverlapTokens,
@@ -560,6 +587,7 @@ func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata
 	}{
 		{key: "mistral_api_key", value: strings.TrimSpace(sources.MistralAPIKey)},
 		{key: "elevenlabs_api_key", value: strings.TrimSpace(sources.ElevenLabsAPIKey)},
+		{key: "cohere_api_key", value: strings.TrimSpace(sources.CohereAPIKey)},
 		{key: "x402_facilitator_token", value: strings.TrimSpace(sources.X402FacilitatorToken)},
 		{key: "auth_token", value: strings.TrimSpace(sources.AuthToken)},
 	}
@@ -622,6 +650,8 @@ func applySecretSourceField(meta *SecretSourceMetadata, key, value string) {
 		meta.MistralAPIKey = value
 	case "secret_sources.elevenlabs_api_key":
 		meta.ElevenLabsAPIKey = value
+	case "secret_sources.cohere_api_key":
+		meta.CohereAPIKey = value
 	case "secret_sources.x402_facilitator_token":
 		meta.X402FacilitatorToken = value
 	case "secret_sources.auth_token":
@@ -762,7 +792,29 @@ func applyServerNetworkFileParsed(cfg *Config, fc fileConfig) {
 
 func applyModelFileParsed(cfg *Config, fc fileConfig) {
 	applyModelClientsFileParsed(cfg, fc)
+	applyRerankFileParsed(cfg, fc)
 	applyModelRAGFileParsed(cfg, fc)
+}
+
+// applyRerankFileParsed copies parsed rerank.* file values onto cfg.
+// Split out of applyModelClientsFileParsed to keep that function under
+// the gocyclo budget.
+func applyRerankFileParsed(cfg *Config, fc fileConfig) {
+	if fc.RerankEnabled != nil {
+		cfg.RerankEnabled = *fc.RerankEnabled
+	}
+	if fc.RerankProvider != nil {
+		cfg.RerankProvider = *fc.RerankProvider
+	}
+	if fc.CohereAPIKey != nil {
+		cfg.CohereAPIKey = *fc.CohereAPIKey
+	}
+	if fc.RerankModel != nil {
+		cfg.RerankModel = *fc.RerankModel
+	}
+	if fc.RerankCandidatePool != nil {
+		cfg.RerankCandidatePool = *fc.RerankCandidatePool
+	}
 }
 
 func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
@@ -1104,6 +1156,12 @@ var configKeyAliases = map[string]string{
 	"oversample_factor":                    "rag.oversample_factor",
 	"retrieval_hybrid_enabled":             "retrieval.hybrid.enabled",
 	"hybrid_enabled":                       "retrieval.hybrid.enabled",
+	"rerank_enabled":                       "rerank.enabled",
+	"rerank.cohere.api_key":                "cohere_api_key",
+	"rerank.cohere.model":                  "rerank_model",
+	"rerank.provider":                      "rerank_provider",
+	"rerank.model":                         "rerank_model",
+	"rerank_candidate_pool":                "rerank.candidate_pool",
 	"chunking_strategy":                    "chunking.strategy",
 	"chunking_max_tokens":                  "chunking.max_tokens",
 	"chunking_overlap_tokens":              "chunking.overlap_tokens",
@@ -1158,7 +1216,7 @@ func canonicalizeConfigKey(key string) string {
 
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
 		return true
@@ -1198,6 +1256,8 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.X402ToolsCallEnabled
 	case "retrieval.hybrid.enabled":
 		target = &cfg.RetrievalHybridEnabled
+	case "rerank.enabled":
+		target = &cfg.RerankEnabled
 	default:
 		return nil
 	}
@@ -1230,6 +1290,8 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.IngestMaxFileMB
 	case "mistral_max_ocr_payload_bytes":
 		target = &cfg.MistralMaxOCRPayloadBytes
+	case "rerank.candidate_pool":
+		target = &cfg.RerankCandidatePool
 	default:
 		return nil
 	}
@@ -1304,6 +1366,12 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.ElevenLabsBaseURL = strPtr(value)
 	case "elevenlabs_api_key":
 		cfg.ElevenLabsAPIKey = strPtr(value)
+	case "rerank_provider":
+		cfg.RerankProvider = strPtr(value)
+	case "cohere_api_key":
+		cfg.CohereAPIKey = strPtr(value)
+	case "rerank_model":
+		cfg.RerankModel = strPtr(value)
 	case "elevenlabs_tts_voice_id":
 		cfg.ElevenLabsTTSVoiceID = strPtr(value)
 	case "embed_model_text":
@@ -1462,6 +1530,10 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("rag_max_context_chars", cfg.RAGMaxContextChars)
 	writeInt("rag_oversample_factor", cfg.RAGOversampleFactor)
 	writeBool("retrieval_hybrid_enabled", cfg.RetrievalHybridEnabled)
+	writeBool("rerank_enabled", cfg.RerankEnabled)
+	writeScalar("rerank_provider", cfg.RerankProvider)
+	writeScalar("rerank_model", cfg.RerankModel)
+	writeInt("rerank_candidate_pool", cfg.RerankCandidatePool)
 	writeScalar("chunking_strategy", cfg.ChunkingStrategy)
 	writeInt("chunking_max_tokens", cfg.ChunkingMaxTokens)
 	writeInt("chunking_overlap_tokens", cfg.ChunkingOverlapTokens)
@@ -1525,9 +1597,28 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	applyMistralEnvOverrides(cfg, overrideEnv)
 	applyElevenLabsEnvOverrides(cfg, overrideEnv)
+	applyRerankEnvOverrides(cfg, overrideEnv)
 	applyNetworkEnvOverrides(cfg, overrideEnv)
 	applySessionEnvOverrides(cfg, overrideEnv)
 	applyX402EnvOverrides(cfg, overrideEnv)
+}
+
+// applyRerankEnvOverrides sources the Cohere key (secret) and
+// optional rerank toggles from the environment. COHERE_API_KEY
+// follows the same env-wins-if-nonempty rule as MISTRAL_API_KEY and
+// is never persisted.
+func applyRerankEnvOverrides(cfg *Config, env map[string]string) {
+	if v, ok := envLookup("COHERE_API_KEY", env); ok && strings.TrimSpace(v) != "" {
+		cfg.CohereAPIKey = v
+	}
+	if v, ok := envLookup("DIR2MCP_RERANK_ENABLED", env); ok && strings.TrimSpace(v) != "" {
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			cfg.RerankEnabled = b
+		}
+	}
+	if v, ok := envLookup("DIR2MCP_RERANK_MODEL", env); ok && strings.TrimSpace(v) != "" {
+		cfg.RerankModel = strings.TrimSpace(v)
+	}
 }
 
 func applyMistralEnvOverrides(cfg *Config, env map[string]string) {

@@ -213,6 +213,9 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_HEALTH_CHECK_INTERVAL` | No | Connector health poll interval (default: `5s`) |
 | `DIR2MCP_ALLOWED_ORIGINS` | No | Comma-separated additional browser origins |
 | `DIR2MCP_X402_FACILITATOR_TOKEN` | No | x402 facilitator bearer token |
+| `COHERE_API_KEY` | Conditional | Required only when reranking is enabled (`rerank.enabled: true`, provider `cohere`); secret, never persisted to the config snapshot |
+| `DIR2MCP_RERANK_ENABLED` | No | Enable the optional post-fusion rerank stage (`true`/`false`) |
+| `DIR2MCP_RERANK_MODEL` | No | Cohere rerank model override (default: `rerank-v3.5`) |
 | `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
 | `ELEVENLABS_BASE_URL` | No | ElevenLabs base URL (default: `https://api.elevenlabs.io`) |
 
@@ -238,6 +241,26 @@ Each `dir2mcp up` instance reports a unique MCP server name derived from the ind
 - Developer builds (binaries built locally without a release tag — `dir2mcp version` reports `v0.0.0-dev` or `vdev-<sha>`, optionally with `+dirty`) use a `dir2mcp-dev-<slug>-<6-hex>` prefix instead, so a dev build run from your repo shows up as a distinct entry alongside the brew-installed release in `claude mcp list`.
 - Override via YAML (`server.name: my-alias`) or env (`DIR2MCP_SERVER_NAME=my-alias`). Overrides apply verbatim and bypass the default generated name, including the `dir2mcp-dev-...` prefix used by dev builds.
 - The `dir2mcp up` banner prints a ready-to-paste `claude mcp add --transport http <name> <url> ...` line using this name; the client-side alias you register with is yours to choose.
+
+### Reranking (optional)
+
+An optional post-fusion **reranking** stage can re-score retrieval candidates with a cross-encoder for higher answer quality. It is **off by default** and **fail-open** — any provider error (missing key, network, rate limit) silently falls back to the normal fused order, so a query never fails because reranking failed. Spec: `dirstral-spec/docs/SPEC.md` §9.1.1.
+
+- Provider: **Cohere** (`POST /v2/rerank`, default model `rerank-v3.5`).
+- Enable via YAML:
+
+  ```yaml
+  rerank:
+    enabled: true
+    provider: cohere
+    candidate_pool: 50      # fused candidates re-scored before truncation to k
+    cohere:
+      api_key: ${COHERE_API_KEY}
+      model: rerank-v3.5
+  ```
+
+- Or via env: `DIR2MCP_RERANK_ENABLED=true` + `COHERE_API_KEY=...` (env wins over YAML for the key; the key is a secret and is never written to the config snapshot).
+- For `index=both`, reranking is applied once to the merged candidate pool. Ordering is deterministic (relevance desc, then `chunk_id`).
 
 ### Auth token behavior
 
