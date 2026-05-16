@@ -122,7 +122,9 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
-func (c *Client) Embed(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
+// Embed implements model.Embedder. Mistral embeddings are symmetric, so
+// the input role is accepted and intentionally ignored (SPEC 8.1.5).
+func (c *Client) Embed(ctx context.Context, modelName string, _ model.EmbedRole, inputs []string) ([][]float32, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return nil, &model.ProviderError{
 			Code:      "MISTRAL_AUTH",

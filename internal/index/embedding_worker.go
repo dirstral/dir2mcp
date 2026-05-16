@@ -163,7 +163,7 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		return 0, err
 	}
 
-	vectors, err := w.Embedder.Embed(ctx, modelName, inputs)
+	vectors, err := w.Embedder.Embed(ctx, modelName, model.EmbedDocument, inputs)
 	if err != nil {
 		// distinguish between transient errors (which we want to retry later)
 		// and permanent failures for which the chunks should be marked as

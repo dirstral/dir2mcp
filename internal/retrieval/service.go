@@ -1107,7 +1107,7 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 		// error rather than letting the nil dereference panic later.
 		return nil, ErrMissingEmbedder
 	}
-	vectors, err := s.embedder.Embed(ctx, modelName, []string{query})
+	vectors, err := s.embedder.Embed(ctx, modelName, model.EmbedQuery, []string{query})
 	if err != nil {
 		return nil, err
 	}

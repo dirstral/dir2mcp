@@ -46,14 +46,14 @@ func (f *fakeRetrievalIndex) Save(path string) error { return nil }
 func (f *fakeRetrievalIndex) Load(path string) error { return nil }
 func (f *fakeRetrievalIndex) Close() error           { return nil }
 
-func (e *fakeRetrievalEmbedder) Embed(_ context.Context, model string, texts []string) ([][]float32, error) {
+func (e *fakeRetrievalEmbedder) Embed(_ context.Context, modelName string, _ model.EmbedRole, texts []string) ([][]float32, error) {
 	// return one embedding per input text, matching the real embedder behaviour
 	n := len(texts)
 	if n == 0 {
 		return [][]float32{}, nil
 	}
 	var vec []float32
-	if v, ok := e.vectorsByModel[model]; ok {
+	if v, ok := e.vectorsByModel[modelName]; ok {
 		vec = v
 	} else {
 		vec = []float32{1, 0}
