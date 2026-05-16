@@ -37,7 +37,12 @@ func embedResp(inputs []string) map[string]any {
 func TestEmbed_BatchesPreservesOrderAndRetries(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/embeddings" { // base URL carries the version path
+		// The adapter appends "/embeddings" to the configured BaseURL;
+		// any version segment (e.g. /v1) is part of the operator's
+		// BaseURL, not added here. This test's base has none, so the
+		// path is exactly "/embeddings" (versioned base covered by
+		// TestEndpointPathJoinPreservesVersion).
+		if r.URL.Path != "/embeddings" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
@@ -75,6 +80,28 @@ func TestEmbed_BatchesPreservesOrderAndRetries(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 3 { // 1 retry (429) + 2 batches
 		t.Fatalf("calls = %d, want 3", n)
+	}
+}
+
+// TestEndpointPathJoinPreservesVersion verifies the adapter appends the
+// endpoint to a BaseURL that already carries a version segment, so an
+// operator-configured ".../v1" yields ".../v1/embeddings".
+func TestEndpointPathJoinPreservesVersion(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"index": 0, "embedding": []float64{1}}},
+		})
+	}))
+	defer srv.Close()
+
+	c := openai.NewClient(srv.URL+"/v1", "test-key")
+	if _, err := c.Embed(context.Background(), "m", model.EmbedDocument, []string{"x"}); err != nil {
+		t.Fatalf("embed: %v", err)
+	}
+	if gotPath != "/v1/embeddings" {
+		t.Fatalf("path = %q, want /v1/embeddings", gotPath)
 	}
 }
 
@@ -139,6 +166,34 @@ func TestGenerate_HappyPathAndStructuredContent(t *testing.T) {
 	}
 	if out != "hello world" {
 		t.Fatalf("content = %q, want %q", out, "hello world")
+	}
+}
+
+// TestGenerate_UsesGenerationTimeoutNotDefault locks the fix for the
+// PR #191 review: NewClient always sets HTTPClient (30s), so the
+// per-call GenerationTimeout must still be applied. With a 50ms
+// GenerationTimeout and a 300ms-slow server, Generate must fail fast
+// (~50ms) rather than hang toward the 30s default.
+func TestGenerate_UsesGenerationTimeoutNotDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "late"}}},
+		})
+	}))
+	defer srv.Close()
+
+	c := openai.NewClient(srv.URL, "test-key") // default HTTPClient: 30s
+	c.MaxRetries = 0
+	c.GenerationTimeout = 50 * time.Millisecond
+
+	start := time.Now()
+	_, err := c.Generate(context.Background(), "hi")
+	if err == nil {
+		t.Fatal("want timeout error, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Generate did not honor GenerationTimeout (took %s)", elapsed)
 	}
 }
 

@@ -342,15 +342,26 @@ func (c *Client) doJSON(ctx context.Context, path string, body []byte, timeout t
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: timeout}
-	}
-	resp, err := client.Do(req)
+	resp, err := clientWithTimeout(c.HTTPClient, timeout).Do(req)
 	if err != nil {
 		return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: "request failed", Retryable: true, Cause: err}
 	}
 	return resp, nil
+}
+
+// clientWithTimeout returns an *http.Client that uses the per-call
+// timeout. The default client built by NewClient carries the short
+// (30s) request timeout, so chat completions — which use the longer
+// GenerationTimeout — must override it even when HTTPClient is set
+// (mirrors internal/mistral). The base client's Transport is shared via
+// a shallow copy so connection pooling is preserved.
+func clientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
+	if base == nil {
+		return &http.Client{Timeout: timeout}
+	}
+	cp := *base
+	cp.Timeout = timeout
+	return &cp
 }
 
 func httpError(resp *http.Response) error {
