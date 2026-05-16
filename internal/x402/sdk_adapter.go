@@ -17,9 +17,9 @@ import (
 
 const defaultHTTPTimeout = 10 * time.Second
 
-// NewFacilitatorClient constructs the Coinbase x402 SDK-backed facilitator
-// client. The httpClient argument is forwarded to the SDK client; pass nil to
-// use the package default timeout.
+// NewFacilitatorClient constructs the x402 SDK-backed facilitator client
+// (github.com/x402-foundation/x402/go). The httpClient argument is forwarded
+// to the SDK client; pass nil to use the package default timeout.
 func NewFacilitatorClient(baseURL, bearerToken string, httpClient *http.Client) FacilitatorClient {
 	return newSDKFacilitatorClient(baseURL, bearerToken, httpClient)
 }
