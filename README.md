@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml"><img src="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml/badge.svg" alt="CI"></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.22+-00ADD8?logo=go" alt="Go 1.22+"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25+-00ADD8?logo=go" alt="Go 1.25+"></a>
   <a href="https://goreportcard.com/report/github.com/Dirstral/dir2mcp"><img src="https://goreportcard.com/badge/github.com/Dirstral/dir2mcp" alt="Go Report Card"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
@@ -70,7 +70,7 @@ Pick the row that matches how you run `dir2mcp`:
 
 ## Quickstart
 
-**Build prerequisites (source build only):** Go 1.22+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
+**Build prerequisites (source build only):** Go 1.25+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
 
 ```bash
 git clone https://github.com/Dirstral/dir2mcp
