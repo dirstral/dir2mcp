@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 func TestEmbed_Integration_MistralAPI(t *testing.T) {
@@ -34,7 +35,7 @@ func TestEmbed_Integration_MistralAPI(t *testing.T) {
 		"dir2mcp integration test sentence two",
 	}
 
-	vectors, err := client.Embed(ctx, "mistral-embed", inputs)
+	vectors, err := client.Embed(ctx, "mistral-embed", model.EmbedDocument, inputs)
 	if err != nil {
 		t.Fatalf("Embed returned error: %v", err)
 	}

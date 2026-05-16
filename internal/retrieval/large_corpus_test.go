@@ -13,7 +13,7 @@ type uniformEmbedder struct {
 	vec []float32
 }
 
-func (u *uniformEmbedder) Embed(_ context.Context, _ string, texts []string) ([][]float32, error) {
+func (u *uniformEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i := range texts {
 		vec := make([]float32, len(u.vec))

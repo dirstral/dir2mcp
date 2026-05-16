@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -64,7 +65,7 @@ func TestEmbed_BatchesRequestsAndPreservesOrder(t *testing.T) {
 	client.InitialBackoff = 1 * time.Millisecond
 	client.MaxBackoff = 1 * time.Millisecond
 
-	vectors, err := client.Embed(context.Background(), "mistral-embed", []string{"a", "b", "c"})
+	vectors, err := client.Embed(context.Background(), "mistral-embed", model.EmbedDocument, []string{"a", "b", "c"})
 	if err != nil {
 		t.Fatalf("embed failed: %v", err)
 	}
@@ -78,6 +79,39 @@ func TestEmbed_BatchesRequestsAndPreservesOrder(t *testing.T) {
 
 	if vectors[0][0] != 1.0 || vectors[1][0] != 2.0 || vectors[2][0] != 3.0 {
 		t.Fatalf("unexpected vector ordering: %#v", vectors)
+	}
+}
+
+// TestEmbed_SymmetricProviderIgnoresRole pins SPEC 8.1.5: Mistral is a
+// symmetric embedder, so the request it sends MUST be identical for
+// EmbedDocument and EmbedQuery (the role is accepted and ignored).
+func TestEmbed_SymmetricProviderIgnoresRole(t *testing.T) {
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Compare the RAW request bytes (not a struct round-trip, which
+		// would silently drop a role-specific field like input_type).
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		bodies = append(bodies, string(raw))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"index": 0, "embedding": []float64{1, 2}}},
+		})
+	}))
+	defer server.Close()
+
+	client := mistral.NewClient(server.URL, "test-key")
+	for _, role := range []model.EmbedRole{model.EmbedDocument, model.EmbedQuery} {
+		if _, err := client.Embed(context.Background(), "mistral-embed", role, []string{"hello"}); err != nil {
+			t.Fatalf("embed (%s): %v", role, err)
+		}
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("want 2 requests, got %d", len(bodies))
+	}
+	if bodies[0] != bodies[1] {
+		t.Fatalf("symmetric provider must send byte-identical request regardless of role:\n document=%s\n query=%s", bodies[0], bodies[1])
 	}
 }
 
@@ -104,7 +138,7 @@ func TestEmbed_RetriesOnRateLimitThenSucceeds(t *testing.T) {
 	client.InitialBackoff = 1 * time.Millisecond
 	client.MaxBackoff = 1 * time.Millisecond
 
-	vectors, err := client.Embed(context.Background(), "mistral-embed", []string{"retry-me"})
+	vectors, err := client.Embed(context.Background(), "mistral-embed", model.EmbedDocument, []string{"retry-me"})
 	if err != nil {
 		t.Fatalf("embed should have succeeded after retry: %v", err)
 	}
@@ -138,7 +172,7 @@ func TestEmbed_RetriesOnServerErrorThenSucceeds(t *testing.T) {
 	client.InitialBackoff = 1 * time.Millisecond
 	client.MaxBackoff = 1 * time.Millisecond
 
-	vectors, err := client.Embed(context.Background(), "mistral-embed", []string{"retry-5xx"})
+	vectors, err := client.Embed(context.Background(), "mistral-embed", model.EmbedDocument, []string{"retry-5xx"})
 	if err != nil {
 		t.Fatalf("embed should have succeeded after retry: %v", err)
 	}
@@ -160,7 +194,7 @@ func TestEmbed_MapsAuthErrors(t *testing.T) {
 	client := mistral.NewClient(server.URL, "bad-key")
 	client.MaxRetries = 0
 
-	_, err := client.Embed(context.Background(), "mistral-embed", []string{"x"})
+	_, err := client.Embed(context.Background(), "mistral-embed", model.EmbedDocument, []string{"x"})
 	if err == nil {
 		t.Fatal("expected error")
 	}

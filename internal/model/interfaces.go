@@ -51,8 +51,24 @@ type Ingestor interface {
 	Reindex(ctx context.Context) error
 }
 
+// EmbedRole distinguishes corpus/index-time embeddings from search-time
+// query embeddings. Asymmetric providers (e.g. Cohere `input_type`,
+// Voyage) MUST map it to their mechanism; symmetric providers (OpenAI,
+// Mistral) accept it and MAY ignore it — behavior MUST NOT differ for
+// symmetric providers. The role is set by the call site, not by config,
+// and does not affect the corpus-lifetime embed identity (SPEC 8.1.4 /
+// 8.1.5).
+type EmbedRole string
+
+const (
+	// EmbedDocument is used when embedding corpus content at index time.
+	EmbedDocument EmbedRole = "document"
+	// EmbedQuery is used when embedding a search query at query time.
+	EmbedQuery EmbedRole = "query"
+)
+
 type Embedder interface {
-	Embed(ctx context.Context, model string, inputs []string) ([][]float32, error)
+	Embed(ctx context.Context, model string, role EmbedRole, inputs []string) ([][]float32, error)
 }
 
 type OCR interface {

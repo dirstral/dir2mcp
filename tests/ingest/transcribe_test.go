@@ -182,7 +182,7 @@ type staticEmbedder struct {
 // Embed returns one fixed vector per input text. The method copies the
 // underlying vector for each element of texts so callers can safely modify
 // the returned slices without affecting the mock's stored vector.
-func (e *staticEmbedder) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
+func (e *staticEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i := range texts {
 		out[i] = append([]float32(nil), e.vec...)

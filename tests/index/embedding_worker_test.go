@@ -66,7 +66,7 @@ func (w *testWorker) RunOnce(ctx context.Context, indexKind string) (int, error)
 	return 1, nil
 }
 
-func (e *fakeEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
+func (e *fakeEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, _ []string) ([][]float32, error) {
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -207,7 +207,7 @@ func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
 // corrupt by the worker.
 type panicEmbedder struct{}
 
-func (p *panicEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
+func (p *panicEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, _ []string) ([][]float32, error) {
 	panic("embedder should not be invoked for zero-label batches")
 }
 
