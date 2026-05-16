@@ -21,6 +21,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
+	"github.com/dirstral/dir2mcp/internal/cohere"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -579,6 +580,48 @@ func saveEnvLocalKey(path, keyName, value string) error {
 	return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0o600)
 }
 
+// configureReranker wires the optional Cohere rerank stage onto the
+// retrieval service. Reranking is capability-driven: it activates
+// automatically when a rerank provider credential is present (mirrors
+// how the Mistral key gates embedding/OCR). cfg.RerankEnabled is a
+// tri-state override:
+//
+//	nil    -> auto: on iff a credential is present
+//	*false -> force off even when a credential is present
+//	*true  -> require it; warn + fail-open if no credential
+//
+// It is a fail-open optimization, not a hard dependency. Shared by the
+// `up` and `ask` retrieval paths.
+func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
+	explicit := cfg.RerankEnabled != nil
+	// Explicit opt-out wins, even with a credential present.
+	if explicit && !*cfg.RerankEnabled {
+		return
+	}
+	asked := explicit && *cfg.RerankEnabled
+
+	provider := strings.ToLower(strings.TrimSpace(cfg.RerankProvider))
+	if provider == "" {
+		provider = "cohere"
+	}
+	if provider != "cohere" {
+		if asked {
+			writef(a.stderr, "warning: rerank.provider %q unsupported; reranking disabled\n", cfg.RerankProvider)
+		}
+		return
+	}
+	if strings.TrimSpace(cfg.CohereAPIKey) == "" {
+		// Only warn when the operator explicitly asked for reranking;
+		// auto mode stays silent (no credential simply means off).
+		if asked {
+			writef(a.stderr, "warning: rerank.enabled is set but COHERE_API_KEY is not present; reranking disabled\n")
+		}
+		return
+	}
+	ret.SetReranker(cohere.NewClient(cfg.CohereBaseURL, cfg.CohereAPIKey), cfg.RerankModel, cfg.RerankCandidatePool)
+	ret.SetRerankEnabled(true)
+}
+
 func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st model.Store) (model.Retriever, func(), error) {
 	if a != nil && a.newRetriever != nil {
 		return a.newRetriever(cfg, st), nil, nil
@@ -616,6 +659,7 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
+	a.configureReranker(ret, cfg)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {

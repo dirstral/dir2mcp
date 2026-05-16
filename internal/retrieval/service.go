@@ -106,6 +106,13 @@ type Service struct {
 	// true; the engine can disable it via SetHybridEnabled when the operator
 	// sets retrieval.hybrid.enabled=false.
 	hybridEnabled bool
+	// reranker, when set and rerankEnabled, re-scores the fused candidate
+	// pool before truncation to k (see SPEC 9.1.1). Fail-open: any error
+	// falls back to the pre-rerank order.
+	reranker            model.Reranker
+	rerankEnabled       bool
+	rerankModel         string
+	rerankCandidatePool int
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -141,13 +148,14 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 			"text": make(map[uint64]model.SearchHit),
 			"code": make(map[uint64]model.SearchHit),
 		},
-		rootDir:         ".",
-		stateDir:        filepath.Join(".", ".dir2mcp"),
-		protocolVersion: "2025-11-25",
-		excludeRegexps:  make(map[string]*regexp.Regexp),
-		pathExcludes:    append([]string(nil), defaultPathExcludes...),
-		secretPatterns:  compiledPatterns,
-		hybridEnabled:   true,
+		rootDir:             ".",
+		stateDir:            filepath.Join(".", ".dir2mcp"),
+		protocolVersion:     "2025-11-25",
+		excludeRegexps:      make(map[string]*regexp.Regexp),
+		pathExcludes:        append([]string(nil), defaultPathExcludes...),
+		secretPatterns:      compiledPatterns,
+		hybridEnabled:       true,
+		rerankCandidatePool: defaultRerankCandidatePool,
 	}
 }
 
@@ -157,6 +165,30 @@ func (s *Service) SetHybridEnabled(enabled bool) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.hybridEnabled = enabled
+}
+
+// SetReranker wires an optional rerank provider. modelName is the
+// provider model (empty = provider default); pool caps how many fused
+// candidates are re-scored. pool <= 0 keeps the currently-configured
+// value (default-initialized in NewService) so callers can swap the
+// reranker without resetting an operator-tuned pool. Mirrors how the
+// engine wires SetHybridEnabled from config.
+func (s *Service) SetReranker(r model.Reranker, modelName string, pool int) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.reranker = r
+	s.rerankModel = strings.TrimSpace(modelName)
+	if pool > 0 {
+		s.rerankCandidatePool = pool
+	}
+}
+
+// SetRerankEnabled toggles the optional rerank stage. The engine wires
+// this from config.RerankEnabled at construction time.
+func (s *Service) SetRerankEnabled(enabled bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.rerankEnabled = enabled
 }
 
 func (s *Service) SetLogger(l *log.Logger) {
@@ -457,18 +489,18 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 	}
 	switch mode {
 	case "text":
-		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query)
+		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
 	case "code":
-		return s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query)
+		return s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
 	case "both":
 		return s.searchBothIndices(ctx, query.Query, k, textModel, codeModel, textIndex, codeIndex, query)
 	case "auto":
 		if looksLikeCodeQuery(query.Query) {
-			return s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query)
+			return s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
 		}
-		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query)
+		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
 	default:
-		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query)
+		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
 	}
 }
 
@@ -1057,13 +1089,18 @@ func (s *Service) searchHitForLabel(indexName string, label uint64) model.Search
 	}
 }
 
+// defaultRerankCandidatePool bounds how many fused candidates are sent
+// to the rerank provider before truncation to k. 50 matches the
+// hybrid candidate pool and keeps latency/cost predictable.
+const defaultRerankCandidatePool = 50
+
 // ErrMissingEmbedder is returned when the service was created without
 // a configured embedder and a search attempt is made. This prevents a
 // nil-pointer panic in searchSingleIndex while giving callers a clear
 // failure reason.
 var ErrMissingEmbedder = errors.New("embedder not configured")
 
-func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, modelName string, idx model.Index, indexName string, filters model.SearchQuery) ([]model.SearchHit, error) {
+func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, modelName string, idx model.Index, indexName string, filters model.SearchQuery, allowRerank bool) ([]model.SearchHit, error) {
 	if s.embedder == nil {
 		// caller should have provided an embedder via NewService or
 		// SetEmbedder (not currently available).  Return an explicit
@@ -1087,7 +1124,13 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 		return nil, err
 	}
 	if fused, ok := s.runHybridSearch(ctx, query, k, indexName, filtered); ok {
+		if allowRerank {
+			return s.rerankPool(ctx, query, fused, k), nil
+		}
 		return truncateSearchHits(fused, k), nil
+	}
+	if allowRerank {
+		return s.rerankPool(ctx, query, filtered, k), nil
 	}
 	return truncateSearchHits(filtered, k), nil
 }
@@ -1115,6 +1158,72 @@ func (s *Service) hybridVectorCandidateLimit(k int, idx model.Index) int {
 		return hybridCandidatePoolSize
 	}
 	return k
+}
+
+// rerankPool applies the optional rerank stage to a fused candidate
+// pool and returns the best k. When rerank is disabled or no reranker
+// is configured it is exactly truncateSearchHits(hits, k). It is
+// fail-open: any provider error keeps the pre-rerank order. Output is
+// deterministically ordered (relevance desc, then chunk_id asc) so ties
+// don't depend on provider response ordering (SPEC 9.1.1). Extracted
+// from the search paths to keep their cyclomatic complexity in budget.
+func (s *Service) rerankPool(ctx context.Context, query string, hits []model.SearchHit, k int) []model.SearchHit {
+	s.metaMu.RLock()
+	enabled := s.rerankEnabled
+	rr := s.reranker
+	rmodel := s.rerankModel
+	pool := s.rerankCandidatePool
+	s.metaMu.RUnlock()
+
+	if !enabled || rr == nil || len(hits) <= 1 {
+		return truncateSearchHits(hits, k)
+	}
+	if pool <= 0 {
+		pool = defaultRerankCandidatePool
+	}
+	// fused keeps the full pre-rerank order for fail-open fallback;
+	// cand is the (capped) slice actually sent to the provider. Never
+	// shrink the fallback to the pool: a misconfigured pool < k must
+	// still return up to k results on a rerank failure (and on success
+	// the un-reranked tail is appended below).
+	fused := hits
+	cand := fused
+	if len(cand) > pool {
+		cand = cand[:pool]
+	}
+	docs := make([]string, len(cand))
+	for i, h := range cand {
+		docs[i] = h.Snippet
+	}
+	results, err := rr.Rerank(ctx, rmodel, query, docs, k)
+	if err != nil || len(results) == 0 {
+		if err != nil {
+			s.logf("rerank: provider error, falling back to fused order: %v", err)
+		}
+		return truncateSearchHits(fused, k)
+	}
+	out := make([]model.SearchHit, 0, len(fused))
+	for _, r := range results {
+		if r.Index < 0 || r.Index >= len(cand) {
+			s.logf("rerank: out-of-range index %d, falling back to fused order", r.Index)
+			return truncateSearchHits(fused, k)
+		}
+		h := cand[r.Index]
+		h.Score = r.RelevanceScore
+		out = append(out, h)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		return out[i].ChunkID < out[j].ChunkID
+	})
+	// Preserve fused candidates beyond the reranked pool so rerank only
+	// reorders and never returns fewer than k when more were available.
+	if len(fused) > len(cand) {
+		out = append(out, fused[len(cand):]...)
+	}
+	return truncateSearchHits(out, k)
 }
 
 func truncateSearchHits(hits []model.SearchHit, k int) []model.SearchHit {
@@ -1219,11 +1328,11 @@ func searchExhausted(filteredLen, k, labelsLen, n int) bool {
 
 func (s *Service) searchBothIndices(ctx context.Context, query string, k int, textModel, codeModel string, textIndex, codeIndex model.Index, filters model.SearchQuery) ([]model.SearchHit, error) {
 	// each single-index call will apply the overfetch multiplier internally
-	textHits, err := s.searchSingleIndex(ctx, query, k, textModel, textIndex, "text", filters)
+	textHits, err := s.searchSingleIndex(ctx, query, k, textModel, textIndex, "text", filters, false)
 	if err != nil {
 		return nil, err
 	}
-	codeHits, err := s.searchSingleIndex(ctx, query, k, codeModel, codeIndex, "code", filters)
+	codeHits, err := s.searchSingleIndex(ctx, query, k, codeModel, codeIndex, "code", filters, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1255,10 +1364,8 @@ func (s *Service) searchBothIndices(ctx context.Context, query string, k int, te
 		}
 		return out[i].Score > out[j].Score
 	})
-	if len(out) > k {
-		out = out[:k]
-	}
-	return out, nil
+	// index=both: rerank once on the merged, normalized pool (SPEC 9.1.1).
+	return s.rerankPool(ctx, query, out, k), nil
 }
 
 func normalizeScores(hits []model.SearchHit) {
