@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -87,11 +88,12 @@ func TestEmbed_BatchesRequestsAndPreservesOrder(t *testing.T) {
 func TestEmbed_SymmetricProviderIgnoresRole(t *testing.T) {
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req embedTestRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("decode: %v", err)
+		// Compare the RAW request bytes (not a struct round-trip, which
+		// would silently drop a role-specific field like input_type).
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
 		}
-		raw, _ := json.Marshal(req)
 		bodies = append(bodies, string(raw))
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{{"index": 0, "embedding": []float64{1, 2}}},
@@ -109,7 +111,7 @@ func TestEmbed_SymmetricProviderIgnoresRole(t *testing.T) {
 		t.Fatalf("want 2 requests, got %d", len(bodies))
 	}
 	if bodies[0] != bodies[1] {
-		t.Fatalf("symmetric provider must send identical request regardless of role:\n document=%s\n query=%s", bodies[0], bodies[1])
+		t.Fatalf("symmetric provider must send byte-identical request regardless of role:\n document=%s\n query=%s", bodies[0], bodies[1])
 	}
 }
 
