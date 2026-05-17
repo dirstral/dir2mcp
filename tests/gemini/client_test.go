@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -153,7 +154,7 @@ func TestGenerate_HappyPathAndStructuredContent(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{
 				{"message": map[string]any{"content": []map[string]any{
-					{"type": "text", "text": "hello "},
+					{"type": "text", "text": "hello"},
 					{"type": "text", "text": "world"},
 				}}},
 			},
@@ -165,13 +166,14 @@ func TestGenerate_HappyPathAndStructuredContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	if out != "hello world" {
-		t.Fatalf("content = %q, want %q", out, "hello world")
+	// Multiple text parts are newline-joined (mirrors internal/mistral).
+	if out != "hello\nworld" {
+		t.Fatalf("content = %q, want %q", out, "hello\nworld")
 	}
 }
 
 // TestGenerate_UsesGenerationTimeoutNotDefault locks the same invariant
-// as internal/openai: NewClient always sets HTTPClient (30s), so the
+// as internal/mistral: NewClient always sets HTTPClient (30s), so the
 // per-call GenerationTimeout must still be applied. With a 50ms
 // GenerationTimeout and a 300ms-slow server, Generate must fail fast
 // (~50ms) rather than hang toward the 30s default.
@@ -217,6 +219,7 @@ func TestHTTPErrorMapping(t *testing.T) {
 		retryable bool
 	}{
 		{http.StatusUnauthorized, "GEMINI_AUTH", false},
+		{http.StatusForbidden, "GEMINI_AUTH", false},
 		{http.StatusTooManyRequests, "GEMINI_RATE_LIMIT", true},
 		{http.StatusBadGateway, "GEMINI_FAILED", true},
 		{http.StatusBadRequest, "GEMINI_FAILED", false},
@@ -236,13 +239,122 @@ func TestHTTPErrorMapping(t *testing.T) {
 	}
 }
 
+func TestGenerate_RequestShapeAndStringContent(t *testing.T) {
+	var gotPath, gotAuth, gotModel string
+	var gotMsgs int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotModel, gotMsgs = req.Model, len(req.Messages)
+		// Primary OpenAI-compatible shape: content is a plain string.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "pong"}}},
+		})
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	c.DefaultChatModel = "gemini-custom"
+	out, err := c.Generate(context.Background(), "ping")
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if out != "pong" {
+		t.Fatalf("content = %q, want pong (string-content path)", out)
+	}
+	if gotPath != "/chat/completions" {
+		t.Fatalf("path = %q, want /chat/completions", gotPath)
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Fatalf("auth = %q", gotAuth)
+	}
+	if gotModel != "gemini-custom" || gotMsgs != 1 {
+		t.Fatalf("request shape: model=%q messages=%d", gotModel, gotMsgs)
+	}
+}
+
+func TestGenerate_MissingKeyIsNonRetryableAuth(t *testing.T) {
+	c := gemini.NewClient("http://127.0.0.1:0", "")
+	_, err := c.Generate(context.Background(), "hi")
+	var pe *model.ProviderError
+	if !asProviderErr(err, &pe) || pe.Code != "GEMINI_AUTH" || pe.Retryable {
+		t.Fatalf("want non-retryable GEMINI_AUTH, got %v", err)
+	}
+}
+
+// TestEmbed_DefaultModelFallback covers the empty-model fallback to the
+// (overridable) DefaultEmbedModel — the request body must carry it.
+func TestEmbed_DefaultModelFallback(t *testing.T) {
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotModel = req.Model
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"index": 0, "embedding": []float64{1}}},
+		})
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	c.DefaultEmbedModel = "embed-override"
+	if _, err := c.Embed(context.Background(), "", model.EmbedDocument, []string{"x"}); err != nil {
+		t.Fatalf("embed: %v", err)
+	}
+	if gotModel != "embed-override" {
+		t.Fatalf("model = %q, want embed-override (DefaultEmbedModel fallback)", gotModel)
+	}
+}
+
+// TestNonRetryableStopsImmediately asserts a non-retryable HTTP status
+// (400) is attempted exactly once even with retries enabled — for both
+// Embed and Generate.
+func TestNonRetryableStopsImmediately(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(*gemini.Client) error
+	}{
+		{"embed", func(c *gemini.Client) error {
+			_, e := c.Embed(context.Background(), "m", model.EmbedDocument, []string{"x"})
+			return e
+		}},
+		{"generate", func(c *gemini.Client) error {
+			_, e := c.Generate(context.Background(), "hi")
+			return e
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&calls, 1)
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer srv.Close()
+			c := newClient(srv.URL) // MaxRetries default (3)
+			if err := tc.call(c); err == nil {
+				t.Fatal("want error")
+			}
+			if n := atomic.LoadInt32(&calls); n != 1 {
+				t.Fatalf("non-retryable 400 attempted %d times, want 1", n)
+			}
+		})
+	}
+}
+
+// asProviderErr unwraps via errors.As (repo convention) so wrapped
+// provider errors are still recognized.
 func asProviderErr(err error, target **model.ProviderError) bool {
-	if err == nil {
+	if !errors.As(err, target) {
 		return false
 	}
-	pe, ok := err.(*model.ProviderError)
-	if ok {
-		*target = pe
-	}
-	return ok && strings.HasPrefix(pe.Code, "GEMINI_")
+	return strings.HasPrefix((*target).Code, "GEMINI_")
 }

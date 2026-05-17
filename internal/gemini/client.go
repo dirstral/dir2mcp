@@ -3,10 +3,10 @@
 // {base}/chat/completions). Per SPEC 8.1.2 a `gemini` profile may serve
 // embed ✅ chat ✅ stt ✅ tts ✅; this adapter implements the embed + chat
 // capabilities (model.Embedder / model.Generator) by reusing the same
-// OpenAI-compatible wire shape as internal/openai, selected purely by the
-// Gemini base URL + Gemini model names.
+// OpenAI-compatible wire shape as internal/mistral, selected purely by
+// the Gemini base URL + Gemini model names.
 //
-// It mirrors internal/openai and internal/cohere (BaseURL/APIKey/
+// It mirrors internal/mistral and internal/cohere (BaseURL/APIKey/
 // HTTPClient, bounded exponential retry, typed model.ProviderError) so
 // callers can depend on model.Embedder / model.Generator without taking
 // a hard dependency on this package.
@@ -125,7 +125,7 @@ func (c *Client) Embed(ctx context.Context, modelName string, _ model.EmbedRole,
 	}
 	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
-		modelName = c.DefaultEmbedModel
+		modelName = strings.TrimSpace(c.DefaultEmbedModel)
 		if modelName == "" {
 			modelName = DefaultEmbedModel
 		}
@@ -248,6 +248,9 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return "", &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
 	}
+	if strings.TrimSpace(prompt) == "" {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "prompt is required", Retryable: false}
+	}
 	chatModel := strings.TrimSpace(c.DefaultChatModel)
 	if chatModel == "" {
 		chatModel = DefaultChatModel
@@ -329,13 +332,16 @@ func contentToText(raw json.RawMessage) string {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(raw, &parts); err == nil {
-		var b strings.Builder
+		// Join text parts with newlines to match the existing Generator
+		// adapter (internal/mistral) so multiple parts don't merge into a
+		// different user-visible answer (e.g. "firstsecond").
+		texts := make([]string, 0, len(parts))
 		for _, p := range parts {
 			if p.Type == "" || p.Type == "text" {
-				b.WriteString(p.Text)
+				texts = append(texts, p.Text)
 			}
 		}
-		return b.String()
+		return strings.Join(texts, "\n")
 	}
 	return ""
 }
@@ -360,7 +366,7 @@ func (c *Client) doJSON(ctx context.Context, path string, body []byte, timeout t
 // timeout. The default client built by NewClient carries the short
 // (30s) request timeout, so chat completions — which use the longer
 // GenerationTimeout — must override it even when HTTPClient is set
-// (mirrors internal/openai). The base client's Transport is shared via
+// (mirrors internal/mistral). The base client's Transport is shared via
 // a shallow copy so connection pooling is preserved.
 func clientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
 	if base == nil {
