@@ -113,7 +113,12 @@ func retry[T any](ctx context.Context, c *Client, op func() (T, error)) (T, erro
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if err := c.wait(ctx, c.backoffForAttempt(attempt-1)); err != nil {
-				return zero, err
+				return zero, &model.ProviderError{
+					Code:      "COHERE_FAILED",
+					Message:   "request canceled during retry backoff",
+					Retryable: false,
+					Cause:     err,
+				}
 			}
 		}
 		out, err := op()
@@ -228,6 +233,9 @@ func inputTypeForRole(role model.EmbedRole) string {
 // Inputs are sent in BatchSize-sized batches; each batch is retried with
 // bounded exponential backoff, and vectors preserve input order.
 func (c *Client) Embed(ctx context.Context, modelName string, role model.EmbedRole, inputs []string) ([][]float32, error) {
+	if len(inputs) == 0 {
+		return [][]float32{}, nil
+	}
 	if strings.TrimSpace(c.APIKey) == "" {
 		return nil, &model.ProviderError{Code: "COHERE_AUTH", Message: "missing Cohere API key", Retryable: false}
 	}
@@ -237,9 +245,6 @@ func (c *Client) Embed(ctx context.Context, modelName string, role model.EmbedRo
 		if modelName == "" {
 			modelName = DefaultEmbedModel
 		}
-	}
-	if len(inputs) == 0 {
-		return [][]float32{}, nil
 	}
 
 	batchSize := c.BatchSize
@@ -412,20 +417,20 @@ func clientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
 }
 
 func cohereHTTPError(resp *http.Response) error {
-	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	msg := strings.TrimSpace(string(bodyBytes))
-	if msg == "" {
-		msg = "upstream returned non-200 response"
-	}
+	// Drain (bounded) so the connection can be reused, but never surface
+	// the raw upstream body: it can echo prompt/document content
+	// (CLAUDE.md: do not put raw sensitive payloads in error messages).
+	// The HTTP status is sufficient and machine-parseable via StatusCode.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return &model.ProviderError{Code: "COHERE_AUTH", Message: msg, Retryable: false, StatusCode: resp.StatusCode}
+		return &model.ProviderError{Code: "COHERE_AUTH", Message: fmt.Sprintf("cohere request rejected (HTTP %d)", resp.StatusCode), Retryable: false, StatusCode: resp.StatusCode}
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return &model.ProviderError{Code: "COHERE_RATE_LIMIT", Message: msg, Retryable: true, StatusCode: resp.StatusCode}
+		return &model.ProviderError{Code: "COHERE_RATE_LIMIT", Message: "cohere rate limited (HTTP 429)", Retryable: true, StatusCode: resp.StatusCode}
 	case resp.StatusCode >= http.StatusInternalServerError:
-		return &model.ProviderError{Code: "COHERE_FAILED", Message: msg, Retryable: true, StatusCode: resp.StatusCode}
+		return &model.ProviderError{Code: "COHERE_FAILED", Message: fmt.Sprintf("cohere upstream error (HTTP %d)", resp.StatusCode), Retryable: true, StatusCode: resp.StatusCode}
 	default:
-		return &model.ProviderError{Code: "COHERE_FAILED", Message: msg, Retryable: false, StatusCode: resp.StatusCode}
+		return &model.ProviderError{Code: "COHERE_FAILED", Message: fmt.Sprintf("cohere request failed (HTTP %d)", resp.StatusCode), Retryable: false, StatusCode: resp.StatusCode}
 	}
 }
 

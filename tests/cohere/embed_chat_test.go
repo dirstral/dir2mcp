@@ -76,10 +76,11 @@ func TestEmbed_AsymmetricInputTypeByRole(t *testing.T) {
 			t.Fatalf("decode body %d: %v", i, err)
 		}
 		if b.InputType != tc.want {
-			t.Fatalf("role %s: input_type = %q, want %q (raw=%s)", tc.role, b.InputType, tc.want, raws[i])
+			t.Fatalf("role %s: input_type = %q, want %q", tc.role, b.InputType, tc.want)
 		}
 		if b.Model != "embed-v4.0" || len(b.Texts) != 1 || b.Texts[0] != "hi" {
-			t.Fatalf("unexpected embed body: %+v", b)
+			// sanitized: report shape, not raw input content
+			t.Fatalf("unexpected embed body: model=%q texts=%d", b.Model, len(b.Texts))
 		}
 		if len(b.EmbeddingTypes) != 1 || b.EmbeddingTypes[0] != "float" {
 			t.Fatalf("embedding_types = %v, want [float]", b.EmbeddingTypes)
@@ -87,7 +88,7 @@ func TestEmbed_AsymmetricInputTypeByRole(t *testing.T) {
 	}
 	// Asymmetric: the two raw bodies must differ (unlike symmetric OpenAI).
 	if string(raws[0]) == string(raws[1]) {
-		t.Fatalf("asymmetric provider must send role-dependent bodies; both = %s", raws[0])
+		t.Fatalf("asymmetric provider must send role-dependent bodies (identical len=%d)", len(raws[0]))
 	}
 }
 
@@ -231,7 +232,13 @@ func TestGenerate_HappyPathConcatsTextParts(t *testing.T) {
 		t.Fatalf("model = %q, want %q", b.Model, cohere.DefaultChatModel)
 	}
 	if len(b.Messages) != 1 || b.Messages[0].Role != "user" || b.Messages[0].Content != "hi there" {
-		t.Fatalf("unexpected chat body: %+v", b)
+		// sanitized: report shape, not raw prompt content
+		t.Fatalf("unexpected chat body: model=%q messages=%d role=%q", b.Model, len(b.Messages), func() string {
+			if len(b.Messages) > 0 {
+				return b.Messages[0].Role
+			}
+			return ""
+		}())
 	}
 }
 
