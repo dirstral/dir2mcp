@@ -83,12 +83,27 @@ func TestProviders_UserOverrideAndCustomProfile(t *testing.T) {
 		"  chat:\n" +
 		"    provider: openai\n"
 	r := loadCfg(t, yaml).Providers()
+
+	// per-field override of a built-in
 	chat, err := r.Resolve(provider.CapChat)
 	if err != nil || chat.Name != "openai" {
 		t.Fatalf("chat: %+v %v", chat, err)
 	}
 	if chat.BaseURL != "https://proxy.example/v1" || chat.ChatModel != "gpt-custom" {
 		t.Fatalf("user override not applied: base=%q chat=%q", chat.BaseURL, chat.ChatModel)
+	}
+
+	// the user-only `groq` profile must be registered AND its
+	// ${OPENAI_API_KEY} must have expanded (env-sourced credential).
+	gp, err := provider.Select(nil, r.ByName(), provider.CapChat, "groq", true)
+	if err != nil {
+		t.Fatalf("custom groq profile not registered: %v", err)
+	}
+	if gp.BaseURL != "https://api.groq.com/openai/v1" {
+		t.Fatalf("groq base_url = %q", gp.BaseURL)
+	}
+	if gp.APIKey != "ok" {
+		t.Fatalf("groq ${OPENAI_API_KEY} not expanded: APIKey=%q want %q", gp.APIKey, "ok")
 	}
 }
 

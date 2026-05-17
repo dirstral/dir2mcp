@@ -120,8 +120,8 @@ func parseProvidersDoc(raw []byte) (providersDoc, error) {
 // precedence order (built-ins first, then user-only names in declared
 // order — Go map order is non-deterministic so user-only ordering falls
 // back to sorted names for stability).
-func mergeProfiles(user map[string]providerProfileYAML) (map[string]providerProfileYAML, []string) {
-	merged := builtinProfiles()
+func mergeProfiles(base, user map[string]providerProfileYAML) (map[string]providerProfileYAML, []string) {
+	merged := base
 	for name, up := range user {
 		base, ok := merged[name]
 		if !ok {
@@ -216,8 +216,8 @@ type ProviderResolution struct {
 }
 
 // providersResolution builds the resolution from the parsed doc + env.
-func (d providersDoc) resolve(getenv func(string) string) ProviderResolution {
-	merged, order := mergeProfiles(d.Providers)
+func (d providersDoc) resolve(base map[string]providerProfileYAML, getenv func(string) string) ProviderResolution {
+	merged, order := mergeProfiles(base, d.Providers)
 	byName := toProfiles(merged, getenv)
 	prec := make([]provider.Profile, 0, len(order))
 	for _, n := range order {
@@ -226,6 +226,12 @@ func (d providersDoc) resolve(getenv func(string) string) ProviderResolution {
 		}
 	}
 	return ProviderResolution{byName: byName, precedence: prec, doc: d}
+}
+
+// ByName returns the resolved (built-in + user, env-expanded) profiles
+// keyed by name. Used by tests and CLI introspection (C2-iii).
+func (r ProviderResolution) ByName() map[string]provider.Profile {
+	return r.byName
 }
 
 func (r ProviderResolution) explicit(cap provider.Capability) string {
@@ -245,7 +251,32 @@ func (r ProviderResolution) explicit(cap provider.Capability) string {
 // other capabilities are optional (caller decides preflight failure).
 func (r ProviderResolution) Resolve(cap provider.Capability) (provider.Profile, error) {
 	required := cap == provider.CapEmbed
-	return provider.Select(r.precedence, r.byName, cap, r.explicit(cap), required)
+	p, err := provider.Select(r.precedence, r.byName, cap, r.explicit(cap), required)
+	if err != nil {
+		return p, err
+	}
+	return r.applyModelOverrides(cap, p), nil
+}
+
+// applyModelOverrides overlays model.<cap>.{text_model,code_model,model}
+// onto the selected profile (SPEC §16.2). These were parsed into
+// capBindingYAML but previously ignored.
+func (r ProviderResolution) applyModelOverrides(cap provider.Capability, p provider.Profile) provider.Profile {
+	set := func(dst *string, v string) {
+		if v = strings.TrimSpace(v); v != "" {
+			*dst = v
+		}
+	}
+	switch cap {
+	case provider.CapEmbed:
+		set(&p.EmbedTextModel, r.doc.Model.Embed.TextModel)
+		set(&p.EmbedCodeModel, r.doc.Model.Embed.CodeModel)
+	case provider.CapChat:
+		set(&p.ChatModel, r.doc.Model.Chat.Model)
+	case provider.CapOCR:
+		set(&p.OCRModel, r.doc.Model.OCR.Model)
+	}
+	return p
 }
 
 // EmbedIdentity is the corpus-lifetime identity of the resolved embed
@@ -262,5 +293,66 @@ func (r ProviderResolution) EmbedIdentity() string {
 // credential expansion (SPEC §8.1). The CLI wiring (C2-iii) calls
 // Resolve per capability and builds the adapter via providerfactory.
 func (cfg Config) Providers() ProviderResolution {
-	return cfg.providersDoc.resolve(nil)
+	base := builtinProfiles()
+	seedLegacy(base, cfg)
+	return cfg.providersDoc.resolve(base, nil)
+}
+
+// seedLegacy overlays already-loaded legacy flat config onto the
+// built-in profiles so file-based legacy configs keep working through
+// the new resolver during the transition. User `providers:` entries
+// still take precedence (merged on top of this seed). The legacy fields
+// themselves are removed in the clean-break C2-iii.
+func seedLegacy(m map[string]providerProfileYAML, cfg Config) {
+	lit := func(s string) *string { return &s }
+	seedField := func(name string, fn func(*providerProfileYAML)) {
+		if p, ok := m[name]; ok {
+			fn(&p)
+			m[name] = p
+		}
+	}
+	seedField("mistral", func(p *providerProfileYAML) {
+		if cfg.MistralAPIKey != "" {
+			p.APIKey = lit(cfg.MistralAPIKey)
+		}
+		if cfg.MistralBaseURL != "" {
+			p.BaseURL = cfg.MistralBaseURL
+		}
+		if cfg.EmbedModelText != "" {
+			p.EmbedTextModel = cfg.EmbedModelText
+		}
+		if cfg.EmbedModelCode != "" {
+			p.EmbedCodeModel = cfg.EmbedModelCode
+		}
+		if cfg.ChatModel != "" {
+			p.ChatModel = cfg.ChatModel
+		}
+	})
+	seedField("mistral-ocr", func(p *providerProfileYAML) {
+		if cfg.MistralAPIKey != "" {
+			p.APIKey = lit(cfg.MistralAPIKey)
+		}
+		if cfg.MistralBaseURL != "" {
+			p.BaseURL = cfg.MistralBaseURL
+		}
+		if cfg.STTMistralModel != "" {
+			p.STTModel = cfg.STTMistralModel
+		}
+	})
+	seedField("cohere", func(p *providerProfileYAML) {
+		if cfg.CohereAPIKey != "" {
+			p.APIKey = lit(cfg.CohereAPIKey)
+		}
+		if cfg.CohereBaseURL != "" {
+			p.BaseURL = cfg.CohereBaseURL
+		}
+		if cfg.RerankModel != "" {
+			p.RerankModel = cfg.RerankModel
+		}
+	})
+	seedField("elevenlabs", func(p *providerProfileYAML) {
+		if cfg.ElevenLabsAPIKey != "" {
+			p.APIKey = lit(cfg.ElevenLabsAPIKey)
+		}
+	})
 }
