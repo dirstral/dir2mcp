@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/openai"
@@ -51,20 +50,28 @@ func TestOCR(t *testing.T) {
 }
 
 func TestTranscriber(t *testing.T) {
-	for _, k := range []provider.Kind{provider.KindMistral, provider.KindElevenLabs} {
+	for _, k := range []provider.Kind{provider.KindMistral, provider.KindElevenLabs, provider.KindOpenAI, provider.KindGemini} {
 		if tr, err := providerfactory.Transcriber(prof(k)); err != nil || tr == nil {
 			t.Errorf("Transcriber(%s) = %v, %v", k, tr, err)
 		}
 	}
-	// matrix-capable but not yet implemented -> explicit sentinel
-	for _, k := range []provider.Kind{provider.KindOpenAI, provider.KindGemini} {
-		_, err := providerfactory.Transcriber(prof(k))
-		if !errors.Is(err, providerfactory.ErrCapabilityUnimplemented) {
-			t.Errorf("Transcriber(%s) want ErrCapabilityUnimplemented, got %v", k, err)
+	for _, k := range []provider.Kind{provider.KindCohere, provider.KindAnthropic} {
+		if _, err := providerfactory.Transcriber(prof(k)); err == nil {
+			t.Errorf("Transcriber(%s) must error (not STT-capable)", k)
 		}
 	}
-	if _, err := providerfactory.Transcriber(prof(provider.KindCohere)); err == nil {
-		t.Error("Transcriber(cohere) must error (not STT-capable)")
+}
+
+func TestTTS(t *testing.T) {
+	for _, k := range []provider.Kind{provider.KindElevenLabs, provider.KindOpenAI, provider.KindGemini} {
+		if s, err := providerfactory.TTS(prof(k)); err != nil || s == nil {
+			t.Errorf("TTS(%s) = %v, %v", k, s, err)
+		}
+	}
+	for _, k := range []provider.Kind{provider.KindMistral, provider.KindCohere, provider.KindAnthropic} {
+		if _, err := providerfactory.TTS(prof(k)); err == nil {
+			t.Errorf("TTS(%s) must error (not TTS-capable)", k)
+		}
 	}
 }
 

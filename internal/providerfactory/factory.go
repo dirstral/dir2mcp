@@ -9,6 +9,7 @@
 package providerfactory
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/dirstral/dir2mcp/internal/anthropic"
@@ -21,12 +22,12 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 )
 
-// ErrCapabilityUnimplemented is returned when a profile's kind is marked
-// capable by the SPEC 8.1.2 matrix but the adapter does not yet
-// implement that capability in this release. Currently this is only
-// STT/TTS for kinds `openai` and `gemini` (deferred — see #192 / task
-// tracking; the matrix is normative but the wire adapters are pending).
-var ErrCapabilityUnimplemented = fmt.Errorf("provider capability not implemented in this release")
+// TTSSynthesizer is the optional text-to-speech surface (matches
+// mcp.TTSSynthesizer; declared locally to keep this package free of an
+// mcp import). TTS is fail-open per SPEC 8.3.
+type TTSSynthesizer interface {
+	Synthesize(ctx context.Context, text string) ([]byte, error)
+}
 
 func unsupported(p provider.Profile, cap provider.Capability) error {
 	return fmt.Errorf("provider kind %q cannot serve %s", p.Kind, cap)
@@ -113,11 +114,10 @@ func OCR(p provider.Profile) (model.OCR, error) {
 	return c, nil
 }
 
-// Transcriber builds a model.Transcriber. Implemented for `mistral`
-// (Voxtral) and `elevenlabs` (Scribe). `openai`/`gemini` are matrix-
-// capable but their Transcribe adapters are not yet implemented in this
-// release → ErrCapabilityUnimplemented (so callers degrade explicitly
-// rather than mis-route STT).
+// Transcriber builds a model.Transcriber for STT-capable kinds:
+// `mistral` (Voxtral), `elevenlabs` (Scribe), and `openai`/`gemini`
+// (OpenAI-compatible /v1/audio/transcriptions; endpoint-dependent for
+// openai per SPEC 8.1.2 ³ — validated at first use).
 func Transcriber(p provider.Profile) (model.Transcriber, error) {
 	switch p.Kind {
 	case provider.KindMistral:
@@ -129,10 +129,43 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 	case provider.KindElevenLabs:
 		// elevenlabs.NewClient(apiKey, voiceID); voiceID is TTS-only.
 		return elevenlabs.NewClient(p.APIKey, ""), nil
-	case provider.KindOpenAI, provider.KindGemini:
-		return nil, fmt.Errorf("%w: %s STT", ErrCapabilityUnimplemented, p.Kind)
+	case provider.KindOpenAI:
+		c := openai.NewClient(p.BaseURL, p.APIKey)
+		if p.STTModel != "" {
+			c.DefaultSTTModel = p.STTModel
+		}
+		return c, nil
+	case provider.KindGemini:
+		c := gemini.NewClient(p.BaseURL, p.APIKey)
+		if p.STTModel != "" {
+			c.DefaultSTTModel = p.STTModel
+		}
+		return c, nil
 	default:
 		return nil, unsupported(p, provider.CapSTT)
+	}
+}
+
+// TTS builds a TTSSynthesizer for TTS-capable kinds: `elevenlabs`,
+// `openai`, `gemini` (SPEC 8.1.2). openai TTS is endpoint-dependent.
+func TTS(p provider.Profile) (TTSSynthesizer, error) {
+	switch p.Kind {
+	case provider.KindElevenLabs:
+		return elevenlabs.NewClient(p.APIKey, ""), nil
+	case provider.KindOpenAI:
+		c := openai.NewClient(p.BaseURL, p.APIKey)
+		if p.TTSModel != "" {
+			c.DefaultTTSModel = p.TTSModel
+		}
+		return c, nil
+	case provider.KindGemini:
+		c := gemini.NewClient(p.BaseURL, p.APIKey)
+		if p.TTSModel != "" {
+			c.DefaultTTSModel = p.TTSModel
+		}
+		return c, nil
+	default:
+		return nil, unsupported(p, provider.CapTTS)
 	}
 }
 

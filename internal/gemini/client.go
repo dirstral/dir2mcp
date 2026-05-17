@@ -28,7 +28,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -51,6 +53,9 @@ const (
 	// normally supplies explicit models per profile.
 	DefaultEmbedModel = "text-embedding-004"
 	DefaultChatModel  = "gemini-2.5-flash"
+	DefaultSTTModel   = "gemini-2.5-flash"
+	DefaultTTSModel   = "gemini-2.5-flash-preview-tts"
+	DefaultTTSVoice   = "Kore"
 )
 
 // Client is a Gemini adapter that speaks the OpenAI-compatible wire
@@ -73,12 +78,16 @@ type Client struct {
 	// call is made with an empty model name.
 	DefaultEmbedModel string
 	DefaultChatModel  string
+	DefaultSTTModel   string
+	DefaultTTSModel   string
+	DefaultTTSVoice   string
 }
 
 // compile-time assertions that *Client implements the model contracts.
 var (
-	_ model.Embedder  = (*Client)(nil)
-	_ model.Generator = (*Client)(nil)
+	_ model.Embedder    = (*Client)(nil)
+	_ model.Generator   = (*Client)(nil)
+	_ model.Transcriber = (*Client)(nil)
 )
 
 // NewClient constructs a client with safe default retry/timeout settings.
@@ -100,6 +109,9 @@ func NewClient(baseURL, apiKey string) *Client {
 		GenerationTimeout: defaultGenerationTimeout,
 		DefaultEmbedModel: DefaultEmbedModel,
 		DefaultChatModel:  DefaultChatModel,
+		DefaultSTTModel:   DefaultSTTModel,
+		DefaultTTSModel:   DefaultTTSModel,
+		DefaultTTSVoice:   DefaultTTSVoice,
 	}
 }
 
@@ -344,6 +356,153 @@ func contentToText(raw json.RawMessage) string {
 		return strings.Join(texts, "\n")
 	}
 	return ""
+}
+
+type transcriptionResponse struct {
+	Text string `json:"text"`
+}
+
+// Transcribe implements model.Transcriber via {base}/audio/transcriptions
+// on Gemini's OpenAI-compatible endpoint (SPEC 8.1.2 gemini stt).
+func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
+	if strings.TrimSpace(c.APIKey) == "" {
+		return "", &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
+	}
+	if len(data) == 0 {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription input is empty", Retryable: false}
+	}
+	sttModel := strings.TrimSpace(c.DefaultSTTModel)
+	if sttModel == "" {
+		sttModel = DefaultSTTModel
+	}
+	timeout := c.GenerationTimeout
+	if timeout <= 0 {
+		timeout = defaultGenerationTimeout
+	}
+	return retryAudio(ctx, c, func() (string, error) {
+		return c.transcribeOnce(ctx, relPath, data, sttModel, timeout)
+	})
+}
+
+func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte, sttModel string, timeout time.Duration) (string, error) {
+	name := strings.TrimSpace(filepath.Base(relPath))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = "audio.wav"
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	ff, err := w.CreateFormFile("file", name)
+	if err == nil {
+		_, err = ff.Write(data)
+	}
+	if err == nil {
+		err = w.WriteField("model", sttModel)
+	}
+	if err == nil {
+		err = w.Close()
+	}
+	if err != nil {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to build transcription body", Retryable: false, Cause: err}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/audio/transcriptions", bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to build transcription request", Retryable: false, Cause: err}
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := clientWithTimeout(c.HTTPClient, timeout).Do(req)
+	if err != nil {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", httpError(resp)
+	}
+	var parsed transcriptionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode transcription response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
+	}
+	return strings.TrimSpace(parsed.Text), nil
+}
+
+type speechRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+	Voice string `json:"voice"`
+}
+
+// Synthesize implements the optional TTS surface (mcp.TTSSynthesizer
+// shape) via {base}/audio/speech, returning raw audio bytes. TTS is
+// fail-open per SPEC 8.3.
+func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
+	if strings.TrimSpace(c.APIKey) == "" {
+		return nil, &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts input is empty", Retryable: false}
+	}
+	ttsModel := strings.TrimSpace(c.DefaultTTSModel)
+	if ttsModel == "" {
+		ttsModel = DefaultTTSModel
+	}
+	voice := strings.TrimSpace(c.DefaultTTSVoice)
+	if voice == "" {
+		voice = DefaultTTSVoice
+	}
+	timeout := c.GenerationTimeout
+	if timeout <= 0 {
+		timeout = defaultGenerationTimeout
+	}
+	body, err := json.Marshal(speechRequest{Model: ttsModel, Input: text, Voice: voice})
+	if err != nil {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to marshal tts request", Retryable: false, Cause: err}
+	}
+	return retryAudio(ctx, c, func() ([]byte, error) {
+		resp, err := c.doJSON(ctx, "/audio/speech", body, timeout)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, httpError(resp)
+		}
+		audio, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to read tts audio", Retryable: true, Cause: rerr}
+		}
+		if len(audio) == 0 {
+			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts returned no audio", Retryable: false, StatusCode: resp.StatusCode}
+		}
+		return audio, nil
+	})
+}
+
+// retryAudio runs op with the client's bounded exponential backoff,
+// stopping early on a non-retryable *model.ProviderError.
+func retryAudio[T any](ctx context.Context, c *Client, op func() (T, error)) (T, error) {
+	maxRetries := c.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	var zero T
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			if err := c.wait(ctx, c.backoffForAttempt(attempt-1)); err != nil {
+				return zero, err
+			}
+		}
+		out, err := op()
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		var pErr *model.ProviderError
+		if errors.As(err, &pErr) && !pErr.Retryable {
+			return zero, err
+		}
+	}
+	return zero, lastErr
 }
 
 func (c *Client) doJSON(ctx context.Context, path string, body []byte, timeout time.Duration) (*http.Response, error) {
