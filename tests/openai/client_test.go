@@ -235,6 +235,50 @@ func TestHTTPErrorMapping(t *testing.T) {
 	}
 }
 
+func TestTranscribeAndSynthesize(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/audio/transcriptions":
+			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "multipart/form-data") {
+				t.Errorf("transcribe content-type = %q", ct)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"text": "hello transcript"})
+		case "/audio/speech":
+			_, _ = w.Write([]byte("AUDIOBYTES"))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	txt, err := c.Transcribe(context.Background(), "a.wav", []byte("pcm"))
+	if err != nil || txt != "hello transcript" {
+		t.Fatalf("Transcribe = %q, %v", txt, err)
+	}
+	audio, err := c.Synthesize(context.Background(), "say this")
+	if err != nil || string(audio) != "AUDIOBYTES" {
+		t.Fatalf("Synthesize = %q, %v", audio, err)
+	}
+}
+
+func TestAudioMissingKeyAndEmptyInput(t *testing.T) {
+	nokey := openai.NewClient("http://127.0.0.1:0", "")
+	if _, err := nokey.Transcribe(context.Background(), "a.wav", []byte("x")); err == nil {
+		t.Error("Transcribe missing key must error")
+	}
+	if _, err := nokey.Synthesize(context.Background(), "x"); err == nil {
+		t.Error("Synthesize missing key must error")
+	}
+	keyed := openai.NewClient("http://127.0.0.1:0", "k")
+	if _, err := keyed.Transcribe(context.Background(), "a.wav", nil); err == nil {
+		t.Error("Transcribe empty data must error (no HTTP call)")
+	}
+	if _, err := keyed.Synthesize(context.Background(), "  "); err == nil {
+		t.Error("Synthesize empty text must error (no HTTP call)")
+	}
+}
+
 func asProviderErr(err error, target **model.ProviderError) bool {
 	if err == nil {
 		return false
