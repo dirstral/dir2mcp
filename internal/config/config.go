@@ -174,6 +174,12 @@ type Config struct {
 	HealthCheckInterval time.Duration
 
 	X402 X402Config
+
+	// providersDoc holds the parsed `providers:`/`model:` subtree (SPEC
+	// 0.7.0 §8.1/§16.2), decoded with yaml.v3 separately from the
+	// bespoke flat parser. Unexported/runtime-derived: not persisted,
+	// not part of Default()/persistedConfig. Access via cfg.Providers().
+	providersDoc providersDoc
 }
 
 type fileConfig struct {
@@ -736,6 +742,14 @@ func applyFileOverrides(cfg *Config, path string) error {
 		return fmt.Errorf("parse config file %s: %w", path, err)
 	}
 	applyParsedFileOverrides(cfg, fileCfg)
+
+	// Decode the dynamic providers:/model: subtree with yaml.v3
+	// (SPEC 0.7.0 §16.2) — independent of the flat parser above.
+	doc, err := parseProvidersDoc(raw)
+	if err != nil {
+		return fmt.Errorf("config file %s: %w", path, err)
+	}
+	cfg.providersDoc = doc
 
 	return nil
 }
