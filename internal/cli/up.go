@@ -439,17 +439,14 @@ func requiresMistralAPIKey(cfg config.Config, opts upOptions) bool {
 // still on the legacy Mistral-backed OCR/STT code (not yet flipped to
 // the resolver — that is C2-iii-a2 / #39). While true, a Mistral key is
 // still required regardless of which embed provider resolves.
-func legacyIngestRequiresMistral(cfg config.Config) bool {
-	if strings.EqualFold(strings.TrimSpace(cfg.STTProvider), "mistral") {
-		return true
-	}
-	if strings.EqualFold(strings.TrimSpace(cfg.STTProvider), "auto") &&
-		!strings.EqualFold(strings.TrimSpace(cfg.IngestAudioMode), "off") {
-		return true
-	}
-	if strings.EqualFold(strings.TrimSpace(cfg.IngestExtractor), "mistral") {
-		return true
-	}
+// legacyIngestRequiresMistral is now always false: ingest OCR (#199)
+// and STT incl. auto/elevenlabs (#200) resolve entirely through the
+// provider model, so there is no remaining Mistral-only ingest path
+// that the preflight must guard. Eligibility is enforced at resolution
+// time (a bad explicit binding fails ingest init; auto degrades to
+// off/fallback). The function is retained until the clean break (#38)
+// to avoid churning callers.
+func legacyIngestRequiresMistral(_ config.Config) bool {
 	return false
 }
 
@@ -496,9 +493,17 @@ func buildMCPServerOptions(cfg *config.Config, st model.Store, indexingState *ap
 		mcp.WithIndexingState(indexingState),
 		mcp.WithEventEmitter(emitter.Emit),
 	}
-	// TTS is optional and fail-open (SPEC 8.3): resolve a TTS-capable
-	// provider through the provider model; skip silently if none.
-	if prof, err := cfg.Providers().Resolve(provider.CapTTS); err == nil {
+	// TTS is optional and fail-open (SPEC 8.3). Prefer ElevenLabs when
+	// it is eligible (preserves the legacy "ELEVENLABS_API_KEY -> TTS"
+	// behavior, incl. its voice/base-url config, even when an LLM
+	// provider key is also present); otherwise fall back to auto
+	// precedence among TTS-capable providers.
+	r := cfg.Providers()
+	prof, err := r.ResolveExplicit(provider.CapTTS, "elevenlabs", true)
+	if err != nil {
+		prof, err = r.Resolve(provider.CapTTS)
+	}
+	if err == nil {
 		if tts, terr := providerfactory.TTS(prof); terr == nil {
 			opts = append(opts, mcp.WithTTS(tts))
 		}

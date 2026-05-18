@@ -188,11 +188,17 @@ func TTS(p provider.Profile) (TTSSynthesizer, error) {
 		if p.TTSModel != "" {
 			c.DefaultTTSModel = p.TTSModel
 		}
+		if p.TTSVoice != "" {
+			c.DefaultTTSVoice = p.TTSVoice
+		}
 		return c, nil
 	case provider.KindGemini:
 		c := gemini.NewClient(p.BaseURL, p.APIKey)
 		if p.TTSModel != "" {
 			c.DefaultTTSModel = p.TTSModel
+		}
+		if p.TTSVoice != "" {
+			c.DefaultTTSVoice = p.TTSVoice
 		}
 		return c, nil
 	default:

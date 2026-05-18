@@ -150,7 +150,8 @@ func mergeProfiles(base, user map[string]providerProfileYAML) (map[string]provid
 		}{
 			{&base.EmbedTextModel, up.EmbedTextModel}, {&base.EmbedCodeModel, up.EmbedCodeModel},
 			{&base.ChatModel, up.ChatModel}, {&base.OCRModel, up.OCRModel},
-			{&base.STTModel, up.STTModel}, {&base.TTSModel, up.TTSModel},
+			{&base.STTModel, up.STTModel}, {&base.STTLanguage, up.STTLanguage},
+			{&base.TTSModel, up.TTSModel}, {&base.TTSVoice, up.TTSVoice},
 			{&base.RerankModel, up.RerankModel},
 		} {
 			if f.src != "" {

@@ -200,11 +200,6 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	return options
 }
 
-// newElevenLabsTranscriber builds the legacy ElevenLabs STT client.
-// ElevenLabs STT/TTS stays on this legacy construction during the
-// transition because provider.Profile does not yet carry the
-// ElevenLabs voice/model/language knobs; it flips in the clean-break
-// config rework (#38).
 // mistralExtractor resolves the OCR provider (the bespoke mistral kind)
 // via the provider model and adapts it to model.DocumentExtractor.
 // Returns nil when no Mistral OCR credential is available (matching the
@@ -234,8 +229,6 @@ func mistralExtractor(cfg config.Config) model.DocumentExtractor {
 	return ex
 }
 
-// mistralTranscriber resolves the mistral-ocr profile for STT and
-// re-applies the legacy OCR/transcription payload limit.
 // buildTranscriber adapts a resolved profile to a model.Transcriber and
 // re-applies the Mistral OCR/transcription payload limit (no-op for
 // non-Mistral kinds). ElevenLabs voice/model/language/base-url are
