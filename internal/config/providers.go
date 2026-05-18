@@ -284,6 +284,19 @@ func (r ProviderResolution) applyModelOverrides(cap provider.Capability, p provi
 	return p
 }
 
+// ResolveExplicit selects for cap with an explicit profile name (or ""
+// for auto), applying the same matrix/eligibility rules as Resolve plus
+// the model-name overrides. Used for capabilities whose selector is not
+// in the model: block (e.g. the legacy stt.provider) during the
+// transition.
+func (r ProviderResolution) ResolveExplicit(cap provider.Capability, explicit string, required bool) (provider.Profile, error) {
+	p, err := provider.Select(r.precedence, r.byName, cap, strings.TrimSpace(explicit), required)
+	if err != nil {
+		return p, err
+	}
+	return r.applyModelOverrides(cap, p), nil
+}
+
 // EmbedIdentity is the corpus-lifetime identity of the resolved embed
 // provider (SPEC 8.1.4), or "" if embed cannot be resolved.
 func (r ProviderResolution) EmbedIdentity() string {

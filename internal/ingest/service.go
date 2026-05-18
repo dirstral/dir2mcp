@@ -22,6 +22,8 @@ import (
 	"github.com/dirstral/dir2mcp/internal/elevenlabs"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/providerfactory"
 )
 
 // annotationChunk* constants mirror the hardcoded parameters previously
@@ -199,26 +201,11 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	return options
 }
 
-// TranscriberFromConfig resolves the configured STT provider instance.
-func newMistralTranscriber(cfg config.Config) model.Transcriber {
-	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-	if cfg.MistralMaxOCRPayloadBytes > 0 {
-		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
-	}
-	if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
-		client.DefaultTranscribeModel = modelName
-	}
-	return client
-}
-
-func newMistralExtractor(cfg config.Config) model.DocumentExtractor {
-	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-	if cfg.MistralMaxOCRPayloadBytes > 0 {
-		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
-	}
-	return client
-}
-
+// newElevenLabsTranscriber builds the legacy ElevenLabs STT client.
+// ElevenLabs STT/TTS stays on this legacy construction during the
+// transition because provider.Profile does not yet carry the
+// ElevenLabs voice/model/language knobs; it flips in the clean-break
+// config rework (#38).
 func newElevenLabsTranscriber(cfg config.Config) model.Transcriber {
 	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
 	if baseURL := strings.TrimSpace(cfg.ElevenLabsBaseURL); baseURL != "" {
@@ -233,9 +220,53 @@ func newElevenLabsTranscriber(cfg config.Config) model.Transcriber {
 	return client
 }
 
+// mistralExtractor resolves the OCR provider (the bespoke mistral kind)
+// via the provider model and adapts it to model.DocumentExtractor.
+// Returns nil when no Mistral OCR credential is available (matching the
+// prior "no key -> no extractor" behavior). Docling is handled
+// separately below — it is a local tool, not a provider profile.
+// applyMistralOCRLimit re-applies the legacy
+// mistral_max_ocr_payload_bytes knob to a resolver/factory-built
+// Mistral client (the factory builds a generic client; this Mistral-
+// specific tuning param is not part of provider.Profile). It bounds
+// both OCR and Mistral audio transcription payloads.
+func applyMistralOCRLimit(v any, cfg config.Config) {
+	if mc, ok := v.(*mistral.Client); ok && cfg.MistralMaxOCRPayloadBytes > 0 {
+		mc.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
+	}
+}
+
+func mistralExtractor(cfg config.Config) model.DocumentExtractor {
+	prof, err := cfg.Providers().ResolveExplicit(provider.CapOCR, "mistral-ocr", true)
+	if err != nil {
+		return nil
+	}
+	ex, err := providerfactory.Extractor(prof)
+	if err != nil {
+		return nil
+	}
+	applyMistralOCRLimit(ex, cfg)
+	return ex
+}
+
+// mistralTranscriber resolves the mistral-ocr profile for STT and
+// re-applies the legacy OCR/transcription payload limit.
+func mistralTranscriber(cfg config.Config) (model.Transcriber, error) {
+	prof, err := cfg.Providers().ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
+	if err != nil {
+		return nil, err
+	}
+	tr, err := providerfactory.Transcriber(prof)
+	if err != nil {
+		return nil, err
+	}
+	applyMistralOCRLimit(tr, cfg)
+	return tr, nil
+}
+
 // DocumentExtractorFromConfig resolves document extraction provider selection.
 // Priority: configured docling command, auto-detected docling binary, then
-// Mistral OCR.
+// Mistral OCR (via the provider model).
 func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
 	mode := strings.ToLower(strings.TrimSpace(cfg.IngestExtractor))
 	if mode == "" {
@@ -253,10 +284,7 @@ func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
 		}
 		return nil
 	case "mistral":
-		if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-			return newMistralExtractor(cfg)
-		}
-		return nil
+		return mistralExtractor(cfg)
 	default: // auto
 		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
 			return NewDoclingExtractor(tpl)
@@ -264,44 +292,46 @@ func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
 		if _, err := exec.LookPath("docling"); err == nil {
 			return NewDoclingExtractor("")
 		}
-		if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-			return newMistralExtractor(cfg)
-		}
-		return nil
+		return mistralExtractor(cfg)
 	}
 }
 
 func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
-	provider := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
-	if provider == "" {
-		provider = transcriberProviderAuto
+	sel := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
+	if sel == "" {
+		sel = transcriberProviderAuto
+	}
+	if sel == transcriberProviderOff || sel == "none" || sel == "disabled" {
+		return nil, nil
 	}
 
-	switch provider {
-	case transcriberProviderOff, "none", "disabled":
-		return nil, nil
+	// Mistral STT flips to the resolver (fully preserved via
+	// seedLegacy + the mistral-ocr profile's STT model). ElevenLabs
+	// STT stays legacy during the transition (provider.Profile lacks
+	// the ElevenLabs voice/model/language knobs — flips in #38).
+	switch sel {
 	case transcriberProviderMistral:
-		if strings.TrimSpace(cfg.MistralAPIKey) == "" {
-			return nil, fmt.Errorf("stt provider %q requires MISTRAL_API_KEY", transcriberProviderMistral)
+		tr, err := mistralTranscriber(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
 		}
-		return newMistralTranscriber(cfg), nil
-	case transcriberProviderAuto:
-		if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-			return newMistralTranscriber(cfg), nil
-		}
-		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
-			return nil, nil
-		}
-		// auto-selected ElevenLabs; fall through to the shared build path below.
+		return tr, nil
 	case transcriberProviderElevenLabs:
 		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
-			return nil, fmt.Errorf("stt provider %q requires ELEVENLABS_API_KEY", transcriberProviderElevenLabs)
+			return nil, fmt.Errorf("stt provider %q requires ELEVENLABS_API_KEY", sel)
 		}
+		return newElevenLabsTranscriber(cfg), nil
+	case transcriberProviderAuto:
+		if tr, err := mistralTranscriber(cfg); err == nil {
+			return tr, nil
+		}
+		if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
+			return newElevenLabsTranscriber(cfg), nil
+		}
+		return nil, nil // auto + nothing eligible -> STT off
 	default:
-		return nil, fmt.Errorf("unsupported transcriber provider %q", provider)
+		return nil, fmt.Errorf("unsupported transcriber provider %q", sel)
 	}
-
-	return newElevenLabsTranscriber(cfg), nil
 }
 
 // healthCheckInterval returns the configured base poll interval for connector
