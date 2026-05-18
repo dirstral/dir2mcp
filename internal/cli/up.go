@@ -208,18 +208,6 @@ func applyScalarOverrides(cfg *config.Config, opts upOptions) {
 	if opts.allowedOrigins != "" {
 		cfg.AllowedOrigins = config.MergeAllowedOrigins(cfg.AllowedOrigins, opts.allowedOrigins)
 	}
-	if opts.embedModelText != "" {
-		cfg.EmbedModelText = opts.embedModelText
-	}
-	if opts.embedModelCode != "" {
-		cfg.EmbedModelCode = opts.embedModelCode
-	}
-	if strings.TrimSpace(opts.chatModel) != "" {
-		cfg.ChatModel = strings.TrimSpace(opts.chatModel)
-	}
-	if opts.mistralMaxOCRPayloadBytes > 0 {
-		cfg.MistralMaxOCRPayloadBytes = opts.mistralMaxOCRPayloadBytes
-	}
 	applyX402Overrides(cfg, opts)
 	resolveServerName(cfg)
 }
@@ -370,45 +358,34 @@ func (a *App) applyPublicMode(cfg *config.Config, opts upOptions) int {
 	return exitSuccess
 }
 
-// checkMistralAPIKey reports a user-friendly error when the API key is missing.
 // checkMistralAPIKey is the §2.5 startup preflight for the embedding
-// provider. Generalized (SPEC 8.1.3): instead of demanding
-// MISTRAL_API_KEY specifically, it requires that an embed provider
-// *resolves* (a credentialed or credential-less profile that can serve
-// embed). Mistral via MISTRAL_API_KEY remains the default that
-// satisfies it. (Name kept until the C2-iii-b clean break to avoid
-// caller churn.)
+// provider (SPEC 8.1.3): it requires that an embed provider *resolves*
+// — a credentialed or credential-less profile that can serve embed.
+// Mistral via MISTRAL_API_KEY remains the default that satisfies it.
+// (Name retained to avoid caller churn.)
 func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteractiveMode bool) int {
-	if !requiresMistralAPIKey(*cfg, opts) {
+	if !requiresMistralAPIKey(opts) {
 		return exitSuccess
 	}
-	// Legacy fast-path: a Mistral key satisfies embed AND the legacy
-	// Mistral-backed OCR/STT paths — unchanged behavior during the
-	// transition (those ingest paths flip in C2-iii-a2 / #39).
-	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+	if _, embErr := cfg.Providers().Resolve(provider.CapEmbed); embErr == nil {
 		return exitSuccess
+	} else {
+		msg := "CONFIG_INVALID: no embedding provider configured"
+		hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
+		var ce *provider.ConfigError
+		if errors.As(embErr, &ce) {
+			// Surface the actionable reason (bad explicit binding /
+			// incapable kind) instead of the generic message
+			// (ce.Error() is already CONFIG_INVALID-prefixed).
+			msg = ce.Error()
+		}
+		return a.reportEmbedPreflightError(opts, nonInteractiveMode, msg, hint)
 	}
-	// Keyless start is allowed only when an embed provider resolves
-	// elsewhere AND no legacy Mistral-only ingest path is still active.
-	_, embErr := cfg.Providers().Resolve(provider.CapEmbed)
-	legacyIngest := legacyIngestRequiresMistral(*cfg)
-	if embErr == nil && !legacyIngest {
-		return exitSuccess
-	}
+}
 
-	msg := "CONFIG_INVALID: no embedding provider configured"
-	hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
-	var ce *provider.ConfigError
-	switch {
-	case errors.As(embErr, &ce):
-		// Surface the actionable reason (bad explicit binding /
-		// incapable kind) instead of the generic message (ce.Error()
-		// is already CONFIG_INVALID-prefixed).
-		msg = ce.Error()
-	case embErr == nil && legacyIngest:
-		msg = "CONFIG_INVALID: OCR/STT still requires MISTRAL_API_KEY (legacy path)"
-		hint = "Set MISTRAL_API_KEY, or disable the Mistral STT/extractor ingest paths"
-	}
+// reportEmbedPreflightError emits the §2.5 preflight failure in the
+// CLI's JSON / non-interactive / interactive styles.
+func (a *App) reportEmbedPreflightError(opts upOptions, nonInteractiveMode bool, msg, hint string) int {
 	if opts.jsonOutput {
 		writeCLIError(a.stderr, true, exitConfigInvalid, msg, hint, "Or run: dir2mcp config init")
 		return exitConfigInvalid
@@ -425,29 +402,12 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 	return exitConfigInvalid
 }
 
-func requiresMistralAPIKey(cfg config.Config, opts upOptions) bool {
-	// Embedding workers require a model provider unless running read-only.
-	if !opts.readOnly {
-		return true
-	}
-	// In read-only mode, only the still-legacy Mistral-backed ingest
-	// paths require it.
-	return legacyIngestRequiresMistral(cfg)
-}
-
-// legacyIngestRequiresMistral reports whether an enabled ingest path is
-// still on the legacy Mistral-backed OCR/STT code (not yet flipped to
-// the resolver — that is C2-iii-a2 / #39). While true, a Mistral key is
-// still required regardless of which embed provider resolves.
-// legacyIngestRequiresMistral is now always false: ingest OCR (#199)
-// and STT incl. auto/elevenlabs (#200) resolve entirely through the
-// provider model, so there is no remaining Mistral-only ingest path
-// that the preflight must guard. Eligibility is enforced at resolution
-// time (a bad explicit binding fails ingest init; auto degrades to
-// off/fallback). The function is retained until the clean break (#38)
-// to avoid churning callers.
-func legacyIngestRequiresMistral(_ config.Config) bool {
-	return false
+// requiresMistralAPIKey reports whether the embed-provider preflight
+// applies. Embedding workers require a resolvable embed provider unless
+// running read-only (serving an existing index, where the embedder is
+// never exercised). (Name retained to avoid caller churn.)
+func requiresMistralAPIKey(opts upOptions) bool {
+	return !opts.readOnly
 }
 
 // initStoreAndIndices initialises the metadata store and both HNSW indices.

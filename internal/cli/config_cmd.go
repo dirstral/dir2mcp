@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/provider"
 )
 
 func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, created bool) {
@@ -67,15 +68,19 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 		if global.quiet {
 			return exitSuccess
 		}
+		embedProvider, embedReady := "none", false
+		if ep, perr := cfg.Providers().Resolve(provider.CapEmbed); perr == nil {
+			embedProvider, embedReady = ep.Name, true
+		}
 		writef(
 			a.stdout,
-			"root=%s state_dir=%s listen=%s mcp_path=%s mistral_base_url=%s mistral_api_key_set=%t\n",
+			"root=%s state_dir=%s listen=%s mcp_path=%s embed_provider=%s embed_ready=%t\n",
 			cfg.RootDir,
 			cfg.StateDir,
 			cfg.ListenAddr,
 			cfg.MCPPath,
-			cfg.MistralBaseURL,
-			cfg.MistralAPIKey != "",
+			embedProvider,
+			embedReady,
 		)
 	default:
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("unknown config subcommand: %s", args[0]))

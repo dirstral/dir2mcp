@@ -163,11 +163,6 @@ type upOptions struct {
 	tlsCert                       string
 	tlsKey                        string
 	allowedOrigins                string
-	// overrideable models, set via flags or env/config
-	embedModelText            string
-	embedModelCode            string
-	chatModel                 string
-	mistralMaxOCRPayloadBytes int
 }
 
 type optionalBoolFlag struct {
@@ -534,17 +529,6 @@ func (a *App) printUsage() {
 	}
 	writeln(o)
 
-	writeln(o, s.sectionHeader("Model Flags")+" "+s.Dim.Render("(up)"))
-	modelFlags := [][2]string{
-		{"--embed-model-text <model>", "embedding model for text chunks"},
-		{"--embed-model-code <model>", "embedding model for code chunks"},
-		{"--chat-model <model>", "model used for ask / retrieval"},
-	}
-	for _, f := range modelFlags {
-		writef(o, "  %-30s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
-	}
-	writeln(o)
-
 	writeln(o, s.sectionHeader("Payment Flags")+" "+s.Dim.Render("(up, x402)"))
 	x402Flags := [][2]string{
 		{"--x402 <mode>", "payment gating: off | on | required"},
@@ -607,11 +591,8 @@ func (a *App) resolveModelClients(cfg config.Config) (model.Embedder, model.Gene
 	}
 	var gen model.Generator
 	if cp, err := r.Resolve(provider.CapChat); err == nil {
-		// Legacy/flag chat_model still wins during the transition,
-		// regardless of which provider resolves for chat.
-		if m := strings.TrimSpace(cfg.ChatModel); m != "" {
-			cp.ChatModel = m
-		}
+		// The chat model comes from the resolved profile
+		// (providers:/model: config).
 		if g, ferr := providerfactory.Generator(cp); ferr == nil {
 			gen = g
 		}
@@ -1213,10 +1194,6 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.tlsCert, "tls-cert", "", "path to TLS certificate file (PEM)")
 	fs.StringVar(&opts.tlsKey, "tls-key", "", "path to TLS private key file (PEM)")
 	fs.StringVar(&opts.allowedOrigins, "allowed-origins", "", "comma-separated origins to append to the allowlist")
-	fs.StringVar(&opts.embedModelText, "embed-model-text", "", "override embedding model used for text chunks")
-	fs.StringVar(&opts.embedModelCode, "embed-model-code", "", "override embedding model used for code chunks")
-	fs.StringVar(&opts.chatModel, "chat-model", "", "override model used for chat/completions")
-	fs.IntVar(&opts.mistralMaxOCRPayloadBytes, "mistral-max-ocr-payload-bytes", 0, "override max encoded OCR payload size in bytes (0 = config/default)")
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}
@@ -1238,9 +1215,6 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 
 	if fs.NArg() > 0 {
 		return upOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	if opts.mistralMaxOCRPayloadBytes < 0 {
-		return upOptions{}, fmt.Errorf("invalid --mistral-max-ocr-payload-bytes: must be >= 0")
 	}
 	// --daemon and --foreground are mutually exclusive — one forces
 	// daemon mode regardless of TTY, the other forces foreground.
