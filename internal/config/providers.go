@@ -302,6 +302,37 @@ func (r ProviderResolution) ResolveExplicit(cap provider.Capability, explicit st
 	return r.applyModelOverrides(cap, p), nil
 }
 
+// readSnapshotEmbedIdentity returns the embed_identity recorded in the
+// effective snapshot for stateDir, or "" if there is no snapshot / no
+// recorded identity (a fresh index — VerifyEmbedIdentity treats that as
+// always-compatible).
+func readSnapshotEmbedIdentity(stateDir string) string {
+	raw, err := os.ReadFile(EffectiveSnapshotPath(stateDir))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line != strings.TrimLeft(line, " \t") { // top-level only
+			continue
+		}
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "embed_identity:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// VerifyEmbedIdentity enforces the SPEC 8.1.4 corpus-lifetime invariant:
+// if a prior snapshot recorded a different embed identity than the one
+// resolved now, refuse to serve (the index's vectors are not comparable
+// across embed providers/models). A fresh state dir (no snapshot)
+// always passes. Returns a *provider.ConfigError on mismatch.
+func (cfg Config) VerifyEmbedIdentity(stateDir string) error {
+	recorded := readSnapshotEmbedIdentity(stateDir)
+	current := cfg.Providers().EmbedIdentity()
+	return provider.VerifyEmbedIdentity(recorded, current)
+}
+
 // EmbedIdentity is the corpus-lifetime identity of the resolved embed
 // provider (SPEC 8.1.4), or "" if embed cannot be resolved.
 func (r ProviderResolution) EmbedIdentity() string {

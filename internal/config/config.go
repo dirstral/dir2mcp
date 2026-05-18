@@ -563,6 +563,7 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 		return "", fmt.Errorf("marshal snapshot yaml: %w", err)
 	}
 	raw = appendSnapshotSecretSourceMetadata(raw, sources)
+	raw = appendSnapshotEmbedIdentity(raw, cfg.Providers().EmbedIdentity())
 	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
 		raw = append(raw, '\n')
 	}
@@ -600,6 +601,22 @@ func LoadEffectiveSnapshot(path string) (Config, SecretSourceMetadata, error) {
 		return Config{}, SecretSourceMetadata{}, err
 	}
 	return cfg, sources, nil
+}
+
+// appendSnapshotEmbedIdentity records the resolved embed identity
+// (provider+models) in the snapshot so a later load can detect a
+// changed embed provider/model and refuse to mix vector spaces
+// (SPEC 8.1.4). A top-level scalar — ignored by the flat config parser
+// and the providers:/model: yaml subtree decode on reload.
+func appendSnapshotEmbedIdentity(raw []byte, id string) []byte {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return raw
+	}
+	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+	return append(raw, []byte("embed_identity: "+id+"\n")...)
 }
 
 func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata) []byte {
