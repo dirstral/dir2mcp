@@ -837,6 +837,13 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 	if code := a.checkMistralAPIKey(&cfg, opts, nonInteractiveMode); code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
 	}
+	// SPEC 8.1.4: refuse to mix vector spaces if the embed
+	// provider/model changed since the index was built.
+	if err := cfg.VerifyEmbedIdentity(cfg.StateDir); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, err.Error(),
+			"The embed provider/model changed since the index was built — run `dir2mcp reindex`, or restore the previous embed config.")
+		return config.Config{}, authMaterial{}, "", "", false, exitConfigInvalid
+	}
 	auth, err := prepareAuthMaterial(cfg)
 	if err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("auth setup: %v", err))
