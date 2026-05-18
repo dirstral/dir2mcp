@@ -42,6 +42,14 @@ func TestProviders_BuiltinAutoSelectByCredential(t *testing.T) {
 }
 
 func TestProviders_NoCredentialEmbedFails(t *testing.T) {
+	// Deterministic: blank any embed-capable provider key the host/CI
+	// may already export (Resolve reads process env via cfg.Providers).
+	for _, k := range []string{
+		"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+		"GEMINI_API_KEY", "COHERE_API_KEY", "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY",
+	} {
+		t.Setenv(k, "")
+	}
 	// No creds and no explicit binding: auto-select must NOT silently
 	// fall through to the credential-less `local` (it's excluded from
 	// auto precedence) — embed must fail so preflight surfaces it.

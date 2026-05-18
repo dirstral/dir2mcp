@@ -590,21 +590,33 @@ func saveEnvLocalKey(path, keyName, value string) error {
 // already encodes the read-only/ingest nuances; a nil embedder later
 // surfaces as ErrMissingEmbedder at query time (matching the previous
 // keyless-client behavior).
-func (a *App) resolveModelClients(cfg config.Config) (model.Embedder, model.Generator) {
+// Returns the embedder, generator, and the resolved embed text/code
+// model names (from the chosen embed profile) so the retrieval service
+// and embedding workers use the right model for the selected provider
+// instead of the hardcoded mistral defaults. Empty names mean "let the
+// adapter use its provider default".
+func (a *App) resolveModelClients(cfg config.Config) (model.Embedder, model.Generator, string, string) {
 	r := cfg.Providers()
 	var embedder model.Embedder
+	var textModel, codeModel string
 	if ep, err := r.Resolve(provider.CapEmbed); err == nil {
 		if e, ferr := providerfactory.Embedder(ep); ferr == nil {
 			embedder = e
+			textModel, codeModel = ep.EmbedTextModel, ep.EmbedCodeModel
 		}
 	}
 	var gen model.Generator
 	if cp, err := r.Resolve(provider.CapChat); err == nil {
+		// Legacy/flag chat_model still wins during the transition,
+		// regardless of which provider resolves for chat.
+		if m := strings.TrimSpace(cfg.ChatModel); m != "" {
+			cp.ChatModel = m
+		}
 		if g, ferr := providerfactory.Generator(cp); ferr == nil {
 			gen = g
 		}
 	}
-	return embedder, gen
+	return embedder, gen, textModel, codeModel
 }
 
 // configureReranker wires the optional Cohere rerank stage onto the
@@ -622,6 +634,17 @@ func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
 		return // explicit opt-out wins
 	}
 	asked := explicit && *cfg.RerankEnabled
+
+	// Honor the legacy flat rerank_provider during the transition: a
+	// non-cohere value preserves the prior "unsupported provider
+	// disables rerank" behavior (only cohere serves rerank — SPEC
+	// 8.1.2).
+	if rpName := strings.ToLower(strings.TrimSpace(cfg.RerankProvider)); rpName != "" && rpName != "cohere" {
+		if asked {
+			writef(a.stderr, "warning: rerank.provider %q unsupported; reranking disabled\n", cfg.RerankProvider)
+		}
+		return
+	}
 
 	rp, err := cfg.Providers().Resolve(provider.CapRerank)
 	if err != nil {
@@ -668,8 +691,10 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 		return nil, nil, fmt.Errorf("load code index: %w", err)
 	}
 
-	embedder, generator := a.resolveModelClients(cfg)
+	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
 	ret := retrieval.NewService(st, textIx, embedder, generator)
+	ret.SetQueryEmbeddingModel(etm)
+	ret.SetCodeEmbeddingModel(ecm)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)

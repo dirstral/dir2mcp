@@ -52,8 +52,10 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() { _ = textIx.Close() }()
 	defer func() { _ = codeIx.Close() }()
 
-	embedder, generator := a.resolveModelClients(cfg)
+	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
 	ret := retrieval.NewService(st, textIx, embedder, generator)
+	ret.SetQueryEmbeddingModel(etm)
+	ret.SetCodeEmbeddingModel(ecm)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
@@ -113,7 +115,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer a.stopPersistenceWithLog(persistence)
 
 	embedErrCh := make(chan error, 4)
-	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, cfg.EmbedModelText, cfg.EmbedModelCode)
+	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm)
 
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
@@ -380,11 +382,33 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 	if !requiresMistralAPIKey(*cfg, opts) {
 		return exitSuccess
 	}
-	if _, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+	// Legacy fast-path: a Mistral key satisfies embed AND the legacy
+	// Mistral-backed OCR/STT paths — unchanged behavior during the
+	// transition (those ingest paths flip in C2-iii-a2 / #39).
+	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
 		return exitSuccess
 	}
-	const msg = "CONFIG_INVALID: no embedding provider configured"
-	const hint = "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
+	// Keyless start is allowed only when an embed provider resolves
+	// elsewhere AND no legacy Mistral-only ingest path is still active.
+	_, embErr := cfg.Providers().Resolve(provider.CapEmbed)
+	legacyIngest := legacyIngestRequiresMistral(*cfg)
+	if embErr == nil && !legacyIngest {
+		return exitSuccess
+	}
+
+	msg := "CONFIG_INVALID: no embedding provider configured"
+	hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
+	var ce *provider.ConfigError
+	switch {
+	case errors.As(embErr, &ce):
+		// Surface the actionable reason (bad explicit binding /
+		// incapable kind) instead of the generic message (ce.Error()
+		// is already CONFIG_INVALID-prefixed).
+		msg = ce.Error()
+	case embErr == nil && legacyIngest:
+		msg = "CONFIG_INVALID: OCR/STT still requires MISTRAL_API_KEY (legacy path)"
+		hint = "Set MISTRAL_API_KEY, or disable the Mistral STT/extractor ingest paths"
+	}
 	if opts.jsonOutput {
 		writeCLIError(a.stderr, true, exitConfigInvalid, msg, hint, "Or run: dir2mcp config init")
 		return exitConfigInvalid
@@ -395,20 +419,27 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 		writeln(a.stderr, hint)
 		writeln(a.stderr, "Or run: dir2mcp config init")
 	} else {
-		writef(a.stderr, "%s no embedding provider configured\n", se.errPrefix())
+		writef(a.stderr, "%s %s\n", se.errPrefix(), strings.TrimPrefix(msg, "CONFIG_INVALID: "))
 		writeln(a.stderr, "Run: dir2mcp config init")
 	}
 	return exitConfigInvalid
 }
 
 func requiresMistralAPIKey(cfg config.Config, opts upOptions) bool {
-	// Embedding workers require Mistral credentials unless running read-only.
+	// Embedding workers require a model provider unless running read-only.
 	if !opts.readOnly {
 		return true
 	}
+	// In read-only mode, only the still-legacy Mistral-backed ingest
+	// paths require it.
+	return legacyIngestRequiresMistral(cfg)
+}
 
-	// In read-only mode, require a key only when an enabled ingest path still
-	// depends on Mistral providers.
+// legacyIngestRequiresMistral reports whether an enabled ingest path is
+// still on the legacy Mistral-backed OCR/STT code (not yet flipped to
+// the resolver — that is C2-iii-a2 / #39). While true, a Mistral key is
+// still required regardless of which embed provider resolves.
+func legacyIngestRequiresMistral(cfg config.Config) bool {
 	if strings.EqualFold(strings.TrimSpace(cfg.STTProvider), "mistral") {
 		return true
 	}
