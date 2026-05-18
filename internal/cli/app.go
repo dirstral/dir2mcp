@@ -21,14 +21,14 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
-	"github.com/dirstral/dir2mcp/internal/cohere"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/mcp"
-	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -580,45 +580,89 @@ func saveEnvLocalKey(path, keyName, value string) error {
 	return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0o600)
 }
 
+// resolveModelClients builds the embed + chat adapters for the
+// retrieval service through the provider resolver (SPEC 8.1.3) +
+// providerfactory. It is **best-effort by design**: unresolved
+// embed/chat yields a nil client so the server can still boot (e.g.
+// read-only serving an existing index, where the embedder may never be
+// exercised). The hard requirement is enforced once, in the §2.5
+// startup preflight (checkMistralAPIKey + requiresMistralAPIKey), which
+// already encodes the read-only/ingest nuances; a nil embedder later
+// surfaces as ErrMissingEmbedder at query time (matching the previous
+// keyless-client behavior).
+// Returns the embedder, generator, and the resolved embed text/code
+// model names (from the chosen embed profile) so the retrieval service
+// and embedding workers use the right model for the selected provider
+// instead of the hardcoded mistral defaults. Empty names mean "let the
+// adapter use its provider default".
+func (a *App) resolveModelClients(cfg config.Config) (model.Embedder, model.Generator, string, string) {
+	r := cfg.Providers()
+	var embedder model.Embedder
+	var textModel, codeModel string
+	if ep, err := r.Resolve(provider.CapEmbed); err == nil {
+		if e, ferr := providerfactory.Embedder(ep); ferr == nil {
+			embedder = e
+			textModel, codeModel = ep.EmbedTextModel, ep.EmbedCodeModel
+		}
+	}
+	var gen model.Generator
+	if cp, err := r.Resolve(provider.CapChat); err == nil {
+		// Legacy/flag chat_model still wins during the transition,
+		// regardless of which provider resolves for chat.
+		if m := strings.TrimSpace(cfg.ChatModel); m != "" {
+			cp.ChatModel = m
+		}
+		if g, ferr := providerfactory.Generator(cp); ferr == nil {
+			gen = g
+		}
+	}
+	return embedder, gen, textModel, codeModel
+}
+
 // configureReranker wires the optional Cohere rerank stage onto the
-// retrieval service. Reranking is capability-driven: it activates
-// automatically when a rerank provider credential is present (mirrors
-// how the Mistral key gates embedding/OCR). cfg.RerankEnabled is a
-// tri-state override:
+// retrieval service through the resolver (SPEC 8.1.3). cfg.RerankEnabled
+// is a tri-state override:
 //
-//	nil    -> auto: on iff a credential is present
-//	*false -> force off even when a credential is present
-//	*true  -> require it; warn + fail-open if no credential
+//	nil    -> auto: on iff a rerank provider resolves
+//	*false -> force off even when one resolves
+//	*true  -> require it; warn + fail-open if none resolves
 //
-// It is a fail-open optimization, not a hard dependency. Shared by the
-// `up` and `ask` retrieval paths.
+// Fail-open optimization, not a hard dependency. Shared by `up`/`ask`.
 func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
 	explicit := cfg.RerankEnabled != nil
-	// Explicit opt-out wins, even with a credential present.
 	if explicit && !*cfg.RerankEnabled {
-		return
+		return // explicit opt-out wins
 	}
 	asked := explicit && *cfg.RerankEnabled
 
-	provider := strings.ToLower(strings.TrimSpace(cfg.RerankProvider))
-	if provider == "" {
-		provider = "cohere"
-	}
-	if provider != "cohere" {
+	// Honor the legacy flat rerank_provider during the transition: a
+	// non-cohere value preserves the prior "unsupported provider
+	// disables rerank" behavior (only cohere serves rerank — SPEC
+	// 8.1.2).
+	if rpName := strings.ToLower(strings.TrimSpace(cfg.RerankProvider)); rpName != "" && rpName != "cohere" {
 		if asked {
 			writef(a.stderr, "warning: rerank.provider %q unsupported; reranking disabled\n", cfg.RerankProvider)
 		}
 		return
 	}
-	if strings.TrimSpace(cfg.CohereAPIKey) == "" {
-		// Only warn when the operator explicitly asked for reranking;
-		// auto mode stays silent (no credential simply means off).
+
+	rp, err := cfg.Providers().Resolve(provider.CapRerank)
+	if err != nil {
+		// No eligible rerank provider (or an invalid explicit binding).
+		// Auto mode stays silent; only warn when explicitly asked.
 		if asked {
-			writef(a.stderr, "warning: rerank.enabled is set but COHERE_API_KEY is not present; reranking disabled\n")
+			writef(a.stderr, "warning: rerank.enabled is set but no rerank provider resolved (%v); reranking disabled\n", err)
 		}
 		return
 	}
-	ret.SetReranker(cohere.NewClient(cfg.CohereBaseURL, cfg.CohereAPIKey), cfg.RerankModel, cfg.RerankCandidatePool)
+	rk, err := providerfactory.Reranker(rp)
+	if err != nil {
+		if asked {
+			writef(a.stderr, "warning: rerank provider %q unusable (%v); reranking disabled\n", rp.Name, err)
+		}
+		return
+	}
+	ret.SetReranker(rk, rp.RerankModel, cfg.RerankCandidatePool)
 	ret.SetRerankEnabled(true)
 }
 
@@ -647,11 +691,10 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 		return nil, nil, fmt.Errorf("load code index: %w", err)
 	}
 
-	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-	if cfg.MistralMaxOCRPayloadBytes > 0 {
-		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
-	}
-	ret := retrieval.NewService(st, textIx, client, client)
+	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
+	ret := retrieval.NewService(st, textIx, embedder, generator)
+	ret.SetQueryEmbeddingModel(etm)
+	ret.SetCodeEmbeddingModel(ecm)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
