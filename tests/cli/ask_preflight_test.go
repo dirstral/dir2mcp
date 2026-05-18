@@ -60,7 +60,7 @@ func TestAskPreflight_NonMistralCredentialPasses(t *testing.T) {
 	})
 	withWorkingDir(t, tmp, func() {
 		code := app.RunWithContext(context.Background(),
-			[]string{"ask", "--mode", "search_only", "alpha"})
+			[]string{"ask", "--non-interactive", "--mode", "search_only", "alpha"})
 		if code != 0 {
 			t.Fatalf("non-Mistral credential should pass preflight; code=%d stderr=%s", code, stderr.String())
 		}
