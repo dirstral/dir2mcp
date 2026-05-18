@@ -69,9 +69,14 @@ func builtinProfiles() map[string]providerProfileYAML {
 // builtinPrecedence is the deterministic auto-selection order (SPEC
 // 8.1.3): Mistral first (historical default), then the rest. User-only
 // profiles are appended in declared order after these.
+// `local` is intentionally excluded: it is credential-less and would
+// otherwise silently win auto-selection when no real credential is
+// set, masking a missing-credential misconfig (and pointing at a
+// localhost endpoint that is usually not running). It remains fully
+// usable via an explicit `model.<cap>.provider: local` binding.
 var builtinPrecedence = []string{
 	"mistral", "mistral-ocr", "openai", "gemini", "cohere",
-	"anthropic", "elevenlabs", "openrouter", "local",
+	"anthropic", "elevenlabs", "openrouter",
 }
 
 // extractProvidersSubtree returns only the top-level `providers:` and

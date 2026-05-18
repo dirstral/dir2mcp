@@ -42,12 +42,18 @@ func TestProviders_BuiltinAutoSelectByCredential(t *testing.T) {
 }
 
 func TestProviders_NoCredentialEmbedFails(t *testing.T) {
-	// no provider creds at all; local (credential-less) is openai-kind
-	// so it CAN serve embed -> auto-selects local. Assert that.
+	// No creds and no explicit binding: auto-select must NOT silently
+	// fall through to the credential-less `local` (it's excluded from
+	// auto precedence) — embed must fail so preflight surfaces it.
 	cfg := loadCfg(t, "version: 1\n")
-	p, err := cfg.Providers().Resolve(provider.CapEmbed)
+	if _, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+		t.Fatal("embed must not resolve with no credentials and no explicit binding")
+	}
+	// But an explicit `local` binding works (credential-less, eligible).
+	exp := loadCfg(t, "model:\n  embed:\n    provider: local\n")
+	p, err := exp.Providers().Resolve(provider.CapEmbed)
 	if err != nil || p.Name != "local" {
-		t.Fatalf("expected credential-less 'local' for embed, got %+v %v", p, err)
+		t.Fatalf("explicit local embed should resolve, got %+v %v", p, err)
 	}
 }
 

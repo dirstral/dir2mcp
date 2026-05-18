@@ -21,9 +21,9 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/mcp"
-	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
@@ -52,14 +52,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() { _ = textIx.Close() }()
 	defer func() { _ = codeIx.Close() }()
 
-	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-	if cfg.MistralMaxOCRPayloadBytes > 0 {
-		client.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
-	}
-	if strings.TrimSpace(cfg.ChatModel) != "" {
-		client.DefaultChatModel = strings.TrimSpace(cfg.ChatModel)
-	}
-	ret := retrieval.NewService(st, textIx, client, client)
+	embedder, generator := a.resolveModelClients(cfg)
+	ret := retrieval.NewService(st, textIx, embedder, generator)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
@@ -119,7 +113,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer a.stopPersistenceWithLog(persistence)
 
 	embedErrCh := make(chan error, 4)
-	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, client, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, cfg.EmbedModelText, cfg.EmbedModelCode)
+	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, cfg.EmbedModelText, cfg.EmbedModelCode)
 
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
@@ -375,31 +369,33 @@ func (a *App) applyPublicMode(cfg *config.Config, opts upOptions) int {
 }
 
 // checkMistralAPIKey reports a user-friendly error when the API key is missing.
+// checkMistralAPIKey is the §2.5 startup preflight for the embedding
+// provider. Generalized (SPEC 8.1.3): instead of demanding
+// MISTRAL_API_KEY specifically, it requires that an embed provider
+// *resolves* (a credentialed or credential-less profile that can serve
+// embed). Mistral via MISTRAL_API_KEY remains the default that
+// satisfies it. (Name kept until the C2-iii-b clean break to avoid
+// caller churn.)
 func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteractiveMode bool) int {
-	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-		return exitSuccess
-	}
 	if !requiresMistralAPIKey(*cfg, opts) {
 		return exitSuccess
 	}
+	if _, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+		return exitSuccess
+	}
+	const msg = "CONFIG_INVALID: no embedding provider configured"
+	const hint = "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
 	if opts.jsonOutput {
-		writeCLIError(
-			a.stderr,
-			true,
-			exitConfigInvalid,
-			"CONFIG_INVALID: Missing MISTRAL_API_KEY",
-			"Set env: MISTRAL_API_KEY=...",
-			"Or run: dir2mcp config init",
-		)
+		writeCLIError(a.stderr, true, exitConfigInvalid, msg, hint, "Or run: dir2mcp config init")
 		return exitConfigInvalid
 	}
 	se := a.sty(opts.jsonOutput)
 	if nonInteractiveMode {
-		writef(a.stderr, "%s CONFIG_INVALID: Missing MISTRAL_API_KEY\n", se.errPrefix())
-		writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
+		writef(a.stderr, "%s %s\n", se.errPrefix(), msg)
+		writeln(a.stderr, hint)
 		writeln(a.stderr, "Or run: dir2mcp config init")
 	} else {
-		writef(a.stderr, "%s Missing MISTRAL_API_KEY\n", se.errPrefix())
+		writef(a.stderr, "%s no embedding provider configured\n", se.errPrefix())
 		writeln(a.stderr, "Run: dir2mcp config init")
 	}
 	return exitConfigInvalid
@@ -751,7 +747,7 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 
 // startEmbeddingIfNotReadOnly starts embedding workers when readOnly is false
 // and the store exposes the ChunkSource interface.
-func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, client *mistral.Client, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode string) {
+func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode string) {
 	if readOnly {
 		return
 	}
@@ -760,7 +756,7 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.St
 		return
 	}
 	embedLogger := pickEmbedLogger(stderr, jsonOutput)
-	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, client, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode)
+	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode)
 }
 
 // printHumanConnectionIfVerbose prints the human-readable connection block
