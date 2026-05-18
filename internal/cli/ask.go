@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/provider"
 )
 
 func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) int {
@@ -44,26 +45,27 @@ func (a *App) runAskLocal(ctx context.Context, global globalOptions, opts askOpt
 		cfg.StateDir = filepath.Join(".", ".dir2mcp")
 	}
 
-	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+	// SPEC 8.1.3 preflight: an embed provider must resolve (generalized
+	// from the legacy MISTRAL_API_KEY-specific check; mirrors `up`).
+	if _, embErr := cfg.Providers().Resolve(provider.CapEmbed); embErr != nil {
+		msg := "CONFIG_INVALID: no embedding provider configured"
+		hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
+		var ce *provider.ConfigError
+		if errors.As(embErr, &ce) {
+			msg = ce.Error()
+		}
 		if global.jsonOutput {
-			writeCLIError(
-				a.stderr,
-				true,
-				exitConfigInvalid,
-				"CONFIG_INVALID: Missing MISTRAL_API_KEY",
-				"Set env: MISTRAL_API_KEY=...",
-				"Or run: dir2mcp config init",
-			)
+			writeCLIError(a.stderr, true, exitConfigInvalid, msg, hint, "Or run: dir2mcp config init")
 			return exitConfigInvalid
 		}
 		se := a.sty(global.jsonOutput)
 		nonInteractiveMode := global.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
 		if nonInteractiveMode {
-			writef(a.stderr, "%s CONFIG_INVALID: Missing MISTRAL_API_KEY\n", se.errPrefix())
-			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
+			writef(a.stderr, "%s %s\n", se.errPrefix(), msg)
+			writeln(a.stderr, hint)
 			writeln(a.stderr, "Or run: dir2mcp config init")
 		} else {
-			writef(a.stderr, "%s Missing MISTRAL_API_KEY\n", se.errPrefix())
+			writef(a.stderr, "%s %s\n", se.errPrefix(), strings.TrimPrefix(msg, "CONFIG_INVALID: "))
 			writeln(a.stderr, "Run: dir2mcp config init")
 		}
 		return exitConfigInvalid
