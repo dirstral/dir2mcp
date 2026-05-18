@@ -101,6 +101,21 @@ func Generator(p provider.Profile) (model.Generator, error) {
 	}
 }
 
+// Extractor builds a model.DocumentExtractor for the OCR provider
+// (same mistral client as OCR; ingest uses the DocumentExtractor
+// interface). Docling is a local extractor, not a provider profile,
+// and is selected by ingest independently of this.
+func Extractor(p provider.Profile) (model.DocumentExtractor, error) {
+	if p.Kind != provider.KindMistral {
+		return nil, unsupported(p, provider.CapOCR)
+	}
+	c := mistral.NewClient(p.BaseURL, p.APIKey)
+	if p.OCRModel != "" {
+		c.DefaultOCRModel = p.OCRModel
+	}
+	return c, nil
+}
+
 // OCR builds a model.OCR. Only the bespoke `mistral` kind serves OCR
 // (SPEC 8.1.2 — there is no OpenAI-compatible OCR endpoint).
 func OCR(p provider.Profile) (model.OCR, error) {

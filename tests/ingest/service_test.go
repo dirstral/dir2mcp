@@ -646,9 +646,12 @@ func TestTranscriberFromConfig_ExplicitProviderRequiresCredentials(t *testing.T)
 		wantErr  string
 	}{
 		{
+			// legacy stt.provider "mistral" maps to the mistral-ocr
+			// profile; without a credential the resolver returns a
+			// CONFIG_INVALID naming that profile.
 			name:     "mistral missing key",
 			provider: "mistral",
-			wantErr:  "requires MISTRAL_API_KEY",
+			wantErr:  "mistral-ocr",
 		},
 		{
 			name:     "elevenlabs missing key",
