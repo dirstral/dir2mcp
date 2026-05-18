@@ -275,6 +275,16 @@ func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
 }
 
 func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
+	return TranscriberFromConfigWithLanguage(cfg, "")
+}
+
+// TranscriberFromConfigWithLanguage is TranscriberFromConfig with a
+// per-request language override (the `language` arg of the transcribe
+// MCP tool). A non-empty language is applied onto the resolved profile
+// before the adapter is built so it reaches the wire (e.g. Mistral's
+// `language` form field); empty leaves the profile's configured
+// STTLanguage untouched.
+func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (model.Transcriber, error) {
 	sel := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
 	if sel == "" {
 		sel = transcriberProviderAuto
@@ -290,12 +300,16 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 	// profiles, or STT off when none is eligible. ElevenLabs voice/
 	// model/language/base-url are preserved on the profile (seedLegacy).
 	r := cfg.Providers()
+	langOverride := strings.TrimSpace(language)
 	// build wraps BOTH resolver and factory/build failures with the
 	// selected provider so the error contract is consistent regardless
 	// of where the failure occurred.
 	build := func(prof provider.Profile, err error) (model.Transcriber, error) {
 		if err != nil {
 			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
+		}
+		if langOverride != "" {
+			prof.STTLanguage = langOverride
 		}
 		tr, berr := buildTranscriber(prof, cfg)
 		if berr != nil {

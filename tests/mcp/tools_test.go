@@ -336,7 +336,10 @@ func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/chat/completions" {
+		// Mistral chat now routes through the OpenAI-compatible
+		// backbone: POST {base}/chat/completions (not the native
+		// /v1/chat/completions path).
+		if r.URL.Path == "/chat/completions" {
 			http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
 			return
 		}
@@ -359,7 +362,9 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
+		// Mistral chat now routes through the OpenAI-compatible
+		// backbone: POST {base}/chat/completions.
+		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
 		}
