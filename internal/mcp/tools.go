@@ -19,6 +19,8 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/providerfactory"
 )
 
 const (
@@ -914,7 +916,7 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		sourceText = string(runes[:maxChars])
 	}
 
-	client, toolErr := s.newMistralClient()
+	client, toolErr := s.newGenerator()
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1595,18 +1597,22 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		}
 	}
 
-	client, toolErr := s.newMistralClient()
-	if toolErr != nil {
-		return "", false, false, toolErr
+	// STT resolves through the provider model (SPEC 8.1.3); the legacy
+	// stt.provider selector still maps onto a profile during the
+	// transition. The per-request language override is threaded onto the
+	// resolved profile so it reaches the wire.
+	transcriber, tErr := ingest.TranscriberFromConfigWithLanguage(s.cfg, language)
+	if tErr != nil {
+		return "", false, false, &toolExecutionError{Code: "CONFIG_INVALID", Message: tErr.Error(), Retryable: false}
 	}
-	if strings.TrimSpace(language) != "" {
-		client.DefaultTranscribeLanguage = strings.TrimSpace(language)
+	if transcriber == nil {
+		return "", false, false, &toolExecutionError{Code: "CONFIG_INVALID", Message: "no speech-to-text provider configured", Retryable: false}
 	}
 	ing, err := ingest.NewService(s.cfg, s.store)
 	if err != nil {
 		return "", false, false, &toolExecutionError{Code: "CONFIG_INVALID", Message: err.Error(), Retryable: false}
 	}
-	ing.SetTranscriber(client)
+	ing.SetTranscriber(transcriber)
 
 	// generate transcript text first so we can accurately determine whether
 	// there is anything worth indexing.
@@ -1724,19 +1730,29 @@ func escapeGlobLiteral(input string) string {
 	return b.String()
 }
 
-func (s *Server) newMistralClient() (*mistral.Client, *toolExecutionError) {
-	apiKey := strings.TrimSpace(s.cfg.MistralAPIKey)
-	if apiKey == "" {
-		return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: "MISTRAL_API_KEY is required", Retryable: false}
-	}
-	client := mistral.NewClient(s.cfg.MistralBaseURL, apiKey)
-	if s.cfg.MistralMaxOCRPayloadBytes > 0 {
-		client.MaxOCRPayloadBytes = s.cfg.MistralMaxOCRPayloadBytes
+// newGenerator resolves the chat provider through the provider model
+// (SPEC 8.1.3) and builds its adapter. It replaces the legacy
+// Mistral-only annotate client: Mistral chat now routes through the
+// OpenAI-compatible backbone like any other provider. The legacy flat
+// chat_model still wins during the transition (mirrors
+// cli.resolveModelClients; removed with the field in the clean break).
+func (s *Server) newGenerator() (model.Generator, *toolExecutionError) {
+	cp, err := s.cfg.Providers().Resolve(provider.CapChat)
+	if err != nil {
+		var ce *provider.ConfigError
+		if errors.As(err, &ce) {
+			return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: ce.Error(), Retryable: false}
+		}
+		return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: "no chat provider configured", Retryable: false}
 	}
 	if modelName := strings.TrimSpace(s.cfg.ChatModel); modelName != "" {
-		client.DefaultChatModel = modelName
+		cp.ChatModel = modelName
 	}
-	return client, nil
+	gen, ferr := providerfactory.Generator(cp)
+	if ferr != nil {
+		return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: ferr.Error(), Retryable: false}
+	}
+	return gen, nil
 }
 
 func parseJSONObjectFromModelOutput(raw string) (map[string]interface{}, error) {

@@ -141,6 +141,9 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 		if p.STTModel != "" {
 			c.DefaultTranscribeModel = p.STTModel
 		}
+		if p.STTLanguage != "" {
+			c.DefaultTranscribeLanguage = p.STTLanguage
+		}
 		return c, nil
 	case provider.KindElevenLabs:
 		return newElevenLabs(p), nil
