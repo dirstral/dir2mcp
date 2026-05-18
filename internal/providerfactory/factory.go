@@ -11,6 +11,7 @@ package providerfactory
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/anthropic"
 	"github.com/dirstral/dir2mcp/internal/cohere"
@@ -142,8 +143,7 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 		}
 		return c, nil
 	case provider.KindElevenLabs:
-		// elevenlabs.NewClient(apiKey, voiceID); voiceID is TTS-only.
-		return elevenlabs.NewClient(p.APIKey, ""), nil
+		return newElevenLabs(p), nil
 	case provider.KindOpenAI:
 		c := openai.NewClient(p.BaseURL, p.APIKey)
 		if p.STTModel != "" {
@@ -161,22 +161,44 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 	}
 }
 
+// newElevenLabs builds an ElevenLabs client carrying the profile's
+// voice / STT model / language / base URL (shared by Transcriber+TTS).
+func newElevenLabs(p provider.Profile) *elevenlabs.Client {
+	c := elevenlabs.NewClient(p.APIKey, p.TTSVoice)
+	if p.BaseURL != "" {
+		c.BaseURL = strings.TrimRight(strings.TrimSpace(p.BaseURL), "/")
+	}
+	if p.STTModel != "" {
+		c.TranscribeModel = p.STTModel
+	}
+	if p.STTLanguage != "" {
+		c.TranscribeLanguageCode = p.STTLanguage
+	}
+	return c
+}
+
 // TTS builds a TTSSynthesizer for TTS-capable kinds: `elevenlabs`,
 // `openai`, `gemini` (SPEC 8.1.2). openai TTS is endpoint-dependent.
 func TTS(p provider.Profile) (TTSSynthesizer, error) {
 	switch p.Kind {
 	case provider.KindElevenLabs:
-		return elevenlabs.NewClient(p.APIKey, ""), nil
+		return newElevenLabs(p), nil
 	case provider.KindOpenAI:
 		c := openai.NewClient(p.BaseURL, p.APIKey)
 		if p.TTSModel != "" {
 			c.DefaultTTSModel = p.TTSModel
+		}
+		if p.TTSVoice != "" {
+			c.DefaultTTSVoice = p.TTSVoice
 		}
 		return c, nil
 	case provider.KindGemini:
 		c := gemini.NewClient(p.BaseURL, p.APIKey)
 		if p.TTSModel != "" {
 			c.DefaultTTSModel = p.TTSModel
+		}
+		if p.TTSVoice != "" {
+			c.DefaultTTSVoice = p.TTSVoice
 		}
 		return c, nil
 	default:
