@@ -19,7 +19,6 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
-	"github.com/dirstral/dir2mcp/internal/elevenlabs"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/provider"
@@ -206,20 +205,6 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 // transition because provider.Profile does not yet carry the
 // ElevenLabs voice/model/language knobs; it flips in the clean-break
 // config rework (#38).
-func newElevenLabsTranscriber(cfg config.Config) model.Transcriber {
-	client := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
-	if baseURL := strings.TrimSpace(cfg.ElevenLabsBaseURL); baseURL != "" {
-		client.BaseURL = strings.TrimRight(baseURL, "/")
-	}
-	if modelName := strings.TrimSpace(cfg.STTElevenLabsModel); modelName != "" {
-		client.TranscribeModel = modelName
-	}
-	if languageCode := strings.TrimSpace(cfg.STTElevenLabsLanguageCode); languageCode != "" {
-		client.TranscribeLanguageCode = languageCode
-	}
-	return client
-}
-
 // mistralExtractor resolves the OCR provider (the bespoke mistral kind)
 // via the provider model and adapts it to model.DocumentExtractor.
 // Returns nil when no Mistral OCR credential is available (matching the
@@ -251,11 +236,11 @@ func mistralExtractor(cfg config.Config) model.DocumentExtractor {
 
 // mistralTranscriber resolves the mistral-ocr profile for STT and
 // re-applies the legacy OCR/transcription payload limit.
-func mistralTranscriber(cfg config.Config) (model.Transcriber, error) {
-	prof, err := cfg.Providers().ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
-	if err != nil {
-		return nil, err
-	}
+// buildTranscriber adapts a resolved profile to a model.Transcriber and
+// re-applies the Mistral OCR/transcription payload limit (no-op for
+// non-Mistral kinds). ElevenLabs voice/model/language/base-url are
+// carried on the profile (seeded from legacy config in seedLegacy).
+func buildTranscriber(prof provider.Profile, cfg config.Config) (model.Transcriber, error) {
 	tr, err := providerfactory.Transcriber(prof)
 	if err != nil {
 		return nil, err
@@ -305,30 +290,35 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		return nil, nil
 	}
 
-	// Mistral STT flips to the resolver (fully preserved via
-	// seedLegacy + the mistral-ocr profile's STT model). ElevenLabs
-	// STT stays legacy during the transition (provider.Profile lacks
-	// the ElevenLabs voice/model/language knobs — flips in #38).
+	// STT now resolves entirely through the provider model (SPEC
+	// 8.1.3). The legacy stt.provider selector maps onto a profile:
+	// explicit mistral/elevenlabs -> required (a missing credential is
+	// a hard error); auto -> deterministic precedence among STT-capable
+	// profiles, or STT off when none is eligible. ElevenLabs voice/
+	// model/language/base-url are preserved on the profile (seedLegacy).
+	r := cfg.Providers()
 	switch sel {
 	case transcriberProviderMistral:
-		tr, err := mistralTranscriber(cfg)
+		prof, err := r.ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
 		if err != nil {
 			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
 		}
-		return tr, nil
+		return buildTranscriber(prof, cfg)
 	case transcriberProviderElevenLabs:
-		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
-			return nil, fmt.Errorf("stt provider %q requires ELEVENLABS_API_KEY", sel)
+		prof, err := r.ResolveExplicit(provider.CapSTT, "elevenlabs", true)
+		if err != nil {
+			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
 		}
-		return newElevenLabsTranscriber(cfg), nil
+		return buildTranscriber(prof, cfg)
 	case transcriberProviderAuto:
-		if tr, err := mistralTranscriber(cfg); err == nil {
-			return tr, nil
+		prof, err := r.Resolve(provider.CapSTT)
+		if errors.Is(err, provider.ErrNoProvider) {
+			return nil, nil // nothing eligible -> STT off
 		}
-		if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
-			return newElevenLabsTranscriber(cfg), nil
+		if err != nil {
+			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
 		}
-		return nil, nil // auto + nothing eligible -> STT off
+		return buildTranscriber(prof, cfg)
 	default:
 		return nil, fmt.Errorf("unsupported transcriber provider %q", sel)
 	}

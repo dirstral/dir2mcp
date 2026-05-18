@@ -26,7 +26,9 @@ type providerProfileYAML struct {
 	ChatModel      string  `yaml:"chat_model"`
 	OCRModel       string  `yaml:"ocr_model"`
 	STTModel       string  `yaml:"stt_model"`
+	STTLanguage    string  `yaml:"stt_language"`
 	TTSModel       string  `yaml:"tts_model"`
+	TTSVoice       string  `yaml:"tts_voice"`
 	RerankModel    string  `yaml:"rerank_model"`
 }
 
@@ -206,7 +208,9 @@ func toProfiles(merged map[string]providerProfileYAML, getenv func(string) strin
 			ChatModel:      p.ChatModel,
 			OCRModel:       p.OCRModel,
 			STTModel:       p.STTModel,
+			STTLanguage:    p.STTLanguage,
 			TTSModel:       p.TTSModel,
+			TTSVoice:       p.TTSVoice,
 			RerankModel:    p.RerankModel,
 		}
 	}
@@ -321,56 +325,59 @@ func (cfg Config) Providers() ProviderResolution {
 // the new resolver during the transition. User `providers:` entries
 // still take precedence (merged on top of this seed). The legacy fields
 // themselves are removed in the clean-break C2-iii.
+func litStr(s string) *string { return &s }
+
+func setStr(dst *string, v string) {
+	if v != "" {
+		*dst = v
+	}
+}
+
 func seedLegacy(m map[string]providerProfileYAML, cfg Config) {
-	lit := func(s string) *string { return &s }
-	seedField := func(name string, fn func(*providerProfileYAML)) {
+	seed := func(name string, fn func(*providerProfileYAML)) {
 		if p, ok := m[name]; ok {
 			fn(&p)
 			m[name] = p
 		}
 	}
-	seedField("mistral", func(p *providerProfileYAML) {
-		if cfg.MistralAPIKey != "" {
-			p.APIKey = lit(cfg.MistralAPIKey)
-		}
-		if cfg.MistralBaseURL != "" {
-			p.BaseURL = cfg.MistralBaseURL
-		}
-		if cfg.EmbedModelText != "" {
-			p.EmbedTextModel = cfg.EmbedModelText
-		}
-		if cfg.EmbedModelCode != "" {
-			p.EmbedCodeModel = cfg.EmbedModelCode
-		}
-		if cfg.ChatModel != "" {
-			p.ChatModel = cfg.ChatModel
-		}
-	})
-	seedField("mistral-ocr", func(p *providerProfileYAML) {
-		if cfg.MistralAPIKey != "" {
-			p.APIKey = lit(cfg.MistralAPIKey)
-		}
-		if cfg.MistralBaseURL != "" {
-			p.BaseURL = cfg.MistralBaseURL
-		}
-		if cfg.STTMistralModel != "" {
-			p.STTModel = cfg.STTMistralModel
-		}
-	})
-	seedField("cohere", func(p *providerProfileYAML) {
-		if cfg.CohereAPIKey != "" {
-			p.APIKey = lit(cfg.CohereAPIKey)
-		}
-		if cfg.CohereBaseURL != "" {
-			p.BaseURL = cfg.CohereBaseURL
-		}
-		if cfg.RerankModel != "" {
-			p.RerankModel = cfg.RerankModel
-		}
-	})
-	seedField("elevenlabs", func(p *providerProfileYAML) {
-		if cfg.ElevenLabsAPIKey != "" {
-			p.APIKey = lit(cfg.ElevenLabsAPIKey)
-		}
-	})
+	seed("mistral", func(p *providerProfileYAML) { seedMistralChatEmbed(p, cfg) })
+	seed("mistral-ocr", func(p *providerProfileYAML) { seedMistralOCR(p, cfg) })
+	seed("cohere", func(p *providerProfileYAML) { seedCohere(p, cfg) })
+	seed("elevenlabs", func(p *providerProfileYAML) { seedElevenLabs(p, cfg) })
+}
+
+func seedMistralChatEmbed(p *providerProfileYAML, cfg Config) {
+	if cfg.MistralAPIKey != "" {
+		p.APIKey = litStr(cfg.MistralAPIKey)
+	}
+	setStr(&p.BaseURL, cfg.MistralBaseURL)
+	setStr(&p.EmbedTextModel, cfg.EmbedModelText)
+	setStr(&p.EmbedCodeModel, cfg.EmbedModelCode)
+	setStr(&p.ChatModel, cfg.ChatModel)
+}
+
+func seedMistralOCR(p *providerProfileYAML, cfg Config) {
+	if cfg.MistralAPIKey != "" {
+		p.APIKey = litStr(cfg.MistralAPIKey)
+	}
+	setStr(&p.BaseURL, cfg.MistralBaseURL)
+	setStr(&p.STTModel, cfg.STTMistralModel)
+}
+
+func seedCohere(p *providerProfileYAML, cfg Config) {
+	if cfg.CohereAPIKey != "" {
+		p.APIKey = litStr(cfg.CohereAPIKey)
+	}
+	setStr(&p.BaseURL, cfg.CohereBaseURL)
+	setStr(&p.RerankModel, cfg.RerankModel)
+}
+
+func seedElevenLabs(p *providerProfileYAML, cfg Config) {
+	if cfg.ElevenLabsAPIKey != "" {
+		p.APIKey = litStr(cfg.ElevenLabsAPIKey)
+	}
+	setStr(&p.BaseURL, cfg.ElevenLabsBaseURL)
+	setStr(&p.TTSVoice, cfg.ElevenLabsTTSVoiceID)
+	setStr(&p.STTModel, cfg.STTElevenLabsModel)
+	setStr(&p.STTLanguage, cfg.STTElevenLabsLanguageCode)
 }

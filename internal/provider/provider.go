@@ -103,7 +103,9 @@ type Profile struct {
 	ChatModel      string
 	OCRModel       string
 	STTModel       string
+	STTLanguage    string // optional STT language hint (e.g. ElevenLabs)
 	TTSModel       string
+	TTSVoice       string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
 	RerankModel    string
 }
 

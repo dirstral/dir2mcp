@@ -16,7 +16,6 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
-	"github.com/dirstral/dir2mcp/internal/elevenlabs"
 	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -24,6 +23,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
@@ -496,12 +496,12 @@ func buildMCPServerOptions(cfg *config.Config, st model.Store, indexingState *ap
 		mcp.WithIndexingState(indexingState),
 		mcp.WithEventEmitter(emitter.Emit),
 	}
-	if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
-		ttsClient := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
-		if strings.TrimSpace(cfg.ElevenLabsBaseURL) != "" {
-			ttsClient.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.ElevenLabsBaseURL), "/")
+	// TTS is optional and fail-open (SPEC 8.3): resolve a TTS-capable
+	// provider through the provider model; skip silently if none.
+	if prof, err := cfg.Providers().Resolve(provider.CapTTS); err == nil {
+		if tts, terr := providerfactory.TTS(prof); terr == nil {
+			opts = append(opts, mcp.WithTTS(tts))
 		}
-		opts = append(opts, mcp.WithTTS(ttsClient))
 	}
 	return opts
 }
