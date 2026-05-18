@@ -290,28 +290,32 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 	// profiles, or STT off when none is eligible. ElevenLabs voice/
 	// model/language/base-url are preserved on the profile (seedLegacy).
 	r := cfg.Providers()
+	// build wraps BOTH resolver and factory/build failures with the
+	// selected provider so the error contract is consistent regardless
+	// of where the failure occurred.
+	build := func(prof provider.Profile, err error) (model.Transcriber, error) {
+		if err != nil {
+			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
+		}
+		tr, berr := buildTranscriber(prof, cfg)
+		if berr != nil {
+			return nil, fmt.Errorf("stt provider %q: %w", sel, berr)
+		}
+		return tr, nil
+	}
 	switch sel {
 	case transcriberProviderMistral:
 		prof, err := r.ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
-		if err != nil {
-			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
-		}
-		return buildTranscriber(prof, cfg)
+		return build(prof, err)
 	case transcriberProviderElevenLabs:
 		prof, err := r.ResolveExplicit(provider.CapSTT, "elevenlabs", true)
-		if err != nil {
-			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
-		}
-		return buildTranscriber(prof, cfg)
+		return build(prof, err)
 	case transcriberProviderAuto:
 		prof, err := r.Resolve(provider.CapSTT)
 		if errors.Is(err, provider.ErrNoProvider) {
 			return nil, nil // nothing eligible -> STT off
 		}
-		if err != nil {
-			return nil, fmt.Errorf("stt provider %q: %w", sel, err)
-		}
-		return buildTranscriber(prof, cfg)
+		return build(prof, err)
 	default:
 		return nil, fmt.Errorf("unsupported transcriber provider %q", sel)
 	}
