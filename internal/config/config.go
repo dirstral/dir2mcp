@@ -300,6 +300,8 @@ type persistedConfig struct {
 	X402PayTo            string `yaml:"x402_pay_to"`
 }
 
+// Default returns the baseline Config (used as the starting point
+// before dotenv/env/file overrides are layered on).
 func Default() Config {
 	return Config{
 		RootDir:         ".",
@@ -399,6 +401,9 @@ func LoadFile(path string) (Config, error) {
 	return load(path, nil, false)
 }
 
+// buildPersistedConfig projects a Config onto persistedConfig, the
+// subset that is safe to write to disk (secrets are intentionally
+// excluded so they never land in the YAML/snapshot).
 func buildPersistedConfig(cfg *Config) persistedConfig {
 	if cfg == nil {
 		return persistedConfig{}
@@ -575,6 +580,10 @@ func appendSnapshotEmbedIdentity(raw []byte, id string) []byte {
 	return append(raw, []byte("embed_identity: "+id+"\n")...)
 }
 
+// appendSnapshotSecretSourceMetadata appends a `secret_sources:` block
+// to raw recording where each secret was sourced from (env/file/…)
+// without writing the secret values themselves. Empty entries are
+// skipped; the block is omitted entirely when no sources are set.
 func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata) []byte {
 	entries := []struct {
 		key   string
@@ -609,6 +618,9 @@ func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata
 	return append(raw, []byte(buf.String())...)
 }
 
+// parseSecretSourceMetadata reads the `secret_sources:` block back out
+// of a snapshot into SecretSourceMetadata (the inverse of
+// appendSnapshotSecretSourceMetadata).
 func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	meta := SecretSourceMetadata{}
 	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
@@ -638,6 +650,8 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	return meta, nil
 }
 
+// applySecretSourceField assigns a single parsed `secret_sources.<name>`
+// key/value onto meta; unknown keys are ignored.
 func applySecretSourceField(meta *SecretSourceMetadata, key, value string) {
 	switch key {
 	case "secret_sources.elevenlabs_api_key":
@@ -833,6 +847,10 @@ func applyRerankFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyModelClientsFileParsed overlays the parsed ingest/ElevenLabs
+// client settings from the config file onto cfg (only keys present in
+// the file are applied; the spec-removed Mistral client keys are no
+// longer handled here).
 func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	if fc.DoclingCommand != nil {
 		cfg.DoclingCommand = *fc.DoclingCommand
@@ -1261,6 +1279,9 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 	return nil
 }
 
+// setIntFileScalar parses value as an int and assigns it to the
+// fileConfig field selected by key; returns an error for an unknown key
+// or a non-integer value.
 func setIntFileScalar(cfg *fileConfig, key, value string) error {
 	var target **int
 	switch key {
@@ -1365,6 +1386,9 @@ func setRerankStringFileScalar(cfg *fileConfig, key, value string) bool {
 	return true
 }
 
+// setModelStringFileScalar assigns a model/provider-related flat string
+// key onto the fileConfig (rerank keys first, then ElevenLabs/STT). The
+// spec-removed Mistral/embed/chat keys are no longer accepted here.
 func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 	if setRerankStringFileScalar(cfg, key, value) {
 		return
@@ -1465,6 +1489,8 @@ func isListConfigKey(key string) bool {
 	}
 }
 
+// marshalConfigYAML renders a persistedConfig as the flat-key YAML
+// written to .dir2mcp.yaml / the effective snapshot.
 func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	var b strings.Builder
 	writeScalar := func(key, value string) {
