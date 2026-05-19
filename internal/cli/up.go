@@ -367,11 +367,10 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 	if !requiresMistralAPIKey(opts) {
 		return exitSuccess
 	}
-	if _, embErr := cfg.Providers().Resolve(provider.CapEmbed); embErr == nil {
-		return exitSuccess
-	} else {
+	hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
+	prof, embErr := cfg.Providers().Resolve(provider.CapEmbed)
+	if embErr != nil {
 		msg := "CONFIG_INVALID: no embedding provider configured"
-		hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
 		var ce *provider.ConfigError
 		if errors.As(embErr, &ce) {
 			// Surface the actionable reason (bad explicit binding /
@@ -381,6 +380,15 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 		}
 		return a.reportEmbedPreflightError(opts, nonInteractiveMode, msg, hint)
 	}
+	// Resolution alone is not enough: the runtime also builds the
+	// adapter (resolveModelClients -> providerfactory.Embedder). Fail
+	// fast here rather than letting a non-read-only server ingest with
+	// a nil embedder and silently produce no embeddings.
+	if _, ferr := providerfactory.Embedder(prof); ferr != nil {
+		return a.reportEmbedPreflightError(opts, nonInteractiveMode,
+			fmt.Sprintf("CONFIG_INVALID: embedding provider %q is unusable: %v", prof.Name, ferr), hint)
+	}
+	return exitSuccess
 }
 
 // reportEmbedPreflightError emits the §2.5 preflight failure in the

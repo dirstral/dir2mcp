@@ -360,12 +360,17 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			"stt_provider": defaultSTTProvider,
 			"stt_model":    defaultSTTModel,
 			"chat": func() string {
-				if cp, err := s.cfg.Providers().Resolve(provider.CapChat); err == nil {
-					if m := strings.TrimSpace(cp.ChatModel); m != "" {
-						return m
-					}
+				cp, err := s.cfg.Providers().Resolve(provider.CapChat)
+				if err != nil {
+					// No chat provider resolves; report the built-in default.
+					return defaultChatModel
 				}
-				return defaultChatModel
+				if m := strings.TrimSpace(cp.ChatModel); m != "" {
+					return m
+				}
+				// Resolved but no explicit model: the adapter uses its
+				// own provider-kind default — don't misreport Mistral's.
+				return "(" + cp.Name + " provider default)"
 			}(),
 		},
 	}
