@@ -352,8 +352,13 @@ func (cfg Config) Providers() ProviderResolution {
 	return cfg.providersDoc.resolve(base, nil)
 }
 
+// litStr returns a pointer to s, used to set a providerProfileYAML
+// api_key to a concrete literal (distinct from an absent/credential-less
+// nil api_key).
 func litStr(s string) *string { return &s }
 
+// setStr overwrites *dst with v only when v is non-empty, so a blank
+// flat-config value never clobbers a built-in profile default.
 func setStr(dst *string, v string) {
 	if v != "" {
 		*dst = v
@@ -389,6 +394,8 @@ func seedMistralOCR(p *providerProfileYAML, cfg Config) {
 	setStr(&p.STTModel, cfg.STTMistralModel)
 }
 
+// seedCohere bridges the spec-retained flat rerank.cohere config
+// (api_key/base_url/model, SPEC 0.7.0 §16.2) onto the cohere profile.
 func seedCohere(p *providerProfileYAML, cfg Config) {
 	if cfg.CohereAPIKey != "" {
 		p.APIKey = litStr(cfg.CohereAPIKey)
@@ -397,6 +404,9 @@ func seedCohere(p *providerProfileYAML, cfg Config) {
 	setStr(&p.RerankModel, cfg.RerankModel)
 }
 
+// seedElevenLabs bridges the spec-retained flat stt.elevenlabs config
+// (api_key/base_url/voice/model/language, SPEC 0.7.0 §16.2) onto the
+// elevenlabs profile.
 func seedElevenLabs(p *providerProfileYAML, cfg Config) {
 	if cfg.ElevenLabsAPIKey != "" {
 		p.APIKey = litStr(cfg.ElevenLabsAPIKey)
