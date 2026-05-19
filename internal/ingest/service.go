@@ -205,17 +205,6 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 // Returns nil when no Mistral OCR credential is available (matching the
 // prior "no key -> no extractor" behavior). Docling is handled
 // separately below — it is a local tool, not a provider profile.
-// applyMistralOCRLimit re-applies the legacy
-// mistral_max_ocr_payload_bytes knob to a resolver/factory-built
-// Mistral client (the factory builds a generic client; this Mistral-
-// specific tuning param is not part of provider.Profile). It bounds
-// both OCR and Mistral audio transcription payloads.
-func applyMistralOCRLimit(v any, cfg config.Config) {
-	if mc, ok := v.(*mistral.Client); ok && cfg.MistralMaxOCRPayloadBytes > 0 {
-		mc.MaxOCRPayloadBytes = cfg.MistralMaxOCRPayloadBytes
-	}
-}
-
 func mistralExtractor(cfg config.Config) model.DocumentExtractor {
 	prof, err := cfg.Providers().ResolveExplicit(provider.CapOCR, "mistral-ocr", true)
 	if err != nil {
@@ -225,21 +214,13 @@ func mistralExtractor(cfg config.Config) model.DocumentExtractor {
 	if err != nil {
 		return nil
 	}
-	applyMistralOCRLimit(ex, cfg)
 	return ex
 }
 
-// buildTranscriber adapts a resolved profile to a model.Transcriber and
-// re-applies the Mistral OCR/transcription payload limit (no-op for
-// non-Mistral kinds). ElevenLabs voice/model/language/base-url are
-// carried on the profile (seeded from legacy config in seedLegacy).
-func buildTranscriber(prof provider.Profile, cfg config.Config) (model.Transcriber, error) {
-	tr, err := providerfactory.Transcriber(prof)
-	if err != nil {
-		return nil, err
-	}
-	applyMistralOCRLimit(tr, cfg)
-	return tr, nil
+// buildTranscriber adapts a resolved profile to a model.Transcriber.
+// ElevenLabs voice/model/language/base-url are carried on the profile.
+func buildTranscriber(prof provider.Profile) (model.Transcriber, error) {
+	return providerfactory.Transcriber(prof)
 }
 
 // DocumentExtractorFromConfig resolves document extraction provider selection.
@@ -311,7 +292,7 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 		if langOverride != "" {
 			prof.STTLanguage = langOverride
 		}
-		tr, berr := buildTranscriber(prof, cfg)
+		tr, berr := buildTranscriber(prof)
 		if berr != nil {
 			return nil, fmt.Errorf("stt provider %q: %w", sel, berr)
 		}

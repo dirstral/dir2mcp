@@ -360,10 +360,17 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			"stt_provider": defaultSTTProvider,
 			"stt_model":    defaultSTTModel,
 			"chat": func() string {
-				if s.cfg.ChatModel != "" {
-					return s.cfg.ChatModel
+				cp, err := s.cfg.Providers().Resolve(provider.CapChat)
+				if err != nil {
+					// No chat provider resolves; report the built-in default.
+					return defaultChatModel
 				}
-				return defaultChatModel
+				if m := strings.TrimSpace(cp.ChatModel); m != "" {
+					return m
+				}
+				// Resolved but no explicit model: the adapter uses its
+				// own provider-kind default — don't misreport Mistral's.
+				return "(" + cp.Name + " provider default)"
 			}(),
 		},
 	}
@@ -1733,9 +1740,8 @@ func escapeGlobLiteral(input string) string {
 // newGenerator resolves the chat provider through the provider model
 // (SPEC 8.1.3) and builds its adapter. It replaces the legacy
 // Mistral-only annotate client: Mistral chat now routes through the
-// OpenAI-compatible backbone like any other provider. The legacy flat
-// chat_model still wins during the transition (mirrors
-// cli.resolveModelClients; removed with the field in the clean break).
+// OpenAI-compatible backbone like any other provider. The chat model
+// comes from the resolved profile (providers:/model: config).
 func (s *Server) newGenerator() (model.Generator, *toolExecutionError) {
 	cp, err := s.cfg.Providers().Resolve(provider.CapChat)
 	if err != nil {
@@ -1744,9 +1750,6 @@ func (s *Server) newGenerator() (model.Generator, *toolExecutionError) {
 			return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: ce.Error(), Retryable: false}
 		}
 		return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: "no chat provider configured", Retryable: false}
-	}
-	if modelName := strings.TrimSpace(s.cfg.ChatModel); modelName != "" {
-		cp.ChatModel = modelName
 	}
 	gen, ferr := providerfactory.Generator(cp)
 	if ferr != nil {
