@@ -1111,14 +1111,11 @@ func loadConfigForDaemonParent(global globalOptions) (config.Config, error) {
 	return cfg, nil
 }
 
+// saveEffectiveConfigSnapshot writes the effective (post-merge) config
+// snapshot, recording where each secret was sourced from
+// (env/configured/…) without persisting the secret values themselves.
 func saveEffectiveConfigSnapshot(cfg config.Config, auth authMaterial, x402TokenSource string) error {
 	sources := config.SecretSourceMetadata{}
-	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-		sources.MistralAPIKey = "configured"
-		if strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != "" {
-			sources.MistralAPIKey = "env"
-		}
-	}
 	if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
 		sources.ElevenLabsAPIKey = "configured"
 		if strings.TrimSpace(os.Getenv("ELEVENLABS_API_KEY")) != "" {

@@ -199,9 +199,12 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 // causing the ingest service to be unaware of any environment overrides.
 func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	tmp := t.TempDir()
-	// exercise a non-default value so we can distinguish default vs loaded
-	t.Setenv("MISTRAL_API_KEY", "abc123")
-	t.Setenv("MISTRAL_BASE_URL", "https://example.local/")
+	// Exercise a non-default value so we can distinguish default vs
+	// loaded. The provider clean break (#38) removed the MISTRAL_*
+	// env→Config mapping; DIR2MCP_DOCLING_COMMAND remains a loader-applied
+	// env override and is a clean, observable proxy for "the loaded
+	// config (not config.Default()) reached the ingestor".
+	t.Setenv("DIR2MCP_DOCLING_COMMAND", "cat {input}")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -221,11 +224,8 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 		}
 	})
 
-	if seenCfg.MistralAPIKey != "abc123" {
-		t.Fatalf("config not propagated to ingestor: got api key %q", seenCfg.MistralAPIKey)
-	}
-	if seenCfg.MistralBaseURL != "https://example.local/" {
-		t.Fatalf("config not propagated to ingestor: got base url %q", seenCfg.MistralBaseURL)
+	if seenCfg.DoclingCommand != "cat {input}" {
+		t.Fatalf("config not propagated to ingestor: got docling command %q", seenCfg.DoclingCommand)
 	}
 }
 

@@ -28,8 +28,11 @@ func TestDocumentExtractorFromConfig_PrefersDoclingCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping POSIX-only command test on Windows")
 	}
+	// A Mistral credential is present (resolves the OCR profile via the
+	// built-in ${MISTRAL_API_KEY} placeholder post clean-break #38), yet
+	// the configured docling command must still take precedence.
+	t.Setenv("MISTRAL_API_KEY", "test-key")
 	cfg := config.Config{
-		MistralAPIKey:  "test-key",
 		DoclingCommand: "cat {input}",
 	}
 

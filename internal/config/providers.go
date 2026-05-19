@@ -352,19 +352,25 @@ func (cfg Config) Providers() ProviderResolution {
 	return cfg.providersDoc.resolve(base, nil)
 }
 
-// seedLegacy overlays already-loaded legacy flat config onto the
-// built-in profiles so file-based legacy configs keep working through
-// the new resolver during the transition. User `providers:` entries
-// still take precedence (merged on top of this seed). The legacy fields
-// themselves are removed in the clean-break C2-iii.
+// litStr returns a pointer to s, used to set a providerProfileYAML
+// api_key to a concrete literal (distinct from an absent/credential-less
+// nil api_key).
 func litStr(s string) *string { return &s }
 
+// setStr overwrites *dst with v only when v is non-empty, so a blank
+// flat-config value never clobbers a built-in profile default.
 func setStr(dst *string, v string) {
 	if v != "" {
 		*dst = v
 	}
 }
 
+// seedLegacy overlays the spec-retained flat stt:/rerank: config
+// (SPEC 0.7.0 §16.2 retains these shapes) onto the built-in profiles
+// so the resolver honors them. The monolithic mistral chat/embed
+// surface was removed in the clean break (C2-iii); only the
+// STT/rerank-relevant settings are bridged here. User `providers:`
+// entries still take precedence (merged on top of this seed).
 func seedLegacy(m map[string]providerProfileYAML, cfg Config) {
 	seed := func(name string, fn func(*providerProfileYAML)) {
 		if p, ok := m[name]; ok {
@@ -372,30 +378,24 @@ func seedLegacy(m map[string]providerProfileYAML, cfg Config) {
 			m[name] = p
 		}
 	}
-	seed("mistral", func(p *providerProfileYAML) { seedMistralChatEmbed(p, cfg) })
+	// The monolithic `mistral` chat/embed profile is fully removed
+	// config (clean break): its credential resolves via the built-in
+	// ${MISTRAL_API_KEY} placeholder or an explicit providers: entry.
 	seed("mistral-ocr", func(p *providerProfileYAML) { seedMistralOCR(p, cfg) })
 	seed("cohere", func(p *providerProfileYAML) { seedCohere(p, cfg) })
 	seed("elevenlabs", func(p *providerProfileYAML) { seedElevenLabs(p, cfg) })
 }
 
-func seedMistralChatEmbed(p *providerProfileYAML, cfg Config) {
-	if cfg.MistralAPIKey != "" {
-		p.APIKey = litStr(cfg.MistralAPIKey)
-	}
-	setStr(&p.BaseURL, cfg.MistralBaseURL)
-	setStr(&p.EmbedTextModel, cfg.EmbedModelText)
-	setStr(&p.EmbedCodeModel, cfg.EmbedModelCode)
-	setStr(&p.ChatModel, cfg.ChatModel)
-}
-
+// seedMistralOCR bridges only the spec-retained Mistral STT model
+// (stt.mistral.model, §16.2) onto the mistral-ocr profile. The
+// credential and base URL are no longer flat config — the profile
+// keeps its built-in ${MISTRAL_API_KEY} / default base URL.
 func seedMistralOCR(p *providerProfileYAML, cfg Config) {
-	if cfg.MistralAPIKey != "" {
-		p.APIKey = litStr(cfg.MistralAPIKey)
-	}
-	setStr(&p.BaseURL, cfg.MistralBaseURL)
 	setStr(&p.STTModel, cfg.STTMistralModel)
 }
 
+// seedCohere bridges the spec-retained flat rerank.cohere config
+// (api_key/base_url/model, SPEC 0.7.0 §16.2) onto the cohere profile.
 func seedCohere(p *providerProfileYAML, cfg Config) {
 	if cfg.CohereAPIKey != "" {
 		p.APIKey = litStr(cfg.CohereAPIKey)
@@ -404,6 +404,9 @@ func seedCohere(p *providerProfileYAML, cfg Config) {
 	setStr(&p.RerankModel, cfg.RerankModel)
 }
 
+// seedElevenLabs bridges the spec-retained flat stt.elevenlabs config
+// (api_key/base_url/voice/model/language, SPEC 0.7.0 §16.2) onto the
+// elevenlabs profile.
 func seedElevenLabs(p *providerProfileYAML, cfg Config) {
 	if cfg.ElevenLabsAPIKey != "" {
 		p.APIKey = litStr(cfg.ElevenLabsAPIKey)

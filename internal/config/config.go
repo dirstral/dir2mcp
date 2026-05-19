@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/dirstral/dir2mcp/internal/mistral"
 )
 
 const DefaultProtocolVersion = "2025-11-25"
@@ -21,7 +19,6 @@ const DefaultProtocolVersion = "2025-11-25"
 const EffectiveConfigSnapshotFile = ".dir2mcp.yaml.snapshot"
 
 type SecretSourceMetadata struct {
-	MistralAPIKey        string
 	ElevenLabsAPIKey     string
 	CohereAPIKey         string
 	X402FacilitatorToken string
@@ -76,12 +73,6 @@ type Config struct {
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
 	// It is not loaded from disk and should not be persisted.
 	ResolvedAuthToken string
-	MistralAPIKey     string
-	MistralBaseURL    string
-	// MistralMaxOCRPayloadBytes optionally overrides the maximum encoded
-	// payload size accepted by the Mistral client for OCR/image processing
-	// and audio transcription requests. Values <= 0 use client defaults.
-	MistralMaxOCRPayloadBytes int
 	// DoclingCommand optionally configures a local docling CLI command
 	// template used for rich document extraction.
 	DoclingCommand       string
@@ -98,18 +89,6 @@ type Config struct {
 	// field is intentionally not persisted to disk.
 	Warnings []error
 
-	// EmbedModelText and EmbedModelCode specify the names of the Mistral
-	// embedding models used for text and code chunks respectively.  They are
-	// exposed via configuration so operators can override the hardcoded
-	// defaults if the upstream API changes or custom models are desired.
-	EmbedModelText string
-	EmbedModelCode string
-	// ChatModel specifies the Mistral chat/completion model used for
-	// RAG-style generation.  Operators can override the hardcoded default
-	// when upstream introduces a new alias or model.  Environment variable
-	// DIR2MCP_CHAT_MODEL also affects this value.
-	ChatModel string
-
 	RAGSystemPrompt     string
 	RAGGenerateAnswer   bool
 	RAGKDefault         int
@@ -123,9 +102,8 @@ type Config struct {
 	RetrievalHybridEnabled bool
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
-	// present (mirrors how MistralAPIKey gates embedding/OCR).
-	// CohereAPIKey is a secret: env-sourced, never persisted to the
-	// config snapshot (mirrors MistralAPIKey).
+	// present. CohereAPIKey is a secret: env-sourced, never persisted
+	// to the config snapshot.
 	//
 	// RerankEnabled is a tri-state override (nil = auto: on iff a
 	// credential is present; *false = force off even with a credential;
@@ -136,7 +114,7 @@ type Config struct {
 	CohereAPIKey   string
 	// CohereBaseURL overrides the Cohere API endpoint (self-hosted /
 	// proxied deployments and tests). Empty = provider default. Not a
-	// secret; persisted like MistralBaseURL.
+	// secret; persisted to the config snapshot.
 	CohereBaseURL         string
 	RerankModel           string
 	RerankCandidatePool   int
@@ -183,30 +161,24 @@ type Config struct {
 }
 
 type fileConfig struct {
-	RootDir                   *string
-	StateDir                  *string
-	ListenAddr                *string
-	MCPPath                   *string
-	ProtocolVersion           *string
-	Public                    *bool
-	AuthMode                  *string
-	ServerName                *string
-	RateLimitRPS              *int
-	RateLimitBurst            *int
-	TrustedProxies            []string
-	PathExcludes              []string
-	SecretPatterns            []string
-	MistralAPIKey             *string
-	MistralBaseURL            *string
-	MistralMaxOCRPayloadBytes *int
-	DoclingCommand            *string
+	RootDir         *string
+	StateDir        *string
+	ListenAddr      *string
+	MCPPath         *string
+	ProtocolVersion *string
+	Public          *bool
+	AuthMode        *string
+	ServerName      *string
+	RateLimitRPS    *int
+	RateLimitBurst  *int
+	TrustedProxies  []string
+	PathExcludes    []string
+	SecretPatterns  []string
+	DoclingCommand  *string
 
 	ElevenLabsBaseURL         *string
 	ElevenLabsTTSVoiceID      *string
 	AllowedOrigins            []string
-	EmbedModelText            *string
-	EmbedModelCode            *string
-	ChatModel                 *string
 	RAGSystemPrompt           *string
 	RAGGenerateAnswer         *bool
 	RAGKDefault               *int
@@ -257,22 +229,20 @@ type fileConfig struct {
 }
 
 type persistedConfig struct {
-	RootDir                   string   `yaml:"root_dir"`
-	StateDir                  string   `yaml:"state_dir"`
-	ListenAddr                string   `yaml:"listen_addr"`
-	MCPPath                   string   `yaml:"mcp_path"`
-	ProtocolVersion           string   `yaml:"protocol_version"`
-	Public                    bool     `yaml:"public"`
-	AuthMode                  string   `yaml:"auth_mode"`
-	ServerName                string   `yaml:"server_name"`
-	RateLimitRPS              int      `yaml:"rate_limit_rps"`
-	RateLimitBurst            int      `yaml:"rate_limit_burst"`
-	TrustedProxies            []string `yaml:"trusted_proxies"`
-	PathExcludes              []string `yaml:"path_excludes"`
-	SecretPatterns            []string `yaml:"secret_patterns"`
-	MistralBaseURL            string   `yaml:"mistral_base_url"`
-	MistralMaxOCRPayloadBytes int      `yaml:"mistral_max_ocr_payload_bytes"`
-	DoclingCommand            string   `yaml:"docling_command"`
+	RootDir         string   `yaml:"root_dir"`
+	StateDir        string   `yaml:"state_dir"`
+	ListenAddr      string   `yaml:"listen_addr"`
+	MCPPath         string   `yaml:"mcp_path"`
+	ProtocolVersion string   `yaml:"protocol_version"`
+	Public          bool     `yaml:"public"`
+	AuthMode        string   `yaml:"auth_mode"`
+	ServerName      string   `yaml:"server_name"`
+	RateLimitRPS    int      `yaml:"rate_limit_rps"`
+	RateLimitBurst  int      `yaml:"rate_limit_burst"`
+	TrustedProxies  []string `yaml:"trusted_proxies"`
+	PathExcludes    []string `yaml:"path_excludes"`
+	SecretPatterns  []string `yaml:"secret_patterns"`
+	DoclingCommand  string   `yaml:"docling_command"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -281,9 +251,6 @@ type persistedConfig struct {
 	ElevenLabsBaseURL         string   `yaml:"elevenlabs_base_url"`
 	ElevenLabsTTSVoiceID      string   `yaml:"elevenlabs_tts_voice_id"`
 	AllowedOrigins            []string `yaml:"allowed_origins"`
-	EmbedModelText            string   `yaml:"embed_model_text"`
-	EmbedModelCode            string   `yaml:"embed_model_code"`
-	ChatModel                 string   `yaml:"chat_model"`
 	RAGSystemPrompt           string   `yaml:"rag_system_prompt"`
 	RAGGenerateAnswer         bool     `yaml:"rag_generate_answer"`
 	RAGKDefault               int      `yaml:"rag_k_default"`
@@ -333,6 +300,8 @@ type persistedConfig struct {
 	X402PayTo            string `yaml:"x402_pay_to"`
 }
 
+// Default returns the baseline Config (used as the starting point
+// before dotenv/env/file overrides are layered on).
 func Default() Config {
 	return Config{
 		RootDir:         ".",
@@ -370,8 +339,6 @@ func Default() Config {
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
 		},
-		MistralAPIKey:        "",
-		MistralBaseURL:       "",
 		ElevenLabsAPIKey:     "",
 		ElevenLabsBaseURL:    "",
 		ElevenLabsTTSVoiceID: "JBFqnCBsd6RMkjVDRZzb",
@@ -379,10 +346,6 @@ func Default() Config {
 			"http://localhost",
 			"http://127.0.0.1",
 		},
-		// default embedding models
-		EmbedModelText:         "mistral-embed",
-		EmbedModelCode:         "codestral-embed",
-		ChatModel:              mistral.DefaultChatModel,
 		RAGSystemPrompt:        "",
 		RAGGenerateAnswer:      true,
 		RAGKDefault:            10,
@@ -438,6 +401,9 @@ func LoadFile(path string) (Config, error) {
 	return load(path, nil, false)
 }
 
+// buildPersistedConfig projects a Config onto persistedConfig, the
+// subset that is safe to write to disk (secrets are intentionally
+// excluded so they never land in the YAML/snapshot).
 func buildPersistedConfig(cfg *Config) persistedConfig {
 	if cfg == nil {
 		return persistedConfig{}
@@ -457,8 +423,6 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		TrustedProxies:            append([]string(nil), cfg.TrustedProxies...),
 		PathExcludes:              append([]string(nil), cfg.PathExcludes...),
 		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
-		MistralBaseURL:            cfg.MistralBaseURL,
-		MistralMaxOCRPayloadBytes: cfg.MistralMaxOCRPayloadBytes,
 		DoclingCommand:            cfg.DoclingCommand,
 		SessionInactivityTimeout:  cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:        cfg.SessionMaxLifetime,
@@ -466,9 +430,6 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		ElevenLabsBaseURL:         cfg.ElevenLabsBaseURL,
 		ElevenLabsTTSVoiceID:      cfg.ElevenLabsTTSVoiceID,
 		AllowedOrigins:            append([]string(nil), cfg.AllowedOrigins...),
-		EmbedModelText:            cfg.EmbedModelText,
-		EmbedModelCode:            cfg.EmbedModelCode,
-		ChatModel:                 cfg.ChatModel,
 		RAGSystemPrompt:           cfg.RAGSystemPrompt,
 		RAGGenerateAnswer:         cfg.RAGGenerateAnswer,
 		RAGKDefault:               cfg.RAGKDefault,
@@ -619,12 +580,15 @@ func appendSnapshotEmbedIdentity(raw []byte, id string) []byte {
 	return append(raw, []byte("embed_identity: "+id+"\n")...)
 }
 
+// appendSnapshotSecretSourceMetadata appends a `secret_sources:` block
+// to raw recording where each secret was sourced from (env/file/…)
+// without writing the secret values themselves. Empty entries are
+// skipped; the block is omitted entirely when no sources are set.
 func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata) []byte {
 	entries := []struct {
 		key   string
 		value string
 	}{
-		{key: "mistral_api_key", value: strings.TrimSpace(sources.MistralAPIKey)},
 		{key: "elevenlabs_api_key", value: strings.TrimSpace(sources.ElevenLabsAPIKey)},
 		{key: "cohere_api_key", value: strings.TrimSpace(sources.CohereAPIKey)},
 		{key: "x402_facilitator_token", value: strings.TrimSpace(sources.X402FacilitatorToken)},
@@ -654,6 +618,9 @@ func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata
 	return append(raw, []byte(buf.String())...)
 }
 
+// parseSecretSourceMetadata reads the `secret_sources:` block back out
+// of a snapshot into SecretSourceMetadata (the inverse of
+// appendSnapshotSecretSourceMetadata).
 func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	meta := SecretSourceMetadata{}
 	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
@@ -683,10 +650,10 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	return meta, nil
 }
 
+// applySecretSourceField assigns a single parsed `secret_sources.<name>`
+// key/value onto meta; unknown keys are ignored.
 func applySecretSourceField(meta *SecretSourceMetadata, key, value string) {
 	switch key {
-	case "secret_sources.mistral_api_key":
-		meta.MistralAPIKey = value
 	case "secret_sources.elevenlabs_api_key":
 		meta.ElevenLabsAPIKey = value
 	case "secret_sources.cohere_api_key":
@@ -880,18 +847,13 @@ func applyRerankFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyModelClientsFileParsed overlays the parsed ingest/ElevenLabs
+// client settings from the config file onto cfg (only keys present in
+// the file are applied; the spec-removed Mistral client keys are no
+// longer handled here).
 func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
-	if fc.MistralBaseURL != nil {
-		cfg.MistralBaseURL = *fc.MistralBaseURL
-	}
-	if fc.MistralMaxOCRPayloadBytes != nil {
-		cfg.MistralMaxOCRPayloadBytes = *fc.MistralMaxOCRPayloadBytes
-	}
 	if fc.DoclingCommand != nil {
 		cfg.DoclingCommand = *fc.DoclingCommand
-	}
-	if fc.MistralAPIKey != nil {
-		cfg.MistralAPIKey = *fc.MistralAPIKey
 	}
 	if fc.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fc.ElevenLabsBaseURL
@@ -901,15 +863,6 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.ElevenLabsTTSVoiceID != nil {
 		cfg.ElevenLabsTTSVoiceID = *fc.ElevenLabsTTSVoiceID
-	}
-	if fc.EmbedModelText != nil {
-		cfg.EmbedModelText = *fc.EmbedModelText
-	}
-	if fc.EmbedModelCode != nil {
-		cfg.EmbedModelCode = *fc.EmbedModelCode
-	}
-	if fc.ChatModel != nil {
-		cfg.ChatModel = *fc.ChatModel
 	}
 }
 
@@ -1195,15 +1148,8 @@ var configKeyAliases = map[string]string{
 	"security.allowed_origins":             "allowed_origins",
 	"security.path_excludes":               "path_excludes",
 	"security.secret_patterns":             "secret_patterns",
-	"mistral.embed_text_model":             "embed_model_text",
-	"mistral.embed_code_model":             "embed_model_code",
-	"mistral.chat_model":                   "chat_model",
-	"mistral.max_ocr_payload_bytes":        "mistral_max_ocr_payload_bytes",
 	"docling.command":                      "docling_command",
 	"ingest.docling.command":               "docling_command",
-	"mistral.api_key":                      "mistral_api_key",
-	"stt.mistral.api_key":                  "mistral_api_key",
-	"secrets.mistral_api_key":              "mistral_api_key",
 	"stt.elevenlabs.api_key":               "elevenlabs_api_key",
 	"secrets.elevenlabs_api_key":           "elevenlabs_api_key",
 	"secrets.x402_facilitator_url":         "x402_facilitator_url",
@@ -1333,6 +1279,9 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 	return nil
 }
 
+// setIntFileScalar parses value as an int and assigns it to the
+// fileConfig field selected by key; returns an error for an unknown key
+// or a non-integer value.
 func setIntFileScalar(cfg *fileConfig, key, value string) error {
 	var target **int
 	switch key {
@@ -1352,8 +1301,6 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.ChunkingOverlapTokens
 	case "ingest.max_file_mb":
 		target = &cfg.IngestMaxFileMB
-	case "mistral_max_ocr_payload_bytes":
-		target = &cfg.MistralMaxOCRPayloadBytes
 	case "rerank.candidate_pool":
 		target = &cfg.RerankCandidatePool
 	default:
@@ -1439,27 +1386,20 @@ func setRerankStringFileScalar(cfg *fileConfig, key, value string) bool {
 	return true
 }
 
+// setModelStringFileScalar assigns a model/provider-related flat string
+// key onto the fileConfig (rerank keys first, then ElevenLabs/STT). The
+// spec-removed Mistral/embed/chat keys are no longer accepted here.
 func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 	if setRerankStringFileScalar(cfg, key, value) {
 		return
 	}
 	switch key {
-	case "mistral_base_url":
-		cfg.MistralBaseURL = strPtr(value)
-	case "mistral_api_key":
-		cfg.MistralAPIKey = strPtr(value)
 	case "elevenlabs_base_url":
 		cfg.ElevenLabsBaseURL = strPtr(value)
 	case "elevenlabs_api_key":
 		cfg.ElevenLabsAPIKey = strPtr(value)
 	case "elevenlabs_tts_voice_id":
 		cfg.ElevenLabsTTSVoiceID = strPtr(value)
-	case "embed_model_text":
-		cfg.EmbedModelText = strPtr(value)
-	case "embed_model_code":
-		cfg.EmbedModelCode = strPtr(value)
-	case "chat_model":
-		cfg.ChatModel = strPtr(value)
 	case "docling_command":
 		cfg.DoclingCommand = strPtr(value)
 	case "rag.system_prompt":
@@ -1549,6 +1489,8 @@ func isListConfigKey(key string) bool {
 	}
 }
 
+// marshalConfigYAML renders a persistedConfig as the flat-key YAML
+// written to .dir2mcp.yaml / the effective snapshot.
 func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	var b strings.Builder
 	writeScalar := func(key, value string) {
@@ -1592,8 +1534,6 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("trusted_proxies", cfg.TrustedProxies)
 	writeList("path_excludes", cfg.PathExcludes)
 	writeList("secret_patterns", cfg.SecretPatterns)
-	writeScalar("mistral_base_url", cfg.MistralBaseURL)
-	writeInt("mistral_max_ocr_payload_bytes", cfg.MistralMaxOCRPayloadBytes)
 	writeScalar("docling_command", cfg.DoclingCommand)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
@@ -1601,9 +1541,6 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("elevenlabs_base_url", cfg.ElevenLabsBaseURL)
 	writeScalar("elevenlabs_tts_voice_id", cfg.ElevenLabsTTSVoiceID)
 	writeList("allowed_origins", cfg.AllowedOrigins)
-	writeScalar("embed_model_text", cfg.EmbedModelText)
-	writeScalar("embed_model_code", cfg.EmbedModelCode)
-	writeScalar("chat_model", cfg.ChatModel)
 	writeBool("rag_generate_answer", cfg.RAGGenerateAnswer)
 	writeInt("rag_k_default", cfg.RAGKDefault)
 	writeScalar("rag_system_prompt", cfg.RAGSystemPrompt)
@@ -1676,7 +1613,7 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_SERVER_NAME", overrideEnv); ok {
 		cfg.ServerName = strings.TrimSpace(raw)
 	}
-	applyMistralEnvOverrides(cfg, overrideEnv)
+	applyIngestEnvOverrides(cfg, overrideEnv)
 	applyElevenLabsEnvOverrides(cfg, overrideEnv)
 	applyRerankEnvOverrides(cfg, overrideEnv)
 	applyNetworkEnvOverrides(cfg, overrideEnv)
@@ -1705,23 +1642,13 @@ func applyRerankEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
-func applyMistralEnvOverrides(cfg *Config, env map[string]string) {
-	if apiKey, ok := envLookup("MISTRAL_API_KEY", env); ok && strings.TrimSpace(apiKey) != "" {
-		cfg.MistralAPIKey = apiKey
-	}
-	if baseURL, ok := envLookup("MISTRAL_BASE_URL", env); ok && strings.TrimSpace(baseURL) != "" {
-		cfg.MistralBaseURL = baseURL
-	}
-	applyMistralNumericEnvOverrides(cfg, env)
-	applyMistralModelEnvOverrides(cfg, env)
-}
-
-func applyMistralNumericEnvOverrides(cfg *Config, env map[string]string) {
-	if raw, ok := envLookup("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", env); ok {
-		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
-			cfg.MistralMaxOCRPayloadBytes = n
-		}
-	}
+// applyIngestEnvOverrides applies the ingest-related env overrides.
+// Mistral provider credentials/models are no longer flat config: the
+// MISTRAL_API_KEY env var is consumed by the built-in `mistral`/
+// `mistral-ocr` profiles via their ${MISTRAL_API_KEY} placeholder
+// (expanded at resolution time); base URL / model overrides go through
+// providers:/model: in .dir2mcp.yaml.
+func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_DOCLING_COMMAND", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.DoclingCommand = strings.TrimSpace(raw)
 	}
@@ -1732,18 +1659,6 @@ func applyMistralNumericEnvOverrides(cfg *Config, env map[string]string) {
 		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
 			cfg.RetrievalHybridEnabled = parsed
 		}
-	}
-}
-
-func applyMistralModelEnvOverrides(cfg *Config, env map[string]string) {
-	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", env); ok && strings.TrimSpace(m) != "" {
-		cfg.EmbedModelText = strings.TrimSpace(m)
-	}
-	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_CODE", env); ok && strings.TrimSpace(m) != "" {
-		cfg.EmbedModelCode = strings.TrimSpace(m)
-	}
-	if m, ok := envLookup("DIR2MCP_CHAT_MODEL", env); ok && strings.TrimSpace(m) != "" {
-		cfg.ChatModel = strings.TrimSpace(m)
 	}
 }
 

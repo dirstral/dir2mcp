@@ -665,9 +665,14 @@ func TestTranscriberFromConfig_ExplicitProviderRequiresCredentials(t *testing.T)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Credentials resolve from env via the built-in
+			// ${MISTRAL_API_KEY}/${ELEVENLABS_API_KEY} placeholders
+			// (clean break #38). Clear them so the resolver returns a
+			// CONFIG_INVALID naming the explicitly-bound profile.
+			t.Setenv("MISTRAL_API_KEY", "")
+			t.Setenv("ELEVENLABS_API_KEY", "")
 			cfg := config.Default()
 			cfg.STTProvider = tc.provider
-			cfg.MistralAPIKey = ""
 			cfg.ElevenLabsAPIKey = ""
 
 			transcriber, err := ingest.TranscriberFromConfig(cfg)
@@ -685,9 +690,10 @@ func TestTranscriberFromConfig_ExplicitProviderRequiresCredentials(t *testing.T)
 }
 
 func TestTranscriberFromConfig_AutoProviderWithoutCredentialsReturnsNil(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "")
+	t.Setenv("ELEVENLABS_API_KEY", "")
 	cfg := config.Default()
 	cfg.STTProvider = "auto"
-	cfg.MistralAPIKey = ""
 	cfg.ElevenLabsAPIKey = ""
 
 	transcriber, err := ingest.TranscriberFromConfig(cfg)
