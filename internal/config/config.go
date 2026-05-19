@@ -391,6 +391,8 @@ func Default() Config {
 	}
 }
 
+// Load returns defaults with dotenv/env overrides and, if path is
+// non-empty and exists, the YAML config file layered on top.
 func Load(path string) (Config, error) {
 	return load(path, nil, true)
 }
@@ -472,6 +474,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 	}
 }
 
+// SaveFile validates cfg and writes its persistable subset to path as
+// flat-key YAML (secrets excluded), creating parent directories.
 func SaveFile(path string, cfg Config) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("config path is required")
@@ -503,6 +507,8 @@ func SaveFile(path string, cfg Config) error {
 	return nil
 }
 
+// EffectiveSnapshotPath returns the snapshot file path under stateDir,
+// falling back to the default state dir when stateDir is empty.
 func EffectiveSnapshotPath(stateDir string) string {
 	trimmed := strings.TrimSpace(stateDir)
 	if trimmed == "" {
@@ -511,6 +517,9 @@ func EffectiveSnapshotPath(stateDir string) string {
 	return filepath.Join(trimmed, EffectiveConfigSnapshotFile)
 }
 
+// SaveEffectiveSnapshot validates cfg and writes the effective config
+// snapshot (persistable subset plus secret-source metadata and the
+// resolved embed identity) with 0600 perms, returning its path.
 func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", fmt.Errorf("validate config: %w", err)
@@ -538,6 +547,9 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 	return path, nil
 }
 
+// LoadEffectiveSnapshot reads a snapshot written by
+// SaveEffectiveSnapshot, returning the layered+validated Config and the
+// recorded secret-source metadata.
 func LoadEffectiveSnapshot(path string) (Config, SecretSourceMetadata, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -665,6 +677,9 @@ func applySecretSourceField(meta *SecretSourceMetadata, key, value string) {
 	}
 }
 
+// load builds a Config from defaults, optionally layering dotenv/env
+// overrides and a YAML file, then validates the result. It is the shared
+// implementation behind Load/LoadFile.
 func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, error) {
 	// Start from defaults, then layer dotenv/env overrides.
 	cfg := Default()
@@ -708,6 +723,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	return cfg, nil
 }
 
+// applyFileOverrides reads the YAML file at path and overlays its flat
+// keys onto cfg, and decodes the providers:/model: subtree into
+// cfg.providersDoc (SPEC 0.7.0 §16.2).
 func applyFileOverrides(cfg *Config, path string) error {
 	if cfg == nil {
 		return nil
@@ -738,6 +756,8 @@ func applyFileOverrides(cfg *Config, path string) error {
 	return nil
 }
 
+// applyParsedFileOverrides overlays a parsed fileConfig onto cfg by
+// dispatching to the server/model/ingest/x402 sub-appliers.
 func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 	applyServerFileParsed(cfg, fileCfg)
 	applyModelFileParsed(cfg, fileCfg)
@@ -745,11 +765,15 @@ func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 	applyX402FileParsed(cfg, fileCfg)
 }
 
+// applyServerFileParsed overlays parsed server core and network file
+// settings onto cfg.
 func applyServerFileParsed(cfg *Config, fc fileConfig) {
 	applyServerCoreFileParsed(cfg, fc)
 	applyServerNetworkFileParsed(cfg, fc)
 }
 
+// applyServerCoreFileParsed copies the set core server file fields
+// (paths, listen addr, protocol, auth, rate limits) onto cfg.
 func applyServerCoreFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RootDir != nil {
 		cfg.RootDir = *fc.RootDir
@@ -783,6 +807,9 @@ func applyServerCoreFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyServerNetworkFileParsed copies the set network-related file
+// fields (proxy/origin/exclude lists and TLS paths) onto cfg,
+// normalizing string slices.
 func applyServerNetworkFileParsed(cfg *Config, fc fileConfig) {
 	if fc.TrustedProxies != nil {
 		cfg.TrustedProxies = normalizeStringSlice(fc.TrustedProxies)
@@ -804,6 +831,8 @@ func applyServerNetworkFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyModelFileParsed overlays parsed model client, rerank, and RAG
+// file settings onto cfg.
 func applyModelFileParsed(cfg *Config, fc fileConfig) {
 	applyModelClientsFileParsed(cfg, fc)
 	applyRerankFileParsed(cfg, fc)
@@ -866,6 +895,8 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyModelRAGFileParsed copies the set RAG/retrieval and session/health
+// timing file fields onto cfg.
 func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RAGSystemPrompt != nil {
 		cfg.RAGSystemPrompt = *fc.RAGSystemPrompt
@@ -896,12 +927,15 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyIngestFileParsed overlays parsed chunking, ingest-mode, and STT
+// file settings onto cfg.
 func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 	applyChunkingFileParsed(cfg, fc)
 	applyIngestModesFileParsed(cfg, fc)
 	applySTTFileParsed(cfg, fc)
 }
 
+// applyChunkingFileParsed copies the set chunking file fields onto cfg.
 func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
 	if fc.ChunkingStrategy != nil {
 		cfg.ChunkingStrategy = *fc.ChunkingStrategy
@@ -914,6 +948,9 @@ func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyIngestModesFileParsed copies the set ingest discovery/mode file
+// fields (gitignore, symlinks, size limit, per-type modes, extractor)
+// onto cfg.
 func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestGitignore != nil {
 		cfg.IngestGitignore = *fc.IngestGitignore
@@ -941,6 +978,8 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applySTTFileParsed copies the set speech-to-text file fields
+// (provider and Mistral/ElevenLabs model + language) onto cfg.
 func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.STTProvider != nil {
 		cfg.STTProvider = *fc.STTProvider
@@ -956,6 +995,8 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// applyX402FileParsed copies the set x402 file fields onto cfg.X402.
+// Any file-supplied facilitator token is ignored (env-only).
 func applyX402FileParsed(cfg *Config, fc fileConfig) {
 	if fc.X402Mode != nil {
 		cfg.X402.Mode = *fc.X402Mode
@@ -988,6 +1029,8 @@ func applyX402FileParsed(cfg *Config, fc fileConfig) {
 	}
 }
 
+// normalizeStringSlice trims each value and drops empties, returning nil
+// when the input is nil.
 func normalizeStringSlice(values []string) []string {
 	if values == nil {
 		return nil
@@ -1003,6 +1046,9 @@ func normalizeStringSlice(values []string) []string {
 	return out
 }
 
+// parseConfigYAML parses the supported flat/nested-key YAML subset into
+// a fileConfig using a bespoke line scanner (lists, inline lists, and
+// indentation-derived section prefixes).
 func parseConfigYAML(raw []byte) (fileConfig, error) {
 	cfg := fileConfig{}
 	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
@@ -1068,6 +1114,9 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 	return cfg, nil
 }
 
+// resolveYAMLKey splits a "key: value" line, prefixes the key with the
+// nearest enclosing section, and returns its canonical form plus the
+// trimmed value.
 func resolveYAMLKey(line string, sectionByIndent map[int]string, indent int) (key, value string, err error) {
 	k, v, ok := strings.Cut(line, ":")
 	if !ok {
@@ -1080,6 +1129,8 @@ func resolveYAMLKey(line string, sectionByIndent map[int]string, indent int) (ke
 	return canonicalizeConfigKey(k), strings.TrimSpace(v), nil
 }
 
+// pruneStaleIndents drops section entries at or deeper than indent so
+// section prefixes don't leak across sibling/dedented blocks.
 func pruneStaleIndents(sectionByIndent map[int]string, indent int) {
 	for level := range sectionByIndent {
 		if level >= indent {
@@ -1088,6 +1139,9 @@ func pruneStaleIndents(sectionByIndent map[int]string, indent int) {
 	}
 }
 
+// handleYAMLEmptyValue handles a key with no inline value: starting a
+// list, opening a map section at indent, or setting an empty scalar.
+// Returns the list key when a block list begins.
 func handleYAMLEmptyValue(cfg *fileConfig, key string, sectionByIndent map[int]string, indent int) (newListKey string, err error) {
 	if isListConfigKey(key) {
 		setFileListValue(cfg, key, "")
@@ -1103,6 +1157,8 @@ func handleYAMLEmptyValue(cfg *fileConfig, key string, sectionByIndent map[int]s
 	return "", nil
 }
 
+// handleYAMLInlineList parses a bracketed inline list value (e.g.
+// "[a, b]") and appends its items to the list field selected by key.
 func handleYAMLInlineList(cfg *fileConfig, key, value string, lineNo int) error {
 	if !strings.HasSuffix(value, "]") {
 		return fmt.Errorf("line %d: malformed list value for %s", lineNo, key)
@@ -1124,6 +1180,8 @@ func handleYAMLInlineList(cfg *fileConfig, key, value string, lineNo int) error 
 	return nil
 }
 
+// nearestSectionPrefix returns the section name registered at the
+// greatest indent strictly less than indent, or "" if none.
 func nearestSectionPrefix(sectionByIndent map[int]string, indent int) string {
 	bestIndent := -1
 	best := ""
@@ -1216,6 +1274,8 @@ var configKeyAliases = map[string]string{
 	"x402.route_policy.tools_call.pay_to":  "x402_pay_to",
 }
 
+// canonicalizeConfigKey lower-cases and trims key and maps it through
+// configKeyAliases, returning the canonical form (or key unchanged).
 func canonicalizeConfigKey(key string) string {
 	key = strings.TrimSpace(strings.ToLower(key))
 	if canonical, ok := configKeyAliases[key]; ok {
@@ -1224,6 +1284,8 @@ func canonicalizeConfigKey(key string) string {
 	return key
 }
 
+// isMapSectionKey reports whether key names a nested mapping section
+// (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
 	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere":
@@ -1237,6 +1299,9 @@ func isMapSectionKey(key string) bool {
 	}
 }
 
+// setFileScalarValue assigns a scalar value to the fileConfig field
+// matching key, trying bool, int, and duration parsers before falling
+// back to string assignment.
 func setFileScalarValue(cfg *fileConfig, key, value string) error {
 	if err := setBoolFileScalar(cfg, key, value); err != nil {
 		return err
@@ -1251,6 +1316,9 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 	return nil
 }
 
+// setBoolFileScalar parses value as a bool and assigns it to the
+// fileConfig field selected by key; unknown keys are a no-op and an
+// unparseable value is an error.
 func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 	var target **bool
 	switch key {
@@ -1314,6 +1382,9 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 	return nil
 }
 
+// setDurationFileScalar parses value as a time.Duration and assigns it
+// to the fileConfig field selected by key; unknown keys are a no-op and
+// an unparseable value is an error.
 func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 	var target **time.Duration
 	switch key {
@@ -1337,6 +1408,8 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 	return nil
 }
 
+// setStringFileScalar dispatches a string key/value to the
+// server/model/ingest/x402 string setters.
 func setStringFileScalar(cfg *fileConfig, key, value string) {
 	setServerStringFileScalar(cfg, key, value)
 	setModelStringFileScalar(cfg, key, value)
@@ -1344,6 +1417,9 @@ func setStringFileScalar(cfg *fileConfig, key, value string) {
 	setX402StringFileScalar(cfg, key, value)
 }
 
+// setServerStringFileScalar assigns server-related string keys (paths,
+// listen addr, protocol, auth mode, server name, TLS files) onto the
+// fileConfig.
 func setServerStringFileScalar(cfg *fileConfig, key, value string) {
 	switch key {
 	case "root_dir":
@@ -1409,6 +1485,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 	}
 }
 
+// setIngestStringFileScalar assigns ingest mode and STT string keys
+// onto the fileConfig.
 func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 	switch key {
 	case "ingest.pdf.mode":
@@ -1432,6 +1510,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 	}
 }
 
+// setX402StringFileScalar assigns x402 string keys onto the fileConfig;
+// the facilitator token key is deliberately ignored (env-only).
 func setX402StringFileScalar(cfg *fileConfig, key, value string) {
 	switch key {
 	case "x402_mode":
@@ -1455,6 +1535,9 @@ func setX402StringFileScalar(cfg *fileConfig, key, value string) {
 	}
 }
 
+// setFileListValue appends value to the list field selected by the
+// canonicalized key, initializing the slice on first use and skipping
+// blank items.
 func setFileListValue(cfg *fileConfig, key, value string) {
 	key = canonicalizeConfigKey(key)
 	appendValue := func(target *[]string, item string) {
@@ -1479,6 +1562,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 	}
 }
 
+// isListConfigKey reports whether key (after canonicalization) maps to
+// a list-valued config field.
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
@@ -1584,6 +1669,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
+// unquoteYAMLScalar trims value and strips matching single/double
+// quotes (interpreting escapes in double-quoted form).
 func unquoteYAMLScalar(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 {
@@ -1599,10 +1686,18 @@ func unquoteYAMLScalar(value string) string {
 	return value
 }
 
+// strPtr returns a pointer to value.
 func strPtr(value string) *string { return &value }
-func boolPtr(value bool) *bool    { return &value }
-func intPtr(value int) *int       { return &value }
 
+// boolPtr returns a pointer to value.
+func boolPtr(value bool) *bool { return &value }
+
+// intPtr returns a pointer to value.
+func intPtr(value int) *int { return &value }
+
+// applyEnvOverrides layers all supported environment-variable overrides
+// onto cfg. Env always wins when present (an empty DIR2MCP_SERVER_NAME
+// clears a YAML-set name).
 func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if cfg == nil {
 		return
@@ -1662,6 +1757,8 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
+// applyElevenLabsEnvOverrides applies the ElevenLabs API key, base URL,
+// and voice ID env overrides (only when non-empty).
 func applyElevenLabsEnvOverrides(cfg *Config, env map[string]string) {
 	if apiKey, ok := envLookup("ELEVENLABS_API_KEY", env); ok && strings.TrimSpace(apiKey) != "" {
 		cfg.ElevenLabsAPIKey = apiKey
@@ -1674,6 +1771,9 @@ func applyElevenLabsEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
+// applyNetworkEnvOverrides merges allowed-origins and trusted-proxy env
+// lists and applies rate-limit env overrides (ignoring invalid/negative
+// numbers).
 func applyNetworkEnvOverrides(cfg *Config, env map[string]string) {
 	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", env); ok {
 		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
@@ -1693,6 +1793,9 @@ func applyNetworkEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
+// applySessionEnvOverrides applies the session inactivity/max-lifetime
+// and health-check-interval duration env overrides, preferring the new
+// inactivity var name and warning on the deprecated alias.
 func applySessionEnvOverrides(cfg *Config, env map[string]string) {
 	// session-related environment variables are durations parsed by time.ParseDuration.
 	// Syntactically invalid values (parse errors) are warned about but not fatal; values
@@ -1720,6 +1823,8 @@ func applySessionEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
+// applyDurationEnvField parses raw as a duration into target; an empty
+// value is ignored and a parse error is recorded as a non-fatal warning.
 func applyDurationEnvField(cfg *Config, raw, varName string, target *time.Duration) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -1733,16 +1838,22 @@ func applyDurationEnvField(cfg *Config, raw, varName string, target *time.Durati
 	*target = d
 }
 
+// applyX402EnvOverrides applies the basic and route-policy x402 env
+// overrides onto cfg.X402.
 func applyX402EnvOverrides(cfg *Config, env map[string]string) {
 	applyX402BasicEnvOverrides(cfg, env)
 	applyX402RouteEnvOverrides(cfg, env)
 }
 
+// applyX402BasicEnvOverrides applies the x402 endpoint and pricing env
+// overrides onto cfg.X402.
 func applyX402BasicEnvOverrides(cfg *Config, env map[string]string) {
 	applyX402EndpointEnvOverrides(cfg, env)
 	applyX402PricingEnvOverrides(cfg, env)
 }
 
+// applyX402EndpointEnvOverrides applies the x402 mode, facilitator
+// URL/token, and resource base URL env overrides (only when non-empty).
 func applyX402EndpointEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_X402_MODE", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Mode = strings.TrimSpace(raw)
@@ -1758,6 +1869,9 @@ func applyX402EndpointEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
+// applyX402PricingEnvOverrides applies the x402 tools-call-enabled and
+// price env overrides (warning on an invalid boolean and accepting a
+// compatibility alias for the price var).
 func applyX402PricingEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_X402_TOOLS_CALL_ENABLED", env); ok && strings.TrimSpace(raw) != "" {
 		trimmed := strings.TrimSpace(raw)
@@ -1779,6 +1893,8 @@ func applyX402PricingEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
+// applyX402RouteEnvOverrides applies the x402 route-policy network,
+// scheme, asset, and pay-to env overrides (only when non-empty).
 func applyX402RouteEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_X402_NETWORK", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Network = strings.TrimSpace(raw)
@@ -1822,6 +1938,8 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// validateIngestExtractor normalizes IngestExtractor (defaulting empty)
+// and rejects any value outside auto/docling/mistral/off.
 func (c *Config) validateIngestExtractor() error {
 	extractorMode := strings.ToLower(strings.TrimSpace(c.IngestExtractor))
 	if extractorMode == "" {
@@ -1836,6 +1954,8 @@ func (c *Config) validateIngestExtractor() error {
 	return nil
 }
 
+// validateNumericBounds rejects negative session/health durations, RAG,
+// chunking, and ingest size values.
 func (c *Config) validateNumericBounds() error {
 	if c.SessionInactivityTimeout < 0 {
 		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
@@ -1867,6 +1987,8 @@ func (c *Config) validateNumericBounds() error {
 	return nil
 }
 
+// applyValidationDefaults rewrites zero SessionInactivityTimeout and
+// HealthCheckInterval to their Default() values.
 func (c *Config) applyValidationDefaults() {
 	if c.SessionInactivityTimeout == 0 {
 		// zero is shorthand for the default
@@ -1941,6 +2063,10 @@ func (c *Config) ValidateX402(strict bool) error {
 	return c.validateX402Strict()
 }
 
+// validateX402Strict enforces the strict-mode x402 requirements:
+// facilitator/resource URLs, a positive integer price, a valid
+// scheme, a CAIP-2 network, and non-empty asset/pay_to. It normalizes
+// scheme and network in place.
 func (c *Config) validateX402Strict() error {
 	if strings.TrimSpace(c.X402.FacilitatorURL) == "" {
 		return fmt.Errorf("x402 facilitator URL is required")
@@ -1987,6 +2113,9 @@ func (c *Config) validateX402Strict() error {
 	return nil
 }
 
+// normalizeX402URL validates rawURL has a scheme and host and returns
+// it with any trailing slash trimmed; an empty input yields "" with no
+// error.
 func normalizeX402URL(rawURL, label string) (string, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -2007,6 +2136,8 @@ func normalizeX402URL(rawURL, label string) (string, error) {
 	return parsed.String(), nil
 }
 
+// isCAIP2Network reports whether value is a CAIP-2 "namespace:reference"
+// identifier with valid lengths and character classes.
 func isCAIP2Network(value string) bool {
 	parts := strings.Split(strings.TrimSpace(value), ":")
 	if len(parts) != 2 {
@@ -2020,6 +2151,8 @@ func isCAIP2Network(value string) bool {
 	return isCAIP2Namespace(ns) && isCAIP2Reference(ref)
 }
 
+// isCAIP2Namespace reports whether ns contains only lowercase letters
+// and digits.
 func isCAIP2Namespace(ns string) bool {
 	for _, r := range ns {
 		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
@@ -2029,6 +2162,8 @@ func isCAIP2Namespace(ns string) bool {
 	return true
 }
 
+// isCAIP2Reference reports whether ref contains only alphanumerics,
+// hyphen, or underscore.
 func isCAIP2Reference(ref string) bool {
 	for _, r := range ref {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
@@ -2071,6 +2206,9 @@ func MergeAllowedOrigins(existing []string, csv string) []string {
 	return merged
 }
 
+// normalizeOriginKey returns a canonical dedup key for origin
+// (scheme://host[:port] with default ports dropped, or host:port / bare
+// host), or "" if origin is invalid.
 func normalizeOriginKey(origin string) string {
 	origin = strings.TrimSpace(origin)
 	if origin == "" {
@@ -2128,6 +2266,8 @@ func MergeTrustedProxies(existing []string, csv string) []string {
 	return merged
 }
 
+// normalizeTrustedProxyKey returns the canonical CIDR string for value
+// (a CIDR or a single IP widened to /32 or /128), or "" if invalid.
 func normalizeTrustedProxyKey(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -2152,6 +2292,8 @@ func normalizeTrustedProxyKey(value string) string {
 	return (&net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}).String()
 }
 
+// loadDotEnvFiles loads each dotenv path in order, stopping at the
+// first error.
 func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {
 	for _, p := range paths {
 		if err := loadDotEnvFile(p, overrideEnv); err != nil {
@@ -2161,6 +2303,9 @@ func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {
 	return nil
 }
 
+// loadDotEnvFile parses a dotenv file (supporting "export" and
+// quoting), setting each key only when not already present and
+// non-empty. A missing file is not an error.
 func loadDotEnvFile(path string, overrideEnv map[string]string) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -2204,6 +2349,8 @@ func loadDotEnvFile(path string, overrideEnv map[string]string) error {
 	return scanner.Err()
 }
 
+// envLookup reads key from overrideEnv when non-nil, otherwise from the
+// process environment.
 func envLookup(key string, overrideEnv map[string]string) (string, bool) {
 	if overrideEnv != nil {
 		val, ok := overrideEnv[key]
@@ -2212,6 +2359,8 @@ func envLookup(key string, overrideEnv map[string]string) (string, bool) {
 	return os.LookupEnv(key)
 }
 
+// envSet writes key=value into overrideEnv when non-nil, otherwise into
+// the process environment.
 func envSet(key, value string, overrideEnv map[string]string) error {
 	if overrideEnv != nil {
 		overrideEnv[key] = value
@@ -2220,6 +2369,8 @@ func envSet(key, value string, overrideEnv map[string]string) error {
 	return os.Setenv(key, value)
 }
 
+// unquoteEnvValue strips matching surrounding quotes from a dotenv
+// value (interpreting escapes only for double quotes).
 func unquoteEnvValue(v string) string {
 	if len(v) >= 2 {
 		if strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
