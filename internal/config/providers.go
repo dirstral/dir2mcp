@@ -352,12 +352,6 @@ func (cfg Config) Providers() ProviderResolution {
 	return cfg.providersDoc.resolve(base, nil)
 }
 
-// seedLegacy overlays the spec-retained flat stt:/rerank: config
-// (SPEC 0.7.0 §16.2 retains these shapes) onto the built-in profiles
-// so the resolver honors them. The monolithic mistral chat/embed
-// surface was removed in the clean break (C2-iii); only the
-// STT/rerank-relevant settings are bridged here. User `providers:`
-// entries still take precedence (merged on top of this seed).
 func litStr(s string) *string { return &s }
 
 func setStr(dst *string, v string) {
@@ -366,6 +360,12 @@ func setStr(dst *string, v string) {
 	}
 }
 
+// seedLegacy overlays the spec-retained flat stt:/rerank: config
+// (SPEC 0.7.0 §16.2 retains these shapes) onto the built-in profiles
+// so the resolver honors them. The monolithic mistral chat/embed
+// surface was removed in the clean break (C2-iii); only the
+// STT/rerank-relevant settings are bridged here. User `providers:`
+// entries still take precedence (merged on top of this seed).
 func seedLegacy(m map[string]providerProfileYAML, cfg Config) {
 	seed := func(name string, fn func(*providerProfileYAML)) {
 		if p, ok := m[name]; ok {
