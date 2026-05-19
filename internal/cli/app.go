@@ -170,6 +170,8 @@ type optionalBoolFlag struct {
 	set   bool
 }
 
+// String renders the flag's current boolean value, returning "false" for a
+// nil receiver.
 func (o *optionalBoolFlag) String() string {
 	if o == nil {
 		return "false"
@@ -177,6 +179,8 @@ func (o *optionalBoolFlag) String() string {
 	return strconv.FormatBool(o.value)
 }
 
+// Set parses s as a boolean, records the value, and marks the flag as
+// explicitly set.
 func (o *optionalBoolFlag) Set(s string) error {
 	parsed, err := strconv.ParseBool(strings.TrimSpace(s))
 	if err != nil {
@@ -187,6 +191,8 @@ func (o *optionalBoolFlag) Set(s string) error {
 	return nil
 }
 
+// IsBoolFlag reports that this flag may be used without an explicit value,
+// allowing the bare --flag form.
 func (o *optionalBoolFlag) IsBoolFlag() bool {
 	return true
 }
@@ -278,10 +284,13 @@ type corpusIndexing struct {
 	Unknown         int64  `json:"unknown"`
 }
 
+// NewApp constructs an App wired to os.Stdout and os.Stderr.
 func NewApp() *App {
 	return NewAppWithIO(os.Stdout, os.Stderr)
 }
 
+// NewAppWithIO constructs an App with the given output writers and the
+// default ingestor/store constructors.
 func NewAppWithIO(stdout, stderr io.Writer) *App {
 	return &App{
 		stdout: stdout,
@@ -304,6 +313,9 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 	}
 }
 
+// NewAppWithIOAndHooks constructs an App with the given writers, overriding
+// the default ingestor/store/retriever constructors with any non-nil hooks
+// (used by tests to inject fakes).
 func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
 	app := NewAppWithIO(stdout, stderr)
 	if hooks.NewIngestor != nil {
@@ -318,10 +330,13 @@ func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
 	return app
 }
 
+// writef writes a formatted string to out, discarding any write error.
 func writef(out io.Writer, format string, args ...interface{}) {
 	_, _ = fmt.Fprintf(out, format, args...)
 }
 
+// writeln writes args followed by a newline to out, discarding any write
+// error.
 func writeln(out io.Writer, args ...interface{}) {
 	_, _ = fmt.Fprintln(out, args...)
 }
@@ -342,6 +357,9 @@ func (a *App) sty(jsonMode bool) styles {
 	return s
 }
 
+// storeForConfig returns the metadata store for cfg, using the injected
+// newStore hook when present and otherwise the default sqlite store in the
+// state directory.
 func (a *App) storeForConfig(cfg config.Config) model.Store {
 	if a != nil && a.newStore != nil {
 		return a.newStore(cfg)
@@ -349,6 +367,9 @@ func (a *App) storeForConfig(cfg config.Config) model.Store {
 	return store.NewSQLiteStore(filepath.Join(cfg.StateDir, "meta.sqlite"))
 }
 
+// Run is the process entrypoint: it installs a signal-cancelled context,
+// dispatches args, and maps a clean exit after interruption to the
+// signal-interrupt exit code.
 func (a *App) Run(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -359,6 +380,8 @@ func (a *App) Run(args []string) int {
 	return code
 }
 
+// RunWithContext parses global flags and dispatches the remaining command
+// under ctx, printing usage when no command is given.
 func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		a.printUsage()
@@ -379,6 +402,9 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	return a.runCommand(ctx, globalOpts, remaining, jsonRequested)
 }
 
+// runCommand validates the command name against the canonical command
+// surface and dispatches it, handling the up/down/version paths directly and
+// delegating the rest to runSimpleCommand.
 func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remaining []string, jsonRequested bool) int {
 	command := remaining[0]
 	// Validate against the canonical command surface before dispatch. The
@@ -424,6 +450,9 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 	}
 }
 
+// runSimpleCommand dispatches the non-up/down commands (status, reindex,
+// config, bridge, install, uninstall, doctor, print-config) plus the legacy
+// shims, returning handled=false when command is none of these.
 func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
 	if code, handled := a.runLegacyShimCommand(ctx, globalOpts, command, args); handled {
 		return code, true
@@ -451,6 +480,8 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 	}
 }
 
+// runLegacyShimCommand dispatches the legacy ask/search/open-file/list-files
+// compatibility shims, returning handled=false when command is none of them.
 func (a *App) runLegacyShimCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
 	switch command {
 	case "ask":
@@ -466,6 +497,8 @@ func (a *App) runLegacyShimCommand(ctx context.Context, globalOpts globalOptions
 	}
 }
 
+// printUsage writes the styled top-level help text (commands and flag
+// groups) to stdout.
 func (a *App) printUsage() {
 	s := a.sty(false)
 	o := a.stdout
@@ -539,6 +572,8 @@ func (a *App) printUsage() {
 	}
 }
 
+// saveEnvLocalKey upserts keyName=value into the dotenv-style file at path,
+// replacing any existing assignment and writing the file 0o600.
 func saveEnvLocalKey(path, keyName, value string) error {
 	var existing []byte
 	if _, statErr := os.Stat(path); statErr == nil {
@@ -647,6 +682,11 @@ func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
 	ret.SetRerankEnabled(true)
 }
 
+// buildRetrieverForAsk constructs a retrieval service for the ask path:
+// it loads the text/code HNSW indexes, resolves the embed/chat clients,
+// wires reranking, and preloads embedded chunk metadata. It returns the
+// retriever plus a cleanup func that closes the loaded indexes. The injected
+// newRetriever hook short-circuits this when present.
 func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st model.Store) (model.Retriever, func(), error) {
 	if a != nil && a.newRetriever != nil {
 		return a.newRetriever(cfg, st), nil, nil
@@ -700,6 +740,8 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	return ret, cleanup, nil
 }
 
+// parseAskOptions parses the ask subcommand flags and trailing question,
+// applying defaults and validating k, mode, index, and the doc-types filter.
 func parseAskOptions(args []string) (askOptions, error) {
 	opts := askOptions{
 		k:     mcp.DefaultSearchK,
@@ -765,6 +807,7 @@ func parseAskOptions(args []string) (askOptions, error) {
 	return opts, nil
 }
 
+// readCorpusSnapshot reads and JSON-decodes the corpus snapshot at path.
 func readCorpusSnapshot(path string) (corpusSnapshot, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -777,12 +820,15 @@ func readCorpusSnapshot(path string) (corpusSnapshot, error) {
 	return snapshot, nil
 }
 
+// emitJSON encodes payload as JSON to out without HTML escaping.
 func emitJSON(out io.Writer, payload interface{}) error {
 	enc := json.NewEncoder(out)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(payload)
 }
 
+// isJSONFlagEnabled reports whether arg is a --json/-json flag (bare or with
+// a truthy =value form).
 func isJSONFlagEnabled(arg string) bool {
 	if arg == "--json" || arg == "-json" {
 		return true
@@ -802,6 +848,8 @@ func isJSONFlagEnabled(arg string) bool {
 	return err == nil && enabled
 }
 
+// argsContainJSONFlag reports whether any arg enables JSON output, used to
+// format early errors before full flag parsing.
 func argsContainJSONFlag(args []string) bool {
 	for _, arg := range args {
 		if isJSONFlagEnabled(arg) {
@@ -811,6 +859,8 @@ func argsContainJSONFlag(args []string) bool {
 	return false
 }
 
+// exitCodeLabel maps an exit code to its stable machine-readable error code
+// string used in JSON error payloads.
 func exitCodeLabel(exitCode int) string {
 	switch exitCode {
 	case exitConfigInvalid:
@@ -828,6 +878,9 @@ func exitCodeLabel(exitCode int) string {
 	}
 }
 
+// writeCLIError writes an error to stderr, as a structured JSON payload when
+// jsonOutput is set (with a hand-rolled fallback if encoding fails) or as
+// plain text with optional hint lines otherwise.
 func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message string, hints ...string) {
 	if jsonOutput {
 		filteredHints := make([]string, 0, len(hints))
@@ -875,6 +928,7 @@ func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message stri
 	}
 }
 
+// serializeHits converts search hits into JSON-ready maps for CLI output.
 func serializeHits(hits []model.SearchHit) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(hits))
 	for _, hit := range hits {
@@ -891,6 +945,7 @@ func serializeHits(hits []model.SearchHit) []map[string]interface{} {
 	return out
 }
 
+// serializeCitations converts citations into JSON-ready maps for CLI output.
 func serializeCitations(citations []model.Citation) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(citations))
 	for _, citation := range citations {
@@ -903,6 +958,8 @@ func serializeCitations(citations []model.Citation) []map[string]interface{} {
 	return out
 }
 
+// serializeSpan converts a span into a JSON-ready map, shaped per its kind
+// (page, time, or the default line range).
 func serializeSpan(span model.Span) map[string]interface{} {
 	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
 	case "page":
@@ -925,6 +982,8 @@ func serializeSpan(span model.Span) map[string]interface{} {
 	}
 }
 
+// formatSpan renders a span as a compact human-readable token (e.g.
+// "page:3", "time:1000-2000", or "lines:10-20").
 func formatSpan(span model.Span) string {
 	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
 	case "page":
@@ -966,6 +1025,10 @@ func tryConsumeGlobalFlagSet(arg string, remaining []string, opts *globalOptions
 	return remaining, false, nil
 }
 
+// parseGlobalOptions consumes leading global flags from args, returning the
+// parsed options and the remaining command tokens. Unknown flags are
+// rejected only before the command position; everything after the first
+// non-flag token (including a trailing "--") is left for the subcommand.
 func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	opts := globalOptions{}
 	var remaining []string
@@ -1019,6 +1082,9 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	return opts, remaining, nil
 }
 
+// parseJSONFlagValue matches the --json/-json flag. matched reports whether
+// arg is the flag at all; enabled is its boolean value, with err set for an
+// unparseable =value form.
 func parseJSONFlagValue(arg string) (enabled bool, matched bool, err error) {
 	if arg == "--json" || arg == "-json" {
 		return true, true, nil
@@ -1042,6 +1108,9 @@ func parseJSONFlagValue(arg string) (enabled bool, matched bool, err error) {
 	return false, false, nil
 }
 
+// consumeGlobalFlagValue extracts the value for flagName from args,
+// supporting both --flag=value and --flag value forms, and returns the
+// number of tokens consumed.
 func consumeGlobalFlagValue(flagName string, args []string) (string, int, error) {
 	if len(args) == 0 {
 		return "", 0, fmt.Errorf("missing value for %s", flagName)
@@ -1063,6 +1132,8 @@ func consumeGlobalFlagValue(flagName string, args []string) (string, int, error)
 	return value, 2, nil
 }
 
+// resolveConfigPath returns the configured config path, defaulting to
+// ".dir2mcp.yaml" when none was supplied.
 func resolveConfigPath(global globalOptions) string {
 	if trimmed := strings.TrimSpace(global.configPath); trimmed != "" {
 		return trimmed
@@ -1070,6 +1141,9 @@ func resolveConfigPath(global globalOptions) string {
 	return ".dir2mcp.yaml"
 }
 
+// applyGlobalPathOverrides overlays the --dir and --state-dir global flags
+// onto cfg, deriving a default state directory under the new root when the
+// state directory was left at its default.
 func applyGlobalPathOverrides(cfg config.Config, global globalOptions) config.Config {
 	if root := strings.TrimSpace(global.rootDir); root != "" {
 		stateLooksDefault := strings.TrimSpace(cfg.StateDir) == "" ||
@@ -1085,6 +1159,9 @@ func applyGlobalPathOverrides(cfg config.Config, global globalOptions) config.Co
 	return cfg
 }
 
+// loadConfigWithGlobalOptions loads the config file, applies the global path
+// overrides, and writes the effective-config snapshot (a snapshot failure is
+// recorded as a non-fatal warning).
 func loadConfigWithGlobalOptions(global globalOptions) (config.Config, error) {
 	cfg, err := config.Load(resolveConfigPath(global))
 	if err != nil {
@@ -1140,6 +1217,8 @@ func saveEffectiveConfigSnapshot(cfg config.Config, auth authMaterial, x402Token
 	return err
 }
 
+// validateTLSFlags ensures the TLS cert and key flags are supplied together
+// and that each points to an existing regular file.
 func validateTLSFlags(certPath, keyPath string) error {
 	certPath = strings.TrimSpace(certPath)
 	keyPath = strings.TrimSpace(keyPath)
@@ -1161,6 +1240,9 @@ func validateTLSFlags(certPath, keyPath string) error {
 	return nil
 }
 
+// parseUpOptions parses the up subcommand flags on top of the global
+// options, applying the facilitator-token file-wins precedence and rejecting
+// the --daemon/--foreground and --daemon/--json conflicts.
 func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	opts := upOptions{globalOptions: global}
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
@@ -1227,12 +1309,16 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	return opts, nil
 }
 
+// closeStoreWithLog closes the store, logging any close error to stderr.
 func (a *App) closeStoreWithLog(st model.Store) {
 	if closeErr := st.Close(); closeErr != nil {
 		writef(a.stderr, "close store: %v\n", closeErr)
 	}
 }
 
+// clearContentHashesIfSupported clears stored document content hashes when
+// the store implements contentHashResetter (forcing re-ingestion), returning
+// an exit code; stores without the capability are a no-op success.
 func clearContentHashesIfSupported(ctx context.Context, st model.Store, stderr io.Writer, jsonOutput bool) int {
 	resetter, ok := interface{}(st).(contentHashResetter)
 	if !ok {
@@ -1245,6 +1331,7 @@ func clearContentHashesIfSupported(ctx context.Context, st model.Store, stderr i
 	return exitSuccess
 }
 
+// ensureRootAccessible verifies that root exists and is a directory.
 func ensureRootAccessible(root string) error {
 	info, err := os.Stat(root)
 	if err != nil {
@@ -1256,6 +1343,9 @@ func ensureRootAccessible(root string) error {
 	return nil
 }
 
+// prepareAuthMaterial resolves the bearer-token auth material for the
+// configured auth mode: "none" disables auth, "auto" delegates to
+// prepareAutoAuthMaterial, and "file:<path>" loads a token from disk.
 func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
 	mode := strings.TrimSpace(cfg.AuthMode)
 	if mode == "" {
@@ -1303,6 +1393,9 @@ func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
 	return authMaterial{}, fmt.Errorf("unsupported auth mode: %s", mode)
 }
 
+// prepareAutoAuthMaterial resolves auth material in "auto" mode: it prefers
+// the env-var token, otherwise reads the persisted secret.token, generating
+// and persisting a new random token when none exists.
 func prepareAutoAuthMaterial(cfg config.Config) (authMaterial, error) {
 	if token := strings.TrimSpace(os.Getenv(authTokenEnvVar)); token != "" {
 		return authMaterial{
@@ -1339,6 +1432,8 @@ func prepareAutoAuthMaterial(cfg config.Config) (authMaterial, error) {
 	}, nil
 }
 
+// readToken reads and trims the token at path; when allowMissing is set, a
+// missing file yields an empty token instead of an error.
 func readToken(path string, allowMissing bool) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -1350,6 +1445,8 @@ func readToken(path string, allowMissing bool) (string, error) {
 	return strings.TrimSpace(string(content)), nil
 }
 
+// generateTokenHex returns a cryptographically random 32-byte token as a hex
+// string.
 func generateTokenHex() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -1358,6 +1455,8 @@ func generateTokenHex() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// writeSecretToken writes token to path with 0o600 permissions, truncating
+// any existing file.
 func writeSecretToken(path, token string) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -1373,6 +1472,8 @@ func writeSecretToken(path, token string) error {
 	return nil
 }
 
+// buildMCPURL assembles the MCP endpoint URL from the address and path,
+// choosing the https scheme when TLS is enabled.
 func buildMCPURL(addr, path string, tlsEnabled bool) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
@@ -1390,6 +1491,9 @@ func PublicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
 	return publicURLAddress(configuredListenAddr, resolvedListenAddr)
 }
 
+// publicURLAddress joins the configured listen host with the resolved
+// runtime port (falling back to the configured port, then "0"), defaulting
+// the host to 0.0.0.0 when none was configured.
 func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
 	configuredListenAddr = strings.TrimSpace(configuredListenAddr)
 	resolvedListenAddr = strings.TrimSpace(resolvedListenAddr)
@@ -1415,6 +1519,9 @@ func ExtractPortFromAddress(addr string) string {
 	return extractPortFromAddress(addr)
 }
 
+// extractPortFromAddress returns the numeric port from a host:port address,
+// with a best-effort fallback for malformed values that still end in a
+// numeric ":port" token, and "" when none can be determined.
 func extractPortFromAddress(addr string) string {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
@@ -1445,6 +1552,7 @@ func extractPortFromAddress(addr string) string {
 	return ""
 }
 
+// isNumericPort reports whether port is a non-empty string of ASCII digits.
 func isNumericPort(port string) bool {
 	if port == "" {
 		return false
@@ -1457,6 +1565,9 @@ func isNumericPort(port string) bool {
 	return true
 }
 
+// buildConnectionPayload assembles the connection.json payload describing
+// the MCP transport, URL, required headers, session policy, and token
+// source; the Authorization header hint is omitted when auth is disabled.
 func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) connectionPayload {
 	headers := map[string]string{
 		protocol.MCPProtocolVersionHeader: cfg.ProtocolVersion,
@@ -1480,6 +1591,8 @@ func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) co
 	}
 }
 
+// writeConnectionFile writes the connection payload as indented JSON to
+// path with 0o600 permissions (the file is credential-adjacent).
 func writeConnectionFile(path string, payload connectionPayload) error {
 	content, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -1494,14 +1607,21 @@ func writeConnectionFile(path string, payload connectionPayload) error {
 	return os.WriteFile(path, content, 0o600)
 }
 
+// newNDJSONEmitter constructs an ndjsonEmitter that writes events to out
+// when enabled.
 func newNDJSONEmitter(out io.Writer, enabled bool) *ndjsonEmitter {
 	return &ndjsonEmitter{enabled: enabled, out: out}
 }
 
+// runCorpusWriter periodically writes the corpus snapshot using the default
+// 5s interval until ctx is cancelled.
 func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) {
 	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, emitter, 5*time.Second)
 }
 
+// runCorpusWriterWithInterval emits an initial corpus snapshot, then
+// refreshes it every interval while indexing is running, returning when ctx
+// is cancelled. A non-positive interval defaults to 5s.
 func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -1538,6 +1658,9 @@ func logSnapshotErr(stderr io.Writer, err error) {
 	writef(stderr, "write corpus snapshot: %v\n", err)
 }
 
+// writeCorpusSnapshot builds the corpus snapshot and atomically writes it to
+// corpus.json in stateDir via a per-write temp file and rename (with a
+// Windows remove-and-retry fallback).
 func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) error {
 	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState, stderr, emitter)
 	if err != nil {
@@ -1586,6 +1709,9 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	return nil
 }
 
+// buildCorpusSnapshot collects corpus stats and assembles a corpusSnapshot,
+// preferring live indexing-state counters when available and otherwise
+// deriving them from the store, including the code/total doc ratio.
 func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) (corpusSnapshot, error) {
 	corpusStats, err := collectCorpusStats(ctx, st, stderr, emitter)
 	if err != nil {
@@ -1636,6 +1762,9 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 	}, nil
 }
 
+// collectCorpusStats returns corpus statistics, preferring the store's
+// aggregate CorpusStats and otherwise falling back to a ListFiles scan
+// (which leaves representation/chunk/embed counters at the -1 sentinel).
 func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (model.CorpusStats, error) {
 	if st == nil {
 		return model.CorpusStats{DocCounts: map[string]int64{}}, nil
@@ -1680,6 +1809,9 @@ func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, e
 	}, nil
 }
 
+// collectActiveDocCounts returns per-doc-type and total counts of non-deleted
+// documents, preferring the store's aggregate ActiveDocCounts and otherwise
+// paginating through ListFiles.
 func collectActiveDocCounts(ctx context.Context, st model.Store) (map[string]int64, int64, error) {
 	if st == nil {
 		return map[string]int64{}, 0, nil
@@ -1733,6 +1865,9 @@ type documentStatusCounts struct {
 	Unknown int64
 }
 
+// collectDocumentStatusCounts paginates through ListFiles and tallies
+// documents by status (indexed/skipped/error/deleted/unknown), reporting any
+// unexpected status values it encounters.
 func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (documentStatusCounts, error) {
 	if st == nil {
 		return documentStatusCounts{}, nil
@@ -1789,6 +1924,9 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.
 	return counts, nil
 }
 
+// reportUnexpectedDocStatuses surfaces a sorted summary of unexpected
+// document statuses, emitting a structured NDJSON warning when an emitter is
+// active and otherwise a plain stderr warning.
 func reportUnexpectedDocStatuses(statusCounts map[string]int64, examples map[string]string, stderr io.Writer, emitter *ndjsonEmitter) {
 	parts := make([]string, 0, len(statusCounts))
 	for statusVal, count := range statusCounts {
@@ -1808,6 +1946,8 @@ func reportUnexpectedDocStatuses(statusCounts map[string]int64, examples map[str
 	}
 }
 
+// Emit writes a single timestamped NDJSON event line when the emitter is
+// enabled; encoding failures are silently dropped.
 func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 	if !e.enabled {
 		return
@@ -1825,6 +1965,9 @@ func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 	_, _ = fmt.Fprintln(e.out, string(encoded))
 }
 
+// printHumanConnection prints the styled "ready for connections" banner to
+// stdout, summarizing the mode, MCP endpoint URL, auth source, required
+// headers, and client registration hint.
 func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool) {
 	s := a.sty(false)
 	writeln(a.stdout)
@@ -1877,6 +2020,8 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	writeln(a.stdout)
 }
 
+// isTerminal reports whether file is a character device (an interactive
+// terminal).
 func isTerminal(file *os.File) bool {
 	if file == nil {
 		return false
