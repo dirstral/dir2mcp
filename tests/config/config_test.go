@@ -8,61 +8,50 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-func TestLoad_UsesDotEnvWhenEnvIsMissing(t *testing.T) {
-	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
-
+// resolvedEmbedAPIKey loads via config.Load (which applies dotenv into
+// the process env) and returns the credential the provider resolver
+// expands for the built-in mistral profile's ${MISTRAL_API_KEY}
+// placeholder. Post clean-break (#38) the Mistral credential is no
+// longer a Config field — dotenv/env feeds the resolver, not Config.
+func resolvedEmbedAPIKey(t *testing.T, tmp string) string {
+	t.Helper()
+	var key string
 	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_API_KEY", "")
-		t.Setenv("MISTRAL_BASE_URL", "")
 		cfg, err := config.Load("")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
-		if cfg.MistralAPIKey != "from_dotenv" {
-			t.Fatalf("unexpected api key: %q", cfg.MistralAPIKey)
+		p, err := cfg.Providers().Resolve(provider.CapEmbed)
+		if err != nil {
+			t.Fatalf("resolve embed: %v", err)
 		}
-		if cfg.MistralBaseURL != "https://dotenv.local" {
-			t.Fatalf("unexpected base URL: %q", cfg.MistralBaseURL)
-		}
+		key = p.APIKey
 	})
+	return key
+}
+
+func TestLoad_UsesDotEnvWhenEnvIsMissing(t *testing.T) {
+	tmp := t.TempDir()
+	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\n")
+
+	t.Setenv("MISTRAL_API_KEY", "")
+	if got := resolvedEmbedAPIKey(t, tmp); got != "from_dotenv" {
+		t.Fatalf("unexpected resolved api key: %q", got)
+	}
 }
 
 func TestLoad_EnvOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\n")
 
-	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_API_KEY", "from_env")
-		t.Setenv("MISTRAL_BASE_URL", "https://env.local")
-		cfg, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg.MistralAPIKey != "from_env" {
-			t.Fatalf("unexpected api key: %q", cfg.MistralAPIKey)
-		}
-		if cfg.MistralBaseURL != "https://env.local" {
-			t.Fatalf("unexpected base URL: %q", cfg.MistralBaseURL)
-		}
-	})
-}
-
-func TestLoad_MistralMaxOCRPayloadBytes_FromEnv(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", "26214400")
-		cfg, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg.MistralMaxOCRPayloadBytes != 26214400 {
-			t.Fatalf("unexpected mistral max ocr payload bytes: %d", cfg.MistralMaxOCRPayloadBytes)
-		}
-	})
+	t.Setenv("MISTRAL_API_KEY", "from_env")
+	if got := resolvedEmbedAPIKey(t, tmp); got != "from_env" {
+		t.Fatalf("unexpected resolved api key: %q", got)
+	}
 }
 
 func TestConfigValidateRejectsInvalidIngestExtractor(t *testing.T) {
@@ -75,23 +64,13 @@ func TestConfigValidateRejectsInvalidIngestExtractor(t *testing.T) {
 
 func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\nMISTRAL_BASE_URL=https://env-file.local\n")
-	writeFile(t, filepath.Join(tmp, ".env.local"), "MISTRAL_API_KEY=from_env_local\nMISTRAL_BASE_URL=https://env-local.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\n")
+	writeFile(t, filepath.Join(tmp, ".env.local"), "MISTRAL_API_KEY=from_env_local\n")
 
-	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_API_KEY", "")
-		t.Setenv("MISTRAL_BASE_URL", "")
-		cfg, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg.MistralAPIKey != "from_env_local" {
-			t.Fatalf("unexpected api key: %q", cfg.MistralAPIKey)
-		}
-		if cfg.MistralBaseURL != "https://env-local.local" {
-			t.Fatalf("unexpected base URL: %q", cfg.MistralBaseURL)
-		}
-	})
+	t.Setenv("MISTRAL_API_KEY", "")
+	if got := resolvedEmbedAPIKey(t, tmp); got != "from_env_local" {
+		t.Fatalf("unexpected resolved api key: %q", got)
+	}
 }
 
 func TestLoad_UsesDotEnvWhenEnvIsMissing_ElevenLabs(t *testing.T) {
@@ -635,38 +614,46 @@ func TestDefault_RateLimitValues(t *testing.T) {
 	}
 }
 
+// Post clean-break (#38) the embed model names are profile config
+// (built-in mistral defaults; overridable via model.embed.* per SPEC
+// §16.2), not Config fields. Resolve through the provider resolver.
 func TestDefault_EmbedModels(t *testing.T) {
-	cfg := config.Default()
-	if cfg.EmbedModelText != "mistral-embed" {
-		t.Fatalf("unexpected default text embed model: %q", cfg.EmbedModelText)
+	t.Setenv("MISTRAL_API_KEY", "k")
+	p, err := loadCfg(t, "version: 1\n").Providers().Resolve(provider.CapEmbed)
+	if err != nil {
+		t.Fatalf("resolve embed: %v", err)
 	}
-	if cfg.EmbedModelCode != "codestral-embed" {
-		t.Fatalf("unexpected default code embed model: %q", cfg.EmbedModelCode)
+	if p.EmbedTextModel != "mistral-embed" {
+		t.Fatalf("unexpected default text embed model: %q", p.EmbedTextModel)
+	}
+	if p.EmbedCodeModel != "codestral-embed" {
+		t.Fatalf("unexpected default code embed model: %q", p.EmbedCodeModel)
 	}
 }
 
-func TestLoad_EnvOverridesEmbedModels(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "foo-model")
-		t.Setenv("DIR2MCP_EMBED_MODEL_CODE", "bar-model")
-		cfg, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg.EmbedModelText != "foo-model" {
-			t.Fatalf("unexpected embed model text: %q", cfg.EmbedModelText)
-		}
-		if cfg.EmbedModelCode != "bar-model" {
-			t.Fatalf("unexpected embed model code: %q", cfg.EmbedModelCode)
-		}
-	})
+func TestModel_OverridesEmbedModels(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "k")
+	yaml := "model:\n  embed:\n    text_model: foo-model\n    code_model: bar-model\n"
+	p, err := loadCfg(t, yaml).Providers().Resolve(provider.CapEmbed)
+	if err != nil {
+		t.Fatalf("resolve embed: %v", err)
+	}
+	if p.EmbedTextModel != "foo-model" {
+		t.Fatalf("unexpected embed model text: %q", p.EmbedTextModel)
+	}
+	if p.EmbedCodeModel != "bar-model" {
+		t.Fatalf("unexpected embed model code: %q", p.EmbedCodeModel)
+	}
 }
 
 func TestDefault_ChatModel(t *testing.T) {
-	cfg := config.Default()
-	if cfg.ChatModel != "mistral-small-2506" {
-		t.Fatalf("unexpected default chat model: %q", cfg.ChatModel)
+	t.Setenv("MISTRAL_API_KEY", "k")
+	p, err := loadCfg(t, "version: 1\n").Providers().Resolve(provider.CapChat)
+	if err != nil {
+		t.Fatalf("resolve chat: %v", err)
+	}
+	if p.ChatModel != "mistral-small-2506" {
+		t.Fatalf("unexpected default chat model: %q", p.ChatModel)
 	}
 }
 
@@ -752,18 +739,16 @@ func TestLoad_RejectsNegativeRAGAndChunkingTunables(t *testing.T) {
 	}
 }
 
-func TestLoad_EnvOverridesChatModel(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("DIR2MCP_CHAT_MODEL", "new-chat")
-		cfg, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg.ChatModel != "new-chat" {
-			t.Fatalf("unexpected chat model: %q", cfg.ChatModel)
-		}
-	})
+func TestModel_OverridesChatModel(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "k")
+	yaml := "model:\n  chat:\n    model: new-chat\n"
+	p, err := loadCfg(t, yaml).Providers().Resolve(provider.CapChat)
+	if err != nil {
+		t.Fatalf("resolve chat: %v", err)
+	}
+	if p.ChatModel != "new-chat" {
+		t.Fatalf("unexpected chat model: %q", p.ChatModel)
+	}
 }
 
 func TestLoad_RateLimitEnvOverrides(t *testing.T) {

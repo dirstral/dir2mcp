@@ -41,9 +41,10 @@ func TestEmbedIdentity_SnapshotRecordsAndVerifies(t *testing.T) {
 	}
 
 	// Changed embed model -> refused with a CONFIG_INVALID-class error.
-	changed := config.Default()
+	// Post clean-break (#38) the embed model name is provider config
+	// (model.embed.text_model per SPEC §16.2), not a Config field.
+	changed := loadCfg(t, "model:\n  embed:\n    text_model: some-other-embed-v9\n")
 	changed.StateDir = dir
-	changed.EmbedModelText = "some-other-embed-v9" // seeds the mistral profile
 	err = changed.VerifyEmbedIdentity(dir)
 	if err == nil || !strings.Contains(err.Error(), "CONFIG_INVALID") {
 		t.Fatalf("changed embed identity must be refused, got: %v", err)

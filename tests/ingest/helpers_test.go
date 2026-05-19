@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -12,7 +13,9 @@ import (
 func mustNewIngestService(t *testing.T, cfg config.Config, st model.Store) *ingest.Service {
 	t.Helper()
 	provider := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
-	if provider == "mistral" && strings.TrimSpace(cfg.MistralAPIKey) == "" {
+	// Post clean-break (#38) the Mistral credential resolves from env
+	// via the built-in ${MISTRAL_API_KEY} placeholder, not a Config field.
+	if provider == "mistral" && strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) == "" {
 		cfg.STTProvider = "off"
 	}
 	svc, err := ingest.NewService(cfg, st)

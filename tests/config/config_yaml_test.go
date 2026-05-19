@@ -54,32 +54,21 @@ func TestLoadFile_ReadsYAMLValues(t *testing.T) {
 func TestLoad_FileThenEnvOverridesYAML(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".dir2mcp.yaml")
-	writeFile(t, path, ""+
-		"mistral_base_url: https://yaml.example\n"+
-		"mistral_max_ocr_payload_bytes: 111\n"+
-		"embed_model_text: yaml-embed\n")
+	// The Mistral flat keys / DIR2MCP_* model env vars were removed in
+	// the provider clean break (#38); docling_command remains a flat
+	// YAML key whose DIR2MCP_DOCLING_COMMAND env override still applies,
+	// so it exercises the same file-then-env precedence path.
+	writeFile(t, path, "docling_command: yaml-docling {input}\n")
 
 	testutil.WithWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_BASE_URL", "https://env.example")
-		t.Setenv("DIR2MCP_MISTRAL_MAX_OCR_PAYLOAD_BYTES", "222")
-		t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "env-embed")
-		t.Setenv("DIR2MCP_DOCLING_COMMAND", "docling --to md --output - {input}")
+		t.Setenv("DIR2MCP_DOCLING_COMMAND", "env-docling {input}")
 
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
-		if cfg.MistralBaseURL != "https://env.example" {
-			t.Fatalf("MistralBaseURL=%q want=%q", cfg.MistralBaseURL, "https://env.example")
-		}
-		if cfg.EmbedModelText != "env-embed" {
-			t.Fatalf("EmbedModelText=%q want=%q", cfg.EmbedModelText, "env-embed")
-		}
-		if cfg.MistralMaxOCRPayloadBytes != 222 {
-			t.Fatalf("MistralMaxOCRPayloadBytes=%d want=%d", cfg.MistralMaxOCRPayloadBytes, 222)
-		}
-		if cfg.DoclingCommand != "docling --to md --output - {input}" {
-			t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)
+		if cfg.DoclingCommand != "env-docling {input}" {
+			t.Fatalf("DoclingCommand=%q want env override of YAML", cfg.DoclingCommand)
 		}
 	})
 }
@@ -91,8 +80,7 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	cfg := config.Default()
 	cfg.RootDir = "/tmp/repo"
 	cfg.StateDir = "/tmp/repo/.dir2mcp"
-	cfg.MistralMaxOCRPayloadBytes = 26214400
-	cfg.MistralAPIKey = "super-secret"
+	cfg.DoclingCommand = "docling --to md - {input}"
 	cfg.ElevenLabsAPIKey = "another-secret"
 	cfg.AllowedOrigins = []string{"http://localhost", "https://example.com"}
 
@@ -108,16 +96,13 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	if !strings.Contains(text, "root_dir: /tmp/repo") {
 		t.Fatalf("saved yaml missing root_dir, got:\n%s", text)
 	}
-	if !strings.Contains(text, "mistral_max_ocr_payload_bytes: 26214400") {
-		t.Fatalf("saved yaml missing mistral_max_ocr_payload_bytes, got:\n%s", text)
-	}
 	if !strings.Contains(text, "docling_command:") {
 		t.Fatalf("saved yaml missing docling_command, got:\n%s", text)
 	}
-	if strings.Contains(strings.ToLower(text), "mistral_api_key") {
-		t.Fatalf("saved yaml must not include MISTRAL_API_KEY key, got:\n%s", text)
+	if strings.Contains(strings.ToLower(text), "elevenlabs_api_key") {
+		t.Fatalf("saved yaml must not include the ELEVENLABS_API_KEY key, got:\n%s", text)
 	}
-	if strings.Contains(text, "super-secret") || strings.Contains(text, "another-secret") {
+	if strings.Contains(text, "another-secret") {
 		t.Fatalf("saved yaml must not include secret values, got:\n%s", text)
 	}
 }
@@ -209,7 +194,6 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"    cert_file: /tmp/cert.pem\n"+
 		"    key_file: /tmp/key.pem\n"+
 		"secrets:\n"+
-		"  mistral_api_key: nested-mistral\n"+
 		"  elevenlabs_api_key: nested-eleven\n"+
 		"  x402_facilitator_url: https://facilitator.example\n")
 
@@ -282,9 +266,6 @@ func assertNestedServerAndSecrets(t *testing.T, cfg config.Config) {
 	if cfg.ServerTLSKeyFile != "/tmp/key.pem" {
 		t.Fatalf("ServerTLSKeyFile=%q", cfg.ServerTLSKeyFile)
 	}
-	if cfg.MistralAPIKey != "nested-mistral" {
-		t.Fatalf("MistralAPIKey=%q", cfg.MistralAPIKey)
-	}
 	if cfg.ElevenLabsAPIKey != "nested-eleven" {
 		t.Fatalf("ElevenLabsAPIKey=%q", cfg.ElevenLabsAPIKey)
 	}
@@ -311,7 +292,6 @@ func TestLoadFile_FlatAliasesRemainSupportedForNestedFields(t *testing.T) {
 		"stt_mistral_model: voxtral-mini-latest\n"+
 		"stt_elevenlabs_model: scribe\n"+
 		"elevenlabs_language_code: en\n"+
-		"secrets.mistral_api_key: flat-mistral\n"+
 		"secrets.elevenlabs_api_key: flat-eleven\n"+
 		"secrets.x402_facilitator_url: https://flat-facilitator.example\n"+
 		"tls_cert_file: /etc/cert.pem\n"+
@@ -358,8 +338,8 @@ func assertFlatSTTAliases(t *testing.T, cfg config.Config) {
 
 func assertFlatSecretsAndTLSAliases(t *testing.T, cfg config.Config) {
 	t.Helper()
-	if cfg.MistralAPIKey != "flat-mistral" || cfg.ElevenLabsAPIKey != "flat-eleven" {
-		t.Fatalf("secret aliases not applied: mistral=%q eleven=%q", cfg.MistralAPIKey, cfg.ElevenLabsAPIKey)
+	if cfg.ElevenLabsAPIKey != "flat-eleven" {
+		t.Fatalf("secret alias not applied: eleven=%q", cfg.ElevenLabsAPIKey)
 	}
 	if cfg.X402.FacilitatorURL != "https://flat-facilitator.example" {
 		t.Fatalf("x402 facilitator alias not applied: %q", cfg.X402.FacilitatorURL)

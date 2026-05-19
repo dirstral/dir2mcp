@@ -146,7 +146,6 @@ func requireRetryableAndResetBody(t *testing.T, resp *http.Response) {
 
 func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/audio/transcriptions" {
@@ -156,7 +155,7 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer upstream.Close()
-	cfg.MistralBaseURL = upstream.URL
+	cfg = withMistralUpstream(t, cfg, "mistral-ocr", upstream.URL)
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
@@ -175,7 +174,6 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 
 func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.MistralAPIKey = "test-key"
 	var gotLanguage string
 
 	// use a channel to propagate handler errors back to the main goroutine
@@ -196,7 +194,7 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 		_, _ = io.WriteString(w, `{"segments":[{"start":1,"end":2,"text":"alpha"},{"start":3,"end":4,"text":"beta"}]}`)
 	}))
 	defer upstream.Close()
-	cfg.MistralBaseURL = upstream.URL
+	cfg = withMistralUpstream(t, cfg, "mistral-ocr", upstream.URL)
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
@@ -269,7 +267,6 @@ func TestMCPToolsCallTranscribe_CreatesAudioDocWhenNotYetIndexed(t *testing.T) {
 	cfg.StateDir = stateDir
 	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
-	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/audio/transcriptions" {
@@ -285,7 +282,7 @@ func TestMCPToolsCallTranscribe_CreatesAudioDocWhenNotYetIndexed(t *testing.T) {
 		_, _ = io.WriteString(w, `{"segments":[{"start":1,"end":2,"text":"alpha"}]}`)
 	}))
 	defer upstream.Close()
-	cfg.MistralBaseURL = upstream.URL
+	cfg = withMistralUpstream(t, cfg, "mistral-ocr", upstream.URL)
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
@@ -333,7 +330,6 @@ func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Mistral chat now routes through the OpenAI-compatible
@@ -346,7 +342,7 @@ func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer upstream.Close()
-	cfg.MistralBaseURL = upstream.URL
+	cfg = withMistralUpstream(t, cfg, "mistral", upstream.URL)
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
@@ -359,7 +355,6 @@ func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Mistral chat now routes through the OpenAI-compatible
@@ -374,7 +369,7 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{\"summary\":\"alpha\",\"tags\":[\"x\"]}"}}]}`)
 	}))
 	defer upstream.Close()
-	cfg.MistralBaseURL = upstream.URL
+	cfg = withMistralUpstream(t, cfg, "mistral", upstream.URL)
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
@@ -410,7 +405,10 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_PromptTooLarge(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("small"))
-	cfg.MistralAPIKey = "test-key"
+	// Chat resolves to the built-in mistral profile via the env-sourced
+	// ${MISTRAL_API_KEY} placeholder (clean break #38); no upstream is
+	// hit — the prompt-size guard rejects before any provider call.
+	t.Setenv("MISTRAL_API_KEY", "test-key")
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
@@ -443,7 +441,6 @@ func TestMCPToolsCallTranscribeAndAsk_MissingQuestion(t *testing.T) {
 
 func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/audio/transcriptions" {
@@ -456,7 +453,7 @@ func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 		_, _ = io.WriteString(w, `{"segments":[{"start":1,"end":2,"text":"alpha in transcript"}]}`)
 	}))
 	defer upstream.Close()
-	cfg.MistralBaseURL = upstream.URL
+	cfg = withMistralUpstream(t, cfg, "mistral-ocr", upstream.URL)
 
 	retriever := &askAudioRetrieverStub{
 		askResult: model.AskResult{
@@ -498,6 +495,36 @@ func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 	if got := envelope.Result.StructuredContent["transcript_provider"]; got != "mistral" {
 		t.Fatalf("unexpected transcript_provider: %#v", got)
 	}
+}
+
+// withMistralUpstream rebuilds cfg so the named Mistral provider profile
+// resolves to a fake upstream server. Post clean-break (#38) the
+// credential and base URL are provider config — an env-sourced
+// ${MISTRAL_API_KEY} plus a `providers:` base_url override loaded via
+// config.LoadFile (providersDoc is unexported, set only on load) — not
+// Config fields. `profile` is:
+//   - "mistral":     OpenAI-backbone chat, POST {base}/chat/completions
+//   - "mistral-ocr": native client, POST {base}/v1/audio/transcriptions
+//
+// The runtime/programmatic fields from `base` are carried onto the
+// loaded cfg (LoadFile only knows the providers subtree + defaults).
+func withMistralUpstream(t *testing.T, base config.Config, profile, upstreamURL string) config.Config {
+	t.Helper()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	p := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	body := "providers:\n  " + profile + ":\n    base_url: " + upstreamURL + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatalf("write provider cfg: %v", err)
+	}
+	loaded, err := config.LoadFile(p)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	loaded.RootDir = base.RootDir
+	loaded.StateDir = base.StateDir
+	loaded.MCPPath = base.MCPPath
+	loaded.AuthMode = base.AuthMode
+	return loaded
 }
 
 func setupMCPToolStore(t *testing.T, relPath, docType string, content []byte) (config.Config, *store.SQLiteStore, string) {
