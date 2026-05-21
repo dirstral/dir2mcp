@@ -2010,6 +2010,8 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	}
 	writeln(a.stdout, s.subkv(protocol.MCPSessionHeader, s.dim("(assigned after initialize response)")))
 	writeln(a.stdout)
+
+	printRoutingSection(a.stdout, s, routingDecisions(cfg))
 	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, auth.mode != "none")
 	writeln(a.stdout, s.separator(44))
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))

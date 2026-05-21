@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -225,33 +224,18 @@ func buildTranscriber(prof provider.Profile) (model.Transcriber, error) {
 
 // DocumentExtractorFromConfig resolves document extraction provider selection.
 // Priority: configured docling command, auto-detected docling binary, then
-// Mistral OCR (via the provider model).
+// Mistral OCR (via the provider model). Selection mirrors
+// DescribeDocumentExtractor so the diagnostic banner is always in sync.
 func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
-	mode := strings.ToLower(strings.TrimSpace(cfg.IngestExtractor))
-	if mode == "" {
-		mode = "auto"
-	}
-	switch mode {
-	case "off":
-		return nil
+	decision := DescribeDocumentExtractor(cfg)
+	switch decision.Name {
 	case "docling":
-		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
-			return NewDoclingExtractor(tpl)
-		}
-		if _, err := exec.LookPath("docling"); err == nil {
-			return NewDoclingExtractor("")
-		}
+		tpl := strings.TrimSpace(cfg.DoclingCommand)
+		return NewDoclingExtractor(tpl)
+	case "mistral-ocr":
+		return mistralExtractor(cfg)
+	default:
 		return nil
-	case "mistral":
-		return mistralExtractor(cfg)
-	default: // auto
-		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
-			return NewDoclingExtractor(tpl)
-		}
-		if _, err := exec.LookPath("docling"); err == nil {
-			return NewDoclingExtractor("")
-		}
-		return mistralExtractor(cfg)
 	}
 }
 
