@@ -104,7 +104,8 @@ func (w *EmbeddingWorker) indexChunks(ctx context.Context, validTasks []model.Ch
 				}
 			}
 			category := string(store.ClassifyError(addErr))
-			if mfErr := w.Source.MarkFailedWithCategory(ctx, labels[idx:idx+1], category, addErr.Error()); mfErr != nil {
+			reason := store.SanitizeReason(addErr.Error())
+			if mfErr := w.Source.MarkFailedWithCategory(ctx, labels[idx:idx+1], category, reason); mfErr != nil {
 				w.logf("mark failed update error: %v (index error: %v) labels=%v", mfErr, addErr, labels[idx:idx+1])
 			}
 			return idx, addErr
@@ -186,7 +187,8 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 			return 0, err
 		}
 		category := string(store.ClassifyError(err))
-		if mfErr := w.Source.MarkFailedWithCategory(ctx, labels, category, err.Error()); mfErr != nil {
+		reason := store.SanitizeReason(err.Error())
+		if mfErr := w.Source.MarkFailedWithCategory(ctx, labels, category, reason); mfErr != nil {
 			w.logf("mark failed update error: %v (source error: %v) labels=%v", mfErr, err, labels)
 		}
 		return 0, err

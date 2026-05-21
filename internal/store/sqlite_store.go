@@ -544,8 +544,8 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO chunks(chunk_id, rel_path, doc_type, rep_type, text, index_kind, embedding_status, embedding_error, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, 'pending', '', 0)
+		`INSERT INTO chunks(chunk_id, rel_path, doc_type, rep_type, text, index_kind, embedding_status, embedding_error, error_category, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, 'pending', '', '', 0)
 		 ON CONFLICT(chunk_id) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -554,7 +554,8 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 		   index_kind=excluded.index_kind,
 		   deleted=0,
 		   embedding_status='pending',
-		   embedding_error=''`,
+		   embedding_error='',
+		   error_category=''`,
 		int64(task.Label),
 		relPath,
 		defaultIfEmpty(task.Metadata.DocType, "unknown"),

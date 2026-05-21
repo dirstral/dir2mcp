@@ -155,7 +155,14 @@ func extractorCheck(cfg config.Config) doctorCheck {
 func indexingFailureCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
 	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
 	if _, err := os.Stat(metaPath); err != nil {
-		return doctorCheck{Name: "indexing_failures", Status: doctorStatusOK, Detail: "no index yet"}
+		// Only ENOENT is the legitimate "no index yet" path. A
+		// permission or I/O failure here would otherwise be reported
+		// as healthy, hiding the actual blocker.
+		if errors.Is(err, os.ErrNotExist) {
+			return doctorCheck{Name: "indexing_failures", Status: doctorStatusOK, Detail: "no index yet"}
+		}
+		return doctorCheck{Name: "indexing_failures", Status: doctorStatusError,
+			Detail: fmt.Sprintf("stat %s: %v", metaPath, err)}
 	}
 	st := a.storeForConfig(cfg)
 	defer func() { _ = st.Close() }()
@@ -189,9 +196,19 @@ func summarizeFailureCategories(categories map[string]int64) string {
 	for k, v := range categories {
 		entries = append(entries, entry{category: k, count: v})
 	}
-	// Insertion sort for stability + simplicity over a tiny N.
+	// Insertion sort for stability + simplicity over a tiny N. Tied
+	// counts break by category name ascending so the output is
+	// byte-identical across runs (Go map iteration would otherwise
+	// randomize the seed order before the sort, leaving ties
+	// non-deterministic).
 	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && entries[j-1].count < entries[j].count; j-- {
+		for j := i; j > 0; j-- {
+			if entries[j-1].count > entries[j].count {
+				break
+			}
+			if entries[j-1].count == entries[j].count && entries[j-1].category < entries[j].category {
+				break
+			}
 			entries[j-1], entries[j] = entries[j], entries[j-1]
 		}
 	}

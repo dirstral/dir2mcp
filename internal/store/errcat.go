@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrorCategory is a coarse classification for chunk-embedding failures.
@@ -96,6 +98,67 @@ func containsAny(s string, needles []string) bool {
 		}
 	}
 	return false
+}
+
+// sanitizedReasonMaxBytes bounds the length of error reason strings
+// persisted into the chunks table. The cap is small enough that even
+// an attacker-controlled error body can't smuggle a useful secret or
+// payload chunk through the diagnostics surface, large enough to
+// preserve the prose prefix that humans actually read.
+const sanitizedReasonMaxBytes = 256
+
+// SanitizeReason produces a chunks.embedding_error payload that is
+// safe to surface through dir2mcp status / doctor / support-bundle.
+// Upstream error strings can interpolate raw request/response bodies
+// (OCR returning a PDF stream excerpt; HTTP clients including a
+// failing input fragment; etc.), and those bodies are exactly the
+// payloads the "no secrets in diagnostics" contract forbids us from
+// persisting. The sanitizer therefore:
+//
+//  1. Replaces every non-printable byte with a space so binary
+//     payload fragments collapse to whitespace runs instead of
+//     leaking through as raw bytes.
+//  2. Collapses whitespace runs so the previous step doesn't
+//     produce sprawling blank ranges.
+//  3. Truncates to sanitizedReasonMaxBytes with an elision marker
+//     so long payloads can't fill the column.
+//
+// Callers should pass the original err.Error() output; the returned
+// string is what they hand to MarkFailedWithCategory.
+func SanitizeReason(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, r := range raw {
+		switch {
+		case r == utf8.RuneError:
+			// Invalid UTF-8 byte: drop it. These typically come
+			// from binary payload fragments that the upstream
+			// interpolated into the error string.
+			continue
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		default:
+			// Whitespace and control bytes collapse to a single
+			// space; the strings.Fields pass below removes
+			// resulting runs.
+			b.WriteByte(' ')
+		}
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	const ellipsis = "…" // 3 bytes in UTF-8
+	if len(out) > sanitizedReasonMaxBytes {
+		cut := sanitizedReasonMaxBytes - len(ellipsis)
+		// Walk back to a rune boundary so we never split a
+		// multi-byte UTF-8 sequence mid-character.
+		for cut > 0 && !utf8.RuneStart(out[cut]) {
+			cut--
+		}
+		out = out[:cut] + ellipsis
+	}
+	return out
 }
 
 // isNetTransient reports whether err unwraps to a net.Error that
