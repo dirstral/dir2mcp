@@ -13,11 +13,21 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 type claudeServerConfig struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
+}
+
+func resolveClaudeServerName(cfg *config.Config, override string) string {
+	resolveServerName(cfg)
+	if t := strings.TrimSpace(override); t != "" {
+		return t
+	}
+	return cfg.ServerName
 }
 
 func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
@@ -39,11 +49,7 @@ func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
-	resolveServerName(&cfg)
-	effectiveServerName := strings.TrimSpace(*serverName)
-	if effectiveServerName == "" {
-		effectiveServerName = cfg.ServerName
-	}
+	effectiveServerName := resolveClaudeServerName(&cfg, *serverName)
 	effectiveStateDir := cfg.StateDir
 	if strings.TrimSpace(*stateDir) != "" {
 		effectiveStateDir = strings.TrimSpace(*stateDir)
@@ -98,11 +104,7 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
-	resolveServerName(&cfg)
-	effectiveServerName := strings.TrimSpace(*serverName)
-	if effectiveServerName == "" {
-		effectiveServerName = cfg.ServerName
-	}
+	effectiveServerName := resolveClaudeServerName(&cfg, *serverName)
 	effectiveStateDir := cfg.StateDir
 	if strings.TrimSpace(*stateDir) != "" {
 		effectiveStateDir = strings.TrimSpace(*stateDir)
@@ -170,7 +172,7 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 	fs := flag.NewFlagSet("uninstall claude", flag.ContinueOnError)
 	fs.SetOutput(ioDiscard{})
-	serverName := fs.String("name", "dir2mcp", "server name to remove from Claude config")
+	serverName := fs.String("name", "", "server name to remove (defaults to configured/auto-derived name)")
 	configPath := fs.String("config-path", defaultClaudeDesktopConfigPath(), "Claude Desktop config path")
 	if err := fs.Parse(args); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid uninstall claude flags: %v", err))
@@ -180,6 +182,12 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("uninstall claude does not accept positional arguments: %s", strings.Join(fs.Args(), " ")))
 		return exitConfigInvalid
 	}
+	cfg, err := loadConfigWithGlobalOptions(global)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
+		return exitConfigInvalid
+	}
+	effectiveServerName := resolveClaudeServerName(&cfg, *serverName)
 
 	// Loading the file into a map preserves any unrelated mcpServers entries
 	// the user may have configured for other tools — we only touch our own.
@@ -199,7 +207,7 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 		}
 	}
 
-	_, present := mcpServers[*serverName]
+	_, present := mcpServers[effectiveServerName]
 	if !present {
 		// Idempotent no-op: it's not an error to uninstall something that
 		// isn't installed. Report and exit clean so scripts can run this
@@ -207,7 +215,7 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 		if global.jsonOutput {
 			if err := emitJSON(a.stdout, map[string]interface{}{
 				"path":        *configPath,
-				"server_name": *serverName,
+				"server_name": effectiveServerName,
 				"removed":     false,
 				"reason":      "entry_not_present",
 			}); err != nil {
@@ -216,11 +224,11 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 			}
 			return exitSuccess
 		}
-		writef(a.stdout, "no MCP server %q in %s; nothing to remove\n", *serverName, *configPath)
+		writef(a.stdout, "no MCP server %q in %s; nothing to remove\n", effectiveServerName, *configPath)
 		return exitSuccess
 	}
 
-	delete(mcpServers, *serverName)
+	delete(mcpServers, effectiveServerName)
 	if len(mcpServers) == 0 {
 		// Drop the now-empty mcpServers key entirely so the resulting JSON
 		// matches the never-installed shape (modulo any unrelated keys).
@@ -237,7 +245,7 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 	if global.jsonOutput {
 		if err := emitJSON(a.stdout, map[string]interface{}{
 			"path":        *configPath,
-			"server_name": *serverName,
+			"server_name": effectiveServerName,
 			"removed":     true,
 		}); err != nil {
 			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode claude uninstall json: %v", err))
@@ -245,7 +253,7 @@ func (a *App) runClaudeUninstall(global globalOptions, args []string) int {
 		}
 		return exitSuccess
 	}
-	writef(a.stdout, "removed MCP server %q from %s\n", *serverName, *configPath)
+	writef(a.stdout, "removed MCP server %q from %s\n", effectiveServerName, *configPath)
 	writef(a.stdout, "restart Claude Desktop to drop the server entry\n")
 	return exitSuccess
 }

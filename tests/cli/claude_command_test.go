@@ -137,50 +137,15 @@ func TestClaudeInstallDefaultsToResolvedServerName(t *testing.T) {
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
 	}
-	stateDir := filepath.Join(tmp, "state")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		t.Fatalf("mkdir state: %v", err)
-	}
-	tokenPath := filepath.Join(stateDir, "secret.token")
-	if err := os.WriteFile(tokenPath, []byte("tok-auto\n"), 0o600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-	connection := map[string]interface{}{
-		"transport":    "mcp_streamable_http",
-		"url":          "http://127.0.0.1:9882/mcp",
-		"headers":      map[string]string{"MCP-Protocol-Version": "2025-11-25"},
-		"session":      map[string]interface{}{"uses_mcp_session_id": true, "header_name": "MCP-Session-Id", "assigned_on_initialize": true},
-		"public":       false,
-		"token_source": "secret.token",
-		"token_file":   tokenPath,
-	}
-	raw, _ := json.Marshal(connection)
-	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), raw, 0o644); err != nil {
-		t.Fatalf("write connection: %v", err)
-	}
+	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-auto")
 
 	configPath := filepath.Join(tmp, "claude_desktop_config.json")
 	if err := os.WriteFile(configPath, []byte("{\"preferences\":{\"coworkWebSearchEnabled\":true}}\n"), 0o644); err != nil {
 		t.Fatalf("write initial config: %v", err)
 	}
 
-	absRoot, err := filepath.Abs(rootDir)
-	if err != nil {
-		t.Fatalf("abs root: %v", err)
-	}
-	wantName := identity.Resolve(absRoot, "", buildinfo.IsDev())
-	wantPrefix := wantName[:strings.LastIndex(wantName, "-")+1]
-
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(rootDir); err != nil {
-		t.Fatalf("chdir root: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWD)
-	})
+	wantPrefix := resolvedServerNamePrefix(t, rootDir)
+	withCWD(t, rootDir)
 
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
@@ -218,6 +183,34 @@ func TestClaudeInstallDefaultsToResolvedServerName(t *testing.T) {
 	if _, legacy := mcpServers["dir2mcp"]; legacy {
 		t.Fatalf("legacy fixed server name should not be written by default: %+v", mcpServers)
 	}
+}
+
+func resolvedServerNamePrefix(t *testing.T, rootDir string) string {
+	t.Helper()
+	absRoot, err := filepath.Abs(rootDir)
+	if err != nil {
+		t.Fatalf("abs root: %v", err)
+	}
+	wantName := identity.Resolve(absRoot, "", buildinfo.IsDev())
+	idx := strings.LastIndex(wantName, "-")
+	if idx <= 0 {
+		t.Fatalf("unexpected resolved name without separator: %q", wantName)
+	}
+	return wantName[:idx+1]
+}
+
+func withCWD(t *testing.T, dir string) {
+	t.Helper()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir %s: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
 }
 
 func TestClaudeDoctorPassesWithValidState(t *testing.T) {
@@ -364,6 +357,7 @@ func TestClaudeUninstallRemovesEntryAndPreservesUnrelatedKeys(t *testing.T) {
 	code := app.RunWithContext(context.Background(), []string{
 		"uninstall", "claude",
 		"--config-path", configPath,
+		"--name", "dir2mcp",
 	})
 	if code != 0 {
 		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
@@ -410,6 +404,7 @@ func TestClaudeUninstallDropsEmptyMCPServersBlock(t *testing.T) {
 	code := app.RunWithContext(context.Background(), []string{
 		"uninstall", "claude",
 		"--config-path", configPath,
+		"--name", "dir2mcp",
 	})
 	if code != 0 {
 		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
