@@ -10,12 +10,20 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 type ChunkSource interface {
 	NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error)
 	MarkEmbedded(ctx context.Context, labels []uint64) error
 	MarkFailed(ctx context.Context, labels []uint64, reason string) error
+	// MarkFailedWithCategory is the classification-aware variant. New
+	// failure write sites should use it so dir2mcp status / doctor /
+	// support-bundle can group errors by cause. category is the string
+	// form of store.ErrorCategory so the interface contract stays
+	// loose — implementations don't need to depend on the store
+	// package's type.
+	MarkFailedWithCategory(ctx context.Context, labels []uint64, category, reason string) error
 }
 
 type EmbeddingWorker struct {
@@ -95,7 +103,9 @@ func (w *EmbeddingWorker) indexChunks(ctx context.Context, validTasks []model.Ch
 					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])
 				}
 			}
-			if mfErr := w.Source.MarkFailed(ctx, labels[idx:idx+1], addErr.Error()); mfErr != nil {
+			category := string(store.ClassifyError(addErr))
+			reason := store.SanitizeReason(addErr.Error())
+			if mfErr := w.Source.MarkFailedWithCategory(ctx, labels[idx:idx+1], category, reason); mfErr != nil {
 				w.logf("mark failed update error: %v (index error: %v) labels=%v", mfErr, addErr, labels[idx:idx+1])
 			}
 			return idx, addErr
@@ -176,14 +186,16 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		if isTransientEmbedError(err) {
 			return 0, err
 		}
-		if mfErr := w.Source.MarkFailed(ctx, labels, err.Error()); mfErr != nil {
+		category := string(store.ClassifyError(err))
+		reason := store.SanitizeReason(err.Error())
+		if mfErr := w.Source.MarkFailedWithCategory(ctx, labels, category, reason); mfErr != nil {
 			w.logf("mark failed update error: %v (source error: %v) labels=%v", mfErr, err, labels)
 		}
 		return 0, err
 	}
 	if len(vectors) != len(validTasks) {
 		reason := "embedding vector count mismatch"
-		if mfErr := w.Source.MarkFailed(ctx, labels, reason); mfErr != nil {
+		if mfErr := w.Source.MarkFailedWithCategory(ctx, labels, string(store.ErrorCategoryEmbeddingFailure), reason); mfErr != nil {
 			w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, labels)
 		}
 		return 0, errors.New(reason)

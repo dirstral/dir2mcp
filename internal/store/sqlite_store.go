@@ -282,6 +282,11 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE mcp_sessions ADD COLUMN auth_scope TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE representations ADD COLUMN meta_json TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE documents ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		// error_category folds free-text embedding_error into a small
+		// enum (store.ErrorCategory) so dir2mcp status / doctor can
+		// surface "rate_limit: 67, payload_too_large: 21" instead of
+		// just an aggregate failure count.
+		`ALTER TABLE chunks ADD COLUMN error_category TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -357,6 +362,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   index_kind TEXT NOT NULL DEFAULT 'text',
   embedding_status TEXT NOT NULL DEFAULT 'pending',
   embedding_error TEXT NOT NULL DEFAULT '',
+  error_category TEXT NOT NULL DEFAULT '',
   deleted INTEGER NOT NULL DEFAULT 0,
   UNIQUE(rep_id, ordinal),
   FOREIGN KEY (rep_id) REFERENCES representations(rep_id) ON DELETE CASCADE
@@ -538,8 +544,8 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO chunks(chunk_id, rel_path, doc_type, rep_type, text, index_kind, embedding_status, embedding_error, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, 'pending', '', 0)
+		`INSERT INTO chunks(chunk_id, rel_path, doc_type, rep_type, text, index_kind, embedding_status, embedding_error, error_category, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, 'pending', '', '', 0)
 		 ON CONFLICT(chunk_id) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -548,7 +554,8 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 		   index_kind=excluded.index_kind,
 		   deleted=0,
 		   embedding_status='pending',
-		   embedding_error=''`,
+		   embedding_error='',
+		   error_category=''`,
 		int64(task.Label),
 		relPath,
 		defaultIfEmpty(task.Metadata.DocType, "unknown"),
@@ -1035,6 +1042,12 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 		return model.CorpusStats{}, err
 	}
 
+	summary, err := loadFailureSummary(ctx, db, failureSummaryMaxSamples)
+	if err != nil {
+		return model.CorpusStats{}, err
+	}
+	stats.FailureSummary = summary
+
 	return stats, nil
 }
 
@@ -1215,11 +1228,25 @@ func spanFromRow(kind string, start, end int) model.Span {
 }
 
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
-	return s.markEmbeddingStatus(ctx, labels, "ok", "")
+	return s.markEmbeddingStatus(ctx, labels, "ok", "", "")
 }
 
+// MarkFailed retains its original signature for callers that have not
+// yet adopted error classification; they are recorded with an empty
+// category (effectively ErrorCategoryUnknown for query/aggregation
+// purposes). New call sites should prefer MarkFailedWithCategory so
+// the failure surfaces in dir2mcp status / doctor breakdowns.
 func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason string) error {
-	return s.markEmbeddingStatus(ctx, labels, "error", reason)
+	return s.markEmbeddingStatus(ctx, labels, "error", reason, "")
+}
+
+// MarkFailedWithCategory records a chunk-embedding failure together
+// with a classification category (see ClassifyError). Category is
+// stored alongside the existing free-text reason so the original
+// message stays available for debugging while aggregations operate on
+// the enum.
+func (s *SQLiteStore) MarkFailedWithCategory(ctx context.Context, labels []uint64, category ErrorCategory, reason string) error {
+	return s.markEmbeddingStatus(ctx, labels, "error", reason, string(category))
 }
 
 func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time, authScope string) error {
@@ -1407,7 +1434,7 @@ func (s *SQLiteStore) ListMCPPaymentOutcomes(ctx context.Context) ([]MCPPaymentO
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, status, reason string) error {
+func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, status, reason, category string) error {
 	if len(labels) == 0 {
 		return nil
 	}
@@ -1433,14 +1460,15 @@ func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.PrepareContext(ctx, `UPDATE chunks SET embedding_status = ?, embedding_error = ? WHERE chunk_id = ?`)
+	stmt, err := tx.PrepareContext(ctx,
+		`UPDATE chunks SET embedding_status = ?, embedding_error = ?, error_category = ? WHERE chunk_id = ?`)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stmt.Close() }()
 
 	for _, label := range labels {
-		if _, err := stmt.ExecContext(ctx, status, reason, int64(label)); err != nil {
+		if _, err := stmt.ExecContext(ctx, status, reason, category, int64(label)); err != nil {
 			return err
 		}
 	}

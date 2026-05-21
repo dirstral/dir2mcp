@@ -68,8 +68,11 @@ func TestStatsJSONFlattening(t *testing.T) {
 	}
 
 	// sanity-check: every json tag in CorpusStats should appear in the above
-	// list. this catches developers who forget to update the expected slice
-	// when adding new stats fields.
+	// list, except for fields tagged omitempty (which legitimately don't
+	// appear when their value is the zero value, as is the case for
+	// failure_summary on the populated-but-summary-less fixture above).
+	// This still catches developers who forget to update the expected
+	// slice when adding new always-emitted stats fields.
 	csTags := make(map[string]struct{})
 	csType := reflect.TypeOf(CorpusStats{})
 	for i := 0; i < csType.NumField(); i++ {
@@ -77,7 +80,19 @@ func TestStatsJSONFlattening(t *testing.T) {
 		if tag == "" {
 			continue
 		}
-		csTags[strings.SplitN(tag, ",", 2)[0]] = struct{}{}
+		parts := strings.Split(tag, ",")
+		name := parts[0]
+		omitempty := false
+		for _, opt := range parts[1:] {
+			if opt == "omitempty" {
+				omitempty = true
+				break
+			}
+		}
+		if omitempty {
+			continue
+		}
+		csTags[name] = struct{}{}
 	}
 	for tag := range csTags {
 		found := false

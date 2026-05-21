@@ -175,6 +175,30 @@ type CorpusStats struct {
 	EmbeddedOK      int64            `json:"embedded_ok"`
 	Errors          int64            `json:"errors"`
 	Unknown         int64            `json:"unknown"`
+	// FailureSummary groups chunk-level embedding failures by
+	// store.ErrorCategory ("rate_limit", "payload_too_large", etc.)
+	// plus a small sample of representative {rel_path, message}
+	// pairs. Omitted from JSON when no failures have been recorded
+	// so existing consumers continue to see a flat shape on healthy
+	// corpora.
+	FailureSummary *FailureSummary `json:"failure_summary,omitempty"`
+}
+
+// FailureSummary aggregates chunk embedding errors for diagnostics.
+// Categories is keyed by the string form of store.ErrorCategory (kept
+// as plain map[string]int64 here so the model package does not depend
+// on internal/store).
+type FailureSummary struct {
+	Categories map[string]int64 `json:"categories"`
+	Samples    []FailureSample  `json:"samples,omitempty"`
+}
+
+// FailureSample is one representative failed chunk: enough information
+// to start triage without dumping the entire chunks table.
+type FailureSample struct {
+	RelPath  string `json:"rel_path"`
+	Category string `json:"category"`
+	Message  string `json:"message"`
 }
 
 // MarshalJSON ensures that a nil DocCounts map is encoded as an empty object

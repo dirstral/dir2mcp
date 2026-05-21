@@ -80,10 +80,16 @@ func (a *App) runUninstall(_ context.Context, global globalOptions, args []strin
 	}
 }
 
-// runDoctor runs client-specific diagnostics — bridge command
-// resolution, connection URL validity, endpoint reachability, token
-// presence — for the requested client.
+// runDoctor dispatches to either the daemon-side preflight (no
+// positional client argument) or a client-specific integration check
+// (`dir2mcp doctor claude`). The two paths are intentionally separate
+// commands sharing one CLI verb: the daemon flavour answers "is this
+// install healthy?", the client flavour answers "is this client wired
+// up correctly?".
 func (a *App) runDoctor(ctx context.Context, global globalOptions, args []string) int {
+	if len(args) == 0 {
+		return a.runServerDoctor(ctx, global, args)
+	}
 	client, rest, ok := extractClient(a, global.jsonOutput, "doctor", args)
 	if !ok {
 		return exitConfigInvalid
