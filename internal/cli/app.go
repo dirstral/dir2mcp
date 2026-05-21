@@ -59,21 +59,22 @@ const (
 )
 
 var commands = map[string]struct{}{
-	"up":           {},
-	"down":         {},
-	"status":       {},
-	"ask":          {},
-	"search":       {},
-	"open-file":    {},
-	"list-files":   {},
-	"reindex":      {},
-	"bridge":       {},
-	"config":       {},
-	"install":      {},
-	"uninstall":    {},
-	"doctor":       {},
-	"print-config": {},
-	"version":      {},
+	"up":             {},
+	"down":           {},
+	"status":         {},
+	"ask":            {},
+	"search":         {},
+	"open-file":      {},
+	"list-files":     {},
+	"reindex":        {},
+	"bridge":         {},
+	"config":         {},
+	"install":        {},
+	"uninstall":      {},
+	"doctor":         {},
+	"print-config":   {},
+	"support-bundle": {},
+	"version":        {},
 }
 
 type App struct {
@@ -475,6 +476,8 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runDoctor(ctx, globalOpts, args), true
 	case "print-config":
 		return a.runPrintConfig(ctx, globalOpts, args), true
+	case "support-bundle":
+		return a.runSupportBundle(ctx, globalOpts, args), true
 	default:
 		return 0, false
 	}
@@ -526,6 +529,7 @@ func (a *App) printUsage() {
 		{"uninstall", "remove dir2mcp from a client (e.g. dir2mcp uninstall claude)"},
 		{"doctor", "run client integration diagnostics (e.g. dir2mcp doctor claude)"},
 		{"print-config", "print the MCP-server JSON snippet for a client"},
+		{"support-bundle", "collect logs + config + status into a shareable tar.gz"},
 		{"version", "print build version"},
 	}
 	for _, c := range cmds {
@@ -2010,6 +2014,8 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	}
 	writeln(a.stdout, s.subkv(protocol.MCPSessionHeader, s.dim("(assigned after initialize response)")))
 	writeln(a.stdout)
+
+	printRoutingSection(a.stdout, s, routingDecisions(cfg))
 	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, auth.mode != "none")
 	writeln(a.stdout, s.separator(44))
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))

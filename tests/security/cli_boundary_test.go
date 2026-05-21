@@ -25,21 +25,22 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 	commands := extractCommandsMap(t, file)
 
 	expected := map[string]struct{}{
-		"up":           {},
-		"down":         {},
-		"status":       {},
-		"ask":          {},
-		"search":       {},
-		"open-file":    {},
-		"list-files":   {},
-		"reindex":      {},
-		"bridge":       {},
-		"config":       {},
-		"install":      {},
-		"uninstall":    {},
-		"doctor":       {},
-		"print-config": {},
-		"version":      {},
+		"up":             {},
+		"down":           {},
+		"status":         {},
+		"ask":            {},
+		"search":         {},
+		"open-file":      {},
+		"list-files":     {},
+		"reindex":        {},
+		"bridge":         {},
+		"config":         {},
+		"install":        {},
+		"uninstall":      {},
+		"doctor":         {},
+		"print-config":   {},
+		"support-bundle": {},
+		"version":        {},
 	}
 
 	assertCommandSurface(t, commands, expected)
@@ -175,8 +176,10 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"registration_hint.go":      {},
 		"registration_hint_test.go": {},
 		"remote_commands.go":        {},
+		"routing_decision.go":       {},
 		"status.go":                 {},
 		"style.go":                  {},
+		"support_bundle.go":         {},
 		"up.go":                     {},
 		"up_daemon.go":              {},
 	}
