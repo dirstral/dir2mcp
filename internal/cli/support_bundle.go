@@ -35,9 +35,13 @@ const supportLogTailBytes int64 = 2 * 1024 * 1024 // 2 MB
 // themselves.
 func (a *App) runSupportBundle(ctx context.Context, global globalOptions, args []string) int {
 	fs := flag.NewFlagSet("support-bundle", flag.ContinueOnError)
-	fs.SetOutput(a.stderr)
+	// Route flag-parse output through writeCLIError so JSON callers get
+	// a single structured error object on stdout/stderr instead of the
+	// flag package's prose mixed with our JSON envelope.
+	fs.SetOutput(io.Discard)
 	output := fs.String("output", "", "destination tar.gz path (default: ./dir2mcp-support-<timestamp>.tar.gz)")
 	if err := fs.Parse(args); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("support-bundle: %v", err))
 		return exitConfigInvalid
 	}
 	if rest := fs.Args(); len(rest) > 0 {
@@ -243,9 +247,12 @@ func marshalRoutingJSON(cfg config.Config) ([]byte, error) {
 }
 
 // writeSupportBundle writes files as a single gzip-compressed tarball
-// at destPath. Directories in destPath must already exist.
+// at destPath. Directories in destPath must already exist. Mode 0o600
+// keeps the bundle owner-readable only — its contents include the
+// server log and diagnostic metadata that should not be exposed to
+// other local users by an unfavourable umask.
 func writeSupportBundle(destPath string, files []supportFile) error {
-	f, err := os.Create(destPath)
+	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

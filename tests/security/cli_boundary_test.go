@@ -177,11 +177,9 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"registration_hint_test.go": {},
 		"remote_commands.go":        {},
 		"routing_decision.go":       {},
-		"routing_decision_test.go":  {},
 		"status.go":                 {},
 		"style.go":                  {},
 		"support_bundle.go":         {},
-		"support_bundle_test.go":    {},
 		"up.go":                     {},
 		"up_daemon.go":              {},
 	}

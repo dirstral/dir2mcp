@@ -43,10 +43,10 @@ func DescribeDocumentExtractor(cfg config.Config) ExtractorDecision {
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=off"}
 	case "docling":
 		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
-			return ExtractorDecision{Name: "docling", Source: "explicit", Reason: "configured docling command: " + tpl}
+			return ExtractorDecision{Name: "docling", Source: "explicit", Reason: "configured docling command"}
 		}
-		if path, err := exec.LookPath("docling"); err == nil {
-			return ExtractorDecision{Name: "docling", Source: "explicit", Reason: "auto-detected at " + path}
+		if _, err := exec.LookPath("docling"); err == nil {
+			return ExtractorDecision{Name: "docling", Source: "explicit", Reason: "auto-detected on PATH"}
 		}
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling but docling command is unavailable"}
 	case "mistral":
@@ -56,10 +56,10 @@ func DescribeDocumentExtractor(cfg config.Config) ExtractorDecision {
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=mistral but the mistral-ocr provider has no credential"}
 	default: // auto
 		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
-			return ExtractorDecision{Name: "docling", Source: "auto", Reason: "configured docling command: " + tpl}
+			return ExtractorDecision{Name: "docling", Source: "auto", Reason: "configured docling command"}
 		}
-		if path, err := exec.LookPath("docling"); err == nil {
-			return ExtractorDecision{Name: "docling", Source: "auto", Reason: "auto-detected at " + path}
+		if _, err := exec.LookPath("docling"); err == nil {
+			return ExtractorDecision{Name: "docling", Source: "auto", Reason: "auto-detected on PATH"}
 		}
 		if mistralOCRAvailable(cfg) {
 			return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: "docling not found on PATH; falling back to Mistral OCR"}
@@ -67,6 +67,14 @@ func DescribeDocumentExtractor(cfg config.Config) ExtractorDecision {
 		return ExtractorDecision{Source: "disabled", Reason: "no extractor available: docling not on PATH and no Mistral credential"}
 	}
 }
+
+// The literal value of cfg.DoclingCommand is intentionally NOT
+// embedded in Reason: a user-supplied command template may carry
+// credential-bearing flags (e.g. `docling --api-key …`), and Reason
+// flows through the startup banner and the support-bundle's
+// routing.json. Including the value would compromise the
+// "no secrets in diagnostics" contract enforced by the support-bundle
+// tests. The exec.LookPath result is also redacted for symmetry.
 
 // mistralOCRAvailable reports whether the mistral-ocr provider profile
 // resolves to a usable credential. Used by DescribeDocumentExtractor to
