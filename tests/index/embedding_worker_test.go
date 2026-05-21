@@ -15,10 +15,11 @@ import (
 )
 
 type fakeChunkSource struct {
-	tasks        []model.ChunkTask
-	embedded     []uint64
-	failedLabels []uint64
-	failedReason string
+	tasks          []model.ChunkTask
+	embedded       []uint64
+	failedLabels   []uint64
+	failedReason   string
+	failedCategory string
 	// markFailedErr, if non-nil, is returned from MarkFailed.
 	markFailedErr error
 }
@@ -37,6 +38,15 @@ func (s *fakeChunkSource) MarkEmbedded(_ context.Context, labels []uint64) error
 func (s *fakeChunkSource) MarkFailed(_ context.Context, labels []uint64, reason string) error {
 	s.failedLabels = append(s.failedLabels, labels...)
 	s.failedReason = reason
+	return s.markFailedErr
+}
+
+// MarkFailedWithCategory mirrors MarkFailed and additionally records
+// the supplied classification for tests that assert on grouping.
+func (s *fakeChunkSource) MarkFailedWithCategory(_ context.Context, labels []uint64, category, reason string) error {
+	s.failedLabels = append(s.failedLabels, labels...)
+	s.failedReason = reason
+	s.failedCategory = category
 	return s.markFailedErr
 }
 

@@ -272,17 +272,18 @@ type corpusSnapshot struct {
 // the ListFiles-only fallback path where those metrics cannot be derived from
 // the store. Consumers should treat -1 as "unknown", not as an error.
 type corpusIndexing struct {
-	Mode            string `json:"mode"`
-	Running         bool   `json:"running"`
-	Scanned         int64  `json:"scanned"`
-	Indexed         int64  `json:"indexed"`
-	Skipped         int64  `json:"skipped"`
-	Deleted         int64  `json:"deleted"`
-	Representations int64  `json:"representations"`
-	ChunksTotal     int64  `json:"chunks_total"`
-	EmbeddedOK      int64  `json:"embedded_ok"`
-	Errors          int64  `json:"errors"`
-	Unknown         int64  `json:"unknown"`
+	Mode            string                `json:"mode"`
+	Running         bool                  `json:"running"`
+	Scanned         int64                 `json:"scanned"`
+	Indexed         int64                 `json:"indexed"`
+	Skipped         int64                 `json:"skipped"`
+	Deleted         int64                 `json:"deleted"`
+	Representations int64                 `json:"representations"`
+	ChunksTotal     int64                 `json:"chunks_total"`
+	EmbeddedOK      int64                 `json:"embedded_ok"`
+	Errors          int64                 `json:"errors"`
+	Unknown         int64                 `json:"unknown"`
+	FailureSummary  *model.FailureSummary `json:"failure_summary,omitempty"`
 }
 
 // NewApp constructs an App wired to os.Stdout and os.Stderr.
@@ -1759,6 +1760,12 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			EmbeddedOK:      idx.EmbeddedOK,
 			Errors:          idx.Errors,
 			Unknown:         idx.Unknown,
+			// FailureSummary travels straight through from the
+			// aggregate CorpusStats so `status --json` consumers see
+			// the same grouping the doctor renders. Omitted from JSON
+			// when no failures have been recorded (omitempty on the
+			// struct tag).
+			FailureSummary: corpusStats.FailureSummary,
 		},
 		DocCounts: docCounts,
 		TotalDocs: totalDocs,

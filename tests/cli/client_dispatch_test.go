@@ -17,10 +17,21 @@ import (
 // output modes. Without this, a regression in those branches would go
 // uncaught since the happy-path tests only exercise `claude`.
 
-var clientVerbs = []string{"install", "uninstall", "doctor", "print-config"}
+// clientVerbsRequiringClient lists verbs that hard-require a
+// positional <client>. "doctor" is NOT in this set: its no-arg form
+// now routes to the daemon-side preflight (runServerDoctor) and
+// must succeed without a client name. Doctor-specific behaviour is
+// covered by TestServerDoctor_* in server_doctor_test.go.
+var clientVerbsRequiringClient = []string{"install", "uninstall", "print-config"}
+
+// clientVerbsRejectingUnknownClient lists every verb that still
+// validates an explicit <client> positional. "doctor" stays here:
+// `dir2mcp doctor chatgpt` must still fail with an unknown-client
+// error even though `dir2mcp doctor` now succeeds.
+var clientVerbsRejectingUnknownClient = []string{"install", "uninstall", "doctor", "print-config"}
 
 func TestClientVerb_MissingClient_Human(t *testing.T) {
-	for _, verb := range clientVerbs {
+	for _, verb := range clientVerbsRequiringClient {
 		t.Run(verb, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			app := cli.NewAppWithIO(&stdout, &stderr)
@@ -45,7 +56,7 @@ func TestClientVerb_MissingClient_Human(t *testing.T) {
 }
 
 func TestClientVerb_MissingClient_JSON(t *testing.T) {
-	for _, verb := range clientVerbs {
+	for _, verb := range clientVerbsRequiringClient {
 		t.Run(verb, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			app := cli.NewAppWithIO(&stdout, &stderr)
@@ -70,7 +81,7 @@ func TestClientVerb_MissingClient_JSON(t *testing.T) {
 }
 
 func TestClientVerb_UnknownClient_Human(t *testing.T) {
-	for _, verb := range clientVerbs {
+	for _, verb := range clientVerbsRejectingUnknownClient {
 		t.Run(verb, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			app := cli.NewAppWithIO(&stdout, &stderr)
@@ -92,7 +103,7 @@ func TestClientVerb_UnknownClient_Human(t *testing.T) {
 }
 
 func TestClientVerb_UnknownClient_JSON(t *testing.T) {
-	for _, verb := range clientVerbs {
+	for _, verb := range clientVerbsRejectingUnknownClient {
 		t.Run(verb, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			app := cli.NewAppWithIO(&stdout, &stderr)
