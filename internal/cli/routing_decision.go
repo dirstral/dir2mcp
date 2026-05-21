@@ -52,11 +52,13 @@ func routingSectionHasContent(rows []routingRow) bool {
 // banner. Provider is the profile name (or "" if none resolved); Reason
 // is a short suffix explaining the choice when not obvious (e.g.
 // "fallback; docling not found"). Both are renderable to a single banner
-// line.
+// line. JSON tags match the snake_case convention used elsewhere
+// (status, list-files) so the support bundle's routing.json is
+// consistent with other tooling.
 type routingRow struct {
-	Capability string
-	Provider   string
-	Reason     string
+	Capability string `json:"capability"`
+	Provider   string `json:"provider"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // routingDecisions summarizes the providers that will serve the active
