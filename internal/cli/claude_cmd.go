@@ -23,7 +23,7 @@ type claudeServerConfig struct {
 func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
 	fs := flag.NewFlagSet("print-config claude", flag.ContinueOnError)
 	fs.SetOutput(ioDiscard{})
-	serverName := fs.String("name", "dir2mcp", "server name")
+	serverName := fs.String("name", "", "server name (defaults to configured/auto-derived name)")
 	stateDir := fs.String("state-dir", "", "state directory containing connection.json")
 	if err := fs.Parse(args); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid print-config claude flags: %v", err))
@@ -39,6 +39,11 @@ func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
 	}
+	resolveServerName(&cfg)
+	effectiveServerName := strings.TrimSpace(*serverName)
+	if effectiveServerName == "" {
+		effectiveServerName = cfg.ServerName
+	}
 	effectiveStateDir := cfg.StateDir
 	if strings.TrimSpace(*stateDir) != "" {
 		effectiveStateDir = strings.TrimSpace(*stateDir)
@@ -53,7 +58,7 @@ func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
 
 	payload := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
-			*serverName: entry,
+			effectiveServerName: entry,
 		},
 	}
 	if global.jsonOutput {
@@ -76,7 +81,7 @@ func (a *App) runClaudePrintConfig(global globalOptions, args []string) int {
 func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 	fs := flag.NewFlagSet("install claude", flag.ContinueOnError)
 	fs.SetOutput(ioDiscard{})
-	serverName := fs.String("name", "dir2mcp", "server name")
+	serverName := fs.String("name", "", "server name (defaults to configured/auto-derived name)")
 	stateDir := fs.String("state-dir", "", "state directory containing connection.json")
 	configPath := fs.String("config-path", defaultClaudeDesktopConfigPath(), "Claude Desktop config path")
 	if err := fs.Parse(args); err != nil {
@@ -92,6 +97,11 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return exitConfigInvalid
+	}
+	resolveServerName(&cfg)
+	effectiveServerName := strings.TrimSpace(*serverName)
+	if effectiveServerName == "" {
+		effectiveServerName = cfg.ServerName
 	}
 	effectiveStateDir := cfg.StateDir
 	if strings.TrimSpace(*stateDir) != "" {
@@ -128,7 +138,7 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("prepare Claude MCP entry: %v", err))
 		return exitGeneric
 	}
-	mcpServers[*serverName] = entryRaw
+	mcpServers[effectiveServerName] = entryRaw
 	root["mcpServers"] = mcpServers
 
 	if err := os.MkdirAll(filepath.Dir(*configPath), 0o755); err != nil {
@@ -143,7 +153,7 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 	if global.jsonOutput {
 		if err := emitJSON(a.stdout, map[string]interface{}{
 			"path":        *configPath,
-			"server_name": *serverName,
+			"server_name": effectiveServerName,
 			"command":     commandPath,
 			"updated":     true,
 		}); err != nil {
@@ -152,7 +162,7 @@ func (a *App) runClaudeInstall(global globalOptions, args []string) int {
 		}
 		return exitSuccess
 	}
-	writef(a.stdout, "updated %s with MCP server %q\n", *configPath, *serverName)
+	writef(a.stdout, "updated %s with MCP server %q\n", *configPath, effectiveServerName)
 	writef(a.stdout, "restart Claude Desktop to load the updated MCP server entry\n")
 	return exitSuccess
 }
