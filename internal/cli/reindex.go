@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -144,11 +143,9 @@ func startReindexProgress(ctx context.Context, out io.Writer, st model.Store, gl
 		printReindexProgressLine(out, ctx, st)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		var once sync.Once
 		for {
 			select {
 			case <-ctx.Done():
-				once.Do(func() {})
 				return
 			case <-ticker.C:
 				printReindexProgressLine(out, ctx, st)
