@@ -4,12 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
+
+// reindexProgressInterval is how often the reindex command prints a
+// status line while the ingestor is running. Picked small enough that
+// users see motion on slow-OCR corpora but large enough that the
+// stderr stream stays readable.
+const reindexProgressInterval = 5 * time.Second
 
 func (a *App) runReindex(ctx context.Context, global globalOptions, args []string) int {
 	if len(args) > 0 {
@@ -17,54 +27,87 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitConfigInvalid
 	}
 
-	// load configuration first so that both the ingestor and any
-	// auxiliary components (OCR client) share the same settings.  When
-	// Load returns an error we treat it as fatal instead of silently
-	// proceeding with defaults as was previously the case.
-	cfg, err := loadConfigWithGlobalOptions(global)
-	if err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
-		return exitConfigInvalid
+	cfg, code := a.loadReindexConfig(global)
+	if code != exitSuccess {
+		return code
 	}
-
-	baseDir := strings.TrimSpace(cfg.StateDir)
-	if baseDir == "" {
-		baseDir = ".dir2mcp"
+	st, code := a.prepareReindexStore(ctx, global, cfg)
+	if code != exitSuccess {
+		return code
 	}
-	// ensure the directory exists before we let the store constructor write
-	// to it
-	textIndexPath := filepath.Join(baseDir, "vectors_text.hnsw")
-	codeIndexPath := filepath.Join(baseDir, "vectors_code.hnsw")
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitRootInaccessible, fmt.Sprintf("create state dir: %v", err))
-		return exitRootInaccessible
-	}
-	// update cfg so that the store factory uses the same baseDir
-	cfg.StateDir = baseDir
-	st := a.storeForConfig(cfg)
 	defer a.closeStoreWithLog(st)
-	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
-		return exitIndexLoadFailure
-	}
-	if exitCode := clearContentHashesIfSupported(ctx, st, a.stderr, global.jsonOutput); exitCode != exitSuccess {
-		return exitCode
-	}
-	for _, indexPath := range []string{textIndexPath, codeIndexPath} {
-		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("remove stale index file %s: %v", indexPath, err))
-			return exitGeneric
-		}
-	}
 
-	// use the factory hook (same as runUp) to allow tests to intercept
 	ing, err := a.newIngestor(cfg, st)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
 		return exitConfigInvalid
 	}
 
+	progressCtx, stopProgress := context.WithCancel(ctx)
+	defer stopProgress()
+	progressDone := startReindexProgress(progressCtx, a.stderr, st, global, reindexProgressInterval)
+
 	err = ing.Reindex(ctx)
+	stopProgress()
+	<-progressDone
+	return a.finishReindex(ctx, global, st, err)
+}
+
+// loadReindexConfig pulls the layered config and normalises the state
+// directory. Extracted from runReindex so the parent function stays
+// under the cyclomatic-complexity budget.
+func (a *App) loadReindexConfig(global globalOptions) (config.Config, int) {
+	cfg, err := loadConfigWithGlobalOptions(global)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
+		return cfg, exitConfigInvalid
+	}
+	baseDir := strings.TrimSpace(cfg.StateDir)
+	if baseDir == "" {
+		baseDir = ".dir2mcp"
+	}
+	cfg.StateDir = baseDir
+	return cfg, exitSuccess
+}
+
+// prepareReindexStore creates the state directory, opens the store,
+// clears prior content hashes, and removes stale vector index files
+// so the upcoming Reindex starts from a clean slate. Returns the
+// initialised store on success; on any failure it writes a CLI error
+// and returns the appropriate exit code.
+func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg config.Config) (model.Store, int) {
+	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitRootInaccessible, fmt.Sprintf("create state dir: %v", err))
+		return nil, exitRootInaccessible
+	}
+	st := a.storeForConfig(cfg)
+	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		_ = st.Close()
+		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
+		return nil, exitIndexLoadFailure
+	}
+	if code := clearContentHashesIfSupported(ctx, st, a.stderr, global.jsonOutput); code != exitSuccess {
+		_ = st.Close()
+		return nil, code
+	}
+	for _, indexPath := range []string{
+		filepath.Join(cfg.StateDir, "vectors_text.hnsw"),
+		filepath.Join(cfg.StateDir, "vectors_code.hnsw"),
+	} {
+		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = st.Close()
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("remove stale index file %s: %v", indexPath, err))
+			return nil, exitGeneric
+		}
+	}
+	return st, exitSuccess
+}
+
+// finishReindex handles the post-Reindex flow: dispatch on the
+// ingestor's return error, then (on success) emit the final progress
+// summary so users see the final counters without having to re-query
+// status.
+func (a *App) finishReindex(ctx context.Context, global globalOptions, st model.Store, err error) int {
 	if errors.Is(err, model.ErrNotImplemented) {
 		if !global.quiet {
 			writeln(a.stdout, "reindex is not available yet: ingestion pipeline not implemented")
@@ -75,5 +118,88 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("reindex failed: %v", err))
 		return exitGeneric
 	}
+	if !global.quiet && !global.jsonOutput {
+		printReindexFinalSummary(a.stderr, ctx, st)
+	}
 	return exitSuccess
+}
+
+// startReindexProgress spawns a goroutine that prints periodic
+// progress lines to out while the ingestor is running, then returns a
+// channel that closes when the goroutine exits. The poller stops as
+// soon as ctx is cancelled (the caller does this once Reindex
+// returns). Silent under --quiet and under --json so machine-readable
+// callers and quiet-script users see a clean output stream.
+func startReindexProgress(ctx context.Context, out io.Writer, st model.Store, global globalOptions, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	if global.quiet || global.jsonOutput {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		// One immediate tick so users see a "starting" line within
+		// a second instead of waiting a full interval before the
+		// first progress update.
+		printReindexProgressLine(out, ctx, st)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var once sync.Once
+		for {
+			select {
+			case <-ctx.Done():
+				once.Do(func() {})
+				return
+			case <-ticker.C:
+				printReindexProgressLine(out, ctx, st)
+			}
+		}
+	}()
+	return done
+}
+
+// printReindexProgressLine emits one [reindex] status line to out.
+// CorpusStats is only available from the SQLite-backed store; for any
+// other backend the function is silent so the reindex command stays
+// usable with future store implementations.
+func printReindexProgressLine(out io.Writer, ctx context.Context, st model.Store) {
+	stats, ok := corpusStatsForReindex(ctx, st)
+	if !ok {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "[reindex] scanned=%d indexed=%d skipped=%d errors=%d chunks=%d embedded=%d\n",
+		stats.Scanned, stats.Indexed, stats.Skipped, stats.Errors, stats.ChunksTotal, stats.EmbeddedOK)
+}
+
+// printReindexFinalSummary writes a one-line completion summary so the
+// user knows the run finished and what the final counts are. Same
+// CorpusStats source as the progress poller; silent when stats are
+// unavailable.
+func printReindexFinalSummary(out io.Writer, ctx context.Context, st model.Store) {
+	stats, ok := corpusStatsForReindex(ctx, st)
+	if !ok {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "[reindex] done: scanned=%d indexed=%d skipped=%d errors=%d chunks=%d embedded=%d\n",
+		stats.Scanned, stats.Indexed, stats.Skipped, stats.Errors, stats.ChunksTotal, stats.EmbeddedOK)
+}
+
+// corpusStatsForReindex pulls CorpusStats from the SQLite-backed
+// store, swallowing the type-assertion miss and any transient query
+// error so the progress poller never crashes a healthy reindex run.
+// Returns ok=false when stats are unavailable (caller should skip
+// printing rather than emit a misleading zero-line).
+func corpusStatsForReindex(ctx context.Context, st model.Store) (model.CorpusStats, bool) {
+	type corpusStatser interface {
+		CorpusStats(ctx context.Context) (model.CorpusStats, error)
+	}
+	cs, ok := st.(corpusStatser)
+	if !ok {
+		return model.CorpusStats{}, false
+	}
+	stats, err := cs.CorpusStats(ctx)
+	if err != nil {
+		return model.CorpusStats{}, false
+	}
+	return stats, true
 }

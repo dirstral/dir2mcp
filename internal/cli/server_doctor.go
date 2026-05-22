@@ -178,10 +178,34 @@ func indexingFailureCheck(ctx context.Context, a *App, cfg config.Config) doctor
 	if err != nil {
 		return doctorCheck{Name: "indexing_failures", Status: doctorStatusError, Detail: err.Error()}
 	}
-	if stats.FailureSummary == nil || len(stats.FailureSummary.Categories) == 0 {
+	return renderIndexingFailureCheck(stats)
+}
+
+// renderIndexingFailureCheck combines document-level and chunk-level
+// failure counters into one doctor row. Document-level errors
+// (CorpusStats.Errors) come from the extraction/representation stage
+// — they happen *before* chunks are ever created, so a corpus that
+// fails entirely at extraction has 0 chunk-level failures and
+// previously slipped through this check as "0 failures" even though
+// every PDF in the corpus had failed. Both counts are surfaced so
+// neither stage can hide.
+func renderIndexingFailureCheck(stats model.CorpusStats) doctorCheck {
+	docErrors := stats.Errors
+	var chunkCategories map[string]int64
+	if stats.FailureSummary != nil {
+		chunkCategories = stats.FailureSummary.Categories
+	}
+	if docErrors == 0 && len(chunkCategories) == 0 {
 		return doctorCheck{Name: "indexing_failures", Status: doctorStatusOK, Detail: "0 failures"}
 	}
-	return doctorCheck{Name: "indexing_failures", Status: doctorStatusWarn, Detail: summarizeFailureCategories(stats.FailureSummary.Categories)}
+	parts := []string{}
+	if docErrors > 0 {
+		parts = append(parts, fmt.Sprintf("%d document(s) failed extraction", docErrors))
+	}
+	if len(chunkCategories) > 0 {
+		parts = append(parts, "chunk failures: "+summarizeFailureCategories(chunkCategories))
+	}
+	return doctorCheck{Name: "indexing_failures", Status: doctorStatusWarn, Detail: strings.Join(parts, "; ")}
 }
 
 // summarizeFailureCategories renders the failure-category map as a
