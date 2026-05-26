@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,6 +15,9 @@ import (
 // mtime_unix, deterministic rel_path tiebreak, deleted rows excluded,
 // limit applied. Backs SPEC §15.6.
 func TestSQLiteStore_RecentFailures_OrderAndLimit(t *testing.T) {
+	if os.Getenv("RUN_INTEGRATION_TESTS") == "" {
+		t.Skip("set RUN_INTEGRATION_TESTS=1 to run integration tests")
+	}
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
@@ -73,6 +77,9 @@ func TestSQLiteStore_RecentFailures_OrderAndLimit(t *testing.T) {
 // omit when no failures" path: an empty result means the stats tool
 // will not include recent_failures in its output.
 func TestSQLiteStore_RecentFailures_EmptyOnHealthyCorpus(t *testing.T) {
+	if os.Getenv("RUN_INTEGRATION_TESTS") == "" {
+		t.Skip("set RUN_INTEGRATION_TESTS=1 to run integration tests")
+	}
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
