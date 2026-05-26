@@ -374,6 +374,10 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			}(),
 		},
 	}
+	if failures := loadRecentFailuresForStats(ctx, s.store); len(failures) > 0 {
+		structured["recent_failures"] = failures
+	}
+
 	s.sessionMu.RLock()
 	sessionItems := make([]map[string]interface{}, 0, len(s.sessions))
 	for id, si := range s.sessions {
@@ -408,6 +412,51 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		},
 		StructuredContent: structured,
 	}, nil
+}
+
+// statsRecentFailuresLimit caps the recent_failures array per the spec
+// (SPEC §15.6 "Implementations SHOULD cap at 20 entries by default").
+const statsRecentFailuresLimit = 20
+
+// loadRecentFailuresForStats returns the per-doc projection emitted in
+// dir2mcp_stats's optional recent_failures array: rel_path, doc_type,
+// mtime_unix, error_message — the spec-required item shape, no more
+// (additionalProperties:false on the item schema).
+//
+// Type-asserts the store rather than touching the model.Store interface
+// so mocks/in-memory backends used in tests don't need an extra method.
+// Returns nil (not empty slice) when stats are unavailable or when the
+// store has no failures; the caller omits the field entirely in that
+// case, matching the spec's "MAY omit when no failures are recorded".
+//
+// Errors from the underlying query are swallowed and logged via the
+// returned nil — a healthy stats call must not fail because the
+// failure-aggregation side query had a transient issue.
+func loadRecentFailuresForStats(ctx context.Context, st model.Store) []map[string]interface{} {
+	if st == nil {
+		return nil
+	}
+	type recentFailurer interface {
+		RecentFailures(ctx context.Context, limit int) ([]model.Document, error)
+	}
+	rf, ok := st.(recentFailurer)
+	if !ok {
+		return nil
+	}
+	docs, err := rf.RecentFailures(ctx, statsRecentFailuresLimit)
+	if err != nil || len(docs) == 0 {
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, map[string]interface{}{
+			"rel_path":      d.RelPath,
+			"doc_type":      d.DocType,
+			"mtime_unix":    d.MTimeUnix,
+			"error_message": d.ErrorMessage,
+		})
+	}
+	return out
 }
 
 func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
