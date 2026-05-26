@@ -287,6 +287,12 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// surface "rate_limit: 67, payload_too_large: 21" instead of
 		// just an aggregate failure count.
 		`ALTER TABLE chunks ADD COLUMN error_category TEXT NOT NULL DEFAULT ''`,
+		// error_message stores a short human-readable explanation when
+		// a document ends up with status='error' (extraction crash,
+		// representation generation failure). Surfaced in the support
+		// bundle's list-files.json so maintainers can tell *why* a doc
+		// failed without grepping server.log.
+		`ALTER TABLE documents ADD COLUMN error_message TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -496,10 +502,16 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 	}
 	defer s.ReleaseDB()
 
+	// error_message is unconditionally overwritten by excluded.error_message
+	// so a successful re-ingest after a prior error clears the stale message
+	// (caller passes "" for healthy docs, the failure-recovery message
+	// otherwise). Title intentionally uses the CASE-preserve pattern because
+	// title can be extracted *after* the first upsert; error_message has no
+	// such two-phase write, so the always-replace semantics are correct.
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rel_path) DO UPDATE SET
 		   doc_type=excluded.doc_type,
 		   source_type=excluded.source_type,
@@ -508,7 +520,8 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		   content_hash=excluded.content_hash,
 		   status=excluded.status,
 		   deleted=excluded.deleted,
-		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END`,
+		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END,
+		   error_message=excluded.error_message`,
 		relPath,
 		normalizeDocType(doc.DocType),
 		normalizeSourceType(doc.SourceType),
@@ -518,8 +531,47 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		normalizeStatus(doc.Status),
 		boolToInt(doc.Deleted),
 		strings.TrimSpace(doc.Title),
+		sanitizeDocErrorMessage(doc.ErrorMessage),
 	)
 	return err
+}
+
+// sanitizeDocErrorMessage normalises a free-text upstream error before it
+// is persisted to documents.error_message. We strip leading/trailing
+// whitespace, replace embedded control characters with spaces (so the
+// message stays one line in the support bundle), and cap the length at
+// 512 bytes so a runaway stack trace can't bloat the documents table.
+// Truncation respects UTF-8 boundaries to avoid persisting an invalid
+// trailing rune.
+func sanitizeDocErrorMessage(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	const maxBytes = 512
+	var b strings.Builder
+	b.Grow(len(msg))
+	for _, r := range msg {
+		if r == '\n' || r == '\r' || r == '\t' {
+			b.WriteByte(' ')
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := b.String()
+	if len(out) <= maxBytes {
+		return out
+	}
+	// Truncate on a rune boundary.
+	cut := maxBytes
+	for cut > 0 && (out[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return out[:cut]
 }
 
 func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask) error {
@@ -878,7 +930,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	var deleted int
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message
 		 FROM documents WHERE rel_path = ?`,
 		normalizedPath,
 	)
@@ -893,6 +945,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 		&doc.Status,
 		&deleted,
 		&doc.Title,
+		&doc.ErrorMessage,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Document{}, os.ErrNotExist
@@ -919,7 +972,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 
 	normalizedPrefix := normalizePrefix(prefix)
 
-	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title FROM documents`
+	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message FROM documents`
 	where := []string{"deleted = 0"}
 	args := make([]any, 0, 4)
 	if normalizedPrefix != "" {
@@ -955,6 +1008,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 			&doc.Status,
 			&deleted,
 			&doc.Title,
+			&doc.ErrorMessage,
 		); err != nil {
 			return nil, 0, err
 		}
