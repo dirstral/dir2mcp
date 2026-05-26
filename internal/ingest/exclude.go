@@ -45,6 +45,26 @@ func HasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
 	return false
 }
 
+// RedactSecretsInMessage replaces any substring matching one of the
+// configured secret patterns with the literal "[REDACTED]". Used before
+// persisting upstream error text to documents.error_message (and thus
+// to the support bundle) so that a provider error that quotes back the
+// triggering payload — e.g. a misconfigured Authorization header or an
+// echoed API key — cannot leak through the diagnostic surface.
+func RedactSecretsInMessage(msg string, patterns []*regexp.Regexp) string {
+	if msg == "" {
+		return msg
+	}
+	out := msg
+	for _, rx := range patterns {
+		if rx == nil {
+			continue
+		}
+		out = rx.ReplaceAllString(out, "[REDACTED]")
+	}
+	return out
+}
+
 func matchesAnyPathExclude(relPath string, globs []string) bool {
 	return MatchesAnyPathExclude(relPath, globs)
 }

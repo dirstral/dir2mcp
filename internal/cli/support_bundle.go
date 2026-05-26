@@ -210,9 +210,28 @@ func marshalStatusJSON(ctx context.Context, a *App, cfg config.Config) ([]byte, 
 	}, "", "  ")
 }
 
-// marshalListFilesJSON returns the same payload `dir2mcp list-files
-// --json` would emit. Reads directly from the sqlite store so it works
-// without the daemon running.
+// supportBundleFileRow is the per-document shape emitted in the bundle's
+// list-files.json. It deliberately uses snake_case keys (matching the
+// MCP tool conventions) and adds error_message — a maintainer-facing
+// field that is intentionally NOT part of the spec-bound MCP list_files
+// tool output (SPEC §15.5 uses additionalProperties:false, and the
+// support bundle is a diagnostic artifact outside that contract).
+type supportBundleFileRow struct {
+	RelPath      string `json:"rel_path"`
+	DocType      string `json:"doc_type"`
+	SourceType   string `json:"source_type,omitempty"`
+	Title        string `json:"title,omitempty"`
+	SizeBytes    int64  `json:"size_bytes"`
+	MTimeUnix    int64  `json:"mtime_unix"`
+	Status       string `json:"status"`
+	Deleted      bool   `json:"deleted"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+// marshalListFilesJSON dumps the per-document list with extraction-error
+// messages included so maintainers can tell from the bundle alone *why*
+// a document failed, not just *that* it did. Reads directly from the
+// sqlite store so it works without the daemon running.
 func marshalListFilesJSON(ctx context.Context, a *App, cfg config.Config) ([]byte, error) {
 	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
 	if _, err := os.Stat(metaPath); err != nil {
@@ -230,8 +249,22 @@ func marshalListFilesJSON(ctx context.Context, a *App, cfg config.Config) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("list files: %w", err)
 	}
+	rows := make([]supportBundleFileRow, 0, len(docs))
+	for _, d := range docs {
+		rows = append(rows, supportBundleFileRow{
+			RelPath:      d.RelPath,
+			DocType:      d.DocType,
+			SourceType:   d.SourceType,
+			Title:        d.Title,
+			SizeBytes:    d.SizeBytes,
+			MTimeUnix:    d.MTimeUnix,
+			Status:       d.Status,
+			Deleted:      d.Deleted,
+			ErrorMessage: d.ErrorMessage,
+		})
+	}
 	return json.MarshalIndent(map[string]interface{}{
-		"files": docs,
+		"files": rows,
 		"total": total,
 	}, "", "  ")
 }

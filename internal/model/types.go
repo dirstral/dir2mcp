@@ -16,6 +16,15 @@ type Document struct {
 	ContentHash string
 	Status      string
 	Deleted     bool
+	// ErrorMessage is populated when Status == "error" with a short
+	// human-readable description of why ingest failed (extraction
+	// crash, representation generation failure, etc.). Surfaced in
+	// the support bundle's list-files.json so a maintainer can tell
+	// *why* a document failed without having to grep server.log. The
+	// field is intentionally not part of the MCP `list_files` tool
+	// output (that schema is fixed by SPEC §15.5 with
+	// additionalProperties:false); it is a diagnostic-bundle field.
+	ErrorMessage string
 }
 
 type Representation struct {
