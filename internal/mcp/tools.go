@@ -458,17 +458,18 @@ func redactStatsErrorMessage(msg string) string {
 // store has no failures; the caller omits the field entirely in that
 // case, matching the spec's "MAY omit when no failures are recorded".
 //
-// Errors from the underlying query are swallowed and logged via the
-// returned nil — a healthy stats call must not fail because the
-// failure-aggregation side query had a transient issue.
+// Errors from the underlying query are silently swallowed (return nil)
+// — a healthy stats call must not fail because the failure-aggregation
+// side query had a transient issue. The MCP layer has no logger handle
+// here; if richer diagnostics are needed later, plumb one through.
 func loadRecentFailuresForStats(ctx context.Context, st model.Store) []map[string]interface{} {
 	if st == nil {
 		return nil
 	}
-	type recentFailurer interface {
+	type recentFailuresLister interface {
 		RecentFailures(ctx context.Context, limit int) ([]model.Document, error)
 	}
-	rf, ok := st.(recentFailurer)
+	rf, ok := st.(recentFailuresLister)
 	if !ok {
 		return nil
 	}
