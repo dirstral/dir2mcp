@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,9 +25,6 @@ import (
 // backend persists raw text. Defense in depth for SPEC §15.6
 // ("error_message MUST NOT contain secrets").
 func TestMCPToolsCallStats_RecentFailuresRedactsCredentialShapes(t *testing.T) {
-	if os.Getenv("RUN_INTEGRATION_TESTS") == "" {
-		t.Skip("set RUN_INTEGRATION_TESTS=1 to run integration tests")
-	}
 	tmp := t.TempDir()
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
@@ -88,9 +84,6 @@ func TestMCPToolsCallStats_RecentFailuresRedactsCredentialShapes(t *testing.T) {
 // programmatic surface for the per-document failure visibility that the
 // support bundle already exposes via list-files.json.
 func TestMCPToolsCallStats_RecentFailuresPresentWhenSeeded(t *testing.T) {
-	if os.Getenv("RUN_INTEGRATION_TESTS") == "" {
-		t.Skip("set RUN_INTEGRATION_TESTS=1 to run integration tests")
-	}
 	tmp := t.TempDir()
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
@@ -121,9 +114,6 @@ func TestMCPToolsCallStats_RecentFailuresPresentWhenSeeded(t *testing.T) {
 // not emit an empty recent_failures array, so consumers can rely on
 // "field present" meaning "real failures exist".
 func TestMCPToolsCallStats_RecentFailuresOmittedWhenHealthy(t *testing.T) {
-	if os.Getenv("RUN_INTEGRATION_TESTS") == "" {
-		t.Skip("set RUN_INTEGRATION_TESTS=1 to run integration tests")
-	}
 	tmp := t.TempDir()
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
