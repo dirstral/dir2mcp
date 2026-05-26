@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -418,6 +419,34 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 // (SPEC §15.6 "Implementations SHOULD cap at 20 entries by default").
 const statsRecentFailuresLimit = 20
 
+// statsErrorMessageRedactors is a small safety net of common credential
+// shapes applied at the MCP boundary before emitting recent_failures.
+// The write-side already runs the operator's configured
+// `secret_patterns` against err.Error() (see ingest.RedactSecretsInMessage,
+// PR #212) — this is belt-and-suspenders for the cases where the
+// operator hasn't configured any patterns or where a non-SQLite store
+// backend persists raw text. SPEC §15.6: "error_message MUST NOT
+// contain secrets". Kept tight (high-confidence shapes only) to avoid
+// false positives that would hide the actionable failure description.
+var statsErrorMessageRedactors = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}`),
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                                 // AWS access key
+	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),                                           // OpenAI / Mistral / Anthropic style
+	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9_]{20,}`),                                      // GitHub PAT / OAuth
+	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),                                     // Slack
+	regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-.]{10,}\.[A-Za-z0-9_\-]{5,}`), // JWT
+}
+
+// redactStatsErrorMessage runs the high-confidence credential
+// redactors over msg, replacing each match with the literal
+// "[REDACTED]". Returns msg unchanged when no pattern matches.
+func redactStatsErrorMessage(msg string) string {
+	for _, rx := range statsErrorMessageRedactors {
+		msg = rx.ReplaceAllString(msg, "[REDACTED]")
+	}
+	return msg
+}
+
 // loadRecentFailuresForStats returns the per-doc projection emitted in
 // dir2mcp_stats's optional recent_failures array: rel_path, doc_type,
 // mtime_unix, error_message — the spec-required item shape, no more
@@ -453,7 +482,7 @@ func loadRecentFailuresForStats(ctx context.Context, st model.Store) []map[strin
 			"rel_path":      d.RelPath,
 			"doc_type":      d.DocType,
 			"mtime_unix":    d.MTimeUnix,
-			"error_message": d.ErrorMessage,
+			"error_message": redactStatsErrorMessage(d.ErrorMessage),
 		})
 	}
 	return out
@@ -2617,6 +2646,25 @@ func statsOutputSchema() map[string]interface{} {
 					},
 				},
 				"required": []string{"active", "items"},
+			},
+			// recent_failures: optional per SPEC §15.6 — implementations
+			// MAY omit when no failures are recorded; clients MUST treat
+			// omission as "no recent failures". additionalProperties:false
+			// on the item mirrors the canonical schema mirror in
+			// dirstral-spec/spec/tools/schemas/stats.json.
+			"recent_failures": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]interface{}{
+						"rel_path":      map[string]interface{}{"type": "string"},
+						"doc_type":      map[string]interface{}{"type": "string"},
+						"mtime_unix":    map[string]interface{}{"type": "integer"},
+						"error_message": map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"rel_path", "doc_type", "mtime_unix", "error_message"},
+				},
 			},
 		},
 		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models", "sessions"},

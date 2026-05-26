@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -15,6 +16,66 @@ import (
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
+
+// TestMCPToolsCallStats_RecentFailuresRedactsCredentialShapes pins the
+// belt-and-suspenders redaction at the MCP boundary (CodeRabbit
+// follow-up on PR #213). The write-side already applies the operator's
+// configured secret_patterns; this read-side pass catches the cases
+// where the operator has none configured or where a future store
+// backend persists raw text. Defense in depth for SPEC §15.6
+// ("error_message MUST NOT contain secrets").
+func TestMCPToolsCallStats_RecentFailuresRedactsCredentialShapes(t *testing.T) {
+	tmp := t.TempDir()
+	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// Bypass the ingest-side redactor by upserting documents whose
+	// error_message carries credential shapes verbatim (simulating
+	// a non-SQLite store backend or an operator with no
+	// secret_patterns configured).
+	leaky := []model.Document{
+		{RelPath: "aws.pdf", DocType: "pdf", MTimeUnix: 100, Status: "error",
+			ErrorMessage: "401 from upstream: AKIAIOSFODNN7EXAMPLE rejected"},
+		{RelPath: "bearer.pdf", DocType: "pdf", MTimeUnix: 200, Status: "error",
+			ErrorMessage: "auth failed: Bearer abcdefghij1234567890ZYXWV mismatch"},
+		{RelPath: "openai.pdf", DocType: "pdf", MTimeUnix: 300, Status: "error",
+			ErrorMessage: "rate limit: key sk-proj-AbCdEfGhIjKlMnOpQr exceeded quota"},
+	}
+	for _, d := range leaky {
+		if err := st.UpsertDocument(context.Background(), d); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	cfg := config.Default()
+	cfg.StateDir = tmp
+	cfg.MCPPath = protocol.DefaultMCPPath
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sc := callStatsTool(t, server.URL+cfg.MCPPath)
+	failuresRaw, ok := sc["recent_failures"].([]interface{})
+	if !ok {
+		t.Fatalf("recent_failures missing: %#v", sc)
+	}
+	for _, raw := range failuresRaw {
+		row, _ := raw.(map[string]interface{})
+		msg, _ := row["error_message"].(string)
+		for _, leak := range []string{"AKIAIOSFODNN7EXAMPLE", "abcdefghij1234567890ZYXWV", "sk-proj-AbCdEfGhIjKlMnOpQr"} {
+			if strings.Contains(msg, leak) {
+				t.Errorf("credential leaked through MCP boundary: %q (full=%q)", leak, msg)
+			}
+		}
+		if !strings.Contains(msg, "[REDACTED]") {
+			t.Errorf("expected [REDACTED] sentinel in sanitized message, got %q", msg)
+		}
+	}
+}
 
 // TestMCPToolsCallStats_RecentFailuresPresentWhenSeeded pins SPEC §15.6:
 // when the SQLite store has documents in status='error', the dir2mcp_stats
