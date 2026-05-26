@@ -492,7 +492,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 			MTimeUnix:    f.MTimeUnix,
 			Status:       "error",
 			Deleted:      false,
-			ErrorMessage: buildErr.Error(),
+			ErrorMessage: RedactSecretsInMessage(buildErr.Error(), secretPatterns),
 		}
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
 			return fmt.Errorf("upsert error document: %w", err)
@@ -560,7 +560,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
 		doc.Status = "error"
-		doc.ErrorMessage = err.Error()
+		doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
@@ -701,7 +701,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
 		doc.Status = "error"
-		doc.ErrorMessage = err.Error()
+		doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}

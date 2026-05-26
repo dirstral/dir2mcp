@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -256,6 +257,68 @@ func TestHasSecretMatch(t *testing.T) {
 			result := ingest.HasSecretMatch(tt.content, patterns)
 			if result != tt.expected {
 				t.Errorf("hasSecretMatch() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestRedactSecretsInMessage pins the per-document error_message
+// redaction (PR #212 + CodeRabbit follow-up): upstream provider error
+// strings sometimes echo back the triggering payload (Authorization
+// headers, API keys, etc.). Persisting those raw into
+// documents.error_message would re-export them in the support bundle.
+// RedactSecretsInMessage reuses the user's configured secret patterns
+// so any string matching a configured pattern is replaced with
+// "[REDACTED]" before write.
+func TestRedactSecretsInMessage(t *testing.T) {
+	patterns, err := ingest.CompileSecretPatterns([]string{
+		`AKIA[0-9A-Z]{16}`,
+		`sk_[a-z0-9]{32}`,
+	})
+	if err != nil {
+		t.Fatalf("compile patterns: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		in      string
+		wantSub string // expected substring after redaction
+		mustNot string // must NOT appear in the output
+	}{
+		{
+			name:    "AWS key in error text",
+			in:      "upstream rejected request: AKIAIOSFODNN7EXAMPLE invalid signature",
+			wantSub: "[REDACTED]",
+			mustNot: "AKIAIOSFODNN7EXAMPLE",
+		},
+		{
+			name:    "API key in error text",
+			in:      "401 unauthorized using key sk_12345678901234567890123456789012",
+			wantSub: "[REDACTED]",
+			mustNot: "sk_12345678901234567890123456789012",
+		},
+		{
+			name:    "benign message left intact",
+			in:      "docling extraction failed: unsupported PDF version 1.7",
+			wantSub: "unsupported PDF version 1.7",
+			mustNot: "[REDACTED]",
+		},
+		{
+			name:    "empty message stays empty",
+			in:      "",
+			wantSub: "",
+			mustNot: "[REDACTED]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ingest.RedactSecretsInMessage(tt.in, patterns)
+			if tt.wantSub != "" && !strings.Contains(got, tt.wantSub) {
+				t.Errorf("got %q, want substring %q", got, tt.wantSub)
+			}
+			if tt.mustNot != "" && strings.Contains(got, tt.mustNot) {
+				t.Errorf("got %q, must NOT contain %q", got, tt.mustNot)
 			}
 		})
 	}
