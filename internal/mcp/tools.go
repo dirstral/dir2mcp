@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -374,6 +375,10 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			}(),
 		},
 	}
+	if failures := loadRecentFailuresForStats(ctx, s.store); len(failures) > 0 {
+		structured["recent_failures"] = failures
+	}
+
 	s.sessionMu.RLock()
 	sessionItems := make([]map[string]interface{}, 0, len(s.sessions))
 	for id, si := range s.sessions {
@@ -408,6 +413,80 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		},
 		StructuredContent: structured,
 	}, nil
+}
+
+// statsRecentFailuresLimit caps the recent_failures array per the spec
+// (SPEC §15.6 "Implementations SHOULD cap at 20 entries by default").
+const statsRecentFailuresLimit = 20
+
+// statsErrorMessageRedactors is a small safety net of common credential
+// shapes applied at the MCP boundary before emitting recent_failures.
+// The write-side already runs the operator's configured
+// `secret_patterns` against err.Error() (see ingest.RedactSecretsInMessage,
+// PR #212) — this is belt-and-suspenders for the cases where the
+// operator hasn't configured any patterns or where a non-SQLite store
+// backend persists raw text. SPEC §15.6: "error_message MUST NOT
+// contain secrets". Kept tight (high-confidence shapes only) to avoid
+// false positives that would hide the actionable failure description.
+var statsErrorMessageRedactors = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}`),
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                                 // AWS access key
+	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),                                           // OpenAI / Mistral / Anthropic style
+	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9_]{20,}`),                                      // GitHub PAT / OAuth
+	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),                                     // Slack
+	regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-.]{10,}\.[A-Za-z0-9_\-]{5,}`), // JWT
+}
+
+// redactStatsErrorMessage runs the high-confidence credential
+// redactors over msg, replacing each match with the literal
+// "[REDACTED]". Returns msg unchanged when no pattern matches.
+func redactStatsErrorMessage(msg string) string {
+	for _, rx := range statsErrorMessageRedactors {
+		msg = rx.ReplaceAllString(msg, "[REDACTED]")
+	}
+	return msg
+}
+
+// loadRecentFailuresForStats returns the per-doc projection emitted in
+// dir2mcp_stats's optional recent_failures array: rel_path, doc_type,
+// mtime_unix, error_message — the spec-required item shape, no more
+// (additionalProperties:false on the item schema).
+//
+// Type-asserts the store rather than touching the model.Store interface
+// so mocks/in-memory backends used in tests don't need an extra method.
+// Returns nil (not empty slice) when stats are unavailable or when the
+// store has no failures; the caller omits the field entirely in that
+// case, matching the spec's "MAY omit when no failures are recorded".
+//
+// Errors from the underlying query are silently swallowed (return nil)
+// — a healthy stats call must not fail because the failure-aggregation
+// side query had a transient issue. The MCP layer has no logger handle
+// here; if richer diagnostics are needed later, plumb one through.
+func loadRecentFailuresForStats(ctx context.Context, st model.Store) []map[string]interface{} {
+	if st == nil {
+		return nil
+	}
+	type recentFailuresLister interface {
+		RecentFailures(ctx context.Context, limit int) ([]model.Document, error)
+	}
+	rf, ok := st.(recentFailuresLister)
+	if !ok {
+		return nil
+	}
+	docs, err := rf.RecentFailures(ctx, statsRecentFailuresLimit)
+	if err != nil || len(docs) == 0 {
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, map[string]interface{}{
+			"rel_path":      d.RelPath,
+			"doc_type":      d.DocType,
+			"mtime_unix":    d.MTimeUnix,
+			"error_message": redactStatsErrorMessage(d.ErrorMessage),
+		})
+	}
+	return out
 }
 
 func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
@@ -2568,6 +2647,25 @@ func statsOutputSchema() map[string]interface{} {
 					},
 				},
 				"required": []string{"active", "items"},
+			},
+			// recent_failures: optional per SPEC §15.6 — implementations
+			// MAY omit when no failures are recorded; clients MUST treat
+			// omission as "no recent failures". additionalProperties:false
+			// on the item mirrors the canonical schema mirror in
+			// dirstral-spec/spec/tools/schemas/stats.json.
+			"recent_failures": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]interface{}{
+						"rel_path":      map[string]interface{}{"type": "string"},
+						"doc_type":      map[string]interface{}{"type": "string"},
+						"mtime_unix":    map[string]interface{}{"type": "integer"},
+						"error_message": map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"rel_path", "doc_type", "mtime_unix", "error_message"},
+				},
 			},
 		},
 		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models", "sessions"},

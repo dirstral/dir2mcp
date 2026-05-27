@@ -1033,6 +1033,68 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	return docs, total, nil
 }
 
+// RecentFailures returns up to limit documents that ended ingest with
+// status='error', newest-first by mtime_unix and rel_path-stable for
+// ties (so callers see deterministic output across runs). Deleted rows
+// are excluded — they're tombstones, not actionable failures. Backs
+// the optional `recent_failures` field on dir2mcp_stats (SPEC §15.6).
+//
+// limit <= 0 is treated as the recommended default of 20 per the spec.
+// Returned documents carry the same per-row fields ListFiles emits;
+// callers should project to whatever shape they need.
+func (s *SQLiteStore) RecentFailures(ctx context.Context, limit int) ([]model.Document, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message
+		 FROM documents
+		 WHERE status = 'error' AND deleted = 0
+		 ORDER BY mtime_unix DESC, rel_path ASC
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]model.Document, 0, limit)
+	for rows.Next() {
+		var doc model.Document
+		var deleted int
+		if err := rows.Scan(
+			&doc.DocID,
+			&doc.RelPath,
+			&doc.DocType,
+			&doc.SourceType,
+			&doc.SizeBytes,
+			&doc.MTimeUnix,
+			&doc.ContentHash,
+			&doc.Status,
+			&deleted,
+			&doc.Title,
+			&doc.ErrorMessage,
+		); err != nil {
+			return nil, err
+		}
+		doc.Deleted = deleted == 1
+		out = append(out, doc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ActiveDocCounts returns active-document counts grouped by doc_type along
 // with the total active document count using aggregate SQL queries.  The
 // implementation simply obtains a database handle and delegates to
