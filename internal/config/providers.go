@@ -11,6 +11,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/provider"
@@ -379,6 +380,7 @@ func (cfg Config) ProviderEnvVarRefs() []string {
 			return ""
 		})
 	}
+	sort.Strings(refs)
 	return refs
 }
 

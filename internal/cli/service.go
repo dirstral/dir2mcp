@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -40,21 +41,6 @@ type serviceManager interface {
 	install(spec serviceSpec) (unitPath string, err error)
 	uninstall(label string) (unitPath string, removed bool, err error)
 	status(label string) (serviceState, error)
-}
-
-// serviceCredentialEnvKeys are the provider credential variables a
-// persisted .env.local can carry. The launchd/systemd job does NOT
-// inherit credentials exported in an interactive shell, so the install
-// preflight checks these against the corpus dotenv to warn operators
-// before the daemon fails at boot with "no embedding provider configured".
-var serviceCredentialEnvKeys = []string{
-	"MISTRAL_API_KEY",
-	"OPENAI_API_KEY",
-	"OPENROUTER_API_KEY",
-	"ANTHROPIC_API_KEY",
-	"GEMINI_API_KEY",
-	"COHERE_API_KEY",
-	"ELEVENLABS_API_KEY",
 }
 
 // serviceContext bundles the resolved per-corpus values both install and
@@ -100,16 +86,20 @@ func serviceLabel(serverName string) string {
 	return "com.dirstral." + strings.TrimSpace(serverName)
 }
 
-// validateServiceName rejects name overrides that could cause path
-// traversal when the label is used as a filename under ~/Library/LaunchAgents.
-// Auto-derived names (identity.AutoServerName) are already safe; this
-// guard covers explicit --name overrides that bypass that derivation.
+// validateServiceName rejects name overrides that could produce an invalid
+// launchd label or a dangerous plist filename. Auto-derived names are already
+// safe; this guard covers explicit --name overrides that bypass that derivation.
+// Allowed characters: A-Za-z0-9 plus dot, underscore, and hyphen — the same
+// set permitted in reverse-DNS launchd labels.
 func validateServiceName(name string) error {
-	if strings.ContainsAny(name, `/\`) {
-		return fmt.Errorf("service name %q must not contain path separators (/ or \\)", name)
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("service name must not be empty or whitespace-only")
 	}
-	if filepath.IsAbs(name) {
-		return fmt.Errorf("service name %q must not be an absolute path", name)
+	for _, r := range name {
+		ok := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
+		if !ok {
+			return fmt.Errorf("service name %q contains disallowed character %q (allowed: A-Za-z0-9._-)", name, string(r))
+		}
 	}
 	return nil
 }
@@ -331,7 +321,8 @@ func (a *App) emitServiceJSON(payload map[string]interface{}) int {
 // into failed and reported as warnings in text mode.
 func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config, jsonOut, quiet bool) (saved, failed []string) {
 	envPath := filepath.Join(workingDir, ".env.local")
-	saved, failed = persistCredentialsFromEnv(envPath, cfg.ProviderEnvVarRefs())
+	refs := cfg.ProviderEnvVarRefs()
+	saved, failed = persistCredentialsFromEnv(envPath, refs)
 
 	if jsonOut || quiet {
 		return
@@ -347,7 +338,7 @@ func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config, js
 	}
 	// Nothing in the current environment to auto-save. Fall back to the
 	// warning if there's also nothing already persisted in a dotenv file.
-	if persistentCredentialInDotenv(workingDir) {
+	if persistentCredentialInDotenv(workingDir, refs) {
 		return
 	}
 	writef(a.stderr, "warning: no persisted provider credential found in %s\n", envPath)
@@ -384,10 +375,10 @@ func persistCredentialsFromEnv(envPath string, envVarRefs []string) (saved, fail
 
 // persistentCredentialInDotenv reports whether the corpus dir holds a
 // dotenv file (.env.local preferred, then .env) that defines a non-empty
-// provider credential the booted daemon could read.
-func persistentCredentialInDotenv(dir string) bool {
+// value for any of the given credential env var names.
+func persistentCredentialInDotenv(dir string, refs []string) bool {
 	for _, name := range []string{".env.local", ".env"} {
-		if dotenvHasCredential(filepath.Join(dir, name)) {
+		if dotenvHasCredential(filepath.Join(dir, name), refs) {
 			return true
 		}
 	}
@@ -395,10 +386,10 @@ func persistentCredentialInDotenv(dir string) bool {
 }
 
 // dotenvHasCredential scans a single dotenv file and returns true if it
-// contains at least one non-empty provider credential. Returns false on
-// any I/O or scan error (conservative: assume no credential rather than
+// contains at least one non-empty assignment for a key in refs. Returns false
+// on any I/O or scan error (conservative: assume no credential rather than
 // masking the read failure as a credential hit).
-func dotenvHasCredential(path string) bool {
+func dotenvHasCredential(path string, refs []string) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return false
@@ -413,7 +404,7 @@ func dotenvHasCredential(path string) bool {
 		}
 		line = strings.TrimPrefix(line, "export ")
 		key, value, ok := strings.Cut(line, "=")
-		if !ok || !isServiceCredentialKey(strings.TrimSpace(key)) {
+		if !ok || !slices.Contains(refs, strings.TrimSpace(key)) {
 			continue
 		}
 		if strings.Trim(strings.TrimSpace(value), `"'`) != "" {
@@ -423,17 +414,6 @@ func dotenvHasCredential(path string) bool {
 	// A scan error means we couldn't read the full file. Treat as no
 	// credential found (conservative) — if the warning fires the operator
 	// can explicitly confirm credentials are configured another way.
-	return false
-}
-
-// isServiceCredentialKey reports whether key names a known provider
-// credential variable that .env.local can supply to the booted daemon.
-func isServiceCredentialKey(key string) bool {
-	for _, k := range serviceCredentialEnvKeys {
-		if key == k {
-			return true
-		}
-	}
 	return false
 }
 

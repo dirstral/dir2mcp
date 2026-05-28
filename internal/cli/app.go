@@ -594,10 +594,11 @@ func saveEnvLocalKey(path, keyName, value string) error {
 		}
 	}
 	prefix := keyName + "="
+	exportPrefix := "export " + keyName + "="
 	lines := strings.Split(string(existing), "\n")
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if !strings.HasPrefix(line, prefix) {
+		if !strings.HasPrefix(line, prefix) && !strings.HasPrefix(line, exportPrefix) {
 			out = append(out, line)
 		}
 	}

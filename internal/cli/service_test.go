@@ -62,6 +62,10 @@ func TestRenderLaunchdPlist(t *testing.T) {
 }
 
 func TestPersistentCredentialInDotenv(t *testing.T) {
+	refs := []string{
+		"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+		"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "COHERE_API_KEY", "ELEVENLABS_API_KEY",
+	}
 	tests := []struct {
 		name string
 		file string // "" => no file written
@@ -85,7 +89,7 @@ func TestPersistentCredentialInDotenv(t *testing.T) {
 					t.Fatalf("write %s: %v", tc.file, err)
 				}
 			}
-			if got := persistentCredentialInDotenv(dir); got != tc.want {
+			if got := persistentCredentialInDotenv(dir, refs); got != tc.want {
 				t.Errorf("persistentCredentialInDotenv = %v, want %v", got, tc.want)
 			}
 		})
@@ -165,6 +169,28 @@ func TestPersistCredentialsFromEnv_Upsert(t *testing.T) {
 	}
 }
 
+// TestPersistCredentialsFromEnv_ExportPrefixUpsert verifies that an existing
+// "export KEY=old" line in .env.local is replaced — not left alongside — when
+// the new value is written, so the earlier export line cannot shadow the update.
+func TestPersistCredentialsFromEnv_ExportPrefixUpsert(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env.local")
+	if err := os.WriteFile(envPath, []byte("export MISTRAL_API_KEY=old-value\n"), 0o600); err != nil {
+		t.Fatalf("seed .env.local: %v", err)
+	}
+
+	t.Setenv("MISTRAL_API_KEY", "new-value")
+	persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY"})
+
+	body, _ := os.ReadFile(envPath)
+	if !strings.Contains(string(body), "MISTRAL_API_KEY=new-value") {
+		t.Errorf("expected new-value to be written:\n%s", body)
+	}
+	if strings.Contains(string(body), "old-value") {
+		t.Errorf("old-value from export line should have been removed:\n%s", body)
+	}
+}
+
 // TestPersistCredentialsFromEnv_CustomKey pins that envVarRefs is not
 // limited to built-in providers: a custom key like MY_PROVIDER_API_KEY
 // supplied via providers: api_key: "${MY_PROVIDER_API_KEY}" in YAML is
@@ -205,9 +231,9 @@ func TestPersistCredentialsFromEnv_NewlineRejected(t *testing.T) {
 	}
 }
 
-// TestValidateServiceName pins path-traversal rejection for explicit
-// --name overrides. Auto-derived names are safe; this guards operator
-// overrides that could embed path separators.
+// TestValidateServiceName pins the allowlist validation for explicit --name
+// overrides. Only A-Za-z0-9._- are permitted; whitespace, control chars,
+// path separators, and absolute paths must all be rejected.
 func TestValidateServiceName(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -220,6 +246,9 @@ func TestValidateServiceName(t *testing.T) {
 		{"/etc/evil", true},
 		{"foo/bar", true},
 		{`foo\bar`, true},
+		{"foo bar", true},        // space not allowed
+		{" ", true},              // whitespace-only
+		{"hello\x00world", true}, // null byte
 	} {
 		err := validateServiceName(tc.name)
 		if (err != nil) != tc.wantErr {
