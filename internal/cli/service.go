@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 // serviceSpec is the platform-agnostic description of the supervised
@@ -114,15 +116,17 @@ func validateServiceName(name string) error {
 
 // resolveServiceContext loads config, derives the per-corpus label /
 // binary / paths, and validates any explicit name override for path safety.
-func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (serviceContext, error) {
+// It returns the loaded config alongside the context so callers can
+// extract provider env-var refs for credential auto-persist.
+func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (serviceContext, config.Config, error) {
 	if t := strings.TrimSpace(nameOverride); t != "" {
 		if err := validateServiceName(t); err != nil {
-			return serviceContext{}, err
+			return serviceContext{}, config.Config{}, err
 		}
 	}
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
-		return serviceContext{}, fmt.Errorf("load config: %w", err)
+		return serviceContext{}, config.Config{}, fmt.Errorf("load config: %w", err)
 	}
 	name := resolveClaudeServerName(&cfg, nameOverride)
 	abs, err := filepath.Abs(cfg.RootDir)
@@ -135,7 +139,7 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 	}
 	bin, err := os.Executable()
 	if err != nil {
-		return serviceContext{}, fmt.Errorf("locate dir2mcp executable: %w", err)
+		return serviceContext{}, config.Config{}, fmt.Errorf("locate dir2mcp executable: %w", err)
 	}
 	return serviceContext{
 		label:      serviceLabel(name),
@@ -144,7 +148,7 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 		stateDir:   stateDir,
 		binaryPath: bin,
 		logPath:    filepath.Join(stateDir, "service.log"),
-	}, nil
+	}, cfg, nil
 }
 
 // runServiceInstall handles `dir2mcp service install`.
@@ -153,7 +157,7 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 	if code != exitSuccess {
 		return code
 	}
-	sc, mgr, code := a.serviceContextAndManager(global, name)
+	sc, cfg, mgr, code := a.serviceContextAndManager(global, name)
 	if code != exitSuccess {
 		return code
 	}
@@ -161,7 +165,7 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", sc.stateDir, err))
 		return exitGeneric
 	}
-	a.persistAndWarnCredentials(sc.workingDir)
+	a.persistAndWarnCredentials(sc.workingDir, cfg)
 
 	// Propagate global flag overrides so the installed service restarts
 	// with the exact same config/state-dir the operator used for install,
@@ -205,7 +209,7 @@ func (a *App) runServiceUninstall(global globalOptions, args []string) int {
 	if code != exitSuccess {
 		return code
 	}
-	sc, mgr, code := a.serviceContextAndManager(global, name)
+	sc, _, mgr, code := a.serviceContextAndManager(global, name)
 	if code != exitSuccess {
 		return code
 	}
@@ -234,7 +238,7 @@ func (a *App) runServiceStatus(global globalOptions, args []string) int {
 	if code != exitSuccess {
 		return code
 	}
-	sc, mgr, code := a.serviceContextAndManager(global, name)
+	sc, _, mgr, code := a.serviceContextAndManager(global, name)
 	if code != exitSuccess {
 		return code
 	}
@@ -278,19 +282,20 @@ func (a *App) parseServiceFlags(usage string, global globalOptions, args []strin
 }
 
 // serviceContextAndManager resolves the per-corpus context and the OS
-// backend, mapping their errors to the right exit codes.
-func (a *App) serviceContextAndManager(global globalOptions, name string) (serviceContext, serviceManager, int) {
-	sc, err := a.resolveServiceContext(global, name)
+// backend, mapping their errors to the right exit codes. The loaded
+// config is also returned so callers can access provider env-var refs.
+func (a *App) serviceContextAndManager(global globalOptions, name string) (serviceContext, config.Config, serviceManager, int) {
+	sc, cfg, err := a.resolveServiceContext(global, name)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, err.Error())
-		return serviceContext{}, nil, exitConfigInvalid
+		return serviceContext{}, config.Config{}, nil, exitConfigInvalid
 	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, err.Error())
-		return serviceContext{}, nil, exitGeneric
+		return serviceContext{}, config.Config{}, nil, exitGeneric
 	}
-	return sc, mgr, exitSuccess
+	return sc, cfg, mgr, exitSuccess
 }
 
 // emitServiceJSON marshals payload as JSON to stdout, returning the
@@ -309,11 +314,15 @@ func (a *App) emitServiceJSON(payload map[string]interface{}) int {
 // .env.local in the corpus working directory, so the launchd service can
 // read them after a reboot — launchd does not inherit shell exports.
 //
+// The set of keys to check is derived from cfg.ProviderEnvVarRefs() so
+// custom providers defined via providers: in .dir2mcp.yaml with ${MY_KEY}
+// placeholders are covered in addition to the built-in providers.
+//
 // If no credentials are found in the environment AND none are already
 // persisted in .env.local / .env, a warning is printed instead.
-func (a *App) persistAndWarnCredentials(workingDir string) {
+func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config) {
 	envPath := filepath.Join(workingDir, ".env.local")
-	saved := persistCredentialsFromEnv(envPath)
+	saved := persistCredentialsFromEnv(envPath, cfg.ProviderEnvVarRefs())
 	if len(saved) > 0 {
 		for _, key := range saved {
 			writef(a.stdout, "  saved %s to %s (will survive reboots)\n", key, envPath)
@@ -327,17 +336,16 @@ func (a *App) persistAndWarnCredentials(workingDir string) {
 	}
 	writef(a.stderr, "warning: no persisted provider credential found in %s\n", envPath)
 	writeln(a.stderr, "  The service starts from a clean environment and will NOT inherit credentials exported in your shell.")
-	writeln(a.stderr, "  Run `dir2mcp config init` to persist MISTRAL_API_KEY to .env.local (or add a providers: block to .dir2mcp.yaml),")
+	writeln(a.stderr, "  Run `dir2mcp config init` to persist the credential to .env.local (or add a providers: block to .dir2mcp.yaml),")
 	writeln(a.stderr, "  otherwise the daemon will fail at boot with \"no embedding provider configured\".")
 }
 
-// persistCredentialsFromEnv writes each serviceCredentialEnvKeys key
-// found non-empty in os.Getenv into the dotenv file at envPath, using the
-// same upsert semantics as `dir2mcp config init`. Returns the list of
-// keys that were saved.
-func persistCredentialsFromEnv(envPath string) []string {
+// persistCredentialsFromEnv writes each key in envVarRefs that is found
+// non-empty in os.Getenv into the dotenv file at envPath, using the same
+// upsert semantics as `dir2mcp config init`. Returns the list of keys saved.
+func persistCredentialsFromEnv(envPath string, envVarRefs []string) []string {
 	var saved []string
-	for _, key := range serviceCredentialEnvKeys {
+	for _, key := range envVarRefs {
 		val := strings.TrimSpace(os.Getenv(key))
 		if val == "" {
 			continue

@@ -352,6 +352,36 @@ func (cfg Config) Providers() ProviderResolution {
 	return cfg.providersDoc.resolve(base, nil)
 }
 
+// ProviderEnvVarRefs returns the distinct environment variable names
+// referenced in api_key fields across all provider profiles (builtin +
+// user-defined). For example, a builtin profile with api_key "${MISTRAL_API_KEY}"
+// contributes "MISTRAL_API_KEY", and a user profile with api_key "${MY_KEY}"
+// contributes "MY_KEY". Used by `dir2mcp service install` to auto-persist
+// every relevant credential to .env.local, not just the hardcoded list.
+func (cfg Config) ProviderEnvVarRefs() []string {
+	base := builtinProfiles()
+	seedLegacy(base, cfg)
+	merged, _ := mergeProfiles(base, cfg.providersDoc.Providers)
+
+	seen := make(map[string]struct{})
+	var refs []string
+	for _, p := range merged {
+		if p.APIKey == nil {
+			continue
+		}
+		os.Expand(*p.APIKey, func(key string) string {
+			if key != "" {
+				if _, ok := seen[key]; !ok {
+					seen[key] = struct{}{}
+					refs = append(refs, key)
+				}
+			}
+			return ""
+		})
+	}
+	return refs
+}
+
 // litStr returns a pointer to s, used to set a providerProfileYAML
 // api_key to a concrete literal (distinct from an absent/credential-less
 // nil api_key).

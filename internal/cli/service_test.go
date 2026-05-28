@@ -92,9 +92,9 @@ func TestPersistentCredentialInDotenv(t *testing.T) {
 	}
 }
 
-// TestPersistCredentialsFromEnv pins the auto-save behaviour: any
-// serviceCredentialEnvKeys key found in the current environment is written
-// to .env.local so the launchd service can read it after a reboot.
+// TestPersistCredentialsFromEnv pins the auto-save behaviour: any key in
+// envVarRefs found in the current environment is written to .env.local so
+// the launchd service can read it after a reboot.
 func TestPersistCredentialsFromEnv(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env.local")
@@ -102,7 +102,7 @@ func TestPersistCredentialsFromEnv(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "sk-live-value")
 	t.Setenv("OPENAI_API_KEY", "")
 
-	saved := persistCredentialsFromEnv(envPath)
+	saved := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"})
 	if len(saved) != 1 || saved[0] != "MISTRAL_API_KEY" {
 		t.Fatalf("expected [MISTRAL_API_KEY], got %v", saved)
 	}
@@ -128,15 +128,14 @@ func TestPersistCredentialsFromEnv(t *testing.T) {
 	}
 }
 
-// TestPersistCredentialsFromEnv_NoneSet returns empty when no known key
-// is in the environment.
+// TestPersistCredentialsFromEnv_NoneSet returns empty when no key in
+// envVarRefs is in the environment.
 func TestPersistCredentialsFromEnv_NoneSet(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env.local")
-	for _, k := range serviceCredentialEnvKeys {
-		t.Setenv(k, "")
-	}
-	saved := persistCredentialsFromEnv(envPath)
+	t.Setenv("MISTRAL_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	saved := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"})
 	if len(saved) != 0 {
 		t.Errorf("expected nothing saved, got %v", saved)
 	}
@@ -155,7 +154,7 @@ func TestPersistCredentialsFromEnv_Upsert(t *testing.T) {
 	}
 
 	t.Setenv("MISTRAL_API_KEY", "new-value")
-	persistCredentialsFromEnv(envPath)
+	persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY"})
 
 	body, _ := os.ReadFile(envPath)
 	if !strings.Contains(string(body), "MISTRAL_API_KEY=new-value") {
@@ -163,6 +162,24 @@ func TestPersistCredentialsFromEnv_Upsert(t *testing.T) {
 	}
 	if strings.Contains(string(body), "old-value") {
 		t.Errorf("old-value should have been replaced:\n%s", body)
+	}
+}
+
+// TestPersistCredentialsFromEnv_CustomKey pins that envVarRefs is not
+// limited to built-in providers: a custom key like MY_PROVIDER_API_KEY
+// supplied via providers: api_key: "${MY_PROVIDER_API_KEY}" in YAML is
+// also saved when found in the current environment.
+func TestPersistCredentialsFromEnv_CustomKey(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env.local")
+	t.Setenv("MY_PROVIDER_API_KEY", "custom-secret")
+	saved := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "MY_PROVIDER_API_KEY"})
+	if len(saved) != 1 || saved[0] != "MY_PROVIDER_API_KEY" {
+		t.Fatalf("expected [MY_PROVIDER_API_KEY], got %v", saved)
+	}
+	body, _ := os.ReadFile(envPath)
+	if !strings.Contains(string(body), "MY_PROVIDER_API_KEY=custom-secret") {
+		t.Errorf(".env.local missing custom key:\n%s", body)
 	}
 }
 
