@@ -92,6 +92,80 @@ func TestPersistentCredentialInDotenv(t *testing.T) {
 	}
 }
 
+// TestPersistCredentialsFromEnv pins the auto-save behaviour: any
+// serviceCredentialEnvKeys key found in the current environment is written
+// to .env.local so the launchd service can read it after a reboot.
+func TestPersistCredentialsFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env.local")
+
+	t.Setenv("MISTRAL_API_KEY", "sk-live-value")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	saved := persistCredentialsFromEnv(envPath)
+	if len(saved) != 1 || saved[0] != "MISTRAL_API_KEY" {
+		t.Fatalf("expected [MISTRAL_API_KEY], got %v", saved)
+	}
+
+	body, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read .env.local: %v", err)
+	}
+	if !strings.Contains(string(body), "MISTRAL_API_KEY=sk-live-value") {
+		t.Errorf(".env.local missing expected key=value:\n%s", body)
+	}
+	if strings.Contains(string(body), "OPENAI_API_KEY") {
+		t.Errorf(".env.local should not contain empty key OPENAI_API_KEY:\n%s", body)
+	}
+
+	// File must be written 0o600 (owner-read-write only).
+	fi, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("stat .env.local: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf(".env.local permissions = %v, want 0600", fi.Mode().Perm())
+	}
+}
+
+// TestPersistCredentialsFromEnv_NoneSet returns empty when no known key
+// is in the environment.
+func TestPersistCredentialsFromEnv_NoneSet(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env.local")
+	for _, k := range serviceCredentialEnvKeys {
+		t.Setenv(k, "")
+	}
+	saved := persistCredentialsFromEnv(envPath)
+	if len(saved) != 0 {
+		t.Errorf("expected nothing saved, got %v", saved)
+	}
+	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+		t.Error(".env.local should not be created when no credentials are set")
+	}
+}
+
+// TestPersistCredentialsFromEnv_Upsert verifies the existing value in
+// .env.local is replaced when a newer value is in the environment.
+func TestPersistCredentialsFromEnv_Upsert(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env.local")
+	if err := os.WriteFile(envPath, []byte("MISTRAL_API_KEY=old-value\n"), 0o600); err != nil {
+		t.Fatalf("seed .env.local: %v", err)
+	}
+
+	t.Setenv("MISTRAL_API_KEY", "new-value")
+	persistCredentialsFromEnv(envPath)
+
+	body, _ := os.ReadFile(envPath)
+	if !strings.Contains(string(body), "MISTRAL_API_KEY=new-value") {
+		t.Errorf("expected upserted new-value:\n%s", body)
+	}
+	if strings.Contains(string(body), "old-value") {
+		t.Errorf("old-value should have been replaced:\n%s", body)
+	}
+}
+
 // TestValidateServiceName pins path-traversal rejection for explicit
 // --name overrides. Auto-derived names are safe; this guards operator
 // overrides that could embed path separators.

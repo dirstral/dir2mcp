@@ -161,7 +161,7 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", sc.stateDir, err))
 		return exitGeneric
 	}
-	a.warnIfNoPersistentCredential(sc.workingDir)
+	a.persistAndWarnCredentials(sc.workingDir)
 
 	// Propagate global flag overrides so the installed service restarts
 	// with the exact same config/state-dir the operator used for install,
@@ -303,19 +303,51 @@ func (a *App) emitServiceJSON(payload map[string]interface{}) int {
 	return exitSuccess
 }
 
-// warnIfNoPersistentCredential surfaces the launchd/systemd credential
-// trap: the supervised job starts from a clean environment, so a key that
-// only lives as a shell `export` will be gone at boot. We warn (rather
-// than block) so operators who configure credentials another way — e.g. a
-// literal providers: api_key in .dir2mcp.yaml — are not stopped.
-func (a *App) warnIfNoPersistentCredential(workingDir string) {
+// persistAndWarnCredentials is called during `service install`. It looks
+// for provider credentials in the current process environment (from the
+// operator's `export KEY=...` session) and persists any it finds to
+// .env.local in the corpus working directory, so the launchd service can
+// read them after a reboot — launchd does not inherit shell exports.
+//
+// If no credentials are found in the environment AND none are already
+// persisted in .env.local / .env, a warning is printed instead.
+func (a *App) persistAndWarnCredentials(workingDir string) {
+	envPath := filepath.Join(workingDir, ".env.local")
+	saved := persistCredentialsFromEnv(envPath)
+	if len(saved) > 0 {
+		for _, key := range saved {
+			writef(a.stdout, "  saved %s to %s (will survive reboots)\n", key, envPath)
+		}
+		return
+	}
+	// Nothing in the current environment to auto-save. Fall back to the
+	// warning if there's also nothing already persisted in a dotenv file.
 	if persistentCredentialInDotenv(workingDir) {
 		return
 	}
-	writef(a.stderr, "warning: no persisted provider credential found in %s\n", filepath.Join(workingDir, ".env.local"))
+	writef(a.stderr, "warning: no persisted provider credential found in %s\n", envPath)
 	writeln(a.stderr, "  The service starts from a clean environment and will NOT inherit credentials exported in your shell.")
 	writeln(a.stderr, "  Run `dir2mcp config init` to persist MISTRAL_API_KEY to .env.local (or add a providers: block to .dir2mcp.yaml),")
 	writeln(a.stderr, "  otherwise the daemon will fail at boot with \"no embedding provider configured\".")
+}
+
+// persistCredentialsFromEnv writes each serviceCredentialEnvKeys key
+// found non-empty in os.Getenv into the dotenv file at envPath, using the
+// same upsert semantics as `dir2mcp config init`. Returns the list of
+// keys that were saved.
+func persistCredentialsFromEnv(envPath string) []string {
+	var saved []string
+	for _, key := range serviceCredentialEnvKeys {
+		val := strings.TrimSpace(os.Getenv(key))
+		if val == "" {
+			continue
+		}
+		if err := saveEnvLocalKey(envPath, key, val); err != nil {
+			continue
+		}
+		saved = append(saved, key)
+	}
+	return saved
 }
 
 // persistentCredentialInDotenv reports whether the corpus dir holds a
