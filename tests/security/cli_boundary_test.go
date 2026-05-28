@@ -40,6 +40,7 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 		"doctor":         {},
 		"print-config":   {},
 		"support-bundle": {},
+		"service":        {},
 		"version":        {},
 	}
 
@@ -178,6 +179,11 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"remote_commands.go":        {},
 		"routing_decision.go":       {},
 		"server_doctor.go":          {},
+		"service.go":                {},
+		"service_darwin.go":         {},
+		"service_darwin_test.go":    {},
+		"service_other.go":          {},
+		"service_test.go":           {},
 		"status.go":                 {},
 		"style.go":                  {},
 		"support_bundle.go":         {},

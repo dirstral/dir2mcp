@@ -74,6 +74,7 @@ var commands = map[string]struct{}{
 	"doctor":         {},
 	"print-config":   {},
 	"support-bundle": {},
+	"service":        {},
 	"version":        {},
 }
 
@@ -453,8 +454,9 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 }
 
 // runSimpleCommand dispatches the non-up/down commands (status, reindex,
-// config, bridge, install, uninstall, doctor, print-config) plus the legacy
-// shims, returning handled=false when command is none of these.
+// config, bridge, install, uninstall, doctor, print-config, support-bundle,
+// service) plus the legacy shims, returning handled=false when command is
+// none of these.
 func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, command string, args []string) (int, bool) {
 	if code, handled := a.runLegacyShimCommand(ctx, globalOpts, command, args); handled {
 		return code, true
@@ -479,6 +481,8 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runPrintConfig(ctx, globalOpts, args), true
 	case "support-bundle":
 		return a.runSupportBundle(ctx, globalOpts, args), true
+	case "service":
+		return a.runService(ctx, globalOpts, args), true
 	default:
 		return 0, false
 	}
@@ -531,6 +535,7 @@ func (a *App) printUsage() {
 		{"doctor", "run client integration diagnostics (e.g. dir2mcp doctor claude)"},
 		{"print-config", "print the MCP-server JSON snippet for a client"},
 		{"support-bundle", "collect logs + config + status into a shareable tar.gz"},
+		{"service", "auto-start the daemon at login (macOS launchd): install|uninstall|status"},
 		{"version", "print build version"},
 	}
 	for _, c := range cmds {

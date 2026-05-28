@@ -164,10 +164,17 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `uninstall <client>` | Remove dir2mcp from a supported MCP client |
 | `doctor <client>` | Run client-integration diagnostics |
 | `print-config <client>` | Print the MCP-server JSON snippet a client expects |
+| `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
 | `version` | Print version |
 
 Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.
 `ask`, `search`, `open-file`, and `list-files` are legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
+
+### Auto-start at login (macOS)
+
+`dir2mcp up` runs a background daemon, but it does not come back on its own after a reboot. `dir2mcp service install` registers a per-corpus launchd agent that restarts `dir2mcp up --foreground` at every login (and on crash), so the MCP server stays connected across reboots. Use `service status` to inspect it and `service uninstall` to remove it.
+
+The launchd job starts from a clean environment and will **not** inherit a `MISTRAL_API_KEY` you only `export`ed in a shell. Persist the credential first with `dir2mcp config init` (writes `.env.local` in the corpus directory) so the booted daemon can find it; `service install` warns when no persisted credential is present.
 
 ## MCP Tools
 
