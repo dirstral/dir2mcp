@@ -92,6 +92,29 @@ func TestPersistentCredentialInDotenv(t *testing.T) {
 	}
 }
 
+// TestValidateServiceName pins path-traversal rejection for explicit
+// --name overrides. Auto-derived names are safe; this guards operator
+// overrides that could embed path separators.
+func TestValidateServiceName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wantErr bool
+	}{
+		{"dir2mcp-legal-abc123", false},
+		{"com.dirstral.foo", false},
+		{"simple", false},
+		{"../../etc/evil", true},
+		{"/etc/evil", true},
+		{"foo/bar", true},
+		{`foo\bar`, true},
+	} {
+		err := validateServiceName(tc.name)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("validateServiceName(%q): got err=%v, wantErr=%v", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
 // TestRunService_RejectsBadSubcommand pins the dispatch guard rails that
 // run before any OS backend is touched, so they behave identically on
 // every platform.

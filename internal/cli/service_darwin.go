@@ -20,6 +20,7 @@ type launchdManager struct {
 	runCmd func(name string, args ...string) (string, error)
 }
 
+// newServiceManager returns the macOS launchd backend.
 func newServiceManager() (serviceManager, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -35,20 +36,30 @@ func newServiceManager() (serviceManager, error) {
 	}, nil
 }
 
+// backendName identifies this manager in CLI output.
 func (m *launchdManager) backendName() string { return "launchd" }
 
+// plistPath returns the canonical LaunchAgent plist path for label.
+// filepath.Base clamps any residual path separators in label so it
+// cannot escape the LaunchAgents directory, even if upstream validation
+// is somehow bypassed.
 func (m *launchdManager) plistPath(label string) string {
-	return filepath.Join(m.home, "Library", "LaunchAgents", label+".plist")
+	return filepath.Join(m.home, "Library", "LaunchAgents", filepath.Base(label)+".plist")
 }
 
+// domainTarget returns the launchctl GUI domain target for this user.
 func (m *launchdManager) domainTarget() string {
 	return fmt.Sprintf("gui/%d", m.uid)
 }
 
+// serviceTarget returns the launchctl service target for label in this
+// user's GUI domain.
 func (m *launchdManager) serviceTarget(label string) string {
 	return fmt.Sprintf("gui/%d/%s", m.uid, label)
 }
 
+// install writes the LaunchAgent plist and bootstraps it into the user's
+// GUI domain, kicking off an immediate (re)start via kickstart -k.
 func (m *launchdManager) install(spec serviceSpec) (string, error) {
 	plistPath := m.plistPath(spec.Label)
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
@@ -71,6 +82,8 @@ func (m *launchdManager) install(spec serviceSpec) (string, error) {
 	return plistPath, nil
 }
 
+// uninstall bootouts the service from the user's GUI domain and removes
+// the plist file. Returns removed=false when the service was not installed.
 func (m *launchdManager) uninstall(label string) (string, bool, error) {
 	plistPath := m.plistPath(label)
 	// Unload first (ignore error: it may already be stopped/absent),
@@ -88,6 +101,19 @@ func (m *launchdManager) uninstall(label string) (string, bool, error) {
 	return plistPath, true, nil
 }
 
+// launchdNotFoundPhrases are substrings launchctl prints when a service
+// is not registered in the domain. Only these known-absent outputs are
+// treated as "not installed / not loaded"; any other error is returned
+// to the caller so genuine command failures don't masquerade as absent.
+var launchdNotFoundPhrases = []string{
+	"could not find service",
+	"not found in domain",
+}
+
+// status queries the launchd GUI domain for label and returns whether the
+// service is installed (plist on disk) and running (active in domain).
+// Only explicit "service not found" outputs from launchctl are treated
+// as absent state; other command failures are returned as errors.
 func (m *launchdManager) status(label string) (serviceState, error) {
 	plistPath := m.plistPath(label)
 	state := serviceState{UnitPath: plistPath}
@@ -99,14 +125,20 @@ func (m *launchdManager) status(label string) (serviceState, error) {
 
 	out, err := m.runCmd("launchctl", "print", m.serviceTarget(label))
 	if err != nil {
-		// Not loaded into the user's GUI domain. If the plist is on
-		// disk it's installed-but-stopped; otherwise fully absent.
-		if state.Installed {
-			state.Detail = "installed, not loaded"
-		} else {
-			state.Detail = "not installed"
+		// Distinguish "service not registered" (normal absent state) from
+		// real command failures (permission denied, domain error, etc.).
+		msg := strings.ToLower(strings.TrimSpace(out))
+		for _, phrase := range launchdNotFoundPhrases {
+			if strings.Contains(msg, phrase) {
+				if state.Installed {
+					state.Detail = "installed, not loaded"
+				} else {
+					state.Detail = "not installed"
+				}
+				return state, nil
+			}
 		}
-		return state, nil
+		return state, fmt.Errorf("launchctl print %s: %w: %s", m.serviceTarget(label), err, strings.TrimSpace(out))
 	}
 	state.Installed = true
 	if strings.Contains(out, "state = running") {

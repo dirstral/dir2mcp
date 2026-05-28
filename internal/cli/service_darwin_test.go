@@ -139,13 +139,48 @@ func TestLaunchdManager_StatusReportsRunning(t *testing.T) {
 	}
 }
 
+// TestLaunchdManager_StatusReportsNotInstalled pins the "service absent"
+// path: launchctl exits non-zero AND prints "Could not find service",
+// which is the known-absent phrase the status method uses to distinguish
+// a clean absent state from a real command failure.
 func TestLaunchdManager_StatusReportsNotInstalled(t *testing.T) {
-	mgr, _ := newFakeLaunchd(t, "Could not find service", fmt.Errorf("exit status 113"))
+	mgr, _ := newFakeLaunchd(t, "Could not find service \"com.dirstral.absent\" in domain for port", fmt.Errorf("exit status 113"))
 	state, err := mgr.status("com.dirstral.absent")
 	if err != nil {
-		t.Fatalf("status: %v", err)
+		t.Fatalf("status should not error for a known-absent service: %v", err)
 	}
 	if state.Installed || state.Running {
 		t.Errorf("expected absent service, got %+v", state)
+	}
+}
+
+// TestLaunchdManager_StatusErrorsOnCommandFailure pins that a launchctl
+// failure whose output does not match a known-absent phrase is surfaced
+// as an error rather than silently reported as "not installed".
+func TestLaunchdManager_StatusErrorsOnCommandFailure(t *testing.T) {
+	mgr, _ := newFakeLaunchd(t, "permission denied", fmt.Errorf("exit status 1"))
+	_, err := mgr.status("com.dirstral.some-label")
+	if err == nil {
+		t.Fatal("expected status to surface non-absent launchctl failure as error")
+	}
+	if !strings.Contains(err.Error(), "launchctl print") {
+		t.Errorf("error should mention launchctl print: %v", err)
+	}
+}
+
+// TestLaunchdManager_PlistPathClampsTraversal verifies the filepath.Base
+// defense-in-depth in plistPath: even if a label containing separators
+// somehow reaches the method, the returned path stays inside LaunchAgents.
+func TestLaunchdManager_PlistPathClampsTraversal(t *testing.T) {
+	mgr, _ := newFakeLaunchd(t, "", nil)
+	crafted := "../../etc/evil"
+	got := mgr.plistPath(crafted)
+	base := filepath.Base(got)
+	launchAgentsDir := filepath.Join(mgr.home, "Library", "LaunchAgents")
+	if !strings.HasPrefix(got, launchAgentsDir) {
+		t.Errorf("plistPath escaped LaunchAgents dir: %q", got)
+	}
+	if base != "evil.plist" {
+		t.Errorf("expected clamped basename evil.plist, got %q", base)
 	}
 }

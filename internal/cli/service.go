@@ -68,6 +68,7 @@ type serviceContext struct {
 	logPath    string
 }
 
+// runService dispatches `dir2mcp service <subcommand>`.
 func (a *App) runService(_ context.Context, global globalOptions, args []string) int {
 	if len(args) == 0 {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
@@ -97,7 +98,28 @@ func serviceLabel(serverName string) string {
 	return "com.dirstral." + strings.TrimSpace(serverName)
 }
 
+// validateServiceName rejects name overrides that could cause path
+// traversal when the label is used as a filename under ~/Library/LaunchAgents.
+// Auto-derived names (identity.AutoServerName) are already safe; this
+// guard covers explicit --name overrides that bypass that derivation.
+func validateServiceName(name string) error {
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("service name %q must not contain path separators (/ or \\)", name)
+	}
+	if filepath.IsAbs(name) {
+		return fmt.Errorf("service name %q must not be an absolute path", name)
+	}
+	return nil
+}
+
+// resolveServiceContext loads config, derives the per-corpus label /
+// binary / paths, and validates any explicit name override for path safety.
 func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (serviceContext, error) {
+	if t := strings.TrimSpace(nameOverride); t != "" {
+		if err := validateServiceName(t); err != nil {
+			return serviceContext{}, err
+		}
+	}
 	cfg, err := loadConfigWithGlobalOptions(global)
 	if err != nil {
 		return serviceContext{}, fmt.Errorf("load config: %w", err)
@@ -125,6 +147,7 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 	}, nil
 }
 
+// runServiceInstall handles `dir2mcp service install`.
 func (a *App) runServiceInstall(global globalOptions, args []string) int {
 	name, code := a.parseServiceFlags("service install", global, args)
 	if code != exitSuccess {
@@ -134,17 +157,28 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 	if code != exitSuccess {
 		return code
 	}
-	if err := os.MkdirAll(sc.stateDir, 0o755); err != nil {
+	if err := os.MkdirAll(sc.stateDir, 0o700); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", sc.stateDir, err))
 		return exitGeneric
 	}
 	a.warnIfNoPersistentCredential(sc.workingDir)
 
+	// Propagate global flag overrides so the installed service restarts
+	// with the exact same config/state-dir the operator used for install,
+	// rather than re-discovering defaults from the working directory alone.
+	serviceArgs := []string{"up", "--foreground"}
+	if p := strings.TrimSpace(global.configPath); p != "" {
+		serviceArgs = append(serviceArgs, "--config", p)
+	}
+	if p := strings.TrimSpace(global.stateDir); p != "" {
+		serviceArgs = append(serviceArgs, "--state-dir", p)
+	}
+
 	unitPath, err := mgr.install(serviceSpec{
 		Label:      sc.label,
 		BinaryPath: sc.binaryPath,
 		WorkingDir: sc.workingDir,
-		Args:       []string{"up", "--foreground"},
+		Args:       serviceArgs,
 		LogPath:    sc.logPath,
 	})
 	if err != nil {
@@ -165,6 +199,7 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 	return exitSuccess
 }
 
+// runServiceUninstall handles `dir2mcp service uninstall`.
 func (a *App) runServiceUninstall(global globalOptions, args []string) int {
 	name, code := a.parseServiceFlags("service uninstall", global, args)
 	if code != exitSuccess {
@@ -193,6 +228,7 @@ func (a *App) runServiceUninstall(global globalOptions, args []string) int {
 	return exitSuccess
 }
 
+// runServiceStatus handles `dir2mcp service status`.
 func (a *App) runServiceStatus(global globalOptions, args []string) int {
 	name, code := a.parseServiceFlags("service status", global, args)
 	if code != exitSuccess {
@@ -257,6 +293,8 @@ func (a *App) serviceContextAndManager(global globalOptions, name string) (servi
 	return sc, mgr, exitSuccess
 }
 
+// emitServiceJSON marshals payload as JSON to stdout, returning the
+// appropriate exit code.
 func (a *App) emitServiceJSON(payload map[string]interface{}) int {
 	if err := emitJSON(a.stdout, payload); err != nil {
 		writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode service json: %v", err))
@@ -292,6 +330,10 @@ func persistentCredentialInDotenv(dir string) bool {
 	return false
 }
 
+// dotenvHasCredential scans a single dotenv file and returns true if it
+// contains at least one non-empty provider credential. Returns false on
+// any I/O or scan error (conservative: assume no credential rather than
+// masking the read failure as a credential hit).
 func dotenvHasCredential(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -314,9 +356,14 @@ func dotenvHasCredential(path string) bool {
 			return true
 		}
 	}
+	// A scan error means we couldn't read the full file. Treat as no
+	// credential found (conservative) — if the warning fires the operator
+	// can explicitly confirm credentials are configured another way.
 	return false
 }
 
+// isServiceCredentialKey reports whether key names a known provider
+// credential variable that .env.local can supply to the booted daemon.
 func isServiceCredentialKey(key string) bool {
 	for _, k := range serviceCredentialEnvKeys {
 		if key == k {
@@ -356,6 +403,8 @@ func renderLaunchdPlist(spec serviceSpec) string {
 	return b.String()
 }
 
+// writePlistString writes a <key>/<string> pair into a plist builder,
+// XML-escaping both the key and value.
 func writePlistString(b *strings.Builder, key, value string) {
 	b.WriteString("  <key>")
 	xmlEscape(b, key)
@@ -364,6 +413,8 @@ func writePlistString(b *strings.Builder, key, value string) {
 	b.WriteString("</string>\n")
 }
 
+// xmlEscape writes s XML-escaped into b, so special characters in corpus
+// paths (& < >) cannot corrupt the plist document.
 func xmlEscape(b *strings.Builder, s string) {
 	_ = xml.EscapeText(b, []byte(s))
 }
