@@ -177,8 +177,8 @@ func TestLaunchdManager_PlistPathClampsTraversal(t *testing.T) {
 	got := mgr.plistPath(crafted)
 	base := filepath.Base(got)
 	launchAgentsDir := filepath.Join(mgr.home, "Library", "LaunchAgents")
-	if !strings.HasPrefix(got, launchAgentsDir) {
-		t.Errorf("plistPath escaped LaunchAgents dir: %q", got)
+	if filepath.Dir(got) != launchAgentsDir {
+		t.Errorf("plistPath escaped LaunchAgents dir: %q (want parent %s)", got, launchAgentsDir)
 	}
 	if base != "evil.plist" {
 		t.Errorf("expected clamped basename evil.plist, got %q", base)

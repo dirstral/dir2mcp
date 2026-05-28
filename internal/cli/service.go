@@ -137,6 +137,9 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 	if stateDir == "" {
 		stateDir = filepath.Join(abs, ".dir2mcp")
 	}
+	if !filepath.IsAbs(stateDir) {
+		stateDir = filepath.Join(abs, stateDir)
+	}
 	bin, err := os.Executable()
 	if err != nil {
 		return serviceContext{}, config.Config{}, fmt.Errorf("locate dir2mcp executable: %w", err)
@@ -165,7 +168,7 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", sc.stateDir, err))
 		return exitGeneric
 	}
-	a.persistAndWarnCredentials(sc.workingDir, cfg)
+	savedCreds, failedCreds := a.persistAndWarnCredentials(sc.workingDir, cfg, global.jsonOutput, global.quiet)
 
 	// Propagate global flag overrides so the installed service restarts
 	// with the exact same config/state-dir the operator used for install,
@@ -194,12 +197,16 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 		return a.emitServiceJSON(map[string]interface{}{
 			"action": "install", "label": sc.label, "backend": mgr.backendName(),
 			"unit_path": unitPath, "working_dir": sc.workingDir, "binary": sc.binaryPath,
+			"persisted_credentials": savedCreds,
+			"failed_credentials":    failedCreds,
 		})
 	}
-	writef(a.stdout, "installed %s service %q\n", mgr.backendName(), sc.label)
-	writef(a.stdout, "  unit:    %s\n", unitPath)
-	writef(a.stdout, "  workdir: %s\n", sc.workingDir)
-	writeln(a.stdout, "the daemon will start now and again at every login")
+	if !global.quiet {
+		writef(a.stdout, "installed %s service %q\n", mgr.backendName(), sc.label)
+		writef(a.stdout, "  unit:    %s\n", unitPath)
+		writef(a.stdout, "  workdir: %s\n", sc.workingDir)
+		writeln(a.stdout, "the daemon will start now and again at every login")
+	}
 	return exitSuccess
 }
 
@@ -224,10 +231,12 @@ func (a *App) runServiceUninstall(global globalOptions, args []string) int {
 			"unit_path": unitPath, "removed": removed,
 		})
 	}
-	if removed {
-		writef(a.stdout, "removed %s service %q (%s)\n", mgr.backendName(), sc.label, unitPath)
-	} else {
-		writef(a.stdout, "no %s service %q was installed\n", mgr.backendName(), sc.label)
+	if !global.quiet {
+		if removed {
+			writef(a.stdout, "removed %s service %q (%s)\n", mgr.backendName(), sc.label, unitPath)
+		} else {
+			writef(a.stdout, "no %s service %q was installed\n", mgr.backendName(), sc.label)
+		}
 	}
 	return exitSuccess
 }
@@ -254,11 +263,13 @@ func (a *App) runServiceStatus(global globalOptions, args []string) int {
 			"detail": state.Detail, "unit_path": state.UnitPath,
 		})
 	}
-	writef(a.stdout, "%s service %q\n", mgr.backendName(), sc.label)
-	writef(a.stdout, "  installed: %t\n", state.Installed)
-	writef(a.stdout, "  running:   %t\n", state.Running)
-	if strings.TrimSpace(state.Detail) != "" {
-		writef(a.stdout, "  detail:    %s\n", state.Detail)
+	if !global.quiet {
+		writef(a.stdout, "%s service %q\n", mgr.backendName(), sc.label)
+		writef(a.stdout, "  installed: %t\n", state.Installed)
+		writef(a.stdout, "  running:   %t\n", state.Running)
+		if strings.TrimSpace(state.Detail) != "" {
+			writef(a.stdout, "  detail:    %s\n", state.Detail)
+		}
 	}
 	return exitSuccess
 }
@@ -314,19 +325,24 @@ func (a *App) emitServiceJSON(payload map[string]interface{}) int {
 // .env.local in the corpus working directory, so the launchd service can
 // read them after a reboot — launchd does not inherit shell exports.
 //
-// The set of keys to check is derived from cfg.ProviderEnvVarRefs() so
-// custom providers defined via providers: in .dir2mcp.yaml with ${MY_KEY}
-// placeholders are covered in addition to the built-in providers.
-//
-// If no credentials are found in the environment AND none are already
-// persisted in .env.local / .env, a warning is printed instead.
-func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config) {
+// In JSON or quiet mode all normal output is suppressed; the caller
+// receives (saved, failed) to include in structured output instead.
+// Write failures and invalid values (containing newlines) are collected
+// into failed and reported as warnings in text mode.
+func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config, jsonOut, quiet bool) (saved, failed []string) {
 	envPath := filepath.Join(workingDir, ".env.local")
-	saved := persistCredentialsFromEnv(envPath, cfg.ProviderEnvVarRefs())
+	saved, failed = persistCredentialsFromEnv(envPath, cfg.ProviderEnvVarRefs())
+
+	if jsonOut || quiet {
+		return
+	}
+	for _, key := range saved {
+		writef(a.stdout, "  saved %s to %s (will survive reboots)\n", key, envPath)
+	}
+	for _, key := range failed {
+		writef(a.stderr, "  warning: failed to persist %s to %s (check file permissions or key value)\n", key, envPath)
+	}
 	if len(saved) > 0 {
-		for _, key := range saved {
-			writef(a.stdout, "  saved %s to %s (will survive reboots)\n", key, envPath)
-		}
 		return
 	}
 	// Nothing in the current environment to auto-save. Fall back to the
@@ -338,24 +354,32 @@ func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config) {
 	writeln(a.stderr, "  The service starts from a clean environment and will NOT inherit credentials exported in your shell.")
 	writeln(a.stderr, "  Run `dir2mcp config init` to persist the credential to .env.local (or add a providers: block to .dir2mcp.yaml),")
 	writeln(a.stderr, "  otherwise the daemon will fail at boot with \"no embedding provider configured\".")
+	return
 }
 
 // persistCredentialsFromEnv writes each key in envVarRefs that is found
 // non-empty in os.Getenv into the dotenv file at envPath, using the same
-// upsert semantics as `dir2mcp config init`. Returns the list of keys saved.
-func persistCredentialsFromEnv(envPath string, envVarRefs []string) []string {
-	var saved []string
+// upsert semantics as `dir2mcp config init`. Returns (saved, failed):
+// saved are keys that were written successfully; failed are keys whose
+// values contained newlines (would corrupt the dotenv file) or whose
+// write failed (permissions, disk full, etc.).
+func persistCredentialsFromEnv(envPath string, envVarRefs []string) (saved, failed []string) {
 	for _, key := range envVarRefs {
 		val := strings.TrimSpace(os.Getenv(key))
 		if val == "" {
 			continue
 		}
+		if strings.ContainsAny(val, "\r\n") {
+			failed = append(failed, key)
+			continue
+		}
 		if err := saveEnvLocalKey(envPath, key, val); err != nil {
+			failed = append(failed, key)
 			continue
 		}
 		saved = append(saved, key)
 	}
-	return saved
+	return
 }
 
 // persistentCredentialInDotenv reports whether the corpus dir holds a

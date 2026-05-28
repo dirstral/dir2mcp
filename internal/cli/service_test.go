@@ -102,7 +102,7 @@ func TestPersistCredentialsFromEnv(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "sk-live-value")
 	t.Setenv("OPENAI_API_KEY", "")
 
-	saved := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"})
+	saved, _ := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"})
 	if len(saved) != 1 || saved[0] != "MISTRAL_API_KEY" {
 		t.Fatalf("expected [MISTRAL_API_KEY], got %v", saved)
 	}
@@ -135,7 +135,7 @@ func TestPersistCredentialsFromEnv_NoneSet(t *testing.T) {
 	envPath := filepath.Join(dir, ".env.local")
 	t.Setenv("MISTRAL_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
-	saved := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"})
+	saved, _ := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"})
 	if len(saved) != 0 {
 		t.Errorf("expected nothing saved, got %v", saved)
 	}
@@ -173,13 +173,35 @@ func TestPersistCredentialsFromEnv_CustomKey(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env.local")
 	t.Setenv("MY_PROVIDER_API_KEY", "custom-secret")
-	saved := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "MY_PROVIDER_API_KEY"})
+	saved, _ := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "MY_PROVIDER_API_KEY"})
 	if len(saved) != 1 || saved[0] != "MY_PROVIDER_API_KEY" {
 		t.Fatalf("expected [MY_PROVIDER_API_KEY], got %v", saved)
 	}
 	body, _ := os.ReadFile(envPath)
 	if !strings.Contains(string(body), "MY_PROVIDER_API_KEY=custom-secret") {
 		t.Errorf(".env.local missing custom key:\n%s", body)
+	}
+}
+
+// TestPersistCredentialsFromEnv_NewlineRejected pins that values containing
+// \r or \n are placed in the failed list rather than written to .env.local,
+// preventing newline injection that could corrupt the file format.
+func TestPersistCredentialsFromEnv_NewlineRejected(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env.local")
+	t.Setenv("MISTRAL_API_KEY", "good-value")
+	t.Setenv("OPENAI_API_KEY", "bad\nvalue")
+
+	saved, failed := persistCredentialsFromEnv(envPath, []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"})
+	if len(saved) != 1 || saved[0] != "MISTRAL_API_KEY" {
+		t.Errorf("saved = %v, want [MISTRAL_API_KEY]", saved)
+	}
+	if len(failed) != 1 || failed[0] != "OPENAI_API_KEY" {
+		t.Errorf("failed = %v, want [OPENAI_API_KEY]", failed)
+	}
+	body, _ := os.ReadFile(envPath)
+	if strings.Contains(string(body), "OPENAI_API_KEY") {
+		t.Errorf(".env.local must not contain rejected key: %s", body)
 	}
 }
 
