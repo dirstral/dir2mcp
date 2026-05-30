@@ -128,3 +128,35 @@ func TestProviders_EmbedIdentityStable(t *testing.T) {
 		t.Fatalf("embed identity = %q", id)
 	}
 }
+
+func TestProviders_EnvVarRefs(t *testing.T) {
+	// Default config (no custom providers): built-in profiles reference
+	// the standard credential env vars.
+	refs := loadCfg(t, "version: 1\n").ProviderEnvVarRefs()
+	inRefs := func(key string) bool {
+		for _, r := range refs {
+			if r == key {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{"MISTRAL_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"} {
+		if !inRefs(want) {
+			t.Errorf("ProviderEnvVarRefs missing built-in key %q; got %v", want, refs)
+		}
+	}
+	// A custom provider with ${MY_CUSTOM_KEY} must also appear.
+	custom := loadCfg(t, "providers:\n  myprovider:\n    kind: openai\n    api_key: ${MY_CUSTOM_KEY}\n")
+	customRefs := custom.ProviderEnvVarRefs()
+	if !func() bool {
+		for _, r := range customRefs {
+			if r == "MY_CUSTOM_KEY" {
+				return true
+			}
+		}
+		return false
+	}() {
+		t.Errorf("ProviderEnvVarRefs missing custom key MY_CUSTOM_KEY; got %v", customRefs)
+	}
+}
