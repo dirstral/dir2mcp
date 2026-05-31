@@ -83,7 +83,7 @@ func (b *bridge) routes() {
 }
 
 func (b *bridge) methodGuard(allowed string, fn http.HandlerFunc, extra ...string) http.HandlerFunc {
-	allowedMethods := map[string]struct{}{allowed: struct{}{}}
+	allowedMethods := map[string]struct{}{allowed: {}}
 	for _, method := range extra {
 		allowedMethods[method] = struct{}{}
 	}
