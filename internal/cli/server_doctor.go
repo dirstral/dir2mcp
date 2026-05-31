@@ -62,6 +62,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		providerCheck(cfg, "embed", provider.CapEmbed, true),
 		providerCheck(cfg, "chat", provider.CapChat, false),
 		extractorCheck(cfg),
+		extractionCoverageCheck(ctx, a, cfg),
 		indexingFailureCheck(ctx, a, cfg),
 	)
 	return a.renderDoctorReport(global, checks)
@@ -141,6 +142,84 @@ func extractorCheck(cfg config.Config) doctorCheck {
 		status = doctorStatusWarn
 	}
 	return doctorCheck{Name: "extractor", Status: status, Detail: detail}
+}
+
+// extractionCoverageCheck surfaces the two silent failures behind a corpus
+// that returns "no relevant context" on every ask: (A) documents that need an
+// extractor (pdf/image/document) exist, but no extractor is available, so they
+// produce no searchable text; and (B) chunks exist but none are embedded, so
+// search matches nothing. Both are reported with the concrete document/chunk
+// counts and the remedial command, since the user-facing symptom (empty
+// answers) gives no hint of the cause.
+//
+// Like indexingFailureCheck, it reads CorpusStats from the SQLite store and
+// degrades gracefully when there is no index yet or the store is not
+// SQLite-backed.
+func extractionCoverageCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
+	const name = "extraction_coverage"
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no index yet"}
+		}
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("stat %s: %v", metaPath, err)}
+	}
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	sqliteStore, ok := st.(*store.SQLiteStore)
+	if !ok {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: "store is not SQLite-backed; coverage aggregation unavailable"}
+	}
+	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("initialize store: %v", err)}
+	}
+	stats, err := sqliteStore.CorpusStats(ctx)
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
+	}
+
+	// Count documents whose type requires an extractor to become searchable.
+	// Restrict to index-eligible rows (deleted=0 AND status='ok') so skipped
+	// or already-errored documents don't inflate the "needs extraction" count
+	// or trip a false error — those are surfaced by indexing_failures instead.
+	okCounts, err := sqliteStore.ActiveDocCountsByStatus(ctx, "ok")
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
+	}
+	var extractable int64
+	for docType, n := range okCounts {
+		if ingest.ShouldGenerateExtractedMarkdown(docType) {
+			extractable += n
+		}
+	}
+
+	// (A) Extractable documents exist but no extractor will run: those
+	// documents produce no representation, no chunks, and never appear in any
+	// answer. This is a hard configuration dead-end, so it is an error.
+	if extractable > 0 {
+		if d := ingest.DescribeDocumentExtractor(cfg); d.Name == "" {
+			detail := fmt.Sprintf(
+				"%d document(s) need extraction (pdf/image/document) but no extractor is available: %s. "+
+					"They produce no searchable text. Enable an extractor (set ingest.extractor to auto/docling/mistral, "+
+					"not off), then make one available (install docling or set MISTRAL_API_KEY), and run `dir2mcp reindex`.",
+				extractable, d.Reason)
+			return doctorCheck{Name: name, Status: doctorStatusError, Detail: detail}
+		}
+	}
+
+	// (B) Chunks were created but none are embedded: extraction succeeded yet
+	// search still matches nothing. Warn (it can also be a transient mid-index
+	// state) with the remedial action.
+	if stats.ChunksTotal > 0 && stats.EmbeddedOK == 0 {
+		detail := fmt.Sprintf(
+			"%d chunk(s) indexed but 0 embedded; no embedding provider has run. "+
+				"Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) and run `dir2mcp reindex`.",
+			stats.ChunksTotal)
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: detail}
+	}
+
+	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
+		"%d extractable doc(s); %d/%d chunks embedded", extractable, stats.EmbeddedOK, stats.ChunksTotal)}
 }
 
 // indexingFailureCheck reads the store-level FailureSummary (set by
