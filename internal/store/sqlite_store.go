@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -207,17 +208,22 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 	}
 
 	for _, span := range spans {
-		spanKind, startValue, endValue, spanErr := spanToRow(span)
+		spanKind, startValue, endValue, extraJSON, spanErr := spanToRow(span)
 		if spanErr != nil {
 			return 0, spanErr
 		}
+		var extra any // NULL for scalar kinds, JSON text for region spans
+		if extraJSON != "" {
+			extra = extraJSON
+		}
 		if _, err := exec.ExecContext(
 			ctx,
-			`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (?, ?, ?, ?, NULL)`,
+			`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (?, ?, ?, ?, ?)`,
 			chunkID,
 			spanKind,
 			startValue,
 			endValue,
+			extra,
 		); err != nil {
 			return 0, err
 		}
@@ -1184,13 +1190,13 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
 	          ),
 	          ranked_spans AS (
-	            SELECT s.chunk_id, s.span_kind, s.start, s."end",
+	            SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
 	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
 	            FROM spans s
 	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
 	          )
 	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
-	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, '')
 	          FROM filtered_chunks fc
 	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
 	if strings.TrimSpace(indexKind) != "" {
@@ -1209,24 +1215,25 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	tasks := make([]model.ChunkTask, 0, limit)
 	for rows.Next() {
 		var (
-			chunkID int64
-			relPath string
-			docType string
-			repType string
-			text    string
-			idxKind string
-			spanK   string
-			spanS   int
-			spanE   int
+			chunkID   int64
+			relPath   string
+			docType   string
+			repType   string
+			text      string
+			idxKind   string
+			spanK     string
+			spanS     int
+			spanE     int
+			spanExtra string
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &spanK, &spanS, &spanE); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &spanK, &spanS, &spanE, &spanExtra); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
 			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
 		}
 		uid := uint64(chunkID)
-		span := spanFromRow(spanK, spanS, spanE)
+		span := spanFromRow(spanK, spanS, spanE, spanExtra)
 		tasks = append(tasks, model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
 			ChunkID: uid,
 			RelPath: relPath,
@@ -1259,13 +1266,13 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
 	          ),
 	          ranked_spans AS (
-	            SELECT s.chunk_id, s.span_kind, s.start, s."end",
+	            SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
 	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
 	            FROM spans s
 	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
 	          )
 	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
-	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0),
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''),
 	                 COALESCE(d.title, '')
 	          FROM filtered_chunks fc
 	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1
@@ -1286,25 +1293,26 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	out := make([]model.ChunkTask, 0, limit)
 	for rows.Next() {
 		var (
-			chunkID int64
-			relPath string
-			docType string
-			repType string
-			text    string
-			kind    string
-			spanK   string
-			spanS   int
-			spanE   int
-			title   string
+			chunkID   int64
+			relPath   string
+			docType   string
+			repType   string
+			text      string
+			kind      string
+			spanK     string
+			spanS     int
+			spanE     int
+			spanExtra string
+			title     string
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &title); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &spanExtra, &title); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
 			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
 		}
 		uid := uint64(chunkID)
-		span := spanFromRow(spanK, spanS, spanE)
+		span := spanFromRow(spanK, spanS, spanE, spanExtra)
 		out = append(out, model.ChunkTask{
 			Label:     uid,
 			Text:      text,
@@ -1323,7 +1331,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	return out, rows.Err()
 }
 
-func spanFromRow(kind string, start, end int) model.Span {
+func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "page":
 		if start <= 0 || end <= 0 || end != start {
@@ -1335,6 +1343,24 @@ func spanFromRow(kind string, start, end int) model.Span {
 			return model.Span{Kind: "lines"}
 		}
 		return model.Span{Kind: "time", StartMS: start, EndMS: end}
+	case "region":
+		// A region span requires a well-formed extra_json payload with a
+		// bbox. If anything is missing or malformed, degrade to a page span
+		// on start (per spec: region clients fall back to page-level), or to
+		// lines when even the page range is unusable.
+		if start <= 0 || end <= 0 || end < start || strings.TrimSpace(extraJSON) == "" {
+			if start > 0 {
+				return model.Span{Kind: "page", Page: start}
+			}
+			return model.Span{Kind: "lines"}
+		}
+		var r model.RegionSpan
+		if err := json.Unmarshal([]byte(extraJSON), &r); err != nil || r.BBox == nil {
+			return model.Span{Kind: "page", Page: start}
+		}
+		r.StartPage = start
+		r.EndPage = end
+		return model.Span{Kind: "region", Region: &r}
 	case "lines":
 		if start > 0 && end >= start {
 			return model.Span{Kind: "lines", StartLine: start, EndLine: end}
@@ -1780,25 +1806,44 @@ func normalizeEmbeddingStatus(status string) string {
 	}
 }
 
-func spanToRow(span model.Span) (kind string, start int, end int, err error) {
+// spanToRow flattens a span to its stored columns. extraJSON is the empty
+// string for the scalar kinds (stored as SQL NULL) and a JSON object for
+// region spans carrying bbox/section/label (spec §5.4).
+func spanToRow(span model.Span) (kind string, start int, end int, extraJSON string, err error) {
 	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
 	case "lines":
 		if span.StartLine <= 0 || span.EndLine <= 0 || span.EndLine < span.StartLine {
-			return "", 0, 0, errors.New("invalid lines span")
+			return "", 0, 0, "", errors.New("invalid lines span")
 		}
-		return "lines", span.StartLine, span.EndLine, nil
+		return "lines", span.StartLine, span.EndLine, "", nil
 	case "page":
 		if span.Page <= 0 {
-			return "", 0, 0, errors.New("invalid page span")
+			return "", 0, 0, "", errors.New("invalid page span")
 		}
-		return "page", span.Page, span.Page, nil
+		return "page", span.Page, span.Page, "", nil
 	case "time":
 		if span.StartMS < 0 || span.EndMS < 0 || span.EndMS < span.StartMS {
-			return "", 0, 0, errors.New("invalid time span")
+			return "", 0, 0, "", errors.New("invalid time span")
 		}
-		return "time", span.StartMS, span.EndMS, nil
+		return "time", span.StartMS, span.EndMS, "", nil
+	case "region":
+		r := span.Region
+		if r == nil {
+			return "", 0, 0, "", errors.New("invalid region span: missing region payload")
+		}
+		if r.StartPage <= 0 || r.EndPage <= 0 || r.EndPage < r.StartPage {
+			return "", 0, 0, "", errors.New("invalid region span: bad page range")
+		}
+		if r.BBox == nil {
+			return "", 0, 0, "", errors.New("invalid region span: missing bbox")
+		}
+		encoded, mErr := json.Marshal(r)
+		if mErr != nil {
+			return "", 0, 0, "", fmt.Errorf("marshal region span: %w", mErr)
+		}
+		return "region", r.StartPage, r.EndPage, string(encoded), nil
 	default:
-		return "", 0, 0, fmt.Errorf("unsupported span kind: %q", span.Kind)
+		return "", 0, 0, "", fmt.Errorf("unsupported span kind: %q", span.Kind)
 	}
 }
 

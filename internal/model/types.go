@@ -56,6 +56,33 @@ type Span struct {
 	Page      int
 	StartMS   int
 	EndMS     int
+	// Region is set only when Kind == "region" (structured document
+	// extraction, spec §5.4). It carries the page range, primary-page
+	// bounding box, and section breadcrumb. nil for all other kinds, which
+	// keeps Span comparable for the scalar kinds.
+	Region *RegionSpan
+}
+
+// RegionSpan localizes a chunk to a rectangular area within a page range of a
+// structured document (dirstral-spec §5.4 "region" span kind). It is the
+// in-memory shape of the spans.extra_json blob for region spans.
+type RegionSpan struct {
+	StartPage int      `json:"-"`
+	EndPage   int      `json:"-"`
+	BBox      *BBox    `json:"bbox,omitempty"`
+	Section   []string `json:"section,omitempty"`
+	Label     string   `json:"label,omitempty"`
+}
+
+// BBox is a bounding box in the source document's point space. CoordOrigin is
+// the origin actually stored ("TOPLEFT" or "BOTTOMLEFT").
+type BBox struct {
+	Page        int     `json:"page"`
+	L           float64 `json:"l"`
+	T           float64 `json:"t"`
+	R           float64 `json:"r"`
+	B           float64 `json:"b"`
+	CoordOrigin string  `json:"coord_origin"`
 }
 
 type SearchQuery struct {
