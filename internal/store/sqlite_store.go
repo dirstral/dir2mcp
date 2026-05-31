@@ -60,6 +60,48 @@ type dbExecutor interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// ActiveDocCountsByStatus returns per-doc_type counts of non-deleted documents
+// filtered to the given status (e.g. "ok"). Diagnostics that must reflect only
+// the documents the indexer will actually attempt to process use this so they
+// do not count skipped/errored rows. An empty status counts all non-deleted
+// documents (equivalent to the corpus-wide DocCounts).
+func (s *SQLiteStore) ActiveDocCountsByStatus(ctx context.Context, status string) (map[string]int64, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	query := `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`
+	args := []any{}
+	if strings.TrimSpace(status) != "" {
+		query = `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 AND status = ? GROUP BY doc_type`
+		args = append(args, status)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var (
+			docType string
+			count   int64
+		)
+		if err := rows.Scan(&docType, &count); err != nil {
+			return nil, err
+		}
+		docType = strings.TrimSpace(docType)
+		if docType == "" {
+			docType = "unknown"
+		}
+		counts[docType] += count
+	}
+	return counts, rows.Err()
+}
+
 // activeDocCountsWith encapsulates the query logic previously found in
 // SQLiteStore.ActiveDocCounts.  It accepts any dbExecutor so callers can reuse
 // an existing *sql.DB or a *sql.Tx without having to open a handle again.
