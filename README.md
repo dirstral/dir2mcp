@@ -209,7 +209,7 @@ vary by deployment. The commonly used variables are:
 |---|---|---|
 | `MISTRAL_API_KEY` | Conditional | Required for embeddings, Mistral-based extraction/STT, and generation; not required for docling-only read-only extraction flows |
 | `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction provider mode: `auto` (default), `docling`, `mistral`, or `off` |
-| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to md --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction |
+| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
 | `DIR2MCP_SERVER_NAME` | No | Override the MCP server name (and suggested `claude mcp add` alias). Defaults to a unique `dir2mcp-<slug>-<6-hex>` derived from the indexed directory |
@@ -229,7 +229,7 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 
 ```yaml
 ingest_extractor: auto
-docling_command: docling --to md --output - {input}
+docling_command: docling --to json --output - {input}
 ```
 
 ### Server identity
