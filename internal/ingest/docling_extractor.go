@@ -9,9 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 )
 
-const defaultDoclingCommand = "docling --to md --output - {input}"
+// defaultDoclingCommand requests structured JSON (DoclingDocument) so the
+// pipeline can preserve reading order, section hierarchy, and per-element
+// page/bbox provenance (spec 0.9.0 §7.4.B). When a custom docling_command
+// emits flat Markdown instead, Extract transparently falls back to treating
+// the output as Markdown.
+const defaultDoclingCommand = "docling --to json --output - {input}"
 
 const (
 	maxDoclingStdoutBytes = 100 * 1024 * 1024
@@ -47,7 +54,27 @@ func NewDoclingExtractor(commandTemplate string) *doclingExtractor {
 	return &doclingExtractor{commandTemplate: tpl}
 }
 
-func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
+// StructuredExtraction is the result of structured docling extraction: the
+// rendered Markdown persisted as the extracted_markdown representation, the
+// ordered blocks (reading order + section breadcrumb + provenance) that drive
+// section-aware chunking and region spans, and the document title.
+type StructuredExtraction struct {
+	Markdown string
+	Blocks   []docling.Block
+	Title    string
+}
+
+// structuredExtractor is implemented by extractors that can emit a structured
+// document model. The ingest service type-asserts against it to choose the
+// structured path; extractors that only produce flat text (e.g. Mistral OCR)
+// do not implement it and use the page-separated path.
+type structuredExtractor interface {
+	ExtractStructured(ctx context.Context, relPath string, data []byte) (StructuredExtraction, error)
+}
+
+// run executes the configured docling command against data and returns the
+// trimmed stdout.
+func (d *doclingExtractor) run(ctx context.Context, relPath string, data []byte) (string, error) {
 	ext := filepath.Ext(relPath)
 	if ext == "" {
 		ext = ".bin"
@@ -92,6 +119,57 @@ func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []b
 		return "", fmt.Errorf("docling command produced empty output")
 	}
 	return out, nil
+}
+
+// Extract returns Markdown suitable for chunking/indexing. When the command
+// emits a structured DoclingDocument (the default `--to json`), the document is
+// linearized to Markdown in reading order; when it emits flat Markdown (a
+// custom `--to md` command), the output is returned as-is.
+func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
+	out, err := d.run(ctx, relPath, data)
+	if err != nil {
+		return "", err
+	}
+	doc, perr := docling.Parse([]byte(out))
+	if perr == nil {
+		return docling.RenderMarkdown(doc.Linearize()), nil
+	}
+	// Output that looks like JSON but failed to parse is a structured-extraction
+	// failure (truncated/schema-drifted DoclingDocument); fail fast rather than
+	// persisting raw JSON as the representation. Genuinely non-JSON output is a
+	// custom flat-Markdown command (--to md), returned as-is.
+	if looksLikeJSON(out) {
+		return "", fmt.Errorf("parse structured docling output for %s: %w", relPath, perr)
+	}
+	return out, nil
+}
+
+// looksLikeJSON reports whether trimmed output begins with a JSON object or
+// array delimiter, used to distinguish a broken DoclingDocument from a
+// deliberate flat-Markdown command.
+func looksLikeJSON(out string) bool {
+	t := strings.TrimSpace(out)
+	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
+}
+
+// ExtractStructured runs the command and parses the structured DoclingDocument.
+// It returns an error when the output is not a parseable DoclingDocument, so
+// callers can fall back to the flat path.
+func (d *doclingExtractor) ExtractStructured(ctx context.Context, relPath string, data []byte) (StructuredExtraction, error) {
+	out, err := d.run(ctx, relPath, data)
+	if err != nil {
+		return StructuredExtraction{}, err
+	}
+	doc, err := docling.Parse([]byte(out))
+	if err != nil {
+		return StructuredExtraction{}, err
+	}
+	blocks := doc.Linearize()
+	return StructuredExtraction{
+		Markdown: docling.RenderMarkdown(blocks),
+		Blocks:   blocks,
+		Title:    doc.Title(),
+	}, nil
 }
 
 func buildDoclingCommandArgs(template, inputPath string) ([]string, error) {
