@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -285,6 +286,202 @@ func chunkOCRByPages(content string) []chunkSegment {
 		})
 	}
 	return out
+}
+
+// Structured-document chunking parameters (spec §7.5 size constraints). They
+// mirror the raw-text defaults so structured and plain text chunk at a
+// comparable granularity.
+const (
+	structuredChunkMaxChars     = 2500
+	structuredChunkOverlapChars = 250
+	structuredChunkMinChars     = 200
+)
+
+// chunkStructuredBlocks implements section/element-aware chunking over the
+// ordered blocks of a structured document (spec §7.5): consecutive blocks
+// sharing the same section breadcrumb are grouped, then split by size; tables
+// are kept atomic (never merged with surrounding text nor split). Each segment
+// carries a region span (page range + primary-page bbox + section), degrading
+// to a page span when a block lacks a bounding box.
+func chunkStructuredBlocks(blocks []docling.Block) []chunkSegment {
+	maxChars, overlapChars, minChars := normalizeTextChunkParams(
+		structuredChunkMaxChars, structuredChunkOverlapChars, structuredChunkMinChars)
+
+	lastPage := 1
+	out := make([]chunkSegment, 0, len(blocks))
+
+	var buf []docling.Block
+	var bufText strings.Builder
+	var bufSection []string
+
+	flush := func() {
+		text := strings.TrimSpace(bufText.String())
+		buffered := buf
+		buf = nil
+		bufText.Reset()
+		bufSection = nil
+		if text == "" || len(buffered) == 0 {
+			return
+		}
+		span := spanForBlocks(buffered, &lastPage)
+		for _, piece := range splitTextBySize(text, maxChars, overlapChars, minChars) {
+			out = append(out, chunkSegment{Text: piece, Span: span})
+		}
+	}
+
+	for _, b := range blocks {
+		if strings.TrimSpace(b.Text) == "" {
+			continue
+		}
+		if b.Label == docling.LabelTable {
+			// Tables are atomic: flush any pending text, then emit the table as
+			// a single segment regardless of size.
+			flush()
+			out = append(out, chunkSegment{
+				Text: b.Text,
+				Span: spanForBlocks([]docling.Block{b}, &lastPage),
+			})
+			continue
+		}
+		if len(buf) > 0 && !sameSection(bufSection, b.Section) {
+			flush()
+		}
+		if len(buf) == 0 {
+			bufSection = b.Section
+		}
+		if bufText.Len() > 0 {
+			bufText.WriteString("\n\n")
+		}
+		bufText.WriteString(b.Text)
+		buf = append(buf, b)
+		if bufText.Len() >= maxChars {
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+// ChunkStructuredBlocks splits structured document blocks using the same
+// section-aware policy as ingestion. Exported so tests can exercise the logic
+// directly (mirrors ChunkTextByChars/ChunkCodeByLines).
+func ChunkStructuredBlocks(blocks []docling.Block) []ChunkSegment {
+	raw := chunkStructuredBlocks(blocks)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// splitTextBySize breaks text into size-bounded pieces, reusing the char
+// chunker but discarding its line spans (structured chunks carry region spans).
+func splitTextBySize(text string, maxChars, overlapChars, minChars int) []string {
+	segs := chunkTextByChars(text, maxChars, overlapChars, minChars)
+	if len(segs) == 0 {
+		return []string{text}
+	}
+	out := make([]string, 0, len(segs))
+	for _, s := range segs {
+		out = append(out, s.Text)
+	}
+	return out
+}
+
+// sameSection reports whether two section breadcrumbs are identical.
+func sameSection(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// spanForBlocks derives a span for a chunk from its source blocks: a region
+// span (page range + union bbox on the primary page + section) when a bounding
+// box is available, otherwise a page span on the primary (or last-known) page.
+// lastPage carries forward the most recent known page so blocks lacking
+// provenance still cite a plausible page rather than page 0.
+func spanForBlocks(bs []docling.Block, lastPage *int) model.Span {
+	startPage, endPage, primary := 0, 0, 0
+	var section []string
+	label := ""
+	for _, b := range bs {
+		if label == "" {
+			label = b.Label
+		}
+		if section == nil && len(b.Section) > 0 {
+			section = b.Section
+		}
+		if b.Page <= 0 {
+			continue
+		}
+		if startPage == 0 || b.Page < startPage {
+			startPage = b.Page
+		}
+		if b.Page > endPage {
+			endPage = b.Page
+		}
+		if primary == 0 {
+			primary = b.Page
+		}
+	}
+
+	var union *model.BBox
+	for _, b := range bs {
+		if b.Page != primary || b.BBox == nil {
+			continue
+		}
+		mb := model.BBox{
+			Page: b.BBox.Page, L: b.BBox.L, T: b.BBox.T,
+			R: b.BBox.R, B: b.BBox.B, CoordOrigin: b.BBox.CoordOrigin,
+		}
+		if union == nil {
+			cp := mb
+			union = &cp
+			continue
+		}
+		union.L = minF(union.L, mb.L)
+		union.T = minF(union.T, mb.T)
+		union.R = maxF(union.R, mb.R)
+		union.B = maxF(union.B, mb.B)
+	}
+
+	if primary > 0 {
+		*lastPage = primary
+	}
+	if union != nil {
+		return model.Span{Kind: "region", Region: &model.RegionSpan{
+			StartPage: startPage,
+			EndPage:   endPage,
+			BBox:      union,
+			Section:   section,
+			Label:     label,
+		}}
+	}
+	page := primary
+	if page <= 0 {
+		page = *lastPage
+	}
+	return model.Span{Kind: "page", Page: page}
+}
+
+func minF(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxF(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func chunkTranscriptByTime(content string) []chunkSegment {
