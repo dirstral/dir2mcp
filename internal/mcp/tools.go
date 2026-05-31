@@ -1990,10 +1990,49 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 			"start_ms": span.StartMS,
 			"end_ms":   span.EndMS,
 		}
+	case "region":
+		return buildRegionSpan(span)
 	default:
 		return map[string]interface{}{
 			"kind": kind,
 		}
+	}
+}
+
+// buildRegionSpan renders a region span per spec §15.1.1: page range plus the
+// primary-page bounding box and section breadcrumb. A region span missing its
+// payload or bbox degrades to a page span on the start page (or the document
+// variant when even that is unavailable), so clients always get a usable
+// citation.
+func buildRegionSpan(span model.Span) map[string]interface{} {
+	r := span.Region
+	if r == nil || r.BBox == nil {
+		page := 0
+		if r != nil {
+			page = r.StartPage
+		}
+		if page <= 0 {
+			return map[string]interface{}{"kind": "document"}
+		}
+		return map[string]interface{}{"kind": "page", "page": page}
+	}
+	section := r.Section
+	if section == nil {
+		section = []string{}
+	}
+	return map[string]interface{}{
+		"kind":       "region",
+		"start_page": r.StartPage,
+		"end_page":   r.EndPage,
+		"bbox": map[string]interface{}{
+			"page":         r.BBox.Page,
+			"l":            r.BBox.L,
+			"t":            r.BBox.T,
+			"r":            r.BBox.R,
+			"b":            r.BBox.B,
+			"coord_origin": r.BBox.CoordOrigin,
+		},
+		"section": section,
 	}
 }
 
