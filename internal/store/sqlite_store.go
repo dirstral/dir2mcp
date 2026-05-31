@@ -74,9 +74,11 @@ func (s *SQLiteStore) ActiveDocCountsByStatus(ctx context.Context, status string
 
 	query := `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`
 	args := []any{}
-	if strings.TrimSpace(status) != "" {
+	// Trim once and use the trimmed value for both the conditional and the SQL
+	// arg, so a whitespace-padded status doesn't silently match nothing.
+	if trimmed := strings.TrimSpace(status); trimmed != "" {
 		query = `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 AND status = ? GROUP BY doc_type`
-		args = append(args, status)
+		args = append(args, trimmed)
 	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {

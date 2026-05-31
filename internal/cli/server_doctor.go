@@ -200,7 +200,8 @@ func extractionCoverageCheck(ctx context.Context, a *App, cfg config.Config) doc
 		if d := ingest.DescribeDocumentExtractor(cfg); d.Name == "" {
 			detail := fmt.Sprintf(
 				"%d document(s) need extraction (pdf/image/document) but no extractor is available: %s. "+
-					"They produce no searchable text. Install docling or set MISTRAL_API_KEY, then run `dir2mcp reindex`.",
+					"They produce no searchable text. Enable an extractor (set ingest.extractor to auto/docling/mistral, "+
+					"not off), then make one available (install docling or set MISTRAL_API_KEY), and run `dir2mcp reindex`.",
 				extractable, d.Reason)
 			return doctorCheck{Name: name, Status: doctorStatusError, Detail: detail}
 		}
