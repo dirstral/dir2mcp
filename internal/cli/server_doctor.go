@@ -179,8 +179,15 @@ func extractionCoverageCheck(ctx context.Context, a *App, cfg config.Config) doc
 	}
 
 	// Count documents whose type requires an extractor to become searchable.
+	// Restrict to index-eligible rows (deleted=0 AND status='ok') so skipped
+	// or already-errored documents don't inflate the "needs extraction" count
+	// or trip a false error — those are surfaced by indexing_failures instead.
+	okCounts, err := sqliteStore.ActiveDocCountsByStatus(ctx, "ok")
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
+	}
 	var extractable int64
-	for docType, n := range stats.DocCounts {
+	for docType, n := range okCounts {
 		if ingest.ShouldGenerateExtractedMarkdown(docType) {
 			extractable += n
 		}

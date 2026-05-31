@@ -52,7 +52,9 @@ func seedDoctorStore(t *testing.T, tmp string, fn func(ctx context.Context, st *
 		t.Fatalf("init store: %v", err)
 	}
 	fn(ctx, st)
-	_ = st.Close()
+	if err := st.Close(); err != nil {
+		t.Logf("warning: store close failed: %v", err)
+	}
 }
 
 // TestServerDoctor_ExtractionCoverage_NoExtractor pins the loud diagnostic for
@@ -100,7 +102,13 @@ func TestServerDoctor_ExtractionCoverage_NoEmbeddings(t *testing.T) {
 		if err := st.UpsertDocument(ctx, model.Document{RelPath: "notes.md", DocType: "md", Status: "ok"}); err != nil {
 			t.Fatalf("seed doc: %v", err)
 		}
-		repID, err := st.UpsertRepresentation(ctx, model.Representation{DocID: 1, RepType: "raw_text", RepHash: "h1"})
+		// Fetch the assigned doc_id rather than assuming it is 1, so the test
+		// is robust to bootstrap rows or schema changes.
+		doc, err := st.GetDocumentByPath(ctx, "notes.md")
+		if err != nil {
+			t.Fatalf("get seeded doc: %v", err)
+		}
+		repID, err := st.UpsertRepresentation(ctx, model.Representation{DocID: doc.DocID, RepType: "raw_text", RepHash: "h1"})
 		if err != nil {
 			t.Fatalf("seed rep: %v", err)
 		}
@@ -124,6 +132,38 @@ func TestServerDoctor_ExtractionCoverage_NoEmbeddings(t *testing.T) {
 		if !strings.Contains(c.Detail, want) {
 			t.Errorf("detail missing %q: %s", want, c.Detail)
 		}
+	}
+}
+
+// TestServerDoctor_ExtractionCoverage_SkippedNotCounted pins that only
+// index-eligible (status='ok') extractable documents are counted: a skipped
+// PDF must not trip the "needs extraction" error on its own.
+func TestServerDoctor_ExtractionCoverage_SkippedNotCounted(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "")
+	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "off")
+	t.Setenv("PATH", t.TempDir())
+
+	seedDoctorStore(t, tmp, func(ctx context.Context, st *store.SQLiteStore) {
+		// One ok PDF (counts) and one skipped PDF (must NOT count).
+		if err := st.UpsertDocument(ctx, model.Document{RelPath: "ok.pdf", DocType: "pdf", Status: "ok"}); err != nil {
+			t.Fatalf("seed ok pdf: %v", err)
+		}
+		if err := st.UpsertDocument(ctx, model.Document{RelPath: "big.pdf", DocType: "pdf", Status: "skipped"}); err != nil {
+			t.Fatalf("seed skipped pdf: %v", err)
+		}
+	})
+
+	c := findCheck(runDoctorReport(t, tmp), "extraction_coverage")
+	if c == nil {
+		t.Fatal("extraction_coverage check missing")
+	}
+	if c.Status != "error" {
+		t.Errorf("status = %q, want error", c.Status)
+	}
+	// Exactly one document should be counted, not two.
+	if !strings.Contains(c.Detail, "1 document(s) need extraction") {
+		t.Errorf("expected only the ok pdf counted (1), got: %s", c.Detail)
 	}
 }
 
