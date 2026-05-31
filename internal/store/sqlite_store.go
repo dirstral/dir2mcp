@@ -1344,29 +1344,34 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 		}
 		return model.Span{Kind: "time", StartMS: start, EndMS: end}
 	case "region":
-		// A region span requires a well-formed extra_json payload with a
-		// bbox. If anything is missing or malformed, degrade to a page span
-		// on start (per spec: region clients fall back to page-level), or to
-		// lines when even the page range is unusable.
-		if start <= 0 || end <= 0 || end < start || strings.TrimSpace(extraJSON) == "" {
-			if start > 0 {
-				return model.Span{Kind: "page", Page: start}
-			}
-			return model.Span{Kind: "lines"}
-		}
-		var r model.RegionSpan
-		if err := json.Unmarshal([]byte(extraJSON), &r); err != nil || r.BBox == nil {
-			return model.Span{Kind: "page", Page: start}
-		}
-		r.StartPage = start
-		r.EndPage = end
-		return model.Span{Kind: "region", Region: &r}
+		return regionSpanFromRow(start, end, extraJSON)
 	case "lines":
 		if start > 0 && end >= start {
 			return model.Span{Kind: "lines", StartLine: start, EndLine: end}
 		}
 	}
 	return model.Span{Kind: "lines"}
+}
+
+// regionSpanFromRow reconstructs a region span from its stored columns. A
+// region requires a well-formed extra_json payload with a bbox; if anything is
+// missing or malformed it degrades to a page span on the start page (per spec:
+// region clients fall back to page-level), or to lines when even the page range
+// is unusable.
+func regionSpanFromRow(start, end int, extraJSON string) model.Span {
+	if start <= 0 || end <= 0 || end < start || strings.TrimSpace(extraJSON) == "" {
+		if start > 0 {
+			return model.Span{Kind: "page", Page: start}
+		}
+		return model.Span{Kind: "lines"}
+	}
+	var r model.RegionSpan
+	if err := json.Unmarshal([]byte(extraJSON), &r); err != nil || r.BBox == nil {
+		return model.Span{Kind: "page", Page: start}
+	}
+	r.StartPage = start
+	r.EndPage = end
+	return model.Span{Kind: "region", Region: &r}
 }
 
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
@@ -1827,24 +1832,30 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 		}
 		return "time", span.StartMS, span.EndMS, "", nil
 	case "region":
-		r := span.Region
-		if r == nil {
-			return "", 0, 0, "", errors.New("invalid region span: missing region payload")
-		}
-		if r.StartPage <= 0 || r.EndPage <= 0 || r.EndPage < r.StartPage {
-			return "", 0, 0, "", errors.New("invalid region span: bad page range")
-		}
-		if r.BBox == nil {
-			return "", 0, 0, "", errors.New("invalid region span: missing bbox")
-		}
-		encoded, mErr := json.Marshal(r)
-		if mErr != nil {
-			return "", 0, 0, "", fmt.Errorf("marshal region span: %w", mErr)
-		}
-		return "region", r.StartPage, r.EndPage, string(encoded), nil
+		return regionSpanToRow(span.Region)
 	default:
 		return "", 0, 0, "", fmt.Errorf("unsupported span kind: %q", span.Kind)
 	}
+}
+
+// regionSpanToRow validates and flattens a region span: the page range goes to
+// start/end and the bbox/section/label payload is marshaled to extra_json. A
+// region MUST carry a bbox and a valid page range (spec §5.4).
+func regionSpanToRow(r *model.RegionSpan) (kind string, start int, end int, extraJSON string, err error) {
+	if r == nil {
+		return "", 0, 0, "", errors.New("invalid region span: missing region payload")
+	}
+	if r.StartPage <= 0 || r.EndPage <= 0 || r.EndPage < r.StartPage {
+		return "", 0, 0, "", errors.New("invalid region span: bad page range")
+	}
+	if r.BBox == nil {
+		return "", 0, 0, "", errors.New("invalid region span: missing bbox")
+	}
+	encoded, mErr := json.Marshal(r)
+	if mErr != nil {
+		return "", 0, 0, "", fmt.Errorf("marshal region span: %w", mErr)
+	}
+	return "region", r.StartPage, r.EndPage, string(encoded), nil
 }
 
 func boolToInt(v bool) int {

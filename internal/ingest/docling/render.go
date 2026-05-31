@@ -58,7 +58,17 @@ func renderTableMarkdown(d *tableData) string {
 	if len(cells) == 0 {
 		return ""
 	}
+	nRows, nCols := tableDimensions(d, cells)
+	if nRows <= 0 || nCols <= 0 {
+		return ""
+	}
+	grid, headerRow := buildTableGrid(cells, nRows, nCols)
+	return renderGridMarkdown(grid, headerRow, nCols)
+}
 
+// tableDimensions returns the row/column count, expanding the declared
+// num_rows/num_cols to cover any cell offsets that exceed them.
+func tableDimensions(d *tableData, cells []tableCell) (int, int) {
 	nRows, nCols := d.NumRows, d.NumCols
 	for _, c := range cells {
 		if c.EndRowOffset > nRows {
@@ -68,18 +78,20 @@ func renderTableMarkdown(d *tableData) string {
 			nCols = c.EndColOffset
 		}
 	}
-	if nRows <= 0 || nCols <= 0 {
-		return ""
-	}
+	return nRows, nCols
+}
 
+// buildTableGrid places cells into a 2D grid by their start offsets and returns
+// the grid plus the chosen header row (the topmost row with a column-header
+// cell, or 0 when none is flagged).
+func buildTableGrid(cells []tableCell, nRows, nCols int) ([][]string, int) {
 	grid := make([][]string, nRows)
 	for r := range grid {
 		grid[r] = make([]string, nCols)
 	}
 	headerRow := -1
 	for _, c := range cells {
-		r := c.StartRowOffset
-		col := c.StartColOffset
+		r, col := c.StartRowOffset, c.StartColOffset
 		if r < 0 || r >= nRows || col < 0 || col >= nCols {
 			continue
 		}
@@ -91,7 +103,12 @@ func renderTableMarkdown(d *tableData) string {
 	if headerRow == -1 {
 		headerRow = 0
 	}
+	return grid, headerRow
+}
 
+// renderGridMarkdown emits a GitHub-flavored Markdown table: the header row, a
+// separator, then the remaining rows in order.
+func renderGridMarkdown(grid [][]string, headerRow, nCols int) string {
 	var b strings.Builder
 	writeRow := func(row []string) {
 		b.WriteString("|")
@@ -103,13 +120,12 @@ func renderTableMarkdown(d *tableData) string {
 		b.WriteString("\n")
 	}
 	writeRow(grid[headerRow])
-	// separator
 	b.WriteString("|")
 	for c := 0; c < nCols; c++ {
 		b.WriteString(" --- |")
 	}
 	b.WriteString("\n")
-	for r := 0; r < nRows; r++ {
+	for r := 0; r < len(grid); r++ {
 		if r == headerRow {
 			continue
 		}

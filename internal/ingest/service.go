@@ -961,6 +961,17 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 		return nil
 	}
 
+	// Structured path: when the extractor exposes a DoclingDocument, preserve
+	// its structure (reading order, section breadcrumb, page/bbox provenance)
+	// as region spans. Falls through to the flat path when the extractor is not
+	// structured, or yields no parseable structure (custom --to md command).
+	if se, ok := s.extractor.(structuredExtractor); ok {
+		res, err := s.readOrComputeStructured(ctx, doc, content, se)
+		if err == nil && len(res.Blocks) > 0 {
+			return s.persistStructuredRepresentation(ctx, doc, res)
+		}
+	}
+
 	ocrText, err := s.readOrComputeOCR(ctx, doc, content)
 	if err != nil {
 		return err
@@ -994,6 +1005,89 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 		return fmt.Errorf("persist ocr chunks: %w", err)
 	}
 	return nil
+}
+
+// persistStructuredRepresentation stores the extracted_markdown representation
+// from a structured extraction: the rendered Markdown is the representation
+// text (rep_hash is computed over it, as in the flat path), while the document
+// structure is carried as region spans on section-aware chunks. The title from
+// the document's title element is preferred over the text heuristic.
+func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model.Document, res StructuredExtraction) error {
+	md := strings.TrimSpace(res.Markdown)
+	if md == "" {
+		return nil
+	}
+
+	if title := strings.TrimSpace(res.Title); title != "" {
+		s.persistTitle(ctx, doc, title)
+	} else {
+		s.persistTitleIfFound(ctx, doc, md)
+	}
+
+	rep := model.Representation{
+		DocID:       doc.DocID,
+		RepType:     RepTypeExtractedMarkdown,
+		RepHash:     computeRepHash([]byte(md)),
+		MetaJSON:    s.extractionMetaJSON(),
+		CreatedUnix: time.Now().Unix(),
+		Deleted:     false,
+	}
+	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
+	if err != nil {
+		return fmt.Errorf("upsert structured representation: %w", err)
+	}
+
+	segments := chunkStructuredBlocks(res.Blocks)
+	if len(segments) == 0 {
+		return nil
+	}
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments); err != nil {
+		return fmt.Errorf("persist structured chunks: %w", err)
+	}
+	return nil
+}
+
+// readOrComputeStructured returns the structured extraction for content,
+// caching the result as JSON under <state>/cache/docling keyed by content hash
+// so re-indexing does not re-run docling. The cache is an implementation
+// detail (spec §7.4.B: the raw DoclingDocument is not a representation).
+func (s *Service) readOrComputeStructured(ctx context.Context, doc model.Document, content []byte, se structuredExtractor) (StructuredExtraction, error) {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "docling")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return StructuredExtraction{}, fmt.Errorf("create docling cache dir: %w", err)
+	}
+	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".json")
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		var res StructuredExtraction
+		if json.Unmarshal(cached, &res) == nil && len(res.Blocks) > 0 {
+			return res, nil
+		}
+	}
+
+	res, err := se.ExtractStructured(ctx, doc.RelPath, content)
+	if err != nil {
+		return StructuredExtraction{}, err
+	}
+	if encoded, mErr := json.Marshal(res); mErr == nil {
+		if wErr := os.WriteFile(cachePath, encoded, 0o644); wErr != nil {
+			s.getLogger().Printf("cache structured extraction for %s: %v", doc.RelPath, wErr)
+		}
+	}
+	return res, nil
+}
+
+// persistTitle sets documents.title to an explicit title (e.g. from a
+// structured document's title element), preferring it over the heuristic.
+// Non-fatal: a failed write only degrades citation display.
+func (s *Service) persistTitle(ctx context.Context, doc model.Document, title string) {
+	title = strings.TrimSpace(title)
+	if title == "" || title == doc.Title {
+		return
+	}
+	doc.Title = title
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		s.getLogger().Printf("persist title for %s: %v", doc.RelPath, err)
+	}
 }
 
 func (s *Service) extractionMetaJSON() string {

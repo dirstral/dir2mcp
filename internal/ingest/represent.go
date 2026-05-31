@@ -304,62 +304,92 @@ const (
 // carries a region span (page range + primary-page bbox + section), degrading
 // to a page span when a block lacks a bounding box.
 func chunkStructuredBlocks(blocks []docling.Block) []chunkSegment {
-	maxChars, overlapChars, minChars := normalizeTextChunkParams(
-		structuredChunkMaxChars, structuredChunkOverlapChars, structuredChunkMinChars)
-
-	lastPage := 1
-	out := make([]chunkSegment, 0, len(blocks))
-
-	var buf []docling.Block
-	var bufText strings.Builder
-	var bufSection []string
-
-	flush := func() {
-		text := strings.TrimSpace(bufText.String())
-		buffered := buf
-		buf = nil
-		bufText.Reset()
-		bufSection = nil
-		if text == "" || len(buffered) == 0 {
-			return
-		}
-		span := spanForBlocks(buffered, &lastPage)
-		for _, piece := range splitTextBySize(text, maxChars, overlapChars, minChars) {
-			out = append(out, chunkSegment{Text: piece, Span: span})
-		}
-	}
-
+	c := newStructuredChunker()
 	for _, b := range blocks {
 		if strings.TrimSpace(b.Text) == "" {
 			continue
 		}
 		if b.Label == docling.LabelTable {
-			// Tables are atomic: flush any pending text, then emit the table as
-			// a single segment regardless of size.
-			flush()
-			out = append(out, chunkSegment{
-				Text: b.Text,
-				Span: spanForBlocks([]docling.Block{b}, &lastPage),
-			})
+			// Tables are atomic: flush any pending prose, then emit the table
+			// as a single segment regardless of size.
+			c.flush()
+			c.emitAtomic(b)
 			continue
 		}
-		if len(buf) > 0 && !sameSection(bufSection, b.Section) {
-			flush()
-		}
-		if len(buf) == 0 {
-			bufSection = b.Section
-		}
-		if bufText.Len() > 0 {
-			bufText.WriteString("\n\n")
-		}
-		bufText.WriteString(b.Text)
-		buf = append(buf, b)
-		if bufText.Len() >= maxChars {
-			flush()
-		}
+		c.add(b)
 	}
-	flush()
-	return out
+	c.flush()
+	return c.out
+}
+
+// structuredChunker accumulates consecutive same-section blocks and flushes
+// them into size-bounded segments, each tagged with a region span. It exists to
+// keep chunkStructuredBlocks simple (one branch per block kind) by moving the
+// buffer bookkeeping behind add/flush/emitAtomic.
+type structuredChunker struct {
+	maxChars     int
+	overlapChars int
+	minChars     int
+	lastPage     int
+	out          []chunkSegment
+	buf          []docling.Block
+	bufText      strings.Builder
+	bufSection   []string
+}
+
+func newStructuredChunker() *structuredChunker {
+	maxChars, overlapChars, minChars := normalizeTextChunkParams(
+		structuredChunkMaxChars, structuredChunkOverlapChars, structuredChunkMinChars)
+	return &structuredChunker{
+		maxChars:     maxChars,
+		overlapChars: overlapChars,
+		minChars:     minChars,
+		lastPage:     1,
+	}
+}
+
+// add appends a prose block to the buffer, starting a new chunk when the
+// section breadcrumb changes and flushing when the buffer reaches max size.
+func (c *structuredChunker) add(b docling.Block) {
+	if len(c.buf) > 0 && !sameSection(c.bufSection, b.Section) {
+		c.flush()
+	}
+	if len(c.buf) == 0 {
+		c.bufSection = b.Section
+	}
+	if c.bufText.Len() > 0 {
+		c.bufText.WriteString("\n\n")
+	}
+	c.bufText.WriteString(b.Text)
+	c.buf = append(c.buf, b)
+	if c.bufText.Len() >= c.maxChars {
+		c.flush()
+	}
+}
+
+// emitAtomic appends a single block as its own chunk (used for tables).
+func (c *structuredChunker) emitAtomic(b docling.Block) {
+	c.out = append(c.out, chunkSegment{
+		Text: b.Text,
+		Span: spanForBlocks([]docling.Block{b}, &c.lastPage),
+	})
+}
+
+// flush turns the buffered blocks into one or more size-bounded segments
+// sharing a single region span, then resets the buffer.
+func (c *structuredChunker) flush() {
+	text := strings.TrimSpace(c.bufText.String())
+	buffered := c.buf
+	c.buf = nil
+	c.bufText.Reset()
+	c.bufSection = nil
+	if text == "" || len(buffered) == 0 {
+		return
+	}
+	span := spanForBlocks(buffered, &c.lastPage)
+	for _, piece := range splitTextBySize(text, c.maxChars, c.overlapChars, c.minChars) {
+		c.out = append(c.out, chunkSegment{Text: piece, Span: span})
+	}
 }
 
 // ChunkStructuredBlocks splits structured document blocks using the same
@@ -407,16 +437,33 @@ func sameSection(a, b []string) bool {
 // lastPage carries forward the most recent known page so blocks lacking
 // provenance still cite a plausible page rather than page 0.
 func spanForBlocks(bs []docling.Block, lastPage *int) model.Span {
-	startPage, endPage, primary := 0, 0, 0
-	var section []string
-	label := ""
+	startPage, endPage, primary := blockPageRange(bs)
+	section, label := blockSectionLabel(bs)
+	union := unionBBoxOnPage(bs, primary)
+
+	if primary > 0 {
+		*lastPage = primary
+	}
+	if union != nil {
+		return model.Span{Kind: "region", Region: &model.RegionSpan{
+			StartPage: startPage,
+			EndPage:   endPage,
+			BBox:      union,
+			Section:   section,
+			Label:     label,
+		}}
+	}
+	page := primary
+	if page <= 0 {
+		page = *lastPage
+	}
+	return model.Span{Kind: "page", Page: page}
+}
+
+// blockPageRange returns the first, last, and primary (first in reading order)
+// page across the blocks, ignoring blocks without a page.
+func blockPageRange(bs []docling.Block) (startPage, endPage, primary int) {
 	for _, b := range bs {
-		if label == "" {
-			label = b.Label
-		}
-		if section == nil && len(b.Section) > 0 {
-			section = b.Section
-		}
 		if b.Page <= 0 {
 			continue
 		}
@@ -430,7 +477,26 @@ func spanForBlocks(bs []docling.Block, lastPage *int) model.Span {
 			primary = b.Page
 		}
 	}
+	return startPage, endPage, primary
+}
 
+// blockSectionLabel returns the first non-empty section breadcrumb and the
+// first block label across the blocks.
+func blockSectionLabel(bs []docling.Block) (section []string, label string) {
+	for _, b := range bs {
+		if label == "" {
+			label = b.Label
+		}
+		if section == nil && len(b.Section) > 0 {
+			section = b.Section
+		}
+	}
+	return section, label
+}
+
+// unionBBoxOnPage returns the smallest rectangle enclosing all block bounding
+// boxes on the primary page, or nil when none have a box there.
+func unionBBoxOnPage(bs []docling.Block, primary int) *model.BBox {
 	var union *model.BBox
 	for _, b := range bs {
 		if b.Page != primary || b.BBox == nil {
@@ -450,24 +516,7 @@ func spanForBlocks(bs []docling.Block, lastPage *int) model.Span {
 		union.R = maxF(union.R, mb.R)
 		union.B = maxF(union.B, mb.B)
 	}
-
-	if primary > 0 {
-		*lastPage = primary
-	}
-	if union != nil {
-		return model.Span{Kind: "region", Region: &model.RegionSpan{
-			StartPage: startPage,
-			EndPage:   endPage,
-			BBox:      union,
-			Section:   section,
-			Label:     label,
-		}}
-	}
-	page := primary
-	if page <= 0 {
-		page = *lastPage
-	}
-	return model.Span{Kind: "page", Page: page}
+	return union
 }
 
 func minF(a, b float64) float64 {

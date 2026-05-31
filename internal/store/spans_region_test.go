@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -38,21 +39,24 @@ func TestRegionSpanRoundTrip(t *testing.T) {
 	if out.Kind != "region" || out.Region == nil {
 		t.Fatalf("round-trip lost region: %+v", out)
 	}
-	r := out.Region
-	if r.StartPage != 3 || r.EndPage != 3 {
-		t.Errorf("page range = %d-%d, want 3-3", r.StartPage, r.EndPage)
+	assertRegionEquals(t, out.Region, in.Region)
+}
+
+// assertRegionEquals fails t when the round-tripped region differs from want in
+// any of its page range, bbox, section, or label fields.
+func assertRegionEquals(t *testing.T, got, want *model.RegionSpan) {
+	t.Helper()
+	if got.StartPage != want.StartPage || got.EndPage != want.EndPage {
+		t.Errorf("page range = %d-%d, want %d-%d", got.StartPage, got.EndPage, want.StartPage, want.EndPage)
 	}
-	if r.BBox == nil || r.BBox.L != 72 || r.BBox.T != 90.5 || r.BBox.R != 523 || r.BBox.B != 410.2 {
-		t.Errorf("bbox lost: %+v", r.BBox)
+	if got.BBox == nil || *got.BBox != *want.BBox {
+		t.Errorf("bbox = %+v, want %+v", got.BBox, want.BBox)
 	}
-	if r.BBox != nil && r.BBox.CoordOrigin != "TOPLEFT" {
-		t.Errorf("coord_origin = %q, want TOPLEFT", r.BBox.CoordOrigin)
+	if strings.Join(got.Section, "|") != strings.Join(want.Section, "|") {
+		t.Errorf("section = %v, want %v", got.Section, want.Section)
 	}
-	if len(r.Section) != 2 || r.Section[0] != "Results" || r.Section[1] != "3.1 Revenue" {
-		t.Errorf("section = %v, want [Results 3.1 Revenue]", r.Section)
-	}
-	if r.Label != "paragraph" {
-		t.Errorf("label = %q, want paragraph", r.Label)
+	if got.Label != want.Label {
+		t.Errorf("label = %q, want %q", got.Label, want.Label)
 	}
 }
 
@@ -103,7 +107,7 @@ func TestRegionSpanToRow_Rejects(t *testing.T) {
 // usable citation. Mirrors the spec's "treat as a page-level citation" rule.
 func TestRegionSpanFromRow_DegradesToPage(t *testing.T) {
 	for name, extra := range map[string]string{
-		"empty extra":   "",
+		"empty extra":    "",
 		"malformed json": "{not json",
 		"no bbox":        `{"section":["A"]}`,
 	} {
