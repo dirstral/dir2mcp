@@ -1,9 +1,10 @@
-package mcp
+package tests
 
 import (
 	"reflect"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -20,7 +21,7 @@ func TestBuildOpenFileSpan_Region(t *testing.T) {
 			Label:     "paragraph",
 		},
 	}
-	got := buildOpenFileSpan(span)
+	got := mcp.BuildOpenFileSpan(span)
 
 	if got["kind"] != "region" {
 		t.Fatalf("kind = %v, want region", got["kind"])
@@ -48,7 +49,7 @@ func TestBuildOpenFileSpan_Region(t *testing.T) {
 // bbox) degrades to a page span on the start page, and to the document variant
 // when no page is available, so clients always receive a usable citation.
 func TestBuildOpenFileSpan_RegionDegrades(t *testing.T) {
-	noBBox := buildOpenFileSpan(model.Span{
+	noBBox := mcp.BuildOpenFileSpan(model.Span{
 		Kind:   "region",
 		Region: &model.RegionSpan{StartPage: 5, EndPage: 5},
 	})
@@ -56,7 +57,7 @@ func TestBuildOpenFileSpan_RegionDegrades(t *testing.T) {
 		t.Errorf("no-bbox region = %+v, want page span on 5", noBBox)
 	}
 
-	empty := buildOpenFileSpan(model.Span{Kind: "region"})
+	empty := mcp.BuildOpenFileSpan(model.Span{Kind: "region"})
 	if empty["kind"] != "document" {
 		t.Errorf("payload-less region = %+v, want document variant", empty)
 	}
@@ -65,15 +66,15 @@ func TestBuildOpenFileSpan_RegionDegrades(t *testing.T) {
 // TestBuildOpenFileSpan_ScalarKindsUnchanged guards that adding region did not
 // disturb the existing kinds.
 func TestBuildOpenFileSpan_ScalarKindsUnchanged(t *testing.T) {
-	lines := buildOpenFileSpan(model.Span{Kind: "lines", StartLine: 12, EndLine: 48})
+	lines := mcp.BuildOpenFileSpan(model.Span{Kind: "lines", StartLine: 12, EndLine: 48})
 	if lines["kind"] != "lines" || lines["start_line"] != 12 || lines["end_line"] != 48 {
 		t.Errorf("lines span wrong: %+v", lines)
 	}
-	page := buildOpenFileSpan(model.Span{Kind: "page", Page: 7})
+	page := mcp.BuildOpenFileSpan(model.Span{Kind: "page", Page: 7})
 	if page["kind"] != "page" || page["page"] != 7 {
 		t.Errorf("page span wrong: %+v", page)
 	}
-	tm := buildOpenFileSpan(model.Span{Kind: "time", StartMS: 1000, EndMS: 5000})
+	tm := mcp.BuildOpenFileSpan(model.Span{Kind: "time", StartMS: 1000, EndMS: 5000})
 	if tm["kind"] != "time" || tm["start_ms"] != 1000 || tm["end_ms"] != 5000 {
 		t.Errorf("time span wrong: %+v", tm)
 	}

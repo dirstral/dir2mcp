@@ -130,11 +130,26 @@ func (d *doclingExtractor) Extract(ctx context.Context, relPath string, data []b
 	if err != nil {
 		return "", err
 	}
-	if doc, perr := docling.Parse([]byte(out)); perr == nil {
+	doc, perr := docling.Parse([]byte(out))
+	if perr == nil {
 		return docling.RenderMarkdown(doc.Linearize()), nil
 	}
-	// Not a DoclingDocument (custom --to md command): treat as flat Markdown.
+	// Output that looks like JSON but failed to parse is a structured-extraction
+	// failure (truncated/schema-drifted DoclingDocument); fail fast rather than
+	// persisting raw JSON as the representation. Genuinely non-JSON output is a
+	// custom flat-Markdown command (--to md), returned as-is.
+	if looksLikeJSON(out) {
+		return "", fmt.Errorf("parse structured docling output for %s: %w", relPath, perr)
+	}
 	return out, nil
+}
+
+// looksLikeJSON reports whether trimmed output begins with a JSON object or
+// array delimiter, used to distinguish a broken DoclingDocument from a
+// deliberate flat-Markdown command.
+func looksLikeJSON(out string) bool {
+	t := strings.TrimSpace(out)
+	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
 }
 
 // ExtractStructured runs the command and parses the structured DoclingDocument.

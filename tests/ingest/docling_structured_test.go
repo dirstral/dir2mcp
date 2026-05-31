@@ -2,12 +2,26 @@ package tests
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 )
+
+// requireDoclingIntegration gates the extractor tests that shell out to an
+// external command: they are skipped on Windows (POSIX-only `cat` stand-in) and
+// unless RUN_INTEGRATION_TESTS is set, per the repo's integration-test policy.
+func requireDoclingIntegration(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping POSIX-only command test on Windows")
+	}
+	if os.Getenv("RUN_INTEGRATION_TESTS") == "" {
+		t.Skip("set RUN_INTEGRATION_TESTS=1 to run integration tests")
+	}
+}
 
 // structuredJSON is a minimal DoclingDocument with a title, a section header,
 // and a paragraph carrying provenance, used to exercise the structured path
@@ -30,9 +44,7 @@ const structuredJSON = `{
 // emits DoclingDocument JSON; the extractor returns ordered blocks, rendered
 // Markdown, and the title.
 func TestDoclingExtractor_ExtractStructured(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping POSIX-only command test on Windows")
-	}
+	requireDoclingIntegration(t)
 	ex := ingest.NewDoclingExtractor("cat {input}")
 	res, err := ex.ExtractStructured(context.Background(), "doc.json", []byte(structuredJSON))
 	if err != nil {
@@ -71,9 +83,7 @@ func TestDoclingExtractor_ExtractStructured(t *testing.T) {
 // Extract entrypoint linearizes a DoclingDocument to Markdown (so the default
 // `--to json` command still yields Markdown for the extracted_markdown rep).
 func TestDoclingExtractor_Extract_RendersStructuredAsMarkdown(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping POSIX-only command test on Windows")
-	}
+	requireDoclingIntegration(t)
 	ex := ingest.NewDoclingExtractor("cat {input}")
 	md, err := ex.Extract(context.Background(), "doc.json", []byte(structuredJSON))
 	if err != nil {
@@ -91,9 +101,7 @@ func TestDoclingExtractor_Extract_RendersStructuredAsMarkdown(t *testing.T) {
 // TestDoclingExtractor_Extract_FlatFallback pins backward compatibility: a
 // custom command emitting non-JSON (flat Markdown) is returned verbatim.
 func TestDoclingExtractor_Extract_FlatFallback(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping POSIX-only command test on Windows")
-	}
+	requireDoclingIntegration(t)
 	ex := ingest.NewDoclingExtractor("cat {input}")
 	md, err := ex.Extract(context.Background(), "sample.md", []byte("# Plain markdown\n\nbody"))
 	if err != nil {

@@ -1374,6 +1374,18 @@ func regionSpanFromRow(start, end int, extraJSON string) model.Span {
 	return model.Span{Kind: "region", Region: &r}
 }
 
+// SpanToRow and SpanFromRow expose the span <-> row mapping for tests in the
+// tests/ tree (the repo keeps all test files there, per AGENTS.md). They are
+// thin wrappers over the unexported helpers and carry no behavior of their own.
+func SpanToRow(span model.Span) (kind string, start, end int, extraJSON string, err error) {
+	return spanToRow(span)
+}
+
+// SpanFromRow is the read-side counterpart to SpanToRow; see its doc.
+func SpanFromRow(kind string, start, end int, extraJSON string) model.Span {
+	return spanFromRow(kind, start, end, extraJSON)
+}
+
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
 	return s.markEmbeddingStatus(ctx, labels, "ok", "", "")
 }

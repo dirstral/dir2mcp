@@ -161,7 +161,14 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 			IndexKind:       indexKind,
 			EmbeddingStatus: "pending",
 		}
-		if _, err := st.InsertChunkWithSpans(ctx, chunk, []model.Span{seg.Span}); err != nil {
+		// A kind-less span carries no provenance (e.g. a structured chunk whose
+		// source elements exposed no page); persist the chunk with no span row
+		// rather than fabricating one.
+		var spans []model.Span
+		if strings.TrimSpace(seg.Span.Kind) != "" {
+			spans = []model.Span{seg.Span}
+		}
+		if _, err := st.InsertChunkWithSpans(ctx, chunk, spans); err != nil {
 			return fmt.Errorf("insert chunk %d: %w", i, err)
 		}
 	}
@@ -344,7 +351,8 @@ func newStructuredChunker() *structuredChunker {
 		maxChars:     maxChars,
 		overlapChars: overlapChars,
 		minChars:     minChars,
-		lastPage:     1,
+		// 0 = no page observed yet; spanForBlocks must not fabricate page 1.
+		lastPage: 0,
 	}
 }
 
@@ -433,9 +441,12 @@ func sameSection(a, b []string) bool {
 
 // spanForBlocks derives a span for a chunk from its source blocks: a region
 // span (page range + union bbox on the primary page + section) when a bounding
-// box is available, otherwise a page span on the primary (or last-known) page.
-// lastPage carries forward the most recent known page so blocks lacking
-// provenance still cite a plausible page rather than page 0.
+// box is available, otherwise a page span on the primary (or last-seen) page.
+// lastPage carries forward the most recent *observed* page (0 = none seen yet)
+// so a block lacking its own page still cites the surrounding page rather than a
+// fabricated page 1. When no page has ever been observed it returns a kind-less
+// span, which the chunk writer persists with no provenance row (spec: a region
+// citation degrades to page-level, never to a made-up page).
 func spanForBlocks(bs []docling.Block, lastPage *int) model.Span {
 	startPage, endPage, primary := blockPageRange(bs)
 	section, label := blockSectionLabel(bs)
@@ -456,6 +467,10 @@ func spanForBlocks(bs []docling.Block, lastPage *int) model.Span {
 	page := primary
 	if page <= 0 {
 		page = *lastPage
+	}
+	if page <= 0 {
+		// No page ever observed: emit no provenance rather than inventing one.
+		return model.Span{}
 	}
 	return model.Span{Kind: "page", Page: page}
 }

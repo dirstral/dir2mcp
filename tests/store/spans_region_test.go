@@ -1,14 +1,15 @@
-package store
+package tests
 
 import (
 	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// TestRegionSpanRoundTrip pins that a region span survives spanToRow ->
-// spanFromRow: page range comes back from start/end, and bbox/section/label
+// TestRegionSpanRoundTrip pins that a region span survives SpanToRow ->
+// SpanFromRow: the page range comes back from start/end, and bbox/section/label
 // come back from the extra_json payload (spec 0.9.0 §5.4).
 func TestRegionSpanRoundTrip(t *testing.T) {
 	in := model.Span{
@@ -16,17 +17,15 @@ func TestRegionSpanRoundTrip(t *testing.T) {
 		Region: &model.RegionSpan{
 			StartPage: 3,
 			EndPage:   3,
-			BBox: &model.BBox{
-				Page: 3, L: 72, T: 90.5, R: 523, B: 410.2, CoordOrigin: "TOPLEFT",
-			},
-			Section: []string{"Results", "3.1 Revenue"},
-			Label:   "paragraph",
+			BBox:      &model.BBox{Page: 3, L: 72, T: 90.5, R: 523, B: 410.2, CoordOrigin: "TOPLEFT"},
+			Section:   []string{"Results", "3.1 Revenue"},
+			Label:     "paragraph",
 		},
 	}
 
-	kind, start, end, extra, err := spanToRow(in)
+	kind, start, end, extra, err := store.SpanToRow(in)
 	if err != nil {
-		t.Fatalf("spanToRow: %v", err)
+		t.Fatalf("SpanToRow: %v", err)
 	}
 	if kind != "region" || start != 3 || end != 3 {
 		t.Fatalf("row = (%q,%d,%d), want (region,3,3)", kind, start, end)
@@ -35,7 +34,7 @@ func TestRegionSpanRoundTrip(t *testing.T) {
 		t.Fatal("region span must produce a non-empty extra_json payload")
 	}
 
-	out := spanFromRow(kind, start, end, extra)
+	out := store.SpanFromRow(kind, start, end, extra)
 	if out.Kind != "region" || out.Region == nil {
 		t.Fatalf("round-trip lost region: %+v", out)
 	}
@@ -71,11 +70,11 @@ func TestRegionSpanMultiPage(t *testing.T) {
 			BBox:      &model.BBox{Page: 4, L: 10, T: 20, R: 30, B: 40, CoordOrigin: "TOPLEFT"},
 		},
 	}
-	kind, start, end, extra, err := spanToRow(in)
+	kind, start, end, extra, err := store.SpanToRow(in)
 	if err != nil {
-		t.Fatalf("spanToRow: %v", err)
+		t.Fatalf("SpanToRow: %v", err)
 	}
-	out := spanFromRow(kind, start, end, extra)
+	out := store.SpanFromRow(kind, start, end, extra)
 	if out.Region == nil || out.Region.StartPage != 4 || out.Region.EndPage != 5 {
 		t.Fatalf("page range lost: %+v", out.Region)
 	}
@@ -84,7 +83,7 @@ func TestRegionSpanMultiPage(t *testing.T) {
 	}
 }
 
-// TestRegionSpanToRow_Rejects pins the validation guards in spanToRow.
+// TestRegionSpanToRow_Rejects pins the validation guards in SpanToRow.
 func TestRegionSpanToRow_Rejects(t *testing.T) {
 	cases := map[string]model.Span{
 		"missing region payload": {Kind: "region"},
@@ -94,7 +93,7 @@ func TestRegionSpanToRow_Rejects(t *testing.T) {
 	}
 	for name, span := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, _, _, _, err := spanToRow(span); err == nil {
+			if _, _, _, _, err := store.SpanToRow(span); err == nil {
 				t.Errorf("expected error for %q", name)
 			}
 		})
@@ -112,7 +111,7 @@ func TestRegionSpanFromRow_DegradesToPage(t *testing.T) {
 		"no bbox":        `{"section":["A"]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := spanFromRow("region", 7, 7, extra)
+			got := store.SpanFromRow("region", 7, 7, extra)
 			if got.Kind != "page" || got.Page != 7 {
 				t.Errorf("degraded span = %+v, want page span on page 7", got)
 			}
@@ -120,7 +119,7 @@ func TestRegionSpanFromRow_DegradesToPage(t *testing.T) {
 	}
 
 	// A region row with an unusable page range degrades to lines.
-	if got := spanFromRow("region", 0, 0, `{"bbox":{"page":1}}`); got.Kind != "lines" {
+	if got := store.SpanFromRow("region", 0, 0, `{"bbox":{"page":1}}`); got.Kind != "lines" {
 		t.Errorf("zero page range should degrade to lines, got %+v", got)
 	}
 }
@@ -134,14 +133,14 @@ func TestScalarSpansUnaffected(t *testing.T) {
 		{Kind: "time", StartMS: 1000, EndMS: 5000},
 	}
 	for _, in := range cases {
-		kind, start, end, extra, err := spanToRow(in)
+		kind, start, end, extra, err := store.SpanToRow(in)
 		if err != nil {
-			t.Fatalf("spanToRow(%+v): %v", in, err)
+			t.Fatalf("SpanToRow(%+v): %v", in, err)
 		}
 		if extra != "" {
 			t.Errorf("%s span must have empty extra_json, got %q", kind, extra)
 		}
-		out := spanFromRow(kind, start, end, extra)
+		out := store.SpanFromRow(kind, start, end, extra)
 		if out.Kind != in.Kind || out.Region != nil {
 			t.Errorf("round-trip changed %+v -> %+v", in, out)
 		}

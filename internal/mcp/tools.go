@@ -1970,6 +1970,13 @@ func inferDocType(relPath string) string {
 	}
 }
 
+// BuildOpenFileSpan exposes buildOpenFileSpan for tests in the tests/ tree
+// (the repo keeps all test files there, per AGENTS.md). It is a thin wrapper
+// with no behavior of its own.
+func BuildOpenFileSpan(span model.Span) map[string]interface{} {
+	return buildOpenFileSpan(span)
+}
+
 func buildOpenFileSpan(span model.Span) map[string]interface{} {
 	kind := strings.TrimSpace(span.Kind)
 	switch kind {
@@ -2269,6 +2276,41 @@ func spanDefinitionSchema() map[string]interface{} {
 					"end_ms":   map[string]interface{}{"type": "integer"},
 				},
 				"required": []string{"kind", "start_ms", "end_ms"},
+			},
+			map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"kind":       map[string]interface{}{"const": "region"},
+					"start_page": map[string]interface{}{"type": "integer"},
+					"end_page":   map[string]interface{}{"type": "integer"},
+					"bbox": map[string]interface{}{
+						"type":                 "object",
+						"additionalProperties": false,
+						"properties": map[string]interface{}{
+							"page":         map[string]interface{}{"type": "integer"},
+							"l":            map[string]interface{}{"type": "number"},
+							"t":            map[string]interface{}{"type": "number"},
+							"r":            map[string]interface{}{"type": "number"},
+							"b":            map[string]interface{}{"type": "number"},
+							"coord_origin": map[string]interface{}{"type": "string"},
+						},
+						"required": []string{"page", "l", "t", "r", "b", "coord_origin"},
+					},
+					"section": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"required": []string{"kind", "start_page", "end_page", "bbox", "section"},
+			},
+			map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"kind": map[string]interface{}{"const": "document"},
+				},
+				"required": []string{"kind"},
 			},
 		},
 	}

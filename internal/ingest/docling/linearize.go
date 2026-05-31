@@ -278,7 +278,13 @@ func (w *walker) captionText(refs []*refItem) string {
 	var parts []string
 	for _, r := range refs {
 		if t := w.doc.resolveText(r.target()); t != nil {
-			if s := strings.TrimSpace(t.Text); s != "" {
+			// Mirror emitText's Text-or-Orig fallback so captions are not lost
+			// when docling populates only orig.
+			s := strings.TrimSpace(t.Text)
+			if s == "" {
+				s = strings.TrimSpace(t.Orig)
+			}
+			if s != "" {
 				parts = append(parts, s)
 				w.seen[r.target()] = true // don't also emit the caption standalone
 			}
