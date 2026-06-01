@@ -130,6 +130,12 @@ type Config struct {
 	IngestAudioMode      string
 	IngestArchivesMode   string
 	IngestExtractor      string
+	// IngestWatch enables a filesystem watcher so a running server keeps
+	// indexing added/changed/deleted files after the initial scan. Opt-in.
+	IngestWatch bool
+	// IngestWatchDebounce coalesces editor write bursts: a path is processed
+	// once it has been quiet for this long.
+	IngestWatchDebounce time.Duration
 
 	STTProvider               string
 	STTMistralModel           string
@@ -202,6 +208,8 @@ type fileConfig struct {
 	IngestAudioMode           *string
 	IngestArchivesMode        *string
 	IngestExtractor           *string
+	IngestWatch               *bool
+	IngestWatchDebounce       *time.Duration
 	STTProvider               *string
 	STTMistralModel           *string
 	STTElevenLabsModel        *string
@@ -248,37 +256,39 @@ type persistedConfig struct {
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
 	HealthCheckInterval      time.Duration `yaml:"health_check_interval"`
 
-	ElevenLabsBaseURL         string   `yaml:"elevenlabs_base_url"`
-	ElevenLabsTTSVoiceID      string   `yaml:"elevenlabs_tts_voice_id"`
-	AllowedOrigins            []string `yaml:"allowed_origins"`
-	RAGSystemPrompt           string   `yaml:"rag_system_prompt"`
-	RAGGenerateAnswer         bool     `yaml:"rag_generate_answer"`
-	RAGKDefault               int      `yaml:"rag_k_default"`
-	RAGMaxContextChars        int      `yaml:"rag_max_context_chars"`
-	RAGOversampleFactor       int      `yaml:"rag_oversample_factor"`
-	RetrievalHybridEnabled    bool     `yaml:"retrieval_hybrid_enabled"`
-	RerankEnabled             bool     `yaml:"rerank_enabled"`
-	RerankProvider            string   `yaml:"rerank_provider"`
-	CohereBaseURL             string   `yaml:"cohere_base_url"`
-	RerankModel               string   `yaml:"rerank_model"`
-	RerankCandidatePool       int      `yaml:"rerank_candidate_pool"`
-	ChunkingStrategy          string   `yaml:"chunking_strategy"`
-	ChunkingMaxTokens         int      `yaml:"chunking_max_tokens"`
-	ChunkingOverlapTokens     int      `yaml:"chunking_overlap_tokens"`
-	IngestGitignore           bool     `yaml:"ingest_gitignore"`
-	IngestFollowSymlinks      bool     `yaml:"ingest_follow_symlinks"`
-	IngestMaxFileMB           int      `yaml:"ingest_max_file_mb"`
-	IngestPDFMode             string   `yaml:"ingest_pdf_mode"`
-	IngestImagesMode          string   `yaml:"ingest_images_mode"`
-	IngestAudioMode           string   `yaml:"ingest_audio_mode"`
-	IngestArchivesMode        string   `yaml:"ingest_archives_mode"`
-	IngestExtractor           string   `yaml:"ingest_extractor"`
-	STTProvider               string   `yaml:"stt_provider"`
-	STTMistralModel           string   `yaml:"stt_mistral_model"`
-	STTElevenLabsModel        string   `yaml:"stt_elevenlabs_model"`
-	STTElevenLabsLanguageCode string   `yaml:"stt_elevenlabs_language_code"`
-	ServerTLSCertFile         string   `yaml:"server_tls_cert_file"`
-	ServerTLSKeyFile          string   `yaml:"server_tls_key_file"`
+	ElevenLabsBaseURL         string        `yaml:"elevenlabs_base_url"`
+	ElevenLabsTTSVoiceID      string        `yaml:"elevenlabs_tts_voice_id"`
+	AllowedOrigins            []string      `yaml:"allowed_origins"`
+	RAGSystemPrompt           string        `yaml:"rag_system_prompt"`
+	RAGGenerateAnswer         bool          `yaml:"rag_generate_answer"`
+	RAGKDefault               int           `yaml:"rag_k_default"`
+	RAGMaxContextChars        int           `yaml:"rag_max_context_chars"`
+	RAGOversampleFactor       int           `yaml:"rag_oversample_factor"`
+	RetrievalHybridEnabled    bool          `yaml:"retrieval_hybrid_enabled"`
+	RerankEnabled             bool          `yaml:"rerank_enabled"`
+	RerankProvider            string        `yaml:"rerank_provider"`
+	CohereBaseURL             string        `yaml:"cohere_base_url"`
+	RerankModel               string        `yaml:"rerank_model"`
+	RerankCandidatePool       int           `yaml:"rerank_candidate_pool"`
+	ChunkingStrategy          string        `yaml:"chunking_strategy"`
+	ChunkingMaxTokens         int           `yaml:"chunking_max_tokens"`
+	ChunkingOverlapTokens     int           `yaml:"chunking_overlap_tokens"`
+	IngestGitignore           bool          `yaml:"ingest_gitignore"`
+	IngestFollowSymlinks      bool          `yaml:"ingest_follow_symlinks"`
+	IngestMaxFileMB           int           `yaml:"ingest_max_file_mb"`
+	IngestPDFMode             string        `yaml:"ingest_pdf_mode"`
+	IngestImagesMode          string        `yaml:"ingest_images_mode"`
+	IngestAudioMode           string        `yaml:"ingest_audio_mode"`
+	IngestArchivesMode        string        `yaml:"ingest_archives_mode"`
+	IngestExtractor           string        `yaml:"ingest_extractor"`
+	IngestWatch               bool          `yaml:"ingest_watch"`
+	IngestWatchDebounce       time.Duration `yaml:"ingest_watch_debounce"`
+	STTProvider               string        `yaml:"stt_provider"`
+	STTMistralModel           string        `yaml:"stt_mistral_model"`
+	STTElevenLabsModel        string        `yaml:"stt_elevenlabs_model"`
+	STTElevenLabsLanguageCode string        `yaml:"stt_elevenlabs_language_code"`
+	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
+	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
 	// The following fields configure optional x402 payment gating.  The
 	// facilitator token itself is treated like any other sensitive API key:
@@ -370,6 +380,8 @@ func Default() Config {
 		IngestAudioMode:           "auto",
 		IngestArchivesMode:        "deep",
 		IngestExtractor:           "auto",
+		IngestWatch:               false,
+		IngestWatchDebounce:       500 * time.Millisecond,
 		STTProvider:               "mistral",
 		STTMistralModel:           "voxtral-mini-latest",
 		STTElevenLabsModel:        "scribe_v1",
@@ -454,6 +466,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestAudioMode:           cfg.IngestAudioMode,
 		IngestArchivesMode:        cfg.IngestArchivesMode,
 		IngestExtractor:           cfg.IngestExtractor,
+		IngestWatch:               cfg.IngestWatch,
+		IngestWatchDebounce:       cfg.IngestWatchDebounce,
 		STTProvider:               cfg.STTProvider,
 		STTMistralModel:           cfg.STTMistralModel,
 		STTElevenLabsModel:        cfg.STTElevenLabsModel,
@@ -976,6 +990,12 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestExtractor != nil {
 		cfg.IngestExtractor = *fc.IngestExtractor
 	}
+	if fc.IngestWatch != nil {
+		cfg.IngestWatch = *fc.IngestWatch
+	}
+	if fc.IngestWatchDebounce != nil {
+		cfg.IngestWatchDebounce = *fc.IngestWatchDebounce
+	}
 }
 
 // applySTTFileParsed copies the set speech-to-text file fields
@@ -1330,6 +1350,8 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.IngestGitignore
 	case "ingest.follow_symlinks":
 		target = &cfg.IngestFollowSymlinks
+	case "ingest.watch":
+		target = &cfg.IngestWatch
 	case "x402_tools_call_enabled":
 		target = &cfg.X402ToolsCallEnabled
 	case "retrieval.hybrid.enabled":
@@ -1394,6 +1416,8 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.SessionMaxLifetime
 	case "health_check_interval":
 		target = &cfg.HealthCheckInterval
+	case "ingest.watch_debounce":
+		target = &cfg.IngestWatchDebounce
 	default:
 		return nil
 	}
@@ -1648,6 +1672,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_audio_mode", cfg.IngestAudioMode)
 	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
 	writeScalar("ingest_extractor", cfg.IngestExtractor)
+	writeBool("ingest_watch", cfg.IngestWatch)
+	writeScalar("ingest_watch_debounce", cfg.IngestWatchDebounce.String())
 	writeScalar("stt_provider", cfg.STTProvider)
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
@@ -1749,6 +1775,14 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	}
 	if raw, ok := envLookup("DIR2MCP_INGEST_EXTRACTOR", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.IngestExtractor = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH", env); ok && strings.TrimSpace(raw) != "" {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			cfg.IngestWatch = parsed
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH_DEBOUNCE", env); ok && strings.TrimSpace(raw) != "" {
+		applyDurationEnvField(cfg, raw, "DIR2MCP_INGEST_WATCH_DEBOUNCE", &cfg.IngestWatchDebounce)
 	}
 	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_HYBRID_ENABLED", env); ok && strings.TrimSpace(raw) != "" {
 		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
@@ -1965,6 +1999,9 @@ func (c *Config) validateNumericBounds() error {
 	}
 	if c.HealthCheckInterval < 0 {
 		return fmt.Errorf("health_check_interval must be non-negative: %v", c.HealthCheckInterval)
+	}
+	if c.IngestWatchDebounce < 0 {
+		return fmt.Errorf("ingest.watch_debounce must be non-negative: %v", c.IngestWatchDebounce)
 	}
 	if c.RAGMaxContextChars < 0 {
 		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)

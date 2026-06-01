@@ -182,6 +182,8 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"    mode: deep\n"+
 		"  follow_symlinks: true\n"+
 		"  max_file_mb: 42\n"+
+		"  watch: true\n"+
+		"  watch_debounce: 2s\n"+
 		"stt:\n"+
 		"  provider: elevenlabs\n"+
 		"  mistral:\n"+
@@ -239,6 +241,12 @@ func assertNestedIngestFields(t *testing.T, cfg config.Config) {
 	}
 	if cfg.DoclingCommand != "docling --to md --output - {input}" {
 		t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)
+	}
+	if !cfg.IngestWatch {
+		t.Fatal("expected IngestWatch=true")
+	}
+	if cfg.IngestWatchDebounce != 2*time.Second {
+		t.Fatalf("IngestWatchDebounce=%v", cfg.IngestWatchDebounce)
 	}
 }
 
