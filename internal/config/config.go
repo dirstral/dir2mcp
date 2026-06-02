@@ -1259,6 +1259,8 @@ var configKeyAliases = map[string]string{
 	"follow_symlinks":                      "ingest.follow_symlinks",
 	"ingest_max_file_mb":                   "ingest.max_file_mb",
 	"max_file_mb":                          "ingest.max_file_mb",
+	"ingest_watch":                         "ingest.watch",
+	"ingest_watch_debounce":                "ingest.watch_debounce",
 	"ingest_pdf_mode":                      "ingest.pdf.mode",
 	"pdf_mode":                             "ingest.pdf.mode",
 	"ingest_images_mode":                   "ingest.images.mode",

@@ -548,7 +548,13 @@ type watchable interface {
 func startWatchWorker(runCtx context.Context, readOnly, enabled bool, ing interface {
 	Run(context.Context) error
 }, stderr io.Writer) {
-	if readOnly || !enabled {
+	if !enabled {
+		return
+	}
+	if readOnly {
+		// Don't leave the knob silently inert — tell the operator continuous
+		// sync is disabled because the server is read-only.
+		_, _ = fmt.Fprintln(stderr, "warning: ingest.watch is enabled but ignored in read-only mode; continuous indexing is disabled")
 		return
 	}
 	w, ok := ing.(watchable)
