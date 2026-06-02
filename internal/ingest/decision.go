@@ -35,8 +35,21 @@ type ExtractorDecision struct {
 // DocumentExtractorFromConfig so the banner reflects what the runtime
 // will actually use. For docling-serve, availability includes endpoint
 // reachability per spec 0.10.0 §7.4.B.
+//
+// This convenience form uses a background context; the docling-serve
+// reachability probe it may run is therefore uncancellable and can block
+// for up to the probe timeout. Hot paths that already hold a request
+// context (e.g. MCP tool handlers) should call
+// DescribeDocumentExtractorContext instead.
 func DescribeDocumentExtractor(cfg config.Config) ExtractorDecision {
 	return describeDocumentExtractor(context.Background(), cfg)
+}
+
+// DescribeDocumentExtractorContext is DescribeDocumentExtractor with a
+// caller-provided context so the docling-serve reachability probe honours
+// cancellation and deadlines.
+func DescribeDocumentExtractorContext(ctx context.Context, cfg config.Config) ExtractorDecision {
+	return describeDocumentExtractor(ctx, cfg)
 }
 
 func describeDocumentExtractor(ctx context.Context, cfg config.Config) ExtractorDecision {

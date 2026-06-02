@@ -71,9 +71,11 @@ func TestDoclingServeExtractor_Extract_ParsesJSONContent(t *testing.T) {
 }
 
 func TestDoclingServeExtractor_Extract_ErrorsOnNon200(t *testing.T) {
-	const secretMarker = "SECRET-LEAK-token-abc123"
+	// A neutral, non-credential-shaped sentinel so secret scanners don't flag
+	// this fixture; it still stands in for an untrusted, must-not-leak body.
+	const responseBodyMarker = "do-not-echo-this-response-body"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, secretMarker, http.StatusInternalServerError)
+		http.Error(w, responseBodyMarker, http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
@@ -84,8 +86,32 @@ func TestDoclingServeExtractor_Extract_ErrorsOnNon200(t *testing.T) {
 	}
 	// The error is persisted as Document.ErrorMessage — it must not echo the
 	// (untrusted) response body.
-	if strings.Contains(err.Error(), secretMarker) {
+	if strings.Contains(err.Error(), responseBodyMarker) {
 		t.Errorf("error leaked response body: %v", err)
+	}
+}
+
+func TestDoclingServeExtractor_PreservesQueryWhenJoiningPath(t *testing.T) {
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"success","document":{"json_content":`+servedDoc+`}}`)
+	}))
+	defer srv.Close()
+
+	// A serve_url carrying a routing/auth query must still hit the convert path
+	// (not "?token=secret/v1/convert/file") and keep the query on the wire.
+	ext := ingest.NewDoclingServeExtractor(srv.URL + "/?token=secret")
+	if _, err := ext.Extract(context.Background(), "report.pdf", []byte("x")); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if gotPath != "/v1/convert/file" {
+		t.Errorf("convert path = %q, want /v1/convert/file", gotPath)
+	}
+	if gotQuery != "token=secret" {
+		t.Errorf("query = %q, want token=secret preserved on the wire", gotQuery)
 	}
 }
 

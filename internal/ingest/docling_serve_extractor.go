@@ -78,7 +78,7 @@ func (d *doclingServeExtractor) buildConvertRequest(ctx context.Context, relPath
 		return nil, fmt.Errorf("finalize docling-serve request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.baseURL+doclingServeConvertPath, &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, joinServeURL(d.baseURL, doclingServeConvertPath), &body)
 	if err != nil {
 		return nil, fmt.Errorf("create docling-serve request: %w", err)
 	}
@@ -169,7 +169,7 @@ func ProbeDoclingServe(ctx context.Context, baseURL string) error {
 	if base == "" {
 		return fmt.Errorf("endpoint is not configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+doclingServeReadyPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinServeURL(base, doclingServeReadyPath), nil)
 	if err != nil {
 		return err
 	}
@@ -183,6 +183,21 @@ func ProbeDoclingServe(ctx context.Context, baseURL string) error {
 		return fmt.Errorf("health check returned HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// joinServeURL appends apiPath to base's path while preserving any userinfo and
+// query string (which a deployment may use to carry auth or signed routing
+// params). Plain concatenation would corrupt such URLs — for
+// "http://h/?token=x" it would yield "http://h/?token=x/v1/convert/file", so
+// the path lands inside the query. Falls back to concatenation only when base
+// is unparseable, which the caller's own validation already rejects upstream.
+func joinServeURL(base, apiPath string) string {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return base + apiPath
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + apiPath
+	return u.String()
 }
 
 // SanitizeServeURL reduces a docling-serve endpoint to scheme://host/path,

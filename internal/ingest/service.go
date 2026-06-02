@@ -226,8 +226,18 @@ func buildTranscriber(prof provider.Profile) (model.Transcriber, error) {
 // Priority: configured docling command, auto-detected docling binary, then
 // Mistral OCR (via the provider model). Selection mirrors
 // DescribeDocumentExtractor so the diagnostic banner is always in sync.
+//
+// It uses a background context for any reachability probe; callers on hot
+// paths that hold a request context should use
+// DocumentExtractorFromConfigContext so the probe is cancellable.
 func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
-	decision := DescribeDocumentExtractor(cfg)
+	return DocumentExtractorFromConfigContext(context.Background(), cfg)
+}
+
+// DocumentExtractorFromConfigContext is DocumentExtractorFromConfig with a
+// caller-provided context, threaded into the docling-serve reachability probe.
+func DocumentExtractorFromConfigContext(ctx context.Context, cfg config.Config) model.DocumentExtractor {
+	decision := DescribeDocumentExtractorContext(ctx, cfg)
 	switch decision.Name {
 	case "docling":
 		tpl := strings.TrimSpace(cfg.DoclingCommand)

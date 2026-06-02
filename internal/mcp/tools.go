@@ -1738,7 +1738,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 			}
 		}
-		extractor := ingest.DocumentExtractorFromConfig(s.cfg)
+		extractor := ingest.DocumentExtractorFromConfigContext(ctx, s.cfg)
 		if extractor == nil {
 			return "", "", &toolExecutionError{
 				Code:      "CONFIG_INVALID",
