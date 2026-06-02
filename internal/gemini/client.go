@@ -15,23 +15,26 @@
 // mapped onto `taskType` (RETRIEVAL_DOCUMENT / RETRIEVAL_QUERY, and
 // CODE_RETRIEVAL_QUERY for a query against the configured code model).
 //
-// TODO(spec 8.1.2): native Gemini STT/TTS. The capability matrix marks
-// `gemini` as stt ✅ tts ✅, but this adapter implements embed + chat
-// only. Audio (model.Transcriber / TTS) is deferred to a follow-up PR
-// and is intentionally not implemented here.
+// STT (model.Transcriber) and TTS use the native
+// models/{model}:generateContent surface too (SPEC 8.2/8.3): STT sends the
+// audio as an inline-data part; TTS requests responseModalities:[AUDIO]
+// with a speechConfig voice and WAV-wraps the returned PCM. Gemini's
+// OpenAI-compatible layer exposes no /v1/audio/*, so only chat rides it.
 package gemini
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
-	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +64,11 @@ const (
 	DefaultSTTModel   = "gemini-2.5-flash"
 	DefaultTTSModel   = "gemini-2.5-flash-preview-tts"
 	DefaultTTSVoice   = "Kore"
+
+	// geminiTTSSampleRate is the sample rate of Gemini's TTS PCM output
+	// (signed 16-bit little-endian, mono); used to build the WAV header
+	// when the response mimeType omits an explicit rate.
+	geminiTTSSampleRate = 24000
 )
 
 // Client is a Gemini adapter that speaks the OpenAI-compatible wire
@@ -93,8 +101,11 @@ type Client struct {
 	EmbedCodeDim     int
 	DefaultChatModel string
 	DefaultSTTModel  string
-	DefaultTTSModel  string
-	DefaultTTSVoice  string
+	// DefaultSTTLanguage is an optional language hint included in the
+	// transcription prompt (SPEC 8.2 stt_language); empty omits it.
+	DefaultSTTLanguage string
+	DefaultTTSModel    string
+	DefaultTTSVoice    string
 }
 
 // compile-time assertions that *Client implements the model contracts.
@@ -466,12 +477,56 @@ func contentToText(raw json.RawMessage) string {
 	return ""
 }
 
-type transcriptionResponse struct {
-	Text string `json:"text"`
+// Native generateContent request/response shapes, shared by STT and TTS.
+// Gemini's OpenAI-compatible layer exposes no /v1/audio/*, so audio uses
+// models/{model}:generateContent (SPEC 8.2/8.3).
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // base64
 }
 
-// Transcribe implements model.Transcriber via {base}/audio/transcriptions
-// on Gemini's OpenAI-compatible endpoint (SPEC 8.1.2 gemini stt).
+type geminiPart struct {
+	Text       string            `json:"text,omitempty"`
+	InlineData *geminiInlineData `json:"inlineData,omitempty"`
+}
+
+type geminiContent struct {
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiPrebuiltVoice struct {
+	VoiceName string `json:"voiceName"`
+}
+
+type geminiVoiceConfig struct {
+	PrebuiltVoiceConfig geminiPrebuiltVoice `json:"prebuiltVoiceConfig"`
+}
+
+type geminiSpeechConfig struct {
+	VoiceConfig geminiVoiceConfig `json:"voiceConfig"`
+}
+
+type geminiGenerationConfig struct {
+	ResponseModalities []string            `json:"responseModalities,omitempty"`
+	SpeechConfig       *geminiSpeechConfig `json:"speechConfig,omitempty"`
+}
+
+type geminiGenerateRequest struct {
+	Contents         []geminiContent         `json:"contents"`
+	GenerationConfig *geminiGenerationConfig `json:"generationConfig,omitempty"`
+}
+
+type geminiGenerateResponse struct {
+	Candidates []struct {
+		Content geminiContent `json:"content"`
+	} `json:"candidates"`
+}
+
+// Transcribe implements model.Transcriber via the native
+// models/{model}:generateContent surface: the audio is sent as an inline
+// data part with a transcription instruction, and the model's text output
+// is the transcript (SPEC 8.2). Gemini's OpenAI-compatible layer has no
+// /v1/audio/transcriptions.
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return "", &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
@@ -493,55 +548,56 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 }
 
 func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte, sttModel string, timeout time.Duration) (string, error) {
-	name := strings.TrimSpace(filepath.Base(relPath))
-	if name == "" || name == "." || name == string(filepath.Separator) {
-		name = "audio.wav"
+	prompt := "Generate a verbatim transcript of the speech in this audio. Return only the transcript text, with no commentary, labels, or timestamps."
+	if lang := strings.TrimSpace(c.DefaultSTTLanguage); lang != "" {
+		prompt += " The audio language is " + lang + "."
 	}
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	ff, err := w.CreateFormFile("file", name)
-	if err == nil {
-		_, err = ff.Write(data)
-	}
-	if err == nil {
-		err = w.WriteField("model", sttModel)
-	}
-	if err == nil {
-		err = w.Close()
-	}
+	body, err := json.Marshal(geminiGenerateRequest{
+		Contents: []geminiContent{{Parts: []geminiPart{
+			{Text: prompt},
+			{InlineData: &geminiInlineData{MimeType: audioMIMEType(relPath), Data: base64.StdEncoding.EncodeToString(data)}},
+		}}},
+	})
 	if err != nil {
-		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to build transcription body", Retryable: false, Cause: err}
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to marshal transcription request", Retryable: false, Cause: err}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/audio/transcriptions", bytes.NewReader(buf.Bytes()))
+	resp, err := c.doNativeJSON(ctx, "/models/"+sttModel+":generateContent", body, timeout)
 	if err != nil {
-		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to build transcription request", Retryable: false, Cause: err}
-	}
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	resp, err := clientWithTimeout(c.HTTPClient, timeout).Do(req)
-	if err != nil {
-		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
+		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", httpError(resp)
 	}
-	var parsed transcriptionResponse
+	var parsed geminiGenerateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode transcription response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
-	return strings.TrimSpace(parsed.Text), nil
+	text := strings.TrimSpace(firstCandidateText(parsed))
+	if text == "" {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription response had no text", Retryable: false, StatusCode: resp.StatusCode}
+	}
+	return text, nil
 }
 
-type speechRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
-	Voice string `json:"voice"`
+// firstCandidateText concatenates the text parts of the first candidate.
+func firstCandidateText(r geminiGenerateResponse) string {
+	if len(r.Candidates) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range r.Candidates[0].Content.Parts {
+		b.WriteString(p.Text)
+	}
+	return b.String()
 }
 
 // Synthesize implements the optional TTS surface (mcp.TTSSynthesizer
-// shape) via {base}/audio/speech, returning raw audio bytes. TTS is
-// fail-open per SPEC 8.3.
+// shape) via the native models/{model}:generateContent surface with
+// responseModalities:[AUDIO] + a speechConfig voice (SPEC 8.3). Gemini
+// returns raw PCM (s16le, 24kHz, mono); it is WAV-wrapped so the bytes are
+// directly playable, matching the other TTS adapters. TTS is fail-open
+// per SPEC 8.3.
 func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return nil, &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
@@ -561,12 +617,18 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	if timeout <= 0 {
 		timeout = defaultGenerationTimeout
 	}
-	body, err := json.Marshal(speechRequest{Model: ttsModel, Input: text, Voice: voice})
+	body, err := json.Marshal(geminiGenerateRequest{
+		Contents: []geminiContent{{Parts: []geminiPart{{Text: text}}}},
+		GenerationConfig: &geminiGenerationConfig{
+			ResponseModalities: []string{"AUDIO"},
+			SpeechConfig:       &geminiSpeechConfig{VoiceConfig: geminiVoiceConfig{PrebuiltVoiceConfig: geminiPrebuiltVoice{VoiceName: voice}}},
+		},
+	})
 	if err != nil {
 		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to marshal tts request", Retryable: false, Cause: err}
 	}
 	return retryAudio(ctx, c, func() ([]byte, error) {
-		resp, err := c.doJSON(ctx, "/audio/speech", body, timeout)
+		resp, err := c.doNativeJSON(ctx, "/models/"+ttsModel+":generateContent", body, timeout)
 		if err != nil {
 			return nil, err
 		}
@@ -574,15 +636,100 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, httpError(resp)
 		}
-		audio, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to read tts audio", Retryable: true, Cause: rerr}
+		var parsed geminiGenerateResponse
+		if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode tts response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 		}
-		if len(audio) == 0 {
-			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts returned no audio", Retryable: false, StatusCode: resp.StatusCode}
+		pcm, rate, perr := firstAudioPart(parsed)
+		if perr != nil {
+			return nil, perr
 		}
-		return audio, nil
+		return wavWrapPCM16(pcm, rate), nil
 	})
+}
+
+// firstAudioPart returns the decoded PCM bytes and sample rate from the
+// first inline-audio part of the first candidate. The sample rate is
+// parsed from the part's mimeType (e.g. "audio/L16;rate=24000"),
+// defaulting to geminiTTSSampleRate.
+func firstAudioPart(r geminiGenerateResponse) ([]byte, int, error) {
+	if len(r.Candidates) == 0 {
+		return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts response had no candidates", Retryable: false}
+	}
+	for _, p := range r.Candidates[0].Content.Parts {
+		if p.InlineData == nil || p.InlineData.Data == "" {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(p.InlineData.Data)
+		if err != nil {
+			return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode tts audio", Retryable: false, Cause: err}
+		}
+		return raw, sampleRateFromMIME(p.InlineData.MimeType), nil
+	}
+	return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts response had no audio", Retryable: false}
+}
+
+// audioMIMEType maps a file extension to a Gemini-accepted audio MIME
+// type, defaulting to audio/wav for unknown/empty extensions.
+func audioMIMEType(relPath string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(relPath), ".")) {
+	case "mp3":
+		return "audio/mp3"
+	case "aiff", "aif":
+		return "audio/aiff"
+	case "aac":
+		return "audio/aac"
+	case "ogg", "oga":
+		return "audio/ogg"
+	case "flac":
+		return "audio/flac"
+	case "m4a", "mp4":
+		return "audio/mp4"
+	default:
+		return "audio/wav"
+	}
+}
+
+// sampleRateFromMIME extracts the rate from a PCM mime type like
+// "audio/L16;rate=24000"; defaults to geminiTTSSampleRate.
+func sampleRateFromMIME(mime string) int {
+	for _, seg := range strings.Split(mime, ";") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(seg), "rate="); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return geminiTTSSampleRate
+}
+
+// wavWrapPCM16 wraps raw signed-16-bit little-endian mono PCM in a minimal
+// RIFF/WAVE container so the bytes are directly playable (SPEC 8.3) —
+// Gemini returns headerless PCM, while every other TTS adapter returns a
+// self-describing container.
+func wavWrapPCM16(pcm []byte, sampleRate int) []byte {
+	if sampleRate <= 0 {
+		sampleRate = geminiTTSSampleRate
+	}
+	const numChannels, bitsPerSample = 1, 16
+	byteRate := sampleRate * numChannels * bitsPerSample / 8
+	blockAlign := numChannels * bitsPerSample / 8
+	var buf bytes.Buffer
+	buf.WriteString("RIFF")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(36+len(pcm)))
+	buf.WriteString("WAVE")
+	buf.WriteString("fmt ")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(16)) // PCM fmt chunk size
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))  // audio format = PCM
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(numChannels))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(byteRate))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(blockAlign))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(bitsPerSample))
+	buf.WriteString("data")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(pcm)))
+	buf.Write(pcm)
+	return buf.Bytes()
 }
 
 // retryAudio runs op with the client's bounded exponential backoff,

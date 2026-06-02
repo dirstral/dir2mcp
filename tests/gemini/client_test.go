@@ -1,7 +1,10 @@
 package tests
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -423,30 +426,179 @@ func TestNonRetryableStopsImmediately(t *testing.T) {
 	}
 }
 
-func TestTranscribeAndSynthesize(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/audio/transcriptions":
-			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "multipart/form-data") {
-				t.Errorf("transcribe content-type = %q", ct)
+// nativeGenContentReq is the native generateContent request shape (subset).
+type nativeGenContentReq struct {
+	Contents []struct {
+		Parts []struct {
+			Text       string `json:"text"`
+			InlineData *struct {
+				MimeType string `json:"mimeType"`
+				Data     string `json:"data"`
+			} `json:"inlineData"`
+		} `json:"parts"`
+	} `json:"contents"`
+	GenerationConfig struct {
+		ResponseModalities []string `json:"responseModalities"`
+		SpeechConfig       struct {
+			VoiceConfig struct {
+				PrebuiltVoiceConfig struct {
+					VoiceName string `json:"voiceName"`
+				} `json:"prebuiltVoiceConfig"`
+			} `json:"voiceConfig"`
+		} `json:"speechConfig"`
+	} `json:"generationConfig"`
+}
+
+// TestTranscribe_NativeGenerateContent verifies STT uses the native
+// generateContent surface: correct path + x-goog-api-key auth, audio sent
+// as an inline-data part with the extension-derived MIME type, and the
+// candidate text returned as the transcript (SPEC 8.2).
+func TestTranscribe_NativeGenerateContent(t *testing.T) {
+	for _, tc := range []struct{ file, wantMime string }{
+		{"a.wav", "audio/wav"},
+		{"a.mp3", "audio/mp3"},
+		{"a.flac", "audio/flac"},
+		{"noext", "audio/wav"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			var gotPath, gotKey, gotMime, gotData, gotPrompt string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotKey = r.URL.Path, r.Header.Get("x-goog-api-key")
+				var req nativeGenContentReq
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				for _, p := range req.Contents[0].Parts {
+					if p.Text != "" {
+						gotPrompt = p.Text
+					}
+					if p.InlineData != nil {
+						gotMime, gotData = p.InlineData.MimeType, p.InlineData.Data
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"candidates": []map[string]any{{"content": map[string]any{
+						"parts": []map[string]any{{"text": "hello transcript"}},
+					}}},
+				})
+			}))
+			defer srv.Close()
+
+			c := newClient(srv.URL)
+			txt, err := c.Transcribe(context.Background(), tc.file, []byte("pcm"))
+			if err != nil || txt != "hello transcript" {
+				t.Fatalf("Transcribe = %q, %v", txt, err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"text": "hello transcript"})
-		case "/audio/speech":
-			_, _ = w.Write([]byte("AUDIOBYTES"))
-		default:
-			t.Errorf("unexpected path %s", r.URL.Path)
-		}
+			if want := "/models/gemini-2.5-flash:generateContent"; gotPath != want {
+				t.Errorf("path = %q, want %q", gotPath, want)
+			}
+			if gotKey != "test-key" {
+				t.Errorf("api key header = %q, want test-key", gotKey)
+			}
+			if gotMime != tc.wantMime {
+				t.Errorf("mime = %q, want %q", gotMime, tc.wantMime)
+			}
+			if dec, _ := base64.StdEncoding.DecodeString(gotData); string(dec) != "pcm" {
+				t.Errorf("inline audio = %q, want base64(pcm)", gotData)
+			}
+			if !strings.Contains(strings.ToLower(gotPrompt), "transcript") {
+				t.Errorf("prompt = %q, want a transcription instruction", gotPrompt)
+			}
+		})
+	}
+}
+
+// TestTranscribe_LanguageHint verifies the optional STT language hint
+// (SPEC 8.2 stt_language) is woven into the transcription prompt.
+func TestTranscribe_LanguageHint(t *testing.T) {
+	var gotPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req nativeGenContentReq
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotPrompt = req.Contents[0].Parts[0].Text
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{{"content": map[string]any{
+				"parts": []map[string]any{{"text": "hola"}},
+			}}},
+		})
 	}))
 	defer srv.Close()
 
 	c := newClient(srv.URL)
-	txt, err := c.Transcribe(context.Background(), "a.wav", []byte("pcm"))
-	if err != nil || txt != "hello transcript" {
-		t.Fatalf("Transcribe = %q, %v", txt, err)
+	c.DefaultSTTLanguage = "Spanish"
+	if _, err := c.Transcribe(context.Background(), "a.wav", []byte("pcm")); err != nil {
+		t.Fatalf("Transcribe: %v", err)
 	}
+	if !strings.Contains(gotPrompt, "Spanish") {
+		t.Errorf("prompt = %q, want it to mention the configured language", gotPrompt)
+	}
+}
+
+// TestSynthesize_NativeAudioWavWrapped verifies TTS uses generateContent
+// with responseModalities:[AUDIO] + the configured voice, and that the
+// returned raw PCM is WAV-wrapped (SPEC 8.3).
+func TestSynthesize_NativeAudioWavWrapped(t *testing.T) {
+	pcm := []byte{0x01, 0x02, 0x03, 0x04}
+	var gotPath string
+	var gotMods []string
+	var gotVoice string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var req nativeGenContentReq
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotMods = req.GenerationConfig.ResponseModalities
+		gotVoice = req.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{{"content": map[string]any{
+				"parts": []map[string]any{{"inlineData": map[string]any{
+					"mimeType": "audio/L16;rate=24000",
+					"data":     base64.StdEncoding.EncodeToString(pcm),
+				}}},
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	c.DefaultTTSVoice = "Puck"
 	audio, err := c.Synthesize(context.Background(), "say this")
-	if err != nil || string(audio) != "AUDIOBYTES" {
-		t.Fatalf("Synthesize = %q, %v", audio, err)
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	if want := "/models/gemini-2.5-flash-preview-tts:generateContent"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if len(gotMods) != 1 || gotMods[0] != "AUDIO" {
+		t.Errorf("responseModalities = %v, want [AUDIO]", gotMods)
+	}
+	if gotVoice != "Puck" {
+		t.Errorf("voice = %q, want Puck", gotVoice)
+	}
+	// The output must be a 44-byte-header WAV wrapping the PCM payload.
+	if len(audio) != 44+len(pcm) {
+		t.Fatalf("wav length = %d, want %d", len(audio), 44+len(pcm))
+	}
+	if string(audio[0:4]) != "RIFF" || string(audio[8:12]) != "WAVE" {
+		t.Fatalf("missing RIFF/WAVE header: %x", audio[:12])
+	}
+	if rate := binary.LittleEndian.Uint32(audio[24:28]); rate != 24000 {
+		t.Errorf("sample rate = %d, want 24000", rate)
+	}
+	if !bytes.Equal(audio[44:], pcm) {
+		t.Errorf("PCM payload not preserved: got %x want %x", audio[44:], pcm)
+	}
+}
+
+// TestSynthesize_NoAudioPartErrors covers a candidate with no inline audio.
+func TestSynthesize_NoAudioPartErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{{"content": map[string]any{
+				"parts": []map[string]any{{"text": "no audio here"}},
+			}}},
+		})
+	}))
+	defer srv.Close()
+	if _, err := newClient(srv.URL).Synthesize(context.Background(), "hi"); err == nil {
+		t.Fatal("want error when response carries no audio part")
 	}
 }
 
