@@ -208,8 +208,9 @@ vary by deployment. The commonly used variables are:
 | Variable | Required | Description |
 |---|---|---|
 | `MISTRAL_API_KEY` | Conditional | Required for embeddings, Mistral-based extraction/STT, and generation; not required for docling-only read-only extraction flows |
-| `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction provider mode: `auto` (default), `docling`, `mistral`, or `off` |
+| `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `mistral`, or `off` |
 | `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
+| `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
 | `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
 | `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
@@ -233,6 +234,22 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 ingest_extractor: auto
 docling_command: docling --to json --output - {input}
 ```
+
+### docling extraction over HTTP (docling-serve)
+
+Instead of spawning the docling CLI per document, dir2mcp can call a long-running [**docling-serve**](https://github.com/docling-project/docling-serve) HTTP container. This is the same docling engine and produces **byte-identical** output (the same structured `DoclingDocument` → Markdown + region citations) — only the transport differs (spec 0.10.0 §7.4.B).
+
+```yaml
+ingest:
+  extractor: docling-serve         # or: auto
+  docling:
+    serve_url: http://127.0.0.1:5001
+```
+
+- Run the container yourself, e.g.: `docker run --rm -p 5001:5001 ghcr.io/docling-project/docling-serve-cpu`. dir2mcp does **not** start or stop it — lifecycle is user-managed; it probes and fails fast.
+- `extractor: docling-serve` **requires** a reachable `serve_url`. An empty or unreachable endpoint **disables** the extractor (it does **not** silently fall back to the CLI); `dir2mcp doctor` reports it as a warning via a `/health` probe.
+- Under `extractor: auto`, docling-serve is used only when the docling CLI isn't on `PATH` (local CLI is preferred); an empty `serve_url` simply means the HTTP transport isn't considered.
+- Env equivalent: `DIR2MCP_DOCLING_SERVE_URL=http://127.0.0.1:5001`.
 
 ### Continuous incremental indexing (optional)
 

@@ -232,6 +232,8 @@ func DocumentExtractorFromConfig(cfg config.Config) model.DocumentExtractor {
 	case "docling":
 		tpl := strings.TrimSpace(cfg.DoclingCommand)
 		return NewDoclingExtractor(tpl)
+	case "docling-serve":
+		return NewDoclingServeExtractor(cfg.IngestDoclingServeURL)
 	case "mistral-ocr":
 		return mistralExtractor(cfg)
 	default:
@@ -1099,6 +1101,9 @@ func (s *Service) extractionMetaJSON() string {
 	case *doclingExtractor:
 		meta["provider"] = "docling"
 		meta["command"] = strings.TrimSpace(ex.commandTemplate)
+	case *doclingServeExtractor:
+		meta["provider"] = "docling-serve"
+		meta["serve_url"] = ex.baseURL
 	case *mistral.Client:
 		meta["provider"] = "mistral"
 		meta["model"] = strings.TrimSpace(ex.DefaultOCRModel)

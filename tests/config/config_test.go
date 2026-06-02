@@ -62,6 +62,15 @@ func TestConfigValidateRejectsInvalidIngestExtractor(t *testing.T) {
 	}
 }
 
+func TestConfigValidateAcceptsDoclingServeExtractor(t *testing.T) {
+	cfg := config.Default()
+	cfg.IngestExtractor = "docling-serve"
+	cfg.IngestDoclingServeURL = "http://127.0.0.1:5001"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("docling-serve must be a valid extractor: %v", err)
+	}
+}
+
 func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\n")
