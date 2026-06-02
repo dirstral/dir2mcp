@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -103,12 +104,20 @@ func (d *doclingServeExtractor) convert(ctx context.Context, relPath string, dat
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxDoclingStdoutBytes))
+	// Read one byte past the limit so an over-size response surfaces as a clear
+	// "too large" error rather than a confusing truncated-JSON decode failure.
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxDoclingStdoutBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read docling-serve response: %w", err)
 	}
+	if len(payload) > maxDoclingStdoutBytes {
+		return nil, fmt.Errorf("docling-serve response exceeded %d bytes", maxDoclingStdoutBytes)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("docling-serve returned HTTP %d: %s", resp.StatusCode, httpBodySnippet(payload))
+		// Deliberately do NOT echo the response body: this error is persisted as
+		// Document.ErrorMessage, and an untrusted body could carry document
+		// fragments or credential-bearing routing details.
+		return nil, fmt.Errorf("docling-serve returned HTTP %d", resp.StatusCode)
 	}
 
 	var parsed doclingServeResponse
@@ -176,13 +185,15 @@ func ProbeDoclingServe(ctx context.Context, baseURL string) error {
 	return nil
 }
 
-// httpBodySnippet returns a short, single-line excerpt of a response body for
-// error messages.
-func httpBodySnippet(b []byte) string {
-	s := strings.TrimSpace(string(b))
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) > 200 {
-		s = s[:200] + "…"
+// SanitizeServeURL reduces a docling-serve endpoint to scheme://host/path,
+// dropping any userinfo, query, or fragment. Used before the endpoint is
+// written to diagnostic surfaces (extraction metadata, the doctor report) so a
+// URL carrying credentials or signed routing params never becomes durable or
+// logged. Returns "" when the URL cannot be parsed.
+func SanitizeServeURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
 	}
-	return s
+	return u.Scheme + "://" + u.Host + u.Path
 }

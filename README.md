@@ -246,8 +246,9 @@ ingest:
     serve_url: http://127.0.0.1:5001
 ```
 
-- Run the container yourself, e.g.: `docker run --rm -p 5001:5001 ghcr.io/docling-project/docling-serve-cpu`. dir2mcp does **not** start or stop it — lifecycle is user-managed; it probes and fails fast.
-- `extractor: docling-serve` **requires** a reachable `serve_url`. An empty or unreachable endpoint **disables** the extractor (it does **not** silently fall back to the CLI); `dir2mcp doctor` reports it as a warning via a `/health` probe.
+- Run the container yourself, e.g.: `docker run --rm -p 5001:5001 ghcr.io/docling-project/docling-serve-cpu`. dir2mcp does **not** start or stop it — lifecycle is user-managed.
+- `extractor: docling-serve` **requires** a non-empty `serve_url`: an empty value is rejected at startup (`CONFIG_INVALID`). It never silently falls back to the docling CLI.
+- A configured-but-**unreachable** endpoint is not a fallback either — `dir2mcp doctor` flags it via a `/health` probe, and document extraction errors per file at runtime until the endpoint comes back.
 - Under `extractor: auto`, docling-serve is used only when the docling CLI isn't on `PATH` (local CLI is preferred); an empty `serve_url` simply means the HTTP transport isn't considered.
 - Env equivalent: `DIR2MCP_DOCLING_SERVE_URL=http://127.0.0.1:5001`.
 

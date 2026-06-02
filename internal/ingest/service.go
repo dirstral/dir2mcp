@@ -1103,7 +1103,9 @@ func (s *Service) extractionMetaJSON() string {
 		meta["command"] = strings.TrimSpace(ex.commandTemplate)
 	case *doclingServeExtractor:
 		meta["provider"] = "docling-serve"
-		meta["serve_url"] = ex.baseURL
+		// Sanitized (scheme/host/path only): this is persisted per-document, so
+		// any userinfo/query in the URL must not become durable metadata.
+		meta["serve_url"] = SanitizeServeURL(ex.baseURL)
 	case *mistral.Client:
 		meta["provider"] = "mistral"
 		meta["model"] = strings.TrimSpace(ex.DefaultOCRModel)

@@ -71,14 +71,34 @@ func TestDoclingServeExtractor_Extract_ParsesJSONContent(t *testing.T) {
 }
 
 func TestDoclingServeExtractor_Extract_ErrorsOnNon200(t *testing.T) {
+	const secretMarker = "SECRET-LEAK-token-abc123"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
+		http.Error(w, secretMarker, http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
 	ext := ingest.NewDoclingServeExtractor(srv.URL)
-	if _, err := ext.Extract(context.Background(), "report.pdf", []byte("x")); err == nil {
+	_, err := ext.Extract(context.Background(), "report.pdf", []byte("x"))
+	if err == nil {
 		t.Fatal("expected error on HTTP 500, got nil")
+	}
+	// The error is persisted as Document.ErrorMessage — it must not echo the
+	// (untrusted) response body.
+	if strings.Contains(err.Error(), secretMarker) {
+		t.Errorf("error leaked response body: %v", err)
+	}
+}
+
+func TestSanitizeServeURL(t *testing.T) {
+	cases := map[string]string{
+		"http://127.0.0.1:5001":                   "http://127.0.0.1:5001",
+		"http://user:pass@host:5001/v1?token=sec": "http://host:5001/v1",
+		"https://example.com/base/":               "https://example.com/base/",
+	}
+	for in, want := range cases {
+		if got := ingest.SanitizeServeURL(in); got != want {
+			t.Errorf("SanitizeServeURL(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
