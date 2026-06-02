@@ -449,6 +449,26 @@ type nativeGenContentReq struct {
 	} `json:"generationConfig"`
 }
 
+// decodeGenContent decodes a native generateContent request and validates
+// it has at least one content part, so a shape change surfaces as a clear
+// test failure (HTTP 400 + t.Errorf) instead of an out-of-range panic in
+// the handler goroutine. Returns ok=false when the caller must not index.
+func decodeGenContent(t *testing.T, w http.ResponseWriter, r *http.Request) (nativeGenContentReq, bool) {
+	t.Helper()
+	var req nativeGenContentReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		t.Errorf("decode generateContent request: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return req, false
+	}
+	if len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 {
+		t.Errorf("generateContent request has no content parts")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return req, false
+	}
+	return req, true
+}
+
 // TestTranscribe_NativeGenerateContent verifies STT uses the native
 // generateContent surface: correct path + x-goog-api-key auth, audio sent
 // as an inline-data part with the extension-derived MIME type, and the
@@ -464,8 +484,10 @@ func TestTranscribe_NativeGenerateContent(t *testing.T) {
 			var gotPath, gotKey, gotMime, gotData, gotPrompt string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotPath, gotKey = r.URL.Path, r.Header.Get("x-goog-api-key")
-				var req nativeGenContentReq
-				_ = json.NewDecoder(r.Body).Decode(&req)
+				req, ok := decodeGenContent(t, w, r)
+				if !ok {
+					return
+				}
 				for _, p := range req.Contents[0].Parts {
 					if p.Text != "" {
 						gotPrompt = p.Text
@@ -496,7 +518,10 @@ func TestTranscribe_NativeGenerateContent(t *testing.T) {
 			if gotMime != tc.wantMime {
 				t.Errorf("mime = %q, want %q", gotMime, tc.wantMime)
 			}
-			if dec, _ := base64.StdEncoding.DecodeString(gotData); string(dec) != "pcm" {
+			dec, derr := base64.StdEncoding.DecodeString(gotData)
+			if derr != nil {
+				t.Errorf("inline audio not valid base64 (%q): %v", gotData, derr)
+			} else if string(dec) != "pcm" {
 				t.Errorf("inline audio = %q, want base64(pcm)", gotData)
 			}
 			if !strings.Contains(strings.ToLower(gotPrompt), "transcript") {
@@ -511,8 +536,10 @@ func TestTranscribe_NativeGenerateContent(t *testing.T) {
 func TestTranscribe_LanguageHint(t *testing.T) {
 	var gotPrompt string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req nativeGenContentReq
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		req, ok := decodeGenContent(t, w, r)
+		if !ok {
+			return
+		}
 		gotPrompt = req.Contents[0].Parts[0].Text
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"candidates": []map[string]any{{"content": map[string]any{
@@ -542,8 +569,10 @@ func TestSynthesize_NativeAudioWavWrapped(t *testing.T) {
 	var gotVoice string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		var req nativeGenContentReq
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		req, ok := decodeGenContent(t, w, r)
+		if !ok {
+			return
+		}
 		gotMods = req.GenerationConfig.ResponseModalities
 		gotVoice = req.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName
 		_ = json.NewEncoder(w).Encode(map[string]any{

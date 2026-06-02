@@ -1,10 +1,10 @@
-// Package gemini provides a direct-HTTP adapter for Google Gemini. Chat
-// (model.Generator) and STT use Gemini's OpenAI-compatible surface (POST
-// {base}/chat/completions); embeddings (model.Embedder) use Gemini's
-// NATIVE surface (POST {base-without-/openai}/models/{model}:batchEmbedContents)
-// because only the native API supports `taskType` (asymmetric embeddings,
-// SPEC 8.1.5) and `outputDimensionality` (Matryoshka/MRL, SPEC 8.1.6) —
-// the OpenAI-compatible /embeddings shim exposes neither.
+// Package gemini provides a direct-HTTP adapter for Google Gemini. Only
+// chat (model.Generator) uses Gemini's OpenAI-compatible surface (POST
+// {base}/chat/completions); embeddings (model.Embedder) and audio
+// (model.Transcriber / TTS) use Gemini's NATIVE surface
+// ({base-without-/openai}/models/{model}:{batchEmbedContents,generateContent})
+// because the OpenAI-compatible layer exposes neither `taskType`/
+// `outputDimensionality` (SPEC 8.1.5/8.1.6) nor `/v1/audio/*` (SPEC 8.2/8.3).
 //
 // It mirrors internal/mistral and internal/cohere (BaseURL/APIKey/
 // HTTPClient, bounded exponential retry, typed model.ProviderError) so
@@ -664,7 +664,11 @@ func firstAudioPart(r geminiGenerateResponse) ([]byte, int, error) {
 		if err != nil {
 			return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode tts audio", Retryable: false, Cause: err}
 		}
-		return raw, sampleRateFromMIME(p.InlineData.MimeType), nil
+		rate, err := sampleRateFromMIME(p.InlineData.MimeType)
+		if err != nil {
+			return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: err.Error(), Retryable: false}
+		}
+		return raw, rate, nil
 	}
 	return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts response had no audio", Retryable: false}
 }
@@ -690,17 +694,30 @@ func audioMIMEType(relPath string) string {
 	}
 }
 
-// sampleRateFromMIME extracts the rate from a PCM mime type like
-// "audio/L16;rate=24000"; defaults to geminiTTSSampleRate.
-func sampleRateFromMIME(mime string) int {
-	for _, seg := range strings.Split(mime, ";") {
+// sampleRateFromMIME extracts the rate from Gemini's PCM mime type (e.g.
+// "audio/L16;rate=24000"). wavWrapPCM16 only produces a correct file for
+// signed-16-bit little-endian PCM, so a non-L16 type or a malformed rate
+// is rejected (returning a structured error) rather than silently wrapped
+// into a "valid" WAV with corrupted audio. An empty mime type falls back
+// to the documented default rate.
+func sampleRateFromMIME(mime string) (int, error) {
+	m := strings.TrimSpace(strings.ToLower(mime))
+	if m == "" {
+		return geminiTTSSampleRate, nil
+	}
+	if !strings.HasPrefix(m, "audio/l16") {
+		return 0, fmt.Errorf("unsupported tts audio mime type %q (expected audio/L16 PCM)", mime)
+	}
+	for _, seg := range strings.Split(m, ";") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(seg), "rate="); ok {
-			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
-				return n
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n <= 0 {
+				return 0, fmt.Errorf("invalid sample rate in tts audio mime type %q", mime)
 			}
+			return n, nil
 		}
 	}
-	return geminiTTSSampleRate
+	return geminiTTSSampleRate, nil
 }
 
 // wavWrapPCM16 wraps raw signed-16-bit little-endian mono PCM in a minimal
