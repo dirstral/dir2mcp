@@ -227,6 +227,7 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_RERANK_MODEL` | No | Cohere rerank model override (default: `rerank-v3.5`) |
 | `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
 | `ELEVENLABS_BASE_URL` | No | ElevenLabs base URL (default: `https://api.elevenlabs.io`) |
+| `GEMINI_API_KEY` | Optional | Google Gemini key; enables the `gemini` provider profile (embeddings, chat). Bind it explicitly to a capability (e.g. `model.embed.provider: gemini`) — auto-selection still prefers Mistral. Secret, never persisted |
 
 For Homebrew and other installed workflows, you can persist this in `.dir2mcp.yaml`:
 
@@ -268,6 +269,27 @@ Notes:
 - It is **best-effort, not a correctness guarantee**: a low-frequency safety rescan reconciles anything missed (kernel event coalescing, OS watch limits on very large trees), so the index converges even if individual events are dropped.
 - Excluded paths, `.gitignore` rules, and size/type limits apply to watched changes exactly as they do to the initial scan.
 - Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.
+
+### Gemini embeddings (`gemini-embedding-001`)
+
+dir2mcp can use Google's [Gemini Embedding model](https://deepmind.google/models/gemini/embedding/) (`gemini-embedding-001`) at full parity via Gemini's **native** embed API. Set `GEMINI_API_KEY` and bind embeddings to the `gemini` provider (auto-selection still prefers Mistral, so the binding is explicit):
+
+```yaml
+model:
+  embed:                       # reindex-bound — see note below
+    provider: gemini
+    text_model: gemini-embedding-001
+    code_model: gemini-embedding-001
+    # Optional Matryoshka output dimensionality (native 3072; truncatable
+    # to 1536 / 768). Omit for the native dimension. Truncated vectors are
+    # re-normalized automatically.
+    text_dim: 3072
+    code_dim: 3072
+```
+
+- **Asymmetric `taskType`** (better retrieval quality): the document/query role is mapped automatically — corpus content embeds as `RETRIEVAL_DOCUMENT`, search queries as `RETRIEVAL_QUERY`, and a query against the configured `code_model` as `CODE_RETRIEVAL_QUERY`. No configuration needed; the role is set by the call site.
+- **Matryoshka dimensions** (`text_dim`/`code_dim`): request a smaller vector to shrink the index. dir2mcp sends Gemini's `outputDimensionality` and L2-normalizes the truncated vectors. The knob is Gemini-only — setting it on a provider that can't honor it is rejected at startup (`CONFIG_INVALID`).
+- **Reindex-bound (spec §8.1.4/§8.1.6):** the embed provider, model, **and requested dimension** form the corpus-lifetime embed identity. Switching to Gemini, or changing the dimension later, requires a `dir2mcp reindex` (the server refuses to mix vector spaces and tells you to reindex).
 
 ### Server identity
 

@@ -100,13 +100,19 @@ type Profile struct {
 
 	EmbedTextModel string
 	EmbedCodeModel string
-	ChatModel      string
-	OCRModel       string
-	STTModel       string
-	STTLanguage    string // optional STT language hint (e.g. ElevenLabs)
-	TTSModel       string
-	TTSVoice       string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
-	RerankModel    string
+	// EmbedTextDim / EmbedCodeDim request a specific embedding output
+	// dimensionality for Matryoshka/MRL models (SPEC 8.1.6), per axis.
+	// Zero means "the model's native dimension". Part of the embed
+	// identity (SPEC 8.1.4), so a change is reindex-bound.
+	EmbedTextDim int
+	EmbedCodeDim int
+	ChatModel    string
+	OCRModel     string
+	STTModel     string
+	STTLanguage  string // optional STT language hint (e.g. ElevenLabs)
+	TTSModel     string
+	TTSVoice     string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
+	RerankModel  string
 }
 
 // Eligible reports whether the profile may be selected/preflighted
@@ -175,30 +181,52 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 }
 
 // EmbedIdentity is the corpus-lifetime embed identity (SPEC 8.1.4):
-// provider name + text/code model. It is recorded in the config
-// snapshot/index and compared on load. Role (8.1.5) is deliberately
-// excluded — it does not affect vector-space compatibility.
+// provider name + text/code model + requested text/code output dimension
+// (8.1.6). It is recorded in the config snapshot/index and compared on
+// load. Role (8.1.5) is deliberately excluded — it does not affect
+// vector-space compatibility, but the requested dimension does.
 func EmbedIdentity(p Profile) string {
-	return fmt.Sprintf("%s|%s|%s",
+	return fmt.Sprintf("%s|%s|%s|%d|%d",
 		strings.TrimSpace(p.Name),
 		strings.TrimSpace(p.EmbedTextModel),
-		strings.TrimSpace(p.EmbedCodeModel))
+		strings.TrimSpace(p.EmbedCodeModel),
+		p.EmbedTextDim,
+		p.EmbedCodeDim)
 }
 
 // VerifyEmbedIdentity returns a *ConfigError when a recorded embed
 // identity differs from the current one (SPEC 8.1.4 — the server MUST
 // NOT silently mix vector spaces). An empty recorded identity (fresh
-// index) always passes.
+// index) always passes. A legacy 3-field identity (pre-8.1.6, no
+// dimension) is normalized to the native "|0|0" form before comparison so
+// upgrading an existing native-dimension corpus does not force a spurious
+// reindex.
 func VerifyEmbedIdentity(recorded, current string) error {
-	recorded = strings.TrimSpace(recorded)
-	if recorded == "" || recorded == strings.TrimSpace(current) {
+	recorded = normalizeEmbedIdentity(strings.TrimSpace(recorded))
+	current = strings.TrimSpace(current)
+	if recorded == "" || recorded == current {
 		return nil
 	}
 	return &ConfigError{
 		Capability: CapEmbed,
 		Profile:    current,
 		Reason: fmt.Sprintf(
-			"embed identity changed (index built with %q, configured %q); embeddings are corpus-lifetime — reindex to change the embed provider/model",
+			"embed identity changed (index built with %q, configured %q); embeddings are corpus-lifetime — reindex to change the embed provider/model/dimension",
 			recorded, current),
 	}
+}
+
+// normalizeEmbedIdentity upgrades a legacy 3-field identity
+// (provider|text_model|code_model) to the current 5-field form by
+// appending the native "|0|0" dimension pair, so a corpus indexed before
+// 8.1.6 with native dimensions still matches after an upgrade. Non-legacy
+// (empty or already 5-field) values are returned unchanged.
+func normalizeEmbedIdentity(id string) string {
+	if id == "" {
+		return ""
+	}
+	if strings.Count(id, "|") == 2 {
+		return id + "|0|0"
+	}
+	return id
 }

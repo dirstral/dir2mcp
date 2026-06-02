@@ -34,10 +34,35 @@ func unsupported(p provider.Profile, cap provider.Capability) error {
 	return fmt.Errorf("provider kind %q cannot serve %s", p.Kind, cap)
 }
 
+// validateEmbedDim enforces SPEC 8.1.6 on the requested output dimension.
+// A negative dimension is always CONFIG_INVALID (it would otherwise form a
+// distinct embed identity yet behave like "unset" at runtime, where checks
+// use > 0). A positive (fixed) dimension is only honored by
+// Matryoshka-capable kinds (Gemini today); requesting it on any other kind
+// is CONFIG_INVALID rather than silently ignored.
+func validateEmbedDim(p provider.Profile) error {
+	if p.EmbedTextDim < 0 || p.EmbedCodeDim < 0 {
+		return fmt.Errorf("CONFIG_INVALID: embed.text_dim/code_dim must be non-negative (got text=%d code=%d)", p.EmbedTextDim, p.EmbedCodeDim)
+	}
+	if p.Kind != provider.KindGemini && (p.EmbedTextDim > 0 || p.EmbedCodeDim > 0) {
+		return fmt.Errorf("CONFIG_INVALID: embed provider kind %q does not support a fixed output dimension (embed.text_dim/code_dim); remove it or use a Matryoshka-capable provider (gemini)", p.Kind)
+	}
+	return nil
+}
+
 // Embedder builds a model.Embedder for the profile (kinds: openai,
 // mistral, cohere, gemini). The per-call model still comes from the
 // caller; Default*Model is only a fallback for empty model names.
+//
+// The embedding output-dimension knob (EmbedTextDim/EmbedCodeDim, SPEC
+// 8.1.6) is only honored by Gemini today; requesting it on any other
+// kind is rejected as CONFIG_INVALID rather than silently ignored.
 func Embedder(p provider.Profile) (model.Embedder, error) {
+	// SPEC 8.1.6 dimension validation applies to every kind (negative is
+	// always invalid; a fixed positive dim is Gemini-only).
+	if err := validateEmbedDim(p); err != nil {
+		return nil, err
+	}
 	switch p.Kind {
 	case provider.KindOpenAI:
 		c := openai.NewClient(p.BaseURL, p.APIKey)
@@ -50,6 +75,9 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
 		}
+		c.CodeEmbedModel = p.EmbedCodeModel
+		c.EmbedTextDim = p.EmbedTextDim
+		c.EmbedCodeDim = p.EmbedCodeDim
 		return c, nil
 	case provider.KindCohere:
 		c := cohere.NewClient(p.BaseURL, p.APIKey)

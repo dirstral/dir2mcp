@@ -24,6 +24,8 @@ type providerProfileYAML struct {
 	APIKey         *string `yaml:"api_key"` // pointer: distinguish "absent" (credential-less) from ""
 	EmbedTextModel string  `yaml:"embed_text_model"`
 	EmbedCodeModel string  `yaml:"embed_code_model"`
+	EmbedTextDim   int     `yaml:"embed_text_dim"`
+	EmbedCodeDim   int     `yaml:"embed_code_dim"`
 	ChatModel      string  `yaml:"chat_model"`
 	OCRModel       string  `yaml:"ocr_model"`
 	STTModel       string  `yaml:"stt_model"`
@@ -37,6 +39,8 @@ type capBindingYAML struct {
 	Provider  string `yaml:"provider"`
 	TextModel string `yaml:"text_model"`
 	CodeModel string `yaml:"code_model"`
+	TextDim   int    `yaml:"text_dim"`
+	CodeDim   int    `yaml:"code_dim"`
 	Model     string `yaml:"model"`
 }
 
@@ -62,10 +66,11 @@ func builtinProfiles() map[string]providerProfileYAML {
 		"openai":      {Kind: "openai", APIKey: s("${OPENAI_API_KEY}")},
 		"openrouter":  {Kind: "openai", BaseURL: "https://openrouter.ai/api/v1", APIKey: s("${OPENROUTER_API_KEY}")},
 		"anthropic":   {Kind: "anthropic", APIKey: s("${ANTHROPIC_API_KEY}")},
-		"gemini":      {Kind: "gemini", APIKey: s("${GEMINI_API_KEY}")},
-		"cohere":      {Kind: "cohere", APIKey: s("${COHERE_API_KEY}")},
-		"elevenlabs":  {Kind: "elevenlabs", APIKey: s("${ELEVENLABS_API_KEY}")},
-		"local":       {Kind: "openai", BaseURL: "http://localhost:11434/v1"}, // credential-less
+		"gemini": {Kind: "gemini", APIKey: s("${GEMINI_API_KEY}"),
+			EmbedTextModel: "gemini-embedding-001", EmbedCodeModel: "gemini-embedding-001", ChatModel: "gemini-2.5-flash"},
+		"cohere":     {Kind: "cohere", APIKey: s("${COHERE_API_KEY}")},
+		"elevenlabs": {Kind: "elevenlabs", APIKey: s("${ELEVENLABS_API_KEY}")},
+		"local":      {Kind: "openai", BaseURL: "http://localhost:11434/v1"}, // credential-less
 	}
 }
 
@@ -207,6 +212,8 @@ func toProfiles(merged map[string]providerProfileYAML, getenv func(string) strin
 			CredentialLess: credLess,
 			EmbedTextModel: p.EmbedTextModel,
 			EmbedCodeModel: p.EmbedCodeModel,
+			EmbedTextDim:   p.EmbedTextDim,
+			EmbedCodeDim:   p.EmbedCodeDim,
 			ChatModel:      p.ChatModel,
 			OCRModel:       p.OCRModel,
 			STTModel:       p.STTModel,
@@ -282,6 +289,12 @@ func (r ProviderResolution) applyModelOverrides(cap provider.Capability, p provi
 	case provider.CapEmbed:
 		set(&p.EmbedTextModel, r.doc.Model.Embed.TextModel)
 		set(&p.EmbedCodeModel, r.doc.Model.Embed.CodeModel)
+		if r.doc.Model.Embed.TextDim > 0 {
+			p.EmbedTextDim = r.doc.Model.Embed.TextDim
+		}
+		if r.doc.Model.Embed.CodeDim > 0 {
+			p.EmbedCodeDim = r.doc.Model.Embed.CodeDim
+		}
 	case provider.CapChat:
 		set(&p.ChatModel, r.doc.Model.Chat.Model)
 	case provider.CapOCR:
