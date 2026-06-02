@@ -197,17 +197,36 @@ func EmbedIdentity(p Profile) string {
 // VerifyEmbedIdentity returns a *ConfigError when a recorded embed
 // identity differs from the current one (SPEC 8.1.4 — the server MUST
 // NOT silently mix vector spaces). An empty recorded identity (fresh
-// index) always passes.
+// index) always passes. A legacy 3-field identity (pre-8.1.6, no
+// dimension) is normalized to the native "|0|0" form before comparison so
+// upgrading an existing native-dimension corpus does not force a spurious
+// reindex.
 func VerifyEmbedIdentity(recorded, current string) error {
-	recorded = strings.TrimSpace(recorded)
-	if recorded == "" || recorded == strings.TrimSpace(current) {
+	recorded = normalizeEmbedIdentity(strings.TrimSpace(recorded))
+	current = strings.TrimSpace(current)
+	if recorded == "" || recorded == current {
 		return nil
 	}
 	return &ConfigError{
 		Capability: CapEmbed,
 		Profile:    current,
 		Reason: fmt.Sprintf(
-			"embed identity changed (index built with %q, configured %q); embeddings are corpus-lifetime — reindex to change the embed provider/model",
+			"embed identity changed (index built with %q, configured %q); embeddings are corpus-lifetime — reindex to change the embed provider/model/dimension",
 			recorded, current),
 	}
+}
+
+// normalizeEmbedIdentity upgrades a legacy 3-field identity
+// (provider|text_model|code_model) to the current 5-field form by
+// appending the native "|0|0" dimension pair, so a corpus indexed before
+// 8.1.6 with native dimensions still matches after an upgrade. Non-legacy
+// (empty or already 5-field) values are returned unchanged.
+func normalizeEmbedIdentity(id string) string {
+	if id == "" {
+		return ""
+	}
+	if strings.Count(id, "|") == 2 {
+		return id + "|0|0"
+	}
+	return id
 }

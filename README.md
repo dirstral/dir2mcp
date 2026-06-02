@@ -287,7 +287,7 @@ model:
     code_dim: 3072
 ```
 
-- **Asymmetric `task_type`** (better retrieval quality): the document/query role is mapped automatically — corpus content embeds as `RETRIEVAL_DOCUMENT`, search queries as `RETRIEVAL_QUERY`, and a query against the configured `code_model` as `CODE_RETRIEVAL_QUERY`. No configuration needed; the role is set by the call site.
+- **Asymmetric `taskType`** (better retrieval quality): the document/query role is mapped automatically — corpus content embeds as `RETRIEVAL_DOCUMENT`, search queries as `RETRIEVAL_QUERY`, and a query against the configured `code_model` as `CODE_RETRIEVAL_QUERY`. No configuration needed; the role is set by the call site.
 - **Matryoshka dimensions** (`text_dim`/`code_dim`): request a smaller vector to shrink the index. dir2mcp sends Gemini's `outputDimensionality` and L2-normalizes the truncated vectors. The knob is Gemini-only — setting it on a provider that can't honor it is rejected at startup (`CONFIG_INVALID`).
 - **Reindex-bound (spec §8.1.4/§8.1.6):** the embed provider, model, **and requested dimension** form the corpus-lifetime embed identity. Switching to Gemini, or changing the dimension later, requires a `dir2mcp reindex` (the server refuses to mix vector spaces and tells you to reindex).
 

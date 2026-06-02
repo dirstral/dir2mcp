@@ -135,3 +135,15 @@ func TestEmbedder_DimRejectedForNonGemini(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbedder_NegativeDimRejected pins SPEC 8.1.6: a negative dimension is
+// CONFIG_INVALID for every kind, including Gemini (it would otherwise form
+// a distinct identity yet behave like "unset" at runtime).
+func TestEmbedder_NegativeDimRejected(t *testing.T) {
+	for _, k := range []provider.Kind{provider.KindGemini, provider.KindOpenAI} {
+		p := provider.Profile{Name: string(k), Kind: k, APIKey: "k", EmbedCodeDim: -1}
+		if _, err := providerfactory.Embedder(p); err == nil {
+			t.Fatalf("kind %q: want CONFIG_INVALID for negative dim, got nil", k)
+		}
+	}
+}

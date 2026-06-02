@@ -152,6 +152,15 @@ func TestEmbedIdentity(t *testing.T) {
 	if native == dimmed {
 		t.Fatalf("requested dimension must change embed identity: %q == %q", native, dimmed)
 	}
+	// A legacy 3-field identity (pre-8.1.6 snapshot, no dims) must NOT
+	// force a spurious reindex against the equivalent native 5-field
+	// identity — it is normalized to "|0|0" before comparison.
+	legacy := "mistral|mistral-embed|codestral-embed"
+	if err := provider.VerifyEmbedIdentity(legacy, "mistral|mistral-embed|codestral-embed|0|0"); err != nil {
+		t.Errorf("legacy 3-field identity must match native 5-field: %v", err)
+	}
+	// But a legacy identity vs a non-native dimension still mismatches.
+	_ = cfgErr(t, provider.VerifyEmbedIdentity(legacy, "mistral|mistral-embed|codestral-embed|768|0"))
 }
 
 func mustErr(_ provider.Profile, err error) error {

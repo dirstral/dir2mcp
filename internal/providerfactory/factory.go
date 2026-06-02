@@ -34,12 +34,17 @@ func unsupported(p provider.Profile, cap provider.Capability) error {
 	return fmt.Errorf("provider kind %q cannot serve %s", p.Kind, cap)
 }
 
-// rejectEmbedDim fails when a fixed output dimension is requested for a
-// provider kind that cannot honor it (SPEC 8.1.6: unsupported dimensions
-// are CONFIG_INVALID, never silently ignored). Only Gemini supports the
-// knob today.
-func rejectEmbedDim(p provider.Profile) error {
-	if p.EmbedTextDim > 0 || p.EmbedCodeDim > 0 {
+// validateEmbedDim enforces SPEC 8.1.6 on the requested output dimension.
+// A negative dimension is always CONFIG_INVALID (it would otherwise form a
+// distinct embed identity yet behave like "unset" at runtime, where checks
+// use > 0). A positive (fixed) dimension is only honored by
+// Matryoshka-capable kinds (Gemini today); requesting it on any other kind
+// is CONFIG_INVALID rather than silently ignored.
+func validateEmbedDim(p provider.Profile) error {
+	if p.EmbedTextDim < 0 || p.EmbedCodeDim < 0 {
+		return fmt.Errorf("CONFIG_INVALID: embed.text_dim/code_dim must be non-negative (got text=%d code=%d)", p.EmbedTextDim, p.EmbedCodeDim)
+	}
+	if p.Kind != provider.KindGemini && (p.EmbedTextDim > 0 || p.EmbedCodeDim > 0) {
 		return fmt.Errorf("CONFIG_INVALID: embed provider kind %q does not support a fixed output dimension (embed.text_dim/code_dim); remove it or use a Matryoshka-capable provider (gemini)", p.Kind)
 	}
 	return nil
@@ -53,11 +58,13 @@ func rejectEmbedDim(p provider.Profile) error {
 // 8.1.6) is only honored by Gemini today; requesting it on any other
 // kind is rejected as CONFIG_INVALID rather than silently ignored.
 func Embedder(p provider.Profile) (model.Embedder, error) {
+	// SPEC 8.1.6 dimension validation applies to every kind (negative is
+	// always invalid; a fixed positive dim is Gemini-only).
+	if err := validateEmbedDim(p); err != nil {
+		return nil, err
+	}
 	switch p.Kind {
 	case provider.KindOpenAI:
-		if err := rejectEmbedDim(p); err != nil {
-			return nil, err
-		}
 		c := openai.NewClient(p.BaseURL, p.APIKey)
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
@@ -73,9 +80,6 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 		c.EmbedCodeDim = p.EmbedCodeDim
 		return c, nil
 	case provider.KindCohere:
-		if err := rejectEmbedDim(p); err != nil {
-			return nil, err
-		}
 		c := cohere.NewClient(p.BaseURL, p.APIKey)
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
