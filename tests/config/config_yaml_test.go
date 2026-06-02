@@ -107,6 +107,35 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	}
 }
 
+// TestSaveFile_WatchSettingsRoundTrip guards against the persisted watch keys
+// being written under a name the loader does not recognize: a SaveFile -> Load
+// cycle must preserve IngestWatch / IngestWatchDebounce.
+func TestSaveFile_WatchSettingsRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+
+	cfg := config.Default()
+	cfg.RootDir = "/tmp/repo"
+	cfg.StateDir = "/tmp/repo/.dir2mcp"
+	cfg.IngestWatch = true
+	cfg.IngestWatchDebounce = 1500 * time.Millisecond
+
+	if err := config.SaveFile(path, cfg); err != nil {
+		t.Fatalf("SaveFile failed: %v", err)
+	}
+
+	loaded, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile failed: %v", err)
+	}
+	if !loaded.IngestWatch {
+		t.Errorf("IngestWatch did not round-trip: got false, want true")
+	}
+	if loaded.IngestWatchDebounce != 1500*time.Millisecond {
+		t.Errorf("IngestWatchDebounce did not round-trip: got %v, want 1.5s", loaded.IngestWatchDebounce)
+	}
+}
+
 func TestSaveFile_RejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
 		name string
@@ -182,6 +211,8 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"    mode: deep\n"+
 		"  follow_symlinks: true\n"+
 		"  max_file_mb: 42\n"+
+		"  watch: true\n"+
+		"  watch_debounce: 2s\n"+
 		"stt:\n"+
 		"  provider: elevenlabs\n"+
 		"  mistral:\n"+
@@ -239,6 +270,12 @@ func assertNestedIngestFields(t *testing.T, cfg config.Config) {
 	}
 	if cfg.DoclingCommand != "docling --to md --output - {input}" {
 		t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)
+	}
+	if !cfg.IngestWatch {
+		t.Fatal("expected IngestWatch=true")
+	}
+	if cfg.IngestWatchDebounce != 2*time.Second {
+		t.Fatalf("IngestWatchDebounce=%v", cfg.IngestWatchDebounce)
 	}
 }
 

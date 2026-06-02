@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/x402-foundation/x402/go v0.0.0-20260516161513-e35becffdc85
 	golang.org/x/term v0.40.0

@@ -210,6 +210,8 @@ vary by deployment. The commonly used variables are:
 | `MISTRAL_API_KEY` | Conditional | Required for embeddings, Mistral-based extraction/STT, and generation; not required for docling-only read-only extraction flows |
 | `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction provider mode: `auto` (default), `docling`, `mistral`, or `off` |
 | `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
+| `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
+| `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
 | `DIR2MCP_SERVER_NAME` | No | Override the MCP server name (and suggested `claude mcp add` alias). Defaults to a unique `dir2mcp-<slug>-<6-hex>` derived from the indexed directory |
@@ -231,6 +233,23 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 ingest_extractor: auto
 docling_command: docling --to json --output - {input}
 ```
+
+### Continuous incremental indexing (optional)
+
+By default `dir2mcp up` scans the directory once at startup. Enable the **filesystem watcher** to keep the index continuously in sync with on-disk changes for the life of the process — added files are indexed, edited files are re-indexed, and removed files are tombstoned (evicted from retrieval).
+
+```yaml
+ingest:
+  watch: true            # default: false
+  watch_debounce: 500ms  # coalesce editor write bursts before re-indexing
+```
+
+Notes:
+
+- The watcher runs alongside the existing embedding worker, so newly indexed files become searchable automatically without a manual `reindex`.
+- It is **best-effort, not a correctness guarantee**: a low-frequency safety rescan reconciles anything missed (kernel event coalescing, OS watch limits on very large trees), so the index converges even if individual events are dropped.
+- Excluded paths, `.gitignore` rules, and size/type limits apply to watched changes exactly as they do to the initial scan.
+- Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.
 
 ### Server identity
 

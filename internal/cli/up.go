@@ -146,6 +146,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ingestErrCh := make(chan error, 1)
 	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh)
+	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, ing, a.stderr)
 
 	return a.runEventLoop(runCtx, cancel, &cfg, st, indexingState, emitter, serverErrCh, ingestErrCh, embedErrCh, stdinQuitCh)
 }
@@ -529,6 +530,41 @@ func startIngestWorker(runCtx context.Context, readOnly bool, ing interface {
 			return
 		}
 		ingestErrCh <- runErr
+	}()
+}
+
+// watchable is implemented by ingestors that support continuous incremental
+// indexing via a filesystem watcher.
+type watchable interface {
+	Watch(context.Context) error
+}
+
+// startWatchWorker launches the filesystem watcher in the background when
+// ingest.watch is enabled and the ingestor supports it. It runs concurrently
+// with the initial scan; processDocument hash-diffs, so any overlap is a cheap
+// no-op. Watcher failures are non-fatal — the watcher's own periodic safety
+// rescan reconciles drift — so a setup error is logged rather than terminating
+// the server.
+func startWatchWorker(runCtx context.Context, readOnly, enabled bool, ing interface {
+	Run(context.Context) error
+}, stderr io.Writer) {
+	if !enabled {
+		return
+	}
+	if readOnly {
+		// Don't leave the knob silently inert — tell the operator continuous
+		// sync is disabled because the server is read-only.
+		_, _ = fmt.Fprintln(stderr, "warning: ingest.watch is enabled but ignored in read-only mode; continuous indexing is disabled")
+		return
+	}
+	w, ok := ing.(watchable)
+	if !ok {
+		return
+	}
+	go func() {
+		if err := w.Watch(runCtx); err != nil && runCtx.Err() == nil {
+			_, _ = fmt.Fprintf(stderr, "watch: %v\n", err)
+		}
 	}()
 }
 
