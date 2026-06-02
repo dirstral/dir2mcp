@@ -314,9 +314,11 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: ingest.extractor=docling but docling command is unavailable")
 		return exitConfigInvalid
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.IngestExtractor), "docling-serve") && ingest.DocumentExtractorFromConfig(*cfg) == nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: ingest.extractor=docling-serve but ingest.docling.serve_url is empty")
-		return exitConfigInvalid
+	if strings.EqualFold(strings.TrimSpace(cfg.IngestExtractor), "docling-serve") {
+		if d := ingest.DescribeDocumentExtractor(*cfg); d.Name == "" {
+			writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("CONFIG_INVALID: %s", d.Reason))
+			return exitConfigInvalid
+		}
 	}
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("root inaccessible: %v", err))

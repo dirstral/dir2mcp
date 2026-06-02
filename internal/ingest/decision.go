@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 
@@ -32,8 +33,13 @@ type ExtractorDecision struct {
 // DescribeDocumentExtractor returns the selection result for cfg
 // without building an extractor. It MUST stay in lockstep with
 // DocumentExtractorFromConfig so the banner reflects what the runtime
-// will actually use.
+// will actually use. For docling-serve, availability includes endpoint
+// reachability per spec 0.10.0 §7.4.B.
 func DescribeDocumentExtractor(cfg config.Config) ExtractorDecision {
+	return describeDocumentExtractor(context.Background(), cfg)
+}
+
+func describeDocumentExtractor(ctx context.Context, cfg config.Config) ExtractorDecision {
 	mode := strings.ToLower(strings.TrimSpace(cfg.IngestExtractor))
 	if mode == "" {
 		mode = "auto"
@@ -50,30 +56,51 @@ func DescribeDocumentExtractor(cfg config.Config) ExtractorDecision {
 		}
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling but docling command is unavailable"}
 	case "docling-serve":
-		if strings.TrimSpace(cfg.IngestDoclingServeURL) != "" {
-			// Reachability is verified by the doctor /health probe, not here:
-			// DescribeDocumentExtractor stays I/O-free for the startup banner.
-			return ExtractorDecision{Name: "docling-serve", Source: "explicit", Reason: "configured docling-serve endpoint"}
-		}
-		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling-serve but ingest.docling.serve_url is empty"}
+		return describeExplicitDoclingServe(ctx, cfg)
 	case "mistral":
 		if mistralOCRAvailable(cfg) {
 			return ExtractorDecision{Name: "mistral-ocr", Source: "explicit"}
 		}
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=mistral but the mistral-ocr provider has no credential"}
 	default: // auto
-		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
-			return ExtractorDecision{Name: "docling", Source: "auto", Reason: "configured docling command"}
-		}
-		if _, err := exec.LookPath("docling"); err == nil {
-			return ExtractorDecision{Name: "docling", Source: "auto", Reason: "auto-detected on PATH"}
-		}
-		if strings.TrimSpace(cfg.IngestDoclingServeURL) != "" {
-			return ExtractorDecision{Name: "docling-serve", Source: "auto", Reason: "configured docling-serve endpoint; docling CLI not found"}
-		}
-		if mistralOCRAvailable(cfg) {
-			return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: "docling not found on PATH; falling back to Mistral OCR"}
-		}
+		return describeAutoDocumentExtractor(ctx, cfg)
+	}
+}
+
+func describeExplicitDoclingServe(ctx context.Context, cfg config.Config) ExtractorDecision {
+	serveURL := strings.TrimSpace(cfg.IngestDoclingServeURL)
+	switch {
+	case serveURL == "":
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling-serve but ingest.docling.serve_url is empty"}
+	case ProbeDoclingServe(ctx, serveURL) == nil:
+		return ExtractorDecision{Name: "docling-serve", Source: "explicit", Reason: "configured docling-serve endpoint"}
+	default:
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling-serve but the docling-serve endpoint is unreachable"}
+	}
+}
+
+func describeAutoDocumentExtractor(ctx context.Context, cfg config.Config) ExtractorDecision {
+	if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
+		return ExtractorDecision{Name: "docling", Source: "auto", Reason: "configured docling command"}
+	}
+	if _, err := exec.LookPath("docling"); err == nil {
+		return ExtractorDecision{Name: "docling", Source: "auto", Reason: "auto-detected on PATH"}
+	}
+	return describeAutoWithoutDoclingCLI(ctx, cfg)
+}
+
+func describeAutoWithoutDoclingCLI(ctx context.Context, cfg config.Config) ExtractorDecision {
+	serveURL := strings.TrimSpace(cfg.IngestDoclingServeURL)
+	switch {
+	case serveURL != "" && ProbeDoclingServe(ctx, serveURL) == nil:
+		return ExtractorDecision{Name: "docling-serve", Source: "auto", Reason: "configured docling-serve endpoint; docling CLI not found"}
+	case mistralOCRAvailable(cfg) && serveURL != "":
+		return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: "docling not found on PATH; docling-serve endpoint unreachable; falling back to Mistral OCR"}
+	case mistralOCRAvailable(cfg):
+		return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: "docling not found on PATH; falling back to Mistral OCR"}
+	case serveURL != "":
+		return ExtractorDecision{Source: "disabled", Reason: "docling not found on PATH; docling-serve endpoint unreachable; and no Mistral credential"}
+	default:
 		return ExtractorDecision{Source: "disabled", Reason: "no extractor available: docling not on PATH, no docling-serve URL, and no Mistral credential"}
 	}
 }

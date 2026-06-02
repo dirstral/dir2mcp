@@ -141,14 +141,6 @@ func extractorCheck(cfg config.Config) doctorCheck {
 	if d.Source == "fallback" {
 		status = doctorStatusWarn
 	}
-	if d.Name == "docling-serve" {
-		if err := ingest.ProbeDoclingServe(context.Background(), cfg.IngestDoclingServeURL); err != nil {
-			// An unreachable endpoint is a disabled extractor (spec §7.4.B/
-			// §7.7); warn so the operator knows document extraction won't run.
-			// The URL is sanitized — doctor output flows into the support bundle.
-			return doctorCheck{Name: "extractor", Status: doctorStatusWarn, Detail: fmt.Sprintf("docling-serve endpoint %s: %v", ingest.SanitizeServeURL(cfg.IngestDoclingServeURL), err)}
-		}
-	}
 	return doctorCheck{Name: "extractor", Status: status, Detail: detail}
 }
 
