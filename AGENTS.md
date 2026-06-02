@@ -67,15 +67,15 @@ Skipped by default. To run:
 ```bash
 RUN_INTEGRATION_TESTS=1 \
 MISTRAL_API_KEY=... \
-    go test -v ./internal/mistral -run Integration
+    go test -v ./tests/mistral -run Integration
 RUN_INTEGRATION_TESTS=1 \
 MISTRAL_API_KEY=... \
 MISTRAL_OCR_SAMPLE=/path/to/file.pdf \
-    go test -v ./tests -run MistralOCR
+    go test -v ./tests/mistral -run MistralOCR
 RUN_INTEGRATION_TESTS=1 \
 MISTRAL_API_KEY=... \
 MISTRAL_STT_SAMPLE=/path/to/file.mp3 \
-    go test -v ./tests -run MistralSTT
+    go test -v ./tests/mistral -run Transcribe_Integration_MistralAPI
 ```
 
 ## MCP dev servers (Codex)
