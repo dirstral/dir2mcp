@@ -119,6 +119,7 @@ func TestSaveFile_WatchSettingsRoundTrip(t *testing.T) {
 	cfg.StateDir = "/tmp/repo/.dir2mcp"
 	cfg.IngestWatch = true
 	cfg.IngestWatchDebounce = 1500 * time.Millisecond
+	cfg.IngestDoclingServeURL = "http://127.0.0.1:5001"
 
 	if err := config.SaveFile(path, cfg); err != nil {
 		t.Fatalf("SaveFile failed: %v", err)
@@ -133,6 +134,9 @@ func TestSaveFile_WatchSettingsRoundTrip(t *testing.T) {
 	}
 	if loaded.IngestWatchDebounce != 1500*time.Millisecond {
 		t.Errorf("IngestWatchDebounce did not round-trip: got %v, want 1.5s", loaded.IngestWatchDebounce)
+	}
+	if loaded.IngestDoclingServeURL != "http://127.0.0.1:5001" {
+		t.Errorf("IngestDoclingServeURL did not round-trip: got %q", loaded.IngestDoclingServeURL)
 	}
 }
 
@@ -201,6 +205,7 @@ func TestLoadFile_ReadsNestedSpecStyleKeys(t *testing.T) {
 		"  extractor: docling\n"+
 		"  docling:\n"+
 		"    command: docling --to md --output - {input}\n"+
+		"    serve_url: http://127.0.0.1:5001\n"+
 		"  pdf:\n"+
 		"    mode: ocr\n"+
 		"  images:\n"+
@@ -270,6 +275,9 @@ func assertNestedIngestFields(t *testing.T, cfg config.Config) {
 	}
 	if cfg.DoclingCommand != "docling --to md --output - {input}" {
 		t.Fatalf("DoclingCommand=%q", cfg.DoclingCommand)
+	}
+	if cfg.IngestDoclingServeURL != "http://127.0.0.1:5001" {
+		t.Fatalf("IngestDoclingServeURL=%q", cfg.IngestDoclingServeURL)
 	}
 	if !cfg.IngestWatch {
 		t.Fatal("expected IngestWatch=true")

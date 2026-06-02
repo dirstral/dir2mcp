@@ -75,10 +75,15 @@ type Config struct {
 	ResolvedAuthToken string
 	// DoclingCommand optionally configures a local docling CLI command
 	// template used for rich document extraction.
-	DoclingCommand       string
-	ElevenLabsAPIKey     string
-	ElevenLabsBaseURL    string
-	ElevenLabsTTSVoiceID string
+	DoclingCommand string
+	// IngestDoclingServeURL is the HTTP endpoint of a running docling-serve
+	// container (e.g. http://127.0.0.1:5001). Required when
+	// ingest.extractor=docling-serve; under extractor=auto an empty value
+	// simply means the HTTP transport is not used (spec 0.10.0 §7.4.B).
+	IngestDoclingServeURL string
+	ElevenLabsAPIKey      string
+	ElevenLabsBaseURL     string
+	ElevenLabsTTSVoiceID  string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -182,6 +187,7 @@ type fileConfig struct {
 	SecretPatterns  []string
 	DoclingCommand  *string
 
+	IngestDoclingServeURL     *string
 	ElevenLabsBaseURL         *string
 	ElevenLabsTTSVoiceID      *string
 	AllowedOrigins            []string
@@ -251,6 +257,7 @@ type persistedConfig struct {
 	PathExcludes    []string `yaml:"path_excludes"`
 	SecretPatterns  []string `yaml:"secret_patterns"`
 	DoclingCommand  string   `yaml:"docling_command"`
+	DoclingServeURL string   `yaml:"docling_serve_url"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -438,6 +445,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		PathExcludes:              append([]string(nil), cfg.PathExcludes...),
 		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
 		DoclingCommand:            cfg.DoclingCommand,
+		DoclingServeURL:           cfg.IngestDoclingServeURL,
 		SessionInactivityTimeout:  cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:        cfg.SessionMaxLifetime,
 		HealthCheckInterval:       cfg.HealthCheckInterval,
@@ -898,6 +906,9 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	if fc.DoclingCommand != nil {
 		cfg.DoclingCommand = *fc.DoclingCommand
 	}
+	if fc.IngestDoclingServeURL != nil {
+		cfg.IngestDoclingServeURL = *fc.IngestDoclingServeURL
+	}
 	if fc.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fc.ElevenLabsBaseURL
 	}
@@ -1228,6 +1239,8 @@ var configKeyAliases = map[string]string{
 	"security.secret_patterns":             "secret_patterns",
 	"docling.command":                      "docling_command",
 	"ingest.docling.command":               "docling_command",
+	"docling.serve_url":                    "docling_serve_url",
+	"ingest.docling.serve_url":             "docling_serve_url",
 	"stt.elevenlabs.api_key":               "elevenlabs_api_key",
 	"secrets.elevenlabs_api_key":           "elevenlabs_api_key",
 	"secrets.x402_facilitator_url":         "x402_facilitator_url",
@@ -1504,6 +1517,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.ElevenLabsTTSVoiceID = strPtr(value)
 	case "docling_command":
 		cfg.DoclingCommand = strPtr(value)
+	case "docling_serve_url":
+		cfg.IngestDoclingServeURL = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "chunking.strategy":
@@ -1646,6 +1661,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("path_excludes", cfg.PathExcludes)
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("docling_command", cfg.DoclingCommand)
+	writeScalar("docling_serve_url", cfg.DoclingServeURL)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
@@ -1774,6 +1790,9 @@ func applyRerankEnvOverrides(cfg *Config, env map[string]string) {
 func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_DOCLING_COMMAND", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.DoclingCommand = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_DOCLING_SERVE_URL", env); ok && strings.TrimSpace(raw) != "" {
+		cfg.IngestDoclingServeURL = strings.TrimSpace(raw)
 	}
 	if raw, ok := envLookup("DIR2MCP_INGEST_EXTRACTOR", env); ok && strings.TrimSpace(raw) != "" {
 		cfg.IngestExtractor = strings.TrimSpace(raw)
@@ -1975,16 +1994,16 @@ func (c *Config) Validate() error {
 }
 
 // validateIngestExtractor normalizes IngestExtractor (defaulting empty)
-// and rejects any value outside auto/docling/mistral/off.
+// and rejects any value outside auto/docling/docling-serve/mistral/off.
 func (c *Config) validateIngestExtractor() error {
 	extractorMode := strings.ToLower(strings.TrimSpace(c.IngestExtractor))
 	if extractorMode == "" {
 		extractorMode = Default().IngestExtractor
 	}
 	switch extractorMode {
-	case "auto", "docling", "mistral", "off":
+	case "auto", "docling", "docling-serve", "mistral", "off":
 	default:
-		return fmt.Errorf("ingest.extractor must be one of auto, docling, mistral, off: %q", c.IngestExtractor)
+		return fmt.Errorf("ingest.extractor must be one of auto, docling, docling-serve, mistral, off: %q", c.IngestExtractor)
 	}
 	c.IngestExtractor = extractorMode
 	return nil
