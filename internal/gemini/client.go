@@ -1,19 +1,19 @@
-// Package gemini provides a direct-HTTP adapter for Google Gemini via its
-// OpenAI-compatible API surface (POST {base}/embeddings, POST
-// {base}/chat/completions). Per SPEC 8.1.2 a `gemini` profile may serve
-// embed ✅ chat ✅ stt ✅ tts ✅; this adapter implements the embed + chat
-// capabilities (model.Embedder / model.Generator) by reusing the same
-// OpenAI-compatible wire shape as internal/mistral, selected purely by
-// the Gemini base URL + Gemini model names.
+// Package gemini provides a direct-HTTP adapter for Google Gemini. Chat
+// (model.Generator) and STT use Gemini's OpenAI-compatible surface (POST
+// {base}/chat/completions); embeddings (model.Embedder) use Gemini's
+// NATIVE surface (POST {base-without-/openai}/models/{model}:batchEmbedContents)
+// because only the native API supports `taskType` (asymmetric embeddings,
+// SPEC 8.1.5) and `outputDimensionality` (Matryoshka/MRL, SPEC 8.1.6) —
+// the OpenAI-compatible /embeddings shim exposes neither.
 //
 // It mirrors internal/mistral and internal/cohere (BaseURL/APIKey/
 // HTTPClient, bounded exponential retry, typed model.ProviderError) so
 // callers can depend on model.Embedder / model.Generator without taking
 // a hard dependency on this package.
 //
-// Gemini embeddings are symmetric, so the model.EmbedRole is accepted
-// and intentionally ignored (SPEC 8.1.5) — observable behavior MUST NOT
-// differ by role for this provider.
+// Gemini embeddings are ASYMMETRIC (SPEC 8.1.5): the model.EmbedRole is
+// mapped onto `taskType` (RETRIEVAL_DOCUMENT / RETRIEVAL_QUERY, and
+// CODE_RETRIEVAL_QUERY for a query against the configured code model).
 //
 // TODO(spec 8.1.2): native Gemini STT/TTS. The capability matrix marks
 // `gemini` as stt ✅ tts ✅, but this adapter implements embed + chat
@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -38,9 +39,13 @@ import (
 )
 
 const (
-	// defaultBaseURL is Gemini's OpenAI-compatible endpoint. The adapter
-	// appends /embeddings and /chat/completions to this base.
-	defaultBaseURL           = "https://generativelanguage.googleapis.com/v1beta/openai"
+	// defaultBaseURL is Gemini's OpenAI-compatible endpoint (chat/STT).
+	// The adapter appends /chat/completions to this base.
+	defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+	// geminiNativeBaseURL is the native API base used for embeddings
+	// (models/{model}:batchEmbedContents) — the OpenAI-compat base minus
+	// the trailing /openai. Used when BaseURL is the default/empty.
+	geminiNativeBaseURL      = "https://generativelanguage.googleapis.com/v1beta"
 	defaultRequestTimeout    = 30 * time.Second
 	defaultGenerationTimeout = 120 * time.Second
 	defaultMaxRetries        = 3
@@ -51,7 +56,7 @@ const (
 	// DefaultEmbedModel / DefaultChatModel are fallbacks used only when
 	// the caller passes an empty model name. The config resolver
 	// normally supplies explicit models per profile.
-	DefaultEmbedModel = "text-embedding-004"
+	DefaultEmbedModel = "gemini-embedding-001"
 	DefaultChatModel  = "gemini-2.5-flash"
 	DefaultSTTModel   = "gemini-2.5-flash"
 	DefaultTTSModel   = "gemini-2.5-flash-preview-tts"
@@ -77,10 +82,19 @@ type Client struct {
 	// DefaultEmbedModel/DefaultChatModel are used when the corresponding
 	// call is made with an empty model name.
 	DefaultEmbedModel string
-	DefaultChatModel  string
-	DefaultSTTModel   string
-	DefaultTTSModel   string
-	DefaultTTSVoice   string
+	// CodeEmbedModel is the resolved code-embedding model name; a query
+	// against it selects Gemini's CODE_RETRIEVAL_QUERY task type (SPEC
+	// 8.1.5). Empty disables the code-aware refinement.
+	CodeEmbedModel string
+	// EmbedTextDim / EmbedCodeDim request a specific output dimensionality
+	// (Matryoshka/MRL, SPEC 8.1.6); zero means the model's native size.
+	// When set, returned vectors are L2-normalized.
+	EmbedTextDim     int
+	EmbedCodeDim     int
+	DefaultChatModel string
+	DefaultSTTModel  string
+	DefaultTTSModel  string
+	DefaultTTSVoice  string
 }
 
 // compile-time assertions that *Client implements the model contracts.
@@ -115,23 +129,42 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
-type embedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+// Native batchEmbedContents request/response shapes. The native API
+// (unlike the OpenAI-compatible /embeddings shim) carries taskType and
+// outputDimensionality, and returns embeddings in request order.
+type geminiEmbedContentPart struct {
+	Text string `json:"text"`
 }
 
-type embedResponse struct {
-	Data []struct {
-		Index     int       `json:"index"`
-		Embedding []float64 `json:"embedding"`
-	} `json:"data"`
+type geminiEmbedContent struct {
+	Parts []geminiEmbedContentPart `json:"parts"`
 }
 
-// Embed implements model.Embedder. Gemini embeddings are symmetric, so
-// the input role is accepted and ignored (SPEC 8.1.5). Inputs are sent
-// in BatchSize-sized batches; each batch is retried with bounded
-// exponential backoff, and vectors are reordered to match input order.
-func (c *Client) Embed(ctx context.Context, modelName string, _ model.EmbedRole, inputs []string) ([][]float32, error) {
+type geminiEmbedSingleRequest struct {
+	Model                string             `json:"model"`
+	Content              geminiEmbedContent `json:"content"`
+	TaskType             string             `json:"taskType,omitempty"`
+	OutputDimensionality *int               `json:"outputDimensionality,omitempty"`
+}
+
+type geminiBatchEmbedRequest struct {
+	Requests []geminiEmbedSingleRequest `json:"requests"`
+}
+
+type geminiBatchEmbedResponse struct {
+	Embeddings []struct {
+		Values []float64 `json:"values"`
+	} `json:"embeddings"`
+}
+
+// Embed implements model.Embedder via Gemini's native embed surface
+// (models/{model}:batchEmbedContents). The input role maps onto taskType
+// (SPEC 8.1.5); a query against the configured code model uses
+// CODE_RETRIEVAL_QUERY. When a non-native output dimension is requested
+// (SPEC 8.1.6) the returned vectors are L2-normalized. Inputs are sent in
+// BatchSize-sized batches, each retried with bounded exponential backoff;
+// the native batch response preserves request order.
+func (c *Client) Embed(ctx context.Context, modelName string, role model.EmbedRole, inputs []string) ([][]float32, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return nil, &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
 	}
@@ -146,6 +179,13 @@ func (c *Client) Embed(ctx context.Context, modelName string, _ model.EmbedRole,
 		return [][]float32{}, nil
 	}
 
+	isCode := c.CodeEmbedModel != "" && modelName == strings.TrimSpace(c.CodeEmbedModel)
+	taskType := geminiTaskType(role, isCode)
+	dim := c.EmbedTextDim
+	if isCode {
+		dim = c.EmbedCodeDim
+	}
+
 	batchSize := c.BatchSize
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
@@ -157,7 +197,7 @@ func (c *Client) Embed(ctx context.Context, modelName string, _ model.EmbedRole,
 		if end > len(inputs) {
 			end = len(inputs)
 		}
-		vectors, err := c.embedBatchWithRetry(ctx, modelName, inputs[start:end])
+		vectors, err := c.embedBatchWithRetry(ctx, modelName, taskType, dim, inputs[start:end])
 		if err != nil {
 			return nil, err
 		}
@@ -166,7 +206,20 @@ func (c *Client) Embed(ctx context.Context, modelName string, _ model.EmbedRole,
 	return out, nil
 }
 
-func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
+// geminiTaskType maps the SPEC 8.1.5 input role onto Gemini's taskType.
+// Documents always embed as RETRIEVAL_DOCUMENT; a query embeds as
+// RETRIEVAL_QUERY, or CODE_RETRIEVAL_QUERY when it targets the code model.
+func geminiTaskType(role model.EmbedRole, isCode bool) string {
+	if role == model.EmbedQuery {
+		if isCode {
+			return "CODE_RETRIEVAL_QUERY"
+		}
+		return "RETRIEVAL_QUERY"
+	}
+	return "RETRIEVAL_DOCUMENT"
+}
+
+func (c *Client) embedBatchWithRetry(ctx context.Context, modelName, taskType string, dim int, inputs []string) ([][]float32, error) {
 	maxRetries := c.MaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
@@ -178,7 +231,7 @@ func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inpu
 				return nil, err
 			}
 		}
-		vectors, err := c.embedBatch(ctx, modelName, inputs)
+		vectors, err := c.embedBatchNative(ctx, modelName, taskType, dim, inputs)
 		if err == nil {
 			return vectors, nil
 		}
@@ -191,12 +244,27 @@ func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inpu
 	return nil, lastErr
 }
 
-func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
-	body, err := json.Marshal(embedRequest{Model: modelName, Input: inputs})
+func (c *Client) embedBatchNative(ctx context.Context, modelName, taskType string, dim int, inputs []string) ([][]float32, error) {
+	qualified := "models/" + modelName
+	reqs := make([]geminiEmbedSingleRequest, len(inputs))
+	for i, in := range inputs {
+		r := geminiEmbedSingleRequest{
+			Model:    qualified,
+			Content:  geminiEmbedContent{Parts: []geminiEmbedContentPart{{Text: in}}},
+			TaskType: taskType,
+		}
+		if dim > 0 {
+			d := dim
+			r.OutputDimensionality = &d
+		}
+		reqs[i] = r
+	}
+	body, err := json.Marshal(geminiBatchEmbedRequest{Requests: reqs})
 	if err != nil {
 		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to marshal embedding request", Retryable: false, Cause: err}
 	}
-	resp, err := c.doJSON(ctx, "/embeddings", body, defaultRequestTimeout)
+
+	resp, err := c.doNativeJSON(ctx, "/"+qualified+":batchEmbedContents", body, defaultRequestTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -205,36 +273,76 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		return nil, httpError(resp)
 	}
 
-	var parsed embedResponse
+	var parsed geminiBatchEmbedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode embedding response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
-	if len(parsed.Data) != len(inputs) {
-		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("embedding response size mismatch: got %d vectors for %d inputs", len(parsed.Data), len(inputs)), Retryable: false, StatusCode: resp.StatusCode}
+	if len(parsed.Embeddings) != len(inputs) {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("embedding response size mismatch: got %d vectors for %d inputs", len(parsed.Embeddings), len(inputs)), Retryable: false, StatusCode: resp.StatusCode}
 	}
 
 	vectors := make([][]float32, len(inputs))
-	seen := make([]bool, len(inputs))
-	for _, item := range parsed.Data {
-		if item.Index < 0 || item.Index >= len(inputs) {
-			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("embedding response contains out-of-range index %d", item.Index), Retryable: false, StatusCode: resp.StatusCode}
+	for i, e := range parsed.Embeddings {
+		vec := make([]float32, len(e.Values))
+		for j, v := range e.Values {
+			vec[j] = float32(v)
 		}
-		if seen[item.Index] {
-			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("embedding response contains duplicate index %d", item.Index), Retryable: false, StatusCode: resp.StatusCode}
+		if dim > 0 {
+			l2Normalize(vec)
 		}
-		vec := make([]float32, len(item.Embedding))
-		for i, v := range item.Embedding {
-			vec[i] = float32(v)
-		}
-		vectors[item.Index] = vec
-		seen[item.Index] = true
-	}
-	for i := range seen {
-		if !seen[i] {
-			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("embedding response missing index %d", i), Retryable: false, StatusCode: resp.StatusCode}
-		}
+		vectors[i] = vec
 	}
 	return vectors, nil
+}
+
+// nativeBaseURL derives Gemini's native API base from the configured
+// (OpenAI-compatible) base by dropping a trailing "/openai" segment, so
+// embeddings reach models/{model}:batchEmbedContents while chat keeps
+// using the OpenAI-compatible base.
+func (c *Client) nativeBaseURL() string {
+	b := strings.TrimRight(c.BaseURL, "/")
+	if trimmed := strings.TrimSuffix(b, "/openai"); trimmed != b {
+		return trimmed
+	}
+	if b == "" {
+		return geminiNativeBaseURL
+	}
+	return b
+}
+
+// doNativeJSON POSTs to Gemini's native API, authenticating with the
+// x-goog-api-key header so the key never lands in a URL/query string.
+func (c *Client) doNativeJSON(ctx context.Context, path string, body []byte, timeout time.Duration) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.nativeBaseURL()+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to build request", Retryable: false, Cause: err}
+	}
+	req.Header.Set("x-goog-api-key", c.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := clientWithTimeout(c.HTTPClient, timeout).Do(req)
+	if err != nil {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "request failed", Retryable: true, Cause: err}
+	}
+	return resp, nil
+}
+
+// l2Normalize scales v to unit L2 length in place. MRL-truncated Gemini
+// vectors (outputDimensionality below the native size) are not
+// pre-normalized, and the index's cosine/IP scoring assumes unit vectors
+// (SPEC 8.1.6). A zero vector is left unchanged.
+func l2Normalize(v []float32) {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	if sum == 0 {
+		return
+	}
+	inv := float32(1.0 / math.Sqrt(sum))
+	for i := range v {
+		v[i] *= inv
+	}
 }
 
 type generateMessage struct {

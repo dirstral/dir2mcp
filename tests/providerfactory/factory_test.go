@@ -3,6 +3,7 @@ package tests
 import (
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/gemini"
 	"github.com/dirstral/dir2mcp/internal/openai"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
@@ -96,5 +97,41 @@ func TestModelDefaultsPropagate(t *testing.T) {
 	g, _ := providerfactory.Generator(p)
 	if oc, ok := g.(*openai.Client); !ok || oc.DefaultChatModel != "my-chat" {
 		t.Fatalf("chat default not propagated: %#v", g)
+	}
+}
+
+// TestEmbedder_GeminiDimsAndCodeModel verifies the Matryoshka dimension
+// and code-model fields (SPEC 8.1.5/8.1.6) propagate to the gemini client.
+func TestEmbedder_GeminiDimsAndCodeModel(t *testing.T) {
+	p := provider.Profile{
+		Name: "gemini", Kind: provider.KindGemini, APIKey: "k",
+		EmbedTextModel: "gemini-embedding-001", EmbedCodeModel: "gemini-embedding-001",
+		EmbedTextDim: 1536, EmbedCodeDim: 768,
+	}
+	e, err := providerfactory.Embedder(p)
+	if err != nil {
+		t.Fatalf("embedder: %v", err)
+	}
+	gc, ok := e.(*gemini.Client)
+	if !ok {
+		t.Fatalf("want *gemini.Client, got %T", e)
+	}
+	if gc.DefaultEmbedModel != "gemini-embedding-001" || gc.CodeEmbedModel != "gemini-embedding-001" {
+		t.Fatalf("models not propagated: %+v", gc)
+	}
+	if gc.EmbedTextDim != 1536 || gc.EmbedCodeDim != 768 {
+		t.Fatalf("dims not propagated: text=%d code=%d", gc.EmbedTextDim, gc.EmbedCodeDim)
+	}
+}
+
+// TestEmbedder_DimRejectedForNonGemini pins SPEC 8.1.6: a fixed output
+// dimension on a provider that can't honor it is CONFIG_INVALID, not
+// silently ignored.
+func TestEmbedder_DimRejectedForNonGemini(t *testing.T) {
+	for _, k := range []provider.Kind{provider.KindOpenAI, provider.KindCohere} {
+		p := provider.Profile{Name: string(k), Kind: k, APIKey: "k", EmbedTextDim: 768}
+		if _, err := providerfactory.Embedder(p); err == nil {
+			t.Fatalf("kind %q: want CONFIG_INVALID for embed dim, got nil", k)
+		}
 	}
 }

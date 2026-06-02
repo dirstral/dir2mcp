@@ -132,7 +132,9 @@ func TestSelectAutoPrecedence(t *testing.T) {
 func TestEmbedIdentity(t *testing.T) {
 	p := provider.Profile{Name: "mistral", EmbedTextModel: "mistral-embed", EmbedCodeModel: "codestral-embed"}
 	id := provider.EmbedIdentity(p)
-	if id != "mistral|mistral-embed|codestral-embed" {
+	// Identity is provider|text_model|code_model|text_dim|code_dim
+	// (SPEC 8.1.4/8.1.6); unset dims record as 0 (native).
+	if id != "mistral|mistral-embed|codestral-embed|0|0" {
 		t.Fatalf("identity = %q", id)
 	}
 	if err := provider.VerifyEmbedIdentity("", id); err != nil {
@@ -141,7 +143,15 @@ func TestEmbedIdentity(t *testing.T) {
 	if err := provider.VerifyEmbedIdentity(id, id); err != nil {
 		t.Errorf("matching identity must pass: %v", err)
 	}
-	_ = cfgErr(t, provider.VerifyEmbedIdentity("openai|text-embedding-3-small|", id))
+	_ = cfgErr(t, provider.VerifyEmbedIdentity("openai|text-embedding-3-small||0|0", id))
+	// A different requested output dimension is a distinct identity
+	// (reindex-bound, SPEC 8.1.6): same provider+models but dim 768 must
+	// not match the native (dim 0) identity.
+	native := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-001"})
+	dimmed := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-001", EmbedTextDim: 768})
+	if native == dimmed {
+		t.Fatalf("requested dimension must change embed identity: %q == %q", native, dimmed)
+	}
 }
 
 func mustErr(_ provider.Profile, err error) error {

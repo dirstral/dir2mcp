@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,49 +22,71 @@ func newClient(url string) *gemini.Client {
 	return c
 }
 
-// embedResp echoes one item per input, embedding[0] = first byte of the
-// input string, returned in REVERSED order to exercise index reordering.
-func embedResp(inputs []string) map[string]any {
-	n := len(inputs)
-	data := make([]map[string]any, n)
-	for i := 0; i < n; i++ {
-		p := n - 1 - i
-		data[i] = map[string]any{"index": p, "embedding": []float64{float64(inputs[p][0]), 0.5}}
+// nativeEmbedReq is the native batchEmbedContents request body shape.
+type nativeEmbedReq struct {
+	Requests []struct {
+		Model   string `json:"model"`
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+		TaskType             string `json:"taskType"`
+		OutputDimensionality *int   `json:"outputDimensionality"`
+	} `json:"requests"`
+}
+
+func decodeNativeEmbed(t *testing.T, r *http.Request) nativeEmbedReq {
+	t.Helper()
+	var req nativeEmbedReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		t.Fatalf("decode native embed request: %v", err)
 	}
-	return map[string]any{"data": data}
+	return req
+}
+
+// embedRespFor returns the native batchEmbedContents response: one
+// embedding per request, IN REQUEST ORDER (the native batch API preserves
+// order), with values[0] = first byte of the request's text so order
+// preservation across batches is verifiable.
+func embedRespFor(req nativeEmbedReq) map[string]any {
+	embs := make([]map[string]any, len(req.Requests))
+	for i, r := range req.Requests {
+		first := 0.0
+		if len(r.Content.Parts) > 0 && r.Content.Parts[0].Text != "" {
+			first = float64(r.Content.Parts[0].Text[0])
+		}
+		embs[i] = map[string]any{"values": []float64{first, 0.5}}
+	}
+	return map[string]any{"embeddings": embs}
 }
 
 func TestEmbed_BatchesPreservesOrderAndRetries(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The adapter appends "/embeddings" to the configured BaseURL;
-		// any version segment is part of the operator's BaseURL, not
-		// added here. This test's base has none, so the path is exactly
-		// "/embeddings" (versioned base covered by
-		// TestEndpointPathJoinPreservesVersion).
-		if r.URL.Path != "/embeddings" {
-			t.Errorf("path = %s", r.URL.Path)
+		// Embeddings use the native surface: base (no /openai here) +
+		// /models/{model}:batchEmbedContents, authenticated with the
+		// x-goog-api-key header (versioned base covered by
+		// TestEmbed_NativeEndpointPath).
+		if want := "/models/gemini-embedding-001:batchEmbedContents"; r.URL.Path != want {
+			t.Errorf("path = %s, want %s", r.URL.Path, want)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Errorf("auth = %q", got)
+		if got := r.Header.Get("x-goog-api-key"); got != "test-key" {
+			t.Errorf("api key header = %q", got)
 		}
 		n := atomic.AddInt32(&calls, 1)
 		if n == 1 { // first batch: one transient 429 then success
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		var req struct {
-			Input []string `json:"input"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		_ = json.NewEncoder(w).Encode(embedResp(req.Input))
+		_ = json.NewEncoder(w).Encode(embedRespFor(decodeNativeEmbed(t, r)))
 	}))
 	defer srv.Close()
 
 	c := newClient(srv.URL)
 	c.BatchSize = 2 // forces 2 batches for 3 inputs (a,b) then (c)
 	in := []string{"a", "b", "c"}
-	vecs, err := c.Embed(context.Background(), "text-embedding-004", model.EmbedDocument, in)
+	vecs, err := c.Embed(context.Background(), "gemini-embedding-001", model.EmbedDocument, in)
 	if err != nil {
 		t.Fatalf("embed: %v", err)
 	}
@@ -73,7 +94,7 @@ func TestEmbed_BatchesPreservesOrderAndRetries(t *testing.T) {
 		t.Fatalf("got %d vectors, want 3", len(vecs))
 	}
 	// Each output vector must correspond to its input across batch
-	// boundaries (embedding[0] == first byte of the input string).
+	// boundaries (values[0] == first byte of the input string).
 	for i, s := range in {
 		if vecs[i][0] != float32(s[0]) {
 			t.Fatalf("order not preserved at %d: got %v, want first-byte of %q", i, vecs[i], s)
@@ -84,17 +105,16 @@ func TestEmbed_BatchesPreservesOrderAndRetries(t *testing.T) {
 	}
 }
 
-// TestEndpointPathJoinPreservesVersion verifies the adapter appends the
-// endpoint to a BaseURL that already carries a version segment, so an
-// operator-configured ".../v1beta/openai" yields
-// ".../v1beta/openai/embeddings".
-func TestEndpointPathJoinPreservesVersion(t *testing.T) {
+// TestEmbed_NativeEndpointPath verifies that embeddings target the native
+// surface: the configured OpenAI-compatible base (".../v1beta/openai") has
+// its trailing "/openai" dropped, then "/models/{model}:batchEmbedContents"
+// is appended — so an operator base of ".../v1beta/openai" yields
+// ".../v1beta/models/m:batchEmbedContents".
+func TestEmbed_NativeEndpointPath(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{{"index": 0, "embedding": []float64{1}}},
-		})
+		_ = json.NewEncoder(w).Encode(embedRespFor(decodeNativeEmbed(t, r)))
 	}))
 	defer srv.Close()
 
@@ -102,8 +122,8 @@ func TestEndpointPathJoinPreservesVersion(t *testing.T) {
 	if _, err := c.Embed(context.Background(), "m", model.EmbedDocument, []string{"x"}); err != nil {
 		t.Fatalf("embed: %v", err)
 	}
-	if gotPath != "/v1beta/openai/embeddings" {
-		t.Fatalf("path = %q, want /v1beta/openai/embeddings", gotPath)
+	if want := "/v1beta/models/m:batchEmbedContents"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
 	}
 }
 
@@ -124,28 +144,80 @@ func TestEmbed_EmptyInputsNoCall(t *testing.T) {
 	}
 }
 
-// TestEmbed_SymmetricRoleByteIdentical pins SPEC 8.1.5: Gemini is a
-// symmetric embedder, so the raw request bytes MUST be identical for
-// EmbedDocument and EmbedQuery (role accepted and ignored).
-func TestEmbed_SymmetricRoleByteIdentical(t *testing.T) {
-	var bodies []string
+// TestEmbed_AsymmetricRoleMapsTaskType pins SPEC 8.1.5: Gemini is an
+// asymmetric embedder, so the role maps onto taskType —
+// document → RETRIEVAL_DOCUMENT, query → RETRIEVAL_QUERY — and a query
+// against the configured code model → CODE_RETRIEVAL_QUERY.
+func TestEmbed_AsymmetricRoleMapsTaskType(t *testing.T) {
+	var gotTask string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		bodies = append(bodies, string(raw))
+		req := decodeNativeEmbed(t, r)
+		gotTask = req.Requests[0].TaskType
+		_ = json.NewEncoder(w).Encode(embedRespFor(req))
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	c.CodeEmbedModel = "code-embed"
+
+	cases := []struct {
+		name      string
+		modelName string
+		role      model.EmbedRole
+		want      string
+	}{
+		{"text document", "text-embed", model.EmbedDocument, "RETRIEVAL_DOCUMENT"},
+		{"text query", "text-embed", model.EmbedQuery, "RETRIEVAL_QUERY"},
+		{"code document", "code-embed", model.EmbedDocument, "RETRIEVAL_DOCUMENT"},
+		{"code query", "code-embed", model.EmbedQuery, "CODE_RETRIEVAL_QUERY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := c.Embed(context.Background(), tc.modelName, tc.role, []string{"hi"}); err != nil {
+				t.Fatalf("embed: %v", err)
+			}
+			if gotTask != tc.want {
+				t.Fatalf("taskType = %q, want %q", gotTask, tc.want)
+			}
+		})
+	}
+}
+
+// TestEmbed_OutputDimensionalityAndNormalize pins SPEC 8.1.6: a requested
+// output dimension is sent as outputDimensionality, and the returned
+// vector is L2-normalized to unit length.
+func TestEmbed_OutputDimensionalityAndNormalize(t *testing.T) {
+	var gotDim *int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := decodeNativeEmbed(t, r)
+		gotDim = req.Requests[0].OutputDimensionality
+		// Return a non-unit vector [3,4] (norm 5) to prove normalization.
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{{"index": 0, "embedding": []float64{1}}},
+			"embeddings": []map[string]any{{"values": []float64{3, 4}}},
 		})
 	}))
 	defer srv.Close()
 
 	c := newClient(srv.URL)
-	for _, role := range []model.EmbedRole{model.EmbedDocument, model.EmbedQuery} {
-		if _, err := c.Embed(context.Background(), "m", role, []string{"hi"}); err != nil {
-			t.Fatalf("embed (%s): %v", role, err)
-		}
+	c.EmbedTextDim = 768
+	vecs, err := c.Embed(context.Background(), "m", model.EmbedDocument, []string{"x"})
+	if err != nil {
+		t.Fatalf("embed: %v", err)
 	}
-	if len(bodies) != 2 || bodies[0] != bodies[1] {
-		t.Fatalf("symmetric provider must send byte-identical request:\n%q\n%q", bodies[0], bodies[1])
+	if gotDim == nil || *gotDim != 768 {
+		t.Fatalf("outputDimensionality = %v, want 768", gotDim)
+	}
+	// [3,4]/5 = [0.6,0.8]; norm must be ~1.
+	got := vecs[0]
+	if d := got[0] - 0.6; d > 1e-6 || d < -1e-6 {
+		t.Fatalf("vec[0] = %v, want 0.6 (normalized)", got[0])
+	}
+	var norm float64
+	for _, v := range got {
+		norm += float64(v) * float64(v)
+	}
+	if norm < 0.999 || norm > 1.001 {
+		t.Fatalf("vector not unit length: norm^2 = %v", norm)
 	}
 }
 
@@ -292,16 +364,12 @@ func TestGenerate_MissingKeyIsNonRetryableAuth(t *testing.T) {
 // TestEmbed_DefaultModelFallback covers the empty-model fallback to the
 // (overridable) DefaultEmbedModel — the request body must carry it.
 func TestEmbed_DefaultModelFallback(t *testing.T) {
-	var gotModel string
+	var gotModel, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Model string `json:"model"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotModel = req.Model
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{{"index": 0, "embedding": []float64{1}}},
-		})
+		gotPath = r.URL.Path
+		req := decodeNativeEmbed(t, r)
+		gotModel = req.Requests[0].Model
+		_ = json.NewEncoder(w).Encode(embedRespFor(req))
 	}))
 	defer srv.Close()
 
@@ -310,8 +378,13 @@ func TestEmbed_DefaultModelFallback(t *testing.T) {
 	if _, err := c.Embed(context.Background(), "", model.EmbedDocument, []string{"x"}); err != nil {
 		t.Fatalf("embed: %v", err)
 	}
-	if gotModel != "embed-override" {
-		t.Fatalf("model = %q, want embed-override (DefaultEmbedModel fallback)", gotModel)
+	// The native request qualifies the model as "models/{model}" and the
+	// URL path carries the same model id.
+	if gotModel != "models/embed-override" {
+		t.Fatalf("model = %q, want models/embed-override (DefaultEmbedModel fallback)", gotModel)
+	}
+	if want := "/models/embed-override:batchEmbedContents"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
 	}
 }
 

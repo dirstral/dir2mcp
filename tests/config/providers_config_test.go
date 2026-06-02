@@ -2,6 +2,7 @@ package tests
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -124,8 +125,38 @@ func TestProviders_UserOverrideAndCustomProfile(t *testing.T) {
 func TestProviders_EmbedIdentityStable(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "mk")
 	id := loadCfg(t, "version: 1\n").Providers().EmbedIdentity()
-	if id != "mistral|mistral-embed|codestral-embed" {
+	// provider|text_model|code_model|text_dim|code_dim (SPEC 8.1.4/8.1.6);
+	// default Mistral has no requested dims (native).
+	if id != "mistral|mistral-embed|codestral-embed|0|0" {
 		t.Fatalf("embed identity = %q", id)
+	}
+}
+
+// TestProviders_EmbedDimensionKnob pins SPEC 8.1.6: model.embed.text_dim/
+// code_dim parse, resolve onto the embed profile, and enter the embed
+// identity (so a dimension change is reindex-bound).
+func TestProviders_EmbedDimensionKnob(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "gk")
+	yaml := "version: 1\n" +
+		"model:\n" +
+		"  embed:\n" +
+		"    provider: gemini\n" +
+		"    text_dim: 1536\n" +
+		"    code_dim: 768\n"
+	r := loadCfg(t, yaml).Providers()
+	p, err := r.Resolve(provider.CapEmbed)
+	if err != nil {
+		t.Fatalf("resolve embed: %v", err)
+	}
+	if p.Name != "gemini" {
+		t.Fatalf("embed provider = %q, want gemini", p.Name)
+	}
+	if p.EmbedTextDim != 1536 || p.EmbedCodeDim != 768 {
+		t.Fatalf("dims = text:%d code:%d, want 1536/768", p.EmbedTextDim, p.EmbedCodeDim)
+	}
+	id := r.EmbedIdentity()
+	if !strings.HasSuffix(id, "|1536|768") {
+		t.Fatalf("embed identity %q must encode requested dims", id)
 	}
 }
 

@@ -34,12 +34,30 @@ func unsupported(p provider.Profile, cap provider.Capability) error {
 	return fmt.Errorf("provider kind %q cannot serve %s", p.Kind, cap)
 }
 
+// rejectEmbedDim fails when a fixed output dimension is requested for a
+// provider kind that cannot honor it (SPEC 8.1.6: unsupported dimensions
+// are CONFIG_INVALID, never silently ignored). Only Gemini supports the
+// knob today.
+func rejectEmbedDim(p provider.Profile) error {
+	if p.EmbedTextDim > 0 || p.EmbedCodeDim > 0 {
+		return fmt.Errorf("CONFIG_INVALID: embed provider kind %q does not support a fixed output dimension (embed.text_dim/code_dim); remove it or use a Matryoshka-capable provider (gemini)", p.Kind)
+	}
+	return nil
+}
+
 // Embedder builds a model.Embedder for the profile (kinds: openai,
 // mistral, cohere, gemini). The per-call model still comes from the
 // caller; Default*Model is only a fallback for empty model names.
+//
+// The embedding output-dimension knob (EmbedTextDim/EmbedCodeDim, SPEC
+// 8.1.6) is only honored by Gemini today; requesting it on any other
+// kind is rejected as CONFIG_INVALID rather than silently ignored.
 func Embedder(p provider.Profile) (model.Embedder, error) {
 	switch p.Kind {
 	case provider.KindOpenAI:
+		if err := rejectEmbedDim(p); err != nil {
+			return nil, err
+		}
 		c := openai.NewClient(p.BaseURL, p.APIKey)
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
@@ -50,8 +68,14 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
 		}
+		c.CodeEmbedModel = p.EmbedCodeModel
+		c.EmbedTextDim = p.EmbedTextDim
+		c.EmbedCodeDim = p.EmbedCodeDim
 		return c, nil
 	case provider.KindCohere:
+		if err := rejectEmbedDim(p); err != nil {
+			return nil, err
+		}
 		c := cohere.NewClient(p.BaseURL, p.APIKey)
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
