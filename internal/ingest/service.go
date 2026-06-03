@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
+	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -892,57 +893,143 @@ func (s *Service) addRepresentations(delta int64) {
 	}
 }
 
-// generateExtractedAndMediaRepresentations handles non-text "visual"
+// generateExtractedAndMediaRepresentations handles non-text "visual" and media
 // documents: the OCR/extractor text representation and, under multimodal
-// augment/replace (SPEC 8.1.7), a direct media chunk. In `replace` an image
-// is embedded from its bytes instead of via OCR→text (OCR is skipped);
-// `augment` keeps OCR and adds the media chunk.
-func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte) error {
-	// pages > 0 means media chunks will be produced (1 for an image, N for a
-	// PDF). In `replace` we then skip OCR; in `augment` OCR is kept alongside.
-	pages := s.mediaPagesFor(doc, content)
-	skipOCR := s.embedMultimodal == "replace" && pages > 0
+// augment/replace (SPEC 8.1.7), direct media chunks (one per page for PDFs,
+// one per time window for audio/video, one for an image). In `replace` the
+// media is embedded from its bytes instead of via OCR→text (OCR is skipped);
+// `augment` keeps OCR and adds the media chunks. It returns whether any media
+// chunks were produced so the caller can apply the same `replace`-skips-text
+// rule to the audio transcript path.
+func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte) (bool, error) {
+	// A non-empty span set means media chunks will be produced. In `replace` we
+	// then skip OCR; in `augment` OCR is kept alongside.
+	spans := s.mediaSpansFor(ctx, doc, content)
+	mediaProduced := len(spans) > 0
+	skipOCR := s.embedMultimodal == "replace" && mediaProduced
 
 	if ShouldGenerateExtractedMarkdown(doc.DocType) && s.extractor != nil && !skipOCR {
 		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
-			return err
+			return false, err
 		}
 		s.addRepresentations(1)
 	}
-	if pages > 0 {
-		if err := s.repGen.GenerateMediaChunks(ctx, doc, computeRepHash(content), pages); err != nil {
-			return err
+	if mediaProduced {
+		if err := s.repGen.GenerateMediaChunks(ctx, doc, computeRepHash(content), spans); err != nil {
+			return false, err
 		}
 		s.addRepresentations(1)
 	}
-	return nil
+	return mediaProduced, nil
 }
 
-// mediaPagesFor returns the number of media chunks (pages) to embed directly
-// for doc under the multimodal mode (SPEC 8.1.7): 0 when media embedding is
-// off or doc is not an embeddable media type; 1 for an image; the page count
-// for a PDF. A PDF whose page count can't be read yields 0 (media skipped,
-// OCR kept) rather than failing the ingest.
-func (s *Service) mediaPagesFor(doc model.Document, content []byte) int {
+// Default media-window lengths for direct audio/video embedding (SPEC 8.1.7).
+// Conservative values at or below the per-modality per-request caps (audio
+// ≤ 180 s, video ≤ 120 s) that also leave headroom under the unified
+// 8192-token budget.
+const (
+	audioWindowMS = 120 * 1000
+	videoWindowMS = 60 * 1000
+)
+
+// probeDuration resolves media duration; indirected so tests can supply a
+// deterministic duration without requiring ffprobe on PATH.
+var probeDuration = avutil.Duration
+
+// mediaSpansFor returns the per-chunk spans to embed directly for doc under the
+// multimodal mode (SPEC 8.1.7): nil when media embedding is off or doc is not
+// an embeddable media type; one `page` span for an image; one `page` span per
+// page for a PDF; one `time` span per window for audio/video. Media whose unit
+// count can't be determined (unreadable PDF, undecodable duration, missing
+// ffprobe) yields nil — media is skipped and the text path is kept — rather
+// than failing the ingest.
+func (s *Service) mediaSpansFor(ctx context.Context, doc model.Document, content []byte) []model.Span {
 	if s.embedMultimodal != "augment" && s.embedMultimodal != "replace" {
-		return 0
+		return nil
 	}
 	switch doc.DocType {
 	case "image":
-		return 1
+		return []model.Span{{Kind: "page", Page: 1}}
 	case "pdf":
-		n, err := pdfutil.PageCount(content)
-		if err != nil {
-			s.getLogger().Printf("multimodal: PDF page count failed for %s (%v); skipping direct media embedding", doc.RelPath, err)
-			return 0
+		return s.pdfPageSpans(doc, content)
+	case "audio":
+		if !isEmbeddableAudio(doc.RelPath) {
+			return nil
 		}
-		if n < 1 {
-			s.getLogger().Printf("multimodal: PDF page count invalid for %s (count=%d); skipping direct media embedding", doc.RelPath, n)
-			return 0
-		}
-		return n
+		return s.mediaTimeSpans(ctx, doc, audioWindowMS)
+	case "video":
+		return s.mediaTimeSpans(ctx, doc, videoWindowMS)
 	default:
-		return 0
+		return nil
+	}
+}
+
+// pdfPageSpans returns one `page` span per PDF page, or nil when the page count
+// can't be read (media skipped, OCR kept).
+func (s *Service) pdfPageSpans(doc model.Document, content []byte) []model.Span {
+	n, err := pdfutil.PageCount(content)
+	if err != nil {
+		s.getLogger().Printf("multimodal: PDF page count failed for %s (%v); skipping direct media embedding", doc.RelPath, err)
+		return nil
+	}
+	if n < 1 {
+		s.getLogger().Printf("multimodal: PDF page count invalid for %s (count=%d); skipping direct media embedding", doc.RelPath, n)
+		return nil
+	}
+	spans := make([]model.Span, n)
+	for i := 0; i < n; i++ {
+		spans[i] = model.Span{Kind: "page", Page: i + 1}
+	}
+	return spans
+}
+
+// mediaTimeSpans probes doc's duration and windows it into contiguous,
+// non-overlapping `time` spans of at most windowMS (SPEC 8.1.7). Returns nil
+// when the duration can't be determined (undecodable, or ffprobe absent),
+// keeping the text path; the condition is a non-fatal per-document warning.
+func (s *Service) mediaTimeSpans(ctx context.Context, doc model.Document, windowMS int) []model.Span {
+	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
+	d, err := probeDuration(ctx, absPath)
+	if err != nil {
+		s.getLogger().Printf("multimodal: media duration unavailable for %s (%v); skipping direct media embedding", doc.RelPath, err)
+		return nil
+	}
+	totalMS := int(d.Milliseconds())
+	if totalMS <= 0 {
+		s.getLogger().Printf("multimodal: media duration invalid for %s (%dms); skipping direct media embedding", doc.RelPath, totalMS)
+		return nil
+	}
+	return windowSpans(totalMS, windowMS)
+}
+
+// windowSpans splits [0, totalMS) into contiguous, non-overlapping half-open
+// `time` windows of at most windowMS. Boundaries are deterministic so
+// citations are stable across re-index (SPEC 8.1.7). The final window holds
+// the remainder.
+func windowSpans(totalMS, windowMS int) []model.Span {
+	if totalMS <= 0 || windowMS <= 0 {
+		return nil
+	}
+	spans := make([]model.Span, 0, (totalMS+windowMS-1)/windowMS)
+	for start := 0; start < totalMS; start += windowMS {
+		end := start + windowMS
+		if end > totalMS {
+			end = totalMS
+		}
+		spans = append(spans, model.Span{Kind: "time", StartMS: start, EndMS: end})
+	}
+	return spans
+}
+
+// isEmbeddableAudio reports whether an audio file's format is accepted for
+// direct multimodal embedding (SPEC 8.1.7 lists MP3 and WAV). Other audio
+// formats keep only their transcript path.
+func isEmbeddableAudio(relPath string) bool {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(relPath), ".")) {
+	case "mp3", "wav":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -968,10 +1055,15 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return nil
 	}
 
-	if err := s.generateExtractedAndMediaRepresentations(ctx, doc, content); err != nil {
+	mediaProduced, err := s.generateExtractedAndMediaRepresentations(ctx, doc, content)
+	if err != nil {
 		return err
 	}
-	if doc.DocType == "audio" && s.transcriber != nil {
+	// In `replace`, direct media embedding stands in for STT→text, so skip the
+	// transcript when audio media chunks were produced (SPEC 8.1.7). `augment`
+	// and `off` keep the transcript path unchanged.
+	skipTranscript := s.embedMultimodal == "replace" && mediaProduced
+	if doc.DocType == "audio" && s.transcriber != nil && !skipTranscript {
 		if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
 			// Provider/transient failures should not fail the entire ingest run.
 			// Persistence/cache failures should still propagate.

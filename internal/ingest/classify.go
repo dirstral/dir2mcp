@@ -40,6 +40,8 @@ func classifyByExtension(ext string) string {
 		return "image"
 	case ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus":
 		return "audio"
+	case ".mp4", ".mov":
+		return "video"
 	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar":
 		return "archive"
 	default:

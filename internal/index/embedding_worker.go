@@ -11,10 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/pdfutil"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
+
+// extractSegment resolves an audio/video time-window into container bytes;
+// indirected so tests can avoid requiring ffmpeg on PATH.
+var extractSegment = avutil.ExtractSegment
 
 type ChunkSource interface {
 	NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error)
@@ -114,7 +119,7 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 	mediaItems := make([]model.MediaInput, 0)
 	for i, t := range validTasks {
 		if isMediaModality(t.Modality) {
-			item, err := w.loadMediaInput(t)
+			item, err := w.loadMediaInput(ctx, t)
 			if err != nil {
 				return nil, err
 			}
@@ -158,10 +163,13 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 	return vectors, nil
 }
 
-// loadMediaInput reads a media chunk's source bytes (resolved from RootDir +
-// MediaRef) and infers its MIME type. The resolved path is constrained to
-// RootDir as defense-in-depth against a traversal in a stored ref.
-func (w *EmbeddingWorker) loadMediaInput(t model.ChunkTask) (model.MediaInput, error) {
+// loadMediaInput resolves a media chunk's source bytes (from RootDir +
+// MediaRef) and infers its MIME type. PDFs are reduced to the chunk's single
+// page and audio/video to the chunk's single time window, so the embedded
+// bytes line up with the cited span and the per-request caps are respected
+// (SPEC 8.1.7). The resolved path is constrained to RootDir as defense-in-depth
+// against a traversal in a stored ref.
+func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask) (model.MediaInput, error) {
 	ref := strings.TrimSpace(t.MediaRef)
 	if ref == "" {
 		return model.MediaInput{}, fmt.Errorf("%w: media chunk %d has no media_ref", ErrFatal, t.Metadata.ChunkID)
@@ -187,25 +195,61 @@ func (w *EmbeddingWorker) loadMediaInput(t model.ChunkTask) (model.MediaInput, e
 	if resolved != realRoot && !strings.HasPrefix(resolved, realRoot+string(os.PathSeparator)) {
 		return model.MediaInput{}, fmt.Errorf("%w: media_ref %q escapes the corpus root", ErrFatal, ref)
 	}
+
+	switch strings.ToLower(strings.TrimSpace(t.Modality)) {
+	case "audio", "video":
+		data, aerr := w.loadMediaSegment(ctx, t, resolved, ref)
+		if aerr != nil {
+			return model.MediaInput{}, aerr
+		}
+		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
+	case "pdf":
+		data, perr := loadPDFPage(t, resolved, ref)
+		if perr != nil {
+			return model.MediaInput{}, perr
+		}
+		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
+	default: // image and other whole-file media
+		data, rerr := os.ReadFile(resolved)
+		if rerr != nil {
+			return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, rerr)
+		}
+		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
+	}
+}
+
+// loadPDFPage extracts the chunk's single page (from its `page` span) into a
+// one-page PDF (SPEC 8.1.7). A missing/invalid page span is a fatal task error
+// so a span/content mismatch surfaces instead of silently embedding page 1.
+func loadPDFPage(t model.ChunkTask, resolved, ref string) ([]byte, error) {
+	if !strings.EqualFold(strings.TrimSpace(t.Metadata.Span.Kind), "page") || t.Metadata.Span.Page < 1 {
+		return nil, fmt.Errorf("%w: pdf media chunk %d has invalid page span", ErrFatal, t.Metadata.ChunkID)
+	}
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, err)
+		return nil, fmt.Errorf("read media %q: %w", ref, err)
 	}
-	// A PDF chunk embeds a single page (SPEC 8.1.7): extract that page (from
-	// the chunk's page span) into its own one-page PDF so the citation and the
-	// embedded content line up, and the per-request page cap is respected.
-	if strings.EqualFold(strings.TrimSpace(t.Modality), "pdf") {
-		if !strings.EqualFold(strings.TrimSpace(t.Metadata.Span.Kind), "page") || t.Metadata.Span.Page < 1 {
-			return model.MediaInput{}, fmt.Errorf("%w: pdf media chunk %d has invalid page span", ErrFatal, t.Metadata.ChunkID)
-		}
-		page := t.Metadata.Span.Page
-		pageData, perr := pdfutil.ExtractPage(data, page)
-		if perr != nil {
-			return model.MediaInput{}, fmt.Errorf("%w: %v", ErrFatal, perr)
-		}
-		data = pageData
+	pageData, perr := pdfutil.ExtractPage(data, t.Metadata.Span.Page)
+	if perr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrFatal, perr)
 	}
-	return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
+	return pageData, nil
+}
+
+// loadMediaSegment cuts the chunk's single time window (from its `time` span)
+// out of the source media (SPEC 8.1.7). A missing/invalid time span is a fatal
+// task error so a span/content mismatch surfaces instead of embedding the wrong
+// segment.
+func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTask, resolved, ref string) ([]byte, error) {
+	span := t.Metadata.Span
+	if !strings.EqualFold(strings.TrimSpace(span.Kind), "time") || span.StartMS < 0 || span.EndMS <= span.StartMS {
+		return nil, fmt.Errorf("%w: %s media chunk %d has invalid time span", ErrFatal, strings.ToLower(t.Modality), t.Metadata.ChunkID)
+	}
+	data, err := extractSegment(ctx, resolved, span.StartMS, span.EndMS)
+	if err != nil {
+		return nil, fmt.Errorf("%w: extract %q segment [%d,%d): %v", ErrFatal, ref, span.StartMS, span.EndMS, err)
+	}
+	return data, nil
 }
 
 // isMediaModality reports whether a chunk modality denotes embeddable media.

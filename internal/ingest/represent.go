@@ -147,16 +147,17 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 	})
 }
 
-// GenerateMediaChunks emits one media chunk per page of a media document so
+// GenerateMediaChunks emits one media chunk per span of a media document so
 // each is embedded directly from its bytes via the multimodal embedder (SPEC
-// 8.1.7), rather than via extracted text. An image is a single page; a PDF
-// is one chunk per page (the embedding worker extracts that page from the
-// file at MediaRef). Each chunk carries no text and a `page` span; pages is
-// clamped to >= 1. contentHash dedups the representation across unchanged
-// re-ingests.
-func (rg *RepresentationGenerator) GenerateMediaChunks(ctx context.Context, doc model.Document, contentHash string, pages int) error {
-	if pages < 1 {
-		pages = 1
+// 8.1.7), rather than via extracted text. The caller decides the unit: an
+// image is a single `page` span, a PDF is one `page` span per page, and audio/
+// video are one `time` span per window. The embedding worker extracts that
+// page/segment from the file at MediaRef before embedding. Each chunk carries
+// no text and exactly one span; an empty spans slice produces no chunks.
+// contentHash dedups the representation across unchanged re-ingests.
+func (rg *RepresentationGenerator) GenerateMediaChunks(ctx context.Context, doc model.Document, contentHash string, spans []model.Span) error {
+	if len(spans) == 0 {
+		return nil
 	}
 	rep := model.Representation{
 		DocID:       doc.DocID,
@@ -170,21 +171,21 @@ func (rg *RepresentationGenerator) GenerateMediaChunks(ctx context.Context, doc 
 		if err != nil {
 			return fmt.Errorf("upsert media representation: %w", err)
 		}
-		for i := 0; i < pages; i++ {
+		for i, span := range spans {
 			chunk := model.Chunk{
 				RepID:           repID,
 				Ordinal:         i,
 				Text:            "",
 				IndexKind:       "text", // media shares the text vector space
 				EmbeddingStatus: "pending",
-				Modality:        doc.DocType, // "image" or "pdf"
+				Modality:        doc.DocType, // "image" | "pdf" | "audio" | "video"
 				MediaRef:        doc.RelPath,
 			}
-			if _, err := tx.InsertChunkWithSpans(ctx, chunk, []model.Span{{Kind: "page", Page: i + 1}}); err != nil {
-				return fmt.Errorf("insert media chunk (page %d): %w", i+1, err)
+			if _, err := tx.InsertChunkWithSpans(ctx, chunk, []model.Span{span}); err != nil {
+				return fmt.Errorf("insert media chunk (ordinal %d): %w", i, err)
 			}
 		}
-		if err := tx.SoftDeleteChunksFromOrdinal(ctx, repID, pages); err != nil {
+		if err := tx.SoftDeleteChunksFromOrdinal(ctx, repID, len(spans)); err != nil {
 			return fmt.Errorf("soft delete stale media chunks: %w", err)
 		}
 		return nil
