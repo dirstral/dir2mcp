@@ -293,7 +293,22 @@ model:
 
 #### Multimodal embeddings (`gemini-embedding-2`, preview — in progress)
 
-Spec §8.1.7 (0.13.0) defines an opt-in `model.embed.multimodal` mode (`off` default | `augment` | `replace`) that embeds images/audio/video/PDFs directly into the same vector space via the multimodal `gemini-embedding-2` model. This is being implemented in phases against a **Public Preview** model: the current build wires the provider plumbing (the `gemini-embedding-2` adapter with media-part embedding, the config knob, and the all-axes validation that `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2`), but the ingestion/retrieval pipeline that produces media chunks is **not wired yet** — so leaving `multimodal: off` (the default) is the only supported setting for now. See [Design 0003](dirstral-spec/docs/design/0003-multimodal-embeddings.md).
+Spec §8.1.7 (0.13.0) defines an opt-in `model.embed.multimodal` mode (`off` default | `augment` | `replace`) that embeds media directly into the same vector space via the multimodal `gemini-embedding-2` model. It is being implemented in phases against a **Public Preview** model:
+
+```yaml
+model:
+  embed:
+    provider: gemini
+    text_model: gemini-embedding-2
+    code_model: gemini-embedding-2
+    multimodal: augment      # off (default) | augment | replace
+```
+
+- **Images** are supported today: under `augment` an image is indexed *both* as OCR text (if an extractor is configured) and as a direct image embedding; under `replace` it is embedded directly *instead of* OCR. A text query then retrieves images from the shared space.
+- **PDF, audio, and video** media chunking is **not wired yet** (follow-up phases); those still go through the existing OCR/STT→text path regardless of mode.
+- `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2` (validated at startup; otherwise `CONFIG_INVALID`), and the mode is reindex-bound (§8.1.4). `off` (default) is fully behavior-preserving.
+
+See [Design 0003](dirstral-spec/docs/design/0003-multimodal-embeddings.md).
 
 ### Server identity
 

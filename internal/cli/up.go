@@ -115,7 +115,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer a.stopPersistenceWithLog(persistence)
 
 	embedErrCh := make(chan error, 4)
-	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm)
+	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir)
 
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
@@ -683,7 +683,7 @@ func startEmbeddingWorkers(
 	indexingState *appstate.IndexingState,
 	errCh chan<- error,
 	logger *log.Logger,
-	textModel, codeModel string,
+	textModel, codeModel, rootDir string,
 ) {
 	if st == nil || embedder == nil {
 		return
@@ -700,6 +700,7 @@ func startEmbeddingWorkers(
 			Embedder:     embedder,
 			ModelForText: textModel,
 			ModelForCode: codeModel,
+			RootDir:      rootDir,
 			BatchSize:    32,
 			Logger:       logger,
 			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
@@ -793,7 +794,7 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 
 // startEmbeddingIfNotReadOnly starts embedding workers when readOnly is false
 // and the store exposes the ChunkSource interface.
-func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode string) {
+func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string) {
 	if readOnly {
 		return
 	}
@@ -802,7 +803,7 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.St
 		return
 	}
 	embedLogger := pickEmbedLogger(stderr, jsonOutput)
-	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode)
+	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir)
 }
 
 // printHumanConnectionIfVerbose prints the human-readable connection block

@@ -49,6 +49,12 @@ type Service struct {
 	extractor     model.DocumentExtractor
 	transcriber   model.Transcriber
 
+	// embedMultimodal is the resolved multimodal embedding mode (SPEC
+	// 8.1.7): "off" (default), "augment", or "replace". When augment/
+	// replace, media documents additionally (or exclusively) get a media
+	// chunk embedded directly from their bytes.
+	embedMultimodal string
+
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
 	// Access must go through the logger() helper or SetLogger; the field
@@ -127,6 +133,11 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc.transcriber = transcriber
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
+	}
+	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
+	// unresolvable embed profile leaves it off (text-only).
+	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+		svc.embedMultimodal = provider.NormalizeEmbedMultimodal(ep.EmbedMultimodal)
 	}
 	return svc, nil
 }
@@ -880,6 +891,30 @@ func (s *Service) addRepresentations(delta int64) {
 	}
 }
 
+// generateExtractedAndMediaRepresentations handles non-text "visual"
+// documents: the OCR/extractor text representation and, under multimodal
+// augment/replace (SPEC 8.1.7), a direct media chunk. In `replace` an image
+// is embedded from its bytes instead of via OCR→text (OCR is skipped);
+// `augment` keeps OCR and adds the media chunk.
+func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte) error {
+	embedImage := (s.embedMultimodal == "augment" || s.embedMultimodal == "replace") && doc.DocType == "image"
+	skipOCR := s.embedMultimodal == "replace" && doc.DocType == "image"
+
+	if ShouldGenerateExtractedMarkdown(doc.DocType) && s.extractor != nil && !skipOCR {
+		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
+			return err
+		}
+		s.addRepresentations(1)
+	}
+	if embedImage {
+		if err := s.repGen.GenerateMediaChunk(ctx, doc, computeRepHash(content)); err != nil {
+			return err
+		}
+		s.addRepresentations(1)
+	}
+	return nil
+}
+
 func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte) error {
 	if s.repGen == nil {
 		return nil
@@ -902,11 +937,8 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return nil
 	}
 
-	if ShouldGenerateExtractedMarkdown(doc.DocType) && s.extractor != nil {
-		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
-			return err
-		}
-		s.addRepresentations(1)
+	if err := s.generateExtractedAndMediaRepresentations(ctx, doc, content); err != nil {
+		return err
 	}
 	if doc.DocType == "audio" && s.transcriber != nil {
 		if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {

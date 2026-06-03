@@ -207,8 +207,8 @@ func lookupChunkDocContext(ctx context.Context, exec dbExecutor, repID int64) (r
 func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType string) (int64, error) {
 	_, err := exec.ExecContext(
 		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, embedding_status, embedding_error, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, embedding_status, embedding_error, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -217,6 +217,8 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		   text_hash=excluded.text_hash,
 		   tokens_est=excluded.tokens_est,
 		   index_kind=excluded.index_kind,
+		   modality=excluded.modality,
+		   media_ref=excluded.media_ref,
 		   embedding_status=excluded.embedding_status,
 		   embedding_error=excluded.embedding_error,
 		   deleted=excluded.deleted`,
@@ -229,6 +231,8 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		strings.TrimSpace(chunk.TextHash),
 		0,
 		normalizeIndexKind(chunk.IndexKind),
+		normalizeModality(chunk.Modality),
+		strings.TrimSpace(chunk.MediaRef),
 		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
 		strings.TrimSpace(chunk.EmbeddingError),
 		boolToInt(chunk.Deleted),
@@ -343,6 +347,13 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// bundle's list-files.json so maintainers can tell *why* a doc
 		// failed without grepping server.log.
 		`ALTER TABLE documents ADD COLUMN error_message TEXT NOT NULL DEFAULT ''`,
+		// modality / media_ref support multimodal embeddings (SPEC 8.1.7):
+		// modality is text|image|audio|video|pdf; media_ref is the corpus
+		// rel_path of the source media for a non-text chunk (the embedding
+		// worker reads those bytes and embeds them directly). Text chunks
+		// keep modality='text', media_ref=''.
+		`ALTER TABLE chunks ADD COLUMN modality TEXT NOT NULL DEFAULT 'text'`,
+		`ALTER TABLE chunks ADD COLUMN media_ref TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -416,6 +427,8 @@ CREATE TABLE IF NOT EXISTS chunks (
   text_hash TEXT NOT NULL DEFAULT '',
   tokens_est INTEGER NOT NULL DEFAULT 0,
   index_kind TEXT NOT NULL DEFAULT 'text',
+  modality TEXT NOT NULL DEFAULT 'text',
+  media_ref TEXT NOT NULL DEFAULT '',
   embedding_status TEXT NOT NULL DEFAULT 'pending',
   embedding_error TEXT NOT NULL DEFAULT '',
   error_category TEXT NOT NULL DEFAULT '',
@@ -682,8 +695,8 @@ func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chun
 	if chunk.RepID <= 0 {
 		return 0, errors.New("rep_id must be > 0")
 	}
-	if strings.TrimSpace(chunk.Text) == "" {
-		return 0, errors.New("chunk text must be non-empty")
+	if err := validateChunkText(chunk); err != nil {
+		return 0, err
 	}
 
 	db, err := s.ensureDB(ctx)
@@ -799,8 +812,8 @@ func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Ch
 	if chunk.RepID <= 0 {
 		return 0, errors.New("rep_id must be > 0")
 	}
-	if strings.TrimSpace(chunk.Text) == "" {
-		return 0, errors.New("chunk text must be non-empty")
+	if err := validateChunkText(chunk); err != nil {
+		return 0, err
 	}
 
 	relPath, docType, repType, err := lookupChunkDocContext(ctx, t.tx, chunk.RepID)
@@ -1229,7 +1242,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 
 	args := []any{"pending"}
 	query := `WITH filtered_chunks AS (
-	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref
 	            FROM chunks c
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
 	          ),
@@ -1239,7 +1252,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	            FROM spans s
 	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
 	          )
-	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind, fc.modality, fc.media_ref,
 	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, '')
 	          FROM filtered_chunks fc
 	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
@@ -1265,12 +1278,14 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			repType   string
 			text      string
 			idxKind   string
+			modality  string
+			mediaRef  string
 			spanK     string
 			spanS     int
 			spanE     int
 			spanExtra string
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &spanK, &spanS, &spanE, &spanExtra); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &modality, &mediaRef, &spanK, &spanS, &spanE, &spanExtra); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -1278,14 +1293,17 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		}
 		uid := uint64(chunkID)
 		span := spanFromRow(spanK, spanS, spanE, spanExtra)
-		tasks = append(tasks, model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
+		task := model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
 			ChunkID: uid,
 			RelPath: relPath,
 			DocType: docType,
 			RepType: repType,
 			Snippet: snippet(text, 240),
 			Span:    span,
-		}))
+		})
+		task.Modality = modality
+		task.MediaRef = mediaRef
+		tasks = append(tasks, task)
 	}
 	return tasks, rows.Err()
 }
@@ -1851,6 +1869,35 @@ func normalizeIndexKind(indexKind string) string {
 	switch strings.ToLower(strings.TrimSpace(indexKind)) {
 	case "code":
 		return "code"
+	default:
+		return "text"
+	}
+}
+
+// validateChunkText enforces non-empty text for text chunks, while allowing
+// an empty text body for media chunks (SPEC 8.1.7) — a media chunk carries no
+// text; its bytes are read from media_ref at embed time.
+func validateChunkText(chunk model.Chunk) error {
+	if normalizeModality(chunk.Modality) == "text" {
+		if strings.TrimSpace(chunk.Text) == "" {
+			return errors.New("chunk text must be non-empty")
+		}
+		return nil
+	}
+	// A media chunk carries no text but MUST reference its source bytes, so
+	// the failure is deterministic at write time rather than later at embed.
+	if strings.TrimSpace(chunk.MediaRef) == "" {
+		return errors.New("media chunk must have a media_ref")
+	}
+	return nil
+}
+
+// normalizeModality maps a chunk modality to a known value, defaulting to
+// "text" (SPEC 8.1.7).
+func normalizeModality(modality string) string {
+	switch strings.ToLower(strings.TrimSpace(modality)) {
+	case "image", "audio", "video", "pdf":
+		return strings.ToLower(strings.TrimSpace(modality))
 	default:
 		return "text"
 	}

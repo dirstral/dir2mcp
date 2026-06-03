@@ -47,6 +47,13 @@ type Chunk struct {
 	EmbeddingStatus string
 	EmbeddingError  string
 	Deleted         bool
+	// Modality is the chunk's content modality for multimodal embeddings
+	// (SPEC 8.1.7): "" / "text" (default), or "image"/"audio"/"video"/"pdf".
+	Modality string
+	// MediaRef is the corpus rel_path of the source media for a non-text
+	// chunk; the embedding worker reads those bytes and embeds them
+	// directly. Empty for text chunks.
+	MediaRef string
 }
 
 type Span struct {
@@ -153,6 +160,11 @@ type ChunkTask struct {
 	Text      string
 	IndexKind string
 	Metadata  ChunkMetadata
+	// Modality / MediaRef carry multimodal-chunk info (SPEC 8.1.7): for a
+	// non-text chunk, Modality is image/audio/video/pdf and MediaRef is the
+	// corpus rel_path whose bytes the worker embeds. Empty/"text" for text.
+	Modality string
+	MediaRef string
 }
 
 // NewChunkTask returns a task with the supplied components. If the provided

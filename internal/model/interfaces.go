@@ -71,6 +71,24 @@ type Embedder interface {
 	Embed(ctx context.Context, model string, role EmbedRole, inputs []string) ([][]float32, error)
 }
 
+// MediaInput is one non-text item to embed (SPEC 8.1.7): the media bytes
+// plus their MIME type (e.g. "image/png", "audio/mp3", "application/pdf").
+type MediaInput struct {
+	MimeType string
+	Data     []byte
+}
+
+// MultimodalEmbedder is an optional capability for embedders that can embed
+// non-text media into the SAME vector space as text (SPEC 8.1.7). The
+// embedding worker type-asserts the configured Embedder against this to
+// embed media chunks; an embedder that does not implement it cannot serve a
+// multimodal corpus (validation rejects that config upstream). Vectors MUST
+// be comparable to those from Embed (same provider/model/dimension).
+type MultimodalEmbedder interface {
+	Embedder
+	EmbedMedia(ctx context.Context, model string, role EmbedRole, items []MediaInput) ([][]float32, error)
+}
+
 type OCR interface {
 	Extract(ctx context.Context, relPath string, data []byte) (string, error)
 }

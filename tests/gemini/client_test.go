@@ -182,7 +182,7 @@ func TestEmbedMedia_NativeInlineData(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL)
-	items := []gemini.MediaInput{
+	items := []model.MediaInput{
 		{MimeType: "image/png", Data: []byte("PNGBYTES")},
 		{MimeType: "audio/mp3", Data: []byte("MP3BYTES")},
 	}
@@ -210,7 +210,7 @@ func TestEmbedMedia_NativeInlineData(t *testing.T) {
 // TestEmbedMedia_EmptyItemErrors covers a media item with no bytes.
 func TestEmbedMedia_EmptyItemErrors(t *testing.T) {
 	c := gemini.NewClient("http://127.0.0.1:0", "k")
-	_, err := c.EmbedMedia(context.Background(), "gemini-embedding-2", model.EmbedDocument, []gemini.MediaInput{{MimeType: "image/png"}})
+	_, err := c.EmbedMedia(context.Background(), "gemini-embedding-2", model.EmbedDocument, []model.MediaInput{{MimeType: "image/png"}})
 	if err == nil {
 		t.Fatal("empty media item must error before any HTTP call")
 	}
