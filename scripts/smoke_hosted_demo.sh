@@ -41,7 +41,7 @@ post_json() {
     curl -sS -o "${body_file}" -D "${headers_file}" -w "%{http_code}" \
       -X POST "${URL}" \
       "${headers[@]}" \
-      "${auth_headers[@]}" \
+      ${auth_headers[@]+"${auth_headers[@]}"} \
       --data "${body}"
   )"
 
