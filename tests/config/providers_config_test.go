@@ -125,9 +125,9 @@ func TestProviders_UserOverrideAndCustomProfile(t *testing.T) {
 func TestProviders_EmbedIdentityStable(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "mk")
 	id := loadCfg(t, "version: 1\n").Providers().EmbedIdentity()
-	// provider|text_model|code_model|text_dim|code_dim (SPEC 8.1.4/8.1.6);
-	// default Mistral has no requested dims (native).
-	if id != "mistral|mistral-embed|codestral-embed|0|0" {
+	// provider|text_model|code_model|text_dim|code_dim|multimodal
+	// (SPEC 8.1.4/8.1.6/8.1.7); default Mistral: native dims, mode off.
+	if id != "mistral|mistral-embed|codestral-embed|0|0|off" {
 		t.Fatalf("embed identity = %q", id)
 	}
 }
@@ -155,8 +155,32 @@ func TestProviders_EmbedDimensionKnob(t *testing.T) {
 		t.Fatalf("dims = text:%d code:%d, want 1536/768", p.EmbedTextDim, p.EmbedCodeDim)
 	}
 	id := r.EmbedIdentity()
-	if !strings.HasSuffix(id, "|1536|768") {
+	if !strings.Contains(id, "|1536|768|") {
 		t.Fatalf("embed identity %q must encode requested dims", id)
+	}
+}
+
+// TestProviders_EmbedMultimodalKnob pins SPEC 8.1.7: model.embed.multimodal
+// parses, resolves onto the embed profile, and enters the embed identity.
+func TestProviders_EmbedMultimodalKnob(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "gk")
+	yaml := "version: 1\n" +
+		"model:\n" +
+		"  embed:\n" +
+		"    provider: gemini\n" +
+		"    text_model: gemini-embedding-2\n" +
+		"    code_model: gemini-embedding-2\n" +
+		"    multimodal: augment\n"
+	r := loadCfg(t, yaml).Providers()
+	p, err := r.Resolve(provider.CapEmbed)
+	if err != nil {
+		t.Fatalf("resolve embed: %v", err)
+	}
+	if p.EmbedMultimodal != "augment" {
+		t.Fatalf("multimodal = %q, want augment", p.EmbedMultimodal)
+	}
+	if !strings.HasSuffix(r.EmbedIdentity(), "|augment") {
+		t.Fatalf("embed identity %q must encode the multimodal mode", r.EmbedIdentity())
 	}
 }
 

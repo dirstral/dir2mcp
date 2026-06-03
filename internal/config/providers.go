@@ -36,12 +36,13 @@ type providerProfileYAML struct {
 }
 
 type capBindingYAML struct {
-	Provider  string `yaml:"provider"`
-	TextModel string `yaml:"text_model"`
-	CodeModel string `yaml:"code_model"`
-	TextDim   int    `yaml:"text_dim"`
-	CodeDim   int    `yaml:"code_dim"`
-	Model     string `yaml:"model"`
+	Provider   string `yaml:"provider"`
+	TextModel  string `yaml:"text_model"`
+	CodeModel  string `yaml:"code_model"`
+	TextDim    int    `yaml:"text_dim"`
+	CodeDim    int    `yaml:"code_dim"`
+	Multimodal string `yaml:"multimodal"`
+	Model      string `yaml:"model"`
 }
 
 type providersDoc struct {
@@ -295,6 +296,7 @@ func (r ProviderResolution) applyModelOverrides(cap provider.Capability, p provi
 		if r.doc.Model.Embed.CodeDim > 0 {
 			p.EmbedCodeDim = r.doc.Model.Embed.CodeDim
 		}
+		set(&p.EmbedMultimodal, r.doc.Model.Embed.Multimodal)
 	case provider.CapChat:
 		set(&p.ChatModel, r.doc.Model.Chat.Model)
 	case provider.CapOCR:

@@ -31,7 +31,11 @@ type nativeEmbedReq struct {
 		Model   string `json:"model"`
 		Content struct {
 			Parts []struct {
-				Text string `json:"text"`
+				Text       string `json:"text"`
+				InlineData *struct {
+					MimeType string `json:"mimeType"`
+					Data     string `json:"data"`
+				} `json:"inlineData"`
 			} `json:"parts"`
 		} `json:"content"`
 		TaskType             string `json:"taskType"`
@@ -151,6 +155,67 @@ func TestEmbed_EmptyInputsNoCall(t *testing.T) {
 // asymmetric embedder, so the role maps onto taskType —
 // document → RETRIEVAL_DOCUMENT, query → RETRIEVAL_QUERY — and a query
 // against the configured code model → CODE_RETRIEVAL_QUERY.
+// TestEmbedMedia_NativeInlineData pins SPEC 8.1.7: EmbedMedia sends each
+// item as an inline-data part (base64 + MIME) to batchEmbedContents, with
+// the role→taskType mapping, and returns one vector per item in order.
+func TestEmbedMedia_NativeInlineData(t *testing.T) {
+	var gotPath, gotTask string
+	var gotMimes, gotData []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		req := decodeNativeEmbed(t, r)
+		for _, rq := range req.Requests {
+			gotTask = rq.TaskType
+			for _, p := range rq.Content.Parts {
+				if p.InlineData != nil {
+					gotMimes = append(gotMimes, p.InlineData.MimeType)
+					gotData = append(gotData, p.InlineData.Data)
+				}
+			}
+		}
+		embs := make([]map[string]any, len(req.Requests))
+		for i := range req.Requests {
+			embs[i] = map[string]any{"values": []float64{float64(i), 0.5}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": embs})
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	items := []gemini.MediaInput{
+		{MimeType: "image/png", Data: []byte("PNGBYTES")},
+		{MimeType: "audio/mp3", Data: []byte("MP3BYTES")},
+	}
+	vecs, err := c.EmbedMedia(context.Background(), "gemini-embedding-2", model.EmbedDocument, items)
+	if err != nil {
+		t.Fatalf("EmbedMedia: %v", err)
+	}
+	if len(vecs) != 2 {
+		t.Fatalf("got %d vectors, want 2", len(vecs))
+	}
+	if want := "/models/gemini-embedding-2:batchEmbedContents"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotTask != "RETRIEVAL_DOCUMENT" {
+		t.Errorf("taskType = %q, want RETRIEVAL_DOCUMENT", gotTask)
+	}
+	if len(gotMimes) != 2 || gotMimes[0] != "image/png" || gotMimes[1] != "audio/mp3" {
+		t.Errorf("mimes = %v, want [image/png audio/mp3]", gotMimes)
+	}
+	if d, _ := base64.StdEncoding.DecodeString(gotData[0]); string(d) != "PNGBYTES" {
+		t.Errorf("first media payload = %q, want base64(PNGBYTES)", gotData[0])
+	}
+}
+
+// TestEmbedMedia_EmptyItemErrors covers a media item with no bytes.
+func TestEmbedMedia_EmptyItemErrors(t *testing.T) {
+	c := gemini.NewClient("http://127.0.0.1:0", "k")
+	_, err := c.EmbedMedia(context.Background(), "gemini-embedding-2", model.EmbedDocument, []gemini.MediaInput{{MimeType: "image/png"}})
+	if err == nil {
+		t.Fatal("empty media item must error before any HTTP call")
+	}
+}
+
 func TestEmbed_AsymmetricRoleMapsTaskType(t *testing.T) {
 	var gotTask string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

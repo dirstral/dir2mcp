@@ -106,13 +106,18 @@ type Profile struct {
 	// identity (SPEC 8.1.4), so a change is reindex-bound.
 	EmbedTextDim int
 	EmbedCodeDim int
-	ChatModel    string
-	OCRModel     string
-	STTModel     string
-	STTLanguage  string // optional STT language hint (e.g. ElevenLabs)
-	TTSModel     string
-	TTSVoice     string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
-	RerankModel  string
+	// EmbedMultimodal is the multimodal embedding mode (SPEC 8.1.7):
+	// "" / "off" (text-only), "augment", or "replace". augment/replace
+	// require a multimodal model on every axis; part of the embed identity
+	// (SPEC 8.1.4), so a change is reindex-bound.
+	EmbedMultimodal string
+	ChatModel       string
+	OCRModel        string
+	STTModel        string
+	STTLanguage     string // optional STT language hint (e.g. ElevenLabs)
+	TTSModel        string
+	TTSVoice        string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
+	RerankModel     string
 }
 
 // Eligible reports whether the profile may be selected/preflighted
@@ -182,16 +187,29 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 
 // EmbedIdentity is the corpus-lifetime embed identity (SPEC 8.1.4):
 // provider name + text/code model + requested text/code output dimension
-// (8.1.6). It is recorded in the config snapshot/index and compared on
-// load. Role (8.1.5) is deliberately excluded — it does not affect
-// vector-space compatibility, but the requested dimension does.
+// (8.1.6) + multimodal mode (8.1.7). It is recorded in the config
+// snapshot/index and compared on load. Role (8.1.5) is deliberately
+// excluded — it does not affect vector-space compatibility, but the
+// requested dimension and multimodal mode do.
 func EmbedIdentity(p Profile) string {
-	return fmt.Sprintf("%s|%s|%s|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%d|%d|%s",
 		strings.TrimSpace(p.Name),
 		strings.TrimSpace(p.EmbedTextModel),
 		strings.TrimSpace(p.EmbedCodeModel),
 		p.EmbedTextDim,
-		p.EmbedCodeDim)
+		p.EmbedCodeDim,
+		NormalizeEmbedMultimodal(p.EmbedMultimodal))
+}
+
+// NormalizeEmbedMultimodal lower-cases/trims the multimodal mode and maps
+// the empty value to "off", so "" and "off" are equivalent everywhere
+// (identity comparison and validation).
+func NormalizeEmbedMultimodal(mode string) string {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	if m == "" {
+		return "off"
+	}
+	return m
 }
 
 // VerifyEmbedIdentity returns a *ConfigError when a recorded embed
@@ -216,17 +234,24 @@ func VerifyEmbedIdentity(recorded, current string) error {
 	}
 }
 
-// normalizeEmbedIdentity upgrades a legacy 3-field identity
-// (provider|text_model|code_model) to the current 5-field form by
-// appending the native "|0|0" dimension pair, so a corpus indexed before
-// 8.1.6 with native dimensions still matches after an upgrade. Non-legacy
-// (empty or already 5-field) values are returned unchanged.
+// normalizeEmbedIdentity upgrades a legacy recorded identity to the
+// current 6-field form before comparison, so upgrading an existing corpus
+// that used native dimensions and no multimodal mode does not force a
+// spurious reindex:
+//   - pre-8.1.6 (3 fields: provider|text|code) → append "|0|0|off"
+//   - pre-8.1.7 (5 fields: …|tdim|cdim)        → append "|off"
+//
+// Empty (fresh index) and already-6-field values are returned unchanged.
 func normalizeEmbedIdentity(id string) string {
 	if id == "" {
 		return ""
 	}
-	if strings.Count(id, "|") == 2 {
-		return id + "|0|0"
+	switch strings.Count(id, "|") {
+	case 2:
+		return id + "|0|0|off"
+	case 4:
+		return id + "|off"
+	default:
+		return id
 	}
-	return id
 }
