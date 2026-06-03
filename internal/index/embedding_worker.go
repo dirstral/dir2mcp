@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,6 +36,12 @@ type EmbeddingWorker struct {
 	ModelForCode   string
 	BatchSize      int
 	OnIndexedChunk func(label uint64, metadata model.ChunkMetadata)
+
+	// RootDir is the corpus root used to resolve a media chunk's MediaRef
+	// (a corpus rel_path) to bytes for multimodal embedding (SPEC 8.1.7).
+	// Required only when media chunks are present; text-only corpora may
+	// leave it empty.
+	RootDir string
 
 	// Logger is optional; if non‑nil its Printf method will be used for
 	// informational messages. When nil the standard library's log package
@@ -90,6 +98,128 @@ func buildEmbedBatch(tasks []model.ChunkTask) (validTasks []model.ChunkTask, inp
 		labels = append(labels, chunkID)
 	}
 	return validTasks, inputs, labels, nil
+}
+
+// embedTasks embeds validTasks and returns vectors aligned 1:1 with them:
+// text chunks go through Embedder.Embed, media chunks (SPEC 8.1.7) through
+// MultimodalEmbedder.EmbedMedia after their bytes are read from RootDir.
+// Both kinds share one model + vector space.
+func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, validTasks []model.ChunkTask) ([][]float32, error) {
+	vectors := make([][]float32, len(validTasks))
+
+	textIdx := make([]int, 0, len(validTasks))
+	textInputs := make([]string, 0, len(validTasks))
+	mediaIdx := make([]int, 0)
+	mediaItems := make([]model.MediaInput, 0)
+	for i, t := range validTasks {
+		if isMediaModality(t.Modality) {
+			item, err := w.loadMediaInput(t)
+			if err != nil {
+				return nil, err
+			}
+			mediaIdx = append(mediaIdx, i)
+			mediaItems = append(mediaItems, item)
+			continue
+		}
+		textIdx = append(textIdx, i)
+		textInputs = append(textInputs, t.Text)
+	}
+
+	if len(textInputs) > 0 {
+		v, err := w.Embedder.Embed(ctx, modelName, model.EmbedDocument, textInputs)
+		if err != nil {
+			return nil, err
+		}
+		if len(v) != len(textInputs) {
+			return nil, fmt.Errorf("%w: embedding vector count mismatch", ErrFatal)
+		}
+		for k, idx := range textIdx {
+			vectors[idx] = v[k]
+		}
+	}
+
+	if len(mediaItems) > 0 {
+		me, ok := w.Embedder.(model.MultimodalEmbedder)
+		if !ok {
+			return nil, fmt.Errorf("%w: embedder %T does not support media (multimodal) embedding", ErrFatal, w.Embedder)
+		}
+		v, err := me.EmbedMedia(ctx, modelName, model.EmbedDocument, mediaItems)
+		if err != nil {
+			return nil, err
+		}
+		if len(v) != len(mediaItems) {
+			return nil, fmt.Errorf("%w: embedding vector count mismatch", ErrFatal)
+		}
+		for k, idx := range mediaIdx {
+			vectors[idx] = v[k]
+		}
+	}
+	return vectors, nil
+}
+
+// loadMediaInput reads a media chunk's source bytes (resolved from RootDir +
+// MediaRef) and infers its MIME type. The resolved path is constrained to
+// RootDir as defense-in-depth against a traversal in a stored ref.
+func (w *EmbeddingWorker) loadMediaInput(t model.ChunkTask) (model.MediaInput, error) {
+	ref := strings.TrimSpace(t.MediaRef)
+	if ref == "" {
+		return model.MediaInput{}, fmt.Errorf("%w: media chunk %d has no media_ref", ErrFatal, t.Metadata.ChunkID)
+	}
+	if strings.TrimSpace(w.RootDir) == "" {
+		return model.MediaInput{}, fmt.Errorf("%w: media embedding requires a corpus root", ErrFatal)
+	}
+	root, err := filepath.Abs(w.RootDir)
+	if err != nil {
+		return model.MediaInput{}, fmt.Errorf("%w: resolve root: %v", ErrFatal, err)
+	}
+	abs := filepath.Join(root, filepath.FromSlash(ref))
+	if abs != root && !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		return model.MediaInput{}, fmt.Errorf("%w: media_ref %q escapes the corpus root", ErrFatal, ref)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, err)
+	}
+	return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
+}
+
+// isMediaModality reports whether a chunk modality denotes embeddable media.
+func isMediaModality(modality string) bool {
+	switch strings.ToLower(strings.TrimSpace(modality)) {
+	case "image", "audio", "video", "pdf":
+		return true
+	default:
+		return false
+	}
+}
+
+// mediaMIMEType maps a file extension to a MIME type for multimodal
+// embedding, defaulting to application/octet-stream.
+func mediaMIMEType(relPath string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(relPath), ".")) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	case "bmp":
+		return "image/bmp"
+	case "pdf":
+		return "application/pdf"
+	case "mp3":
+		return "audio/mp3"
+	case "wav":
+		return "audio/wav"
+	case "mp4":
+		return "video/mp4"
+	case "mov":
+		return "video/quicktime"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // indexChunks adds each vector to the index and fires the OnIndexedChunk hook.
@@ -168,12 +298,14 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	}
 
 	modelName := w.modelForKind(indexKind)
-	validTasks, inputs, labels, err := buildEmbedBatch(tasks)
+	validTasks, _, labels, err := buildEmbedBatch(tasks)
 	if err != nil {
 		return 0, err
 	}
 
-	vectors, err := w.Embedder.Embed(ctx, modelName, model.EmbedDocument, inputs)
+	// Text chunks embed via Embed; media chunks (SPEC 8.1.7) embed via
+	// EmbedMedia. embedTasks returns vectors aligned 1:1 with validTasks.
+	vectors, err := w.embedTasks(ctx, modelName, validTasks)
 	if err != nil {
 		// distinguish between transient errors (which we want to retry later)
 		// and permanent failures for which the chunks should be marked as

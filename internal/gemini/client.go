@@ -110,9 +110,10 @@ type Client struct {
 
 // compile-time assertions that *Client implements the model contracts.
 var (
-	_ model.Embedder    = (*Client)(nil)
-	_ model.Generator   = (*Client)(nil)
-	_ model.Transcriber = (*Client)(nil)
+	_ model.Embedder           = (*Client)(nil)
+	_ model.MultimodalEmbedder = (*Client)(nil)
+	_ model.Generator          = (*Client)(nil)
+	_ model.Transcriber        = (*Client)(nil)
 )
 
 // NewClient constructs a client with safe default retry/timeout settings.
@@ -148,13 +149,6 @@ type geminiEmbedSingleRequest struct {
 	Content              geminiContent `json:"content"`
 	TaskType             string        `json:"taskType,omitempty"`
 	OutputDimensionality *int          `json:"outputDimensionality,omitempty"`
-}
-
-// MediaInput is one non-text item to embed (SPEC 8.1.7): the media bytes
-// plus their MIME type (e.g. "image/png", "audio/mp3", "application/pdf").
-type MediaInput struct {
-	MimeType string
-	Data     []byte
 }
 
 type geminiBatchEmbedRequest struct {
@@ -193,7 +187,7 @@ func (c *Client) Embed(ctx context.Context, modelName string, role model.EmbedRo
 // same native batchEmbedContents surface, sending each item as an
 // inline-data part (SPEC 8.1.7). Role→taskType and dimension/normalization
 // behave as for Embed.
-func (c *Client) EmbedMedia(ctx context.Context, modelName string, role model.EmbedRole, items []MediaInput) ([][]float32, error) {
+func (c *Client) EmbedMedia(ctx context.Context, modelName string, role model.EmbedRole, items []model.MediaInput) ([][]float32, error) {
 	modelName, dim, taskType, err := c.embedParams(modelName, role)
 	if err != nil {
 		return nil, err

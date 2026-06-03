@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,81 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
+
+// fakeMultimodalEmbedder implements model.MultimodalEmbedder for the media path.
+type fakeMultimodalEmbedder struct {
+	gotMedia  []model.MediaInput
+	mediaVecs [][]float32
+	textVecs  [][]float32
+}
+
+func (e *fakeMultimodalEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, _ []string) ([][]float32, error) {
+	return e.textVecs, nil
+}
+
+func (e *fakeMultimodalEmbedder) EmbedMedia(_ context.Context, _ string, _ model.EmbedRole, items []model.MediaInput) ([][]float32, error) {
+	e.gotMedia = append(e.gotMedia, items...)
+	return e.mediaVecs, nil
+}
+
+func mediaTask(label uint64, relPath, modality string) model.ChunkTask {
+	tk := model.NewChunkTask(label, "", "text", model.ChunkMetadata{ChunkID: label, RelPath: relPath, DocType: modality})
+	tk.Modality = modality
+	tk.MediaRef = relPath
+	return tk
+}
+
+// TestEmbeddingWorker_RunOnce_MediaChunk pins SPEC 8.1.7: a media chunk is
+// embedded via EmbedMedia from bytes read at RootDir/MediaRef, with the MIME
+// inferred from the extension, and its vector is indexed.
+func TestEmbeddingWorker_RunOnce_MediaChunk(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pic.png"), []byte("PNGDATA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeChunkSource{tasks: []model.ChunkTask{mediaTask(7, "pic.png", "image")}}
+	idx := index.NewHNSWIndex("")
+	emb := &fakeMultimodalEmbedder{mediaVecs: [][]float32{{0.6, 0.8}}}
+	worker := &index.EmbeddingWorker{
+		Source: source, Index: idx, Embedder: emb,
+		RootDir: root, BatchSize: 4, ModelForText: "gemini-embedding-2",
+	}
+
+	n, err := worker.RunOnce(context.Background(), "text")
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("indexed = %d, want 1", n)
+	}
+	if len(emb.gotMedia) != 1 || string(emb.gotMedia[0].Data) != "PNGDATA" {
+		t.Fatalf("media bytes not passed to EmbedMedia: %+v", emb.gotMedia)
+	}
+	if emb.gotMedia[0].MimeType != "image/png" {
+		t.Fatalf("mime = %q, want image/png", emb.gotMedia[0].MimeType)
+	}
+	if len(source.embedded) != 1 || source.embedded[0] != 7 {
+		t.Fatalf("embedded labels = %v, want [7]", source.embedded)
+	}
+}
+
+// TestEmbeddingWorker_MediaChunk_NonMultimodalEmbedderFails: a media chunk with
+// a text-only embedder is a fatal config error (validation should prevent it
+// upstream, but the worker must not silently mis-embed).
+func TestEmbeddingWorker_MediaChunk_NonMultimodalEmbedderFails(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pic.png"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeChunkSource{tasks: []model.ChunkTask{mediaTask(9, "pic.png", "image")}}
+	worker := &index.EmbeddingWorker{
+		Source: source, Index: index.NewHNSWIndex(""), Embedder: &fakeEmbedder{},
+		RootDir: root, BatchSize: 4,
+	}
+	if _, err := worker.RunOnce(context.Background(), "text"); err == nil {
+		t.Fatal("media chunk with a text-only embedder must error")
+	}
+}
 
 type fakeChunkSource struct {
 	tasks          []model.ChunkTask

@@ -26,6 +26,11 @@ var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d
 
 const (
 	// RepTypeRawText is the representation type for raw text content
+	// RepTypeMedia is a chunk embedded directly from source media bytes via
+	// the multimodal embedder (SPEC 8.1.7), as opposed to extracted/transcribed
+	// text. The chunk has no text body; its bytes live at the document path.
+	RepTypeMedia = "media"
+
 	RepTypeRawText = "raw_text"
 	// RepTypeExtractedMarkdown is the representation type for extractor-generated markdown
 	RepTypeExtractedMarkdown = "extracted_markdown"
@@ -142,6 +147,45 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 		return nil
 	})
 }
+
+// GenerateMediaChunk emits a single media chunk for a whole-file media
+// document (currently images) so it is embedded directly from its bytes via
+// the multimodal embedder (SPEC 8.1.7), rather than via extracted text. The
+// chunk carries no text; the embedding worker reads its bytes from MediaRef
+// (the corpus rel_path). Provenance is a page-1 span. contentHash dedups the
+// representation across unchanged re-ingests.
+func (rg *RepresentationGenerator) GenerateMediaChunk(ctx context.Context, doc model.Document, contentHash string) error {
+	rep := model.Representation{
+		DocID:       doc.DocID,
+		RepType:     RepTypeMedia,
+		RepHash:     contentHash,
+		CreatedUnix: time.Now().Unix(),
+		Deleted:     false,
+	}
+	return rg.store.WithTx(ctx, func(tx model.RepresentationStore) error {
+		repID, err := tx.UpsertRepresentation(ctx, rep)
+		if err != nil {
+			return fmt.Errorf("upsert media representation: %w", err)
+		}
+		chunk := model.Chunk{
+			RepID:           repID,
+			Ordinal:         0,
+			Text:            "",
+			IndexKind:       "text", // media shares the text vector space
+			EmbeddingStatus: "pending",
+			Modality:        doc.DocType, // "image" today; audio/video/pdf later
+			MediaRef:        doc.RelPath,
+		}
+		if _, err := tx.InsertChunkWithSpans(ctx, chunk, []model.Span{{Kind: "page", Page: 1}}); err != nil {
+			return fmt.Errorf("insert media chunk: %w", err)
+		}
+		if err := tx.SoftDeleteChunksFromOrdinal(ctx, repID, 1); err != nil {
+			return fmt.Errorf("soft delete stale media chunks: %w", err)
+		}
+		return nil
+	})
+}
+
 func (rg *RepresentationGenerator) upsertChunksForRepresentation(ctx context.Context, repID int64, indexKind string, segments []chunkSegment) error {
 	// wrap the entire operation in a transaction so we don't end up with a
 	// partial set of chunks if an insertion fails halfway through.  The store
