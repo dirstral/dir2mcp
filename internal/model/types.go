@@ -110,16 +110,24 @@ type SearchHit struct {
 	Score   float64
 	Snippet string
 	Span    Span
+	// Modality / MediaRef identify a multimodal media chunk (SPEC 8.1.7):
+	// Modality is image/audio/video/pdf for a media chunk (empty for text),
+	// and MediaRef is the corpus rel_path whose bytes were embedded. They let
+	// retrieval dedup page-image candidates and mark media-only hits.
+	Modality string
+	MediaRef string
 }
 
 type ChunkMetadata struct {
-	ChunkID uint64
-	RelPath string
-	Title   string
-	DocType string
-	RepType string
-	Snippet string
-	Span    Span
+	ChunkID  uint64
+	RelPath  string
+	Title    string
+	DocType  string
+	RepType  string
+	Snippet  string
+	Span     Span
+	Modality string
+	MediaRef string
 }
 
 // ToSearchHit converts the lightweight chunk metadata back into a full
@@ -127,13 +135,15 @@ type ChunkMetadata struct {
 // SearchHit values but chunk tasks only need a subset of fields.
 func (m ChunkMetadata) ToSearchHit() SearchHit {
 	return SearchHit{
-		ChunkID: m.ChunkID,
-		RelPath: m.RelPath,
-		Title:   m.Title,
-		DocType: m.DocType,
-		RepType: m.RepType,
-		Snippet: m.Snippet,
-		Span:    m.Span,
+		ChunkID:  m.ChunkID,
+		RelPath:  m.RelPath,
+		Title:    m.Title,
+		DocType:  m.DocType,
+		RepType:  m.RepType,
+		Snippet:  m.Snippet,
+		Span:     m.Span,
+		Modality: m.Modality,
+		MediaRef: m.MediaRef,
 	}
 }
 

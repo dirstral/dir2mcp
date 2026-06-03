@@ -51,12 +51,13 @@ func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 	expectedText := "chunk text"
 	expectedIndexKind := "text"
 	expectedMetadata := model.ChunkMetadata{
-		ChunkID: 101,
-		RelPath: "docs/a.md",
-		DocType: "md",
-		RepType: "raw_text",
-		Snippet: "chunk text",
-		Span:    model.Span{Kind: "lines"},
+		ChunkID:  101,
+		RelPath:  "docs/a.md",
+		DocType:  "md",
+		RepType:  "raw_text",
+		Snippet:  "chunk text",
+		Span:     model.Span{Kind: "lines"},
+		Modality: "text", // chunks.modality defaults to 'text' (SPEC 8.1.7)
 	}
 	if tasks[0].Label != 101 || tasks[0].Metadata.ChunkID != 101 ||
 		tasks[0].Text != expectedText ||
