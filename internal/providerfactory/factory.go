@@ -65,11 +65,16 @@ func validateEmbedMultimodal(p provider.Profile) error {
 	case "off":
 		return nil
 	case "augment", "replace":
+		// Trim the model fields to match provider.EmbedIdentity (which
+		// trims), so a value with incidental whitespace isn't rejected as
+		// CONFIG_INVALID when it is treated as equivalent for identity.
+		textModel := strings.TrimSpace(p.EmbedTextModel)
+		codeModel := strings.TrimSpace(p.EmbedCodeModel)
 		if p.Kind != provider.KindGemini ||
-			p.EmbedTextModel != multimodalEmbedModel ||
-			p.EmbedCodeModel != multimodalEmbedModel {
+			textModel != multimodalEmbedModel ||
+			codeModel != multimodalEmbedModel {
 			return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q requires provider=gemini with embed.text_model and embed.code_model both set to %q (got kind=%q text_model=%q code_model=%q)",
-				mode, multimodalEmbedModel, p.Kind, p.EmbedTextModel, p.EmbedCodeModel)
+				mode, multimodalEmbedModel, p.Kind, textModel, codeModel)
 		}
 		return nil
 	default:

@@ -155,8 +155,8 @@ func TestProviders_EmbedDimensionKnob(t *testing.T) {
 		t.Fatalf("dims = text:%d code:%d, want 1536/768", p.EmbedTextDim, p.EmbedCodeDim)
 	}
 	id := r.EmbedIdentity()
-	if !strings.Contains(id, "|1536|768|") {
-		t.Fatalf("embed identity %q must encode requested dims", id)
+	if !strings.HasSuffix(id, "|1536|768|off") {
+		t.Fatalf("embed identity %q must encode requested dims (and off mode)", id)
 	}
 }
 
