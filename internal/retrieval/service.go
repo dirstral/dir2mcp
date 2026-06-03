@@ -707,33 +707,55 @@ func (s *Service) isMediaOnlyDoc(ctx context.Context, relPath string) bool {
 	return hasMedia && !hasText
 }
 
-// isMediaDocExt reports whether relPath's extension is an embeddable media type
-// (SPEC 8.1.7). Used to gate the media-only store lookup so text/code files
-// keep their fast path.
-func isMediaDocExt(relPath string) bool {
-	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
-	case ".pdf",
-		".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg",
-		".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus",
-		".mp4", ".mov":
+// Media extension predicates. These keep the media-only gate (isMediaDocExt),
+// the text-serving binary classification (isBinaryDocType), and the cache
+// candidate selector (openFileOCRCacheCandidates) over a single, consistent set
+// so a format is never classified as media yet served as raw bytes.
+func isImageExt(ext string) bool {
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg":
 		return true
 	default:
 		return false
 	}
 }
 
-// isBinaryDocType reports whether relPath has an extension whose contents are
-// not human-readable as raw bytes (PDF, audio formats). For these doc types
-// the default open_file response should serve the OCR / transcript cache.
-func isBinaryDocType(relPath string) bool {
-	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
-	case ".pdf":
-		return true
-	case ".mp3", ".wav", ".m4a", ".flac":
+func isAudioExt(ext string) bool {
+	switch ext {
+	case ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus":
 		return true
 	default:
 		return false
 	}
+}
+
+func isVideoExt(ext string) bool {
+	switch ext {
+	case ".mp4", ".mov":
+		return true
+	default:
+		return false
+	}
+}
+
+// isMediaDocExt reports whether relPath's extension is an embeddable media type
+// (SPEC 8.1.7). Used to gate the media-only store lookup so text/code files keep
+// their fast path. Covers every media format the pipeline can ingest; video has
+// no text fallback and is handled exclusively by the media-only guard
+// (MEDIA_NO_TEXT), while images/PDF/audio also have a text-serving path below.
+func isMediaDocExt(relPath string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext) || isVideoExt(ext)
+}
+
+// isBinaryDocType reports whether relPath has an extension whose contents are
+// not human-readable as raw bytes but DO have a document-text representation
+// (PDF/image OCR, audio transcript). For these the default open_file response
+// serves the OCR/transcript cache rather than raw bytes. Video is excluded: it
+// has no text representation, so a media-only video resolves to MEDIA_NO_TEXT.
+func isBinaryDocType(relPath string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext)
 }
 
 // openFileFromOCRCache reads the precomputed OCR (or transcript) representation
@@ -798,10 +820,12 @@ func (s *Service) openFileFromOCRCache(stateDir, resolvedAbs, relPath string, se
 // with an optional language suffix (or none), so we glob for any matching
 // file. PDFs use a single .md path.
 func openFileOCRCacheCandidates(stateDir, hashHex, relPath string) []string {
-	switch strings.ToLower(filepath.Ext(relPath)) {
-	case ".pdf":
+	ext := strings.ToLower(filepath.Ext(relPath))
+	switch {
+	case ext == ".pdf" || isImageExt(ext):
+		// PDF and image extraction both write extracted markdown to cache/ocr.
 		return []string{filepath.Join(stateDir, "cache", "ocr", hashHex+".md")}
-	case ".mp3", ".wav", ".m4a", ".flac":
+	case isAudioExt(ext):
 		// transcripts are written as <hash>[<-lang>].txt; default-language
 		// transcripts have no suffix, so the unsuffixed file is preferred.
 		out := []string{filepath.Join(stateDir, "cache", "transcribe", hashHex+".txt")}

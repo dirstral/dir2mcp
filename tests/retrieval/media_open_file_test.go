@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,19 +39,23 @@ func (f *fakeMediaStore) ChunkModalityPresence(_ context.Context, _ string) (boo
 
 // TestOpenFile_MediaOnly_ReturnsMediaNoText pins SPEC 8.1.7/§15.4: a replace-mode
 // media-only document (media chunks, no text) returns the non-retryable
-// MEDIA_NO_TEXT, never raw bytes.
+// MEDIA_NO_TEXT across every media kind — never raw bytes.
 func TestOpenFile_MediaOnly_ReturnsMediaNoText(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), []byte("%PDF-1.4 binary"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	svc := retrieval.NewService(&fakeMediaStore{hasMedia: true, hasText: false}, nil, nil, nil)
-	svc.SetRootDir(root)
-	svc.SetStateDir(filepath.Join(root, ".dir2mcp"))
+	for _, name := range []string{"doc.pdf", "pic.png", "clip.mp4", "voice.aac"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, name), []byte("rawbinary"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			svc := retrieval.NewService(&fakeMediaStore{hasMedia: true, hasText: false}, nil, nil, nil)
+			svc.SetRootDir(root)
+			svc.SetStateDir(filepath.Join(root, ".dir2mcp"))
 
-	_, err := svc.OpenFile(context.Background(), "doc.pdf", model.Span{}, 200)
-	if !errors.Is(err, model.ErrMediaNoText) {
-		t.Fatalf("media-only doc: expected ErrMediaNoText, got %v", err)
+			_, err := svc.OpenFile(context.Background(), name, model.Span{}, 200)
+			if !errors.Is(err, model.ErrMediaNoText) {
+				t.Fatalf("%s media-only: expected ErrMediaNoText, got %v", name, err)
+			}
+		})
 	}
 }
 
@@ -71,6 +77,41 @@ func TestOpenFile_MediaWithText_IsNotMediaNoText(t *testing.T) {
 	}
 	if !errors.Is(err, model.ErrOCRNotReady) {
 		t.Fatalf("expected OCR_NOT_READY (text pending, no cache), got %v", err)
+	}
+}
+
+// TestOpenFile_ImageWithOCR_ServesText confirms the media-text fallback is
+// aligned with the media gate: an image that has OCR text (augment) serves that
+// text rather than raw image bytes (SPEC §15.4 — open_file returns text only).
+func TestOpenFile_ImageWithOCR_ServesText(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".dir2mcp")
+	imgBytes := []byte("\x89PNG\r\n\x1a\nrawimage")
+	if err := os.WriteFile(filepath.Join(root, "diagram.png"), imgBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ocrDir := filepath.Join(stateDir, "cache", "ocr")
+	if err := os.MkdirAll(ocrDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(imgBytes)
+	if err := os.WriteFile(filepath.Join(ocrDir, hex.EncodeToString(sum[:])+".md"), []byte("## Diagram\n\nextracted caption"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := retrieval.NewService(&fakeMediaStore{hasMedia: true, hasText: true}, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetStateDir(stateDir)
+
+	out, err := svc.OpenFile(context.Background(), "diagram.png", model.Span{}, 20000)
+	if err != nil {
+		t.Fatalf("image open_file err: %v", err)
+	}
+	if !strings.Contains(out, "extracted caption") {
+		t.Fatalf("expected OCR text, got %q", out)
+	}
+	if strings.Contains(out, "rawimage") {
+		t.Fatalf("must not serve raw image bytes, got %q", out)
 	}
 }
 
