@@ -66,11 +66,21 @@ func Duration(ctx context.Context, path string) (time.Duration, error) {
 	return time.Duration(secs * float64(time.Second)), nil
 }
 
-// ExtractSegment cuts the half-open window [startMS, endMS) from the media at
-// path and returns the resulting container bytes. The output preserves the
-// source container (stream copy, no re-encode) so the MIME type is unchanged
-// and extraction is deterministic. It returns ErrToolNotFound when ffmpeg is
-// not installed.
+// ExtractSegment cuts the window [startMS, endMS) from the media at path and
+// returns the resulting container bytes. It uses stream copy (no re-encode) so
+// the MIME type is unchanged, extraction is fast, and the output is
+// deterministic for a given input.
+//
+// Accuracy: audio is cut sample-accurately, but for video stream copy can only
+// start at the nearest preceding keyframe, so the clip is keyframe-aligned and
+// may begin slightly before startMS (approximate, not frame-exact). This is
+// acceptable for embedding — a window is a coarse retrieval unit, not a
+// frame-precise clip — and avoids the cost/quality loss of re-encoding. Callers
+// that need frame-exact cuts must re-encode. Window lengths are chosen below the
+// per-modality caps (SPEC 8.1.7) so keyframe drift cannot push a clip over the
+// cap.
+//
+// It returns ErrToolNotFound when ffmpeg is not installed.
 func ExtractSegment(ctx context.Context, path string, startMS, endMS int) ([]byte, error) {
 	if startMS < 0 || endMS <= startMS {
 		return nil, fmt.Errorf("avutil: invalid segment [%d,%d) for %q", startMS, endMS, path)

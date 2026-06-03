@@ -57,6 +57,12 @@ type Service struct {
 	// chunk embedded directly from their bytes.
 	embedMultimodal string
 
+	// ProbeDurationFunc overrides the audio/video duration probe (SPEC 8.1.7
+	// time-window chunking). Defaults to avutil.Duration (ffprobe) when nil;
+	// tests set it to supply a deterministic duration without requiring the
+	// ffprobe binary.
+	ProbeDurationFunc func(ctx context.Context, path string) (time.Duration, error)
+
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
 	// Access must go through the logger() helper or SetLogger; the field
@@ -932,10 +938,6 @@ const (
 	videoWindowMS = 60 * 1000
 )
 
-// probeDuration resolves media duration; indirected so tests can supply a
-// deterministic duration without requiring ffprobe on PATH.
-var probeDuration = avutil.Duration
-
 // mediaSpansFor returns the per-chunk spans to embed directly for doc under the
 // multimodal mode (SPEC 8.1.7): nil when media embedding is off or doc is not
 // an embeddable media type; one `page` span for an image; one `page` span per
@@ -989,7 +991,11 @@ func (s *Service) pdfPageSpans(doc model.Document, content []byte) []model.Span 
 // keeping the text path; the condition is a non-fatal per-document warning.
 func (s *Service) mediaTimeSpans(ctx context.Context, doc model.Document, windowMS int) []model.Span {
 	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
-	d, err := probeDuration(ctx, absPath)
+	probe := s.ProbeDurationFunc
+	if probe == nil {
+		probe = avutil.Duration
+	}
+	d, err := probe(ctx, absPath)
 	if err != nil {
 		s.getLogger().Printf("multimodal: media duration unavailable for %s (%v); skipping direct media embedding", doc.RelPath, err)
 		return nil

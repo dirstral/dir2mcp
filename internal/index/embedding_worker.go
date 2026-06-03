@@ -17,10 +17,6 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// extractSegment resolves an audio/video time-window into container bytes;
-// indirected so tests can avoid requiring ffmpeg on PATH.
-var extractSegment = avutil.ExtractSegment
-
 type ChunkSource interface {
 	NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error)
 	MarkEmbedded(ctx context.Context, labels []uint64) error
@@ -68,6 +64,12 @@ type EmbeddingWorker struct {
 	//
 	// Production code should rarely set this field.
 	RunOnceFunc func(ctx context.Context, indexKind string) (int, error)
+
+	// ExtractSegmentFunc overrides audio/video time-window extraction (SPEC
+	// 8.1.7). Defaults to avutil.ExtractSegment (ffmpeg) when nil; tests set it
+	// to avoid requiring the ffmpeg binary. Production code should rarely set
+	// this field.
+	ExtractSegmentFunc func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)
 }
 
 // validate checks that the worker is properly configured before use.
@@ -245,7 +247,11 @@ func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTas
 	if !strings.EqualFold(strings.TrimSpace(span.Kind), "time") || span.StartMS < 0 || span.EndMS <= span.StartMS {
 		return nil, fmt.Errorf("%w: %s media chunk %d has invalid time span", ErrFatal, strings.ToLower(t.Modality), t.Metadata.ChunkID)
 	}
-	data, err := extractSegment(ctx, resolved, span.StartMS, span.EndMS)
+	extract := w.ExtractSegmentFunc
+	if extract == nil {
+		extract = avutil.ExtractSegment
+	}
+	data, err := extract(ctx, resolved, span.StartMS, span.EndMS)
 	if err != nil {
 		return nil, fmt.Errorf("%w: extract %q segment [%d,%d): %v", ErrFatal, ref, span.StartMS, span.EndMS, err)
 	}
