@@ -8,7 +8,7 @@ single source of truth and this copy can no longer drift.
 - In-tree (pinned submodule): [`dirstral-spec/docs/x402-payment-adapter-spec.md`](../dirstral-spec/docs/x402-payment-adapter-spec.md)
 - Upstream: <https://github.com/dirstral/dirstral-spec/blob/main/docs/x402-payment-adapter-spec.md>
 
-dir2mcp implements spec version `0.5.x` — see [`dirstral-spec/spec/versioning.md`](../dirstral-spec/spec/versioning.md).
+dir2mcp implements spec version `0.14.x` — see [`dirstral-spec/spec/versioning.md`](../dirstral-spec/spec/versioning.md).
 
 If the `dirstral-spec/` directory is empty, fetch the submodule:
 

@@ -321,7 +321,7 @@ model:
 - **Matryoshka dimensions** (`text_dim`/`code_dim`): request a smaller vector to shrink the index. dir2mcp sends Gemini's `outputDimensionality` and L2-normalizes the truncated vectors. The knob is Gemini-only — setting it on a provider that can't honor it is rejected at startup (`CONFIG_INVALID`).
 - **Reindex-bound (spec §8.1.4/§8.1.6):** the embed provider, model, **and requested dimension** form the corpus-lifetime embed identity. Switching to Gemini, or changing the dimension later, requires a `dir2mcp reindex` (the server refuses to mix vector spaces and tells you to reindex).
 
-#### Multimodal embeddings (`gemini-embedding-2`, preview — in progress)
+#### Multimodal embeddings (`gemini-embedding-2`, preview — implemented, default-off)
 
 Spec §8.1.7 (0.14.0) defines an opt-in `model.embed.multimodal` mode (`off` default | `augment` | `replace`) that embeds media directly into the same vector space via the multimodal `gemini-embedding-2` model. It is being implemented in phases against a **Public Preview** model:
 
@@ -336,7 +336,7 @@ model:
 
 - **Images**, **PDFs**, **audio**, and **video** are supported today. Under `augment` the document is indexed *both* as text (image OCR / docling PDF text / audio transcript, if configured) *and* as direct media embeddings; under `replace` it is embedded directly *instead of* text. A PDF is embedded **per page** (each page is its own vector with a page citation); audio and video are embedded **per time window** (each window is its own vector with a `start_ms`/`end_ms` citation). A text query then retrieves images, PDF pages, and media windows from the shared space.
 - **Audio/video duration probing and window extraction** use the external `ffprobe`/`ffmpeg` binaries. When they are absent, audio/video are skipped for direct embedding and the file keeps its text path (audio transcript) — a graceful fallback, not an error. Direct audio embedding covers MP3/WAV; video covers MP4/MOV (the formats the preview model accepts). Other audio formats keep only their transcript; video has no text path.
-- `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2` (validated at startup; otherwise `CONFIG_INVALID`), and the mode is reindex-bound (§8.1.4). `off` (default) is fully behavior-preserving.
+- `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2` (validated at startup; otherwise `CONFIG_INVALID`), and the mode is reindex-bound (§8.1.4). `off` (default) is fully behavior-preserving. The mode is **YAML-only** (`model.embed.multimodal`); there is no environment-variable override, since it is a deploy-time, reindex-bound choice.
 - **Retrieval & citations.** Media hits surface in `search`/`ask` results with their `modality` and `media_ref`. To avoid double-counting, a coarse page-image candidate is dropped when a text/region candidate survives for the same `(rel_path, page)`. `ask` grounds on available text (an `augment` hit's OCR/transcript); a `replace`-mode media-only hit is cited without quoted context. `open_file` on a media-only chunk returns the non-retryable `MEDIA_NO_TEXT` (never raw bytes), distinct from the retryable `OCR_NOT_READY` when text is merely pending.
 
 See [Design 0003](dirstral-spec/docs/design/0003-multimodal-embeddings.md).
@@ -507,7 +507,7 @@ Normative docs are maintained in the [`dirstral-spec`](https://github.com/dirstr
 - [dirstral-spec/docs/SPEC.md](dirstral-spec/docs/SPEC.md) — normative behavior, schemas, and runtime contracts
 - [dirstral-spec/docs/ECOSYSTEM.md](dirstral-spec/docs/ECOSYSTEM.md) — ecosystem/market/discovery/payment context
 - [dirstral-spec/docs/x402-payment-adapter-spec.md](dirstral-spec/docs/x402-payment-adapter-spec.md) — facilitator adapter contract
-- dir2mcp implements spec version `0.5.x` ([versioning](dirstral-spec/spec/versioning.md))
+- dir2mcp implements spec version `0.14.x` ([versioning](dirstral-spec/spec/versioning.md))
 
 ## Development
 
