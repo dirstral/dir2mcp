@@ -932,8 +932,12 @@ func (s *Service) mediaPagesFor(doc model.Document, content []byte) int {
 		return 1
 	case "pdf":
 		n, err := pdfutil.PageCount(content)
-		if err != nil || n < 1 {
+		if err != nil {
 			s.getLogger().Printf("multimodal: PDF page count failed for %s (%v); skipping direct media embedding", doc.RelPath, err)
+			return 0
+		}
+		if n < 1 {
+			s.getLogger().Printf("multimodal: PDF page count invalid for %s (count=%d); skipping direct media embedding", doc.RelPath, n)
 			return 0
 		}
 		return n

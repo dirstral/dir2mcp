@@ -195,10 +195,10 @@ func (w *EmbeddingWorker) loadMediaInput(t model.ChunkTask) (model.MediaInput, e
 	// the chunk's page span) into its own one-page PDF so the citation and the
 	// embedded content line up, and the per-request page cap is respected.
 	if strings.EqualFold(strings.TrimSpace(t.Modality), "pdf") {
-		page := t.Metadata.Span.Page
-		if page < 1 {
-			page = 1
+		if !strings.EqualFold(strings.TrimSpace(t.Metadata.Span.Kind), "page") || t.Metadata.Span.Page < 1 {
+			return model.MediaInput{}, fmt.Errorf("%w: pdf media chunk %d has invalid page span", ErrFatal, t.Metadata.ChunkID)
 		}
+		page := t.Metadata.Span.Page
 		pageData, perr := pdfutil.ExtractPage(data, page)
 		if perr != nil {
 			return model.MediaInput{}, fmt.Errorf("%w: %v", ErrFatal, perr)

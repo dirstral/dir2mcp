@@ -130,6 +130,41 @@ func TestEmbeddingWorker_RunOnce_PdfPageExtracted(t *testing.T) {
 	}
 }
 
+func TestEmbeddingWorker_RunOnce_PdfWithoutValidPageSpanFails(t *testing.T) {
+	root := t.TempDir()
+	pdf := makeWorkerPDF(t, 2)
+	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), pdf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tk := model.NewChunkTask(6, "", "text", model.ChunkMetadata{
+		ChunkID: 6, RelPath: "doc.pdf", DocType: "pdf",
+		Span: model.Span{Kind: "", Page: 0},
+	})
+	tk.Modality = "pdf"
+	tk.MediaRef = "doc.pdf"
+
+	source := &fakeChunkSource{tasks: []model.ChunkTask{tk}}
+	emb := &fakeMultimodalEmbedder{mediaVecs: [][]float32{{1, 0}}}
+	worker := &index.EmbeddingWorker{
+		Source: source, Index: index.NewHNSWIndex(""), Embedder: emb,
+		RootDir: root, BatchSize: 4, ModelForText: "gemini-embedding-2",
+	}
+
+	n, err := worker.RunOnce(context.Background(), "text")
+	if err == nil {
+		t.Fatal("expected error for invalid pdf page span")
+	}
+	if !errors.Is(err, index.ErrFatal) {
+		t.Fatalf("expected fatal error, got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("indexed = %d, want 0", n)
+	}
+	if len(source.failedLabels) != 1 || source.failedLabels[0] != 6 {
+		t.Fatalf("failed labels = %#v, want [6]", source.failedLabels)
+	}
+}
+
 // TestEmbeddingWorker_MediaChunk_NonMultimodalEmbedderFails: a media chunk with
 // a text-only embedder is a fatal config error (validation should prevent it
 // upstream, but the worker must not silently mis-embed).
