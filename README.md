@@ -293,7 +293,7 @@ model:
 
 #### Multimodal embeddings (`gemini-embedding-2`, preview — in progress)
 
-Spec §8.1.7 (0.13.0) defines an opt-in `model.embed.multimodal` mode (`off` default | `augment` | `replace`) that embeds media directly into the same vector space via the multimodal `gemini-embedding-2` model. It is being implemented in phases against a **Public Preview** model:
+Spec §8.1.7 (0.14.0) defines an opt-in `model.embed.multimodal` mode (`off` default | `augment` | `replace`) that embeds media directly into the same vector space via the multimodal `gemini-embedding-2` model. It is being implemented in phases against a **Public Preview** model:
 
 ```yaml
 model:
@@ -304,8 +304,8 @@ model:
     multimodal: augment      # off (default) | augment | replace
 ```
 
-- **Images** and **PDFs** are supported today. Under `augment` the document is indexed *both* as text (image OCR / docling PDF text, if an extractor is configured) *and* as direct media embeddings; under `replace` it is embedded directly *instead of* text. A PDF is embedded **per page** (each page is its own vector with a page citation). A text query then retrieves images and PDF pages from the shared space.
-- **Audio and video** media chunking is **not wired yet** (follow-up phase); those still go through the existing OCR/STT→text path regardless of mode.
+- **Images**, **PDFs**, **audio**, and **video** are supported today. Under `augment` the document is indexed *both* as text (image OCR / docling PDF text / audio transcript, if configured) *and* as direct media embeddings; under `replace` it is embedded directly *instead of* text. A PDF is embedded **per page** (each page is its own vector with a page citation); audio and video are embedded **per time window** (each window is its own vector with a `start_ms`/`end_ms` citation). A text query then retrieves images, PDF pages, and media windows from the shared space.
+- **Audio/video duration probing and window extraction** use the external `ffprobe`/`ffmpeg` binaries. When they are absent, audio/video are skipped for direct embedding and the file keeps its text path (audio transcript) — a graceful fallback, not an error. Direct audio embedding covers MP3/WAV; video covers MP4/MOV (the formats the preview model accepts). Other audio formats keep only their transcript; video has no text path.
 - `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2` (validated at startup; otherwise `CONFIG_INVALID`), and the mode is reindex-bound (§8.1.4). `off` (default) is fully behavior-preserving.
 
 See [Design 0003](dirstral-spec/docs/design/0003-multimodal-embeddings.md).
