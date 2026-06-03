@@ -1,0 +1,76 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.2.0",
+  "name": "Quarterly Report",
+  "origin": { "filename": "report.pdf", "mimetype": "application/pdf" },
+  "pages": {
+    "1": { "size": { "width": 612, "height": 792 }, "page_no": 1 },
+    "2": { "size": { "width": 612, "height": 792 }, "page_no": 2 }
+  },
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      { "$ref": "#/texts/0" },
+      { "$ref": "#/texts/1" },
+      { "$ref": "#/texts/2" },
+      { "$ref": "#/texts/3" },
+      { "$ref": "#/texts/4" },
+      { "$ref": "#/tables/0" },
+      { "$ref": "#/pictures/0" }
+    ]
+  },
+  "texts": [
+    {
+      "self_ref": "#/texts/0", "label": "title", "text": "Quarterly Report",
+      "prov": [{ "page_no": 1, "bbox": { "l": 72, "t": 720, "r": 540, "b": 740, "coord_origin": "BOTTOMLEFT" } }]
+    },
+    {
+      "self_ref": "#/texts/1", "label": "section_header", "level": 1, "text": "Overview",
+      "prov": [{ "page_no": 1, "bbox": { "l": 72, "t": 680, "r": 300, "b": 700, "coord_origin": "BOTTOMLEFT" } }]
+    },
+    {
+      "self_ref": "#/texts/2", "label": "paragraph", "text": "Revenue grew across all regions.",
+      "prov": [{ "page_no": 1, "bbox": { "l": 72, "t": 640, "r": 540, "b": 660, "coord_origin": "BOTTOMLEFT" } }]
+    },
+    {
+      "self_ref": "#/texts/3", "label": "section_header", "level": 2, "text": "Regional Details",
+      "prov": [{ "page_no": 1, "bbox": { "l": 72, "t": 600, "r": 320, "b": 620, "coord_origin": "BOTTOMLEFT" } }]
+    },
+    {
+      "self_ref": "#/texts/4", "label": "paragraph", "text": "EMEA led growth this quarter.",
+      "prov": [{ "page_no": 2, "bbox": { "l": 72, "t": 700, "r": 540, "b": 720, "coord_origin": "BOTTOMLEFT" } }]
+    },
+    {
+      "self_ref": "#/texts/5", "label": "caption", "text": "Table 1: Revenue by region.",
+      "prov": [{ "page_no": 2, "bbox": { "l": 72, "t": 560, "r": 540, "b": 580, "coord_origin": "BOTTOMLEFT" } }]
+    },
+    {
+      "self_ref": "#/texts/6", "label": "caption", "text": "Figure 1: Revenue chart.",
+      "prov": [{ "page_no": 2, "bbox": { "l": 72, "t": 320, "r": 540, "b": 340, "coord_origin": "BOTTOMLEFT" } }]
+    }
+  ],
+  "tables": [
+    {
+      "self_ref": "#/tables/0", "label": "table",
+      "captions": [{ "$ref": "#/texts/5" }],
+      "prov": [{ "page_no": 2, "bbox": { "l": 72, "t": 600, "r": 540, "b": 660, "coord_origin": "BOTTOMLEFT" } }],
+      "data": {
+        "num_rows": 2, "num_cols": 2,
+        "table_cells": [
+          { "text": "Region", "row_span": 1, "col_span": 1, "start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 0, "end_col_offset_idx": 1, "column_header": true },
+          { "text": "Revenue", "row_span": 1, "col_span": 1, "start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 1, "end_col_offset_idx": 2, "column_header": true },
+          { "text": "EMEA", "row_span": 1, "col_span": 1, "start_row_offset_idx": 1, "end_row_offset_idx": 2, "start_col_offset_idx": 0, "end_col_offset_idx": 1 },
+          { "text": "100", "row_span": 1, "col_span": 1, "start_row_offset_idx": 1, "end_row_offset_idx": 2, "start_col_offset_idx": 1, "end_col_offset_idx": 2 }
+        ]
+      }
+    }
+  ],
+  "pictures": [
+    {
+      "self_ref": "#/pictures/0", "label": "picture",
+      "captions": [{ "$ref": "#/texts/6" }],
+      "annotations": [{ "kind": "description", "text": "Bar chart of revenue by region." }],
+      "prov": [{ "page_no": 2, "bbox": { "l": 72, "t": 360, "r": 540, "b": 540, "coord_origin": "BOTTOMLEFT" } }]
+    }
+  ]
+}

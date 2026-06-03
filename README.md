@@ -45,6 +45,17 @@ Then verify:
 dir2mcp version
 ```
 
+### Install tracks: `dir2mcp` vs `dir2mcp-full`
+
+dir2mcp ships in two Homebrew formulas that install the **same binary** but differ in whether the [docling](https://github.com/docling-project/docling) structured-extraction runtime is bundled:
+
+| Track | Install | docling | Pick when |
+|---|---|---|---|
+| **Lean** (default) | `brew install dirstral/tap/dir2mcp` | **Not bundled** — bring your own | You already have `docling`, run a `docling-serve` container, extract via Mistral OCR, or index docling-free corpora |
+| **Full** | `brew install dirstral/tap/dir2mcp-full` | **Bundled** (docling runtime included) | You want local structured PDF/image extraction with zero extra setup |
+
+The two formulas are mutually exclusive (Homebrew refuses to install both at once). Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)).
+
 Build-from-source remains available as an alternative:
 
 ```bash
@@ -235,6 +246,25 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 ingest_extractor: auto
 docling_command: docling --to json --output - {input}
 ```
+
+### Document extraction: modes & fallback
+
+PDFs and images are converted to text by an **extractor**, selected with `ingest.extractor` (env `DIR2MCP_INGEST_EXTRACTOR`):
+
+| Mode | Behavior |
+|---|---|
+| `auto` (default) | Prefer the local `docling` CLI; else a reachable `docling-serve`; else Mistral OCR; else disabled. |
+| `docling` | Local docling CLI only (fails if not on `PATH`). |
+| `docling-serve` | docling-serve HTTP only; requires a reachable `serve_url` (no fallback). |
+| `mistral` | Mistral OCR only (requires `MISTRAL_API_KEY`). |
+| `off` | No extraction (PDFs/images contribute no extracted text). |
+
+Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → disabled**. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document.
+
+**Troubleshooting:**
+- *`OCR: disabled`* — no extractor is available: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`.
+- *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
+- *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
 
 ### docling extraction over HTTP (docling-serve)
 
