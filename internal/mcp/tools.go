@@ -2205,6 +2205,12 @@ func serializeHit(h model.SearchHit) map[string]interface{} {
 	if title := strings.TrimSpace(h.Title); title != "" {
 		out["title"] = title
 	}
+	if modality := strings.TrimSpace(h.Modality); modality != "" {
+		out["modality"] = modality
+	}
+	if mediaRef := strings.TrimSpace(h.MediaRef); mediaRef != "" {
+		out["media_ref"] = mediaRef
+	}
 	return out
 }
 

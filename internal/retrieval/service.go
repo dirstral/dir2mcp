@@ -1124,15 +1124,80 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 		return nil, err
 	}
 	if fused, ok := s.runHybridSearch(ctx, query, k, indexName, filtered); ok {
+		fused = dedupMediaCandidates(fused)
 		if allowRerank {
 			return s.rerankPool(ctx, query, fused, k), nil
 		}
 		return truncateSearchHits(fused, k), nil
 	}
+	filtered = dedupMediaCandidates(filtered)
 	if allowRerank {
 		return s.rerankPool(ctx, query, filtered, k), nil
 	}
 	return truncateSearchHits(filtered, k), nil
+}
+
+// isMediaHit reports whether a candidate is a direct media chunk (SPEC 8.1.7).
+func isMediaHit(h model.SearchHit) bool {
+	switch strings.ToLower(strings.TrimSpace(h.Modality)) {
+	case "image", "audio", "video", "pdf":
+		return true
+	default:
+		return false
+	}
+}
+
+// hitPage returns the document page a hit localizes to, if any. Page spans carry
+// it directly; region spans (structured extraction) carry it in the region.
+func hitPage(h model.SearchHit) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(h.Span.Kind)) {
+	case "page":
+		if h.Span.Page > 0 {
+			return h.Span.Page, true
+		}
+	case "region":
+		if h.Span.Region != nil && h.Span.Region.StartPage > 0 {
+			return h.Span.Region.StartPage, true
+		}
+	}
+	return 0, false
+}
+
+func mediaPageKey(relPath string, page int) string {
+	return relPath + "\x00" + strconv.Itoa(page)
+}
+
+// dedupMediaCandidates implements the SPEC 8.1.7 page-image dedup: drop a media
+// page-image candidate for (rel_path, page) only when a text/region candidate
+// for that same page survives, so a page is not double-counted. It runs BEFORE
+// truncation/rerank. Audio/video time-window media chunks, and media on pages
+// with no competing text/region candidate, are kept; distinct text/region
+// chunks are never collapsed into each other. Order is preserved.
+func dedupMediaCandidates(hits []model.SearchHit) []model.SearchHit {
+	textPages := make(map[string]struct{})
+	for _, h := range hits {
+		if isMediaHit(h) {
+			continue
+		}
+		if p, ok := hitPage(h); ok {
+			textPages[mediaPageKey(h.RelPath, p)] = struct{}{}
+		}
+	}
+	if len(textPages) == 0 {
+		return hits
+	}
+	out := make([]model.SearchHit, 0, len(hits))
+	for _, h := range hits {
+		if isMediaHit(h) {
+			if p, ok := hitPage(h); ok {
+				if _, dup := textPages[mediaPageKey(h.RelPath, p)]; dup {
+					continue
+				}
+			}
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // hybridVectorCandidateLimit returns the number of vector candidates to

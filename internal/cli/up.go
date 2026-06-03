@@ -705,14 +705,7 @@ func startEmbeddingWorkers(
 			Logger:       logger,
 			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
 				if ret != nil {
-					ret.SetChunkMetadataForIndex(workerKind, label, model.SearchHit{
-						ChunkID: metadata.ChunkID,
-						RelPath: metadata.RelPath,
-						DocType: metadata.DocType,
-						RepType: metadata.RepType,
-						Snippet: metadata.Snippet,
-						Span:    metadata.Span,
-					})
+					ret.SetChunkMetadataForIndex(workerKind, label, metadata.ToSearchHit())
 				}
 				if indexingState != nil {
 					indexingState.AddEmbeddedOK(1)

@@ -1294,12 +1294,14 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		uid := uint64(chunkID)
 		span := spanFromRow(spanK, spanS, spanE, spanExtra)
 		task := model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
-			ChunkID: uid,
-			RelPath: relPath,
-			DocType: docType,
-			RepType: repType,
-			Snippet: snippet(text, 240),
-			Span:    span,
+			ChunkID:  uid,
+			RelPath:  relPath,
+			DocType:  docType,
+			RepType:  repType,
+			Snippet:  snippet(text, 240),
+			Span:     span,
+			Modality: modality,
+			MediaRef: mediaRef,
 		})
 		task.Modality = modality
 		task.MediaRef = mediaRef
@@ -1323,7 +1325,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 
 	args := []any{"ok"}
 	query := `WITH filtered_chunks AS (
-	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref
 	            FROM chunks c
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
 	          ),
@@ -1335,7 +1337,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	          )
 	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
 	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''),
-	                 COALESCE(d.title, '')
+	                 COALESCE(d.title, ''), fc.modality, fc.media_ref
 	          FROM filtered_chunks fc
 	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1
 	          LEFT JOIN documents d ON d.rel_path = fc.rel_path`
@@ -1366,8 +1368,10 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			spanE     int
 			spanExtra string
 			title     string
+			modality  string
+			mediaRef  string
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &spanExtra, &title); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &spanExtra, &title, &modality, &mediaRef); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -1379,14 +1383,18 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			Label:     uid,
 			Text:      text,
 			IndexKind: kind,
+			Modality:  modality,
+			MediaRef:  mediaRef,
 			Metadata: model.ChunkMetadata{
-				ChunkID: uid,
-				RelPath: relPath,
-				Title:   title,
-				DocType: docType,
-				RepType: repType,
-				Snippet: snippet(text, 240),
-				Span:    span,
+				ChunkID:  uid,
+				RelPath:  relPath,
+				Title:    title,
+				DocType:  docType,
+				RepType:  repType,
+				Snippet:  snippet(text, 240),
+				Span:     span,
+				Modality: modality,
+				MediaRef: mediaRef,
 			},
 		})
 	}
