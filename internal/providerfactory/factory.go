@@ -50,6 +50,38 @@ func validateEmbedDim(p provider.Profile) error {
 	return nil
 }
 
+// multimodalEmbedModel is the only model that serves multimodal embeddings
+// today (SPEC 8.1.7).
+const multimodalEmbedModel = "gemini-embedding-2"
+
+// validateEmbedMultimodal enforces SPEC 8.1.7. The mode must be a known
+// value; `augment`/`replace` map every modality into one shared vector
+// space, so the ENTIRE binding — provider and BOTH the text and code model
+// axes — must resolve to the multimodal model on Gemini, else CONFIG_INVALID
+// (mixing incomparable vectors in one index is forbidden, §8.1.4).
+func validateEmbedMultimodal(p provider.Profile) error {
+	mode := provider.NormalizeEmbedMultimodal(p.EmbedMultimodal)
+	switch mode {
+	case "off":
+		return nil
+	case "augment", "replace":
+		// Trim the model fields to match provider.EmbedIdentity (which
+		// trims), so a value with incidental whitespace isn't rejected as
+		// CONFIG_INVALID when it is treated as equivalent for identity.
+		textModel := strings.TrimSpace(p.EmbedTextModel)
+		codeModel := strings.TrimSpace(p.EmbedCodeModel)
+		if p.Kind != provider.KindGemini ||
+			textModel != multimodalEmbedModel ||
+			codeModel != multimodalEmbedModel {
+			return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q requires provider=gemini with embed.text_model and embed.code_model both set to %q (got kind=%q text_model=%q code_model=%q)",
+				mode, multimodalEmbedModel, p.Kind, textModel, codeModel)
+		}
+		return nil
+	default:
+		return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q is invalid (expected off, augment, or replace)", mode)
+	}
+}
+
 // Embedder builds a model.Embedder for the profile (kinds: openai,
 // mistral, cohere, gemini). The per-call model still comes from the
 // caller; Default*Model is only a fallback for empty model names.
@@ -61,6 +93,11 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 	// SPEC 8.1.6 dimension validation applies to every kind (negative is
 	// always invalid; a fixed positive dim is Gemini-only).
 	if err := validateEmbedDim(p); err != nil {
+		return nil, err
+	}
+	// SPEC 8.1.7: validate the multimodal mode + its single-shared-space
+	// constraint before building any adapter.
+	if err := validateEmbedMultimodal(p); err != nil {
 		return nil, err
 	}
 	switch p.Kind {

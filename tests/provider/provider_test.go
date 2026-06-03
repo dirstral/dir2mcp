@@ -132,9 +132,9 @@ func TestSelectAutoPrecedence(t *testing.T) {
 func TestEmbedIdentity(t *testing.T) {
 	p := provider.Profile{Name: "mistral", EmbedTextModel: "mistral-embed", EmbedCodeModel: "codestral-embed"}
 	id := provider.EmbedIdentity(p)
-	// Identity is provider|text_model|code_model|text_dim|code_dim
-	// (SPEC 8.1.4/8.1.6); unset dims record as 0 (native).
-	if id != "mistral|mistral-embed|codestral-embed|0|0" {
+	// Identity is provider|text_model|code_model|text_dim|code_dim|multimodal
+	// (SPEC 8.1.4/8.1.6/8.1.7); unset dims record as 0, mode as off.
+	if id != "mistral|mistral-embed|codestral-embed|0|0|off" {
 		t.Fatalf("identity = %q", id)
 	}
 	if err := provider.VerifyEmbedIdentity("", id); err != nil {
@@ -143,7 +143,7 @@ func TestEmbedIdentity(t *testing.T) {
 	if err := provider.VerifyEmbedIdentity(id, id); err != nil {
 		t.Errorf("matching identity must pass: %v", err)
 	}
-	_ = cfgErr(t, provider.VerifyEmbedIdentity("openai|text-embedding-3-small||0|0", id))
+	_ = cfgErr(t, provider.VerifyEmbedIdentity("openai|text-embedding-3-small||0|0|off", id))
 	// A different requested output dimension is a distinct identity
 	// (reindex-bound, SPEC 8.1.6): same provider+models but dim 768 must
 	// not match the native (dim 0) identity.
@@ -152,15 +152,25 @@ func TestEmbedIdentity(t *testing.T) {
 	if native == dimmed {
 		t.Fatalf("requested dimension must change embed identity: %q == %q", native, dimmed)
 	}
-	// A legacy 3-field identity (pre-8.1.6 snapshot, no dims) must NOT
-	// force a spurious reindex against the equivalent native 5-field
-	// identity — it is normalized to "|0|0" before comparison.
-	legacy := "mistral|mistral-embed|codestral-embed"
-	if err := provider.VerifyEmbedIdentity(legacy, "mistral|mistral-embed|codestral-embed|0|0"); err != nil {
-		t.Errorf("legacy 3-field identity must match native 5-field: %v", err)
+	// A different multimodal mode is a distinct identity (reindex-bound,
+	// SPEC 8.1.7).
+	mm := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2", EmbedMultimodal: "augment"})
+	if mm == provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2"}) {
+		t.Fatalf("multimodal mode must change embed identity")
+	}
+	// Legacy identities must NOT force a spurious reindex against the
+	// equivalent current identity: a 3-field (pre-8.1.6) normalizes to
+	// "|0|0|off" and a 5-field (pre-8.1.7) to "|off".
+	legacy3 := "mistral|mistral-embed|codestral-embed"
+	if err := provider.VerifyEmbedIdentity(legacy3, "mistral|mistral-embed|codestral-embed|0|0|off"); err != nil {
+		t.Errorf("legacy 3-field identity must match native current: %v", err)
+	}
+	legacy5 := "mistral|mistral-embed|codestral-embed|0|0"
+	if err := provider.VerifyEmbedIdentity(legacy5, "mistral|mistral-embed|codestral-embed|0|0|off"); err != nil {
+		t.Errorf("legacy 5-field identity must match off-mode current: %v", err)
 	}
 	// But a legacy identity vs a non-native dimension still mismatches.
-	_ = cfgErr(t, provider.VerifyEmbedIdentity(legacy, "mistral|mistral-embed|codestral-embed|768|0"))
+	_ = cfgErr(t, provider.VerifyEmbedIdentity(legacy3, "mistral|mistral-embed|codestral-embed|768|0|off"))
 }
 
 func mustErr(_ provider.Profile, err error) error {

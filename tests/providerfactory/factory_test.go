@@ -136,6 +136,43 @@ func TestEmbedder_DimRejectedForNonGemini(t *testing.T) {
 	}
 }
 
+// TestEmbedder_Multimodal pins SPEC 8.1.7: augment/replace require
+// provider=gemini with both embed models = gemini-embedding-2; off and any
+// other binding combination behave accordingly.
+func TestEmbedder_Multimodal(t *testing.T) {
+	good := provider.Profile{
+		Name: "gemini", Kind: provider.KindGemini, APIKey: "k",
+		EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2",
+	}
+	for _, mode := range []string{"augment", "replace"} {
+		p := good
+		p.EmbedMultimodal = mode
+		if _, err := providerfactory.Embedder(p); err != nil {
+			t.Errorf("mode %q with gemini-embedding-2 on both axes must be valid: %v", mode, err)
+		}
+	}
+	// off (and empty) is always valid, including on non-gemini providers.
+	for _, p := range []provider.Profile{
+		{Name: "mistral", Kind: provider.KindOpenAI, APIKey: "k", EmbedMultimodal: "off"},
+		{Name: "mistral", Kind: provider.KindOpenAI, APIKey: "k"},
+	} {
+		if _, err := providerfactory.Embedder(p); err != nil {
+			t.Errorf("off/empty multimodal must be valid: %v", err)
+		}
+	}
+	// Invalid combinations are CONFIG_INVALID.
+	bad := []provider.Profile{
+		{Name: "mistral", Kind: provider.KindOpenAI, APIKey: "k", EmbedTextModel: "mistral-embed", EmbedCodeModel: "mistral-embed", EmbedMultimodal: "augment"},            // wrong kind/model
+		{Name: "gemini", Kind: provider.KindGemini, APIKey: "k", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-001", EmbedMultimodal: "replace"}, // code axis not multimodal
+		{Name: "gemini", Kind: provider.KindGemini, APIKey: "k", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2", EmbedMultimodal: "bogus"},     // unknown mode
+	}
+	for i, p := range bad {
+		if _, err := providerfactory.Embedder(p); err == nil {
+			t.Errorf("bad multimodal config #%d must be CONFIG_INVALID, got nil", i)
+		}
+	}
+}
+
 // TestEmbedder_NegativeDimRejected pins SPEC 8.1.6: a negative dimension is
 // CONFIG_INVALID for every kind, including Gemini (it would otherwise form
 // a distinct identity yet behave like "unset" at runtime).

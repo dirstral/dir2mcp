@@ -143,19 +143,18 @@ func NewClient(baseURL, apiKey string) *Client {
 // Native batchEmbedContents request/response shapes. The native API
 // (unlike the OpenAI-compatible /embeddings shim) carries taskType and
 // outputDimensionality, and returns embeddings in request order.
-type geminiEmbedContentPart struct {
-	Text string `json:"text"`
-}
-
-type geminiEmbedContent struct {
-	Parts []geminiEmbedContentPart `json:"parts"`
-}
-
 type geminiEmbedSingleRequest struct {
-	Model                string             `json:"model"`
-	Content              geminiEmbedContent `json:"content"`
-	TaskType             string             `json:"taskType,omitempty"`
-	OutputDimensionality *int               `json:"outputDimensionality,omitempty"`
+	Model                string        `json:"model"`
+	Content              geminiContent `json:"content"`
+	TaskType             string        `json:"taskType,omitempty"`
+	OutputDimensionality *int          `json:"outputDimensionality,omitempty"`
+}
+
+// MediaInput is one non-text item to embed (SPEC 8.1.7): the media bytes
+// plus their MIME type (e.g. "image/png", "audio/mp3", "application/pdf").
+type MediaInput struct {
+	MimeType string
+	Data     []byte
 }
 
 type geminiBatchEmbedRequest struct {
@@ -176,8 +175,48 @@ type geminiBatchEmbedResponse struct {
 // BatchSize-sized batches, each retried with bounded exponential backoff;
 // the native batch response preserves request order.
 func (c *Client) Embed(ctx context.Context, modelName string, role model.EmbedRole, inputs []string) ([][]float32, error) {
+	modelName, dim, taskType, err := c.embedParams(modelName, role)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return [][]float32{}, nil
+	}
+	reqs := make([]geminiEmbedSingleRequest, len(inputs))
+	for i, in := range inputs {
+		reqs[i] = c.embedReq(modelName, taskType, dim, geminiPart{Text: in})
+	}
+	return c.embedBatched(ctx, modelName, dim, reqs)
+}
+
+// EmbedMedia embeds non-text media (images, audio, video, PDFs) via the
+// same native batchEmbedContents surface, sending each item as an
+// inline-data part (SPEC 8.1.7). Role→taskType and dimension/normalization
+// behave as for Embed.
+func (c *Client) EmbedMedia(ctx context.Context, modelName string, role model.EmbedRole, items []MediaInput) ([][]float32, error) {
+	modelName, dim, taskType, err := c.embedParams(modelName, role)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return [][]float32{}, nil
+	}
+	reqs := make([]geminiEmbedSingleRequest, len(items))
+	for i, it := range items {
+		if len(it.Data) == 0 {
+			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "media input is empty", Retryable: false}
+		}
+		part := geminiPart{InlineData: &geminiInlineData{MimeType: it.MimeType, Data: base64.StdEncoding.EncodeToString(it.Data)}}
+		reqs[i] = c.embedReq(modelName, taskType, dim, part)
+	}
+	return c.embedBatched(ctx, modelName, dim, reqs)
+}
+
+// embedParams resolves the effective model name, requested output dimension,
+// and taskType for an embed call (shared by Embed/EmbedMedia).
+func (c *Client) embedParams(modelName string, role model.EmbedRole) (string, int, string, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
-		return nil, &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
+		return "", 0, "", &model.ProviderError{Code: "GEMINI_AUTH", Message: "missing Gemini API key", Retryable: false}
 	}
 	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
@@ -186,29 +225,42 @@ func (c *Client) Embed(ctx context.Context, modelName string, role model.EmbedRo
 			modelName = DefaultEmbedModel
 		}
 	}
-	if len(inputs) == 0 {
-		return [][]float32{}, nil
-	}
-
 	isCode := c.CodeEmbedModel != "" && modelName == strings.TrimSpace(c.CodeEmbedModel)
-	taskType := geminiTaskType(role, isCode)
 	dim := c.EmbedTextDim
 	if isCode {
 		dim = c.EmbedCodeDim
 	}
+	return modelName, dim, geminiTaskType(role, isCode), nil
+}
 
+// embedReq builds one native embed request for a single content part.
+func (c *Client) embedReq(modelName, taskType string, dim int, part geminiPart) geminiEmbedSingleRequest {
+	r := geminiEmbedSingleRequest{
+		Model:    "models/" + modelName,
+		Content:  geminiContent{Parts: []geminiPart{part}},
+		TaskType: taskType,
+	}
+	if dim > 0 {
+		d := dim
+		r.OutputDimensionality = &d
+	}
+	return r
+}
+
+// embedBatched sends reqs in BatchSize-sized batches (each retried) and
+// concatenates the vectors in request order.
+func (c *Client) embedBatched(ctx context.Context, modelName string, dim int, reqs []geminiEmbedSingleRequest) ([][]float32, error) {
 	batchSize := c.BatchSize
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
 	}
-
-	out := make([][]float32, 0, len(inputs))
-	for start := 0; start < len(inputs); start += batchSize {
+	out := make([][]float32, 0, len(reqs))
+	for start := 0; start < len(reqs); start += batchSize {
 		end := start + batchSize
-		if end > len(inputs) {
-			end = len(inputs)
+		if end > len(reqs) {
+			end = len(reqs)
 		}
-		vectors, err := c.embedBatchWithRetry(ctx, modelName, taskType, dim, inputs[start:end])
+		vectors, err := c.embedReqsWithRetry(ctx, modelName, dim, reqs[start:end])
 		if err != nil {
 			return nil, err
 		}
@@ -230,7 +282,7 @@ func geminiTaskType(role model.EmbedRole, isCode bool) string {
 	return "RETRIEVAL_DOCUMENT"
 }
 
-func (c *Client) embedBatchWithRetry(ctx context.Context, modelName, taskType string, dim int, inputs []string) ([][]float32, error) {
+func (c *Client) embedReqsWithRetry(ctx context.Context, modelName string, dim int, reqs []geminiEmbedSingleRequest) ([][]float32, error) {
 	maxRetries := c.MaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
@@ -242,7 +294,7 @@ func (c *Client) embedBatchWithRetry(ctx context.Context, modelName, taskType st
 				return nil, err
 			}
 		}
-		vectors, err := c.embedBatchNative(ctx, modelName, taskType, dim, inputs)
+		vectors, err := c.embedReqsNative(ctx, modelName, dim, reqs)
 		if err == nil {
 			return vectors, nil
 		}
@@ -255,27 +307,12 @@ func (c *Client) embedBatchWithRetry(ctx context.Context, modelName, taskType st
 	return nil, lastErr
 }
 
-func (c *Client) embedBatchNative(ctx context.Context, modelName, taskType string, dim int, inputs []string) ([][]float32, error) {
-	qualified := "models/" + modelName
-	reqs := make([]geminiEmbedSingleRequest, len(inputs))
-	for i, in := range inputs {
-		r := geminiEmbedSingleRequest{
-			Model:    qualified,
-			Content:  geminiEmbedContent{Parts: []geminiEmbedContentPart{{Text: in}}},
-			TaskType: taskType,
-		}
-		if dim > 0 {
-			d := dim
-			r.OutputDimensionality = &d
-		}
-		reqs[i] = r
-	}
+func (c *Client) embedReqsNative(ctx context.Context, modelName string, dim int, reqs []geminiEmbedSingleRequest) ([][]float32, error) {
 	body, err := json.Marshal(geminiBatchEmbedRequest{Requests: reqs})
 	if err != nil {
 		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to marshal embedding request", Retryable: false, Cause: err}
 	}
-
-	resp, err := c.doNativeJSON(ctx, "/"+qualified+":batchEmbedContents", body, defaultRequestTimeout)
+	resp, err := c.doNativeJSON(ctx, "/models/"+modelName+":batchEmbedContents", body, defaultRequestTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -288,11 +325,11 @@ func (c *Client) embedBatchNative(ctx context.Context, modelName, taskType strin
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode embedding response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
-	if len(parsed.Embeddings) != len(inputs) {
-		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("embedding response size mismatch: got %d vectors for %d inputs", len(parsed.Embeddings), len(inputs)), Retryable: false, StatusCode: resp.StatusCode}
+	if len(parsed.Embeddings) != len(reqs) {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("embedding response size mismatch: got %d vectors for %d inputs", len(parsed.Embeddings), len(reqs)), Retryable: false, StatusCode: resp.StatusCode}
 	}
 
-	vectors := make([][]float32, len(inputs))
+	vectors := make([][]float32, len(reqs))
 	for i, e := range parsed.Embeddings {
 		vec := make([]float32, len(e.Values))
 		for j, v := range e.Values {

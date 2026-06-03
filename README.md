@@ -291,6 +291,10 @@ model:
 - **Matryoshka dimensions** (`text_dim`/`code_dim`): request a smaller vector to shrink the index. dir2mcp sends Gemini's `outputDimensionality` and L2-normalizes the truncated vectors. The knob is Gemini-only — setting it on a provider that can't honor it is rejected at startup (`CONFIG_INVALID`).
 - **Reindex-bound (spec §8.1.4/§8.1.6):** the embed provider, model, **and requested dimension** form the corpus-lifetime embed identity. Switching to Gemini, or changing the dimension later, requires a `dir2mcp reindex` (the server refuses to mix vector spaces and tells you to reindex).
 
+#### Multimodal embeddings (`gemini-embedding-2`, preview — in progress)
+
+Spec §8.1.7 (0.13.0) defines an opt-in `model.embed.multimodal` mode (`off` default | `augment` | `replace`) that embeds images/audio/video/PDFs directly into the same vector space via the multimodal `gemini-embedding-2` model. This is being implemented in phases against a **Public Preview** model: the current build wires the provider plumbing (the `gemini-embedding-2` adapter with media-part embedding, the config knob, and the all-axes validation that `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2`), but the ingestion/retrieval pipeline that produces media chunks is **not wired yet** — so leaving `multimodal: off` (the default) is the only supported setting for now. See [Design 0003](dirstral-spec/docs/design/0003-multimodal-embeddings.md).
+
 ### Server identity
 
 Each `dir2mcp up` instance reports a unique MCP server name derived from the indexed directory, so running multiple corpora side-by-side (e.g., `dir2mcp-stas-legal-a1b2c3` and `dir2mcp-research-notes-9f44ee`) keeps them distinguishable in your MCP client list.
