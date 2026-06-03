@@ -304,8 +304,8 @@ model:
     multimodal: augment      # off (default) | augment | replace
 ```
 
-- **Images** are supported today: under `augment` an image is indexed *both* as OCR text (if an extractor is configured) and as a direct image embedding; under `replace` it is embedded directly *instead of* OCR. A text query then retrieves images from the shared space.
-- **PDF, audio, and video** media chunking is **not wired yet** (follow-up phases); those still go through the existing OCR/STT→text path regardless of mode.
+- **Images** and **PDFs** are supported today. Under `augment` the document is indexed *both* as text (image OCR / docling PDF text, if an extractor is configured) *and* as direct media embeddings; under `replace` it is embedded directly *instead of* text. A PDF is embedded **per page** (each page is its own vector with a page citation). A text query then retrieves images and PDF pages from the shared space.
+- **Audio and video** media chunking is **not wired yet** (follow-up phase); those still go through the existing OCR/STT→text path regardless of mode.
 - `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2` (validated at startup; otherwise `CONFIG_INVALID`), and the mode is reindex-bound (§8.1.4). `off` (default) is fully behavior-preserving.
 
 See [Design 0003](dirstral-spec/docs/design/0003-multimodal-embeddings.md).

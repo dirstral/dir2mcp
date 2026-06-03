@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/pdfutil"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
@@ -189,6 +190,20 @@ func (w *EmbeddingWorker) loadMediaInput(t model.ChunkTask) (model.MediaInput, e
 	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, err)
+	}
+	// A PDF chunk embeds a single page (SPEC 8.1.7): extract that page (from
+	// the chunk's page span) into its own one-page PDF so the citation and the
+	// embedded content line up, and the per-request page cap is respected.
+	if strings.EqualFold(strings.TrimSpace(t.Modality), "pdf") {
+		page := t.Metadata.Span.Page
+		if page < 1 {
+			page = 1
+		}
+		pageData, perr := pdfutil.ExtractPage(data, page)
+		if perr != nil {
+			return model.MediaInput{}, fmt.Errorf("%w: %v", ErrFatal, perr)
+		}
+		data = pageData
 	}
 	return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -14,7 +15,26 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/pdfutil"
+	"github.com/pdfcpu/pdfcpu/pkg/api"
+	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
+
+// makeWorkerPDF renders an n-page PDF for the worker media-path test.
+func makeWorkerPDF(t *testing.T, n int) []byte {
+	t.Helper()
+	api.DisableConfigDir()
+	parts := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		parts = append(parts, fmt.Sprintf(`"%d":{"content":{"text":[{"value":"page","position":[100,700],"font":{"name":"Helvetica","size":12}}]}}`, i))
+	}
+	js := `{"pages":{` + strings.Join(parts, ",") + `}}`
+	var buf bytes.Buffer
+	if err := api.Create(nil, strings.NewReader(js), &buf, pdfmodel.NewDefaultConfiguration()); err != nil {
+		t.Fatalf("create %d-page pdf: %v", n, err)
+	}
+	return buf.Bytes()
+}
 
 // fakeMultimodalEmbedder implements model.MultimodalEmbedder for the media path.
 type fakeMultimodalEmbedder struct {
@@ -70,6 +90,43 @@ func TestEmbeddingWorker_RunOnce_MediaChunk(t *testing.T) {
 	}
 	if len(source.embedded) != 1 || source.embedded[0] != 7 {
 		t.Fatalf("embedded labels = %v, want [7]", source.embedded)
+	}
+}
+
+// TestEmbeddingWorker_RunOnce_PdfPageExtracted pins SPEC 8.1.7: a PDF media
+// chunk is embedded as a single-page PDF — the worker extracts the page named
+// by the chunk's page span before calling EmbedMedia.
+func TestEmbeddingWorker_RunOnce_PdfPageExtracted(t *testing.T) {
+	root := t.TempDir()
+	pdf := makeWorkerPDF(t, 3)
+	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), pdf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tk := model.NewChunkTask(5, "", "text", model.ChunkMetadata{
+		ChunkID: 5, RelPath: "doc.pdf", DocType: "pdf",
+		Span: model.Span{Kind: "page", Page: 2},
+	})
+	tk.Modality = "pdf"
+	tk.MediaRef = "doc.pdf"
+
+	source := &fakeChunkSource{tasks: []model.ChunkTask{tk}}
+	emb := &fakeMultimodalEmbedder{mediaVecs: [][]float32{{1, 0}}}
+	worker := &index.EmbeddingWorker{
+		Source: source, Index: index.NewHNSWIndex(""), Embedder: emb,
+		RootDir: root, BatchSize: 4, ModelForText: "gemini-embedding-2",
+	}
+	if _, err := worker.RunOnce(context.Background(), "text"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(emb.gotMedia) != 1 {
+		t.Fatalf("EmbedMedia items = %d, want 1", len(emb.gotMedia))
+	}
+	if emb.gotMedia[0].MimeType != "application/pdf" {
+		t.Errorf("mime = %q, want application/pdf", emb.gotMedia[0].MimeType)
+	}
+	// The embedded payload must be the single extracted page, not the whole doc.
+	if n, err := pdfutil.PageCount(emb.gotMedia[0].Data); err != nil || n != 1 {
+		t.Fatalf("embedded PDF page count = %d (err %v), want 1", n, err)
 	}
 }
 
