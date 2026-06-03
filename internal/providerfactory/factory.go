@@ -159,9 +159,10 @@ func OCR(p provider.Profile) (model.OCR, error) {
 }
 
 // Transcriber builds a model.Transcriber for STT-capable kinds:
-// `mistral` (Voxtral), `elevenlabs` (Scribe), and `openai`/`gemini`
-// (OpenAI-compatible /v1/audio/transcriptions; endpoint-dependent for
-// openai per SPEC 8.1.2 ³ — validated at first use).
+// `mistral` (Voxtral), `elevenlabs` (Scribe), `openai`
+// (OpenAI-compatible /v1/audio/transcriptions; endpoint-dependent per
+// SPEC 8.1.2 ³ — validated at first use), and `gemini` (native
+// generateContent with inline audio, SPEC 8.2).
 func Transcriber(p provider.Profile) (model.Transcriber, error) {
 	switch p.Kind {
 	case provider.KindMistral:
@@ -185,6 +186,9 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 		c := gemini.NewClient(p.BaseURL, p.APIKey)
 		if p.STTModel != "" {
 			c.DefaultSTTModel = p.STTModel
+		}
+		if lang := strings.TrimSpace(p.STTLanguage); lang != "" {
+			c.DefaultSTTLanguage = lang
 		}
 		return c, nil
 	default:

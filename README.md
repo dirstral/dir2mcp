@@ -227,7 +227,7 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_RERANK_MODEL` | No | Cohere rerank model override (default: `rerank-v3.5`) |
 | `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
 | `ELEVENLABS_BASE_URL` | No | ElevenLabs base URL (default: `https://api.elevenlabs.io`) |
-| `GEMINI_API_KEY` | Optional | Google Gemini key; enables the `gemini` provider profile (embeddings, chat). Bind it explicitly to a capability (e.g. `model.embed.provider: gemini`) — auto-selection still prefers Mistral. Secret, never persisted |
+| `GEMINI_API_KEY` | Optional | Google Gemini key; enables the `gemini` provider profile (embeddings, chat, and native STT/TTS via `generateContent`). Bind it explicitly to a capability (e.g. `model.embed.provider: gemini`, `stt.provider: gemini`) — auto-selection still prefers Mistral. Secret, never persisted |
 
 For Homebrew and other installed workflows, you can persist this in `.dir2mcp.yaml`:
 
