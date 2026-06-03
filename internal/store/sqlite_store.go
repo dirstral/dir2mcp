@@ -1878,8 +1878,16 @@ func normalizeIndexKind(indexKind string) string {
 // an empty text body for media chunks (SPEC 8.1.7) — a media chunk carries no
 // text; its bytes are read from media_ref at embed time.
 func validateChunkText(chunk model.Chunk) error {
-	if strings.TrimSpace(chunk.Text) == "" && normalizeModality(chunk.Modality) == "text" {
-		return errors.New("chunk text must be non-empty")
+	if normalizeModality(chunk.Modality) == "text" {
+		if strings.TrimSpace(chunk.Text) == "" {
+			return errors.New("chunk text must be non-empty")
+		}
+		return nil
+	}
+	// A media chunk carries no text but MUST reference its source bytes, so
+	// the failure is deterministic at write time rather than later at embed.
+	if strings.TrimSpace(chunk.MediaRef) == "" {
+		return errors.New("media chunk must have a media_ref")
 	}
 	return nil
 }

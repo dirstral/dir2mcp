@@ -172,11 +172,21 @@ func (w *EmbeddingWorker) loadMediaInput(t model.ChunkTask) (model.MediaInput, e
 	if err != nil {
 		return model.MediaInput{}, fmt.Errorf("%w: resolve root: %v", ErrFatal, err)
 	}
-	abs := filepath.Join(root, filepath.FromSlash(ref))
-	if abs != root && !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+	// Resolve symlinks on both the root and the target so a symlink *within*
+	// the corpus that points outside it cannot smuggle out-of-root bytes in
+	// (a lexical Join+HasPrefix check alone would miss that).
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		realRoot = root // root should exist; fall back to the lexical form
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(realRoot, filepath.FromSlash(ref)))
+	if err != nil {
+		return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, err)
+	}
+	if resolved != realRoot && !strings.HasPrefix(resolved, realRoot+string(os.PathSeparator)) {
 		return model.MediaInput{}, fmt.Errorf("%w: media_ref %q escapes the corpus root", ErrFatal, ref)
 	}
-	data, err := os.ReadFile(abs)
+	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, err)
 	}

@@ -26,12 +26,11 @@ var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d
 
 const (
 	// RepTypeRawText is the representation type for raw text content
+	RepTypeRawText = "raw_text"
 	// RepTypeMedia is a chunk embedded directly from source media bytes via
 	// the multimodal embedder (SPEC 8.1.7), as opposed to extracted/transcribed
 	// text. The chunk has no text body; its bytes live at the document path.
 	RepTypeMedia = "media"
-
-	RepTypeRawText = "raw_text"
 	// RepTypeExtractedMarkdown is the representation type for extractor-generated markdown
 	RepTypeExtractedMarkdown = "extracted_markdown"
 	// RepTypeOCRMarkdown is retained as a backward-compatible alias.
