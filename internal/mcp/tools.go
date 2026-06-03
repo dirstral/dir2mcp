@@ -1384,6 +1384,8 @@ func mapOpenFileError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, model.ErrDocTypeUnsupported):
 		return &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+	case errors.Is(err, model.ErrMediaNoText):
+		return &toolExecutionError{Code: "MEDIA_NO_TEXT", Message: "media embedded directly with no text representation (multimodal replace mode); no text is available to open", Retryable: false}
 	case errors.Is(err, model.ErrOCRNotReady):
 		return &toolExecutionError{Code: "OCR_NOT_READY", Message: "ocr representation not yet available; retry once indexing completes or request a specific page/start_ms", Retryable: true}
 	case errors.Is(err, os.ErrNotExist):

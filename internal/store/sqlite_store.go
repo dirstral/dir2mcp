@@ -1310,6 +1310,31 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	return tasks, rows.Err()
 }
 
+// ChunkModalityPresence reports, for a document's live chunks, whether any is a
+// direct media chunk (modality not text) and whether any is text-bearing
+// (modality text/empty). It lets open_file distinguish a permanent media-only
+// document (MEDIA_NO_TEXT, SPEC 8.1.7) from a binary document whose OCR/
+// transcript is merely pending (OCR_NOT_READY). A document with no chunks yields
+// (false, false).
+func (s *SQLiteStore) ChunkModalityPresence(ctx context.Context, relPath string) (hasMedia, hasText bool, err error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	defer s.ReleaseDB()
+
+	const q = `SELECT
+	             COALESCE(MAX(CASE WHEN modality NOT IN ('text', '') THEN 1 ELSE 0 END), 0),
+	             COALESCE(MAX(CASE WHEN modality IN ('text', '') THEN 1 ELSE 0 END), 0)
+	           FROM chunks
+	           WHERE rel_path = ? AND deleted = 0`
+	var m, t int
+	if err := db.QueryRowContext(ctx, q, relPath).Scan(&m, &t); err != nil {
+		return false, false, err
+	}
+	return m == 1, t == 1, nil
+}
+
 func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error) {
 	db, err := s.ensureDB(ctx)
 	if err != nil {
