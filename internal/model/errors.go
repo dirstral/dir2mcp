@@ -32,6 +32,13 @@ var (
 	// yet been computed for a binary document (e.g. PDF, audio). Callers
 	// should retry once ingestion completes rather than fall back to raw bytes.
 	ErrOCRNotReady = errors.New("ocr not ready")
+
+	// ErrMediaNoText indicates a multimodal media-only document (SPEC 8.1.7):
+	// embedded directly under model.embed.multimodal=replace with no text
+	// representation. This is a permanent condition — unlike ErrOCRNotReady,
+	// retrying will not produce text — so open_file MUST surface it as the
+	// non-retryable MEDIA_NO_TEXT and never fall back to raw bytes.
+	ErrMediaNoText = errors.New("media has no text representation")
 )
 
 type ProviderError struct {

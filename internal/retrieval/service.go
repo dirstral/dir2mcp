@@ -644,6 +644,15 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return "", false, err
 	}
 
+	// A replace-mode media-only document (SPEC 8.1.7) has direct media chunks
+	// but no text representation — a permanent condition. open_file returns the
+	// non-retryable MEDIA_NO_TEXT (§15.4), never raw bytes and never the
+	// retryable OCR_NOT_READY. Gated to media extensions so text files skip the
+	// store lookup entirely.
+	if isMediaDocExt(normalizedRel) && s.isMediaOnlyDoc(ctx, normalizedRel) {
+		return "", false, model.ErrMediaNoText
+	}
+
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
 	if content, truncated, handled, err := s.openFileFromMetadata(normalizedRel, span, maxChars, secretPatterns, kind); handled {
 		return content, truncated, err
@@ -670,18 +679,83 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	return s.openFileFromResolvedPath(resolvedAbs, secretPatterns, kind, span, maxChars)
 }
 
-// isBinaryDocType reports whether relPath has an extension whose contents are
-// not human-readable as raw bytes (PDF, audio formats). For these doc types
-// the default open_file response should serve the OCR / transcript cache.
-func isBinaryDocType(relPath string) bool {
-	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
-	case ".pdf":
-		return true
-	case ".mp3", ".wav", ".m4a", ".flac":
+// chunkModalityChecker is the optional store capability used to classify a
+// document as media-only (SPEC 8.1.7). Stores that don't implement it (e.g.
+// test fakes) simply opt out, leaving open_file behavior unchanged.
+type chunkModalityChecker interface {
+	ChunkModalityPresence(ctx context.Context, relPath string) (hasMedia, hasText bool, err error)
+}
+
+// isMediaOnlyDoc reports whether relPath has direct media chunks but no
+// text-bearing chunk — the permanent MEDIA_NO_TEXT condition. It is
+// conservative: any lookup error or a store without the capability returns
+// false, so open_file falls back to its existing behavior rather than
+// misreporting MEDIA_NO_TEXT.
+func (s *Service) isMediaOnlyDoc(ctx context.Context, relPath string) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	checker, ok := store.(chunkModalityChecker)
+	if !ok {
+		return false
+	}
+	hasMedia, hasText, err := checker.ChunkModalityPresence(ctx, relPath)
+	if err != nil {
+		s.logf("open_file: media-only check for %q failed: %v", relPath, err)
+		return false
+	}
+	return hasMedia && !hasText
+}
+
+// Media extension predicates. These keep the media-only gate (isMediaDocExt),
+// the text-serving binary classification (isBinaryDocType), and the cache
+// candidate selector (openFileOCRCacheCandidates) over a single, consistent set
+// so a format is never classified as media yet served as raw bytes.
+func isImageExt(ext string) bool {
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg":
 		return true
 	default:
 		return false
 	}
+}
+
+func isAudioExt(ext string) bool {
+	switch ext {
+	case ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus":
+		return true
+	default:
+		return false
+	}
+}
+
+func isVideoExt(ext string) bool {
+	switch ext {
+	case ".mp4", ".mov":
+		return true
+	default:
+		return false
+	}
+}
+
+// isMediaDocExt reports whether relPath's extension is an embeddable media type
+// (SPEC 8.1.7). Used to gate the media-only store lookup so text/code files keep
+// their fast path. Covers every media format the pipeline can ingest; video has
+// no text fallback and is handled exclusively by the media-only guard
+// (MEDIA_NO_TEXT), while images/PDF/audio also have a text-serving path below.
+func isMediaDocExt(relPath string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext) || isVideoExt(ext)
+}
+
+// isBinaryDocType reports whether relPath has an extension whose contents are
+// not human-readable as raw bytes but DO have a document-text representation
+// (PDF/image OCR, audio transcript). For these the default open_file response
+// serves the OCR/transcript cache rather than raw bytes. Video is excluded: it
+// has no text representation, so a media-only video resolves to MEDIA_NO_TEXT.
+func isBinaryDocType(relPath string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext)
 }
 
 // openFileFromOCRCache reads the precomputed OCR (or transcript) representation
@@ -746,10 +820,12 @@ func (s *Service) openFileFromOCRCache(stateDir, resolvedAbs, relPath string, se
 // with an optional language suffix (or none), so we glob for any matching
 // file. PDFs use a single .md path.
 func openFileOCRCacheCandidates(stateDir, hashHex, relPath string) []string {
-	switch strings.ToLower(filepath.Ext(relPath)) {
-	case ".pdf":
+	ext := strings.ToLower(filepath.Ext(relPath))
+	switch {
+	case ext == ".pdf" || isImageExt(ext):
+		// PDF and image extraction both write extracted markdown to cache/ocr.
 		return []string{filepath.Join(stateDir, "cache", "ocr", hashHex+".md")}
-	case ".mp3", ".wav", ".m4a", ".flac":
+	case isAudioExt(ext):
 		// transcripts are written as <hash>[<-lang>].txt; default-language
 		// transcripts have no suffix, so the unsuffixed file is preferred.
 		out := []string{filepath.Join(stateDir, "cache", "transcribe", hashHex+".txt")}
@@ -1564,7 +1640,15 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 		}
 		line += " "
 		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
-		if snippet == "" {
+		switch {
+		case snippet != "":
+			// Available text (incl. an augment media hit's OCR/transcript)
+			// grounds the answer normally.
+		case isMediaHit(h):
+			// A replace-mode media-only hit has no text: cite it without quoted
+			// context rather than as a missing snippet (SPEC 8.1.7).
+			snippet = "(" + strings.ToLower(strings.TrimSpace(h.Modality)) + " media; cited without quoted text)"
+		default:
 			snippet = "(no snippet)"
 		}
 		line += snippet + "\n"
