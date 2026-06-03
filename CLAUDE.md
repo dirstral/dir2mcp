@@ -10,6 +10,8 @@ dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. I
 - `internal/cli`: CLI command orchestration (`up`, `status`, `ask`, `reindex`, `config`, `version`)
 - `internal/config`: config load/merge/validation
 - `internal/ingest`: file discovery, OCR/transcription/annotation representation generation
+- `internal/pdfutil`: pure-Go PDF helpers (page count, per-page extraction) for multimodal media chunks
+- `internal/avutil`: audio/video helpers (ffprobe duration, ffmpeg time-window extraction) for multimodal media chunks
 - `internal/retrieval`: search/ask/open_file logic
 - `internal/mcp`: JSON-RPC/MCP server and tools
 - `internal/mistral`: Mistral client adapters
