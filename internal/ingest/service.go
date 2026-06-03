@@ -20,6 +20,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/pdfutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 )
@@ -897,8 +898,10 @@ func (s *Service) addRepresentations(delta int64) {
 // is embedded from its bytes instead of via OCR→text (OCR is skipped);
 // `augment` keeps OCR and adds the media chunk.
 func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte) error {
-	embedImage := (s.embedMultimodal == "augment" || s.embedMultimodal == "replace") && doc.DocType == "image"
-	skipOCR := s.embedMultimodal == "replace" && doc.DocType == "image"
+	// pages > 0 means media chunks will be produced (1 for an image, N for a
+	// PDF). In `replace` we then skip OCR; in `augment` OCR is kept alongside.
+	pages := s.mediaPagesFor(doc, content)
+	skipOCR := s.embedMultimodal == "replace" && pages > 0
 
 	if ShouldGenerateExtractedMarkdown(doc.DocType) && s.extractor != nil && !skipOCR {
 		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
@@ -906,13 +909,41 @@ func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, 
 		}
 		s.addRepresentations(1)
 	}
-	if embedImage {
-		if err := s.repGen.GenerateMediaChunk(ctx, doc, computeRepHash(content)); err != nil {
+	if pages > 0 {
+		if err := s.repGen.GenerateMediaChunks(ctx, doc, computeRepHash(content), pages); err != nil {
 			return err
 		}
 		s.addRepresentations(1)
 	}
 	return nil
+}
+
+// mediaPagesFor returns the number of media chunks (pages) to embed directly
+// for doc under the multimodal mode (SPEC 8.1.7): 0 when media embedding is
+// off or doc is not an embeddable media type; 1 for an image; the page count
+// for a PDF. A PDF whose page count can't be read yields 0 (media skipped,
+// OCR kept) rather than failing the ingest.
+func (s *Service) mediaPagesFor(doc model.Document, content []byte) int {
+	if s.embedMultimodal != "augment" && s.embedMultimodal != "replace" {
+		return 0
+	}
+	switch doc.DocType {
+	case "image":
+		return 1
+	case "pdf":
+		n, err := pdfutil.PageCount(content)
+		if err != nil {
+			s.getLogger().Printf("multimodal: PDF page count failed for %s (%v); skipping direct media embedding", doc.RelPath, err)
+			return 0
+		}
+		if n < 1 {
+			s.getLogger().Printf("multimodal: PDF page count invalid for %s (count=%d); skipping direct media embedding", doc.RelPath, n)
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
 }
 
 func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte) error {
