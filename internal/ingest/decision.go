@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -61,13 +60,7 @@ func describeDocumentExtractor(ctx context.Context, cfg config.Config) Extractor
 	case "off":
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=off"}
 	case "docling":
-		if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
-			return ExtractorDecision{Name: "docling", Source: "explicit", Reason: "configured docling command"}
-		}
-		if _, err := exec.LookPath("docling"); err == nil {
-			return ExtractorDecision{Name: "docling", Source: "explicit", Reason: "auto-detected on PATH"}
-		}
-		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling but docling command is unavailable"}
+		return describeExplicitDocling(ctx, cfg)
 	case "docling-serve":
 		return describeExplicitDoclingServe(ctx, cfg)
 	case "mistral":
@@ -92,29 +85,50 @@ func describeExplicitDoclingServe(ctx context.Context, cfg config.Config) Extrac
 	}
 }
 
-func describeAutoDocumentExtractor(ctx context.Context, cfg config.Config) ExtractorDecision {
-	if tpl := strings.TrimSpace(cfg.DoclingCommand); tpl != "" {
-		return ExtractorDecision{Name: "docling", Source: "auto", Reason: "configured docling command"}
+// describeExplicitDocling resolves the docling CLI for ingest.extractor=docling.
+// Per spec 0.15.0 §7.4 the extractor is available only when it both resolves
+// AND passes a functional check; a present-but-broken docling disables
+// extraction (no silent fallback to another engine), mirroring explicit
+// docling-serve.
+func describeExplicitDocling(ctx context.Context, cfg config.Config) ExtractorDecision {
+	bin, source, ok := resolveDoclingBinary(cfg)
+	if !ok {
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling but docling command is unavailable"}
 	}
-	if _, err := exec.LookPath("docling"); err == nil {
-		return ExtractorDecision{Name: "docling", Source: "auto", Reason: "auto-detected on PATH"}
+	if err := doclingFunctionalCheck(ctx, bin); err != nil {
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling but the docling command is present yet failed its functional check"}
 	}
-	return describeAutoWithoutDoclingCLI(ctx, cfg)
+	return ExtractorDecision{Name: "docling", Source: "explicit", Reason: doclingResolvedReason(source)}
 }
 
-func describeAutoWithoutDoclingCLI(ctx context.Context, cfg config.Config) ExtractorDecision {
+func describeAutoDocumentExtractor(ctx context.Context, cfg config.Config) ExtractorDecision {
+	if bin, source, ok := resolveDoclingBinary(cfg); ok {
+		if err := doclingFunctionalCheck(ctx, bin); err == nil {
+			return ExtractorDecision{Name: "docling", Source: "auto", Reason: doclingResolvedReason(source)}
+		}
+		// Resolved but non-functional: skip it and continue the cascade so a
+		// broken docling install degrades gracefully (spec 0.15.0 §7.4).
+		return describeAutoWithoutDoclingCLI(ctx, cfg, "docling CLI present but failed its functional check")
+	}
+	return describeAutoWithoutDoclingCLI(ctx, cfg, "docling not found on PATH")
+}
+
+// describeAutoWithoutDoclingCLI continues the auto cascade when the docling CLI
+// is unavailable. doclingReason explains why (not on PATH, or present but
+// non-functional) and prefixes the fallback reasons.
+func describeAutoWithoutDoclingCLI(ctx context.Context, cfg config.Config, doclingReason string) ExtractorDecision {
 	serveURL := strings.TrimSpace(cfg.IngestDoclingServeURL)
 	switch {
 	case serveURL != "" && ProbeDoclingServe(ctx, serveURL) == nil:
-		return ExtractorDecision{Name: "docling-serve", Source: "auto", Reason: "configured docling-serve endpoint; docling CLI not found"}
+		return ExtractorDecision{Name: "docling-serve", Source: "auto", Reason: doclingReason + "; using configured docling-serve endpoint"}
 	case mistralOCRAvailable(cfg) && serveURL != "":
-		return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: "docling not found on PATH; docling-serve endpoint unreachable; falling back to Mistral OCR"}
+		return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: doclingReason + "; docling-serve endpoint unreachable; falling back to Mistral OCR"}
 	case mistralOCRAvailable(cfg):
-		return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: "docling not found on PATH; falling back to Mistral OCR"}
+		return ExtractorDecision{Name: "mistral-ocr", Source: "fallback", Reason: doclingReason + "; falling back to Mistral OCR"}
 	case serveURL != "":
-		return ExtractorDecision{Source: "disabled", Reason: "docling not found on PATH; docling-serve endpoint unreachable; and no Mistral credential"}
+		return ExtractorDecision{Source: "disabled", Reason: doclingReason + "; docling-serve endpoint unreachable; and no Mistral credential"}
 	default:
-		return ExtractorDecision{Source: "disabled", Reason: "no extractor available: docling not on PATH, no docling-serve URL, and no Mistral credential"}
+		return ExtractorDecision{Source: "disabled", Reason: "no extractor available: " + doclingReason + ", no docling-serve URL, and no Mistral credential"}
 	}
 }
 
