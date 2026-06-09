@@ -16,14 +16,22 @@ import (
 // cannot stall startup or `dir2mcp doctor`.
 const doclingProbeTimeout = 20 * time.Second
 
-// doclingProbeCache memoizes the functional-check result per resolved binary
-// for the process lifetime. Spec 0.15.0 §7.4 says implementations SHOULD cache
-// the result for the run rather than probing per document; a long-running
-// daemon whose docling is repaired mid-run picks up the change on the next
+// doclingProbeEntry memoizes one binary's functional-check result; the
+// sync.Once ensures the probe runs at most once per binary even under
+// concurrent callers.
+type doclingProbeEntry struct {
+	once sync.Once
+	err  error
+}
+
+// doclingProbeEntries caches functional-check results per resolved binary for
+// the process lifetime. Spec 0.15.0 §7.4 says implementations SHOULD cache the
+// result for the run rather than probing per document; a long-running daemon
+// whose docling is repaired mid-run picks up the change on the next
 // `dir2mcp up`.
 var (
-	doclingProbeMu    sync.Mutex
-	doclingProbeCache = map[string]error{}
+	doclingProbeMu      sync.Mutex
+	doclingProbeEntries = map[string]*doclingProbeEntry{}
 )
 
 // resolveDoclingBinary returns the docling executable that would run for cfg,
@@ -70,18 +78,19 @@ func doclingFunctionalCheck(ctx context.Context, bin string) error {
 	}
 
 	doclingProbeMu.Lock()
-	cached, ok := doclingProbeCache[bin]
-	doclingProbeMu.Unlock()
-	if ok {
-		return cached
+	entry, ok := doclingProbeEntries[bin]
+	if !ok {
+		entry = &doclingProbeEntry{}
+		doclingProbeEntries[bin] = entry
 	}
-
-	err := runDoclingVersionProbe(ctx, bin)
-
-	doclingProbeMu.Lock()
-	doclingProbeCache[bin] = err
 	doclingProbeMu.Unlock()
-	return err
+
+	// At most one probe per binary; concurrent callers for the same bin wait,
+	// callers for other bins proceed independently.
+	entry.once.Do(func() {
+		entry.err = runDoclingVersionProbe(ctx, bin)
+	})
+	return entry.err
 }
 
 // looksLikeDocling reports whether bin's base name identifies the real docling
