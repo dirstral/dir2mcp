@@ -27,6 +27,34 @@ const (
 
 var errDoclingOutputTooLarge = errors.New("docling output exceeded configured limit")
 
+// SanitizeDoclingEnv returns env (in os.Environ "KEY=VALUE" form) with the
+// Python path-injection variables removed and user site-packages disabled, so
+// a docling subprocess resolves imports exclusively from its bundled venv.
+//
+// The docling binary is the venv's own console script, so its interpreter
+// already prefers the venv's site-packages — but PYTHONPATH entries are still
+// appended to sys.path and PYTHONHOME overrides the prefix entirely, either of
+// which can shadow the venv's pinned dependencies with a foreign version (the
+// classic "two versions installed" failure). PYTHONNOUSERSITE=1 additionally
+// keeps any user-site packages out of the path.
+func SanitizeDoclingEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			out = append(out, kv)
+			continue
+		}
+		switch key {
+		case "PYTHONPATH", "PYTHONHOME", "PYTHONNOUSERSITE":
+			// Drop path injectors; PYTHONNOUSERSITE is re-added canonically below.
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "PYTHONNOUSERSITE=1")
+}
+
 type doclingExtractor struct {
 	commandTemplate string
 }
@@ -100,6 +128,11 @@ func (d *doclingExtractor) run(ctx context.Context, relPath string, data []byte)
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Run docling with a sanitized environment so it uses only its bundled
+	// venv. A stray PYTHONPATH/PYTHONHOME in the caller's shell (e.g. from a
+	// conda install) would otherwise be added to the venv interpreter's
+	// sys.path and shadow the venv's pinned packages with a different version.
+	cmd.Env = SanitizeDoclingEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: maxDoclingStdoutBytes}
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
