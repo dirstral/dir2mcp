@@ -261,6 +261,8 @@ PDFs and images are converted to text by an **extractor**, selected with `ingest
 
 Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → disabled**. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document.
 
+An extractor counts as *available* only when it can actually **run**, not merely when it is configured (spec 0.15.0 §7.4). The `docling` CLI is functional-checked (a quick `docling --version` probe, cached for the run); a binary that is present but broken — e.g. a venv with ABI-incompatible dependencies — is treated as **unavailable**, exactly as an unreachable `serve_url` makes `docling-serve` unavailable. Under `auto` a broken docling is skipped and the cascade continues; under explicit `docling` it disables extraction (no silent fallback). `dir2mcp doctor` reports the real state instead of a false "healthy".
+
 **Troubleshooting:**
 - *`OCR: disabled`* — no extractor is available: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`.
 - *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
