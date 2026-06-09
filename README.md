@@ -265,6 +265,7 @@ Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistra
 - *`OCR: disabled`* — no extractor is available: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`.
 - *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
 - *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
+- *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.
 
 ### docling extraction over HTTP (docling-serve)
 
