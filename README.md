@@ -169,7 +169,7 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `reindex` | Force full re-ingestion |
-| `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys (saved to `.env.local`) and a corpus profile, then writes/updates `.dir2mcp.yaml`. Non-interactive (`--non-interactive`/`--json`/no TTY) just writes a baseline config. `dir2mcp up` also launches this wizard on first run when started on a TTY with no embedding provider configured. |
+| `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys (saved to `.env.local`) and a corpus profile, then writes/updates `.dir2mcp.yaml`. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config. `dir2mcp up` also launches this wizard on first run when started on a TTY with no embedding provider configured. |
 | `config print` | Print effective config |
 | `install <client>` | Install dir2mcp into a supported MCP client (e.g. `dir2mcp install claude`) |
 | `uninstall <client>` | Remove dir2mcp from a supported MCP client |

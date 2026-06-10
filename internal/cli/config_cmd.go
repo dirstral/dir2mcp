@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/setupwizard"
 )
 
 func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, created bool) {
@@ -36,29 +37,10 @@ func (a *App) setupWizardEligible(global globalOptions) bool {
 	return isTerminal(os.Stdin) && isTerminal(os.Stdout)
 }
 
-// persistWizardKeys writes each non-empty collected credential to .env.local
-// (secrets only ever live here, never in the YAML snapshot). It iterates in the
-// wizardProviderKeys order for deterministic writes and returns the env var
-// names that were saved.
-func persistWizardKeys(envPath string, keys map[string]string) ([]string, error) {
-	saved := make([]string, 0, len(keys))
-	for _, spec := range wizardProviderKeys {
-		v, ok := keys[spec.EnvVar]
-		if !ok || strings.TrimSpace(v) == "" {
-			continue
-		}
-		if err := saveEnvLocalKey(envPath, spec.EnvVar, strings.TrimSpace(v)); err != nil {
-			return saved, err
-		}
-		saved = append(saved, spec.EnvVar)
-	}
-	return saved, nil
-}
-
 // emitWizardSummary reports what the wizard persisted (saved credentials and
 // the applied corpus profile). No-op when nothing was collected or under
 // quiet/JSON output.
-func (a *App) emitWizardSummary(global globalOptions, envPath string, savedKeys []string, profile corpusProfile) {
+func (a *App) emitWizardSummary(global globalOptions, envPath string, savedKeys []string, profile setupwizard.Profile) {
 	if global.quiet || global.jsonOutput {
 		return
 	}
@@ -66,7 +48,7 @@ func (a *App) emitWizardSummary(global globalOptions, envPath string, savedKeys 
 	if len(savedKeys) > 0 {
 		writef(a.stdout, "%s saved %s to %s\n", s.Success.Render("✓"), strings.Join(savedKeys, ", "), envPath)
 	}
-	if profile != "" && profile != corpusProfileGeneral {
+	if profile != "" && profile != setupwizard.ProfileGeneral && profile != setupwizard.ProfileKeep {
 		writef(a.stdout, "%s applied corpus profile: %s\n", s.Success.Render("✓"), profile)
 	}
 }
@@ -210,14 +192,14 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 // exitCode: a negative exitCode means "continue" (form ran, was skipped, or the
 // user aborted into a baseline write); a non-negative exitCode is terminal and
 // the caller should return it.
-func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath string, configExisted bool, cfg *config.Config) (savedKeys []string, profile corpusProfile, exitCode int) {
+func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath string, configExisted bool, cfg *config.Config) (savedKeys []string, profile setupwizard.Profile, exitCode int) {
 	exitCode = -1
 	if !a.setupWizardEligible(global) {
 		return savedKeys, profile, exitCode
 	}
 
-	res, err := runSetupWizard(wizardInput{
-		ExistingKeys:  detectExistingKeys(envPath),
+	res, err := setupwizard.Run(setupwizard.Input{
+		ExistingKeys:  setupwizard.DetectExistingKeys(envPath),
 		ConfigExisted: configExisted,
 	})
 	switch {
@@ -227,9 +209,9 @@ func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath stri
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", err))
 		return savedKeys, profile, exitGeneric
 	default:
-		applyCorpusProfile(cfg, res.Profile)
+		setupwizard.ApplyCorpusProfile(cfg, res.Profile)
 		profile = res.Profile
-		savedKeys, err = persistWizardKeys(envPath, res.Keys)
+		savedKeys, err = setupwizard.PersistKeys(envPath, res.Keys, saveEnvLocalKey)
 		if err != nil {
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
 			return savedKeys, profile, exitGeneric
@@ -246,7 +228,7 @@ func (a *App) protectSecretsFromGit(dir string) {
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		return // not a git repo — nothing to protect
 	}
-	if err := ensureGitignoreEntries(dir, ".env.local", ".dir2mcp/"); err != nil {
+	if err := setupwizard.EnsureGitignoreEntries(dir, ".env.local", ".dir2mcp/"); err != nil {
 		writeln(a.stderr, fmt.Sprintf("warning: could not update .gitignore: %v", err))
 	}
 }

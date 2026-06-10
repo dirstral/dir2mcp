@@ -27,6 +27,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/setupwizard"
 )
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
@@ -892,8 +893,8 @@ func (a *App) maybeFirstRunSetup(cfg *config.Config, opts upOptions) int {
 		configExisted = true
 	}
 
-	res, err := runSetupWizard(wizardInput{
-		ExistingKeys:  detectExistingKeys(envPath),
+	res, err := setupwizard.Run(setupwizard.Input{
+		ExistingKeys:  setupwizard.DetectExistingKeys(envPath),
 		ConfigExisted: configExisted,
 	})
 	if errors.Is(err, huh.ErrUserAborted) {
@@ -924,19 +925,19 @@ func (a *App) maybeFirstRunSetup(cfg *config.Config, opts upOptions) int {
 // persistFirstRunSetup applies the wizard's corpus profile to the config file
 // and writes collected credentials to .env.local (mirroring `config init`), then
 // adds .gitignore protection when inside a git repo.
-func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, configExisted bool, res wizardResult) int {
+func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, configExisted bool, res setupwizard.Result) int {
 	fileCfg := config.Default()
 	if configExisted {
 		if existing, lerr := config.LoadFile(configPath); lerr == nil {
 			fileCfg = existing
 		}
 	}
-	applyCorpusProfile(&fileCfg, res.Profile)
+	setupwizard.ApplyCorpusProfile(&fileCfg, res.Profile)
 	if err := config.SaveFile(configPath, fileCfg); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
 		return exitGeneric
 	}
-	if _, err := persistWizardKeys(envPath, res.Keys); err != nil {
+	if _, err := setupwizard.PersistKeys(envPath, res.Keys, saveEnvLocalKey); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
 		return exitGeneric
 	}
