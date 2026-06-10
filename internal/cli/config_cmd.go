@@ -1,13 +1,14 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/charmbracelet/huh"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/provider"
@@ -25,30 +26,59 @@ func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, 
 	}
 }
 
-func (a *App) promptAndSaveMistralAPIKey(global globalOptions, configPath string, apiKeySet bool) (saved bool) {
-	if global.nonInteractive || global.jsonOutput || apiKeySet ||
-		!isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
+// setupWizardEligible reports whether the interactive huh setup form should
+// run: only on a real TTY and never under --non-interactive / --json / --quiet
+// (which must stay scriptable and prompt-free).
+func (a *App) setupWizardEligible(global globalOptions) bool {
+	if global.nonInteractive || global.jsonOutput || global.quiet {
 		return false
+	}
+	return isTerminal(os.Stdin) && isTerminal(os.Stdout)
+}
+
+// persistWizardKeys writes each non-empty collected credential to .env.local
+// (secrets only ever live here, never in the YAML snapshot). It iterates in the
+// wizardProviderKeys order for deterministic writes and returns the env var
+// names that were saved.
+func persistWizardKeys(envPath string, keys map[string]string) ([]string, error) {
+	saved := make([]string, 0, len(keys))
+	for _, spec := range wizardProviderKeys {
+		v, ok := keys[spec.EnvVar]
+		if !ok || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if err := saveEnvLocalKey(envPath, spec.EnvVar, strings.TrimSpace(v)); err != nil {
+			return saved, err
+		}
+		saved = append(saved, spec.EnvVar)
+	}
+	return saved, nil
+}
+
+// emitWizardSummary reports what the wizard persisted (saved credentials and
+// the applied corpus profile). No-op when nothing was collected or under
+// quiet/JSON output.
+func (a *App) emitWizardSummary(global globalOptions, envPath string, savedKeys []string, profile corpusProfile) {
+	if global.quiet || global.jsonOutput {
+		return
 	}
 	s := a.sty(false)
-	writef(a.stdout, "\n%s\n", s.sectionHeader("Mistral API Key"))
-	writef(a.stdout, "  Get one free at https://console.mistral.ai/api-keys\n\n")
-	writef(a.stdout, "  MISTRAL_API_KEY (leave blank to skip): ")
-	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
-	key := strings.TrimSpace(line)
-	if key == "" {
-		return false
+	if len(savedKeys) > 0 {
+		writef(a.stdout, "%s saved %s to %s\n", s.Success.Render("✓"), strings.Join(savedKeys, ", "), envPath)
 	}
-	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
-	if err := saveEnvLocalKey(envPath, "MISTRAL_API_KEY", key); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
-		return false
+	if profile != "" && profile != corpusProfileGeneral {
+		writef(a.stdout, "%s applied corpus profile: %s\n", s.Success.Render("✓"), profile)
 	}
-	if !global.quiet {
-		writef(a.stdout, "%s saved MISTRAL_API_KEY to %s\n", s.Success.Render("✓"), envPath)
+}
+
+// containsString reports whether s is present in list.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
 	}
-	return true
+	return false
 }
 
 func (a *App) runConfig(ctx context.Context, global globalOptions, args []string) int {
@@ -116,21 +146,30 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	}
 	cfg = applyGlobalPathOverrides(cfg, global)
 
+	// Interactive setup wizard (SPEC §§ config init / charmbracelet/huh): on a
+	// TTY, collect provider credentials and a corpus profile before persisting
+	// the config so the chosen profile lands in the snapshot. Credentials go to
+	// .env.local only — never the .dir2mcp.yaml snapshot. Non-TTY / --json /
+	// --quiet / --non-interactive paths skip the form and keep prior behavior.
+	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
+	savedKeys, chosenProfile, exitCode := a.runConfigInitWizard(global, envPath, &cfg)
+	if exitCode >= 0 {
+		return exitCode
+	}
+
 	if err := config.SaveFile(configPath, cfg); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
 		return exitGeneric
 	}
 
-	// Print config file result immediately so it appears before any prompt.
 	a.emitConfigCreatedMessage(global, configPath, created)
+	a.emitWizardSummary(global, envPath, savedKeys, chosenProfile)
 
-	// Prompt for the Mistral API key when running interactively and the key is
-	// not already present in the environment.
-	apiKeySet := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != ""
-	apiKeySaved := a.promptAndSaveMistralAPIKey(global, configPath, apiKeySet)
+	mistralPresent := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != "" || containsString(savedKeys, "MISTRAL_API_KEY")
+	apiKeySaved := containsString(savedKeys, "MISTRAL_API_KEY")
 
 	nextSteps := []string{}
-	if !apiKeySet && !apiKeySaved {
+	if !mistralPresent {
 		nextSteps = append(nextSteps, "Set env: export MISTRAL_API_KEY=<your-key>")
 		nextSteps = append(nextSteps, "Or add MISTRAL_API_KEY=<key> to .env.local in this directory")
 	}
@@ -160,4 +199,35 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	}
 	writeln(a.stdout)
 	return exitSuccess
+}
+
+// runConfigInitWizard runs the interactive setup form when eligible, applies
+// the chosen corpus profile to cfg, and persists collected credentials to
+// .env.local. It returns the saved env-var names and chosen profile, plus an
+// exitCode: a negative exitCode means "continue" (form ran, was skipped, or the
+// user aborted into a baseline write); a non-negative exitCode is terminal and
+// the caller should return it.
+func (a *App) runConfigInitWizard(global globalOptions, envPath string, cfg *config.Config) (savedKeys []string, profile corpusProfile, exitCode int) {
+	exitCode = -1
+	if !a.setupWizardEligible(global) {
+		return savedKeys, profile, exitCode
+	}
+
+	res, err := runSetupWizard()
+	switch {
+	case errors.Is(err, huh.ErrUserAborted):
+		writeln(a.stderr, "setup cancelled; writing baseline config only")
+	case err != nil:
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", err))
+		return savedKeys, profile, exitGeneric
+	default:
+		applyCorpusProfile(cfg, res.Profile)
+		profile = res.Profile
+		savedKeys, err = persistWizardKeys(envPath, res.Keys)
+		if err != nil {
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
+			return savedKeys, profile, exitGeneric
+		}
+	}
+	return savedKeys, profile, exitCode
 }
