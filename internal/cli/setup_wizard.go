@@ -24,7 +24,7 @@ type providerKeySpec struct {
 // the common path stays a two-field form.
 var wizardProviderKeys = []providerKeySpec{
 	{EnvVar: "MISTRAL_API_KEY", Title: "Mistral API key", Description: "Required — embeddings, PDF/OCR extraction, and answers."},
-	{EnvVar: "COHERE_API_KEY", Title: "Cohere API key", Description: "Optional — enables reranking (sharper citations)."},
+	{EnvVar: "COHERE_API_KEY", Title: "Cohere API key", Description: "Recommended — enables reranking (sharper citations)."},
 	{EnvVar: "OPENAI_API_KEY", Title: "OpenAI API key", Description: "Optional — alternate chat/embedding provider.", Optional: true},
 	{EnvVar: "ANTHROPIC_API_KEY", Title: "Anthropic API key", Description: "Optional — alternate chat provider.", Optional: true},
 	{EnvVar: "GEMINI_API_KEY", Title: "Gemini API key", Description: "Optional — chat, embeddings, and audio.", Optional: true},
@@ -56,9 +56,19 @@ guessing.`
 
 // applyCorpusProfile mutates cfg's retrieval settings to match the chosen
 // profile. It is a pure function over cfg (no IO) so the mapping is unit
-// testable without driving the TUI. Unknown/general profiles leave cfg
-// untouched, preserving Config defaults and any pre-existing user values.
+// testable without driving the TUI.
+//
+// Each profile is self-contained: the managed retrieval fields are first reset
+// to Config defaults, then profile-specific overrides are layered on. This way
+// re-running the wizard and switching profiles (e.g. legal → code) can never
+// inherit a stale value tuned for the previous profile. "general" is therefore
+// the baseline (Config defaults).
 func applyCorpusProfile(cfg *config.Config, profile corpusProfile) {
+	def := config.Default()
+	cfg.RAGKDefault = def.RAGKDefault
+	cfg.RAGMaxContextChars = def.RAGMaxContextChars
+	cfg.RAGSystemPrompt = def.RAGSystemPrompt
+
 	switch profile {
 	case corpusProfileLegal:
 		cfg.RAGKDefault = 12
@@ -68,7 +78,7 @@ func applyCorpusProfile(cfg *config.Config, profile corpusProfile) {
 		cfg.RAGKDefault = 8
 		cfg.RAGSystemPrompt = codeSystemPrompt
 	default:
-		// general / unknown: no overrides.
+		// general: Config defaults (already applied above).
 	}
 }
 

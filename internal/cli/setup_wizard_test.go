@@ -29,8 +29,49 @@ func TestApplyCorpusProfile_Code(t *testing.T) {
 	if cfg.RAGKDefault != 8 {
 		t.Errorf("RAGKDefault=%d want 8", cfg.RAGKDefault)
 	}
+	// Code does not override the context window; it must equal the default,
+	// not whatever a previously applied profile might have left behind.
+	if cfg.RAGMaxContextChars != config.Default().RAGMaxContextChars {
+		t.Errorf("RAGMaxContextChars=%d want default %d", cfg.RAGMaxContextChars, config.Default().RAGMaxContextChars)
+	}
 	if !strings.Contains(strings.ToLower(cfg.RAGSystemPrompt), "source code") {
 		t.Errorf("code profile system prompt missing code grounding: %q", cfg.RAGSystemPrompt)
+	}
+}
+
+// Profiles must be self-contained: switching from legal to code must not leave
+// legal's wider context window (40000) behind.
+func TestApplyCorpusProfile_SwitchingDoesNotInheritStaleValues(t *testing.T) {
+	cfg := config.Default()
+	applyCorpusProfile(&cfg, corpusProfileLegal)
+	if cfg.RAGMaxContextChars != 40000 {
+		t.Fatalf("precondition: legal RAGMaxContextChars=%d want 40000", cfg.RAGMaxContextChars)
+	}
+	applyCorpusProfile(&cfg, corpusProfileCode)
+	if cfg.RAGMaxContextChars != config.Default().RAGMaxContextChars {
+		t.Errorf("code after legal inherited stale RAGMaxContextChars=%d; want default %d",
+			cfg.RAGMaxContextChars, config.Default().RAGMaxContextChars)
+	}
+	if cfg.RAGKDefault != 8 {
+		t.Errorf("code after legal RAGKDefault=%d want 8", cfg.RAGKDefault)
+	}
+	if !strings.Contains(strings.ToLower(cfg.RAGSystemPrompt), "source code") {
+		t.Errorf("code after legal system prompt not switched: %q", cfg.RAGSystemPrompt)
+	}
+}
+
+// general resets the managed fields back to defaults even after another profile
+// was applied, so it is a true baseline rather than "keep whatever".
+func TestApplyCorpusProfile_GeneralResetsAfterLegal(t *testing.T) {
+	def := config.Default()
+	cfg := config.Default()
+	applyCorpusProfile(&cfg, corpusProfileLegal)
+	applyCorpusProfile(&cfg, corpusProfileGeneral)
+	if cfg.RAGKDefault != def.RAGKDefault ||
+		cfg.RAGMaxContextChars != def.RAGMaxContextChars ||
+		cfg.RAGSystemPrompt != def.RAGSystemPrompt {
+		t.Errorf("general after legal did not reset to defaults: k=%d ctx=%d prompt=%q",
+			cfg.RAGKDefault, cfg.RAGMaxContextChars, cfg.RAGSystemPrompt)
 	}
 }
 
