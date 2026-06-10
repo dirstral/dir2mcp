@@ -909,8 +909,13 @@ func (a *App) maybeFirstRunSetup(cfg *config.Config, opts upOptions) int {
 	}
 
 	// Reload so the just-written .env.local credentials and saved profile take
-	// effect for validation/bind below.
-	if reloaded, lerr := loadConfigWithGlobalOptions(opts.globalOptions); lerr == nil {
+	// effect for validation/bind below. Warn (rather than fail) on reload error
+	// so the user can tell why the standard preflight may still complain about a
+	// provider they just configured.
+	reloaded, lerr := loadConfigWithGlobalOptions(opts.globalOptions)
+	if lerr != nil {
+		writef(a.stderr, "warning: could not reload config after setup: %v\n", lerr)
+	} else {
 		*cfg = reloaded
 	}
 	return exitSuccess

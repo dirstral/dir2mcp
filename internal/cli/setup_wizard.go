@@ -247,18 +247,31 @@ func detectExistingKeys(envPath string) map[string]bool {
 }
 
 // dotenvHasKey reports whether content has a non-empty assignment for key,
-// honoring an optional leading "export ".
+// honoring an optional leading "export " and treating quoted-empty values
+// (KEY="" / KEY=”) as unset.
 func dotenvHasKey(content, key string) bool {
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		line = strings.TrimPrefix(line, "export ")
 		if strings.HasPrefix(line, key+"=") {
-			if strings.TrimSpace(strings.TrimPrefix(line, key+"=")) != "" {
+			val := strings.TrimSpace(strings.TrimPrefix(line, key+"="))
+			if unquoteDotenvValue(val) != "" {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// unquoteDotenvValue strips a single pair of matching surrounding quotes from a
+// dotenv value so KEY="" / KEY=” read as empty.
+func unquoteDotenvValue(val string) string {
+	if len(val) >= 2 {
+		if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+			return val[1 : len(val)-1]
+		}
+	}
+	return val
 }
 
 // ensureGitignoreEntries appends any missing entries to dir/.gitignore (creating

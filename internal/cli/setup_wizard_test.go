@@ -188,13 +188,14 @@ func TestApplyCorpusProfile_KeepLeavesConfigUntouched(t *testing.T) {
 }
 
 func TestDotenvHasKey(t *testing.T) {
-	content := "export MISTRAL_API_KEY=abc\nCOHERE_API_KEY=\n# OPENAI_API_KEY=x\nGEMINI_API_KEY=g\n"
+	content := "export MISTRAL_API_KEY=abc\nCOHERE_API_KEY=\n# OPENAI_API_KEY=x\nGEMINI_API_KEY=g\nANTHROPIC_API_KEY=\"\"\nELEVENLABS_API_KEY=''\n"
 	cases := map[string]bool{
 		"MISTRAL_API_KEY":    true,  // export prefix, non-empty
 		"COHERE_API_KEY":     false, // present but empty
 		"OPENAI_API_KEY":     false, // commented out
 		"GEMINI_API_KEY":     true,
-		"ELEVENLABS_API_KEY": false, // absent
+		"ANTHROPIC_API_KEY":  false, // double-quoted empty
+		"ELEVENLABS_API_KEY": false, // single-quoted empty
 	}
 	for key, want := range cases {
 		if got := dotenvHasKey(content, key); got != want {
