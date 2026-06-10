@@ -152,7 +152,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	// .env.local only — never the .dir2mcp.yaml snapshot. Non-TTY / --json /
 	// --quiet / --non-interactive paths skip the form and keep prior behavior.
 	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
-	savedKeys, chosenProfile, exitCode := a.runConfigInitWizard(global, envPath, &cfg)
+	savedKeys, chosenProfile, exitCode := a.runConfigInitWizard(global, configPath, envPath, !created, &cfg)
 	if exitCode >= 0 {
 		return exitCode
 	}
@@ -164,6 +164,9 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 
 	a.emitConfigCreatedMessage(global, configPath, created)
 	a.emitWizardSummary(global, envPath, savedKeys, chosenProfile)
+	if a.setupWizardEligible(global) {
+		a.emitSetupVerification(global)
+	}
 
 	mistralPresent := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != "" || containsString(savedKeys, "MISTRAL_API_KEY")
 	apiKeySaved := containsString(savedKeys, "MISTRAL_API_KEY")
@@ -207,13 +210,16 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 // exitCode: a negative exitCode means "continue" (form ran, was skipped, or the
 // user aborted into a baseline write); a non-negative exitCode is terminal and
 // the caller should return it.
-func (a *App) runConfigInitWizard(global globalOptions, envPath string, cfg *config.Config) (savedKeys []string, profile corpusProfile, exitCode int) {
+func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath string, configExisted bool, cfg *config.Config) (savedKeys []string, profile corpusProfile, exitCode int) {
 	exitCode = -1
 	if !a.setupWizardEligible(global) {
 		return savedKeys, profile, exitCode
 	}
 
-	res, err := runSetupWizard()
+	res, err := runSetupWizard(wizardInput{
+		ExistingKeys:  detectExistingKeys(envPath),
+		ConfigExisted: configExisted,
+	})
 	switch {
 	case errors.Is(err, huh.ErrUserAborted):
 		writeln(a.stderr, "setup cancelled; writing baseline config only")
@@ -228,6 +234,49 @@ func (a *App) runConfigInitWizard(global globalOptions, envPath string, cfg *con
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
 			return savedKeys, profile, exitGeneric
 		}
+		a.protectSecretsFromGit(filepath.Dir(configPath))
 	}
 	return savedKeys, profile, exitCode
+}
+
+// protectSecretsFromGit appends .env.local and the state dir to .gitignore when
+// dir is inside a git repository, so freshly-saved credentials are not committed
+// by accident. Best-effort: failures are surfaced as a warning, not fatal.
+func (a *App) protectSecretsFromGit(dir string) {
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return // not a git repo — nothing to protect
+	}
+	if err := ensureGitignoreEntries(dir, ".env.local", ".dir2mcp/"); err != nil {
+		writeln(a.stderr, fmt.Sprintf("warning: could not update .gitignore: %v", err))
+	}
+}
+
+// emitSetupVerification resolves the embed/chat providers from the freshly
+// written config and prints a one-line readiness summary (resolution only, no
+// network calls — matching `dir2mcp doctor`). Best-effort and silent under
+// quiet/JSON output.
+func (a *App) emitSetupVerification(global globalOptions) {
+	if global.quiet || global.jsonOutput {
+		return
+	}
+	cfg, err := loadConfigWithGlobalOptions(global)
+	if err != nil {
+		return
+	}
+	s := a.sty(false)
+	for _, c := range []struct {
+		label string
+		cap   provider.Capability
+	}{
+		{"embed", provider.CapEmbed},
+		{"chat", provider.CapChat},
+	} {
+		chk := providerCheck(cfg, c.label, c.cap, false)
+		switch chk.Status {
+		case doctorStatusOK:
+			writef(a.stdout, "%s %s provider ready (%s)\n", s.Success.Render("✓"), c.label, chk.Detail)
+		default:
+			writef(a.stdout, "%s %s provider not configured\n", s.dim("•"), c.label)
+		}
+	}
 }

@@ -160,12 +160,104 @@ func TestBuildSetupForm_ConstructsWithoutPanic(t *testing.T) {
 	for _, spec := range wizardProviderKeys {
 		keyValues[spec.EnvVar] = new(string)
 	}
-	var more bool
+	var more, save bool
 	profile := string(corpusProfileGeneral)
 
-	form := buildSetupForm(keyValues, &more, &profile)
-	if form == nil {
-		t.Fatal("buildSetupForm returned nil")
+	// Both the fresh-config and existing-config (keep option) shapes must build.
+	for _, existed := range []bool{false, true} {
+		form := buildSetupForm(keyValues, &more, &profile, &save, wizardInput{
+			ExistingKeys:  map[string]bool{"MISTRAL_API_KEY": existed},
+			ConfigExisted: existed,
+		})
+		if form == nil {
+			t.Fatalf("buildSetupForm returned nil (configExisted=%t)", existed)
+		}
+	}
+}
+
+func TestApplyCorpusProfile_KeepLeavesConfigUntouched(t *testing.T) {
+	cfg := config.Default()
+	cfg.RAGKDefault = 99
+	cfg.RAGMaxContextChars = 12345
+	cfg.RAGSystemPrompt = "custom"
+	applyCorpusProfile(&cfg, corpusProfileKeep)
+	if cfg.RAGKDefault != 99 || cfg.RAGMaxContextChars != 12345 || cfg.RAGSystemPrompt != "custom" {
+		t.Errorf("keep must not change retrieval settings: k=%d ctx=%d prompt=%q",
+			cfg.RAGKDefault, cfg.RAGMaxContextChars, cfg.RAGSystemPrompt)
+	}
+}
+
+func TestDotenvHasKey(t *testing.T) {
+	content := "export MISTRAL_API_KEY=abc\nCOHERE_API_KEY=\n# OPENAI_API_KEY=x\nGEMINI_API_KEY=g\n"
+	cases := map[string]bool{
+		"MISTRAL_API_KEY":    true,  // export prefix, non-empty
+		"COHERE_API_KEY":     false, // present but empty
+		"OPENAI_API_KEY":     false, // commented out
+		"GEMINI_API_KEY":     true,
+		"ELEVENLABS_API_KEY": false, // absent
+	}
+	for key, want := range cases {
+		if got := dotenvHasKey(content, key); got != want {
+			t.Errorf("dotenvHasKey(%q)=%t want %t", key, got, want)
+		}
+	}
+}
+
+func TestDetectExistingKeys_FromEnvAndDotenv(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env.local")
+	if err := os.WriteFile(envPath, []byte("COHERE_API_KEY=co\n"), 0o600); err != nil {
+		t.Fatalf("write .env.local: %v", err)
+	}
+	t.Setenv("MISTRAL_API_KEY", "from-env")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	existing := detectExistingKeys(envPath)
+	if !existing["MISTRAL_API_KEY"] {
+		t.Error("Mistral key from environment not detected")
+	}
+	if !existing["COHERE_API_KEY"] {
+		t.Error("Cohere key from .env.local not detected")
+	}
+	if existing["OPENAI_API_KEY"] {
+		t.Error("empty OpenAI env var must not count as set")
+	}
+}
+
+func TestEnsureGitignoreEntries(t *testing.T) {
+	dir := t.TempDir()
+	// Pre-existing file with one of the entries already present.
+	gi := filepath.Join(dir, ".gitignore")
+	if err := os.WriteFile(gi, []byte(".DS_Store\n.env.local\n"), 0o644); err != nil {
+		t.Fatalf("seed .gitignore: %v", err)
+	}
+
+	if err := ensureGitignoreEntries(dir, ".env.local", ".dir2mcp/"); err != nil {
+		t.Fatalf("ensureGitignoreEntries: %v", err)
+	}
+	raw, err := os.ReadFile(gi)
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	text := string(raw)
+	if c := strings.Count(text, ".env.local"); c != 1 {
+		t.Errorf("expected .env.local exactly once (no dup), got %d:\n%s", c, text)
+	}
+	if !strings.Contains(text, ".dir2mcp/") {
+		t.Errorf("expected .dir2mcp/ appended:\n%s", text)
+	}
+	if !strings.Contains(text, ".DS_Store") {
+		t.Errorf("existing content must be preserved:\n%s", text)
+	}
+
+	// Idempotent: a second run adds nothing.
+	before := text
+	if err := ensureGitignoreEntries(dir, ".env.local", ".dir2mcp/"); err != nil {
+		t.Fatalf("second ensureGitignoreEntries: %v", err)
+	}
+	raw2, _ := os.ReadFile(gi)
+	if string(raw2) != before {
+		t.Errorf("second run changed file:\nbefore=%q\nafter=%q", before, raw2)
 	}
 }
 

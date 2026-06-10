@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/huh"
+
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -826,6 +828,11 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return config.Config{}, authMaterial{}, "", "", false, exitConfigInvalid
 	}
+	// SPEC §147: on a TTY, if required config is missing, run the guided setup
+	// flow before validation/bind (reloads cfg with the new credentials).
+	if code := a.maybeFirstRunSetup(&cfg, opts); code != exitSuccess {
+		return config.Config{}, authMaterial{}, "", "", false, code
+	}
 	tlsCertFile, tlsKeyFile, code := a.applyTLSConfig(&cfg, opts)
 	if code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
@@ -857,6 +864,79 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 	cfg.ResolvedAuthToken = auth.token
 	warnConfigSnapshotErr(a.stderr, opts.quiet, saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource))
 	return cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, exitSuccess
+}
+
+// maybeFirstRunSetup runs the guided setup wizard (SPEC §147) when `up` starts
+// interactively on a TTY but no embedding provider resolves yet. It persists the
+// chosen corpus profile and credentials, then reloads cfg so the new credentials
+// take effect for the rest of the up flow. A skipped or aborted wizard is not an
+// error — the normal §2.5 preflight then reports the missing provider as before.
+func (a *App) maybeFirstRunSetup(cfg *config.Config, opts upOptions) int {
+	if !requiresMistralAPIKey(opts) || upNonInteractiveMode(opts) || opts.jsonOutput {
+		return exitSuccess
+	}
+	if !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
+		return exitSuccess
+	}
+	if _, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+		return exitSuccess // already configured — no first-run prompt
+	}
+
+	se := a.sty(opts.jsonOutput)
+	writef(a.stderr, "%s no embedding provider configured — starting guided setup\n", se.dim("•"))
+
+	configPath := resolveConfigPath(opts.globalOptions)
+	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
+	configExisted := false
+	if _, statErr := os.Stat(configPath); statErr == nil {
+		configExisted = true
+	}
+
+	res, err := runSetupWizard(wizardInput{
+		ExistingKeys:  detectExistingKeys(envPath),
+		ConfigExisted: configExisted,
+	})
+	if errors.Is(err, huh.ErrUserAborted) {
+		return exitSuccess // fall through to the standard preflight error
+	}
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", err))
+		return exitGeneric
+	}
+
+	if code := a.persistFirstRunSetup(opts, configPath, envPath, configExisted, res); code != exitSuccess {
+		return code
+	}
+
+	// Reload so the just-written .env.local credentials and saved profile take
+	// effect for validation/bind below.
+	if reloaded, lerr := loadConfigWithGlobalOptions(opts.globalOptions); lerr == nil {
+		*cfg = reloaded
+	}
+	return exitSuccess
+}
+
+// persistFirstRunSetup applies the wizard's corpus profile to the config file
+// and writes collected credentials to .env.local (mirroring `config init`), then
+// adds .gitignore protection when inside a git repo.
+func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, configExisted bool, res wizardResult) int {
+	fileCfg := config.Default()
+	if configExisted {
+		if existing, lerr := config.LoadFile(configPath); lerr == nil {
+			fileCfg = existing
+		}
+	}
+	applyCorpusProfile(&fileCfg, res.Profile)
+	if err := config.SaveFile(configPath, fileCfg); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
+		return exitGeneric
+	}
+	if _, err := persistWizardKeys(envPath, res.Keys); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
+		return exitGeneric
+	}
+	a.protectSecretsFromGit(filepath.Dir(configPath))
+	return exitSuccess
 }
 
 // publishConnection writes connection.json and emits the standard
