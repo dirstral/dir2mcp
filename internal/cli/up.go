@@ -31,6 +31,15 @@ import (
 )
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
+	// First-run guided setup (SPEC §147) must run here, in the launching parent
+	// while still attached to the TTY — before any daemon fork, whose child has
+	// no terminal and would silently skip the wizard. maybeFirstRunSetup is a
+	// no-op on non-TTY / --json / --non-interactive runs, in the daemon child,
+	// and when an embedding provider already resolves.
+	if code := a.maybeFirstRunSetup(opts); code != exitSuccess {
+		return code
+	}
+
 	// When this is the launching parent (not the daemon child) and the
 	// caller hasn't asked for foreground/JSON behavior, fork a detached
 	// child to run the server and exit the parent once the child is
@@ -829,11 +838,6 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return config.Config{}, authMaterial{}, "", "", false, exitConfigInvalid
 	}
-	// SPEC §147: on a TTY, if required config is missing, run the guided setup
-	// flow before validation/bind (reloads cfg with the new credentials).
-	if code := a.maybeFirstRunSetup(&cfg, opts); code != exitSuccess {
-		return config.Config{}, authMaterial{}, "", "", false, code
-	}
 	tlsCertFile, tlsKeyFile, code := a.applyTLSConfig(&cfg, opts)
 	if code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
@@ -868,18 +872,24 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 }
 
 // maybeFirstRunSetup runs the guided setup wizard (SPEC §147) when `up` starts
-// interactively on a TTY but no embedding provider resolves yet. It persists the
-// chosen corpus profile and credentials, then reloads cfg so the new credentials
-// take effect for the rest of the up flow. A skipped or aborted wizard is not an
-// error — the normal §2.5 preflight then reports the missing provider as before.
-func (a *App) maybeFirstRunSetup(cfg *config.Config, opts upOptions) int {
+// interactively but no embedding provider resolves yet. It must be called from
+// the launching parent (before any daemon fork) so it still owns the TTY; it
+// persists the chosen corpus profile and credentials to disk, which the daemon
+// child (or the foreground prepareUpConfig) then reloads. A skipped or aborted
+// wizard is not an error — the normal §2.5 preflight reports the missing
+// provider as before.
+//
+// upNonInteractiveMode also covers the daemon child (no TTY), so the wizard only
+// ever runs in the interactive parent and is never shown twice.
+func (a *App) maybeFirstRunSetup(opts upOptions) int {
 	if !requiresMistralAPIKey(opts) || upNonInteractiveMode(opts) || opts.jsonOutput {
 		return exitSuccess
 	}
-	if !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
-		return exitSuccess
+	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
+	if err != nil {
+		return exitSuccess // let the standard config-load path report it
 	}
-	if _, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+	if _, rerr := cfg.Providers().Resolve(provider.CapEmbed); rerr == nil {
 		return exitSuccess // already configured — no first-run prompt
 	}
 
@@ -893,33 +903,21 @@ func (a *App) maybeFirstRunSetup(cfg *config.Config, opts upOptions) int {
 		configExisted = true
 	}
 
-	res, err := setupwizard.Run(setupwizard.Input{
+	res, rerr := setupwizard.Run(setupwizard.Input{
 		ExistingKeys:  setupwizard.DetectExistingKeys(envPath),
 		ConfigExisted: configExisted,
 	})
-	if errors.Is(err, huh.ErrUserAborted) {
+	if errors.Is(rerr, huh.ErrUserAborted) {
 		return exitSuccess // fall through to the standard preflight error
 	}
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", err))
+	if rerr != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", rerr))
 		return exitGeneric
 	}
 
-	if code := a.persistFirstRunSetup(opts, configPath, envPath, configExisted, res); code != exitSuccess {
-		return code
-	}
-
-	// Reload so the just-written .env.local credentials and saved profile take
-	// effect for validation/bind below. Warn (rather than fail) on reload error
-	// so the user can tell why the standard preflight may still complain about a
-	// provider they just configured.
-	reloaded, lerr := loadConfigWithGlobalOptions(opts.globalOptions)
-	if lerr != nil {
-		writef(a.stderr, "warning: could not reload config after setup: %v\n", lerr)
-	} else {
-		*cfg = reloaded
-	}
-	return exitSuccess
+	// Persisted to disk (.env.local + .dir2mcp.yaml); the daemon child or the
+	// foreground prepareUpConfig reloads config from disk afterward.
+	return a.persistFirstRunSetup(opts, configPath, envPath, configExisted, res)
 }
 
 // persistFirstRunSetup applies the wizard's corpus profile to the config file

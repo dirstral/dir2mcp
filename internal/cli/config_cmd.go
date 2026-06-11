@@ -150,11 +150,14 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 		a.emitSetupVerification(global)
 	}
 
-	mistralPresent := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")) != "" || containsString(savedKeys, "MISTRAL_API_KEY")
 	apiKeySaved := containsString(savedKeys, "MISTRAL_API_KEY")
 
+	// Base the credential hint on whether an embed provider actually resolves
+	// (honoring .env.local and any configured provider), not just the current
+	// process env — otherwise we nag for MISTRAL_API_KEY even when setup is
+	// already usable (e.g. key in .env.local, or Gemini/OpenAI configured).
 	nextSteps := []string{}
-	if !mistralPresent {
+	if !a.embedProviderResolves(global) {
 		nextSteps = append(nextSteps, "Set env: export MISTRAL_API_KEY=<your-key>")
 		nextSteps = append(nextSteps, "Or add MISTRAL_API_KEY=<key> to .env.local in this directory")
 	}
@@ -225,12 +228,42 @@ func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath stri
 // dir is inside a git repository, so freshly-saved credentials are not committed
 // by accident. Best-effort: failures are surfaced as a warning, not fatal.
 func (a *App) protectSecretsFromGit(dir string) {
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+	if !insideGitRepo(dir) {
 		return // not a git repo — nothing to protect
 	}
 	if err := setupwizard.EnsureGitignoreEntries(dir, ".env.local", ".dir2mcp/"); err != nil {
 		writeln(a.stderr, fmt.Sprintf("warning: could not update .gitignore: %v", err))
 	}
+}
+
+// insideGitRepo reports whether dir or any ancestor contains a .git entry — a
+// directory for a normal clone, or a file for a worktree/submodule. Walking the
+// ancestry matters because `config init` / `up` may run from a subdirectory of
+// the repo.
+func insideGitRepo(dir string) bool {
+	dir = filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
+// embedProviderResolves reports whether an embedding provider resolves from the
+// freshly written config (loading .env.local + any providers: block). Used to
+// decide whether to print the credential next-step hint.
+func (a *App) embedProviderResolves(global globalOptions) bool {
+	cfg, err := loadConfigWithGlobalOptions(global)
+	if err != nil {
+		return false
+	}
+	_, rerr := cfg.Providers().Resolve(provider.CapEmbed)
+	return rerr == nil
 }
 
 // emitSetupVerification resolves the embed/chat providers from the freshly
