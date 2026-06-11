@@ -553,7 +553,7 @@ func (a *App) printUsage() {
 		{"--quiet", "suppress non-error output"},
 	}
 	for _, f := range globals {
-		writef(o, "  %-26s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
+		writef(o, "  %-26s %s\n", s.Accent.Render(f[0]), s.Dim.Render(f[1]))
 	}
 	writeln(o)
 
@@ -568,7 +568,7 @@ func (a *App) printUsage() {
 		{"--allowed-origins <csv>", "CORS allowed origins"},
 	}
 	for _, f := range serverFlags {
-		writef(o, "  %-30s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
+		writef(o, "  %-30s %s\n", s.Accent.Render(f[0]), s.Dim.Render(f[1]))
 	}
 	writeln(o)
 
@@ -578,7 +578,7 @@ func (a *App) printUsage() {
 		{"--x402-facilitator-url", "x402 facilitator endpoint"},
 	}
 	for _, f := range x402Flags {
-		writef(o, "  %-30s %s\n", s.Cyan.Render(f[0]), s.Dim.Render(f[1]))
+		writef(o, "  %-30s %s\n", s.Accent.Render(f[0]), s.Dim.Render(f[1]))
 	}
 }
 
