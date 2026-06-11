@@ -13,9 +13,55 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 )
+
+// dir2mcp brand palette (matches internal/cli/style.go): orange #F2911A is the
+// primary accent, yellow the secondary highlight, on a black button base.
+var (
+	brandOrange = lipgloss.Color("208")
+	brandYellow = lipgloss.Color("220")
+	brandBlack  = lipgloss.Color("0")
+	brandDim    = lipgloss.Color("245")
+	brandRed    = lipgloss.Color("203")
+)
+
+// brandTheme returns a huh theme styled with the dir2mcp brand colors (orange
+// accents, yellow selection highlights, black-on-orange action buttons).
+func brandTheme() *huh.Theme {
+	t := huh.ThemeBase()
+
+	f := &t.Focused
+	f.Base = f.Base.BorderForeground(brandOrange)
+	f.Card = f.Base
+	f.Title = f.Title.Foreground(brandOrange).Bold(true)
+	f.NoteTitle = f.NoteTitle.Foreground(brandOrange).Bold(true)
+	f.Description = f.Description.Foreground(brandDim)
+	f.SelectSelector = f.SelectSelector.Foreground(brandYellow)
+	f.MultiSelectSelector = f.MultiSelectSelector.Foreground(brandYellow)
+	f.SelectedOption = f.SelectedOption.Foreground(brandYellow)
+	f.SelectedPrefix = f.SelectedPrefix.Foreground(brandYellow)
+	f.NextIndicator = f.NextIndicator.Foreground(brandYellow)
+	f.PrevIndicator = f.PrevIndicator.Foreground(brandYellow)
+	f.ErrorIndicator = f.ErrorIndicator.Foreground(brandRed)
+	f.ErrorMessage = f.ErrorMessage.Foreground(brandRed)
+	f.FocusedButton = f.FocusedButton.Foreground(brandBlack).Background(brandOrange).Bold(true)
+	f.BlurredButton = f.BlurredButton.Foreground(brandDim).Background(brandBlack)
+	f.TextInput.Cursor = f.TextInput.Cursor.Foreground(brandYellow)
+	f.TextInput.Prompt = f.TextInput.Prompt.Foreground(brandOrange)
+	f.TextInput.Placeholder = f.TextInput.Placeholder.Foreground(brandDim)
+
+	// Blurred (inactive) groups mirror focused styling but hide the border and
+	// dim the title so the active group stands out.
+	t.Blurred = t.Focused
+	t.Blurred.Base = t.Blurred.Base.BorderStyle(lipgloss.HiddenBorder())
+	t.Blurred.Card = t.Blurred.Base
+	t.Blurred.Title = t.Blurred.Title.Foreground(brandDim).Bold(false)
+
+	return t
+}
 
 // ProviderKeySpec describes one credential the setup wizard can collect. The
 // EnvVar is the dotenv key written to .env.local; secrets are never persisted
@@ -203,7 +249,8 @@ func BuildForm(
 			Value(save),
 	)
 
-	return huh.NewForm(providerGroup, optionalGroup, profileGroup, confirmGroup)
+	return huh.NewForm(providerGroup, optionalGroup, profileGroup, confirmGroup).
+		WithTheme(brandTheme())
 }
 
 // Run runs the interactive huh setup form and returns the user's answers.
