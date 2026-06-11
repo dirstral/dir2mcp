@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dirstral/dir2mcp/internal/secrets"
 )
 
 const DefaultProtocolVersion = "2025-11-25"
@@ -706,6 +708,10 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	// Start from defaults, then layer dotenv/env overrides.
 	cfg := Default()
 	if applyEnv {
+		// SPEC §16.1.1 precedence: env (#1) > keychain (#2) > file/.env.local (#3).
+		// Keychain is consulted before the dotenv files so a stored credential
+		// wins over .env.local but never over an explicit environment variable.
+		loadKeychainCredentials(overrideEnv)
 		if err := loadDotEnvFiles([]string{".env.local", ".env"}, overrideEnv); err != nil {
 			return Config{}, fmt.Errorf("load dotenv files: %w", err)
 		}
@@ -2348,6 +2354,28 @@ func normalizeTrustedProxyKey(value string) string {
 		return (&net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}).String()
 	}
 	return (&net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}).String()
+}
+
+// loadKeychainCredentials layers OS keychain credentials into resolution at
+// SPEC §16.1.1 precedence #2 (env → keychain → file): for each managed provider
+// env var not already set by the real environment, it reads the value from the
+// keychain and sets it, so a subsequent .env.local only fills what remains. It
+// is fail-open (a missing entry or any backend error is skipped) and is disabled
+// entirely when DIR2MCP_DISABLE_KEYCHAIN is set.
+func loadKeychainCredentials(overrideEnv map[string]string) {
+	if v, ok := envLookup(secrets.DisableEnvVar, overrideEnv); ok && strings.TrimSpace(v) != "" {
+		return
+	}
+	for _, key := range secrets.ManagedEnvVars() {
+		if v, ok := envLookup(key, overrideEnv); ok && strings.TrimSpace(v) != "" {
+			continue // explicit environment variable wins (precedence #1)
+		}
+		val, err := secrets.Get(secrets.DefaultService, key)
+		if err != nil || strings.TrimSpace(val) == "" {
+			continue // absent or backend unavailable → fall through to file/env
+		}
+		_ = envSet(key, val, overrideEnv)
+	}
 }
 
 // loadDotEnvFiles loads each dotenv path in order, stopping at the
