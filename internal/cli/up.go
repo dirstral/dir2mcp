@@ -935,11 +935,13 @@ func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, c
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
 		return exitGeneric
 	}
-	if _, err := setupwizard.PersistKeys(envPath, res.Keys, saveEnvLocalKey); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
+	if _, err := setupwizard.PersistKeys(envPath, res.Keys, secretWriter(res.Destination)); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save credentials: %v", err))
 		return exitGeneric
 	}
-	a.protectSecretsFromGit(filepath.Dir(configPath))
+	if res.Destination == setupwizard.DestFile {
+		a.protectSecretsFromGit(filepath.Dir(configPath))
+	}
 	return exitSuccess
 }
 
