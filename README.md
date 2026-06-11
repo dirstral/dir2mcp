@@ -270,9 +270,10 @@ keys (`MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 sources) and can be turned off entirely with `DIR2MCP_DISABLE_KEYCHAIN=1`.
 
 > **Background daemons:** a launchd/systemd service may not be able to unlock the keychain
-> unattended. For always-on `service install` deployments, prefer the persisted `.env.local`
-> credential (which `service install` already writes); the keychain is most useful for the
-> interactive `dir2mcp up` / CLI.
+> unattended. For always-on `service install` deployments, persist the credential to
+> `.env.local` first with `dir2mcp config init` (`service install` warns when no persisted
+> credential is present); the keychain is most useful for the interactive `dir2mcp up` / CLI.
+> Resolution is fail-open, so a daemon that cannot read the keychain falls back to `.env.local`.
 
 ### Document extraction: modes & fallback
 

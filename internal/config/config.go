@@ -2366,7 +2366,7 @@ func loadKeychainCredentials(overrideEnv map[string]string) {
 	if v, ok := envLookup(secrets.DisableEnvVar, overrideEnv); ok && strings.TrimSpace(v) != "" {
 		return
 	}
-	for _, key := range secrets.ManagedEnvVars {
+	for _, key := range secrets.ManagedEnvVars() {
 		if v, ok := envLookup(key, overrideEnv); ok && strings.TrimSpace(v) != "" {
 			continue // explicit environment variable wins (precedence #1)
 		}

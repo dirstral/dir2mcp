@@ -23,10 +23,12 @@ const DefaultService = "dir2mcp"
 // or a headless daemon can opt out without touching the keychain at all.
 const DisableEnvVar = "DIR2MCP_DISABLE_KEYCHAIN"
 
-// ManagedEnvVars is the set of built-in provider credential env vars the
+// managedEnvVars is the set of built-in provider credential env vars the
 // keychain backend reads on load. Custom provider profiles using other env vars
-// are not auto-read (they can still be set via env/.env.local).
-var ManagedEnvVars = []string{
+// are not auto-read (they can still be set via env/.env.local). It is
+// unexported and exposed only via ManagedEnvVars (a copy) so importers cannot
+// mutate which credentials are auto-resolved at runtime.
+var managedEnvVars = []string{
 	"MISTRAL_API_KEY",
 	"OPENAI_API_KEY",
 	"OPENROUTER_API_KEY",
@@ -39,10 +41,19 @@ var ManagedEnvVars = []string{
 // ErrNotFound indicates the requested secret is absent from the keychain.
 var ErrNotFound = keyring.ErrNotFound
 
+// ManagedEnvVars returns a fresh copy of the built-in provider credential env
+// vars the keychain backend reads automatically. Returning a copy keeps the
+// canonical list immutable across the process lifetime.
+func ManagedEnvVars() []string {
+	out := make([]string, len(managedEnvVars))
+	copy(out, managedEnvVars)
+	return out
+}
+
 // IsManaged reports whether key is one of the built-in provider credentials the
 // keychain backend reads automatically.
 func IsManaged(key string) bool {
-	for _, k := range ManagedEnvVars {
+	for _, k := range managedEnvVars {
 		if k == key {
 			return true
 		}

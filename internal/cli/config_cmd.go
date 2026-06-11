@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,8 +235,9 @@ func (a *App) runConfigListSecrets(global globalOptions, args []string) int {
 		InKeychain bool   `json:"in_keychain"`
 		InEnv      bool   `json:"in_env"`
 	}
-	statuses := make([]secretStatus, 0, len(secrets.ManagedEnvVars))
-	for _, k := range secrets.ManagedEnvVars {
+	managed := secrets.ManagedEnvVars()
+	statuses := make([]secretStatus, 0, len(managed))
+	for _, k := range managed {
 		statuses = append(statuses, secretStatus{
 			Key:        k,
 			InKeychain: secrets.Has(secrets.DefaultService, k),
@@ -269,7 +271,8 @@ func (a *App) runConfigListSecrets(global globalOptions, args []string) int {
 }
 
 // readSecretValue reads a secret from a hidden TTY prompt when interactive, or
-// from the first line of stdin when piped/non-interactive.
+// from piped stdin otherwise. It never blocks on a terminal in non-interactive
+// mode (that would hang automation): a TTY with no piped value is an error.
 func (a *App) readSecretValue(global globalOptions, key string) (string, int) {
 	if isTerminal(os.Stdin) && !global.nonInteractive {
 		writef(a.stderr, "Enter value for %s (input hidden): ", key)
@@ -287,8 +290,20 @@ func (a *App) readSecretValue(global globalOptions, key string) (string, int) {
 		return value, exitSuccess
 	}
 
+	// Non-interactive: require a piped/redirected value rather than blocking on
+	// a terminal read.
+	if isTerminal(os.Stdin) {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			"no value provided: pipe the secret on stdin (e.g. `echo $KEY | dir2mcp config set-secret ...`) or run interactively")
+		return "", exitConfigInvalid
+	}
+
 	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("read secret from stdin: %v", err))
+		return "", exitGeneric
+	}
 	value := strings.TrimSpace(line)
 	if value == "" {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, "no value provided on stdin")
