@@ -149,12 +149,24 @@ func ApplyCorpusProfile(cfg *config.Config, profile Profile) {
 	}
 }
 
+// SecretDest is where the wizard persists the collected credentials.
+type SecretDest string
+
+const (
+	// DestFile writes credentials to .env.local (plaintext, 0600). Works with
+	// the background daemon.
+	DestFile SecretDest = "file"
+	// DestKeychain stores credentials in the OS keychain (encrypted at rest).
+	DestKeychain SecretDest = "keychain"
+)
+
 // Result holds the user's answers from the setup form: the collected
-// credentials (keyed by env var, empty entries dropped) and the chosen corpus
-// profile.
+// credentials (keyed by env var, empty entries dropped), the chosen corpus
+// profile, and where to persist the credentials.
 type Result struct {
-	Keys    map[string]string
-	Profile Profile
+	Keys        map[string]string
+	Profile     Profile
+	Destination SecretDest
 }
 
 // Input parameterizes the setup form with what is already known about the
@@ -185,6 +197,7 @@ func BuildForm(
 	keyValues map[string]*string,
 	configureMore *bool,
 	profile *string,
+	dest *string,
 	save *bool,
 	in Input,
 ) *huh.Form {
@@ -241,6 +254,17 @@ func BuildForm(
 			Value(profile),
 	)
 
+	destGroup := huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Where to store credentials?").
+			Description("Keychain is encrypted at rest; .env.local also works for the background service.").
+			Options(
+				huh.NewOption(".env.local file", string(DestFile)),
+				huh.NewOption("OS keychain (encrypted)", string(DestKeychain)),
+			).
+			Value(dest),
+	)
+
 	confirmGroup := huh.NewGroup(
 		huh.NewConfirm().
 			Title("Save these settings?").
@@ -249,7 +273,7 @@ func BuildForm(
 			Value(save),
 	)
 
-	return huh.NewForm(providerGroup, optionalGroup, profileGroup, confirmGroup).
+	return huh.NewForm(providerGroup, optionalGroup, destGroup, profileGroup, confirmGroup).
 		WithTheme(brandTheme())
 }
 
@@ -309,8 +333,9 @@ func Run(in Input) (Result, error) {
 	if in.ConfigExisted {
 		profile = string(ProfileKeep)
 	}
+	dest := string(DestFile)
 
-	form := BuildForm(keyValues, &configureMore, &profile, &save, in)
+	form := BuildForm(keyValues, &configureMore, &profile, &dest, &save, in)
 	if err := form.Run(); err != nil {
 		return Result{}, err
 	}
@@ -324,7 +349,7 @@ func Run(in Input) (Result, error) {
 			keys[env] = v
 		}
 	}
-	return Result{Keys: keys, Profile: Profile(profile)}, nil
+	return Result{Keys: keys, Profile: Profile(profile), Destination: SecretDest(dest)}, nil
 }
 
 // PersistKeys writes each non-empty collected credential via write (a dotenv

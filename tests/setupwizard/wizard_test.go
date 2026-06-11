@@ -205,14 +205,24 @@ func TestBuildForm_ConstructsWithoutPanic(t *testing.T) {
 	}
 	var more, save bool
 	profile := string(setupwizard.ProfileGeneral)
+	dest := string(setupwizard.DestFile)
 
 	for _, existed := range []bool{false, true} {
-		form := setupwizard.BuildForm(keyValues, &more, &profile, &save, setupwizard.Input{
+		form := setupwizard.BuildForm(keyValues, &more, &profile, &dest, &save, setupwizard.Input{
 			ExistingKeys:  map[string]bool{"MISTRAL_API_KEY": existed},
 			ConfigExisted: existed,
 		})
 		if form == nil {
 			t.Fatalf("BuildForm returned nil (configExisted=%t)", existed)
 		}
+	}
+}
+
+func TestSecretDestConstants(t *testing.T) {
+	if setupwizard.DestFile == setupwizard.DestKeychain {
+		t.Fatal("DestFile and DestKeychain must be distinct")
+	}
+	if setupwizard.DestFile != "file" || setupwizard.DestKeychain != "keychain" {
+		t.Fatalf("unexpected dest values: file=%q keychain=%q", setupwizard.DestFile, setupwizard.DestKeychain)
 	}
 }

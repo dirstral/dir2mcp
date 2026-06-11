@@ -56,16 +56,32 @@ func (a *App) setupWizardEligible(global globalOptions) bool {
 	return isTerminal(os.Stdin) && isTerminal(os.Stdout)
 }
 
-// emitWizardSummary reports what the wizard persisted (saved credentials and
-// the applied corpus profile). No-op when nothing was collected or under
+// secretWriter returns the credential-upsert function for the chosen
+// destination: the .env.local writer for DestFile, or an OS keychain writer for
+// DestKeychain (path argument ignored).
+func secretWriter(dest setupwizard.SecretDest) func(path, keyName, value string) error {
+	if dest == setupwizard.DestKeychain {
+		return func(_ string, keyName, value string) error {
+			return secrets.Set(secrets.DefaultService, keyName, value)
+		}
+	}
+	return saveEnvLocalKey
+}
+
+// emitWizardSummary reports what the wizard persisted (saved credentials, where,
+// and the applied corpus profile). No-op when nothing was collected or under
 // quiet/JSON output.
-func (a *App) emitWizardSummary(global globalOptions, envPath string, savedKeys []string, profile setupwizard.Profile) {
+func (a *App) emitWizardSummary(global globalOptions, envPath string, savedKeys []string, dest setupwizard.SecretDest, profile setupwizard.Profile) {
 	if global.quiet || global.jsonOutput {
 		return
 	}
 	s := a.sty(false)
 	if len(savedKeys) > 0 {
-		writef(a.stdout, "%s saved %s to %s\n", s.Success.Render("✓"), strings.Join(savedKeys, ", "), envPath)
+		location := envPath
+		if dest == setupwizard.DestKeychain {
+			location = fmt.Sprintf("the OS keychain (service %q)", secrets.DefaultService)
+		}
+		writef(a.stdout, "%s saved %s to %s\n", s.Success.Render("✓"), strings.Join(savedKeys, ", "), location)
 	}
 	if profile != "" && profile != setupwizard.ProfileGeneral && profile != setupwizard.ProfileKeep {
 		writef(a.stdout, "%s applied corpus profile: %s\n", s.Success.Render("✓"), profile)
@@ -159,7 +175,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	// .env.local only — never the .dir2mcp.yaml snapshot. Non-TTY / --json /
 	// --quiet / --non-interactive paths skip the form and keep prior behavior.
 	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
-	savedKeys, chosenProfile, exitCode := a.runConfigInitWizard(global, configPath, envPath, !created, &cfg)
+	savedKeys, chosenProfile, dest, exitCode := a.runConfigInitWizard(global, configPath, envPath, !created, &cfg)
 	if exitCode >= 0 {
 		return exitCode
 	}
@@ -170,7 +186,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	}
 
 	a.emitConfigCreatedMessage(global, configPath, created)
-	a.emitWizardSummary(global, envPath, savedKeys, chosenProfile)
+	a.emitWizardSummary(global, envPath, savedKeys, dest, chosenProfile)
 	if a.setupWizardEligible(global) {
 		a.emitSetupVerification(global)
 	}
@@ -220,10 +236,11 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 // exitCode: a negative exitCode means "continue" (form ran, was skipped, or the
 // user aborted into a baseline write); a non-negative exitCode is terminal and
 // the caller should return it.
-func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath string, configExisted bool, cfg *config.Config) (savedKeys []string, profile setupwizard.Profile, exitCode int) {
+func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath string, configExisted bool, cfg *config.Config) (savedKeys []string, profile setupwizard.Profile, dest setupwizard.SecretDest, exitCode int) {
 	exitCode = -1
+	dest = setupwizard.DestFile
 	if !a.setupWizardEligible(global) {
-		return savedKeys, profile, exitCode
+		return savedKeys, profile, dest, exitCode
 	}
 
 	res, err := setupwizard.Run(setupwizard.Input{
@@ -235,18 +252,21 @@ func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath stri
 		writeln(a.stderr, "setup cancelled; writing baseline config only")
 	case err != nil:
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", err))
-		return savedKeys, profile, exitGeneric
+		return savedKeys, profile, dest, exitGeneric
 	default:
 		setupwizard.ApplyCorpusProfile(cfg, res.Profile)
 		profile = res.Profile
-		savedKeys, err = setupwizard.PersistKeys(envPath, res.Keys, saveEnvLocalKey)
+		dest = res.Destination
+		savedKeys, err = setupwizard.PersistKeys(envPath, res.Keys, secretWriter(dest))
 		if err != nil {
-			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
-			return savedKeys, profile, exitGeneric
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save credentials: %v", err))
+			return savedKeys, profile, dest, exitGeneric
 		}
-		a.protectSecretsFromGit(filepath.Dir(configPath))
+		if dest == setupwizard.DestFile {
+			a.protectSecretsFromGit(filepath.Dir(configPath))
+		}
 	}
-	return savedKeys, profile, exitCode
+	return savedKeys, profile, dest, exitCode
 }
 
 // protectSecretsFromGit appends .env.local and the state dir to .gitignore when

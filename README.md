@@ -169,7 +169,7 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `reindex` | Force full re-ingestion |
-| `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys (saved to `.env.local`) and a corpus profile, then writes/updates `.dir2mcp.yaml`. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
+| `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys, where to store them (`.env.local` or the OS keychain), and a corpus profile, then writes/updates `.dir2mcp.yaml`. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
 | `config print` | Print effective config |
 | `config set-secret <ENV_VAR>` | Store a provider credential in the OS keychain (encrypted at rest) instead of a plaintext `.env.local` |
 | `config rm-secret <ENV_VAR>` | Remove a credential from the OS keychain |
