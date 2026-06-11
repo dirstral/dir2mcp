@@ -26,6 +26,11 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitConfigInvalid
 	}
 
+	if !a.confirmDestructive(global, "Re-index all documents?", "Discards the current index and rebuilds it from scratch (may re-run OCR/embeddings).") {
+		writeln(a.stderr, "reindex aborted")
+		return exitSuccess
+	}
+
 	cfg, code := a.loadReindexConfig(global)
 	if code != exitSuccess {
 		return code

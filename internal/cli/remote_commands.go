@@ -405,7 +405,7 @@ func (a *App) runAskRemote(ctx context.Context, global globalOptions, opts askOp
 			}
 			writef(a.stdout, "  %s %s  %s\n",
 				s.Brand.Render(fmt.Sprintf("[%d]", i+1)),
-				s.Cyan.Render(relPath),
+				s.Accent.Render(relPath),
 				s.dim(fmt.Sprintf("chunk=%d span=%s", int64(chunkID), spanText)),
 			)
 		}
@@ -425,7 +425,7 @@ func (a *App) runAskRemote(ctx context.Context, global globalOptions, opts askOp
 			if strings.TrimSpace(snippet) == "" {
 				snippet = "(no snippet)"
 			}
-			writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Cyan.Render(relPath), s.dim(fmt.Sprintf("score=%.4f", score)))
+			writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Accent.Render(relPath), s.dim(fmt.Sprintf("score=%.4f", score)))
 			writef(a.stdout, "      %s\n", s.dim(snippet))
 		}
 	}

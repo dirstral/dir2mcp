@@ -142,7 +142,7 @@ func (a *App) runAskSearchOnly(ctx context.Context, global globalOptions, questi
 		if snippet == "" {
 			snippet = "(no snippet)"
 		}
-		writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Cyan.Render(hit.RelPath), s.dim(fmt.Sprintf("score=%.4f", hit.Score)))
+		writef(a.stdout, "  %s %s  %s\n", s.Brand.Render(fmt.Sprintf("[%d]", i+1)), s.Accent.Render(hit.RelPath), s.dim(fmt.Sprintf("score=%.4f", hit.Score)))
 		writef(a.stdout, "      %s\n", s.dim(snippet))
 	}
 	writeln(a.stdout)
@@ -176,7 +176,7 @@ func (a *App) renderAskResult(global globalOptions, askResult model.AskResult) i
 		for i, citation := range askResult.Citations {
 			writef(a.stdout, "  %s %s  %s\n",
 				s.Brand.Render(fmt.Sprintf("[%d]", i+1)),
-				s.Cyan.Render(citation.RelPath),
+				s.Accent.Render(citation.RelPath),
 				s.dim(fmt.Sprintf("chunk=%d span=%s", citation.ChunkID, formatSpan(citation.Span))),
 			)
 		}

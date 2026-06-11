@@ -16,7 +16,6 @@ var (
 	clrGreen  = lipgloss.Color("114")
 	clrRed    = lipgloss.Color("203")
 	clrYellow = lipgloss.Color("220")
-	clrCyan   = lipgloss.Color("81")
 	clrDim    = lipgloss.Color("245")
 	clrWhite  = lipgloss.Color("255")
 )
@@ -31,7 +30,7 @@ type styles struct {
 	Green  lipgloss.Style
 	Red    lipgloss.Style
 	Yellow lipgloss.Style
-	Cyan   lipgloss.Style
+	Accent lipgloss.Style // brand-yellow accent (flags, file paths, links)
 	Dim    lipgloss.Style
 	Bold   lipgloss.Style
 
@@ -63,7 +62,7 @@ func newStyles(w io.Writer, jsonMode bool) styles {
 		s.Green = noop
 		s.Red = noop
 		s.Yellow = noop
-		s.Cyan = noop
+		s.Accent = noop
 		s.Dim = noop
 		s.Bold = noop
 		s.Header = noop
@@ -80,14 +79,14 @@ func newStyles(w io.Writer, jsonMode bool) styles {
 	s.Green = lipgloss.NewStyle().Foreground(clrGreen)
 	s.Red = lipgloss.NewStyle().Foreground(clrRed)
 	s.Yellow = lipgloss.NewStyle().Foreground(clrYellow)
-	s.Cyan = lipgloss.NewStyle().Foreground(clrCyan)
+	s.Accent = lipgloss.NewStyle().Foreground(clrYellow)
 	s.Dim = lipgloss.NewStyle().Foreground(clrDim)
 	s.Bold = lipgloss.NewStyle().Bold(true)
 
 	s.Header = lipgloss.NewStyle().Bold(true).Foreground(clrBrand)
 	s.Key = lipgloss.NewStyle().Foreground(clrDim)
 	s.Value = lipgloss.NewStyle().Foreground(clrWhite)
-	s.URL = lipgloss.NewStyle().Foreground(clrCyan).Underline(true)
+	s.URL = lipgloss.NewStyle().Foreground(clrYellow).Underline(true)
 	s.Warning = lipgloss.NewStyle().Foreground(clrYellow).Bold(true)
 	s.Error = lipgloss.NewStyle().Foreground(clrRed).Bold(true)
 	s.Success = lipgloss.NewStyle().Foreground(clrGreen)

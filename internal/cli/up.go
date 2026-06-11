@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/huh"
+
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -25,9 +27,19 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/setupwizard"
 )
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
+	// First-run guided setup (SPEC §147) must run here, in the launching parent
+	// while still attached to the TTY — before any daemon fork, whose child has
+	// no terminal and would silently skip the wizard. maybeFirstRunSetup is a
+	// no-op on non-TTY / --json / --non-interactive runs, in the daemon child,
+	// and when an embedding provider already resolves.
+	if code := a.maybeFirstRunSetup(opts); code != exitSuccess {
+		return code
+	}
+
 	// When this is the launching parent (not the daemon child) and the
 	// caller hasn't asked for foreground/JSON behavior, fork a detached
 	// child to run the server and exit the parent once the child is
@@ -857,6 +869,78 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 	cfg.ResolvedAuthToken = auth.token
 	warnConfigSnapshotErr(a.stderr, opts.quiet, saveEffectiveConfigSnapshot(cfg, auth, x402TokenSource))
 	return cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, exitSuccess
+}
+
+// maybeFirstRunSetup runs the guided setup wizard (SPEC §147) when `up` starts
+// interactively but no embedding provider resolves yet. It must be called from
+// the launching parent (before any daemon fork) so it still owns the TTY; it
+// persists the chosen corpus profile and credentials to disk, which the daemon
+// child (or the foreground prepareUpConfig) then reloads. A skipped or aborted
+// wizard is not an error — the normal §2.5 preflight reports the missing
+// provider as before.
+//
+// upNonInteractiveMode also covers the daemon child (no TTY), so the wizard only
+// ever runs in the interactive parent and is never shown twice.
+func (a *App) maybeFirstRunSetup(opts upOptions) int {
+	if !requiresMistralAPIKey(opts) || upNonInteractiveMode(opts) || opts.jsonOutput {
+		return exitSuccess
+	}
+	cfg, err := loadConfigWithGlobalOptions(opts.globalOptions)
+	if err != nil {
+		return exitSuccess // let the standard config-load path report it
+	}
+	if _, rerr := cfg.Providers().Resolve(provider.CapEmbed); rerr == nil {
+		return exitSuccess // already configured — no first-run prompt
+	}
+
+	se := a.sty(opts.jsonOutput)
+	writef(a.stderr, "%s no embedding provider configured — starting guided setup\n", se.dim("•"))
+
+	configPath := resolveConfigPath(opts.globalOptions)
+	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
+	configExisted := false
+	if _, statErr := os.Stat(configPath); statErr == nil {
+		configExisted = true
+	}
+
+	res, rerr := setupwizard.Run(setupwizard.Input{
+		ExistingKeys:  setupwizard.DetectExistingKeys(envPath),
+		ConfigExisted: configExisted,
+	})
+	if errors.Is(rerr, huh.ErrUserAborted) {
+		return exitSuccess // fall through to the standard preflight error
+	}
+	if rerr != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", rerr))
+		return exitGeneric
+	}
+
+	// Persisted to disk (.env.local + .dir2mcp.yaml); the daemon child or the
+	// foreground prepareUpConfig reloads config from disk afterward.
+	return a.persistFirstRunSetup(opts, configPath, envPath, configExisted, res)
+}
+
+// persistFirstRunSetup applies the wizard's corpus profile to the config file
+// and writes collected credentials to .env.local (mirroring `config init`), then
+// adds .gitignore protection when inside a git repo.
+func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, configExisted bool, res setupwizard.Result) int {
+	fileCfg := config.Default()
+	if configExisted {
+		if existing, lerr := config.LoadFile(configPath); lerr == nil {
+			fileCfg = existing
+		}
+	}
+	setupwizard.ApplyCorpusProfile(&fileCfg, res.Profile)
+	if err := config.SaveFile(configPath, fileCfg); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
+		return exitGeneric
+	}
+	if _, err := setupwizard.PersistKeys(envPath, res.Keys, saveEnvLocalKey); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save .env.local: %v", err))
+		return exitGeneric
+	}
+	a.protectSecretsFromGit(filepath.Dir(configPath))
+	return exitSuccess
 }
 
 // publishConnection writes connection.json and emits the standard
