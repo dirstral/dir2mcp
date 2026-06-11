@@ -171,6 +171,9 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `reindex` | Force full re-ingestion |
 | `config init` | Create a baseline `.dir2mcp.yaml` |
 | `config print` | Print effective config |
+| `config set-secret <ENV_VAR>` | Store a provider credential in the OS keychain (encrypted at rest) instead of a plaintext `.env.local` |
+| `config rm-secret <ENV_VAR>` | Remove a credential from the OS keychain |
+| `config secrets` | Show which provider credentials are present in the keychain / environment (never prints values) |
 | `install <client>` | Install dir2mcp into a supported MCP client (e.g. `dir2mcp install claude`) |
 | `uninstall <client>` | Remove dir2mcp from a supported MCP client |
 | `doctor <client>` | Run client-integration diagnostics |
@@ -246,6 +249,31 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 ingest_extractor: auto
 docling_command: docling --to json --output - {input}
 ```
+
+### Storing credentials in the OS keychain
+
+Provider API keys can live in the OS keychain (macOS Keychain, Linux Secret Service,
+Windows Credential Manager) — encrypted at rest — instead of a plaintext `.env.local`:
+
+```bash
+dir2mcp config set-secret MISTRAL_API_KEY   # hidden prompt, or pipe: op read … | dir2mcp config set-secret MISTRAL_API_KEY
+dir2mcp config secrets                       # show which keys are in the keychain / env (never prints values)
+dir2mcp config rm-secret MISTRAL_API_KEY
+```
+
+Credentials resolve in the order defined by SPEC §16.1.1: **environment variable → OS
+keychain → `.env.local` / `.env` file**. So an explicit env var always wins, a keychain
+entry beats a plaintext file, and the keychain is consulted only for the built-in provider
+keys (`MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ELEVENLABS_API_KEY`). Keychain access is fail-open
+(a missing entry or an unavailable/locked backend simply falls through to the file/env
+sources) and can be turned off entirely with `DIR2MCP_DISABLE_KEYCHAIN=1`.
+
+> **Background daemons:** a launchd/systemd service may not be able to unlock the keychain
+> unattended. For always-on `service install` deployments, persist the credential to
+> `.env.local` first with `dir2mcp config init` (`service install` warns when no persisted
+> credential is present); the keychain is most useful for the interactive `dir2mcp up` / CLI.
+> Resolution is fail-open, so a daemon that cannot read the keychain falls back to `.env.local`.
 
 ### Document extraction: modes & fallback
 
