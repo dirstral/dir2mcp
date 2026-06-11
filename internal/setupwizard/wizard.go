@@ -253,6 +253,47 @@ func BuildForm(
 		WithTheme(brandTheme())
 }
 
+// PromptSecret runs a single masked, brand-themed input and returns the entered
+// value (trimmed). The caller must ensure stdin/stdout are a TTY. A cancelled
+// prompt (Ctrl-C) returns huh.ErrUserAborted.
+func PromptSecret(title, description string) (string, error) {
+	var v string
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title(title).
+				Description(description).
+				EchoMode(huh.EchoModePassword).
+				Value(&v),
+		),
+	).WithTheme(brandTheme())
+	if err := form.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(v), nil
+}
+
+// Confirm runs a brand-themed yes/no confirmation, returning the user's choice.
+// The caller must ensure stdin/stdout are a TTY. A cancelled prompt (Ctrl-C)
+// returns (false, huh.ErrUserAborted).
+func Confirm(title, description string, defaultYes bool) (bool, error) {
+	v := defaultYes
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(title).
+				Description(description).
+				Affirmative("Yes").
+				Negative("No").
+				Value(&v),
+		),
+	).WithTheme(brandTheme())
+	if err := form.Run(); err != nil {
+		return false, err
+	}
+	return v, nil
+}
+
 // Run runs the interactive huh setup form and returns the user's answers.
 // Credentials are returned (not yet written) so the caller controls persistence
 // (.env.local) and config patching. Declining the final "Save" confirm surfaces

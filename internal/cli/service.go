@@ -206,6 +206,10 @@ func (a *App) runServiceUninstall(global globalOptions, args []string) int {
 	if code != exitSuccess {
 		return code
 	}
+	if !a.confirmDestructive(global, "Remove the dir2mcp background service?", "Stops and unregisters the launchd/systemd agent for this corpus; it will no longer auto-start at login.") {
+		writeln(a.stderr, "service uninstall aborted")
+		return exitSuccess
+	}
 	sc, _, mgr, code := a.serviceContextAndManager(global, name)
 	if code != exitSuccess {
 		return code

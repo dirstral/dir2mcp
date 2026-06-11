@@ -11,8 +11,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
-	"golang.org/x/term"
-
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
@@ -29,6 +27,23 @@ func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, 
 	} else {
 		writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
 	}
+}
+
+// confirmDestructive asks the user to confirm a destructive action. On an
+// interactive TTY (and not --non-interactive/--json/--quiet) it shows a
+// brand-themed yes/no prompt and returns the choice; otherwise it returns true
+// so scripts and automation proceed without blocking. A cancelled prompt
+// (Ctrl-C) declines.
+func (a *App) confirmDestructive(global globalOptions, title, description string) bool {
+	if global.nonInteractive || global.jsonOutput || global.quiet ||
+		!isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
+		return true
+	}
+	ok, err := setupwizard.Confirm(title, description, false)
+	if err != nil {
+		return false
+	}
+	return ok
 }
 
 // setupWizardEligible reports whether the interactive huh setup form should
@@ -408,15 +423,16 @@ func (a *App) runConfigListSecrets(global globalOptions, args []string) int {
 // from piped stdin otherwise. It never blocks on a terminal in non-interactive
 // mode (that would hang automation): a TTY with no piped value is an error.
 func (a *App) readSecretValue(global globalOptions, key string) (string, int) {
-	if isTerminal(os.Stdin) && !global.nonInteractive {
-		writef(a.stderr, "Enter value for %s (input hidden): ", key)
-		raw, err := term.ReadPassword(int(os.Stdin.Fd()))
-		writeln(a.stderr)
+	if isTerminal(os.Stdin) && isTerminal(os.Stdout) && !global.nonInteractive {
+		value, err := setupwizard.PromptSecret(key, "stored encrypted in the OS keychain")
 		if err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, "cancelled; nothing stored")
+				return "", exitConfigInvalid
+			}
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("read secret: %v", err))
 			return "", exitGeneric
 		}
-		value := strings.TrimSpace(string(raw))
 		if value == "" {
 			writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, "empty value; nothing stored")
 			return "", exitConfigInvalid

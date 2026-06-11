@@ -72,6 +72,10 @@ func (a *App) runUninstall(_ context.Context, global globalOptions, args []strin
 	if !ok {
 		return exitConfigInvalid
 	}
+	if !a.confirmDestructive(global, fmt.Sprintf("Remove dir2mcp from %s?", client), "Deletes the dir2mcp MCP server entry from the client configuration.") {
+		writeln(a.stderr, "uninstall aborted")
+		return exitSuccess
+	}
 	switch client {
 	case "claude":
 		return a.runClaudeUninstall(global, rest)
