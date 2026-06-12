@@ -45,7 +45,6 @@ func (d repetitionDetector) Inspect(text string, _ Context) *Finding {
 	}
 	counts := make(map[string]int)
 	total := 0
-	var top string
 	topCount := 0
 	for i := 0; i+d.n <= len(words); i++ {
 		gram := strings.Join(words[i:i+d.n], " ")
@@ -53,7 +52,6 @@ func (d repetitionDetector) Inspect(text string, _ Context) *Finding {
 		total++
 		if counts[gram] > topCount {
 			topCount = counts[gram]
-			top = gram
 		}
 	}
 	if total == 0 {
@@ -61,10 +59,12 @@ func (d repetitionDetector) Inspect(text string, _ Context) *Finding {
 	}
 	frac := float64(topCount) / float64(total)
 	if frac > d.maxFrac {
+		// Detail is intentionally content-free: report only the repetition
+		// metrics, never the repeated phrase itself (which is raw input text).
 		return &Finding{
 			Reason: ReasonRepetitionLoop,
-			Detail: fmt.Sprintf("n-gram %q repeats %d/%d (%.0f%%)",
-				truncate(top, 40), topCount, total, frac*100),
+			Detail: fmt.Sprintf("top %d-gram repeats %d/%d (%.0f%%)",
+				d.n, topCount, total, frac*100),
 			Score: frac,
 		}
 	}
@@ -161,15 +161,13 @@ func (d densityDetector) Inspect(text string, ctx Context) *Finding {
 
 	if ctx.Duration > 0 {
 		minutes := ctx.Duration.Minutes()
-		if minutes >= 1 {
-			cpm := chars / minutes
-			if cpm < d.minCharsPerMinute {
-				return &Finding{
-					Reason: ReasonLowDensity,
-					Detail: fmt.Sprintf("%.0f chars over %.1f min = %.1f chars/min (minimum %.0f)",
-						chars, minutes, cpm, d.minCharsPerMinute),
-					Score: cpm,
-				}
+		cpm := chars / minutes
+		if cpm < d.minCharsPerMinute {
+			return &Finding{
+				Reason: ReasonLowDensity,
+				Detail: fmt.Sprintf("%.0f chars over %.1f min = %.1f chars/min (minimum %.0f)",
+					chars, minutes, cpm, d.minCharsPerMinute),
+				Score: cpm,
 			}
 		}
 	}
@@ -200,19 +198,6 @@ func countSegments(text string) int {
 		}
 	}
 	return n
-}
-
-// truncate shortens s to at most max runes, appending an ellipsis when it
-// trims. It is rune-aware so multibyte content is not split mid-rune.
-func truncate(s string, max int) string {
-	if utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	runes := []rune(s)
-	if max <= 1 {
-		return string(runes[:max])
-	}
-	return string(runes[:max-1]) + "…"
 }
 
 // script identifies a writing system.
@@ -286,7 +271,9 @@ var languageScript = map[string]script{
 	"ru": scriptCyrillic,
 	"uk": scriptCyrillic,
 	"bg": scriptCyrillic,
-	"sr": scriptCyrillic,
+	// "sr" (Serbian) is deliberately omitted: it is digraphic (written in
+	// both Cyrillic and Latin), so a bare "sr" tag stays scriptUnknown and
+	// valid Latin Serbian output is not flagged as a language mismatch.
 	// Other single-script languages.
 	"el": scriptGreek,
 	"ar": scriptArabic,

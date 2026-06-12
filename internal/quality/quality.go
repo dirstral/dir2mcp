@@ -55,7 +55,9 @@ const (
 type Finding struct {
 	// Reason is the stable machine-readable cause.
 	Reason Reason
-	// Detail is a human-readable explanation; it may include excerpts.
+	// Detail is a human-readable explanation containing only redacted
+	// metrics and counts — never raw transcript/OCR/translation excerpts —
+	// so it is always safe to persist or log when a gate trips.
 	Detail string
 	// Score is a detector-specific magnitude (typically a fraction in
 	// [0,1]) describing how strongly the gate tripped.
