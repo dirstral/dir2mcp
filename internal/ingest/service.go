@@ -44,6 +44,7 @@ const (
 	transcriberProviderAuto       = "auto"
 	transcriberProviderMistral    = "mistral"
 	transcriberProviderElevenLabs = "elevenlabs"
+	transcriberProviderWhisper    = "whisper"
 	transcriberProviderOff        = "off"
 )
 
@@ -349,6 +350,12 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 	case transcriberProviderElevenLabs:
 		prof, err := r.ResolveExplicit(provider.CapSTT, "elevenlabs", true)
 		return build(prof, err)
+	case transcriberProviderWhisper:
+		// Self-hosted OpenAI-compatible STT (dir2mcp#240). The profile is
+		// credential-less, so selection succeeds even without an api_key;
+		// a missing base_url surfaces as a provider error at first use.
+		prof, err := r.ResolveExplicit(provider.CapSTT, "whisper", true)
+		return build(prof, err)
 	case transcriberProviderAuto:
 		prof, err := r.Resolve(provider.CapSTT)
 		if errors.Is(err, provider.ErrNoProvider) {
@@ -385,6 +392,8 @@ func sttExpectedLanguage(cfg config.Config) string {
 		prof, err = r.ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
 	case transcriberProviderElevenLabs:
 		prof, err = r.ResolveExplicit(provider.CapSTT, "elevenlabs", true)
+	case transcriberProviderWhisper:
+		prof, err = r.ResolveExplicit(provider.CapSTT, "whisper", true)
 	case transcriberProviderAuto:
 		prof, err = r.Resolve(provider.CapSTT)
 	default:

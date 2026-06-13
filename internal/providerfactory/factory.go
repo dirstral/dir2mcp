@@ -21,6 +21,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/openai"
 	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/whisperapi"
 )
 
 // TTSSynthesizer is the optional text-to-speech surface (matches
@@ -198,10 +199,20 @@ func OCR(p provider.Profile) (model.OCR, error) {
 // Transcriber builds a model.Transcriber for STT-capable kinds:
 // `mistral` (Voxtral), `elevenlabs` (Scribe), `openai`
 // (OpenAI-compatible /v1/audio/transcriptions; endpoint-dependent per
-// SPEC 8.1.2 ³ — validated at first use), and `gemini` (native
-// generateContent with inline audio, SPEC 8.2).
+// SPEC 8.1.2 ³ — validated at first use), `gemini` (native
+// generateContent with inline audio, SPEC 8.2), and `whisper`
+// (self-hosted OpenAI-compatible STT, dir2mcp#240 — credential-optional).
 func Transcriber(p provider.Profile) (model.Transcriber, error) {
 	switch p.Kind {
+	case provider.KindWhisper:
+		c := whisperapi.NewClient(p.BaseURL, p.APIKey)
+		if p.STTModel != "" {
+			c.DefaultModel = p.STTModel
+		}
+		if lang := strings.TrimSpace(p.STTLanguage); lang != "" {
+			c.DefaultLanguage = lang
+		}
+		return c, nil
 	case provider.KindMistral:
 		c := mistral.NewClient(p.BaseURL, p.APIKey)
 		if p.STTModel != "" {

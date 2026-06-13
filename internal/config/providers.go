@@ -72,6 +72,13 @@ func builtinProfiles() map[string]providerProfileYAML {
 		"cohere":     {Kind: "cohere", APIKey: s("${COHERE_API_KEY}")},
 		"elevenlabs": {Kind: "elevenlabs", APIKey: s("${ELEVENLABS_API_KEY}")},
 		"local":      {Kind: "openai", BaseURL: "http://localhost:11434/v1"}, // credential-less
+		// whisper: self-hosted OpenAI-compatible STT (GPU-VPS path,
+		// dir2mcp#240). Credential-less by default (no api_key); operators
+		// point base_url (and optionally set api_key/stt_model) via a
+		// providers: entry or the WHISPER_BASE_URL env default. Excluded from
+		// builtinPrecedence (like `local`) so it never silently wins auto
+		// selection; reach it via stt_provider: whisper.
+		"whisper": {Kind: "whisper", BaseURL: "${WHISPER_BASE_URL}"},
 	}
 }
 

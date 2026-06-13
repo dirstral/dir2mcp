@@ -17,6 +17,7 @@ func TestMatrixMatchesSpec(t *testing.T) {
 		provider.KindGemini:     {provider.CapEmbed: S, provider.CapChat: S, provider.CapOCR: U, provider.CapSTT: S, provider.CapTTS: S, provider.CapRerank: U},
 		provider.KindCohere:     {provider.CapEmbed: S, provider.CapChat: S, provider.CapOCR: U, provider.CapSTT: U, provider.CapTTS: U, provider.CapRerank: S},
 		provider.KindElevenLabs: {provider.CapEmbed: U, provider.CapChat: U, provider.CapOCR: U, provider.CapSTT: S, provider.CapTTS: S, provider.CapRerank: U},
+		provider.KindWhisper:    {provider.CapEmbed: U, provider.CapChat: U, provider.CapOCR: U, provider.CapSTT: S, provider.CapTTS: U, provider.CapRerank: U},
 	}
 	for k, caps := range want {
 		for c, exp := range caps {
