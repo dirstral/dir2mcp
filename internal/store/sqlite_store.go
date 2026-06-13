@@ -891,6 +891,137 @@ func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]mode
 	return out, nil
 }
 
+// TranscriptRepresentation identifies one transcript representation of a
+// document together with its persisted meta_json (used to match a requested
+// language). It is the lookup unit for subtitle export (#254): a document may
+// in principle carry more than one transcript (e.g. distinct languages from a
+// sidecar, #253), so callers select among them by language.
+type TranscriptRepresentation struct {
+	RepID    int64
+	MetaJSON string
+}
+
+// TranscriptSpanChunk pairs a transcript chunk's text with its (time) span. It
+// is the read-side shape consumed by the subtitle cue builder; only active
+// (non-deleted) chunks of the representation are returned, ordered by span
+// start then end so cues render in playback order even if stored out of order.
+type TranscriptSpanChunk struct {
+	Text string
+	Span model.Span
+}
+
+// TranscriptRepresentations returns the active transcript representations of
+// the document at relPath, ordered by rep_id for determinism. An empty slice
+// (with a nil error) means the document exists but has no transcript. The
+// document-missing case is reported as os.ErrNotExist so callers can give a
+// precise "no such document" error distinct from "no transcript".
+func (s *SQLiteStore) TranscriptRepresentations(ctx context.Context, relPath string) ([]TranscriptRepresentation, error) {
+	normalizedPath, err := normalizeRelPath(relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	// Confirm the document exists first so "no document" and "no transcript"
+	// surface as distinct errors to the caller.
+	var docID int64
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT doc_id FROM documents WHERE rel_path = ? AND deleted = 0 LIMIT 1`,
+		normalizedPath,
+	).Scan(&docID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, os.ErrNotExist
+		}
+		return nil, err
+	}
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT rep_id, meta_json
+		 FROM representations
+		 WHERE doc_id = ? AND rep_type = ? AND deleted = 0
+		 ORDER BY rep_id ASC`,
+		docID,
+		"transcript",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]TranscriptRepresentation, 0)
+	for rows.Next() {
+		var rep TranscriptRepresentation
+		if err := rows.Scan(&rep.RepID, &rep.MetaJSON); err != nil {
+			return nil, err
+		}
+		out = append(out, rep)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// TranscriptSpanChunks returns the active chunks of a transcript representation
+// joined to their span rows, ordered by span start then end. Only "time" spans
+// carry subtitle timing; the span is reconstructed through the same
+// spanFromRow mapping used elsewhere so degraded/legacy rows behave
+// consistently. A chunk with no span row is skipped (subtitles require timing).
+func (s *SQLiteStore) TranscriptSpanChunks(ctx context.Context, repID int64) ([]TranscriptSpanChunk, error) {
+	if repID <= 0 {
+		return nil, errors.New("rep_id must be > 0")
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT c.text, sp.span_kind, sp.start, sp.end, COALESCE(sp.extra_json, '')
+		 FROM chunks c
+		 JOIN spans sp ON sp.chunk_id = c.chunk_id
+		 WHERE c.rep_id = ? AND c.deleted = 0
+		 ORDER BY sp.start ASC, sp.end ASC`,
+		repID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]TranscriptSpanChunk, 0)
+	for rows.Next() {
+		var (
+			text      string
+			kind      string
+			start     int
+			end       int
+			extraJSON string
+		)
+		if err := rows.Scan(&text, &kind, &start, &end, &extraJSON); err != nil {
+			return nil, err
+		}
+		out = append(out, TranscriptSpanChunk{
+			Text: text,
+			Span: spanFromRow(kind, start, end, extraJSON),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) error {
 	normalizedPath, err := normalizeRelPath(relPath)
 	if err != nil {
