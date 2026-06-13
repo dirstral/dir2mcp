@@ -37,14 +37,38 @@ type fakeRetrievalIndex struct {
 	lastK int
 }
 
-func (f *fakeRetrievalIndex) Add(label uint64, vector []float32) error { return nil }
-func (f *fakeRetrievalIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
-	f.lastK = k
-	return []uint64{}, []float32{}, nil
+func (f *fakeRetrievalIndex) Upsert(_ context.Context, _ []float32, _ model.IndexPayload) error {
+	return nil
 }
-func (f *fakeRetrievalIndex) Save(path string) error { return nil }
-func (f *fakeRetrievalIndex) Load(path string) error { return nil }
-func (f *fakeRetrievalIndex) Close() error           { return nil }
+func (f *fakeRetrievalIndex) Delete(_ context.Context, _ []uint64) error { return nil }
+func (f *fakeRetrievalIndex) Search(_ context.Context, _ []float32, k int, _ model.Filter) ([]model.IndexHit, error) {
+	f.lastK = k
+	return []model.IndexHit{}, nil
+}
+func (f *fakeRetrievalIndex) Identity(context.Context) (string, error) { return "", nil }
+func (f *fakeRetrievalIndex) Reset(context.Context, string) error      { return nil }
+func (f *fakeRetrievalIndex) Close() error                             { return nil }
+
+// addVec upserts a vector keyed by id with an empty payload. Used by tests that
+// drive filtering through the service's in-memory chunk metadata (SetChunkMetadata)
+// rather than the index payload, and search without push-down predicates.
+func addVec(t *testing.T, idx *index.HNSWIndex, id uint64, vec []float32) {
+	t.Helper()
+	if err := idx.Upsert(context.Background(), vec, model.IndexPayload{ChunkID: id}); err != nil {
+		t.Fatalf("Upsert(%d) failed: %v", id, err)
+	}
+}
+
+// addVecP upserts a vector keyed by id with a rel_path/doc_type payload, so a
+// FilteringIndex (HNSW) can evaluate path/doctype predicates pushed down from
+// the query.
+func addVecP(t *testing.T, idx *index.HNSWIndex, id uint64, vec []float32, relPath, docType string) {
+	t.Helper()
+	payload := model.IndexPayload{ChunkID: id, RelPath: relPath, DocType: docType}
+	if err := idx.Upsert(context.Background(), vec, payload); err != nil {
+		t.Fatalf("Upsert(%d) failed: %v", id, err)
+	}
+}
 
 func (e *fakeRetrievalEmbedder) Embed(_ context.Context, modelName string, _ model.EmbedRole, texts []string) ([][]float32, error) {
 	// return one embedding per input text, matching the real embedder behaviour
@@ -69,9 +93,7 @@ func TestAsk_GeneratorErrorLogged(t *testing.T) {
 	buf := &bytes.Buffer{}
 
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 
 	longQ := strings.Repeat("x", 100)
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, &fakeGenerator{out: "unused", err: errors.New("oh no")})
@@ -96,9 +118,7 @@ func TestAsk_GeneratorErrorLogged(t *testing.T) {
 
 func TestAsk_IndexingCompleteFlag(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 	// provider returns false to simulate ongoing indexing
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
 	svc.SetIndexingCompleteProvider(func() bool { return false })
@@ -115,9 +135,7 @@ func TestAsk_IndexingCompleteFlag(t *testing.T) {
 
 func TestAsk_IndexingCompleteDefaultTrue(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
 	// no provider set, should default to true
 	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "doc.txt", DocType: "md", Snippet: "hi"})
@@ -136,9 +154,7 @@ func TestAsk_IndexingCompleteDefaultTrue(t *testing.T) {
 // prevents regressions when the interface changes.
 func TestIndexingCompleteAccessorDirect(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
 
 	// default provider nil -> should report true
@@ -154,9 +170,7 @@ func TestIndexingCompleteAccessorDirect(t *testing.T) {
 
 func TestIndexingComplete_CanceledContext(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
 	// provider returns true but should not be invoked
 	svc.SetIndexingCompleteProvider(func() bool { t.Fatal("provider should not be called"); return true })
@@ -174,15 +188,9 @@ func TestIndexingComplete_CanceledContext(t *testing.T) {
 
 func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
-	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
-	if err := idx.Add(3, []float32{0, 1}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVecP(t, idx, 1, []float32{1, 0}, "docs/a.md", "md")
+	addVecP(t, idx, 2, []float32{0.9, 0.1}, "src/main.go", "code")
+	addVecP(t, idx, 3, []float32{0, 1}, "docs/b.md", "md")
 
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
@@ -212,12 +220,8 @@ func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 
 func TestSearch_FileGlobFilter(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(10, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
-	if err := idx.Add(20, []float32{0.8, 0.2}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVecP(t, idx, 10, []float32{1, 0}, "src/a.go", "code")
+	addVecP(t, idx, 20, []float32{0.8, 0.2}, "docs/a.md", "md")
 
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
@@ -296,18 +300,10 @@ func TestSearch_OverflowProtection(t *testing.T) {
 func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 	textIdx := index.NewHNSWIndex("")
 	codeIdx := index.NewHNSWIndex("")
-	if err := textIdx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("textIdx.Add failed: %v", err)
-	}
-	if err := textIdx.Add(2, []float32{0.8, 0.2}); err != nil {
-		t.Fatalf("textIdx.Add failed: %v", err)
-	}
-	if err := codeIdx.Add(2, []float32{0.9, 0.1}); err != nil { // duplicate label across indexes
-		t.Fatalf("codeIdx.Add failed: %v", err)
-	}
-	if err := codeIdx.Add(3, []float32{1, 0}); err != nil {
-		t.Fatalf("codeIdx.Add failed: %v", err)
-	}
+	addVec(t, textIdx, 1, []float32{1, 0})
+	addVec(t, textIdx, 2, []float32{0.8, 0.2})
+	addVec(t, codeIdx, 2, []float32{0.9, 0.1}) // duplicate label across indexes
+	addVec(t, codeIdx, 3, []float32{1, 0})
 
 	svc := NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
@@ -549,9 +545,7 @@ func TestLooksLikeCodeQuery(t *testing.T) {
 
 func TestAsk_FallbackAndCitations(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, nil)
@@ -584,9 +578,7 @@ func TestAsk_FallbackAndCitations(t *testing.T) {
 
 func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated answer with [docs/a.md]"})
@@ -607,12 +599,8 @@ func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
 
 func TestAsk_AppendsMissingAttributions(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
-	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated summary without explicit source tags."})
@@ -641,12 +629,8 @@ func TestAsk_AppendsMissingAttributions(t *testing.T) {
 
 func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
-	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
-		t.Fatalf("idx.Add failed: %v", err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
 	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated summary with [docs/a.md] already present."})

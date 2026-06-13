@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"encoding/gob"
 	"errors"
 	"log"
@@ -9,12 +10,38 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+
+	"github.com/dirstral/dir2mcp/internal/model"
+)
+
+// Persisted snapshot basenames (issue #247). The ".v2" marker distinguishes
+// the payload-carrying gob shape (hnswSnapshot) from the legacy bare-map files
+// (vectors_{text,code}.hnsw); a missing v2 file is a fresh index, repopulated by
+// reindex, so legacy files are never decoded.
+const (
+	TextIndexFileName = "vectors_text.v2.hnsw"
+	CodeIndexFileName = "vectors_code.v2.hnsw"
+)
+
+// LegacyIndexFileNames are the pre-#247 bare-map snapshot basenames. reindex
+// removes them alongside the current files so a stale legacy snapshot cannot
+// linger after an upgrade.
+var LegacyIndexFileNames = []string{"vectors_text.hnsw", "vectors_code.hnsw"}
+
+// compile-time assertions that HNSWIndex satisfies the core Index contract and
+// the optional Persistable / FilteringIndex capabilities (issue #247).
+var (
+	_ model.Index          = (*HNSWIndex)(nil)
+	_ model.Persistable    = (*HNSWIndex)(nil)
+	_ model.FilteringIndex = (*HNSWIndex)(nil)
 )
 
 type HNSWIndex struct {
-	path    string
-	mu      sync.RWMutex
-	vectors map[uint64][]float32
+	path     string
+	mu       sync.RWMutex
+	vectors  map[uint64][]float32
+	payloads map[uint64]model.IndexPayload
+	identity string
 
 	// Logger is optional; if non-nil its Printf method will be used for
 	// informational messages. When nil the standard library's log package
@@ -40,116 +67,196 @@ type HNSWIndexMetrics struct {
 	DimensionMismatch atomic.Int64
 }
 
+// hnswSnapshot is the on-disk gob shape (issue #247). It is a distinct,
+// self-describing struct rather than a bare map[uint64][]float32 so the payload
+// metadata and embed identity persist alongside the vectors. To avoid gob
+// decode ambiguity with the legacy bare-map format, the persisted filename is
+// versioned (see NewHNSWIndex / vectors_*.v2.hnsw); a missing v2 file is treated
+// as a fresh index that reindex will repopulate.
+type hnswSnapshot struct {
+	Vectors  map[uint64][]float32
+	Payloads map[uint64]model.IndexPayload
+	Identity string
+}
+
 // NewHNSWIndex creates an empty in-memory HNSW index. The optional
 // path argument is used by Save/Load; if non-empty those methods will
 // persist to the given file.
 func NewHNSWIndex(path string) *HNSWIndex {
 	return &HNSWIndex{
-		path:    path,
-		vectors: make(map[uint64][]float32),
+		path:     path,
+		vectors:  make(map[uint64][]float32),
+		payloads: make(map[uint64]model.IndexPayload),
 	}
 }
 
-func (i *HNSWIndex) Add(label uint64, vector []float32) error {
+// Upsert stores (or replaces) the vector and its payload, keyed by
+// payload.ChunkID.
+func (i *HNSWIndex) Upsert(ctx context.Context, vector []float32, payload model.IndexPayload) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(vector) == 0 {
 		return errors.New("vector cannot be empty")
 	}
-
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	if payload.ChunkID == 0 {
+		return errors.New("payload chunk_id cannot be zero")
+	}
 
 	copied := make([]float32, len(vector))
 	copy(copied, vector)
-	i.vectors[label] = copied
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.vectors[payload.ChunkID] = copied
+	i.payloads[payload.ChunkID] = payload
 	return nil
 }
 
-func (i *HNSWIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
+// Delete removes the vectors and payloads for the given chunk IDs. Unknown IDs
+// are ignored.
+func (i *HNSWIndex) Delete(ctx context.Context, chunkIDs []uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(chunkIDs) == 0 {
+		return nil
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, id := range chunkIDs {
+		delete(i.vectors, id)
+		delete(i.payloads, id)
+	}
+	return nil
+}
+
+// scoredCandidate pairs a chunk_id with its cosine score during search.
+type scoredCandidate struct {
+	chunkID uint64
+	score   float32
+	payload model.IndexPayload
+}
+
+// Search returns the k best matches for vector, filtered by filter. The filter
+// is applied inline (CanFilter is always true for the pure-Go HNSW), so callers
+// may push it down rather than overfetch-then-filter.
+func (i *HNSWIndex) Search(ctx context.Context, vector []float32, k int, filter model.Filter) ([]model.IndexHit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(vector) == 0 {
-		return nil, nil, errors.New("query vector cannot be empty")
+		return nil, errors.New("query vector cannot be empty")
 	}
 	if k <= 0 {
-		return []uint64{}, []float32{}, nil
+		return []model.IndexHit{}, nil
 	}
 
-	type scored struct {
-		label uint64
-		score float32
+	candidates, mismatches := i.collectCandidates(vector, filter)
+	for _, m := range mismatches {
+		i.logf("dimension mismatch: chunk_id=%d candidate_len=%d query_len=%d", m.chunkID, m.candLen, m.queryLen)
 	}
 
-	// We only hold the read lock long enough to inspect each vector's
-	// length, bump the metric on mismatch, and copy candidates for later
-	// scoring.
-	// define local types for readability
-	type mismatch struct {
-		label    uint64
-		candLen  int
-		queryLen int
+	scored := make([]scoredCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		c.score = cosineSimilarity(vector, c.vector)
+		scored = append(scored, scoredCandidate{chunkID: c.chunkID, score: c.score, payload: c.payload})
 	}
-	type candidate struct {
-		label  uint64
-		vector []float32
+
+	const eps = 1e-6
+	sort.Slice(scored, func(a, b int) bool {
+		diff := math.Abs(float64(scored[a].score) - float64(scored[b].score))
+		if diff <= eps {
+			return scored[a].chunkID < scored[b].chunkID
+		}
+		return scored[a].score > scored[b].score
+	})
+
+	if len(scored) > k {
+		scored = scored[:k]
 	}
+	hits := make([]model.IndexHit, len(scored))
+	for idx, s := range scored {
+		hits[idx] = model.IndexHit{ChunkID: s.chunkID, Score: s.score, Payload: s.payload}
+	}
+	return hits, nil
+}
+
+// searchCandidate carries a copied vector + payload for scoring outside the
+// lock.
+type searchCandidate struct {
+	chunkID uint64
+	vector  []float32
+	score   float32
+	payload model.IndexPayload
+}
+
+type dimMismatch struct {
+	chunkID  uint64
+	candLen  int
+	queryLen int
+}
+
+// collectCandidates snapshots, under the read lock, the vectors whose dimension
+// matches the query and whose payload satisfies the filter. Dimension
+// mismatches are returned for logging outside the lock.
+func (i *HNSWIndex) collectCandidates(vector []float32, filter model.Filter) ([]searchCandidate, []dimMismatch) {
 	var (
-		mismatches []mismatch
-		candidates []candidate
+		candidates []searchCandidate
+		mismatches []dimMismatch
 	)
+	applyFilter := !filter.IsZero()
 
 	i.mu.RLock()
-	// collect matching candidates while holding the lock
-	for label, cand := range i.vectors {
+	for id, cand := range i.vectors {
 		if len(cand) != len(vector) {
-			mismatches = append(mismatches, mismatch{label, len(cand), len(vector)})
+			mismatches = append(mismatches, dimMismatch{id, len(cand), len(vector)})
 			if i.Metrics != nil {
-				// atomic counter; update under lock to keep close to observation
 				i.Metrics.DimensionMismatch.Add(1)
 			}
 			continue
 		}
+		payload := i.payloads[id]
+		if applyFilter && !filter.Match(payload) {
+			continue
+		}
 		copyVec := make([]float32, len(cand))
 		copy(copyVec, cand)
-		candidates = append(candidates, candidate{label, copyVec})
+		candidates = append(candidates, searchCandidate{chunkID: id, vector: copyVec, payload: payload})
 	}
 	i.mu.RUnlock()
+	return candidates, mismatches
+}
 
-	// perform logging outside the lock to avoid blocking other routines
-	for _, m := range mismatches {
-		i.logf("dimension mismatch: label=%d candidate_len=%d query_len=%d", m.label, m.candLen, m.queryLen)
+// CanFilter reports whether the backend can evaluate the filter itself. The
+// pure-Go HNSW evaluates every predicate inline, so it always can.
+func (i *HNSWIndex) CanFilter(filter model.Filter) bool {
+	return true
+}
+
+// Identity returns the recorded corpus-lifetime embed identity, or "" when the
+// index is fresh.
+func (i *HNSWIndex) Identity(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.identity, nil
+}
 
-	// now that the lock is released, compute similarities
-	scoredItems := make([]scored, 0, len(candidates))
-	for _, c := range candidates {
-		scoredItems = append(scoredItems, scored{
-			label: c.label,
-			score: cosineSimilarity(vector, c.vector),
-		})
+// Reset clears all vectors/payloads and records identity as the new
+// corpus-lifetime embed identity.
+func (i *HNSWIndex) Reset(ctx context.Context, identity string) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-
-	// eps is the tolerance used when comparing two float32 similarity
-	// scores.  Values that differ by less than eps are treated as equal and
-	// the tie is broken by label to guarantee a stable, deterministic order.
-	const eps = 1e-6
-	sort.Slice(scoredItems, func(a, b int) bool {
-		diff := math.Abs(float64(scoredItems[a].score) - float64(scoredItems[b].score))
-		if diff <= eps {
-			return scoredItems[a].label < scoredItems[b].label
-		}
-		return scoredItems[a].score > scoredItems[b].score
-	})
-
-	if len(scoredItems) > k {
-		scoredItems = scoredItems[:k]
-	}
-
-	labels := make([]uint64, len(scoredItems))
-	scores := make([]float32, len(scoredItems))
-	for idx, item := range scoredItems {
-		labels[idx] = item.label
-		scores[idx] = item.score
-	}
-
-	return labels, scores, nil
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.vectors = make(map[uint64][]float32)
+	i.payloads = make(map[uint64]model.IndexPayload)
+	i.identity = identity
+	return nil
 }
 
 // logf is a small helper that routes messages to the configured logger or
@@ -162,7 +269,12 @@ func (i *HNSWIndex) logf(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
 
-func (i *HNSWIndex) Save(path string) error {
+// Save snapshots the index (vectors + payloads + identity) to path via gob,
+// using an atomic temp-file rename. See hnswSnapshot for the format rationale.
+func (i *HNSWIndex) Save(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if path == "" {
 		path = i.path
 	}
@@ -176,26 +288,13 @@ func (i *HNSWIndex) Save(path string) error {
 		return err
 	}
 
-	// take a snapshot of vectors while holding the read lock. doing this
-	// prevents Add/other writers from blocking on our long-running gob
-	// encoding and file operations. the snapshot is a deep copy of the map
-	// and each slice so that we don't race with callers who might mutate
-	// the original slices after we release the lock.
-	var snapshot map[uint64][]float32
-	i.mu.RLock()
-	snapshot = make(map[uint64][]float32, len(i.vectors))
-	for k, v := range i.vectors {
-		copied := make([]float32, len(v))
-		copy(copied, v)
-		snapshot[k] = copied
-	}
-	i.mu.RUnlock()
+	// Snapshot under the read lock so concurrent Upsert/Delete don't block on
+	// the gob encoding and file I/O, and so we deep-copy each slice rather than
+	// race with callers who might mutate the originals later.
+	snapshot := i.snapshot()
 
-	// perform encoding and all file I/O on the snapshot without holding
-	// any locks. preserve existing cleanup semantics.
 	enc := gob.NewEncoder(file)
-	err = enc.Encode(snapshot)
-	if err != nil {
+	if err := enc.Encode(snapshot); err != nil {
 		closeErr := file.Close()
 		_ = os.Remove(tmpPath)
 		return errors.Join(err, closeErr)
@@ -216,7 +315,30 @@ func (i *HNSWIndex) Save(path string) error {
 	return nil
 }
 
-func (i *HNSWIndex) Load(path string) error {
+// snapshot deep-copies the index state under the read lock for persistence.
+func (i *HNSWIndex) snapshot() hnswSnapshot {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	vectors := make(map[uint64][]float32, len(i.vectors))
+	for k, v := range i.vectors {
+		copied := make([]float32, len(v))
+		copy(copied, v)
+		vectors[k] = copied
+	}
+	payloads := make(map[uint64]model.IndexPayload, len(i.payloads))
+	for k, v := range i.payloads {
+		payloads[k] = v
+	}
+	return hnswSnapshot{Vectors: vectors, Payloads: payloads, Identity: i.identity}
+}
+
+// Load restores the index from a v2 snapshot file. A missing file is treated as
+// a fresh index (no error) — a legacy bare-map file under the old name is simply
+// not present at the v2 path, so the corpus is repopulated on the next reindex.
+func (i *HNSWIndex) Load(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if path == "" {
 		path = i.path
 	}
@@ -233,14 +355,22 @@ func (i *HNSWIndex) Load(path string) error {
 	}
 	defer func() { _ = file.Close() }()
 
-	loaded := make(map[uint64][]float32)
+	var snapshot hnswSnapshot
 	dec := gob.NewDecoder(file)
-	if err := dec.Decode(&loaded); err != nil {
+	if err := dec.Decode(&snapshot); err != nil {
 		return err
+	}
+	if snapshot.Vectors == nil {
+		snapshot.Vectors = make(map[uint64][]float32)
+	}
+	if snapshot.Payloads == nil {
+		snapshot.Payloads = make(map[uint64]model.IndexPayload)
 	}
 
 	i.mu.Lock()
-	i.vectors = loaded
+	i.vectors = snapshot.Vectors
+	i.payloads = snapshot.Payloads
+	i.identity = snapshot.Identity
 	i.mu.Unlock()
 	return nil
 }

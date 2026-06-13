@@ -59,8 +59,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return code
 	}
 	defer func() { _ = st.Close() }()
-	textIndexPath := filepath.Join(cfg.StateDir, "vectors_text.hnsw")
-	codeIndexPath := filepath.Join(cfg.StateDir, "vectors_code.hnsw")
+	textIndexPath := filepath.Join(cfg.StateDir, index.TextIndexFileName)
+	codeIndexPath := filepath.Join(cfg.StateDir, index.CodeIndexFileName)
 	defer func() { _ = textIx.Close() }()
 	defer func() { _ = codeIx.Close() }()
 
@@ -446,30 +446,50 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonO
 		return nil, nil, nil, exitIndexLoadFailure
 	}
 
-	textIndexPath := filepath.Join(cfg.StateDir, "vectors_text.hnsw")
-	textIx := index.NewHNSWIndex(textIndexPath)
-	if err := textIx.Load(textIndexPath); err != nil &&
-		!errors.Is(err, model.ErrNotImplemented) &&
-		!errors.Is(err, os.ErrNotExist) {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load text index: %v", err))
+	// The persisted snapshot format is versioned (vectors_*.v2.hnsw, issue
+	// #247): the v2 file carries vectors + per-vector payloads + the embed
+	// identity, where the legacy file held a bare vector map. A missing v2 file
+	// (incl. an existing corpus that only has the legacy file) is treated as a
+	// fresh index and repopulated on the next reindex — we deliberately do not
+	// decode legacy files to avoid gob ambiguity between the two shapes.
+	identity := cfg.Providers().EmbedIdentity()
+	textIx, code := a.loadHNSWIndex(ctx, cfg, index.TextIndexFileName, "text", identity, jsonOutput)
+	if code != exitSuccess {
 		_ = st.Close()
-		_ = textIx.Close()
-		return nil, nil, nil, exitIndexLoadFailure
+		return nil, nil, nil, code
 	}
-
-	codeIndexPath := filepath.Join(cfg.StateDir, "vectors_code.hnsw")
-	codeIx := index.NewHNSWIndex(codeIndexPath)
-	if err := codeIx.Load(codeIndexPath); err != nil &&
-		!errors.Is(err, model.ErrNotImplemented) &&
-		!errors.Is(err, os.ErrNotExist) {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load code index: %v", err))
+	codeIx, code := a.loadHNSWIndex(ctx, cfg, index.CodeIndexFileName, "code", identity, jsonOutput)
+	if code != exitSuccess {
 		_ = st.Close()
 		_ = textIx.Close()
-		_ = codeIx.Close()
-		return nil, nil, nil, exitIndexLoadFailure
+		return nil, nil, nil, code
 	}
 
 	return st, textIx, codeIx, exitSuccess
+}
+
+// loadHNSWIndex constructs a persisted HNSW index, restores it from its v2
+// snapshot, and reconciles its recorded embed identity with the configured one
+// (issue #247): EnsureIdentity resets the index when the identity is empty
+// (fresh) or differs, so a vector space built under a different embed
+// provider/model/dimension is never silently reused. fileName is the basename
+// under cfg.StateDir; kind is used only for error messages.
+func (a *App) loadHNSWIndex(ctx context.Context, cfg *config.Config, fileName, kind, identity string, jsonOutput bool) (model.Index, int) {
+	path := filepath.Join(cfg.StateDir, fileName)
+	ix := index.NewHNSWIndex(path)
+	if err := ix.Load(ctx, path); err != nil &&
+		!errors.Is(err, model.ErrNotImplemented) &&
+		!errors.Is(err, os.ErrNotExist) {
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load %s index: %v", kind, err))
+		_ = ix.Close()
+		return nil, exitIndexLoadFailure
+	}
+	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("reconcile %s index identity: %v", kind, err))
+		_ = ix.Close()
+		return nil, exitIndexLoadFailure
+	}
+	return ix, exitSuccess
 }
 
 // buildMCPServerOptions constructs the list of mcp.ServerOption values,

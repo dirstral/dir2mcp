@@ -297,12 +297,34 @@ func mediaMIMEType(relPath string) string {
 	}
 }
 
+// payloadFromTask projects a chunk task's metadata into the IndexPayload the
+// index stores alongside the vector (issue #247). The span's time bounds are
+// surfaced as StartMS/EndMS so a backend filtering on media windows has them
+// without re-reading the span; Language/Speaker are not carried on ChunkMetadata
+// today and are left empty for backends to populate when available.
+func payloadFromTask(t model.ChunkTask) model.IndexPayload {
+	meta := t.Metadata
+	return model.IndexPayload{
+		ChunkID:  meta.ChunkID,
+		RelPath:  meta.RelPath,
+		DocType:  meta.DocType,
+		RepType:  meta.RepType,
+		Modality: meta.Modality,
+		Title:    meta.Title,
+		StartMS:  meta.Span.StartMS,
+		EndMS:    meta.Span.EndMS,
+		Snippet:  meta.Snippet,
+		Span:     meta.Span,
+		MediaRef: meta.MediaRef,
+	}
+}
+
 // indexChunks adds each vector to the index and fires the OnIndexedChunk hook.
 // On an index error it marks the failed chunk and, if any chunks were already
 // added, marks those as embedded first.
 func (w *EmbeddingWorker) indexChunks(ctx context.Context, validTasks []model.ChunkTask, labels []uint64, vectors [][]float32) (int, error) {
 	for idx := range validTasks {
-		if addErr := w.Index.Add(validTasks[idx].Metadata.ChunkID, vectors[idx]); addErr != nil {
+		if addErr := w.Index.Upsert(ctx, vectors[idx], payloadFromTask(validTasks[idx])); addErr != nil {
 			if idx > 0 {
 				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
 					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])

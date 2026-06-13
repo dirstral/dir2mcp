@@ -142,9 +142,7 @@ func TestOpenFile_TextFile_UnaffectedByMediaGuard(t *testing.T) {
 // without quoted context rather than dropping it as a missing snippet.
 func TestAsk_MediaOnlyHit_CitedWithoutQuotedText(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatal(err)
-	}
+	addVec(t, idx, 1, []float32{1, 0})
 	gen := &fakeGenerator{out: "an answer [clip.mp4]"}
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},

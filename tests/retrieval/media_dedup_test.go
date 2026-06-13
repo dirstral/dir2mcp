@@ -19,9 +19,7 @@ func TestSearch_DedupsPageImageWhenTextSurvives(t *testing.T) {
 		2: {0.99, 0.01}, // page-image media chunk, page 1 (duplicate of #1)
 		3: {0.98, 0.02}, // page-image media chunk, page 2 (no competing text)
 	} {
-		if err := idx.Add(label, vec); err != nil {
-			t.Fatalf("idx.Add(%d): %v", label, err)
-		}
+		addVec(t, idx, label, vec)
 	}
 
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
@@ -59,9 +57,7 @@ func TestSearch_KeepsTimeWindowMediaAlongsideTranscript(t *testing.T) {
 		1: {1, 0},       // transcript text chunk (time span)
 		2: {0.99, 0.01}, // audio media window (time span)
 	} {
-		if err := idx.Add(label, vec); err != nil {
-			t.Fatalf("idx.Add(%d): %v", label, err)
-		}
+		addVec(t, idx, label, vec)
 	}
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},

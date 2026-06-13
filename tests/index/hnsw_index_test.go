@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -9,41 +10,44 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
-func TestHNSWIndex_AddAndSearch(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("Add failed: %v", err)
+// upsertVec is a small helper that stores a vector keyed by id with a minimal
+// payload (rel_path derived from id so the chunk is not treated as an orphan
+// under a filter). It keeps the direct-index tests terse after the #247 API
+// change from Add(label, vec) to Upsert(ctx, vec, payload).
+func upsertVec(t *testing.T, idx *index.HNSWIndex, id uint64, vec []float32) {
+	t.Helper()
+	payload := model.IndexPayload{ChunkID: id, RelPath: "doc.txt", DocType: "md"}
+	if err := idx.Upsert(context.Background(), vec, payload); err != nil {
+		t.Fatalf("Upsert(%d) failed: %v", id, err)
 	}
-	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
-	if err := idx.Add(3, []float32{0, 1}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
+}
 
-	labels, scores, err := idx.Search([]float32{1, 0}, 2)
+func TestHNSWIndex_UpsertAndSearch(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	upsertVec(t, idx, 1, []float32{1, 0})
+	upsertVec(t, idx, 2, []float32{0.9, 0.1})
+	upsertVec(t, idx, 3, []float32{0, 1})
+
+	hits, err := idx.Search(context.Background(), []float32{1, 0}, 2, model.Filter{})
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
-	// check we got the right number of results
-	if len(labels) != 2 || len(scores) != 2 {
-		t.Fatalf("unexpected result lengths: labels=%d scores=%d", len(labels), len(scores))
+	if len(hits) != 2 {
+		t.Fatalf("unexpected result length: %d", len(hits))
 	}
-
-	// verify both returned labels are correct and in expected order
-	if labels[0] != 1 {
-		t.Fatalf("expected top label 1, got %d", labels[0])
+	if hits[0].ChunkID != 1 {
+		t.Fatalf("expected top chunk 1, got %d", hits[0].ChunkID)
 	}
-	if labels[1] != 2 {
-		t.Fatalf("expected second label 2, got %d", labels[1])
+	if hits[1].ChunkID != 2 {
+		t.Fatalf("expected second chunk 2, got %d", hits[1].ChunkID)
 	}
-
 	// for cosine similarity higher score is better, so results should be
 	// non‑increasing
-	if scores[0] < scores[1] {
-		t.Fatalf("expected scores[0] >= scores[1], got %v and %v", scores[0], scores[1])
+	if hits[0].Score < hits[1].Score {
+		t.Fatalf("expected scores[0] >= scores[1], got %v and %v", hits[0].Score, hits[1].Score)
 	}
 }
 
@@ -54,20 +58,16 @@ func TestHNSWIndex_DimensionMismatch(t *testing.T) {
 	idx.Logger = log.New(&buf, "", 0)
 	idx.Metrics = &index.HNSWIndexMetrics{}
 
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
+	upsertVec(t, idx, 1, []float32{1, 0})
 	// add a vector with incorrect dimension
-	if err := idx.Add(2, []float32{1, 0, 0}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
+	upsertVec(t, idx, 2, []float32{1, 0, 0})
 
-	labels, _, err := idx.Search([]float32{1, 0}, 10)
+	hits, err := idx.Search(context.Background(), []float32{1, 0}, 10, model.Filter{})
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
-	if len(labels) != 1 || labels[0] != 1 {
-		t.Fatalf("unexpected labels after mismatch: %v", labels)
+	if len(hits) != 1 || hits[0].ChunkID != 1 {
+		t.Fatalf("unexpected hits after mismatch: %v", hits)
 	}
 	// read via Load to respect the atomic.Int64 API
 	if idx.Metrics.DimensionMismatch.Load() != 1 {
@@ -83,10 +83,8 @@ func TestHNSWIndex_SaveAndLoad(t *testing.T) {
 	file := filepath.Join(tmp, "idx.bin")
 
 	idx := index.NewHNSWIndex(file)
-	if err := idx.Add(7, []float32{0.1, 0.2, 0.3}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
-	if err := idx.Save(""); err != nil {
+	upsertVec(t, idx, 7, []float32{0.1, 0.2, 0.3})
+	if err := idx.Save(context.Background(), ""); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 	if _, err := os.Stat(file); err != nil {
@@ -94,80 +92,75 @@ func TestHNSWIndex_SaveAndLoad(t *testing.T) {
 	}
 
 	loaded := index.NewHNSWIndex(file)
-	if err := loaded.Load(""); err != nil {
+	if err := loaded.Load(context.Background(), ""); err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	labels, _, err := loaded.Search([]float32{0.1, 0.2, 0.3}, 1)
+	hits, err := loaded.Search(context.Background(), []float32{0.1, 0.2, 0.3}, 1, model.Filter{})
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
-	if len(labels) != 1 || labels[0] != 7 {
-		t.Fatalf("unexpected loaded search result: %#v", labels)
+	if len(hits) != 1 || hits[0].ChunkID != 7 {
+		t.Fatalf("unexpected loaded search result: %#v", hits)
+	}
+	// the persisted payload round-trips alongside the vector.
+	if hits[0].Payload.RelPath != "doc.txt" {
+		t.Fatalf("expected payload to survive save/load, got %q", hits[0].Payload.RelPath)
 	}
 }
 
 func TestHNSWIndex_SearchEmptyIndex(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	// should not panic and should return empty slices
-	labels, scores, err := idx.Search([]float32{1, 0}, 1)
+	// should not panic and should return empty slice
+	hits, err := idx.Search(context.Background(), []float32{1, 0}, 1, model.Filter{})
 	if err != nil {
 		t.Fatalf("expected no error searching empty index, got %v", err)
 	}
-	if len(labels) != 0 || len(scores) != 0 {
-		t.Fatalf("expected empty results from empty index, got labels=%v scores=%v", labels, scores)
+	if len(hits) != 0 {
+		t.Fatalf("expected empty results from empty index, got %v", hits)
 	}
 }
 
 func TestHNSWIndex_KGreaterThanItems(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	if err := idx.Add(10, []float32{1, 0}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
-	if err := idx.Add(20, []float32{0, 1}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
+	upsertVec(t, idx, 10, []float32{1, 0})
+	upsertVec(t, idx, 20, []float32{0, 1})
 
-	labels, scores, err := idx.Search([]float32{1, 0}, 5)
+	hits, err := idx.Search(context.Background(), []float32{1, 0}, 5, model.Filter{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(labels) != 2 || len(scores) != 2 {
-		t.Fatalf("expected 2 results when k>items, got %d", len(labels))
+	if len(hits) != 2 {
+		t.Fatalf("expected 2 results when k>items, got %d", len(hits))
 	}
 }
 
-func TestHNSWIndex_AddDuplicateLabels(t *testing.T) {
+func TestHNSWIndex_UpsertDuplicateChunkIDs(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	// add the same label twice with different vectors; second add should
-	// overwrite the first
-	if err := idx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("add failed: %v", err)
-	}
-	if err := idx.Add(1, []float32{0, 1}); err != nil {
-		t.Fatalf("second add failed: %v", err)
-	}
+	// upsert the same chunk_id twice with different vectors; the second upsert
+	// should overwrite the first
+	upsertVec(t, idx, 1, []float32{1, 0})
+	upsertVec(t, idx, 1, []float32{0, 1})
 
-	// search for a vector similar to the second addition and ensure the
-	// returned score reflects the overwritten vector
-	labels, scores, err := idx.Search([]float32{0, 1}, 1)
+	// search for a vector similar to the second upsert and ensure the returned
+	// score reflects the overwritten vector
+	hits, err := idx.Search(context.Background(), []float32{0, 1}, 1, model.Filter{})
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}
-	if len(labels) != 1 {
-		t.Fatalf("expected 1 label after duplicate add, got %d", len(labels))
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit after duplicate upsert, got %d", len(hits))
 	}
-	if labels[0] != 1 {
-		t.Fatalf("expected label 1, got %d", labels[0])
+	if hits[0].ChunkID != 1 {
+		t.Fatalf("expected chunk 1, got %d", hits[0].ChunkID)
 	}
-	if scores[0] < 0.9 { // cosine similarity for identical vectors should be 1
-		t.Fatalf("expected high score after overwrite, got %v", scores[0])
+	if hits[0].Score < 0.9 { // cosine similarity for identical vectors should be 1
+		t.Fatalf("expected high score after overwrite, got %v", hits[0].Score)
 	}
 }
 
 func TestHNSWIndex_LoadNonExistentFile(t *testing.T) {
 	idx := index.NewHNSWIndex("/nonexistent")
-	err := idx.Load("")
-	if err != nil {
+	if err := idx.Load(context.Background(), ""); err != nil {
 		t.Fatalf("expected nil for nonexistent file, got %v", err)
 	}
 }

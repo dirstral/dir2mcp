@@ -9,9 +9,26 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
+// coreIndexStub provides no-op implementations of the non-persistence
+// model.Index methods so the persistence-focused fakes below only need to
+// define Save/Load (the model.Persistable capability the PersistenceManager
+// type-asserts).
+type coreIndexStub struct{}
+
+func (coreIndexStub) Upsert(context.Context, []float32, model.IndexPayload) error { return nil }
+func (coreIndexStub) Delete(context.Context, []uint64) error                      { return nil }
+func (coreIndexStub) Search(context.Context, []float32, int, model.Filter) ([]model.IndexHit, error) {
+	return nil, nil
+}
+func (coreIndexStub) Identity(context.Context) (string, error) { return "", nil }
+func (coreIndexStub) Reset(context.Context, string) error      { return nil }
+func (coreIndexStub) Close() error                             { return nil }
+
 type fakePersistIndex struct {
+	coreIndexStub
 	loadCalls int32
 	saveCalls int32
 	loadErr   error
@@ -22,22 +39,19 @@ type fakePersistIndex struct {
 	saveNotify chan struct{}
 }
 
-// notifyIndex is a minimal implementation of model.Index used by tests
-// that need to observe when Load begins. It sends a notification on the
-// provided channel immediately when Load is called; if the `done` channel
-// is non-nil, Load blocks until it is closed. This allows tests to control
-// the duration of the call.
+// notifyIndex is a minimal implementation of model.Index + model.Persistable
+// used by tests that need to observe when Load begins. It sends a notification
+// on the provided channel immediately when Load is called; if the `done`
+// channel is non-nil, Load blocks until it is closed. This allows tests to
+// control the duration of the call.
 type notifyIndex struct {
+	coreIndexStub
 	started chan struct{}
 	done    chan struct{}
 }
 
-func (n *notifyIndex) Add(label uint64, vector []float32) error { return nil }
-func (n *notifyIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
-	return nil, nil, nil
-}
-func (n *notifyIndex) Save(path string) error { return nil }
-func (n *notifyIndex) Load(path string) error {
+func (n *notifyIndex) Save(context.Context, string) error { return nil }
+func (n *notifyIndex) Load(context.Context, string) error {
 	select {
 	case n.started <- struct{}{}:
 	default:
@@ -47,21 +61,8 @@ func (n *notifyIndex) Load(path string) error {
 	}
 	return nil
 }
-func (n *notifyIndex) Close() error { return nil }
 
-func (f *fakePersistIndex) Add(label uint64, vector []float32) error {
-	_ = label
-	_ = vector
-	return nil
-}
-
-func (f *fakePersistIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
-	_ = vector
-	_ = k
-	return nil, nil, nil
-}
-
-func (f *fakePersistIndex) Save(path string) error {
+func (f *fakePersistIndex) Save(_ context.Context, path string) error {
 	_ = path
 	atomic.AddInt32(&f.saveCalls, 1)
 	if f.saveNotify != nil {
@@ -74,13 +75,11 @@ func (f *fakePersistIndex) Save(path string) error {
 	return f.saveErr
 }
 
-func (f *fakePersistIndex) Load(path string) error {
+func (f *fakePersistIndex) Load(_ context.Context, path string) error {
 	_ = path
 	atomic.AddInt32(&f.loadCalls, 1)
 	return f.loadErr
 }
-
-func (f *fakePersistIndex) Close() error { return nil }
 
 func TestPersistenceManager_LoadAndSaveAll(t *testing.T) {
 	i1 := &fakePersistIndex{}
@@ -236,15 +235,13 @@ func TestPersistenceManager_LoadAll_CancelDuring(t *testing.T) {
 // concurrentIndex tracks active Save calls and reports if more than one
 // happens at the same time (violating serialization guarantees).
 type concurrentIndex struct {
+	coreIndexStub
 	running int32
 	errCh   chan error
 }
 
-func (c *concurrentIndex) Add(label uint64, vector []float32) error { return nil }
-func (c *concurrentIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
-	return nil, nil, nil
-}
-func (c *concurrentIndex) Save(path string) error {
+func (c *concurrentIndex) Save(_ context.Context, path string) error {
+	_ = path
 	if atomic.AddInt32(&c.running, 1) > 1 {
 		select {
 		case c.errCh <- errors.New("concurrent save"):
@@ -257,7 +254,8 @@ func (c *concurrentIndex) Save(path string) error {
 	return nil
 }
 
-func (c *concurrentIndex) Load(path string) error {
+func (c *concurrentIndex) Load(_ context.Context, path string) error {
+	_ = path
 	if atomic.AddInt32(&c.running, 1) > 1 {
 		select {
 		case c.errCh <- errors.New("concurrent load/save"):
@@ -269,8 +267,6 @@ func (c *concurrentIndex) Load(path string) error {
 	atomic.AddInt32(&c.running, -1)
 	return nil
 }
-
-func (c *concurrentIndex) Close() error { return nil }
 
 func TestPersistenceManager_SaveAll_Serializes(t *testing.T) {
 	ci := &concurrentIndex{errCh: make(chan error, 1)}

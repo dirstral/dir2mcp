@@ -24,12 +24,52 @@ type LexicalSearcher interface {
 	SearchBM25(ctx context.Context, query string, k int, indexKind string) ([]SearchHit, error)
 }
 
+// Index is the core vector-store contract every backend must satisfy (issue
+// #247). The in-memory HNSW is the conforming default; external/on-disk
+// backends (Qdrant #268, pgvector #269, on-disk #246) implement the same
+// interface. Optional capabilities (Persistable, FilteringIndex) are layered on
+// top and discovered via type assertion, mirroring the LexicalSearcher /
+// MultimodalEmbedder pattern.
+//
+// Implementations should be safe for concurrent use; retrieval calls Search
+// concurrently with the embedding worker's Upsert.
 type Index interface {
-	Add(label uint64, vector []float32) error
-	Search(vector []float32, k int) ([]uint64, []float32, error)
-	Save(path string) error
-	Load(path string) error
+	// Upsert stores (or replaces) the vector and its payload, keyed by
+	// payload.ChunkID. An empty vector is an error.
+	Upsert(ctx context.Context, vector []float32, payload IndexPayload) error
+	// Delete removes the vectors (and payloads) for the given chunk IDs.
+	// Unknown IDs are ignored.
+	Delete(ctx context.Context, chunkIDs []uint64) error
+	// Search returns the k best matches for vector, ordered best-first.
+	// A non-zero filter restricts the result set; backends that report
+	// CanFilter false simply ignore it (retrieval applies the filter itself).
+	Search(ctx context.Context, vector []float32, k int, filter Filter) ([]IndexHit, error)
+	// Identity returns the recorded corpus-lifetime embed identity (SPEC
+	// 8.1.4), or "" when the index is fresh.
+	Identity(ctx context.Context) (string, error)
+	// Reset clears all vectors/payloads and records identity as the new
+	// corpus-lifetime embed identity. Called when the embed identity changes.
+	Reset(ctx context.Context, identity string) error
 	Close() error
+}
+
+// Persistable is the optional capability for indexes that can durably
+// snapshot/restore themselves to a path (issue #247). The in-memory HNSW and
+// the future on-disk backend implement it; networked backends (Qdrant,
+// pgvector) own their persistence and do not. PersistenceManager type-asserts
+// against this interface and silently skips indexes that do not implement it.
+type Persistable interface {
+	Save(ctx context.Context, path string) error
+	Load(ctx context.Context, path string) error
+}
+
+// FilteringIndex is the optional capability for indexes that can evaluate a
+// Filter inside the backend (issue #247). When CanFilter reports true for a
+// given filter, retrieval pushes the filter down to Search and trusts the
+// backend-filtered results (skipping the overfetch-then-filter loop); otherwise
+// it falls back to fetching a wider candidate pool and filtering in Go.
+type FilteringIndex interface {
+	CanFilter(filter Filter) bool
 }
 
 type Retriever interface {
