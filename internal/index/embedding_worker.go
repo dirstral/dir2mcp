@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/avutil"
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/pdfutil"
 	"github.com/dirstral/dir2mcp/internal/store"
@@ -44,6 +45,12 @@ type EmbeddingWorker struct {
 	// Required only when media chunks are present; text-only corpora may
 	// leave it empty.
 	RootDir string
+
+	// Corpus is the filesystem abstraction used to read a media chunk's bytes.
+	// Nil means "use a local filesystem rooted at RootDir" — the default that
+	// preserves the historical local-corpus behavior. Resolved lazily via
+	// corpusFS() so callers never observe a nil backend.
+	Corpus corpusfs.CorpusFS
 
 	// Logger is optional; if non‑nil its Printf method will be used for
 	// informational messages. When nil the standard library's log package
@@ -165,54 +172,52 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 	return vectors, nil
 }
 
-// loadMediaInput resolves a media chunk's source bytes (from RootDir +
-// MediaRef) and infers its MIME type. PDFs are reduced to the chunk's single
-// page and audio/video to the chunk's single time window, so the embedded
-// bytes line up with the cited span and the per-request caps are respected
-// (SPEC 8.1.7). The resolved path is constrained to RootDir as defense-in-depth
-// against a traversal in a stored ref.
+// corpusFS resolves the active corpus filesystem, defaulting to a local
+// filesystem rooted at RootDir when none was injected. This keeps local corpora
+// behaving exactly as before while allowing an S3 (or other) backend.
+func (w *EmbeddingWorker) corpusFS() corpusfs.CorpusFS {
+	if w.Corpus != nil {
+		return w.Corpus
+	}
+	return corpusfs.NewLocalFS(w.RootDir)
+}
+
+// loadMediaInput resolves a media chunk's source bytes (from the corpus
+// filesystem + MediaRef) and infers its MIME type. PDFs are reduced to the
+// chunk's single page and audio/video to the chunk's single time window, so the
+// embedded bytes line up with the cited span and the per-request caps are
+// respected (SPEC 8.1.7). The corpus filesystem constrains the ref to the
+// corpus root as defense-in-depth against a traversal in a stored ref.
+//
+// Image and PDF bytes are read whole via Open+io.ReadAll (pdfutil needs the full
+// file to extract a single page). Audio/video go through Localize because ffmpeg
+// (avutil.ExtractSegment) needs a real filesystem path, not an io.Reader — for
+// an object-store backend this downloads the whole object to a temp file.
 func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask) (model.MediaInput, error) {
 	ref := strings.TrimSpace(t.MediaRef)
 	if ref == "" {
 		return model.MediaInput{}, fmt.Errorf("%w: media chunk %d has no media_ref", ErrFatal, t.Metadata.ChunkID)
 	}
-	if strings.TrimSpace(w.RootDir) == "" {
+	if w.Corpus == nil && strings.TrimSpace(w.RootDir) == "" {
 		return model.MediaInput{}, fmt.Errorf("%w: media embedding requires a corpus root", ErrFatal)
 	}
-	root, err := filepath.Abs(w.RootDir)
-	if err != nil {
-		return model.MediaInput{}, fmt.Errorf("%w: resolve root: %v", ErrFatal, err)
-	}
-	// Resolve symlinks on both the root and the target so a symlink *within*
-	// the corpus that points outside it cannot smuggle out-of-root bytes in
-	// (a lexical Join+HasPrefix check alone would miss that).
-	realRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		realRoot = root // root should exist; fall back to the lexical form
-	}
-	resolved, err := filepath.EvalSymlinks(filepath.Join(realRoot, filepath.FromSlash(ref)))
-	if err != nil {
-		return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, err)
-	}
-	if resolved != realRoot && !strings.HasPrefix(resolved, realRoot+string(os.PathSeparator)) {
-		return model.MediaInput{}, fmt.Errorf("%w: media_ref %q escapes the corpus root", ErrFatal, ref)
-	}
+	fsys := w.corpusFS()
 
 	switch strings.ToLower(strings.TrimSpace(t.Modality)) {
 	case "audio", "video":
-		data, aerr := w.loadMediaSegment(ctx, t, resolved, ref)
+		data, aerr := w.loadMediaSegment(ctx, t, fsys, ref)
 		if aerr != nil {
 			return model.MediaInput{}, aerr
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	case "pdf":
-		data, perr := loadPDFPage(t, resolved, ref)
+		data, perr := w.loadPDFPage(ctx, t, fsys, ref)
 		if perr != nil {
 			return model.MediaInput{}, perr
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	default: // image and other whole-file media
-		data, rerr := os.ReadFile(resolved)
+		data, rerr := readWholeMedia(ctx, fsys, ref)
 		if rerr != nil {
 			return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, rerr)
 		}
@@ -220,14 +225,28 @@ func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask)
 	}
 }
 
+// readWholeMedia reads the entire object at ref through the corpus filesystem.
+func readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
+	rc, err := fsys.Open(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(rc)
+}
+
 // loadPDFPage extracts the chunk's single page (from its `page` span) into a
 // one-page PDF (SPEC 8.1.7). A missing/invalid page span is a fatal task error
 // so a span/content mismatch surfaces instead of silently embedding page 1.
-func loadPDFPage(t model.ChunkTask, resolved, ref string) ([]byte, error) {
+//
+// pdfutil.ExtractPage operates on the whole file in memory, so the entire PDF is
+// read via Open even though only one page is embedded; this matches the prior
+// behavior (it previously read the whole file too).
+func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
 	if !strings.EqualFold(strings.TrimSpace(t.Metadata.Span.Kind), "page") || t.Metadata.Span.Page < 1 {
 		return nil, fmt.Errorf("%w: pdf media chunk %d has invalid page span", ErrFatal, t.Metadata.ChunkID)
 	}
-	data, err := os.ReadFile(resolved)
+	data, err := readWholeMedia(ctx, fsys, ref)
 	if err != nil {
 		return nil, fmt.Errorf("read media %q: %w", ref, err)
 	}
@@ -241,17 +260,23 @@ func loadPDFPage(t model.ChunkTask, resolved, ref string) ([]byte, error) {
 // loadMediaSegment cuts the chunk's single time window (from its `time` span)
 // out of the source media (SPEC 8.1.7). A missing/invalid time span is a fatal
 // task error so a span/content mismatch surfaces instead of embedding the wrong
-// segment.
-func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTask, resolved, ref string) ([]byte, error) {
+// segment. The source is Localized to a real path first because ffmpeg cannot
+// read from an io.Reader.
+func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
 	span := t.Metadata.Span
 	if !strings.EqualFold(strings.TrimSpace(span.Kind), "time") || span.StartMS < 0 || span.EndMS <= span.StartMS {
 		return nil, fmt.Errorf("%w: %s media chunk %d has invalid time span", ErrFatal, strings.ToLower(t.Modality), t.Metadata.ChunkID)
 	}
+	localPath, cleanup, err := fsys.Localize(ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("read media %q: %w", ref, err)
+	}
+	defer cleanup()
 	extract := w.ExtractSegmentFunc
 	if extract == nil {
 		extract = avutil.ExtractSegment
 	}
-	data, err := extract(ctx, resolved, span.StartMS, span.EndMS)
+	data, err := extract(ctx, localPath, span.StartMS, span.EndMS)
 	if err != nil {
 		return nil, fmt.Errorf("%w: extract %q segment [%d,%d): %v", ErrFatal, ref, span.StartMS, span.EndMS, err)
 	}
