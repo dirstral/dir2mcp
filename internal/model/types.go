@@ -46,7 +46,12 @@ type Chunk struct {
 	IndexKind       string
 	EmbeddingStatus string
 	EmbeddingError  string
-	Deleted         bool
+	// ErrorCategory is the coarse failure classification persisted with a
+	// chunk when it is inserted already-failed (e.g. quarantined by the
+	// output quality gate). It mirrors store.ErrorCategory but is typed as a
+	// plain string here to avoid an import cycle. Empty for healthy chunks.
+	ErrorCategory string
+	Deleted       bool
 	// Modality is the chunk's content modality for multimodal embeddings
 	// (SPEC 8.1.7): "" / "text" (default), or "image"/"audio"/"video"/"pdf".
 	Modality string

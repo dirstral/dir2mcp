@@ -43,6 +43,13 @@ const (
 	// rejected the input for a reason other than the above (vector
 	// dimension mismatch, model output malformed). Not retryable.
 	ErrorCategoryEmbeddingFailure ErrorCategory = "embedding_failure"
+	// ErrorCategoryQualityGate indicates the output quality gate
+	// (spec 0.16.0) rejected the generated transcript/OCR text as
+	// degenerate (repetition loop, empty output, off-script, low
+	// density, gibberish) before it was embedded. The chunk is
+	// quarantined at insert time so the embedding worker never picks
+	// it up. Not retryable without a better extraction/transcription.
+	ErrorCategoryQualityGate ErrorCategory = "quality_gate"
 )
 
 // classifierRule pairs a category with the keyword set that triggers

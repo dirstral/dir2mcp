@@ -207,8 +207,8 @@ func lookupChunkDocContext(ctx context.Context, exec dbExecutor, repID int64) (r
 func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType string) (int64, error) {
 	_, err := exec.ExecContext(
 		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, embedding_status, embedding_error, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, embedding_status, embedding_error, error_category, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -221,6 +221,7 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		   media_ref=excluded.media_ref,
 		   embedding_status=excluded.embedding_status,
 		   embedding_error=excluded.embedding_error,
+		   error_category=excluded.error_category,
 		   deleted=excluded.deleted`,
 		chunk.RepID,
 		chunk.Ordinal,
@@ -235,6 +236,7 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		strings.TrimSpace(chunk.MediaRef),
 		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
 		strings.TrimSpace(chunk.EmbeddingError),
+		strings.TrimSpace(chunk.ErrorCategory),
 		boolToInt(chunk.Deleted),
 	)
 	if err != nil {
@@ -849,7 +851,7 @@ func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]mode
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT chunk_id, rep_id, ordinal, text, text_hash, index_kind, embedding_status, embedding_error, deleted
+		`SELECT chunk_id, rep_id, ordinal, text, text_hash, index_kind, embedding_status, embedding_error, error_category, deleted
 		 FROM chunks
 		 WHERE rep_id = ?
 		 ORDER BY ordinal ASC`,
@@ -875,6 +877,7 @@ func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]mode
 			&chunk.IndexKind,
 			&chunk.EmbeddingStatus,
 			&chunk.EmbeddingError,
+			&chunk.ErrorCategory,
 			&deleted,
 		); err != nil {
 			return nil, err
