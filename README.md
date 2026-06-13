@@ -56,6 +56,22 @@ dir2mcp ships in two Homebrew formulas that install the **same binary** but diff
 
 The two formulas are mutually exclusive (Homebrew refuses to install both at once). Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)).
 
+### Nix (macOS + Linux)
+
+A [Nix flake](flake.nix) packages the **lean** `dir2mcp` binary for `x86_64`/`aarch64` on both Linux and macOS. Run it without installing:
+
+```bash
+nix run github:dirstral/dir2mcp -- version
+```
+
+Or add it to a profile:
+
+```bash
+nix profile install github:dirstral/dir2mcp
+```
+
+The flake builds the lean binary only (no bundled docling runtime); for batteries-included structured extraction, use the `dir2mcp-full` Homebrew formula or the docling-full container. A `devShells.default` with the Go toolchain is also exposed (`nix develop`).
+
 Build-from-source remains available as an alternative:
 
 ```bash
