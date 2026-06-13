@@ -1393,10 +1393,12 @@ func filterFromQuery(q model.SearchQuery) model.Filter {
 
 // collectVectorCandidates gathers up to k filtered dense-vector candidates. When
 // the index can evaluate the filter itself (FilteringIndex + CanFilter) the
-// filter is pushed down and the backend-filtered results are trusted; otherwise
-// it falls back to the legacy overfetch-then-filter loop. Extracted from
-// searchSingleIndex so the outer function stays under the cyclomatic-complexity
-// budget after hybrid fusion was layered on top.
+// filter is pushed down to narrow the backend's candidate pool; otherwise an
+// empty filter is passed and the predicates are evaluated in Go. In both cases
+// the same widening overfetch loop runs and matchFilters is re-applied so the
+// in-memory orphan/eviction state is honoured. Extracted from searchSingleIndex
+// so the outer function stays under the cyclomatic-complexity budget after
+// hybrid fusion was layered on top.
 func (s *Service) collectVectorCandidates(
 	ctx context.Context,
 	vector []float32,
@@ -1406,56 +1408,33 @@ func (s *Service) collectVectorCandidates(
 	k int,
 ) ([]model.SearchHit, error) {
 	filter := filterFromQuery(filters)
+	// Only push the filter down when the backend can evaluate it itself;
+	// otherwise pass an empty filter so payload-blind backends behave as
+	// before. Either way we run the same widening overfetch loop and re-apply
+	// matchFilters in Go: pushing the filter down narrows the candidate pool
+	// the backend returns, but the in-memory orphan/eviction state (which the
+	// backend payload does not know about, see searchHitFromIndexHit) is still
+	// enforced by the post-materialization re-check. Without the widening loop a
+	// pushed-down search would under-return whenever the re-check drops an
+	// evicted-but-still-indexed chunk.
+	backendFilter := model.Filter{}
 	if fi, ok := idx.(model.FilteringIndex); ok && fi.CanFilter(filter) {
-		return s.collectPushedDownCandidates(ctx, vector, idx, indexName, filters, filter, k)
+		backendFilter = filter
 	}
-	return s.collectOverfetchedCandidates(ctx, vector, idx, indexName, filters, k)
+	return s.collectFilteredCandidates(ctx, vector, idx, indexName, filters, backendFilter, k)
 }
 
-// collectPushedDownCandidates asks the backend for k filtered hits in a single
-// Search and materialises SearchHits from the returned payloads. The full
-// matchFilters re-check is still applied after materialisation so the retrieval
-// service's in-memory state (orphan/eviction, see searchHitFromIndexHit) is
-// honoured even when the backend already pre-filtered on path/doctype.
-func (s *Service) collectPushedDownCandidates(
+// collectFilteredCandidates runs the widening overfetch loop: it requests a
+// widening candidate pool from the backend (with backendFilter pushed down when
+// the backend supports it, or an empty filter otherwise) and applies
+// matchFilters in Go until k results are gathered or the backend is exhausted.
+func (s *Service) collectFilteredCandidates(
 	ctx context.Context,
 	vector []float32,
 	idx model.Index,
 	indexName string,
 	filters model.SearchQuery,
-	filter model.Filter,
-	k int,
-) ([]model.SearchHit, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	hits, err := idx.Search(ctx, vector, k, filter)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]model.SearchHit, 0, len(hits))
-	for _, h := range hits {
-		hit := s.searchHitFromIndexHit(indexName, h)
-		if !matchFilters(hit, filters) {
-			continue
-		}
-		out = append(out, hit)
-		if len(out) >= k {
-			break
-		}
-	}
-	return out, nil
-}
-
-// collectOverfetchedCandidates runs the legacy overfetch loop for backends that
-// cannot filter themselves: it requests a widening unfiltered candidate pool and
-// applies matchFilters in Go.
-func (s *Service) collectOverfetchedCandidates(
-	ctx context.Context,
-	vector []float32,
-	idx model.Index,
-	indexName string,
-	filters model.SearchQuery,
+	backendFilter model.Filter,
 	k int,
 ) ([]model.SearchHit, error) {
 	// Read overfetch under lock to avoid races with SetOverfetchMultiplier.
@@ -1474,7 +1453,7 @@ func (s *Service) collectOverfetchedCandidates(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		hits, err := idx.Search(ctx, vector, n, model.Filter{})
+		hits, err := idx.Search(ctx, vector, n, backendFilter)
 		if err != nil {
 			return nil, err
 		}
