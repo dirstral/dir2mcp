@@ -59,6 +59,12 @@ type Service struct {
 	// gate as "skip screening", proceeding exactly as before the gate existed.
 	qualityGate *quality.Gate
 
+	// transcriptLanguage is the active STT provider profile's language tag
+	// (SPEC 8.1.3), resolved once at construction and fed to the quality
+	// gate's language detector. Empty when STT is off or no language is
+	// configured, in which case the language detector self-skips.
+	transcriptLanguage string
+
 	// embedMultimodal is the resolved multimodal embedding mode (SPEC
 	// 8.1.7): "off" (default), "augment", or "replace". When augment/
 	// replace, media documents additionally (or exclusively) get a media
@@ -156,6 +162,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	if cfg.QualityGatesEnabled {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
 	}
+	svc.transcriptLanguage = sttExpectedLanguage(cfg)
 	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
 	// unresolvable embed profile leaves it off (text-only).
 	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
@@ -343,6 +350,42 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 	default:
 		return nil, fmt.Errorf("unsupported transcriber provider %q", sel)
 	}
+}
+
+// sttExpectedLanguage resolves the active STT provider profile's language tag
+// (SPEC 8.1.3), mirroring the provider selection in
+// TranscriberFromConfigWithLanguage. It returns "" when STT is off, when no
+// STT-capable profile resolves, or when the profile carries no language — in
+// all of which cases the quality gate's language detector self-skips. Resolving
+// from the profile (rather than the legacy stt.elevenlabs_language_code field)
+// ensures Mistral/provider-profile setups still feed the gate a language.
+func sttExpectedLanguage(cfg config.Config) string {
+	sel := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
+	if sel == "" {
+		sel = transcriberProviderAuto
+	}
+	if sel == transcriberProviderOff || sel == "none" || sel == "disabled" {
+		return ""
+	}
+	r := cfg.Providers()
+	var (
+		prof provider.Profile
+		err  error
+	)
+	switch sel {
+	case transcriberProviderMistral:
+		prof, err = r.ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
+	case transcriberProviderElevenLabs:
+		prof, err = r.ResolveExplicit(provider.CapSTT, "elevenlabs", true)
+	case transcriberProviderAuto:
+		prof, err = r.Resolve(provider.CapSTT)
+	default:
+		return ""
+	}
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(prof.STTLanguage)
 }
 
 // healthCheckInterval returns the configured base poll interval for connector
@@ -1374,11 +1417,14 @@ func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx qu
 	}
 }
 
-// transcriptExpectedLanguage returns the configured STT language tag used to
-// drive the quality gate's language detector, or "" when none is configured
-// (in which case the language gate self-skips).
+// transcriptExpectedLanguage returns the active STT provider profile's language
+// tag used to drive the quality gate's language detector, or "" when none is
+// configured (in which case the language gate self-skips). The value is
+// resolved from the same provider profile the transcriber uses (SPEC 8.1.3),
+// not the legacy ElevenLabs-only field, so provider-profile setups (e.g.
+// Mistral) supply the correct expected language.
 func (s *Service) transcriptExpectedLanguage() string {
-	return strings.TrimSpace(s.cfg.STTElevenLabsLanguageCode)
+	return s.transcriptLanguage
 }
 
 func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {

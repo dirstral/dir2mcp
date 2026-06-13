@@ -851,7 +851,7 @@ func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]mode
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT chunk_id, rep_id, ordinal, text, text_hash, index_kind, embedding_status, embedding_error, deleted
+		`SELECT chunk_id, rep_id, ordinal, text, text_hash, index_kind, embedding_status, embedding_error, error_category, deleted
 		 FROM chunks
 		 WHERE rep_id = ?
 		 ORDER BY ordinal ASC`,
@@ -877,6 +877,7 @@ func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]mode
 			&chunk.IndexKind,
 			&chunk.EmbeddingStatus,
 			&chunk.EmbeddingError,
+			&chunk.ErrorCategory,
 			&deleted,
 		); err != nil {
 			return nil, err

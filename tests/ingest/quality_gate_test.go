@@ -100,6 +100,12 @@ func TestQualityGate_DisabledViaSetter(t *testing.T) {
 		if c.EmbeddingStatus != "pending" {
 			t.Fatalf("chunk %d: gate disabled, expected pending, got %q", i, c.EmbeddingStatus)
 		}
+		if c.ErrorCategory != "" {
+			t.Fatalf("chunk %d: gate disabled, expected empty error_category, got %q", i, c.ErrorCategory)
+		}
+		if c.EmbeddingError != "" {
+			t.Fatalf("chunk %d: gate disabled, expected empty embedding_error, got %q", i, c.EmbeddingError)
+		}
 	}
 }
 
