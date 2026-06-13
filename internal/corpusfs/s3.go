@@ -163,10 +163,15 @@ func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options) (Discovere
 	}, true
 }
 
-// keyHasExcludedDir reports whether any path segment of the relative key is a
-// default-excluded directory name (e.g. .git, node_modules).
+// keyHasExcludedDir reports whether the relative key lives under a
+// default-excluded directory (e.g. .git, node_modules). Only ancestor path
+// segments are tested — the final segment is the object's own basename, and
+// LocalFS excludes directories, not regular files, so a file whose name happens
+// to equal an excluded-dir name (e.g. a file literally named "vendor") must
+// still be discovered for the two backends to stay in parity.
 func keyHasExcludedDir(rel string) bool {
-	for _, seg := range strings.Split(rel, "/") {
+	segs := strings.Split(rel, "/")
+	for _, seg := range segs[:len(segs)-1] {
 		if _, ok := defaultExcludedDirs[seg]; ok {
 			return true
 		}

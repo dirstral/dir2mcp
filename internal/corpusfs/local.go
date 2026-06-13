@@ -2,6 +2,7 @@ package corpusfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,13 @@ import (
 	"sort"
 	"strings"
 )
+
+// ErrPathEscapesRoot is returned by Open/Localize when a relPath resolves
+// outside the corpus root (a traversal in a stored ref). Callers can treat it as
+// a permanent, non-retryable failure: re-running with the same ref cannot
+// succeed. It is a sentinel so consumers (e.g. the embedding worker) can map it
+// to their own fatal-error classification without string matching.
+var ErrPathEscapesRoot = errors.New("corpusfs: path escapes the corpus root")
 
 // LocalFS is the default CorpusFS backed by the local filesystem. An NFS mount
 // is a local path, so it is served by LocalFS as well. It is behavior-preserving
@@ -126,7 +134,7 @@ func resolveWithinRoot(root, relPath string) (string, error) {
 		return "", fmt.Errorf("resolve %q: %w", relPath, err)
 	}
 	if resolved != realRoot && !strings.HasPrefix(resolved, realRoot+string(os.PathSeparator)) {
-		return "", fmt.Errorf("corpusfs: path %q escapes the corpus root", relPath)
+		return "", fmt.Errorf("%w: %q", ErrPathEscapesRoot, relPath)
 	}
 	return resolved, nil
 }

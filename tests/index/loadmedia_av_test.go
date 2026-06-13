@@ -128,3 +128,49 @@ func TestEmbeddingWorker_RunOnce_SegmentExtractFails(t *testing.T) {
 		t.Fatalf("expected fatal error on extract failure, got %v", err)
 	}
 }
+
+// TestEmbeddingWorker_RunOnce_MediaRefEscapesRootIsFatal pins the contract that a
+// stored media_ref which escapes the corpus root is a permanent (ErrFatal),
+// non-retryable failure — matching the pre-CorpusFS behavior. Without this the
+// CorpusFS containment error would be misclassified as a transient read error
+// and keep the worker's Run loop alive on a security-relevant invariant
+// violation.
+func TestEmbeddingWorker_RunOnce_MediaRefEscapesRootIsFatal(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.png"), []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escapeRef := "../" + filepath.Base(outside) + "/secret.png"
+
+	for _, tc := range []struct {
+		name, modality string
+		span           model.Span
+	}{
+		{"image", "image", model.Span{}},
+		{"pdf", "pdf", model.Span{Kind: "page", Page: 1}},
+		{"audio", "audio", model.Span{Kind: "time", StartMS: 0, EndMS: 1000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := &fakeChunkSource{tasks: []model.ChunkTask{avTask(9, escapeRef, tc.modality, tc.span)}}
+			worker := &index.EmbeddingWorker{
+				Source: source, Index: index.NewHNSWIndex(""), Embedder: &fakeMultimodalEmbedder{mediaVecs: [][]float32{{1, 0}}},
+				RootDir: root, BatchSize: 4, ModelForText: "gemini-embedding-2",
+				ExtractSegmentFunc: func(context.Context, string, int, int) ([]byte, error) {
+					t.Fatal("extractor must not be called for an escaping ref")
+					return nil, nil
+				},
+			}
+			n, err := worker.RunOnce(context.Background(), "text")
+			if !errors.Is(err, index.ErrFatal) {
+				t.Fatalf("expected fatal error on escaping media_ref, got %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("indexed = %d, want 0", n)
+			}
+			if len(source.failedLabels) != 1 || source.failedLabels[0] != 9 {
+				t.Fatalf("failed labels = %#v, want [9]", source.failedLabels)
+			}
+		})
+	}
+}

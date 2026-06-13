@@ -151,6 +151,40 @@ func TestS3FSWalk_KeyMappingExcludeAndSizeCap(t *testing.T) {
 	}
 }
 
+// TestS3FSWalk_ExcludesDirsNotFilesNamedLikeDirs pins LocalFS↔S3 parity for the
+// excluded-dirs policy: objects *under* an excluded directory are skipped, but a
+// regular object whose own basename equals an excluded-dir name (e.g. a file
+// literally named "vendor") is still discovered — LocalFS excludes directories,
+// not files.
+func TestS3FSWalk_ExcludesDirsNotFilesNamedLikeDirs(t *testing.T) {
+	objs := map[string][]byte{
+		"vendor":            []byte("a file, not a dir"), // top-level file named like an excluded dir
+		"sub/node_modules":  []byte("also a file"),       // nested file named like an excluded dir
+		"vendor/lib.go":     []byte("excluded: under dir"),
+		"node_modules/x.js": []byte("excluded: under dir"),
+		"sub/.git/config":   []byte("excluded: under dir"),
+	}
+	fsys, _ := newFakeS3FS(t, "", objs, "")
+	got, err := fsys.Walk(context.Background(), "", corpusfs.DefaultOptions())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	rels := map[string]bool{}
+	for _, f := range got {
+		rels[f.RelPath] = true
+	}
+	for _, want := range []string{"vendor", "sub/node_modules"} {
+		if !rels[want] {
+			t.Fatalf("expected file %q to be discovered (it is a file, not a dir)", want)
+		}
+	}
+	for _, bad := range []string{"vendor/lib.go", "node_modules/x.js", "sub/.git/config"} {
+		if rels[bad] {
+			t.Fatalf("did not expect %q (lives under an excluded dir)", bad)
+		}
+	}
+}
+
 // TestS3FSWalk_EmptyPrefix verifies key mapping with no prefix configured.
 func TestS3FSWalk_EmptyPrefix(t *testing.T) {
 	objs := map[string][]byte{

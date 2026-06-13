@@ -207,22 +207,37 @@ func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask)
 	case "audio", "video":
 		data, aerr := w.loadMediaSegment(ctx, t, fsys, ref)
 		if aerr != nil {
-			return model.MediaInput{}, aerr
+			return model.MediaInput{}, fatalIfEscape(aerr)
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	case "pdf":
 		data, perr := w.loadPDFPage(ctx, t, fsys, ref)
 		if perr != nil {
-			return model.MediaInput{}, perr
+			return model.MediaInput{}, fatalIfEscape(perr)
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	default: // image and other whole-file media
 		data, rerr := readWholeMedia(ctx, fsys, ref)
 		if rerr != nil {
-			return model.MediaInput{}, fmt.Errorf("read media %q: %w", ref, rerr)
+			return model.MediaInput{}, fatalIfEscape(fmt.Errorf("read media %q: %w", ref, rerr))
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	}
+}
+
+// fatalIfEscape promotes a corpus-root traversal error to ErrFatal so the worker
+// treats a stored ref that escapes the corpus root as a permanent, non-retryable
+// failure (preserving the pre-CorpusFS contract where the escape check returned
+// ErrFatal). Other errors pass through unchanged so genuinely transient read
+// failures (e.g. a temporarily unreadable file) stay retryable.
+func fatalIfEscape(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, corpusfs.ErrPathEscapesRoot) {
+		return fmt.Errorf("%w: %v", ErrFatal, err)
+	}
+	return err
 }
 
 // readWholeMedia reads the entire object at ref through the corpus filesystem.
