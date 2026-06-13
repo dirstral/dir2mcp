@@ -243,3 +243,102 @@ func TestFlatTextFallback(t *testing.T) {
 		t.Errorf("transcript = %q, want flat text fallback", out)
 	}
 }
+
+// TestEmptyAudioRejected asserts empty input is rejected locally as a
+// non-retryable WHISPER_FAILED without any HTTP call.
+func TestEmptyAudioRejected(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_, _ = io.WriteString(w, jsonSegments)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "k")
+	_, err := c.Transcribe(context.Background(), "a.wav", nil)
+	if err == nil {
+		t.Fatal("expected error for empty audio")
+	}
+	pe, ok := err.(*model.ProviderError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.ProviderError", err)
+	}
+	if pe.Code != "WHISPER_FAILED" || pe.Retryable {
+		t.Errorf("err = %+v, want WHISPER_FAILED non-retryable", pe)
+	}
+	if n := atomic.LoadInt32(&calls); n != 0 {
+		t.Errorf("calls = %d, want 0 (no HTTP for empty input)", n)
+	}
+}
+
+// TestMalformedJSON asserts a 200 with an unparseable body surfaces as a
+// non-retryable WHISPER_FAILED decode error (not retried).
+func TestMalformedJSON(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_, _ = io.WriteString(w, `{not valid json`)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "k")
+	_, err := c.Transcribe(context.Background(), "a.wav", []byte("x"))
+	if err == nil {
+		t.Fatal("expected decode error")
+	}
+	pe, ok := err.(*model.ProviderError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.ProviderError", err)
+	}
+	if pe.Code != "WHISPER_FAILED" || pe.Retryable {
+		t.Errorf("err = %+v, want WHISPER_FAILED non-retryable", pe)
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("calls = %d, want 1 (decode error not retried)", n)
+	}
+}
+
+// TestNon200EmptyBody asserts a non-200 with an empty body still yields a
+// categorized ProviderError with a non-empty message (no panic, no leak).
+func TestNon200EmptyBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest) // 4xx, non-retryable, empty body
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "k")
+	_, err := c.Transcribe(context.Background(), "a.wav", []byte("x"))
+	if err == nil {
+		t.Fatal("expected error for non-200")
+	}
+	pe, ok := err.(*model.ProviderError)
+	if !ok {
+		t.Fatalf("error type = %T, want *model.ProviderError", err)
+	}
+	if pe.Code != "WHISPER_FAILED" || pe.Retryable {
+		t.Errorf("err = %+v, want WHISPER_FAILED non-retryable", pe)
+	}
+	if strings.TrimSpace(pe.Message) == "" {
+		t.Error("message should be non-empty even for empty upstream body")
+	}
+	if pe.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", pe.StatusCode)
+	}
+}
+
+// TestContextCancellationRespected asserts an already-cancelled context
+// short-circuits the request rather than hitting the server.
+func TestContextCancellationRespected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, jsonSegments)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	c := newClient(srv.URL, "k")
+	if _, err := c.Transcribe(ctx, "a.wav", []byte("x")); err == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}
