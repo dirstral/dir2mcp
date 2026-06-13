@@ -149,6 +149,14 @@ type Config struct {
 	STTElevenLabsModel        string
 	STTElevenLabsLanguageCode string
 
+	// QualityGatesEnabled is the master switch for the output quality gate
+	// (spec 0.16.0): when true (default), generated transcript/OCR text is
+	// screened for degenerate output (repetition loops, empty output,
+	// off-script, low density, gibberish) before it is chunked and embedded,
+	// and failing chunks are quarantined instead of embedded. Set false to
+	// skip the gate entirely.
+	QualityGatesEnabled bool
+
 	ServerTLSCertFile string
 	ServerTLSKeyFile  string
 
@@ -222,6 +230,7 @@ type fileConfig struct {
 	STTMistralModel           *string
 	STTElevenLabsModel        *string
 	STTElevenLabsLanguageCode *string
+	QualityGatesEnabled       *bool
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -296,6 +305,7 @@ type persistedConfig struct {
 	STTMistralModel           string        `yaml:"stt_mistral_model"`
 	STTElevenLabsModel        string        `yaml:"stt_elevenlabs_model"`
 	STTElevenLabsLanguageCode string        `yaml:"stt_elevenlabs_language_code"`
+	QualityGatesEnabled       bool          `yaml:"quality_gates_enabled"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -395,6 +405,7 @@ func Default() Config {
 		STTMistralModel:           "voxtral-mini-latest",
 		STTElevenLabsModel:        "scribe_v1",
 		STTElevenLabsLanguageCode: "",
+		QualityGatesEnabled:       true,
 		ServerTLSCertFile:         "",
 		ServerTLSKeyFile:          "",
 		X402: X402Config{
@@ -482,6 +493,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		STTMistralModel:           cfg.STTMistralModel,
 		STTElevenLabsModel:        cfg.STTElevenLabsModel,
 		STTElevenLabsLanguageCode: cfg.STTElevenLabsLanguageCode,
+		QualityGatesEnabled:       cfg.QualityGatesEnabled,
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1030,6 +1042,9 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.STTElevenLabsLanguageCode != nil {
 		cfg.STTElevenLabsLanguageCode = *fc.STTElevenLabsLanguageCode
 	}
+	if fc.QualityGatesEnabled != nil {
+		cfg.QualityGatesEnabled = *fc.QualityGatesEnabled
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -1373,6 +1388,8 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.IngestFollowSymlinks
 	case "ingest.watch":
 		target = &cfg.IngestWatch
+	case "quality_gates_enabled":
+		target = &cfg.QualityGatesEnabled
 	case "x402_tools_call_enabled":
 		target = &cfg.X402ToolsCallEnabled
 	case "retrieval.hybrid.enabled":
@@ -1702,6 +1719,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
+	writeBool("quality_gates_enabled", cfg.QualityGatesEnabled)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)

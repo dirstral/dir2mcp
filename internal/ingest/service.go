@@ -24,6 +24,8 @@ import (
 	"github.com/dirstral/dir2mcp/internal/pdfutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
+	"github.com/dirstral/dir2mcp/internal/quality"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // annotationChunk* constants mirror the hardcoded parameters previously
@@ -50,6 +52,12 @@ type Service struct {
 	repGen        *RepresentationGenerator
 	extractor     model.DocumentExtractor
 	transcriber   model.Transcriber
+
+	// qualityGate screens generated transcript/OCR text for degenerate
+	// output before it is chunked and embedded (spec 0.16.0). Nil when the
+	// QualityGatesEnabled master switch is off — callers must treat a nil
+	// gate as "skip screening", proceeding exactly as before the gate existed.
+	qualityGate *quality.Gate
 
 	// embedMultimodal is the resolved multimodal embedding mode (SPEC
 	// 8.1.7): "off" (default), "augment", or "replace". When augment/
@@ -141,6 +149,12 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc.transcriber = transcriber
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
+	}
+	// Construct the output quality gate from config (spec 0.16.0). When the
+	// master switch is on we use the package defaults (per-threshold config is
+	// a follow-up); when off, the field stays nil and screening is skipped.
+	if cfg.QualityGatesEnabled {
+		svc.qualityGate = quality.New(quality.DefaultConfig())
 	}
 	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
 	// unresolvable embed profile leaves it off (text-only).
@@ -383,6 +397,13 @@ func (s *Service) SetOCR(ocr model.OCR) {
 
 func (s *Service) SetTranscriber(transcriber model.Transcriber) {
 	s.transcriber = transcriber
+}
+
+// SetQualityGate overrides the output quality gate (spec 0.16.0). A nil gate
+// disables screening so generated transcript/OCR text is chunked and embedded
+// without quarantine. Mirrors SetTranscriber for tests.
+func (s *Service) SetQualityGate(gate *quality.Gate) {
+	s.qualityGate = gate
 }
 
 // ProcessDocument exposes single-document processing for external tests.
@@ -985,17 +1006,24 @@ func (s *Service) pdfPageSpans(doc model.Document, content []byte) []model.Span 
 	return spans
 }
 
-// mediaTimeSpans probes doc's duration and windows it into contiguous,
-// non-overlapping `time` spans of at most windowMS (SPEC 8.1.7). Returns nil
-// when the duration can't be determined (undecodable, or ffprobe absent),
-// keeping the text path; the condition is a non-fatal per-document warning.
-func (s *Service) mediaTimeSpans(ctx context.Context, doc model.Document, windowMS int) []model.Span {
+// probeDuration resolves doc's media duration using the configured probe
+// (ProbeDurationFunc, defaulting to avutil.Duration). It is the shared entry
+// point for both time-window chunking and the quality gate's density check.
+func (s *Service) probeDuration(ctx context.Context, doc model.Document) (time.Duration, error) {
 	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
 	probe := s.ProbeDurationFunc
 	if probe == nil {
 		probe = avutil.Duration
 	}
-	d, err := probe(ctx, absPath)
+	return probe(ctx, absPath)
+}
+
+// mediaTimeSpans probes doc's duration and windows it into contiguous,
+// non-overlapping `time` spans of at most windowMS (SPEC 8.1.7). Returns nil
+// when the duration can't be determined (undecodable, or ffprobe absent),
+// keeping the text path; the condition is a non-fatal per-document warning.
+func (s *Service) mediaTimeSpans(ctx context.Context, doc model.Document, windowMS int) []model.Span {
+	d, err := s.probeDuration(ctx, doc)
 	if err != nil {
 		s.getLogger().Printf("multimodal: media duration unavailable for %s (%v); skipping direct media embedding", doc.RelPath, err)
 		return nil
@@ -1157,6 +1185,10 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 
 	s.persistTitleIfFound(ctx, doc, ocrText)
 
+	decision := s.screenOutputQuality(doc.RelPath, "ocr", ocrText, quality.Context{
+		Modality: quality.ModalityOCR,
+	})
+
 	rep := model.Representation{
 		DocID:       doc.DocID,
 		RepType:     RepTypeExtractedMarkdown,
@@ -1174,7 +1206,7 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	if len(segments) == 0 {
 		return nil
 	}
-	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments); err != nil {
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return fmt.Errorf("persist ocr chunks: %w", err)
 	}
 	return nil
@@ -1197,6 +1229,10 @@ func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model
 		s.persistTitleIfFound(ctx, doc, md)
 	}
 
+	decision := s.screenOutputQuality(doc.RelPath, "ocr", md, quality.Context{
+		Modality: quality.ModalityOCR,
+	})
+
 	rep := model.Representation{
 		DocID:       doc.DocID,
 		RepType:     RepTypeExtractedMarkdown,
@@ -1214,7 +1250,7 @@ func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model
 	if len(segments) == 0 {
 		return nil
 	}
-	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments); err != nil {
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return fmt.Errorf("persist structured chunks: %w", err)
 	}
 	return nil
@@ -1296,6 +1332,55 @@ func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
 }
 
+// quarantineDecision carries the result of screening generated output through
+// the quality gate (spec 0.16.0). When quarantine is true the chunks for the
+// representation must be inserted already-failed (embedding_status=error with
+// category quality_gate) so the embedding worker never picks them up; the
+// embErr/category fields are the content-free values to persist.
+type quarantineDecision struct {
+	quarantine bool
+	embErr     string
+	category   string
+}
+
+// screenOutputQuality runs the quality gate over generated text. It returns a
+// zero-value (non-quarantine) decision when the gate is disabled (nil) or the
+// verdict is clean, so callers can always insert via the returned decision. On
+// a failed gate it logs a content-free warning and returns the quarantine
+// values. relPath/kind are used only for the diagnostic log line.
+func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx quality.Context) quarantineDecision {
+	if s.qualityGate == nil {
+		return quarantineDecision{}
+	}
+	verdict := s.qualityGate.Evaluate(text, qctx)
+	if verdict.OK() {
+		return quarantineDecision{}
+	}
+	primary := verdict.Primary()
+	var reason quality.Reason
+	var detail string
+	if primary != nil {
+		reason = primary.Reason
+		detail = primary.Detail
+	}
+	// Detail is already redacted/content-free; SanitizeReason bounds/normalizes
+	// it for persistence into chunks.embedding_error.
+	embErr := store.SanitizeReason(detail)
+	s.getLogger().Printf("quality gate quarantined %s output for %s: reason=%s", kind, relPath, reason)
+	return quarantineDecision{
+		quarantine: true,
+		embErr:     embErr,
+		category:   string(store.ErrorCategoryQualityGate),
+	}
+}
+
+// transcriptExpectedLanguage returns the configured STT language tag used to
+// drive the quality gate's language detector, or "" when none is configured
+// (in which case the language gate self-skips).
+func (s *Service) transcriptExpectedLanguage() string {
+	return strings.TrimSpace(s.cfg.STTElevenLabsLanguageCode)
+}
+
 func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
 	if s.repGen == nil || s.transcriber == nil {
 		return nil
@@ -1310,6 +1395,16 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	if transcriptText == "" {
 		return nil
 	}
+
+	var duration time.Duration
+	if d, derr := s.probeDuration(ctx, doc); derr == nil {
+		duration = d
+	}
+	decision := s.screenOutputQuality(doc.RelPath, "transcript", transcriptText, quality.Context{
+		Modality:         quality.ModalityTranscript,
+		ExpectedLanguage: s.transcriptExpectedLanguage(),
+		Duration:         duration,
+	})
 
 	rep := model.Representation{
 		DocID:       doc.DocID,
@@ -1327,7 +1422,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	if len(segments) == 0 {
 		return nil
 	}
-	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments); err != nil {
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return fmt.Errorf("persist transcript chunks: %w", err)
 	}
 	return nil
@@ -1377,7 +1472,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation json representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize)); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize), quarantineDecision{}); upsertErr != nil {
 			return fmt.Errorf("persist annotation json chunks: %w", upsertErr)
 		}
 
@@ -1402,7 +1497,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation text representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize)); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize), quarantineDecision{}); upsertErr != nil {
 			return fmt.Errorf("persist annotation text chunks: %w", upsertErr)
 		}
 		return nil

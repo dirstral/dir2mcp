@@ -140,7 +140,7 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 		if err != nil {
 			return fmt.Errorf("upsert representation: %w", err)
 		}
-		if err := rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, indexKindForDocType(doc.DocType), segments); err != nil {
+		if err := rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, indexKindForDocType(doc.DocType), segments, quarantineDecision{}); err != nil {
 			return err
 		}
 		return nil
@@ -192,16 +192,26 @@ func (rg *RepresentationGenerator) GenerateMediaChunks(ctx context.Context, doc 
 	})
 }
 
-func (rg *RepresentationGenerator) upsertChunksForRepresentation(ctx context.Context, repID int64, indexKind string, segments []chunkSegment) error {
+// quarantineDecision is the subset of the ingest quarantine decision the
+// chunk writer needs: when quarantine is set, chunks are inserted already-failed
+// (embedding_status=error) with the given embedding_error/error_category so the
+// embedding worker never embeds them (spec 0.16.0). The zero value inserts
+// healthy chunks (embedding_status=pending), preserving prior behaviour.
+
+func (rg *RepresentationGenerator) upsertChunksForRepresentation(ctx context.Context, repID int64, indexKind string, segments []chunkSegment, decision quarantineDecision) error {
 	// wrap the entire operation in a transaction so we don't end up with a
 	// partial set of chunks if an insertion fails halfway through.  The store
 	// implementation handles beginning/committing/rolling back the tx.
 	return rg.store.WithTx(ctx, func(tx model.RepresentationStore) error {
-		return rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, indexKind, segments)
+		return rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, indexKind, segments, decision)
 	})
 }
 
-func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx context.Context, st model.RepresentationStore, repID int64, indexKind string, segments []chunkSegment) error {
+func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx context.Context, st model.RepresentationStore, repID int64, indexKind string, segments []chunkSegment, decision quarantineDecision) error {
+	embeddingStatus := "pending"
+	if decision.quarantine {
+		embeddingStatus = "error"
+	}
 	for i, seg := range segments {
 		chunk := model.Chunk{
 			RepID:           repID,
@@ -209,7 +219,9 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 			Text:            seg.Text,
 			TextHash:        computeRepHash([]byte(seg.Text)),
 			IndexKind:       indexKind,
-			EmbeddingStatus: "pending",
+			EmbeddingStatus: embeddingStatus,
+			EmbeddingError:  decision.embErr,
+			ErrorCategory:   decision.category,
 		}
 		// A kind-less span carries no provenance (e.g. a structured chunk whose
 		// source elements exposed no page); persist the chunk with no span row
