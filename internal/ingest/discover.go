@@ -141,8 +141,8 @@ var mediaVariantExtensions = map[string]bool{
 //
 //   - resolution markers: 180p..4320p, plus 2k/4k/8k and 720i/1080i
 //     (e.g. clip.1080p.mp4, clip_720P.mp4, clip-480i.mp4, clip.4k.mp4)
-//   - bitrate markers: a number followed by k/kbps/kb/m/mbps
-//     (e.g. clip.128k.mp3, clip_2500kbps.mp4, clip-5m.mp4)
+//   - bitrate markers: a 2-5 digit number followed by k/kbps/kb/m/mbps
+//     (e.g. clip.128k.mp3, clip_2500kbps.mp4, clip-12m.mp4)
 //   - codec/quality suffixes: common audio/video codec and quality tokens
 //     (e.g. clip.h264.mp4, clip_hevc.mp4, clip-aac.m4a, clip.hd.mp4)
 //
@@ -155,7 +155,7 @@ var renditionMarkerPattern = regexp.MustCompile(
 	`(?i)[._-](?:` +
 		`\d{3,4}[pi]` + // 1080p, 720i, 480P
 		`|[248]k` + // 2k, 4k, 8k
-		`|\d{2,5}(?:kbps|kb|k|mbps|mb|m)` + // 128k, 2500kbps, 5m
+		`|\d{2,5}(?:kbps|kb|k|mbps|mb|m)` + // 128k, 2500kbps, 12m
 		`|h\.?26[45]|x26[45]|hevc|avc|av1|vp9|vp8|mpeg4|xvid|divx` + // video codecs
 		`|aac|mp3|ac3|eac3|opus|flac|dts` + // audio codecs
 		`|hd|fhd|uhd|sd|hq|lq|sq` + // quality tiers

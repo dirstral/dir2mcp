@@ -603,6 +603,74 @@ func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
 	}
 }
 
+// TestServiceRun_MediaVariantGroupingDedupsThroughScan proves the production
+// scan path (Service.Run -> runScan) actually applies §8.6.5 variant dedup when
+// media.variants.group is enabled: only the canonical rendition is ingested as a
+// document, the dropped renditions never produce documents/chunks, and unrelated
+// media is untouched.
+func TestServiceRun_MediaVariantGroupingDedupsThroughScan(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "clip.1080p.mp4"), []byte("hi"))
+	mustWriteFile(t, filepath.Join(root, "clip.720p.mp4"), []byte("medium"))
+	mustWriteFile(t, filepath.Join(root, "clip.480p.mp4"), []byte("the-largest-bytes"))
+	mustWriteFile(t, filepath.Join(root, "other.mp4"), []byte("distinct"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = filepath.Join(root, ".dir2mcp")
+	cfg.MediaVariantsGroup = true
+	cfg.MediaVariantsSelect = "best"
+
+	st := newMemoryStore()
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] hello"})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if _, ok := st.docs["clip.720p.mp4"]; ok {
+		t.Fatalf("dropped rendition clip.720p.mp4 must not be ingested as a document")
+	}
+	if _, ok := st.docs["clip.480p.mp4"]; ok {
+		t.Fatalf("dropped rendition clip.480p.mp4 must not be ingested as a document")
+	}
+	if _, ok := st.docs["clip.1080p.mp4"]; !ok {
+		t.Fatalf("canonical rendition clip.1080p.mp4 must be ingested")
+	}
+	if _, ok := st.docs["other.mp4"]; !ok {
+		t.Fatalf("unrelated media other.mp4 must be ingested")
+	}
+}
+
+// TestServiceRun_MediaVariantGroupingDisabled_IngestsAllRenditions confirms the
+// default (group=false) leaves the scan path unchanged: every rendition is
+// ingested.
+func TestServiceRun_MediaVariantGroupingDisabled_IngestsAllRenditions(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "clip.1080p.mp4"), []byte("hi"))
+	mustWriteFile(t, filepath.Join(root, "clip.720p.mp4"), []byte("medium"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = filepath.Join(root, ".dir2mcp")
+	// MediaVariantsGroup defaults to false.
+
+	st := newMemoryStore()
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] hello"})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	for _, p := range []string{"clip.1080p.mp4", "clip.720p.mp4"} {
+		if _, ok := st.docs[p]; !ok {
+			t.Fatalf("with grouping disabled, rendition %q must be ingested", p)
+		}
+	}
+}
+
 func TestDiscoverOptionsFromConfig_DefaultsRemainSafe(t *testing.T) {
 	cfg := config.Default()
 	options := ingest.DiscoverOptionsFromConfig(cfg)
