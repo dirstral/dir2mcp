@@ -18,6 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -96,6 +97,15 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	wireIngestorHooks(ing, indexingState, ret.EvictDocuments)
 
+	corpusFS, err := buildCorpusFS(ctx, cfg)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize corpus source: %v", err))
+		return exitConfigInvalid
+	}
+	if setter, ok := ing.(corpusFSSetter); ok {
+		setter.SetCorpusFS(corpusFS)
+	}
+
 	emitter.Emit("info", "index_loaded", map[string]interface{}{
 		"state_dir": cfg.StateDir,
 	})
@@ -127,7 +137,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer a.stopPersistenceWithLog(persistence)
 
 	embedErrCh := make(chan error, 4)
-	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir)
+	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS)
 
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
@@ -726,6 +736,7 @@ func startEmbeddingWorkers(
 	errCh chan<- error,
 	logger *log.Logger,
 	textModel, codeModel, rootDir string,
+	corpusFS corpusfs.CorpusFS,
 ) {
 	if st == nil || embedder == nil {
 		return
@@ -743,6 +754,7 @@ func startEmbeddingWorkers(
 			ModelForText: textModel,
 			ModelForCode: codeModel,
 			RootDir:      rootDir,
+			Corpus:       corpusFS,
 			BatchSize:    32,
 			Logger:       logger,
 			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
@@ -806,6 +818,32 @@ func initIndexingState(ctx context.Context, st model.Store, ret *retrieval.Servi
 	return indexingState
 }
 
+// corpusFSSetter is implemented by ingestors that accept an injected corpus
+// filesystem backend (the concrete *ingest.Service does). Asserted so the
+// configured backend (local/nfs/s3) drives discovery and reads.
+type corpusFSSetter interface {
+	SetCorpusFS(fsys corpusfs.CorpusFS)
+}
+
+// buildCorpusFS constructs the corpus filesystem selected by cfg.Source
+// (issue #244). The default kind (local) yields a LocalFS rooted at cfg.RootDir,
+// preserving the historical behavior exactly. StateDir is always local and is
+// where the S3 backend caches downloads.
+func buildCorpusFS(ctx context.Context, cfg config.Config) (corpusfs.CorpusFS, error) {
+	return corpusfs.New(ctx, corpusfs.Config{
+		Kind:              cfg.Source.Kind,
+		RootDir:           cfg.RootDir,
+		StateDir:          cfg.StateDir,
+		S3Bucket:          cfg.Source.S3Bucket,
+		S3Prefix:          cfg.Source.S3Prefix,
+		S3Region:          cfg.Source.S3Region,
+		S3Endpoint:        cfg.Source.S3Endpoint,
+		S3AccessKeyID:     cfg.Source.S3AccessKeyID,
+		S3SecretAccessKey: cfg.Source.S3SecretAccessKey,
+		S3SessionToken:    cfg.Source.S3SessionToken,
+	})
+}
+
 // wireIngestorHooks connects the optional indexing-state and document-delete
 // notification interfaces on ing, if the concrete type supports them.
 func wireIngestorHooks(ing model.Ingestor, indexingState *appstate.IndexingState, evict func([]string)) {
@@ -829,7 +867,7 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 
 // startEmbeddingIfNotReadOnly starts embedding workers when readOnly is false
 // and the store exposes the ChunkSource interface.
-func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string) {
+func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS) {
 	if readOnly {
 		return
 	}
@@ -838,7 +876,7 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.St
 		return
 	}
 	embedLogger := pickEmbedLogger(stderr, jsonOutput)
-	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir)
+	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
 }
 
 // printHumanConnectionIfVerbose prints the human-readable connection block
