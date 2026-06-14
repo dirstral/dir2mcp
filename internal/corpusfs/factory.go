@@ -57,12 +57,18 @@ var newS3Client = func(ctx context.Context, cfg Config) (s3API, error) {
 	if strings.TrimSpace(cfg.S3Region) != "" {
 		loadOpts = append(loadOpts, awsconfig.WithRegion(strings.TrimSpace(cfg.S3Region)))
 	}
-	if strings.TrimSpace(cfg.S3AccessKeyID) != "" && strings.TrimSpace(cfg.S3SecretAccessKey) != "" {
+	// Trim all three credential parts consistently: AWS keys/tokens never carry
+	// meaningful leading/trailing whitespace, and env-sourced values commonly
+	// pick some up. Checking the trimmed value but passing the raw one would let
+	// a whitespace-padded secret pass the guard and then fail auth at AWS.
+	accessKeyID := strings.TrimSpace(cfg.S3AccessKeyID)
+	secretAccessKey := strings.TrimSpace(cfg.S3SecretAccessKey)
+	if accessKeyID != "" && secretAccessKey != "" {
 		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
-				strings.TrimSpace(cfg.S3AccessKeyID),
-				cfg.S3SecretAccessKey,
-				cfg.S3SessionToken,
+				accessKeyID,
+				secretAccessKey,
+				strings.TrimSpace(cfg.S3SessionToken),
 			),
 		))
 	}
