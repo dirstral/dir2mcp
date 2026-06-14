@@ -44,8 +44,8 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 	}
 	// Re-run the fast, config-only preconditions the child would run, so
 	// a misconfig (missing MISTRAL_API_KEY, --public without auth) fails
-	// here instead of after a 15s readiness timeout the user has to debug
-	// from server.log. Listener-bind failures stay in the child — those
+	// here instead of after the full readiness timeout the user has to
+	// debug from server.log. Listener-bind failures stay in the child — those
 	// genuinely need the OS to refuse the port — and the readiness-error
 	// path already points the user at the log for those.
 	if code := a.preflightDaemonParentConfig(&cfg, opts); code != exitSuccess {
@@ -115,6 +115,15 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 
 	connection, err := waitForConnectionFile(connectionFilePath(stateDir), childPid, daemonReadinessTimeout)
 	if err != nil {
+		// Distinguish "still starting" (child alive, just slow — e.g. a cold
+		// dir2mcp-full first run warming up the docling/torch probe) from a
+		// real crash. The former is not a failure: the child keeps running
+		// and will bind shortly, so report it as a friendly success instead
+		// of the scary bind-failure path.
+		if IsDaemonStillStarting(err) {
+			a.reportDaemonStillStarting(childPid, logPath, opts)
+			return exitSuccess
+		}
 		writeCLIError(a.stderr, opts.jsonOutput, exitServerBindFailure,
 			fmt.Sprintf("daemon (pid %d) did not become ready: %v", childPid, err),
 			fmt.Sprintf("Inspect %s for startup errors.", logPath),
@@ -170,6 +179,39 @@ func (a *App) printDaemonReady(cfg config.Config, logPath string, pid int, conne
 	writef(a.stdout, "  %s\n\n", s.dim("Stop with: dir2mcp down"))
 }
 
+// reportDaemonStillStarting prints the friendly "still starting" notice for a
+// healthy-but-slow daemon whose child is alive but hasn't bound within the
+// readiness window (e.g. a cold dir2mcp-full first run warming up the
+// docling/torch probe). This is NOT a failure: the child keeps running and
+// will bind shortly, so the caller returns exitSuccess.
+//
+// In --json mode it emits a single clean, parseable object (status:
+// "starting") on stdout rather than an error payload, so a still-starting
+// result on a scripted run is a clear signal instead of a fatal error.
+func (a *App) reportDaemonStillStarting(pid int, logPath string, opts upOptions) {
+	if opts.jsonOutput {
+		_ = emitJSON(a.stdout, map[string]interface{}{
+			"status": "starting",
+			"pid":    pid,
+			"message": fmt.Sprintf(
+				"daemon (pid %d) is still starting; first run can take longer "+
+					"while models and the document extractor warm up", pid),
+			"log":  logPath,
+			"hint": "Check readiness with: dir2mcp status",
+		})
+		return
+	}
+	if opts.quiet {
+		return
+	}
+	s := a.sty(false)
+	writeln(a.stdout)
+	writef(a.stdout, "  %s %s\n", s.banner(), s.dim(fmt.Sprintf("daemon (pid %d) is still starting", pid)))
+	writef(a.stdout, "  %s\n", s.dim("First run can take longer while models and the document extractor warm up."))
+	writeln(a.stdout, s.kv("Logs", logPath))
+	writef(a.stdout, "  %s\n\n", s.dim("Check readiness with: dir2mcp status"))
+}
+
 // prepareDaemonStateDir ensures the state directory exists, refuses to
 // continue when an existing pid file points at a live process, and
 // clears stale state from a previous run that would confuse the parent's
@@ -209,7 +251,7 @@ func (a *App) prepareDaemonStateDir(stateDir, pidPath string, opts upOptions) in
 // preflightDaemonParentConfig runs the subset of config validation that
 // can fail in the child for purely config-level reasons — i.e. would
 // produce the same error regardless of whether the listener binds. By
-// running these in the parent before fork(), we trade a 15s readiness
+// running these in the parent before fork(), we trade a full readiness
 // timeout (and a misleading "did not become ready" message that frames
 // a config bug as a daemon/network bug) for the immediate, accurate
 // error the in-process body would have printed.
