@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/pdfutil"
@@ -52,6 +54,12 @@ type Service struct {
 	repGen        *RepresentationGenerator
 	extractor     model.DocumentExtractor
 	transcriber   model.Transcriber
+
+	// fsys is the corpus filesystem abstraction used for discovery and byte
+	// reads. Nil means "use a local filesystem rooted at cfg.RootDir" — the
+	// default that preserves the historical local-corpus behavior. It is
+	// resolved lazily via corpusFS() so callers never observe a nil backend.
+	fsys corpusfs.CorpusFS
 
 	// qualityGate screens generated transcript/OCR text for degenerate
 	// output before it is chunked and embedded (spec 0.16.0). Nil when the
@@ -442,6 +450,24 @@ func (s *Service) SetTranscriber(transcriber model.Transcriber) {
 	s.transcriber = transcriber
 }
 
+// SetCorpusFS overrides the corpus filesystem backend used for discovery and
+// byte reads. Passing nil restores the default local-filesystem backend rooted
+// at cfg.RootDir.
+func (s *Service) SetCorpusFS(fsys corpusfs.CorpusFS) {
+	s.fsys = fsys
+}
+
+// corpusFS resolves the active corpus filesystem, defaulting to a local
+// filesystem rooted at cfg.RootDir when none was injected. This keeps local
+// corpora behaving exactly as before while allowing an S3 (or other) backend to
+// be supplied.
+func (s *Service) corpusFS() corpusfs.CorpusFS {
+	if s.fsys != nil {
+		return s.fsys
+	}
+	return corpusfs.NewLocalFS(s.cfg.RootDir)
+}
+
 // SetQualityGate overrides the output quality gate (spec 0.16.0). A nil gate
 // disables screening so generated transcript/OCR text is chunked and embedded
 // without quarantine. Mirrors SetTranscriber for tests.
@@ -535,7 +561,7 @@ func (s *Service) runScan(ctx context.Context) error {
 		return errors.New("ingest store is not configured")
 	}
 
-	discovered, err := DiscoverFilesWithOptions(ctx, s.cfg.RootDir, DiscoverOptionsFromConfig(s.cfg))
+	discovered, err := s.corpusFS().Walk(ctx, s.cfg.RootDir, DiscoverOptionsFromConfig(s.cfg).corpusfsOptions())
 	if err != nil {
 		return err
 	}
@@ -578,7 +604,7 @@ func (s *Service) runScan(ctx context.Context) error {
 }
 
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
-	doc, content, buildErr := s.buildDocumentWithContent(f, secretPatterns)
+	doc, content, buildErr := s.buildDocumentWithContent(ctx, f, secretPatterns)
 	if buildErr != nil {
 		doc = model.Document{
 			RelPath:      f.RelPath,
@@ -682,7 +708,16 @@ func (s *Service) handleArchiveDocument(ctx context.Context, f DiscoveredFile, s
 // as an independent document. One bad member is logged and skipped without
 // aborting the rest.
 func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
-	members, err := extractArchiveMembers(f.AbsPath, f.RelPath)
+	// Archive readers need a real filesystem path. Localize returns the in-root
+	// path for a local corpus (no-op cleanup) or a temp download for an object
+	// store, so this works uniformly across backends.
+	localPath, cleanup, err := s.corpusFS().Localize(ctx, f.RelPath)
+	if err != nil {
+		s.getLogger().Printf("archive localize %s: %v", f.RelPath, err)
+		return nil // localize failure is non-fatal; archive stays "skipped"
+	}
+	defer cleanup()
+	members, err := extractArchiveMembers(localPath, f.RelPath)
 	if err != nil {
 		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
 		return nil // extraction failure is non-fatal; archive stays "skipped"
@@ -803,7 +838,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	return nil
 }
 
-func (s *Service) buildDocumentWithContent(f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
+func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
 	docType := ClassifyDocType(f.RelPath)
 	doc := model.Document{
 		RelPath:   f.RelPath,
@@ -814,7 +849,12 @@ func (s *Service) buildDocumentWithContent(f DiscoveredFile, secretPatterns []*r
 		Deleted:   false,
 	}
 
-	content, err := os.ReadFile(f.AbsPath)
+	rc, err := s.corpusFS().Open(ctx, f.RelPath)
+	if err != nil {
+		return doc, nil, fmt.Errorf("read %s: %w", f.RelPath, err)
+	}
+	content, err := io.ReadAll(rc)
+	_ = rc.Close()
 	if err != nil {
 		return doc, nil, fmt.Errorf("read %s: %w", f.RelPath, err)
 	}
@@ -1052,13 +1092,20 @@ func (s *Service) pdfPageSpans(doc model.Document, content []byte) []model.Span 
 // probeDuration resolves doc's media duration using the configured probe
 // (ProbeDurationFunc, defaulting to avutil.Duration). It is the shared entry
 // point for both time-window chunking and the quality gate's density check.
+// It resolves the media through the CorpusFS (Localize) so non-local backends
+// (e.g. S3) still get duration-aware behavior; for LocalFS this is the real
+// path with a no-op cleanup, preserving local behavior.
 func (s *Service) probeDuration(ctx context.Context, doc model.Document) (time.Duration, error) {
-	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
+	localPath, cleanup, err := s.corpusFS().Localize(ctx, doc.RelPath)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
 	probe := s.ProbeDurationFunc
 	if probe == nil {
 		probe = avutil.Duration
 	}
-	return probe(ctx, absPath)
+	return probe(ctx, localPath)
 }
 
 // mediaTimeSpans probes doc's duration and windows it into contiguous,
