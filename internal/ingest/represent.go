@@ -14,6 +14,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
 // transcriptTimestampBracketedRe matches leading timestamps in [mm:ss] or
@@ -42,6 +43,18 @@ const (
 	// RepTypeAnnotationText is the representation type for flattened annotation text
 	RepTypeAnnotationText = "annotation_text"
 )
+
+// TranscriptRepType returns the rep_type for a transcript in the given language.
+// The empty (source/undifferentiated) language keeps the bare "transcript"
+// rep_type so it remains interchangeable with the STT transcript; each
+// non-empty language gets a distinct, suffixed rep_type ("transcript-en") so
+// per-language transcripts coexist under the store's UNIQUE(doc_id, rep_type)
+// constraint instead of overwriting one another (spec §8.6.2/§8.6.4 keying).
+// The matching read-side query (store.TranscriptRepresentations) selects both
+// the bare and the suffixed forms.
+func TranscriptRepType(language string) string {
+	return RepTypeTranscript + TranscriptLangSuffix(language)
+}
 
 // RepresentationGenerator handles creation of representations from documents
 type RepresentationGenerator struct {
@@ -979,6 +992,85 @@ func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []Ch
 // primarily provided so that tests can exercise the chunking logic directly.
 func ChunkTranscriptByTime(content string) []ChunkSegment {
 	raw := chunkTranscriptByTime(content)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// chunkSubtitleCues turns parsed subtitle cues into time-spanned transcript
+// chunks. Unlike chunkTranscriptByTime (which estimates timing from a flat text
+// transcript), the cues already carry authoritative [StartMS, EndMS] windows, so
+// timing is taken verbatim — the source of the deterministic, stable citations a
+// sidecar transcript provides. Adjacent cues are merged greedily until the
+// accumulated text would exceed TranscriptChunkMaxChars; the merged chunk's span
+// is [first cue start, last merged cue end]. Cues are processed in their given
+// order (callers sort by start time first), so the output is deterministic.
+func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
+	out := make([]chunkSegment, 0, len(cues))
+	var (
+		buf      []string
+		startMS  int
+		endMS    int
+		haveOpen bool
+		bufLen   int
+	)
+	flush := func() {
+		if !haveOpen {
+			return
+		}
+		text := strings.TrimSpace(strings.Join(buf, "\n"))
+		if text != "" {
+			span := model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
+			if span.EndMS <= span.StartMS {
+				span.EndMS = span.StartMS + 1
+			}
+			out = append(out, chunkSegment{Text: text, Span: span})
+		}
+		buf = buf[:0]
+		bufLen = 0
+		haveOpen = false
+	}
+
+	for _, cue := range cues {
+		text := strings.TrimSpace(cue.Text)
+		if text == "" {
+			continue
+		}
+		cueLen := utf8.RuneCountInString(text)
+		// flush() joins buffered cue texts with "\n", so budget one rune for the
+		// separator that will precede this cue when the buffer is non-empty;
+		// otherwise a merged chunk can exceed TranscriptChunkMaxChars by the
+		// number of joins. sepLen is 0 when no chunk is open (the first cue needs
+		// no separator) and resets to 0 after a flush.
+		sepLen := 0
+		if haveOpen {
+			sepLen = 1
+		}
+		// Start a new chunk when the buffer (plus the join separator) would
+		// overflow the transcript chunk size; a single oversized cue still becomes
+		// its own chunk.
+		if haveOpen && bufLen+sepLen+cueLen > TranscriptChunkMaxChars {
+			flush()
+			sepLen = 0
+		}
+		if !haveOpen {
+			startMS = cue.StartMS
+			haveOpen = true
+		}
+		buf = append(buf, text)
+		bufLen += sepLen + cueLen
+		endMS = cue.EndMS
+	}
+	flush()
+	return out
+}
+
+// ChunkSubtitleCues exposes chunkSubtitleCues for tests, converting the
+// unexported segment type to the public ChunkSegment.
+func ChunkSubtitleCues(cues []subtitle.Cue) []ChunkSegment {
+	raw := chunkSubtitleCues(cues)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

@@ -941,14 +941,19 @@ func (s *SQLiteStore) TranscriptRepresentations(ctx context.Context, relPath str
 		return nil, err
 	}
 
+	// Match the bare "transcript" rep_type and any language-suffixed
+	// "transcript-<lang>" so per-language sidecar/translated transcripts (each a
+	// distinct rep_type under UNIQUE(doc_id, rep_type)) are all surfaced; the
+	// caller selects among them by meta_json language.
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT rep_id, meta_json
 		 FROM representations
-		 WHERE doc_id = ? AND rep_type = ? AND deleted = 0
+		 WHERE doc_id = ? AND (rep_type = ? OR rep_type LIKE ?) AND deleted = 0
 		 ORDER BY rep_id ASC`,
 		docID,
 		"transcript",
+		"transcript-%",
 	)
 	if err != nil {
 		return nil, err
@@ -967,6 +972,89 @@ func (s *SQLiteStore) TranscriptRepresentations(ctx context.Context, relPath str
 		return nil, err
 	}
 	return out, nil
+}
+
+// SoftDeleteSidecarTranscripts tombstones (deleted = 1) the document's
+// sidecar-sourced transcript representations and their chunks, returning the
+// number of representations retired. A representation is treated as
+// sidecar-sourced when its rep_type is a language-suffixed "transcript-<lang>"
+// (per-language sidecars persist under that rep_type) OR its rep_type is the
+// bare "transcript" with meta_json source == "sidecar". This lets a forced STT
+// reindex clear stale authored sidecar transcripts before writing the fresh
+// machine transcript, so retrieval/export never mix the two (spec §8.6.4). The
+// document-missing case is reported as os.ErrNotExist for parity with
+// TranscriptRepresentations.
+func (s *SQLiteStore) SoftDeleteSidecarTranscripts(ctx context.Context, relPath string) (int, error) {
+	normalizedPath, err := normalizeRelPath(relPath)
+	if err != nil {
+		return 0, err
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer s.ReleaseDB()
+
+	var docID int64
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT doc_id FROM documents WHERE rel_path = ? AND deleted = 0 LIMIT 1`,
+		normalizedPath,
+	).Scan(&docID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, os.ErrNotExist
+		}
+		return 0, err
+	}
+
+	// Identify the sidecar-sourced transcript reps: every "transcript-<lang>"
+	// (per-language sidecar rep_type) plus any bare "transcript" whose meta_json
+	// declares source == "sidecar". JSON containment is matched with LIKE rather
+	// than a JSON function to stay portable across SQLite builds.
+	const sidecarSourcePredicate = `(rep_type LIKE 'transcript-%' OR (rep_type = 'transcript' AND meta_json LIKE '%"source":"sidecar"%'))`
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT rep_id FROM representations WHERE doc_id = ? AND deleted = 0 AND `+sidecarSourcePredicate,
+		docID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	var repIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		repIDs = append(repIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	_ = rows.Close()
+
+	for _, id := range repIDs {
+		if _, err := tx.ExecContext(ctx, `UPDATE chunks SET deleted = 1 WHERE rep_id = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE representations SET deleted = 1 WHERE rep_id = ?`, id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(repIDs), nil
 }
 
 // TranscriptSpanChunks returns the active chunks of a transcript representation

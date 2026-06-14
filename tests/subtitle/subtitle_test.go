@@ -117,3 +117,43 @@ func TestBuildAndRenderRoundTrip(t *testing.T) {
 		t.Errorf("round-trip SRT:\n got: %q\nwant: %q", got, wantSRT)
 	}
 }
+
+// TestParseTTML_ReturnsCuesInDocumentTimeOrder guards CodeRabbit finding
+// ttml.go ~37: ParseTTML flattens ParseTTMLByLang's language-sorted groups, so
+// without an explicit time sort the output is language-grouped, not the document
+// (time) order the doc comment promises. This bilingual TTML interleaves cues by
+// time across "en"/"fr"; ParseTTML must return them in ascending StartMS order.
+func TestParseTTML_ReturnsCuesInDocumentTimeOrder(t *testing.T) {
+	const ttml = `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:xml="http://www.w3.org/XML/1998/namespace">
+  <body>
+    <div xml:lang="fr">
+      <p begin="00:00:01.000" end="00:00:02.000">bonjour</p>
+      <p begin="00:00:03.000" end="00:00:04.000">au revoir</p>
+    </div>
+    <div xml:lang="en">
+      <p begin="00:00:00.000" end="00:00:01.000">hello</p>
+      <p begin="00:00:02.000" end="00:00:03.000">goodbye</p>
+    </div>
+  </body>
+</tt>`
+
+	cues, err := subtitle.ParseTTML(ttml)
+	if err != nil {
+		t.Fatalf("ParseTTML: %v", err)
+	}
+	wantStart := []int{0, 1000, 2000, 3000}
+	wantText := []string{"hello", "bonjour", "goodbye", "au revoir"}
+	if len(cues) != len(wantStart) {
+		t.Fatalf("expected %d cues, got %d (%+v)", len(wantStart), len(cues), cues)
+	}
+	for i, c := range cues {
+		if c.StartMS != wantStart[i] || c.Text != wantText[i] {
+			t.Fatalf("cue %d: got (start=%d, text=%q), want (start=%d, text=%q)",
+				i, c.StartMS, c.Text, wantStart[i], wantText[i])
+		}
+		if c.Index != i+1 {
+			t.Fatalf("cue %d: expected 1-based index %d, got %d", i, i+1, c.Index)
+		}
+	}
+}
