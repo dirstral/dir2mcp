@@ -1659,7 +1659,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 		if start < 0 || end < 0 || end < start {
 			return model.Span{Kind: "lines"}
 		}
-		return model.Span{Kind: "time", StartMS: start, EndMS: end}
+		return model.Span{Kind: "time", StartMS: start, EndMS: end, Words: wordsFromExtraJSON(extraJSON)}
 	case "region":
 		return regionSpanFromRow(start, end, extraJSON)
 	case "lines":
@@ -1668,6 +1668,37 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 		}
 	}
 	return model.Span{Kind: "lines"}
+}
+
+// wordsFromExtraJSON reconstructs per-word timing for a "time" span from its
+// stored extra_json (spec §8.6.1). It tolerates a NULL/empty/malformed payload
+// by returning nil so a time citation degrades cleanly to segment-level (the
+// behaviour for a transcript without word timing). Words with empty text are
+// dropped; negative durations are clamped to 0.
+func wordsFromExtraJSON(extraJSON string) []model.WordSpan {
+	if strings.TrimSpace(extraJSON) == "" {
+		return nil
+	}
+	var payload struct {
+		Words []model.WordSpan `json:"words"`
+	}
+	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil || len(payload.Words) == 0 {
+		return nil
+	}
+	out := make([]model.WordSpan, 0, len(payload.Words))
+	for _, w := range payload.Words {
+		if strings.TrimSpace(w.W) == "" {
+			continue
+		}
+		if w.D < 0 {
+			w.D = 0
+		}
+		out = append(out, w)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // regionSpanFromRow reconstructs a region span from its stored columns. A
@@ -2174,12 +2205,34 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 		if span.StartMS < 0 || span.EndMS < 0 || span.EndMS < span.StartMS {
 			return "", 0, 0, "", errors.New("invalid time span")
 		}
-		return "time", span.StartMS, span.EndMS, "", nil
+		extra, eErr := timeSpanExtraJSON(span.Words)
+		if eErr != nil {
+			return "", 0, 0, "", eErr
+		}
+		return "time", span.StartMS, span.EndMS, extra, nil
 	case "region":
 		return regionSpanToRow(span.Region)
 	default:
 		return "", 0, 0, "", fmt.Errorf("unsupported span kind: %q", span.Kind)
 	}
+}
+
+// timeSpanExtraJSON marshals per-word timing for a "time" span into the stored
+// extra_json shape `{"words":[{"t":..,"d":..,"w":".."}]}` (spec §8.6.1).
+// Returns the empty string (stored as SQL NULL, preserving prior behaviour) when
+// there is no word timing, so words-absent transcripts round-trip unchanged.
+func timeSpanExtraJSON(words []model.WordSpan) (string, error) {
+	if len(words) == 0 {
+		return "", nil
+	}
+	payload := struct {
+		Words []model.WordSpan `json:"words"`
+	}{Words: words}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal time span words: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // regionSpanToRow validates and flattens a region span: the page range goes to

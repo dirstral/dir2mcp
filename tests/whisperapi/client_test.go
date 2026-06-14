@@ -115,8 +115,8 @@ func TestTranscribeSegmentsFormatting(t *testing.T) {
 	if got.language != "en" {
 		t.Errorf("language field = %q, want en", got.language)
 	}
-	if got.responseFormat != "json" {
-		t.Errorf("response_format = %q, want json (default)", got.responseFormat)
+	if got.responseFormat != "verbose_json" {
+		t.Errorf("response_format = %q, want verbose_json (default, #252)", got.responseFormat)
 	}
 	if !strings.HasSuffix(got.fileName, "ep1.mp3") {
 		t.Errorf("file name = %q, want suffix ep1.mp3", got.fileName)
@@ -341,4 +341,110 @@ func TestContextCancellationRespected(t *testing.T) {
 	if _, err := c.Transcribe(ctx, "a.wav", []byte("x")); err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
+}
+
+// verboseJSONWords is a verbose_json response carrying per-segment word
+// timestamps (the faster-whisper / OpenAI-compatible shape #252 parses).
+const verboseJSONWords = `{
+  "text": "hello there general",
+  "language": "en",
+  "duration": 75.0,
+  "segments": [
+    {"start": 0.0, "end": 4.2, "text": " hello there", "words": [
+      {"word": "hello", "start": 0.0, "end": 0.5},
+      {"word": "there", "start": 0.5, "end": 1.0}
+    ]},
+    {"start": 65.0, "end": 70.0, "text": "general", "words": [
+      {"word": "general", "start": 65.0, "end": 65.8}
+    ]}
+  ]
+}`
+
+// verboseJSONTopLevelWords carries a top-level words[] array instead of
+// per-segment words (some servers emit this shape).
+const verboseJSONTopLevelWords = `{
+  "text": "hello there",
+  "segments": [{"start": 0.0, "end": 2.0, "text": "hello there"}],
+  "words": [
+    {"word": "hello", "start": 0.0, "end": 0.5},
+    {"word": "there", "start": 0.5, "end": 1.0}
+  ]
+}`
+
+// TestTranscribeStructuredWords asserts TranscribeStructured returns the same
+// segment text as Transcribe plus parsed per-word timing in ms (#252).
+func TestTranscribeStructuredWords(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, verboseJSONWords)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "k")
+	res, err := c.TranscribeStructured(context.Background(), "a.wav", []byte("x"))
+	if err != nil {
+		t.Fatalf("TranscribeStructured: %v", err)
+	}
+
+	wantText := "[00:00] hello there\n[01:05] general"
+	if res.Text != wantText {
+		t.Fatalf("text = %q, want %q", res.Text, wantText)
+	}
+	want := []model.TimedWord{
+		{Word: "hello", StartMS: 0, EndMS: 500},
+		{Word: "there", StartMS: 500, EndMS: 1000},
+		{Word: "general", StartMS: 65000, EndMS: 65800},
+	}
+	if len(res.Words) != len(want) {
+		t.Fatalf("words len = %d, want %d (%+v)", len(res.Words), len(want), res.Words)
+	}
+	for i := range want {
+		if res.Words[i] != want[i] {
+			t.Errorf("word[%d] = %+v, want %+v", i, res.Words[i], want[i])
+		}
+	}
+}
+
+// TestTranscribeStructuredTopLevelWords asserts a top-level words[] array is
+// used as a fallback when segments carry no words.
+func TestTranscribeStructuredTopLevelWords(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, verboseJSONTopLevelWords)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "k")
+	res, err := c.TranscribeStructured(context.Background(), "a.wav", []byte("x"))
+	if err != nil {
+		t.Fatalf("TranscribeStructured: %v", err)
+	}
+	if len(res.Words) != 2 || res.Words[1].Word != "there" || res.Words[1].StartMS != 500 {
+		t.Fatalf("top-level words = %+v, want 2 words ending at there@500ms", res.Words)
+	}
+}
+
+// TestTranscribeStructuredWordsAbsent asserts a segments-only response yields a
+// transcript with no word timing (identical to the words-absent path).
+func TestTranscribeStructuredWordsAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, jsonSegments)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "k")
+	res, err := c.TranscribeStructured(context.Background(), "a.wav", []byte("x"))
+	if err != nil {
+		t.Fatalf("TranscribeStructured: %v", err)
+	}
+	if res.Words != nil {
+		t.Errorf("words = %+v, want nil for segments-only response", res.Words)
+	}
+	if res.Text != "[00:00] hello there\n[01:05] general" {
+		t.Errorf("text = %q", res.Text)
+	}
+}
+
+// TestClientImplementsStructuredTranscriber documents the optional capability
+// contract: the whisper client is a model.StructuredTranscriber.
+func TestClientImplementsStructuredTranscriber(t *testing.T) {
+	var _ model.StructuredTranscriber = whisperapi.NewClient("http://x", "")
 }

@@ -623,6 +623,65 @@ func maxF(a, b float64) float64 {
 	return b
 }
 
+// chunkTranscriptByTimeWithWords chunks a transcript exactly like
+// chunkTranscriptByTime (same chunks, same text, same time spans — see spec
+// §8.6.1: word timing is metadata only and MUST NOT add chunks or change text),
+// then attaches each per-word timestamp to the chunk whose time span contains
+// the word's start. Words are stored relative-to-nothing — their absolute ms
+// offsets are kept as {t,d,w} on the chunk's span. A nil/empty words slice
+// produces output byte-for-byte identical to chunkTranscriptByTime, so a
+// provider without word timing is unaffected.
+func chunkTranscriptByTimeWithWords(content string, words []model.TimedWord) []chunkSegment {
+	segs := chunkTranscriptByTime(content)
+	if len(words) == 0 || len(segs) == 0 {
+		return segs
+	}
+	attachWordsToTimeSpans(segs, words)
+	return segs
+}
+
+// attachWordsToTimeSpans assigns words to the chunk whose "time" span covers the
+// word's start time, mutating each chunk's span.Words in place. Words are
+// processed in order; a word is placed in the first chunk for which
+// StartMS <= word.start < EndMS (the final time chunk also catches a word at or
+// beyond its EndMS so trailing words are not dropped). Chunks without a time
+// span are skipped. The chunk text and span bounds are never modified.
+func attachWordsToTimeSpans(segs []chunkSegment, words []model.TimedWord) {
+	for _, w := range words {
+		idx := timeSpanIndexForWord(segs, w.StartMS)
+		if idx < 0 {
+			continue
+		}
+		dur := w.EndMS - w.StartMS
+		if dur < 0 {
+			dur = 0
+		}
+		segs[idx].Span.Words = append(segs[idx].Span.Words, model.WordSpan{
+			T: w.StartMS,
+			D: dur,
+			W: w.Word,
+		})
+	}
+}
+
+// timeSpanIndexForWord returns the index of the time-spanned chunk that owns a
+// word starting at startMS, or -1 when no chunk does. A word inside [StartMS,
+// EndMS) belongs to that chunk; a word at/after the last time chunk's EndMS is
+// assigned to that last time chunk so trailing words are retained.
+func timeSpanIndexForWord(segs []chunkSegment, startMS int) int {
+	lastTime := -1
+	for i := range segs {
+		if segs[i].Span.Kind != "time" {
+			continue
+		}
+		lastTime = i
+		if startMS >= segs[i].Span.StartMS && startMS < segs[i].Span.EndMS {
+			return i
+		}
+	}
+	return lastTime
+}
+
 func chunkTranscriptByTime(content string) []chunkSegment {
 	// normalize line endings just like NormalizeUTF8 does; this ensures both
 	// "\r\n" and lone "\r" are converted to "\n" before we split.  we
@@ -992,6 +1051,18 @@ func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []Ch
 // primarily provided so that tests can exercise the chunking logic directly.
 func ChunkTranscriptByTime(content string) []ChunkSegment {
 	raw := chunkTranscriptByTime(content)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ChunkTranscriptByTimeWithWords is the exported counterpart of
+// chunkTranscriptByTimeWithWords, exposed for tests in the tests/ tree. With a
+// nil/empty words slice it is identical to ChunkTranscriptByTime.
+func ChunkTranscriptByTimeWithWords(content string, words []model.TimedWord) []ChunkSegment {
+	raw := chunkTranscriptByTimeWithWords(content, words)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

@@ -1573,7 +1573,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		return nil
 	}
 
-	transcriptText, err := s.readOrComputeTranscript(ctx, doc, content, "")
+	transcriptText, words, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
 	if err != nil {
 		return err
 	}
@@ -1605,7 +1605,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		return fmt.Errorf("upsert transcript representation: %w", err)
 	}
 
-	segments := chunkTranscriptByTime(transcriptText)
+	segments := chunkTranscriptByTimeWithWords(transcriptText, words)
 	if len(segments) == 0 {
 		return nil
 	}
@@ -1896,29 +1896,43 @@ func TranscriptLangSuffix(language string) string {
 }
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
+	text, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language)
+	return text, err
+}
+
+// readOrComputeTranscriptWithWords is readOrComputeTranscript plus the optional
+// per-word timing the provider returned (spec §8.6.1, #252). The segment text is
+// the authoritative cache key/value (the .txt cache file); word timing is a
+// best-effort sidecar (.words.json) carried only when the transcriber implements
+// model.StructuredTranscriber. A missing or unreadable sidecar yields nil words
+// — behaviour identical to a provider without word timing.
+func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string) (string, []model.TimedWord, error) {
 	if s.transcriber == nil {
-		return "", errors.New("transcriber not configured")
+		return "", nil, errors.New("transcriber not configured")
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return "", fmt.Errorf("create transcript cache dir: %w", err)
+		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
-	cachePath := filepath.Join(cacheDir, computeContentHash(content)+TranscriptLangSuffix(language)+".txt")
+	base := computeContentHash(content) + TranscriptLangSuffix(language)
+	cachePath := filepath.Join(cacheDir, base+".txt")
+	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	if cached, err := os.ReadFile(cachePath); err == nil {
-		return string(cached), nil
+		return string(cached), readCachedWords(wordsPath), nil
 	}
 
-	transcript, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
+	transcript, words, err := s.transcribe(ctx, doc, content)
 	if err != nil {
-		return "", fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+		return "", nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
 
 	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
 	if err := os.WriteFile(cachePath, transcriptBytes, 0o644); err != nil {
-		return "", fmt.Errorf("write transcript cache: %w", err)
+		return "", nil, fmt.Errorf("write transcript cache: %w", err)
 	}
+	s.writeCachedWords(wordsPath, words)
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
 	if shouldEnforceAfterWrite {
 		// Reuse the same cache-policy limits/hooks as OCR for now so transcript
@@ -1936,7 +1950,57 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
-	return string(transcriptBytes), nil
+	return string(transcriptBytes), words, nil
+}
+
+// transcribe calls the configured transcriber, preferring the structured
+// (word-timing) capability when available. Providers that do not implement
+// model.StructuredTranscriber return no words, leaving downstream behaviour
+// unchanged.
+func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+	if st, ok := s.transcriber.(model.StructuredTranscriber); ok {
+		res, err := st.TranscribeStructured(ctx, doc.RelPath, content)
+		if err != nil {
+			return "", nil, err
+		}
+		return res.Text, res.Words, nil
+	}
+	text, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
+	if err != nil {
+		return "", nil, err
+	}
+	return text, nil, nil
+}
+
+// readCachedWords loads per-word timing from the sidecar cache file, returning
+// nil on any error (missing/corrupt sidecar degrades to no word timing).
+func readCachedWords(path string) []model.TimedWord {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var words []model.TimedWord
+	if err := json.Unmarshal(raw, &words); err != nil {
+		return nil
+	}
+	return words
+}
+
+// writeCachedWords persists per-word timing alongside the transcript text. It is
+// best-effort: a write failure is logged and ignored so word timing never blocks
+// transcript ingest. No sidecar is written when there are no words.
+func (s *Service) writeCachedWords(path string, words []model.TimedWord) {
+	if len(words) == 0 {
+		return
+	}
+	raw, err := json.Marshal(words)
+	if err != nil {
+		s.getLogger().Printf("marshal transcript words cache: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		s.getLogger().Printf("write transcript words cache (%s): %v", path, err)
+	}
 }
 
 // ReadOrComputeTranscript exposes transcript cache lookup/computation for tests.

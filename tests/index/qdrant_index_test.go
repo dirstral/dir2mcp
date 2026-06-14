@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -157,7 +158,9 @@ func TestQdrant_UpsertCreatesCollectionAndRoundTrips(t *testing.T) {
 	// Span is intentionally not persisted in Qdrant, so it does not round-trip;
 	// every other field must.
 	in.Span = model.Span{}
-	if got != in {
+	// IndexPayload embeds Span, which carries a slice (Words) and is therefore
+	// not comparable with ==; compare structurally.
+	if !reflect.DeepEqual(got, in) {
 		t.Fatalf("payload did not round-trip: got %+v want %+v", got, in)
 	}
 }
