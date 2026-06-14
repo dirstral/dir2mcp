@@ -50,12 +50,13 @@ func NewS3FS(client s3API, cfg S3Config) (*S3FS, error) {
 	if client == nil {
 		return nil, errors.New("corpusfs: nil s3 client")
 	}
-	if strings.TrimSpace(cfg.Bucket) == "" {
+	bucket := strings.TrimSpace(cfg.Bucket)
+	if bucket == "" {
 		return nil, errors.New("corpusfs: empty s3 bucket")
 	}
 	return &S3FS{
 		client:   client,
-		bucket:   cfg.Bucket,
+		bucket:   bucket,
 		prefix:   normalizeS3Prefix(cfg.Prefix),
 		cacheDir: cfg.CacheDir,
 	}, nil
@@ -74,7 +75,9 @@ func normalizeS3Prefix(prefix string) string {
 
 // keyForRel maps a corpus-relative path to a full S3 object key.
 func (s *S3FS) keyForRel(relPath string) string {
-	return s.prefix + strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(relPath)), "/")
+	// No TrimSpace: Walk emits RelPath verbatim, so keys with leading/trailing
+	// spaces must round-trip exactly through keyForRel for Open/Localize.
+	return s.prefix + strings.TrimPrefix(filepath.ToSlash(relPath), "/")
 }
 
 // relForKey maps a full S3 object key to its corpus-relative path, or returns

@@ -1092,13 +1092,20 @@ func (s *Service) pdfPageSpans(doc model.Document, content []byte) []model.Span 
 // probeDuration resolves doc's media duration using the configured probe
 // (ProbeDurationFunc, defaulting to avutil.Duration). It is the shared entry
 // point for both time-window chunking and the quality gate's density check.
+// It resolves the media through the CorpusFS (Localize) so non-local backends
+// (e.g. S3) still get duration-aware behavior; for LocalFS this is the real
+// path with a no-op cleanup, preserving local behavior.
 func (s *Service) probeDuration(ctx context.Context, doc model.Document) (time.Duration, error) {
-	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
+	localPath, cleanup, err := s.corpusFS().Localize(ctx, doc.RelPath)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
 	probe := s.ProbeDurationFunc
 	if probe == nil {
 		probe = avutil.Duration
 	}
-	return probe(ctx, absPath)
+	return probe(ctx, localPath)
 }
 
 // mediaTimeSpans probes doc's duration and windows it into contiguous,

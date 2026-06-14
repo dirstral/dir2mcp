@@ -31,14 +31,13 @@ func NewLocalFS(root string) *LocalFS {
 	return &LocalFS{root: root}
 }
 
-// Walk enumerates regular files under root. The root argument overrides the
-// receiver's configured root when non-empty so callers that pass an explicit
-// root (e.g. the legacy DiscoverFiles entry points) keep working; otherwise the
-// receiver's root is used.
-func (l *LocalFS) Walk(ctx context.Context, root string, opts Options) ([]DiscoveredFile, error) {
-	if strings.TrimSpace(root) == "" {
-		root = l.root
-	}
+// Walk enumerates regular files under the receiver's root. The root argument is
+// accepted for CorpusFS interface compatibility but ignored: the receiver's
+// configured root is authoritative, so Walk, Open, and Localize always resolve
+// against the same corpus root (callers construct a LocalFS rooted where they
+// intend to walk).
+func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]DiscoveredFile, error) {
+	root := l.root
 	if opts.MaxSizeBytes <= 0 {
 		opts.MaxSizeBytes = defaultMaxFileSizeBytes
 	}
@@ -129,7 +128,15 @@ func resolveWithinRoot(root, relPath string) (string, error) {
 	if err != nil {
 		realRoot = absRoot // root should exist; fall back to the lexical form
 	}
-	resolved, err := filepath.EvalSymlinks(filepath.Join(realRoot, filepath.FromSlash(ref)))
+	// Lexical containment check first, so a ref that escapes the root returns
+	// the ErrPathEscapesRoot sentinel even when the (out-of-root) target does
+	// not exist — otherwise EvalSymlinks would fail first with a generic
+	// resolve error, weakening the sentinel contract for invalid refs.
+	lexical := filepath.Join(realRoot, filepath.FromSlash(ref))
+	if lexical != realRoot && !strings.HasPrefix(lexical, realRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: %q", ErrPathEscapesRoot, relPath)
+	}
+	resolved, err := filepath.EvalSymlinks(lexical)
 	if err != nil {
 		return "", fmt.Errorf("resolve %q: %w", relPath, err)
 	}
