@@ -210,6 +210,22 @@ type Config struct {
 	// true to disable that and always run STT (the kill-switch opt-out).
 	MediaSidecarsDisabled bool
 
+	// MediaVariantsGroup enables media multi-rendition grouping/dedup (spec
+	// §8.6.5, config `media.variants.group`). When true, discovered media
+	// renditions that share a normalized name (rendition markers such as
+	// 1080p/720p, bitrate, codec/quality suffixes stripped) are grouped and a
+	// single canonical rendition is ingested once, so chunks/embeddings are not
+	// duplicated across renditions. Disabled by default: discovery behaves
+	// exactly as before. Non-media and single-rendition assets are unaffected.
+	MediaVariantsGroup bool
+
+	// MediaVariantsSelect chooses the canonical rendition within a group (spec
+	// §8.6.5, config `media.variants.select`): "best" (default) prefers the
+	// highest detected resolution/quality, tiebreaking on largest size then
+	// lexically-lowest path; "first" deterministically takes the
+	// lexically-lowest path. Only consulted when MediaVariantsGroup is true.
+	MediaVariantsSelect string
+
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
 	// screened for degenerate output (repetition loops, empty output,
@@ -313,6 +329,8 @@ type fileConfig struct {
 	STTElevenLabsLanguageCode *string
 	QualityGatesEnabled       *bool
 	MediaSidecarsDisabled     *bool
+	MediaVariantsGroup        *bool
+	MediaVariantsSelect       *string
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -400,6 +418,8 @@ type persistedConfig struct {
 	STTElevenLabsLanguageCode string        `yaml:"stt_elevenlabs_language_code"`
 	QualityGatesEnabled       bool          `yaml:"quality_gates_enabled"`
 	MediaSidecarsDisabled     bool          `yaml:"media_sidecars_disabled"`
+	MediaVariantsGroup        bool          `yaml:"media_variants_group"`
+	MediaVariantsSelect       string        `yaml:"media_variants_select"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -520,6 +540,8 @@ func Default() Config {
 		STTElevenLabsModel:        "scribe_v1",
 		STTElevenLabsLanguageCode: "",
 		QualityGatesEnabled:       true,
+		MediaVariantsGroup:        false,
+		MediaVariantsSelect:       "best",
 		ServerTLSCertFile:         "",
 		ServerTLSKeyFile:          "",
 		X402: X402Config{
@@ -618,6 +640,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		STTElevenLabsLanguageCode: cfg.STTElevenLabsLanguageCode,
 		QualityGatesEnabled:       cfg.QualityGatesEnabled,
 		MediaSidecarsDisabled:     cfg.MediaSidecarsDisabled,
+		MediaVariantsGroup:        cfg.MediaVariantsGroup,
+		MediaVariantsSelect:       cfg.MediaVariantsSelect,
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1226,6 +1250,12 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSidecarsDisabled != nil {
 		cfg.MediaSidecarsDisabled = *fc.MediaSidecarsDisabled
 	}
+	if fc.MediaVariantsGroup != nil {
+		cfg.MediaVariantsGroup = *fc.MediaVariantsGroup
+	}
+	if fc.MediaVariantsSelect != nil {
+		cfg.MediaVariantsSelect = *fc.MediaVariantsSelect
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -1488,6 +1518,8 @@ var configKeyAliases = map[string]string{
 	"extractor":                            "ingest.extractor",
 	"index_backend":                        "index.backend",
 	"backend":                              "index.backend",
+	"media_variants_group":                 "media.variants.group",
+	"media_variants_select":                "media.variants.select",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1544,6 +1576,8 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
+	case "media", "media.variants":
+		return true
 	case "index.pgvector":
 		return true
 	case "ingest.extractor":
@@ -1590,6 +1624,8 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.QualityGatesEnabled
 	case "media_sidecars_disabled":
 		target = &cfg.MediaSidecarsDisabled
+	case "media.variants.group":
+		target = &cfg.MediaVariantsGroup
 	case "x402_tools_call_enabled":
 		target = &cfg.X402ToolsCallEnabled
 	case "retrieval.hybrid.enabled":
@@ -1802,6 +1838,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.STTElevenLabsModel = strPtr(value)
 	case "stt.elevenlabs.language_code":
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
+	case "media.variants.select":
+		cfg.MediaVariantsSelect = strPtr(value)
 	}
 }
 
@@ -1953,6 +1991,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
 	writeBool("quality_gates_enabled", cfg.QualityGatesEnabled)
 	writeBool("media_sidecars_disabled", cfg.MediaSidecarsDisabled)
+	writeBool("media_variants_group", cfg.MediaVariantsGroup)
+	writeScalar("media_variants_select", cfg.MediaVariantsSelect)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)
@@ -2332,6 +2372,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateMediaVariants(); err != nil {
+		return err
+	}
+
 	if err := c.validateNumericBounds(); err != nil {
 		return err
 	}
@@ -2343,6 +2387,25 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
 			c.SessionMaxLifetime, c.SessionInactivityTimeout)
 	}
+	return nil
+}
+
+// validateMediaVariants normalizes MediaVariantsSelect (defaulting empty to
+// "best") and rejects any value outside best/first (spec §8.6.5,
+// media.variants.select). The select policy is only consulted when grouping is
+// enabled, but it is validated unconditionally so a bad value is caught at save
+// time.
+func (c *Config) validateMediaVariants() error {
+	sel := strings.ToLower(strings.TrimSpace(c.MediaVariantsSelect))
+	if sel == "" {
+		sel = Default().MediaVariantsSelect
+	}
+	switch sel {
+	case "best", "first":
+	default:
+		return fmt.Errorf("media.variants.select must be one of best, first: %q", c.MediaVariantsSelect)
+	}
+	c.MediaVariantsSelect = sel
 	return nil
 }
 

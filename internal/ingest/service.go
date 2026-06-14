@@ -259,6 +259,7 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	if cfg.IngestMaxFileMB > 0 {
 		options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * 1024 * 1024
 	}
+	options.MediaVariants = MediaVariantOptionsFromConfig(cfg)
 	return options
 }
 
@@ -584,13 +585,20 @@ func (s *Service) runScan(ctx context.Context) error {
 		return errors.New("ingest store is not configured")
 	}
 
-	discovered, err := s.corpusFS().Walk(ctx, s.cfg.RootDir, DiscoverOptionsFromConfig(s.cfg).corpusfsOptions())
+	discoverOpts := DiscoverOptionsFromConfig(s.cfg)
+	discovered, err := s.corpusFS().Walk(ctx, s.cfg.RootDir, discoverOpts.corpusfsOptions())
 	if err != nil {
 		return err
 	}
-	// Record discovered file mtimes so the transcript path can detect subtitle
-	// sidecars next to media files and mtime-gate their ingestion (§8.6.4).
+	// Record discovered file mtimes (full, pre-dedup set) so the transcript path
+	// can detect subtitle sidecars next to any media rendition and mtime-gate
+	// their ingestion (§8.6.4) even for renditions dropped by variant grouping.
 	s.setSidecarIndex(discovered)
+
+	// Collapse multi-rendition media to a single canonical file (spec §8.6.5)
+	// before ingestion so chunks/embeddings are not duplicated across renditions.
+	// No-op when media.variants.group is disabled (the default).
+	discovered = SelectMediaVariants(discovered, discoverOpts.MediaVariants)
 
 	compiledSecrets, err := compileSecretPatterns(s.cfg.SecretPatterns)
 	if err != nil {
