@@ -797,7 +797,7 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if applyEnv {
 			applyEnvOverrides(&cfg, overrideEnv)
 		}
-		if err := cfg.Validate(); err != nil {
+		if err := cfg.finalizeLoaded(applyEnv); err != nil {
 			return Config{}, err
 		}
 		return cfg, nil
@@ -808,7 +808,7 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 			if applyEnv {
 				applyEnvOverrides(&cfg, overrideEnv)
 			}
-			if err := cfg.Validate(); err != nil {
+			if err := cfg.finalizeLoaded(applyEnv); err != nil {
 				return Config{}, err
 			}
 			return cfg, nil
@@ -822,7 +822,7 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	if applyEnv {
 		applyEnvOverrides(&cfg, overrideEnv)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.finalizeLoaded(applyEnv); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -2295,9 +2295,41 @@ func (c *Config) validateSource() error {
 	if c.Source.S3Bucket == "" {
 		return errors.New("source.kind=s3 requires source.s3.bucket")
 	}
+	// Credential presence is NOT validated here: AWS credentials are never
+	// persisted and are only populated on env-aware load paths. Enforcing them
+	// in validateSource would break LoadFile/LoadEffectiveSnapshot for an
+	// otherwise-valid persisted s3 config. Credential presence is checked in
+	// validateSourceRuntimeSecrets, invoked only when env is applied.
+	return nil
+}
+
+// validateSourceRuntimeSecrets enforces that an s3 corpus source has resolved
+// AWS credentials. It runs only on env-aware load paths (where credentials from
+// environment/keychain/.env.local have been layered in), keeping validateSource
+// limited to persisted invariants so config-file-only loads do not spuriously
+// fail.
+func (c *Config) validateSourceRuntimeSecrets() error {
+	if strings.ToLower(strings.TrimSpace(c.Source.Kind)) != "s3" {
+		return nil
+	}
 	if strings.TrimSpace(c.Source.S3AccessKeyID) == "" || strings.TrimSpace(c.Source.S3SecretAccessKey) == "" {
 		return errors.New("source.kind=s3 requires AWS credentials " +
 			"(set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY via environment, keychain, or .env.local)")
+	}
+	return nil
+}
+
+// finalizeLoaded runs the standard post-load validation: Validate (persisted
+// invariants, always) plus, when env was applied, the runtime-secret checks
+// that depend on resolved credentials.
+func (c *Config) finalizeLoaded(applyEnv bool) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if applyEnv {
+		if err := c.validateSourceRuntimeSecrets(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

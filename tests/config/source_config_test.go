@@ -38,18 +38,29 @@ func TestLoadFile_SourceNestedKeys(t *testing.T) {
 		"    endpoint: https://minio.local:9000",
 	}, "\n")+"\n")
 
+	// LoadFile applies no env, so it validates persisted invariants only and must
+	// NOT require AWS credentials: a persisted s3 source block parses and loads
+	// cleanly. (Credential presence is enforced separately on the env-aware Load
+	// path; see TestValidate_S3CredsAreRuntimeOnly.)
 	cfg, err := config.LoadFile(path)
-	// LoadFile applies no env, so s3 has no credentials -> Validate fails. Read
-	// the parsed values off the returned error path by parsing without validate
-	// is not exposed; instead assert the validation error is the credential one,
-	// which proves the s3 kind + bucket parsed.
-	if err == nil {
-		t.Fatal("expected LoadFile to fail (s3 without credentials)")
+	if err != nil {
+		t.Fatalf("LoadFile(persisted s3 block) = %v, want nil", err)
 	}
-	if !strings.Contains(err.Error(), "AWS credentials") {
-		t.Fatalf("LoadFile err = %v, want AWS-credentials error", err)
+	if cfg.Source.Kind != "s3" {
+		t.Errorf("Source.Kind = %q, want s3", cfg.Source.Kind)
 	}
-	_ = cfg
+	if cfg.Source.S3Bucket != "my-bucket" {
+		t.Errorf("Source.S3Bucket = %q, want my-bucket", cfg.Source.S3Bucket)
+	}
+	if cfg.Source.S3Prefix != "corpus/docs" {
+		t.Errorf("Source.S3Prefix = %q, want corpus/docs", cfg.Source.S3Prefix)
+	}
+	if cfg.Source.S3Region != "eu-central-1" {
+		t.Errorf("Source.S3Region = %q, want eu-central-1", cfg.Source.S3Region)
+	}
+	if cfg.Source.S3Endpoint != "https://minio.local:9000" {
+		t.Errorf("Source.S3Endpoint = %q, want https://minio.local:9000", cfg.Source.S3Endpoint)
+	}
 }
 
 // TestSaveFile_SourceRoundTrip guards the SaveFile -> LoadFile cycle for the
@@ -132,15 +143,35 @@ func TestValidate_S3RequiresBucket(t *testing.T) {
 	}
 }
 
-// TestValidate_S3RequiresCredentials asserts s3 with a bucket but no resolved
-// credentials is a clear, actionable error.
-func TestValidate_S3RequiresCredentials(t *testing.T) {
+// TestValidate_S3CredsAreRuntimeOnly asserts the credential split: persisted
+// invariants (kind, bucket) validate without credentials, but the env-aware
+// load path requires resolved AWS credentials. This guards against the
+// regression where validateSource rejected an otherwise-valid persisted s3
+// config on the env-skipping LoadFile/LoadEffectiveSnapshot paths.
+func TestValidate_S3CredsAreRuntimeOnly(t *testing.T) {
+	// Persisted-invariant validation (no env) must NOT require credentials.
 	cfg := config.Default()
 	cfg.Source.Kind = "s3"
 	cfg.Source.S3Bucket = "b"
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "credentials") {
-		t.Fatalf("Validate(s3,no-creds) = %v, want credentials-required error", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate(s3,bucket,no-creds) = %v, want nil (persisted invariants only)", err)
+	}
+
+	// Persist it, then confirm the env-skipping LoadFile path accepts it...
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	if err := config.SaveFile(path, cfg); err != nil {
+		t.Fatalf("SaveFile: %v", err)
+	}
+	if _, err := config.LoadFile(path); err != nil {
+		t.Fatalf("LoadFile(persisted s3, no creds) = %v, want nil", err)
+	}
+
+	// ...but the env-aware Load path requires resolved credentials.
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	if _, err := config.Load(path); err == nil || !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("Load(s3,no-creds) = %v, want credentials-required error", err)
 	}
 }
 
