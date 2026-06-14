@@ -941,14 +941,19 @@ func (s *SQLiteStore) TranscriptRepresentations(ctx context.Context, relPath str
 		return nil, err
 	}
 
+	// Match the bare "transcript" rep_type and any language-suffixed
+	// "transcript-<lang>" so per-language sidecar/translated transcripts (each a
+	// distinct rep_type under UNIQUE(doc_id, rep_type)) are all surfaced; the
+	// caller selects among them by meta_json language.
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT rep_id, meta_json
 		 FROM representations
-		 WHERE doc_id = ? AND rep_type = ? AND deleted = 0
+		 WHERE doc_id = ? AND (rep_type = ? OR rep_type LIKE ?) AND deleted = 0
 		 ORDER BY rep_id ASC`,
 		docID,
 		"transcript",
+		"transcript-%",
 	)
 	if err != nil {
 		return nil, err

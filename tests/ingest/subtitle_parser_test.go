@@ -147,6 +147,34 @@ func TestParseVTT_HoursAndCRLF(t *testing.T) {
 	assertCue(t, cues[0], 1, want, ((1*60+2)*60+4)*1000, "Deep into the file")
 }
 
+func TestParseSRT_LeadingBOMTolerated(t *testing.T) {
+	t.Parallel()
+	// A leading UTF-8 BOM (common in Windows-authored subtitles) must not block
+	// the first cue's timing line from matching.
+	in := "\uFEFF1\n00:00:00,000 --> 00:00:01,000\nWith BOM\n"
+	cues, err := subtitle.ParseSRT(in)
+	if err != nil {
+		t.Fatalf("ParseSRT: %v", err)
+	}
+	if len(cues) != 1 {
+		t.Fatalf("expected 1 cue, got %d", len(cues))
+	}
+	assertCue(t, cues[0], 1, 0, 1000, "With BOM")
+}
+
+func TestParseVTT_LeadingBOMTolerated(t *testing.T) {
+	t.Parallel()
+	in := "\uFEFFWEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHeader after BOM\n"
+	cues, err := subtitle.ParseVTT(in)
+	if err != nil {
+		t.Fatalf("ParseVTT: %v", err)
+	}
+	if len(cues) != 1 {
+		t.Fatalf("expected 1 cue, got %d", len(cues))
+	}
+	assertCue(t, cues[0], 1, 0, 2000, "Header after BOM")
+}
+
 func TestParseTTML_Monolingual(t *testing.T) {
 	t.Parallel()
 	in := `<?xml version="1.0" encoding="UTF-8"?>

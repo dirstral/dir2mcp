@@ -44,6 +44,18 @@ const (
 	RepTypeAnnotationText = "annotation_text"
 )
 
+// TranscriptRepType returns the rep_type for a transcript in the given language.
+// The empty (source/undifferentiated) language keeps the bare "transcript"
+// rep_type so it remains interchangeable with the STT transcript; each
+// non-empty language gets a distinct, suffixed rep_type ("transcript-en") so
+// per-language transcripts coexist under the store's UNIQUE(doc_id, rep_type)
+// constraint instead of overwriting one another (spec §8.6.2/§8.6.4 keying).
+// The matching read-side query (store.TranscriptRepresentations) selects both
+// the bare and the suffixed forms.
+func TranscriptRepType(language string) string {
+	return RepTypeTranscript + TranscriptLangSuffix(language)
+}
+
 // RepresentationGenerator handles creation of representations from documents
 type RepresentationGenerator struct {
 	store model.RepresentationStore

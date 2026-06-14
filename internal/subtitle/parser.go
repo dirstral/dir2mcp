@@ -220,10 +220,21 @@ func stripInlineTags(s string) string {
 	return strings.TrimSpace(inlineTagRe.ReplaceAllString(s, ""))
 }
 
-// splitLines splits content on LF after normalising CRLF and lone CR to LF so
-// the scanner sees uniform line breaks regardless of the file's origin OS.
+// splitLines splits content on LF after stripping a leading UTF-8 BOM and
+// normalising CRLF and lone CR to LF so the scanner sees uniform line breaks
+// regardless of the file's origin OS. Windows-authored subtitle files commonly
+// carry a BOM; left in place it would prevent the first line from matching the
+// WEBVTT header or a timing line.
 func splitLines(content string) []string {
+	content = stripBOM(content)
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
 	return strings.Split(content, "\n")
+}
+
+// stripBOM removes a single leading UTF-8 BOM (U+FEFF), if present. Such a mark
+// is non-whitespace, so left in place it would block the WEBVTT-header / timing
+// line match on the first line of a Windows-authored subtitle file.
+func stripBOM(content string) string {
+	return strings.TrimPrefix(content, "\uFEFF")
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // mapStore is a minimal Store + RepresentationStore that records documents by
@@ -170,9 +171,80 @@ func TestSidecar_PerLanguage_DistinctTranscripts(t *testing.T) {
 	if len(st.reps) != 2 {
 		t.Fatalf("expected two per-language transcript representations, got %d", len(st.reps))
 	}
-	// Languages are processed sorted: "en" first, then "fr".
+	// Languages are processed sorted: "en" first, then "fr". Each language gets
+	// a distinct rep_type ("transcript-en"/"transcript-fr") so the two rows
+	// coexist under UNIQUE(doc_id, rep_type) instead of overwriting each other.
 	assertSidecarMeta(t, st.reps[0].MetaJSON, "en")
 	assertSidecarMeta(t, st.reps[1].MetaJSON, "fr")
+	if st.reps[0].RepType == st.reps[1].RepType {
+		t.Fatalf("expected distinct per-language rep_types, both were %q", st.reps[0].RepType)
+	}
+}
+
+// TestSidecar_PerLanguage_RealStorePersistsBoth guards the
+// UNIQUE(doc_id, rep_type) collision: against the real SQLite store, two
+// per-language sidecars MUST persist as two distinct transcript representations
+// (selectable by language), not collapse into one.
+func TestSidecar_PerLanguage_RealStorePersistsBoth(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
+	writeFile(t, filepath.Join(root, "talk.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n")
+	writeFile(t, filepath.Join(root, "talk.fr.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nbonjour\n")
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := newSidecarService(t, root, t.TempDir(), st)
+
+	if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "talk.mp3", DocType: "audio"}); err != nil {
+		t.Fatalf("upsert document: %v", err)
+	}
+	doc, err := st.GetDocumentByPath(context.Background(), "talk.mp3")
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	if _, err := svc.IngestSidecarTranscripts(context.Background(), doc); err != nil {
+		t.Fatalf("IngestSidecarTranscripts: %v", err)
+	}
+
+	reps, err := st.TranscriptRepresentations(context.Background(), "talk.mp3")
+	if err != nil {
+		t.Fatalf("TranscriptRepresentations: %v", err)
+	}
+	if len(reps) != 2 {
+		t.Fatalf("expected 2 per-language transcript reps in real store, got %d (%+v)", len(reps), reps)
+	}
+}
+
+// TestSidecar_Undifferentiated_HasNoLanguage verifies that an undifferentiated
+// sidecar ("clip.vtt", not "clip.en.vtt") is recorded with an EMPTY language —
+// the bare extension must not be mistaken for a language tag.
+func TestSidecar_Undifferentiated_HasNoLanguage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "media", "lecture.mp3"), "fake-audio")
+	writeFile(t, filepath.Join(root, "media", "lecture.vtt"),
+		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nIntro\n")
+
+	st := &fakeIngestStore{}
+	svc := newSidecarService(t, root, t.TempDir(), st)
+
+	doc := model.Document{DocID: 1, RelPath: "media/lecture.mp3", DocType: "audio"}
+	if _, err := svc.IngestSidecarTranscripts(context.Background(), doc); err != nil {
+		t.Fatalf("IngestSidecarTranscripts: %v", err)
+	}
+	if len(st.reps) != 1 {
+		t.Fatalf("expected one transcript representation, got %d", len(st.reps))
+	}
+	if got := st.reps[0].RepType; got != ingest.RepTypeTranscript {
+		t.Fatalf("undifferentiated sidecar must use the bare transcript rep_type, got %q", got)
+	}
+	if strings.Contains(st.reps[0].MetaJSON, `"language"`) {
+		t.Fatalf("undifferentiated sidecar must record no language, got meta %s", st.reps[0].MetaJSON)
+	}
 }
 
 func TestSidecar_ForceReindex_RunsSTTInsteadOfSidecar(t *testing.T) {

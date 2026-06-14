@@ -90,10 +90,15 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 		if !isSidecarExt(ext) {
 			continue
 		}
-		// middle is the text between the media base and the sidecar extension:
-		// "" for "clip.vtt", "en" for "clip.en.vtt". A multi-dot middle (e.g.
-		// "clip.foo.bar.vtt") takes the last dotted segment as the language tag.
-		middle := strings.TrimSuffix(relPath[len(prefix):], ext)
+		// middle is the dotted segment(s) between the media base and the sidecar
+		// extension: "" for "clip.vtt", ".en" for "clip.en.vtt". It is derived
+		// from the stem (path without its extension) so an undifferentiated
+		// sidecar — whose stem equals the media base — yields an empty middle
+		// rather than mistaking the bare extension for a language tag. A multi-dot
+		// middle (e.g. "clip.foo.bar.vtt") takes the last dotted segment as the
+		// language tag.
+		middle := strings.TrimPrefix(strings.TrimSuffix(relPath, ext), base)
+		middle = strings.TrimPrefix(middle, ".")
 		lang := ""
 		if middle != "" {
 			parts := strings.Split(middle, ".")
@@ -263,7 +268,7 @@ func (s *Service) persistSidecarTranscript(ctx context.Context, doc model.Docume
 	}
 	rep := model.Representation{
 		DocID:       doc.DocID,
-		RepType:     RepTypeTranscript,
+		RepType:     TranscriptRepType(lang),
 		RepHash:     sidecarRepHash(lang, cues),
 		MetaJSON:    string(metaJSON),
 		CreatedUnix: time.Now().Unix(),
