@@ -33,6 +33,15 @@ func ParseTTML(content string) ([]Cue, error) {
 	if len(all) == 0 {
 		return nil, &ParseError{Msg: "subtitle: no TTML cues parsed"}
 	}
+	// ParseTTMLByLang returns language-sorted groups, so the naive flatten above
+	// is language-grouped, not document (time) order. Sort by start time
+	// (tie-break end time) so the flattened stream matches the doc-order contract.
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].StartMS != all[j].StartMS {
+			return all[i].StartMS < all[j].StartMS
+		}
+		return all[i].EndMS < all[j].EndMS
+	})
 	reindex(all)
 	return all, nil
 }

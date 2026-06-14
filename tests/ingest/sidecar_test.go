@@ -307,6 +307,136 @@ func TestSidecar_FreshSidecarReprocessesUnchangedMedia(t *testing.T) {
 	}
 }
 
+// TestSidecar_FilenameMatching_RejectsExtraDottedSuffixes guards CodeRabbit
+// finding sidecar.go ~105: only "<base><ext>" (no lang) and "<base>.<lang><ext>"
+// (single token, no extra dots) bind to the media. Files with an extra dotted
+// segment — "clip.mp3.vtt" or "clip.notes.en.vtt" for media "clip.mp3" — must
+// NOT be treated as that media's sidecars (and so must not suppress STT).
+func TestSidecar_FilenameMatching_RejectsExtraDottedSuffixes(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "clip.mp3"), "fake-audio")
+	// Valid sidecars (must bind):
+	writeFile(t, filepath.Join(root, "clip.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nundiff\n")
+	writeFile(t, filepath.Join(root, "clip.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nenglish\n")
+	// Invalid (extra dotted suffix) — must NOT bind to clip.mp3:
+	writeFile(t, filepath.Join(root, "clip.mp3.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nwrong\n")
+	writeFile(t, filepath.Join(root, "clip.notes.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nnotes\n")
+
+	st := &fakeIngestStore{}
+	svc := newSidecarService(t, root, t.TempDir(), st)
+
+	doc := model.Document{DocID: 1, RelPath: "clip.mp3", DocType: "audio"}
+	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
+	if err != nil {
+		t.Fatalf("IngestSidecarTranscripts: %v", err)
+	}
+	if !ingested {
+		t.Fatal("expected the valid sidecars to be ingested")
+	}
+	// Exactly two reps: the undifferentiated (bare "transcript") and the English
+	// ("transcript-en"). The two extra-dotted files must contribute nothing.
+	if len(st.reps) != 2 {
+		t.Fatalf("expected exactly 2 transcript reps (clip.vtt + clip.en.vtt), got %d: %+v", len(st.reps), st.reps)
+	}
+	repTypes := map[string]bool{}
+	for _, r := range st.reps {
+		repTypes[r.RepType] = true
+	}
+	if !repTypes[ingest.RepTypeTranscript] || !repTypes[ingest.TranscriptRepType("en")] {
+		t.Fatalf("expected bare + en transcript rep_types, got %v", repTypes)
+	}
+}
+
+// TestSidecar_PathExcludes_NotUsedAsSidecar guards CodeRabbit finding
+// sidecar.go ~137 / service.go seeding: a sidecar whose rel_path matches a
+// configured PathExclude must be ignored entirely — neither read nor persisted —
+// so STT runs instead of being suppressed by an excluded subtitle file.
+func TestSidecar_PathExcludes_NotUsedAsSidecar(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), "fake-audio")
+	writeFile(t, filepath.Join(root, "song.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nexcluded sidecar\n")
+
+	st := &fakeIngestStore{}
+	stt := &fakeTranscriber{text: "[00:00] from stt"}
+	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), PathExcludes: []string{"**/*.vtt"}}
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetTranscriber(stt)
+
+	f := ingest.DiscoveredFile{RelPath: "song.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	if stt.calls != 1 {
+		t.Fatalf("expected STT to run once (excluded .vtt must not suppress it), got %d call(s)", stt.calls)
+	}
+	if len(st.reps) != 1 || st.reps[0].MetaJSON != "" {
+		t.Fatalf("expected one STT transcript rep with no sidecar meta, got %+v", st.reps)
+	}
+}
+
+// TestSidecar_ForceReindex_RetiresStaleSidecarReps guards CodeRabbit finding
+// service.go ~1231: on a forced STT reindex the document's existing
+// sidecar-sourced "transcript-<lang>" reps must be tombstoned before the fresh
+// STT transcript is written, so TranscriptRepresentations returns only the live
+// STT rep — never a stale sidecar transcript alongside it.
+func TestSidecar_ForceReindex_RetiresStaleSidecarReps(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
+	writeFile(t, filepath.Join(root, "talk.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nold sidecar\n")
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// First, ingest the sidecar as the transcript (no STT).
+	sidecarSvc := newSidecarService(t, root, t.TempDir(), st)
+	if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "talk.mp3", DocType: "audio"}); err != nil {
+		t.Fatalf("upsert document: %v", err)
+	}
+	doc, err := st.GetDocumentByPath(context.Background(), "talk.mp3")
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	if _, err := sidecarSvc.IngestSidecarTranscripts(context.Background(), doc); err != nil {
+		t.Fatalf("IngestSidecarTranscripts: %v", err)
+	}
+	reps, err := st.TranscriptRepresentations(context.Background(), "talk.mp3")
+	if err != nil {
+		t.Fatalf("TranscriptRepresentations: %v", err)
+	}
+	if len(reps) != 1 || !strings.Contains(reps[0].MetaJSON, `"source":"sidecar"`) {
+		t.Fatalf("expected one live sidecar transcript rep before force, got %+v", reps)
+	}
+
+	// Now force a reindex: STT must run and the stale sidecar rep must be retired.
+	sttSvc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	stt := &fakeTranscriber{text: "[00:00] fresh stt"}
+	sttSvc.SetTranscriber(stt)
+	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := sttSvc.ProcessDocument(context.Background(), f, nil, true); err != nil {
+		t.Fatalf("ProcessDocument(force): %v", err)
+	}
+	if stt.calls != 1 {
+		t.Fatalf("expected STT to run once under --force, got %d", stt.calls)
+	}
+
+	reps, err = st.TranscriptRepresentations(context.Background(), "talk.mp3")
+	if err != nil {
+		t.Fatalf("TranscriptRepresentations after force: %v", err)
+	}
+	if len(reps) != 1 {
+		t.Fatalf("expected exactly 1 live transcript rep after force (stale sidecar retired), got %d: %+v", len(reps), reps)
+	}
+	if strings.Contains(reps[0].MetaJSON, `"source":"sidecar"`) {
+		t.Fatalf("expected the live rep to be the fresh STT transcript, but it is still a sidecar: %s", reps[0].MetaJSON)
+	}
+}
+
 func assertSidecarMeta(t *testing.T, metaJSON, wantLang string) {
 	t.Helper()
 	if metaJSON == "" {

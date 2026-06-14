@@ -1039,17 +1039,28 @@ func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
 			continue
 		}
 		cueLen := utf8.RuneCountInString(text)
-		// Start a new chunk when the buffer would overflow the transcript chunk
-		// size; a single oversized cue still becomes its own chunk.
-		if haveOpen && bufLen+cueLen > TranscriptChunkMaxChars {
+		// flush() joins buffered cue texts with "\n", so budget one rune for the
+		// separator that will precede this cue when the buffer is non-empty;
+		// otherwise a merged chunk can exceed TranscriptChunkMaxChars by the
+		// number of joins. sepLen is 0 when no chunk is open (the first cue needs
+		// no separator) and resets to 0 after a flush.
+		sepLen := 0
+		if haveOpen {
+			sepLen = 1
+		}
+		// Start a new chunk when the buffer (plus the join separator) would
+		// overflow the transcript chunk size; a single oversized cue still becomes
+		// its own chunk.
+		if haveOpen && bufLen+sepLen+cueLen > TranscriptChunkMaxChars {
 			flush()
+			sepLen = 0
 		}
 		if !haveOpen {
 			startMS = cue.StartMS
 			haveOpen = true
 		}
 		buf = append(buf, text)
-		bufLen += cueLen
+		bufLen += sepLen + cueLen
 		endMS = cue.EndMS
 	}
 	flush()

@@ -50,9 +50,14 @@ type transcriptMeta struct {
 // transcript path can detect media siblings (sidecars) and gate ingestion on
 // their freshness without an extra filesystem stat. It is set once per scan from
 // the same walk that drives discovery, so it works for any CorpusFS backend.
+// PathExcludes are honoured here so an operator who excludes e.g. "**/*.vtt"
+// never has those files read or persisted as transcripts (the exclude contract).
 func (s *Service) setSidecarIndex(files []DiscoveredFile) {
 	idx := make(map[string]int64, len(files))
 	for _, f := range files {
+		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
+			continue
+		}
 		idx[f.RelPath] = f.MTimeUnix
 	}
 	s.sidecarMu.Lock()
@@ -80,29 +85,46 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 		return nil
 	}
 	base := stripExt(mediaRelPath)
-	prefix := base + "."
+	// mediaExt is the media file's own extension token (e.g. "mp3"), lowercased
+	// and without the leading dot. A sidecar whose single tail token equals it —
+	// "clip.mp3.vtt" for media "clip.mp3" — is the media filename plus a subtitle
+	// extension, not a language-tagged sidecar, so it must be rejected.
+	mediaExt := strings.TrimPrefix(strings.ToLower(path.Ext(mediaRelPath)), ".")
 	var out []sidecarFile
 	for relPath, mtime := range index {
-		if !strings.HasPrefix(relPath, prefix) {
-			continue
-		}
 		ext := strings.ToLower(path.Ext(relPath))
 		if !isSidecarExt(ext) {
 			continue
 		}
-		// middle is the dotted segment(s) between the media base and the sidecar
-		// extension: "" for "clip.vtt", ".en" for "clip.en.vtt". It is derived
-		// from the stem (path without its extension) so an undifferentiated
-		// sidecar — whose stem equals the media base — yields an empty middle
-		// rather than mistaking the bare extension for a language tag. A multi-dot
-		// middle (e.g. "clip.foo.bar.vtt") takes the last dotted segment as the
-		// language tag.
-		middle := strings.TrimPrefix(strings.TrimSuffix(relPath, ext), base)
-		middle = strings.TrimPrefix(middle, ".")
+		// stem is the sidecar path without its subtitle extension. tail is the
+		// remainder after the media base. Only the documented shapes bind:
+		//   "<base><ext>"        → tail == ""        (no language)
+		//   "<base>.<lang><ext>" → tail == ".<lang>" (single token, no extra dots)
+		// Anything else — an extra dotted segment ("clip.notes.en.vtt") or the
+		// media extension reused as the token ("clip.mp3.vtt") for media
+		// "clip.mp3" — is NOT this media's sidecar and is skipped, so it cannot
+		// wrongly suppress STT.
+		stem := strings.TrimSuffix(relPath, ext)
+		if !strings.HasPrefix(stem, base) {
+			continue
+		}
+		tail := strings.TrimPrefix(stem, base)
 		lang := ""
-		if middle != "" {
-			parts := strings.Split(middle, ".")
-			lang = strings.TrimSpace(parts[len(parts)-1])
+		switch {
+		case tail == "":
+			// undifferentiated sidecar, no language tag
+		case strings.HasPrefix(tail, ".") && !strings.Contains(tail[1:], "."):
+			lang = strings.TrimSpace(tail[1:])
+			if lang == "" {
+				continue
+			}
+			if mediaExt != "" && strings.EqualFold(lang, mediaExt) {
+				// e.g. "clip.mp3.vtt" for media "clip.mp3": the token is the
+				// media's own extension, not a language tag.
+				continue
+			}
+		default:
+			continue
 		}
 		out = append(out, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
 	}
@@ -132,6 +154,11 @@ func (s *Service) sidecarIndexOrWalk(ctx context.Context) map[string]int64 {
 	}
 	out := make(map[string]int64, len(files))
 	for _, f := range files {
+		// Honour PathExcludes here too so excluded files (e.g. "**/*.vtt") are
+		// never used as sidecars on the standalone fallback path.
+		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
+			continue
+		}
 		out[f.RelPath] = f.MTimeUnix
 	}
 	return out

@@ -157,6 +157,13 @@ type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
 }
 
+// sidecarTranscriptRetirer is the optional store capability used on a forced STT
+// reindex to tombstone a document's stale sidecar-sourced transcript
+// representations before the fresh machine transcript is written (spec §8.6.4).
+type sidecarTranscriptRetirer interface {
+	SoftDeleteSidecarTranscripts(ctx context.Context, relPath string) (int, error)
+}
+
 func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc := &Service{
 		cfg:                             cfg,
@@ -1215,11 +1222,16 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return nil
 	}
 
-	// Subtitle sidecar precedence (§8.6.4): a subtitle file (.vtt/.srt/.ttml)
-	// next to the media is ingested AS the transcript instead of running STT — an
-	// authored transcript is authoritative. `--force`/reindex overrides the gate
-	// and re-runs STT instead. Sidecar ingestion bypasses the quality gate
-	// (authored, not model-derived; §8.6.6/§8.6.7).
+	return s.generateTranscriptOrSidecar(ctx, doc, content, forceReindex)
+}
+
+// generateTranscriptOrSidecar resolves a media document's transcript. Subtitle
+// sidecar precedence (§8.6.4): a subtitle file (.vtt/.srt/.ttml) next to the
+// media is ingested AS the transcript instead of running STT — an authored
+// transcript is authoritative. `--force`/reindex overrides the gate, retiring
+// any stale sidecar transcripts and re-running STT. Sidecar ingestion bypasses
+// the quality gate (authored, not model-derived; §8.6.6/§8.6.7).
+func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, forceReindex bool) error {
 	if !forceReindex {
 		ingested, err := s.ingestSidecarTranscripts(ctx, doc)
 		if err != nil {
@@ -1228,20 +1240,51 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		if ingested {
 			return nil
 		}
+	} else if err := s.retireStaleSidecarTranscripts(ctx, doc); err != nil {
+		return err
 	}
 
-	if doc.DocType == "audio" && s.transcriber != nil {
-		if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
-			// Provider/transient failures should not fail the entire ingest run.
-			// Persistence/cache failures should still propagate.
-			if errors.Is(err, ErrTranscriptProviderFailure) {
-				s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
-				s.addErrors(1)
-				return nil
-			}
-			return err
+	if doc.DocType != "audio" || s.transcriber == nil {
+		return nil
+	}
+	if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
+		// Provider/transient failures should not fail the entire ingest run.
+		// Persistence/cache failures should still propagate.
+		if errors.Is(err, ErrTranscriptProviderFailure) {
+			s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
+			s.addErrors(1)
+			return nil
 		}
-		s.addRepresentations(1)
+		return err
+	}
+	s.addRepresentations(1)
+	return nil
+}
+
+// retireStaleSidecarTranscripts tombstones a media document's existing
+// sidecar-sourced transcript representations before a forced STT reindex
+// regenerates the transcript. Without this, the stale "transcript-<lang>" sidecar
+// rows stay live and surface alongside the fresh STT transcript in
+// retrieval/export (spec §8.6.4). It is a no-op for non-media docs, when the
+// store lacks the optional retirer capability, or when the document has no
+// sidecar transcripts (reported as os.ErrNotExist).
+func (s *Service) retireStaleSidecarTranscripts(ctx context.Context, doc model.Document) error {
+	if !isSidecarMediaType(doc.DocType) {
+		return nil
+	}
+	retirer, ok := s.store.(sidecarTranscriptRetirer)
+	if !ok {
+		return nil
+	}
+	n, err := retirer.SoftDeleteSidecarTranscripts(ctx, doc.RelPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("retire stale sidecar transcripts for %s: %w", doc.RelPath, err)
+	}
+	if n > 0 {
+		s.getLogger().Printf("retired %d stale sidecar transcript(s) for %s before STT reindex", n, doc.RelPath)
 	}
 	return nil
 }
