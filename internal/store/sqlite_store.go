@@ -1255,7 +1255,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 		offset = 0
 	}
 
-	normalizedPrefix := normalizePrefix(prefix)
+	normalizedPrefix := model.NormalizePathPrefix(prefix)
 
 	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message FROM documents`
 	where := []string{"deleted = 0"}
@@ -2069,20 +2069,6 @@ func normalizeRelPath(relPath string) (string, error) {
 	}
 
 	return normalized, nil
-}
-
-func normalizePrefix(prefix string) string {
-	trimmed := strings.TrimSpace(prefix)
-	if trimmed == "" {
-		return ""
-	}
-	trimmed = strings.TrimPrefix(trimmed, "./")
-	trimmed = filepath.ToSlash(filepath.Clean(trimmed))
-	trimmed = strings.TrimPrefix(trimmed, "/")
-	if trimmed == "." {
-		return ""
-	}
-	return trimmed
 }
 
 func normalizeStatus(status string) string {

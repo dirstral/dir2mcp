@@ -1841,7 +1841,10 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 		return false
 	}
 
-	if query.PathPrefix != "" && !strings.HasPrefix(hit.RelPath, query.PathPrefix) {
+	// Normalize path_prefix the same way list_files does so a prefix that lists
+	// a file (e.g. "./acts", "/acts", "acts/", "ACTS") also matches it here
+	// (issue #286 Bug B). MatchesPathPrefix returns true for an empty prefix.
+	if !model.MatchesPathPrefix(hit.RelPath, query.PathPrefix) {
 		return false
 	}
 
