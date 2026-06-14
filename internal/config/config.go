@@ -54,6 +54,24 @@ type SourceConfig struct {
 	S3SessionToken    string
 }
 
+// QdrantConfig configures the optional Qdrant vector index backend (issue #268),
+// selected via index.backend=qdrant. URL and Collection are persisted invariants;
+// APIKey is a runtime-only secret resolved through the existing env/keychain/
+// .env.local precedence (SPEC §16.1.1) and MUST NOT be written to disk or the
+// effective-config snapshot.
+type QdrantConfig struct {
+	// URL is the Qdrant endpoint (gRPC), e.g. "http://localhost:6334" or
+	// "https://xyz.cloud.qdrant.io:6334". Required when index.backend=qdrant.
+	URL string
+	// Collection is the base collection name. Per-kind collections are derived
+	// from it (<collection>_text / <collection>_code) so the text and code
+	// vector spaces never collide. Empty defaults to qdrantindex.DefaultCollection.
+	Collection string
+	// APIKey authenticates to a secured/Cloud deployment. Runtime-only secret;
+	// never persisted. Empty for an unsecured local instance.
+	APIKey string
+}
+
 type X402Config struct {
 	// Mode controls whether x402 payment gating is enabled.  Allowed values
 	// are "off", "on" and "required".  Validation will normalize the
@@ -210,6 +228,10 @@ type Config struct {
 
 	X402 X402Config
 
+	// Qdrant configures the optional Qdrant vector backend (issue #268), used
+	// when IndexBackend=="qdrant". See QdrantConfig.
+	Qdrant QdrantConfig
+
 	// Source selects the corpus backend (local/nfs/s3). See SourceConfig.
 	Source SourceConfig
 
@@ -296,6 +318,8 @@ type fileConfig struct {
 	SourceS3Prefix           *string
 	SourceS3Region           *string
 	SourceS3Endpoint         *string
+	QdrantURL                *string
+	QdrantCollection         *string
 }
 
 type persistedConfig struct {
@@ -380,6 +404,11 @@ type persistedConfig struct {
 	SourceS3Prefix   string `yaml:"source_s3_prefix"`
 	SourceS3Region   string `yaml:"source_s3_region"`
 	SourceS3Endpoint string `yaml:"source_s3_endpoint"`
+
+	// Qdrant vector backend selection (issue #268). The api_key is a secret and
+	// is intentionally NOT declared here so it can never be written to disk.
+	QdrantURL        string `yaml:"qdrant_url"`
+	QdrantCollection string `yaml:"qdrant_collection"`
 }
 
 // Default returns the baseline Config (used as the starting point
@@ -477,6 +506,11 @@ func Default() Config {
 		Source: SourceConfig{
 			Kind: "local",
 		},
+		Qdrant: QdrantConfig{
+			URL:        "",
+			Collection: "",
+			APIKey:     "",
+		},
 	}
 }
 
@@ -572,6 +606,10 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		SourceS3Prefix:   cfg.Source.S3Prefix,
 		SourceS3Region:   cfg.Source.S3Region,
 		SourceS3Endpoint: cfg.Source.S3Endpoint,
+		// Qdrant url/collection are persistable invariants; the api_key is a
+		// secret and is intentionally omitted so it never lands in the YAML.
+		QdrantURL:        cfg.Qdrant.URL,
+		QdrantCollection: cfg.Qdrant.Collection,
 	}
 }
 
@@ -888,6 +926,12 @@ func applySourceFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.SourceS3Endpoint != nil {
 		cfg.Source.S3Endpoint = *fc.SourceS3Endpoint
+	}
+	if fc.QdrantURL != nil {
+		cfg.Qdrant.URL = *fc.QdrantURL
+	}
+	if fc.QdrantCollection != nil {
+		cfg.Qdrant.Collection = *fc.QdrantCollection
 	}
 }
 
@@ -1424,6 +1468,9 @@ var configKeyAliases = map[string]string{
 	"source.s3.prefix":                     "source_s3_prefix",
 	"source.s3.region":                     "source_s3_region",
 	"source.s3.endpoint":                   "source_s3_endpoint",
+	"index.qdrant.url":                     "qdrant_url",
+	"index.qdrant.collection":              "qdrant_collection",
+	"index.qdrant.api_key":                 "qdrant_api_key",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
@@ -1442,7 +1489,7 @@ func isMapSectionKey(key string) bool {
 	switch key {
 	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere", "index":
 		return true
-	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
+	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
 	case "source", "source.s3":
 		return true
@@ -1592,6 +1639,10 @@ func setSourceStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.SourceS3Region = strPtr(value)
 	case "source_s3_endpoint":
 		cfg.SourceS3Endpoint = strPtr(value)
+	case "qdrant_url":
+		cfg.QdrantURL = strPtr(value)
+	case "qdrant_collection":
+		cfg.QdrantCollection = strPtr(value)
 	}
 }
 
@@ -1858,6 +1909,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("source_s3_region", cfg.SourceS3Region)
 	writeScalar("source_s3_endpoint", cfg.SourceS3Endpoint)
 	// S3 credentials are never written to disk (env/keychain-only).
+	writeScalar("qdrant_url", cfg.QdrantURL)
+	writeScalar("qdrant_collection", cfg.QdrantCollection)
+	// qdrant api_key is never written to disk (env/keychain/.env.local-only).
 
 	return []byte(b.String()), nil
 }
@@ -1908,6 +1962,19 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	applySessionEnvOverrides(cfg, overrideEnv)
 	applyX402EnvOverrides(cfg, overrideEnv)
 	applySourceEnvOverrides(cfg, overrideEnv)
+	applyQdrantEnvOverrides(cfg, overrideEnv)
+}
+
+// applyQdrantEnvOverrides applies the Qdrant vector-backend env overrides
+// (issue #268). URL/collection are non-secret settings sourced from
+// DIR2MCP_QDRANT_*. The api_key is a runtime-only secret resolved through the
+// existing precedence (env → keychain → file/.env.local): the loader has already
+// layered keychain/.env.local onto QDRANT_API_KEY by the time this runs, so
+// reading it here honors all three sources. The api_key is never persisted.
+func applyQdrantEnvOverrides(cfg *Config, env map[string]string) {
+	setTrimmedEnv(env, "DIR2MCP_QDRANT_URL", &cfg.Qdrant.URL)
+	setTrimmedEnv(env, "DIR2MCP_QDRANT_COLLECTION", &cfg.Qdrant.Collection)
+	setSecretEnv(env, "QDRANT_API_KEY", &cfg.Qdrant.APIKey)
 }
 
 // applySourceEnvOverrides applies the corpus-source selection env overrides and
@@ -2215,8 +2282,10 @@ func (c *Config) validateIngestExtractor() error {
 }
 
 // validateIndexBackend normalizes IndexBackend (defaulting empty to the
-// "memory" baseline) and rejects any value outside memory/disk (issue #246).
-// Future networked backends (#268 Qdrant, #269 pgvector) extend this set.
+// "memory" baseline) and rejects any value outside memory/disk/qdrant
+// (issues #246, #268). When qdrant is selected it enforces the qdrant
+// persisted invariants (url required). Future networked backends (#269
+// pgvector) extend this set.
 func (c *Config) validateIndexBackend() error {
 	backend := strings.ToLower(strings.TrimSpace(c.IndexBackend))
 	if backend == "" {
@@ -2224,10 +2293,30 @@ func (c *Config) validateIndexBackend() error {
 	}
 	switch backend {
 	case "memory", "disk":
+	case "qdrant":
+		c.IndexBackend = backend
+		return c.validateQdrant()
 	default:
-		return fmt.Errorf("index.backend must be one of memory, disk: %q", c.IndexBackend)
+		return fmt.Errorf("index.backend must be one of memory, disk, qdrant: %q", c.IndexBackend)
 	}
 	c.IndexBackend = backend
+	return nil
+}
+
+// validateQdrant enforces the Qdrant backend persisted invariants (issue #268):
+// a URL is required and the URL/collection are trimmed. The api_key is NOT
+// validated here: it is an optional runtime-only secret (an unsecured local
+// instance needs none), resolved on env-aware load paths and never persisted,
+// so requiring it here would break the env-skipping LoadFile/snapshot paths.
+// Errors are CONFIG_INVALID-style (clear, actionable) so selecting qdrant
+// without an endpoint fails loudly rather than at first request time.
+func (c *Config) validateQdrant() error {
+	c.Qdrant.URL = strings.TrimSpace(c.Qdrant.URL)
+	c.Qdrant.Collection = strings.TrimSpace(c.Qdrant.Collection)
+	if c.Qdrant.URL == "" {
+		return errors.New("index.backend=qdrant requires index.qdrant.url " +
+			"(e.g. http://localhost:6334 or https://<cluster>.cloud.qdrant.io:6334)")
+	}
 	return nil
 }
 

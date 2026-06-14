@@ -494,6 +494,14 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonO
 // when the identity is empty (fresh) or differs, so a vector space built under a
 // different embed provider/model/dimension is never silently reused.
 func (a *App) loadVectorIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
+	// Networked backends (Qdrant, issue #268) carry connection config NewBackend
+	// can't reach and have no local persistence path, so they branch out before
+	// the local memory/disk dispatch. EnsureIdentity still runs (qdrant
+	// implements Identity/Reset); the Persistable Load step is skipped because
+	// Qdrant owns its own durability.
+	if strings.EqualFold(strings.TrimSpace(cfg.IndexBackend), index.BackendQdrant) {
+		return a.loadQdrantIndex(ctx, cfg, kind, identity, jsonOutput)
+	}
 	ix, path := index.NewBackend(cfg.IndexBackend, cfg.StateDir, kind)
 	if p, ok := ix.(model.Persistable); ok {
 		if err := p.Load(ctx, path); err != nil &&
@@ -510,6 +518,29 @@ func (a *App) loadVectorIndex(ctx context.Context, cfg *config.Config, kind, ide
 		return builtIndex{}, exitIndexLoadFailure
 	}
 	return builtIndex{index: ix, path: path}, exitSuccess
+}
+
+// loadQdrantIndex constructs the networked Qdrant backend for one kind (issue
+// #268): it dials Qdrant (verifying reachability up front — no silent fallback)
+// against a per-kind collection, then reconciles the recorded embed identity.
+// There is no local persistence path, so builtIndex.path is left empty and the
+// PersistenceManager is never wired for this kind.
+func (a *App) loadQdrantIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
+	ix, err := index.NewQdrantBackend(ctx, index.QdrantParams{
+		URL:        cfg.Qdrant.URL,
+		APIKey:     cfg.Qdrant.APIKey,
+		Collection: cfg.Qdrant.Collection,
+	}, kind)
+	if err != nil {
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("connect %s index to qdrant: %v", kind, err))
+		return builtIndex{}, exitIndexLoadFailure
+	}
+	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("reconcile %s index identity: %v", kind, err))
+		_ = ix.Close()
+		return builtIndex{}, exitIndexLoadFailure
+	}
+	return builtIndex{index: ix, path: ""}, exitSuccess
 }
 
 // buildMCPServerOptions constructs the list of mcp.ServerOption values,
