@@ -456,8 +456,9 @@ type builtIndex struct {
 }
 
 // initStoreAndIndices initialises the metadata store and both vector indices,
-// dispatching on cfg.IndexBackend ("memory" default | "disk", issue #246). On
-// success the caller is responsible for closing all three.
+// dispatching on cfg.IndexBackend ("memory" default | "disk" | "qdrant" |
+// "pgvector"; issues #246, #268, #269). On success the caller is responsible for
+// closing all three.
 func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, builtIndex, builtIndex, int) {
 	st := a.storeForConfig(*cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
@@ -483,24 +484,26 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonO
 		_ = textIx.index.Close()
 		return nil, builtIndex{}, builtIndex{}, code
 	}
-
 	return st, textIx, codeIx, exitSuccess
 }
 
 // loadVectorIndex constructs the configured vector backend for one kind via the
-// index.backend dispatch (issue #246; #268/#269 will extend the switch),
-// restores it from its persisted snapshot, and reconciles its recorded embed
-// identity with the configured one (issue #247): EnsureIdentity resets the index
-// when the identity is empty (fresh) or differs, so a vector space built under a
-// different embed provider/model/dimension is never silently reused.
+// index.backend dispatch (issues #246, #268, #269), restores it from its
+// persisted snapshot, and reconciles its recorded embed identity with the
+// configured one (issue #247): EnsureIdentity resets the index when the identity
+// is empty (fresh) or differs, so a vector space built under a different embed
+// provider/model/dimension is never silently reused.
 func (a *App) loadVectorIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
-	// Networked backends (Qdrant, issue #268) carry connection config NewBackend
-	// can't reach and have no local persistence path, so they branch out before
-	// the local memory/disk dispatch. EnsureIdentity still runs (qdrant
-	// implements Identity/Reset); the Persistable Load step is skipped because
-	// Qdrant owns its own durability.
+	// Networked backends (Qdrant #268, pgvector #269) carry connection config
+	// NewBackend can't reach and have no local persistence path, so they branch
+	// out before the local memory/disk dispatch. EnsureIdentity still runs (both
+	// implement Identity/Reset); the Persistable Load step is skipped because the
+	// remote store owns its own durability.
 	if strings.EqualFold(strings.TrimSpace(cfg.IndexBackend), index.BackendQdrant) {
 		return a.loadQdrantIndex(ctx, cfg, kind, identity, jsonOutput)
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.IndexBackend), index.BackendPgvector) {
+		return a.loadPgvectorIndex(ctx, cfg, kind, identity, jsonOutput)
 	}
 	ix, path := index.NewBackend(cfg.IndexBackend, cfg.StateDir, kind)
 	if p, ok := ix.(model.Persistable); ok {
@@ -533,6 +536,38 @@ func (a *App) loadQdrantIndex(ctx context.Context, cfg *config.Config, kind, ide
 	}, kind)
 	if err != nil {
 		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("connect %s index to qdrant: %v", kind, err))
+		return builtIndex{}, exitIndexLoadFailure
+	}
+	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("reconcile %s index identity: %v", kind, err))
+		_ = ix.Close()
+		return builtIndex{}, exitIndexLoadFailure
+	}
+	return builtIndex{index: ix, path: ""}, exitSuccess
+}
+
+// loadPgvectorIndex constructs the networked PostgreSQL + pgvector backend for
+// one kind (issue #269): it connects (verifying reachability and the pgvector
+// extension up front — no silent fallback) against a per-kind table, then
+// reconciles the recorded embed identity. A missing DSN, an unreachable server,
+// or a missing extension is reported as a remediable error and aborts startup.
+// There is no local persistence path, so builtIndex.path is left empty and the
+// PersistenceManager is never wired for this kind.
+func (a *App) loadPgvectorIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
+	dsn := strings.TrimSpace(cfg.IndexPgvectorDSN)
+	if dsn == "" {
+		writeCLIError(a.stderr, jsonOutput, exitConfigInvalid,
+			"CONFIG_INVALID: index.backend=pgvector but no DSN configured",
+			"Set DIR2MCP_INDEX_PGVECTOR_DSN (or store it in the keychain / .env.local) to a Postgres connection string.")
+		return builtIndex{}, exitConfigInvalid
+	}
+	ix, err := index.NewPgvectorBackend(ctx, index.PgvectorParams{
+		DSN:    dsn,
+		Schema: cfg.IndexPgvectorSchema,
+		Table:  cfg.IndexPgvectorTable,
+	}, kind)
+	if err != nil {
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("connect %s index to pgvector: %v", kind, err))
 		return builtIndex{}, exitIndexLoadFailure
 	}
 	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {

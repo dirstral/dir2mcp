@@ -39,6 +39,10 @@ var managedEnvVars = []string{
 	// Qdrant vector-backend credential (issue #268), used when
 	// index.backend=qdrant against a secured/Cloud deployment.
 	"QDRANT_API_KEY",
+	// pgvector vector-backend DSN (issue #269), used when index.backend=pgvector.
+	// It is a secret (the libpq connection string carries the password) resolved
+	// through the same env/keychain/.env.local precedence and never persisted.
+	"DIR2MCP_INDEX_PGVECTOR_DSN",
 	// S3 corpus-source credentials (issue #244). Stored under the standard AWS
 	// env var names so a keychain entry satisfies the same reference the
 	// environment/.env.local sources use.

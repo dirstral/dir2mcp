@@ -232,6 +232,18 @@ type Config struct {
 	// when IndexBackend=="qdrant". See QdrantConfig.
 	Qdrant QdrantConfig
 
+	// IndexPgvectorDSN is the libpq connection string for the pgvector backend
+	// (issue #269), used when IndexBackend=="pgvector". It is sensitive (like an
+	// API key / the Qdrant api_key): sourced from the environment / secret store,
+	// never persisted to the config file or the effective-config snapshot.
+	// Required when IndexBackend=pgvector.
+	IndexPgvectorDSN string
+	// IndexPgvectorSchema / IndexPgvectorTable name the vectors table. They are
+	// persisted invariants; empty values fall back to the pgvectorindex package
+	// defaults.
+	IndexPgvectorSchema string
+	IndexPgvectorTable  string
+
 	// Source selects the corpus backend (local/nfs/s3). See SourceConfig.
 	Source SourceConfig
 
@@ -320,6 +332,9 @@ type fileConfig struct {
 	SourceS3Endpoint         *string
 	QdrantURL                *string
 	QdrantCollection         *string
+	IndexPgvectorDSN         *string
+	IndexPgvectorSchema      *string
+	IndexPgvectorTable       *string
 }
 
 type persistedConfig struct {
@@ -409,6 +424,13 @@ type persistedConfig struct {
 	// is intentionally NOT declared here so it can never be written to disk.
 	QdrantURL        string `yaml:"qdrant_url"`
 	QdrantCollection string `yaml:"qdrant_collection"`
+
+	// pgvector backend selection (issue #269). The DSN is sensitive and, like the
+	// Qdrant api_key, is intentionally NOT declared here so it can never be
+	// written to disk: it is sourced from DIR2MCP_INDEX_PGVECTOR_DSN (or the
+	// secret store) at runtime. Schema/table are non-sensitive invariants.
+	IndexPgvectorSchema string `yaml:"index_pgvector_schema"`
+	IndexPgvectorTable  string `yaml:"index_pgvector_table"`
 }
 
 // Default returns the baseline Config (used as the starting point
@@ -610,6 +632,10 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		// secret and is intentionally omitted so it never lands in the YAML.
 		QdrantURL:        cfg.Qdrant.URL,
 		QdrantCollection: cfg.Qdrant.Collection,
+		// pgvector schema/table are persistable invariants; the DSN is a secret
+		// and intentionally omitted (sourced from env/secret store at runtime).
+		IndexPgvectorSchema: cfg.IndexPgvectorSchema,
+		IndexPgvectorTable:  cfg.IndexPgvectorTable,
 	}
 }
 
@@ -911,6 +937,9 @@ func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 
 // applySourceFileParsed overlays parsed corpus-source file fields onto
 // cfg.Source. Credentials are never read from disk (env/keychain-only).
+// It also overlays the networked vector-backend invariants (Qdrant url/
+// collection, pgvector schema/table); their secrets (Qdrant api_key, pgvector
+// DSN) are env/keychain-only and never read from the config file here.
 func applySourceFileParsed(cfg *Config, fc fileConfig) {
 	if fc.SourceKind != nil {
 		cfg.Source.Kind = *fc.SourceKind
@@ -932,6 +961,12 @@ func applySourceFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.QdrantCollection != nil {
 		cfg.Qdrant.Collection = *fc.QdrantCollection
+	}
+	if fc.IndexPgvectorSchema != nil {
+		cfg.IndexPgvectorSchema = *fc.IndexPgvectorSchema
+	}
+	if fc.IndexPgvectorTable != nil {
+		cfg.IndexPgvectorTable = *fc.IndexPgvectorTable
 	}
 }
 
@@ -1471,6 +1506,9 @@ var configKeyAliases = map[string]string{
 	"index.qdrant.url":                     "qdrant_url",
 	"index.qdrant.collection":              "qdrant_collection",
 	"index.qdrant.api_key":                 "qdrant_api_key",
+	"index.pgvector.dsn":                   "index_pgvector_dsn",
+	"index.pgvector.schema":                "index_pgvector_schema",
+	"index.pgvector.table":                 "index_pgvector_table",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
@@ -1492,6 +1530,8 @@ func isMapSectionKey(key string) bool {
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
 	case "source", "source.s3":
+		return true
+	case "index.pgvector":
 		return true
 	case "ingest.extractor":
 		return false
@@ -1627,6 +1667,9 @@ func setStringFileScalar(cfg *fileConfig, key, value string) {
 
 // setSourceStringFileScalar assigns corpus-source string keys onto the
 // fileConfig. Credential keys are deliberately not accepted from disk.
+// It also handles the networked vector-backend invariants (Qdrant url/
+// collection, pgvector schema/table); their secrets (Qdrant api_key, pgvector
+// DSN) are env/keychain-only and intentionally not read from the config file.
 func setSourceStringFileScalar(cfg *fileConfig, key, value string) {
 	switch key {
 	case "source_kind":
@@ -1643,6 +1686,10 @@ func setSourceStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.QdrantURL = strPtr(value)
 	case "qdrant_collection":
 		cfg.QdrantCollection = strPtr(value)
+	case "index_pgvector_schema":
+		cfg.IndexPgvectorSchema = strPtr(value)
+	case "index_pgvector_table":
+		cfg.IndexPgvectorTable = strPtr(value)
 	}
 }
 
@@ -1912,6 +1959,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("qdrant_url", cfg.QdrantURL)
 	writeScalar("qdrant_collection", cfg.QdrantCollection)
 	// qdrant api_key is never written to disk (env/keychain/.env.local-only).
+	writeScalar("index_pgvector_schema", cfg.IndexPgvectorSchema)
+	writeScalar("index_pgvector_table", cfg.IndexPgvectorTable)
+	// index_pgvector_dsn is a secret and never written to disk (env/keychain/.env.local-only).
 
 	return []byte(b.String()), nil
 }
@@ -1963,6 +2013,21 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	applyX402EnvOverrides(cfg, overrideEnv)
 	applySourceEnvOverrides(cfg, overrideEnv)
 	applyQdrantEnvOverrides(cfg, overrideEnv)
+	applyIndexEnvOverrides(cfg, overrideEnv)
+}
+
+// applyIndexEnvOverrides sources vector-index backend settings from the
+// environment. The pgvector DSN is a runtime-only secret resolved through the
+// existing precedence (env → keychain → file/.env.local): the loader has already
+// layered keychain/.env.local onto DIR2MCP_INDEX_PGVECTOR_DSN by the time this
+// runs, so reading it here honors all three sources. It is never persisted.
+// Backend/schema/table are non-secret and may also be set via env for parity
+// with the file keys.
+func applyIndexEnvOverrides(cfg *Config, env map[string]string) {
+	setTrimmedEnv(env, "DIR2MCP_INDEX_BACKEND", &cfg.IndexBackend)
+	setTrimmedEnv(env, "DIR2MCP_INDEX_PGVECTOR_SCHEMA", &cfg.IndexPgvectorSchema)
+	setTrimmedEnv(env, "DIR2MCP_INDEX_PGVECTOR_TABLE", &cfg.IndexPgvectorTable)
+	setSecretEnv(env, "DIR2MCP_INDEX_PGVECTOR_DSN", &cfg.IndexPgvectorDSN)
 }
 
 // applyQdrantEnvOverrides applies the Qdrant vector-backend env overrides
@@ -2282,10 +2347,13 @@ func (c *Config) validateIngestExtractor() error {
 }
 
 // validateIndexBackend normalizes IndexBackend (defaulting empty to the
-// "memory" baseline) and rejects any value outside memory/disk/qdrant
-// (issues #246, #268). When qdrant is selected it enforces the qdrant
-// persisted invariants (url required). Future networked backends (#269
-// pgvector) extend this set.
+// "memory" baseline) and rejects any value outside memory/disk/qdrant/pgvector
+// (issues #246, #268, #269). When qdrant is selected it enforces the qdrant
+// persisted invariants (url required); when pgvector is selected it validates
+// the schema/table names are safe SQL identifiers when set. It deliberately does
+// NOT require the pgvector DSN: the DSN is a runtime-only secret (never
+// persisted), so the missing-DSN check lives in the `up` startup path, not in
+// Validate (which also runs at save time).
 func (c *Config) validateIndexBackend() error {
 	backend := strings.ToLower(strings.TrimSpace(c.IndexBackend))
 	if backend == "" {
@@ -2296,8 +2364,19 @@ func (c *Config) validateIndexBackend() error {
 	case "qdrant":
 		c.IndexBackend = backend
 		return c.validateQdrant()
+	case "pgvector":
+		if s := strings.TrimSpace(c.IndexPgvectorSchema); s != "" {
+			if err := validateSQLIdentifier("index.pgvector.schema", s); err != nil {
+				return err
+			}
+		}
+		if t := strings.TrimSpace(c.IndexPgvectorTable); t != "" {
+			if err := validateSQLIdentifier("index.pgvector.table", t); err != nil {
+				return err
+			}
+		}
 	default:
-		return fmt.Errorf("index.backend must be one of memory, disk, qdrant: %q", c.IndexBackend)
+		return fmt.Errorf("index.backend must be one of memory, disk, qdrant, pgvector: %q", c.IndexBackend)
 	}
 	c.IndexBackend = backend
 	return nil
@@ -2316,6 +2395,25 @@ func (c *Config) validateQdrant() error {
 	if c.Qdrant.URL == "" {
 		return errors.New("index.backend=qdrant requires index.qdrant.url " +
 			"(e.g. http://localhost:6334 or https://<cluster>.cloud.qdrant.io:6334)")
+	}
+	return nil
+}
+
+// validateSQLIdentifier rejects a schema/table name that is not a safe,
+// unqualified SQL identifier (letters, digits, underscore; not starting with a
+// digit). Mirrors pgvectorindex.ValidateIdentifier but is kept local so the
+// config package does not depend on the pgx-backed index package.
+func validateSQLIdentifier(field, ident string) error {
+	for i, r := range ident {
+		isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		isDigit := r >= '0' && r <= '9'
+		if isLetter || r == '_' {
+			continue
+		}
+		if isDigit && i > 0 {
+			continue
+		}
+		return fmt.Errorf("%s %q contains an invalid character %q (allowed: letters, digits, underscore; must not start with a digit)", field, ident, string(r))
 	}
 	return nil
 }

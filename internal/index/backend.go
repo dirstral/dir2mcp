@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/index/diskindex"
+	"github.com/dirstral/dir2mcp/internal/index/pgvectorindex"
 	"github.com/dirstral/dir2mcp/internal/index/qdrantindex"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
@@ -22,6 +23,11 @@ const (
 	// not by NewBackend (which only knows the local stateDir). NewBackend never
 	// returns a qdrant index; the const exists for the selector/StaleIndexFiles.
 	BackendQdrant = "qdrant"
+	// BackendPgvector is the networked PostgreSQL + pgvector backend (issue #269).
+	// Like qdrant it has no local persistence path: it is constructed by the CLI
+	// via NewPgvectorBackend with the resolved DSN/schema/table, not by
+	// NewBackend. The const exists for the selector/StaleIndexFiles.
+	BackendPgvector = "pgvector"
 )
 
 // IndexKind names the two per-corpus vector indices.
@@ -95,6 +101,50 @@ func QdrantCollectionForKind(base, kind string) string {
 	return base + "_" + KindText
 }
 
+// PgvectorParams carries the resolved connection config for the networked
+// PostgreSQL + pgvector backend (issue #269). It mirrors the
+// index.pgvector.{dsn,schema,table} config block; the DSN is a runtime-only
+// secret resolved by the caller and never persisted.
+type PgvectorParams struct {
+	DSN    string
+	Schema string
+	Table  string
+}
+
+// NewPgvectorBackend opens a pgvector-backed model.Index for one kind ("text" or
+// "code"), deriving a distinct per-kind table (<table> / <table>_code) so the
+// two vector spaces never collide in a shared database. Like NewQdrantBackend it
+// has no local persistence path (Postgres owns durability) and the returned
+// index is deliberately NOT model.Persistable, so the caller's Load step is
+// correctly skipped. An unreachable/misconfigured endpoint (bad DSN, missing
+// pgvector extension, no CREATE privilege) returns a non-nil error — no silent
+// fallback. It lives here, alongside the local dispatch, so internal/cli has a
+// single backend-construction entrypoint.
+func NewPgvectorBackend(ctx context.Context, p PgvectorParams, kind string) (model.Index, error) {
+	return pgvectorindex.Open(ctx, pgvectorindex.Config{
+		DSN:    p.DSN,
+		Schema: p.Schema,
+		Table:  PgvectorTableForKind(p.Table, kind),
+	})
+}
+
+// PgvectorTableForKind derives the per-kind vectors table name from the
+// configured base. An empty base falls back to pgvectorindex.DefaultTable so the
+// text/code suffixes remain stable across runs. The text axis keeps the base
+// name (so an existing single-axis table is reused) and the code axis appends
+// "_code". Exported so callers/tests can assert the text/code tables never
+// collide.
+func PgvectorTableForKind(base, kind string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = pgvectorindex.DefaultTable
+	}
+	if kind == KindCode {
+		return base + "_" + KindCode
+	}
+	return base
+}
+
 // kindSnapshotFileName maps an index kind to its HNSW v2 snapshot basename.
 func kindSnapshotFileName(kind string) string {
 	if kind == KindCode {
@@ -110,10 +160,11 @@ func kindSnapshotFileName(kind string) string {
 // switching; the disk backend's segment + identity sidecar are added when
 // selected.
 func StaleIndexFiles(backend string) []string {
-	// Qdrant keeps no local index files: its durability lives server-side and a
-	// reindex clears the collection via the index's Reset (driven by
-	// EnsureIdentity), so there is nothing on disk to remove.
-	if strings.EqualFold(strings.TrimSpace(backend), BackendQdrant) {
+	// Networked backends keep no local index files: their durability lives
+	// server-side and a reindex clears the remote store via the index's Reset
+	// (driven by EnsureIdentity), so there is nothing on disk to remove.
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case BackendQdrant, BackendPgvector:
 		return nil
 	}
 	names := append([]string{TextIndexFileName, CodeIndexFileName}, LegacyIndexFileNames...)
