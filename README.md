@@ -540,6 +540,10 @@ Normative docs are maintained in the [`dirstral-spec`](https://github.com/dirstr
 - [dirstral-spec/docs/x402-payment-adapter-spec.md](dirstral-spec/docs/x402-payment-adapter-spec.md) — facilitator adapter contract
 - dir2mcp implements spec version `0.16.x` ([versioning](dirstral-spec/spec/versioning.md))
 
+Operator guides (in-repo):
+
+- [docs/dual-machine-deployment.md](docs/dual-machine-deployment.md) — run dir2mcp on a GPU VPS with the corpus on NFS or S3
+
 ## Development
 
 ```bash
