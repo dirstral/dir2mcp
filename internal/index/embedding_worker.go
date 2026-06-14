@@ -122,13 +122,21 @@ func buildEmbedBatch(tasks []model.ChunkTask) (validTasks []model.ChunkTask, inp
 func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, validTasks []model.ChunkTask) ([][]float32, error) {
 	vectors := make([][]float32, len(validTasks))
 
+	// cache is scoped to this single embedTasks invocation so sibling chunks of
+	// the same MediaRef (many PDF pages, many video time-windows) share one
+	// backend fetch instead of each re-reading. It holds whole-file bytes and
+	// materialized local paths only for the duration of the batch, and its
+	// Localize temp files are cleaned up here at batch completion (issue #279).
+	cache := newMediaBatchCache()
+	defer cache.cleanup()
+
 	textIdx := make([]int, 0, len(validTasks))
 	textInputs := make([]string, 0, len(validTasks))
 	mediaIdx := make([]int, 0)
 	mediaItems := make([]model.MediaInput, 0)
 	for i, t := range validTasks {
 		if isMediaModality(t.Modality) {
-			item, err := w.loadMediaInput(ctx, t)
+			item, err := w.loadMediaInput(ctx, t, cache)
 			if err != nil {
 				return nil, err
 			}
@@ -193,7 +201,14 @@ func (w *EmbeddingWorker) corpusFS() corpusfs.CorpusFS {
 // file to extract a single page). Audio/video go through Localize because ffmpeg
 // (avutil.ExtractSegment) needs a real filesystem path, not an io.Reader — for
 // an object-store backend this downloads the whole object to a temp file.
-func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask) (model.MediaInput, error) {
+//
+// Both fetch paths go through cache (issue #279), so sibling chunks of the same
+// MediaRef in one batch (every page of a PDF, every time-window of a video)
+// share a single whole-file read or single Localize download instead of
+// re-fetching per chunk. For the default LocalFS this is behavior-preserving (a
+// local file is cheap to re-open and Localize is a no-op); it only removes
+// redundant range GETs / full-object downloads for remote backends such as S3.
+func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask, cache *mediaBatchCache) (model.MediaInput, error) {
 	ref := strings.TrimSpace(t.MediaRef)
 	if ref == "" {
 		return model.MediaInput{}, fmt.Errorf("%w: media chunk %d has no media_ref", ErrFatal, t.Metadata.ChunkID)
@@ -205,24 +220,115 @@ func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask)
 
 	switch strings.ToLower(strings.TrimSpace(t.Modality)) {
 	case "audio", "video":
-		data, aerr := w.loadMediaSegment(ctx, t, fsys, ref)
+		data, aerr := w.loadMediaSegment(ctx, t, fsys, ref, cache)
 		if aerr != nil {
 			return model.MediaInput{}, fatalIfEscape(aerr)
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	case "pdf":
-		data, perr := w.loadPDFPage(ctx, t, fsys, ref)
+		data, perr := w.loadPDFPage(ctx, t, fsys, ref, cache)
 		if perr != nil {
 			return model.MediaInput{}, fatalIfEscape(perr)
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	default: // image and other whole-file media
-		data, rerr := readWholeMedia(ctx, fsys, ref)
+		data, rerr := cache.readWholeMedia(ctx, fsys, ref)
 		if rerr != nil {
 			return model.MediaInput{}, fatalIfEscape(fmt.Errorf("read media %q: %w", ref, rerr))
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	}
+}
+
+// mediaBatchCache memoizes media fetches across the sibling chunks of one
+// embedTasks invocation so a MediaRef shared by many chunks (a PDF read whole
+// for every page, or a video downloaded once per time-window) is fetched from
+// the corpus filesystem exactly once per batch instead of once per chunk
+// (issue #279). It is created and disposed inside a single embedTasks call, so
+// the cached whole-file bytes and any Localize temp files live only for the
+// batch's duration — there is no process-global state or unbounded growth.
+//
+// The zero value is not usable; construct one with newMediaBatchCache.
+type mediaBatchCache struct {
+	// wholeFile holds bytes read via Open+io.ReadAll, keyed by MediaRef. Used
+	// for image and PDF chunks (pdfutil needs the full file to extract a page),
+	// so every page of one PDF shares a single whole-file read.
+	wholeFile map[string][]byte
+	// localized holds the materialized local path of a Localize'd MediaRef so
+	// every audio/video time-window of one source shares a single download.
+	localized map[string]string
+	// cleanups are the Localize cleanup funcs to invoke at batch completion;
+	// holding them here (rather than deferring per call) keeps the materialized
+	// path alive for sibling chunks and removes temp files exactly once.
+	cleanups []func()
+}
+
+// newMediaBatchCache returns an empty, ready-to-use per-batch media cache.
+func newMediaBatchCache() *mediaBatchCache {
+	return &mediaBatchCache{
+		wholeFile: make(map[string][]byte),
+		localized: make(map[string]string),
+	}
+}
+
+// cleanup invokes every tracked Localize cleanup func (removing downloaded temp
+// files) and resets the cache. It is safe to call on a nil receiver and to call
+// more than once. embedTasks defers it so it runs at batch completion.
+func (c *mediaBatchCache) cleanup() {
+	if c == nil {
+		return
+	}
+	for _, fn := range c.cleanups {
+		if fn != nil {
+			fn()
+		}
+	}
+	c.cleanups = nil
+	c.wholeFile = nil
+	c.localized = nil
+}
+
+// readWholeMedia returns the entire object at ref, reading it through the corpus
+// filesystem only on the first request for that ref within the batch and serving
+// cached bytes to sibling chunks. A nil cache falls back to an uncached read so
+// the helper is usable without a batch context.
+func (c *mediaBatchCache) readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
+	if c == nil {
+		return readWholeMedia(ctx, fsys, ref)
+	}
+	if data, ok := c.wholeFile[ref]; ok {
+		return data, nil
+	}
+	data, err := readWholeMedia(ctx, fsys, ref)
+	if err != nil {
+		return nil, err
+	}
+	c.wholeFile[ref] = data
+	return data, nil
+}
+
+// localize returns a real local path for ref, calling fsys.Localize only on the
+// first request for that ref within the batch and reusing the materialized path
+// for sibling chunks. The Localize cleanup is tracked on the cache and runs at
+// batch completion, not per call, so the path stays valid for all siblings. A
+// nil cache falls back to a per-call Localize+cleanup so the helper is usable
+// without a batch context.
+func (c *mediaBatchCache) localize(ctx context.Context, fsys corpusfs.CorpusFS, ref string) (string, func(), error) {
+	if c == nil {
+		return fsys.Localize(ctx, ref)
+	}
+	if path, ok := c.localized[ref]; ok {
+		return path, func() {}, nil
+	}
+	path, cleanup, err := fsys.Localize(ctx, ref)
+	if err != nil {
+		return "", nil, err
+	}
+	c.localized[ref] = path
+	c.cleanups = append(c.cleanups, cleanup)
+	// cleanup is owned by the cache; hand the caller a no-op so a per-call defer
+	// cannot remove a temp file still needed by sibling chunks.
+	return path, func() {}, nil
 }
 
 // fatalIfEscape promotes a corpus-root traversal error to ErrFatal so the worker
@@ -241,6 +347,8 @@ func fatalIfEscape(err error) error {
 }
 
 // readWholeMedia reads the entire object at ref through the corpus filesystem.
+// Callers within a batch should go through mediaBatchCache.readWholeMedia so the
+// read is shared across sibling chunks of the same MediaRef (issue #279).
 func readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
 	rc, err := fsys.Open(ctx, ref)
 	if err != nil {
@@ -257,11 +365,11 @@ func readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string) ([]
 // pdfutil.ExtractPage operates on the whole file in memory, so the entire PDF is
 // read via Open even though only one page is embedded; this matches the prior
 // behavior (it previously read the whole file too).
-func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
+func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string, cache *mediaBatchCache) ([]byte, error) {
 	if !strings.EqualFold(strings.TrimSpace(t.Metadata.Span.Kind), "page") || t.Metadata.Span.Page < 1 {
 		return nil, fmt.Errorf("%w: pdf media chunk %d has invalid page span", ErrFatal, t.Metadata.ChunkID)
 	}
-	data, err := readWholeMedia(ctx, fsys, ref)
+	data, err := cache.readWholeMedia(ctx, fsys, ref)
 	if err != nil {
 		return nil, fmt.Errorf("read media %q: %w", ref, err)
 	}
@@ -275,14 +383,15 @@ func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fs
 // loadMediaSegment cuts the chunk's single time window (from its `time` span)
 // out of the source media (SPEC 8.1.7). A missing/invalid time span is a fatal
 // task error so a span/content mismatch surfaces instead of embedding the wrong
-// segment. The source is Localized to a real path first because ffmpeg cannot
-// read from an io.Reader.
-func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
+// segment. The source is Localized to a real path first (through the per-batch
+// cache so sibling time-windows reuse one download) because ffmpeg cannot read
+// from an io.Reader.
+func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string, cache *mediaBatchCache) ([]byte, error) {
 	span := t.Metadata.Span
 	if !strings.EqualFold(strings.TrimSpace(span.Kind), "time") || span.StartMS < 0 || span.EndMS <= span.StartMS {
 		return nil, fmt.Errorf("%w: %s media chunk %d has invalid time span", ErrFatal, strings.ToLower(t.Modality), t.Metadata.ChunkID)
 	}
-	localPath, cleanup, err := fsys.Localize(ctx, ref)
+	localPath, cleanup, err := cache.localize(ctx, fsys, ref)
 	if err != nil {
 		return nil, fmt.Errorf("read media %q: %w", ref, err)
 	}
