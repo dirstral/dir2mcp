@@ -23,6 +23,11 @@ const (
 	KindGemini     Kind = "gemini"
 	KindCohere     Kind = "cohere"
 	KindElevenLabs Kind = "elevenlabs"
+	// KindWhisper is a self-hosted, OpenAI-compatible STT endpoint
+	// (the GPU-VPS path, dir2mcp#240): POST {base_url}/v1/audio/transcriptions.
+	// Distinct from KindOpenAI so STT auto-selection and the matrix can
+	// treat it as statically STT-capable (Supported) and credential-optional.
+	KindWhisper Kind = "whisper"
 )
 
 // Capability is a model capability bound to a provider profile.
@@ -74,6 +79,13 @@ var matrix = map[Kind]map[Capability]Support{
 	},
 	KindElevenLabs: {
 		CapSTT: Supported, CapTTS: Supported,
+	},
+	KindWhisper: {
+		// Self-hosted OpenAI-compatible STT (dir2mcp#240). Statically
+		// STT-capable: the standard /v1/audio/transcriptions contract is
+		// fixed, so unlike kind:openai (EndpointDependent) we mark it
+		// Supported.
+		CapSTT: Supported,
 	},
 }
 

@@ -51,7 +51,7 @@ func TestOCR(t *testing.T) {
 }
 
 func TestTranscriber(t *testing.T) {
-	for _, k := range []provider.Kind{provider.KindMistral, provider.KindElevenLabs, provider.KindOpenAI, provider.KindGemini} {
+	for _, k := range []provider.Kind{provider.KindMistral, provider.KindElevenLabs, provider.KindOpenAI, provider.KindGemini, provider.KindWhisper} {
 		if tr, err := providerfactory.Transcriber(prof(k)); err != nil || tr == nil {
 			t.Errorf("Transcriber(%s) = %v, %v", k, tr, err)
 		}
