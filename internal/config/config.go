@@ -137,6 +137,15 @@ type Config struct {
 	IngestAudioMode      string
 	IngestArchivesMode   string
 	IngestExtractor      string
+
+	// IndexBackend selects the vector index backend (issue #246): "memory"
+	// (default, the in-memory HNSW) or "disk" (the Tier-B pure-Go on-disk
+	// backend that keeps vector payloads memory-mapped on disk for corpora
+	// that exceed RAM). The "memory" default is byte-identical to legacy
+	// behavior. This is the backend-selection seam future networked backends
+	// (#268 Qdrant, #269 pgvector) extend.
+	IndexBackend string
+
 	// IngestWatch enables a filesystem watcher so a running server keeps
 	// indexing added/changed/deleted files after the initial scan. Opt-in.
 	IngestWatch bool
@@ -224,6 +233,7 @@ type fileConfig struct {
 	IngestAudioMode           *string
 	IngestArchivesMode        *string
 	IngestExtractor           *string
+	IndexBackend              *string
 	IngestWatch               *bool
 	IngestWatchDebounce       *time.Duration
 	STTProvider               *string
@@ -299,6 +309,7 @@ type persistedConfig struct {
 	IngestAudioMode           string        `yaml:"ingest_audio_mode"`
 	IngestArchivesMode        string        `yaml:"ingest_archives_mode"`
 	IngestExtractor           string        `yaml:"ingest_extractor"`
+	IndexBackend              string        `yaml:"index_backend"`
 	IngestWatch               bool          `yaml:"ingest_watch"`
 	IngestWatchDebounce       time.Duration `yaml:"ingest_watch_debounce"`
 	STTProvider               string        `yaml:"stt_provider"`
@@ -399,6 +410,7 @@ func Default() Config {
 		IngestAudioMode:           "auto",
 		IngestArchivesMode:        "deep",
 		IngestExtractor:           "auto",
+		IndexBackend:              "memory",
 		IngestWatch:               false,
 		IngestWatchDebounce:       500 * time.Millisecond,
 		STTProvider:               "mistral",
@@ -487,6 +499,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestAudioMode:           cfg.IngestAudioMode,
 		IngestArchivesMode:        cfg.IngestArchivesMode,
 		IngestExtractor:           cfg.IngestExtractor,
+		IndexBackend:              cfg.IndexBackend,
 		IngestWatch:               cfg.IngestWatch,
 		IngestWatchDebounce:       cfg.IngestWatchDebounce,
 		STTProvider:               cfg.STTProvider,
@@ -1019,6 +1032,9 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestExtractor != nil {
 		cfg.IngestExtractor = *fc.IngestExtractor
 	}
+	if fc.IndexBackend != nil {
+		cfg.IndexBackend = *fc.IndexBackend
+	}
 	if fc.IngestWatch != nil {
 		cfg.IngestWatch = *fc.IngestWatch
 	}
@@ -1305,6 +1321,8 @@ var configKeyAliases = map[string]string{
 	"archives_mode":                        "ingest.archives.mode",
 	"ingest_extractor":                     "ingest.extractor",
 	"extractor":                            "ingest.extractor",
+	"index_backend":                        "index.backend",
+	"backend":                              "index.backend",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1344,7 +1362,7 @@ func canonicalizeConfigKey(key string) string {
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere", "index":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
 		return true
@@ -1563,6 +1581,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestArchivesMode = strPtr(value)
 	case "ingest.extractor":
 		cfg.IngestExtractor = strPtr(value)
+	case "index.backend":
+		cfg.IndexBackend = strPtr(value)
 	case "stt.provider":
 		cfg.STTProvider = strPtr(value)
 	case "stt.mistral.model":
@@ -1713,6 +1733,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_audio_mode", cfg.IngestAudioMode)
 	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
 	writeScalar("ingest_extractor", cfg.IngestExtractor)
+	writeScalar("index_backend", cfg.IndexBackend)
 	writeBool("ingest_watch", cfg.IngestWatch)
 	writeScalar("ingest_watch_debounce", cfg.IngestWatchDebounce.String())
 	writeScalar("stt_provider", cfg.STTProvider)
@@ -1812,14 +1833,21 @@ func applyRerankEnvOverrides(cfg *Config, env map[string]string) {
 // (expanded at resolution time); base URL / model overrides go through
 // providers:/model: in .dir2mcp.yaml.
 func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
-	if raw, ok := envLookup("DIR2MCP_DOCLING_COMMAND", env); ok && strings.TrimSpace(raw) != "" {
-		cfg.DoclingCommand = strings.TrimSpace(raw)
-	}
-	if raw, ok := envLookup("DIR2MCP_DOCLING_SERVE_URL", env); ok && strings.TrimSpace(raw) != "" {
-		cfg.IngestDoclingServeURL = strings.TrimSpace(raw)
-	}
-	if raw, ok := envLookup("DIR2MCP_INGEST_EXTRACTOR", env); ok && strings.TrimSpace(raw) != "" {
-		cfg.IngestExtractor = strings.TrimSpace(raw)
+	// Trimmed string overrides applied only when the variable is set and
+	// non-empty; collected in a table so adding a field stays linear in
+	// cyclomatic complexity.
+	for _, o := range []struct {
+		key   string
+		field *string
+	}{
+		{"DIR2MCP_DOCLING_COMMAND", &cfg.DoclingCommand},
+		{"DIR2MCP_DOCLING_SERVE_URL", &cfg.IngestDoclingServeURL},
+		{"DIR2MCP_INGEST_EXTRACTOR", &cfg.IngestExtractor},
+		{"DIR2MCP_INDEX_BACKEND", &cfg.IndexBackend},
+	} {
+		if raw, ok := envLookup(o.key, env); ok && strings.TrimSpace(raw) != "" {
+			*o.field = strings.TrimSpace(raw)
+		}
 	}
 	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH", env); ok && strings.TrimSpace(raw) != "" {
 		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
@@ -2006,6 +2034,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateIndexBackend(); err != nil {
+		return err
+	}
+
 	if err := c.validateNumericBounds(); err != nil {
 		return err
 	}
@@ -2030,6 +2062,23 @@ func (c *Config) validateIngestExtractor() error {
 		return fmt.Errorf("ingest.extractor must be one of auto, docling, docling-serve, mistral, off: %q", c.IngestExtractor)
 	}
 	c.IngestExtractor = extractorMode
+	return nil
+}
+
+// validateIndexBackend normalizes IndexBackend (defaulting empty to the
+// "memory" baseline) and rejects any value outside memory/disk (issue #246).
+// Future networked backends (#268 Qdrant, #269 pgvector) extend this set.
+func (c *Config) validateIndexBackend() error {
+	backend := strings.ToLower(strings.TrimSpace(c.IndexBackend))
+	if backend == "" {
+		backend = Default().IndexBackend
+	}
+	switch backend {
+	case "memory", "disk":
+	default:
+		return fmt.Errorf("index.backend must be one of memory, disk: %q", c.IndexBackend)
+	}
+	c.IndexBackend = backend
 	return nil
 }
 

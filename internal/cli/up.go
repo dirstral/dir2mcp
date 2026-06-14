@@ -54,13 +54,13 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return code
 	}
 
-	st, textIx, codeIx, code := a.initStoreAndIndices(ctx, &cfg, opts.jsonOutput)
+	st, textBuilt, codeBuilt, code := a.initStoreAndIndices(ctx, &cfg, opts.jsonOutput)
 	if code != exitSuccess {
 		return code
 	}
 	defer func() { _ = st.Close() }()
-	textIndexPath := filepath.Join(cfg.StateDir, index.TextIndexFileName)
-	codeIndexPath := filepath.Join(cfg.StateDir, index.CodeIndexFileName)
+	textIx, textIndexPath := textBuilt.index, textBuilt.path
+	codeIx, codeIndexPath := codeBuilt.index, codeBuilt.path
 	defer func() { _ = textIx.Close() }()
 	defer func() { _ = codeIx.Close() }()
 
@@ -437,59 +437,69 @@ func requiresMistralAPIKey(opts upOptions) bool {
 	return !opts.readOnly
 }
 
-// initStoreAndIndices initialises the metadata store and both HNSW indices.
-// On success the caller is responsible for closing all three.
-func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, model.Index, model.Index, int) {
+// builtIndex pairs a constructed vector index with the on-disk path it persists
+// to, so runUp can wire the PersistenceManager with the backend-appropriate
+// path (HNSW v2 snapshot vs. disk segment).
+type builtIndex struct {
+	index model.Index
+	path  string
+}
+
+// initStoreAndIndices initialises the metadata store and both vector indices,
+// dispatching on cfg.IndexBackend ("memory" default | "disk", issue #246). On
+// success the caller is responsible for closing all three.
+func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, builtIndex, builtIndex, int) {
 	st := a.storeForConfig(*cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
-		return nil, nil, nil, exitIndexLoadFailure
+		return nil, builtIndex{}, builtIndex{}, exitIndexLoadFailure
 	}
 
-	// The persisted snapshot format is versioned (vectors_*.v2.hnsw, issue
-	// #247): the v2 file carries vectors + per-vector payloads + the embed
-	// identity, where the legacy file held a bare vector map. A missing v2 file
-	// (incl. an existing corpus that only has the legacy file) is treated as a
-	// fresh index and repopulated on the next reindex — we deliberately do not
-	// decode legacy files to avoid gob ambiguity between the two shapes.
+	// The persisted snapshot format is versioned (issue #247): for the memory
+	// backend the v2 file (vectors_*.v2.hnsw) carries vectors + per-vector
+	// payloads + the embed identity, where the legacy file held a bare vector
+	// map; for the disk backend the segment (vectors_*.diskv1.idx) memory-maps
+	// vector payloads on disk (issue #246). A missing snapshot is treated as a
+	// fresh index and repopulated on the next reindex.
 	identity := cfg.Providers().EmbedIdentity()
-	textIx, code := a.loadHNSWIndex(ctx, cfg, index.TextIndexFileName, "text", identity, jsonOutput)
+	textIx, code := a.loadVectorIndex(ctx, cfg, index.KindText, identity, jsonOutput)
 	if code != exitSuccess {
 		_ = st.Close()
-		return nil, nil, nil, code
+		return nil, builtIndex{}, builtIndex{}, code
 	}
-	codeIx, code := a.loadHNSWIndex(ctx, cfg, index.CodeIndexFileName, "code", identity, jsonOutput)
+	codeIx, code := a.loadVectorIndex(ctx, cfg, index.KindCode, identity, jsonOutput)
 	if code != exitSuccess {
 		_ = st.Close()
-		_ = textIx.Close()
-		return nil, nil, nil, code
+		_ = textIx.index.Close()
+		return nil, builtIndex{}, builtIndex{}, code
 	}
 
 	return st, textIx, codeIx, exitSuccess
 }
 
-// loadHNSWIndex constructs a persisted HNSW index, restores it from its v2
-// snapshot, and reconciles its recorded embed identity with the configured one
-// (issue #247): EnsureIdentity resets the index when the identity is empty
-// (fresh) or differs, so a vector space built under a different embed
-// provider/model/dimension is never silently reused. fileName is the basename
-// under cfg.StateDir; kind is used only for error messages.
-func (a *App) loadHNSWIndex(ctx context.Context, cfg *config.Config, fileName, kind, identity string, jsonOutput bool) (model.Index, int) {
-	path := filepath.Join(cfg.StateDir, fileName)
-	ix := index.NewHNSWIndex(path)
-	if err := ix.Load(ctx, path); err != nil &&
-		!errors.Is(err, model.ErrNotImplemented) &&
-		!errors.Is(err, os.ErrNotExist) {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load %s index: %v", kind, err))
-		_ = ix.Close()
-		return nil, exitIndexLoadFailure
+// loadVectorIndex constructs the configured vector backend for one kind via the
+// index.backend dispatch (issue #246; #268/#269 will extend the switch),
+// restores it from its persisted snapshot, and reconciles its recorded embed
+// identity with the configured one (issue #247): EnsureIdentity resets the index
+// when the identity is empty (fresh) or differs, so a vector space built under a
+// different embed provider/model/dimension is never silently reused.
+func (a *App) loadVectorIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
+	ix, path := index.NewBackend(cfg.IndexBackend, cfg.StateDir, kind)
+	if p, ok := ix.(model.Persistable); ok {
+		if err := p.Load(ctx, path); err != nil &&
+			!errors.Is(err, model.ErrNotImplemented) &&
+			!errors.Is(err, os.ErrNotExist) {
+			writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load %s index: %v", kind, err))
+			_ = ix.Close()
+			return builtIndex{}, exitIndexLoadFailure
+		}
 	}
 	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
 		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("reconcile %s index identity: %v", kind, err))
 		_ = ix.Close()
-		return nil, exitIndexLoadFailure
+		return builtIndex{}, exitIndexLoadFailure
 	}
-	return ix, exitSuccess
+	return builtIndex{index: ix, path: path}, exitSuccess
 }
 
 // buildMCPServerOptions constructs the list of mcp.ServerOption values,

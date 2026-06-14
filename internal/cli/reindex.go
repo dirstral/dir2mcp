@@ -95,10 +95,11 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 		_ = st.Close()
 		return nil, code
 	}
-	// Remove both the current v2 snapshot files and the legacy pre-#247
-	// bare-map files so a stale snapshot of either shape cannot survive a
-	// reindex.
-	staleNames := append([]string{index.TextIndexFileName, index.CodeIndexFileName}, index.LegacyIndexFileNames...)
+	// Remove stale vector index files so a snapshot of any shape cannot survive
+	// a reindex: the current HNSW v2 files, the legacy pre-#247 bare-map files,
+	// and — when the disk backend is selected — its segment + identity sidecar
+	// (issue #246).
+	staleNames := index.StaleIndexFiles(cfg.IndexBackend)
 	for _, name := range staleNames {
 		indexPath := filepath.Join(cfg.StateDir, name)
 		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {

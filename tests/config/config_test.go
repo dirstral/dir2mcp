@@ -71,6 +71,51 @@ func TestConfigValidateAcceptsDoclingServeExtractor(t *testing.T) {
 	}
 }
 
+func TestConfigDefaultIndexBackendIsMemory(t *testing.T) {
+	if got := config.Default().IndexBackend; got != "memory" {
+		t.Fatalf("default index.backend = %q, want memory", got)
+	}
+}
+
+func TestConfigValidateRejectsInvalidIndexBackend(t *testing.T) {
+	cfg := config.Default()
+	cfg.IndexBackend = "elasticsearch"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for unknown index.backend")
+	}
+}
+
+func TestConfigValidateAcceptsDiskIndexBackend(t *testing.T) {
+	cfg := config.Default()
+	cfg.IndexBackend = "DISK"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disk must be a valid index.backend: %v", err)
+	}
+	if cfg.IndexBackend != "disk" {
+		t.Fatalf("index.backend should normalize to lowercase, got %q", cfg.IndexBackend)
+	}
+}
+
+func TestIndexBackendRoundTripsThroughSaveLoad(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+
+	cfg := config.Default()
+	cfg.RootDir = "/tmp/repo"
+	cfg.StateDir = "/tmp/repo/.dir2mcp"
+	cfg.IndexBackend = "disk"
+	if err := config.SaveFile(path, cfg); err != nil {
+		t.Fatalf("SaveFile failed: %v", err)
+	}
+	loaded, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile failed: %v", err)
+	}
+	if loaded.IndexBackend != "disk" {
+		t.Fatalf("index.backend did not round-trip: got %q, want disk", loaded.IndexBackend)
+	}
+}
+
 func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\n")
