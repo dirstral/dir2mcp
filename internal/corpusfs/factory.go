@@ -87,14 +87,13 @@ var newS3Client = func(ctx context.Context, cfg Config) (s3API, error) {
 // SetS3ClientBuilderForTest swaps the S3 client builder New uses for the s3 kind
 // and returns a restore func. It exists so external tests can exercise the
 // factory's s3 path with a network-free stub client; production code never calls
-// it. Passing nil restores the default builder.
+// it. The returned restore func reinstates the previous builder; passing nil
+// leaves the current builder in place (and restore is still a no-op-safe revert).
 func SetS3ClientBuilderForTest(builder func(ctx context.Context, cfg Config) (S3API, error)) (restore func()) {
 	prev := newS3Client
-	if builder == nil {
-		newS3Client = prev
-		return func() { newS3Client = prev }
+	if builder != nil {
+		newS3Client = builder
 	}
-	newS3Client = builder
 	return func() { newS3Client = prev }
 }
 
