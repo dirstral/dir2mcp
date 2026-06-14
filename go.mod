@@ -12,6 +12,7 @@ require (
 	github.com/pdfcpu/pdfcpu v0.12.1
 	github.com/x402-foundation/x402/go v0.0.0-20260516161513-e35becffdc85
 	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/exp v0.0.0-20231108232855-2478ac86f678
 	golang.org/x/term v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.32.0
