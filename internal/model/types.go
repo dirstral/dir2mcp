@@ -152,7 +152,9 @@ type IndexHit struct {
 // logic (issue #247): a FilteringIndex that reports CanFilter true pushes these
 // predicates down to the backend; otherwise retrieval evaluates Match in Go.
 //
-//   - PathPrefix: keep only rel_paths with this prefix.
+//   - PathPrefix: keep only rel_paths with this prefix, normalized via
+//     NormalizePathPrefix and matched case-insensitively (ASCII) to agree with
+//     the store's list_files LIKE query (issue #286).
 //   - PathGlob:   keep only rel_paths matching this path.Match glob.
 //   - DocTypes:   keep only these doc types (case-insensitive).
 //   - ExcludeOrphans: drop chunks with an empty rel_path (orphaned/evicted).
@@ -173,14 +175,17 @@ func (f Filter) IsZero() bool {
 
 // Match reports whether the payload satisfies every active predicate. It
 // reproduces the semantics of retrieval's matchFilters: an empty rel_path is
-// rejected when ExcludeOrphans is set; PathPrefix is a string prefix; PathGlob
-// uses path.Match; DocTypes is a case-insensitive set membership.
+// rejected when ExcludeOrphans is set; PathPrefix is normalized and matched via
+// MatchesPathPrefix (consistent with list_files); PathGlob uses path.Match;
+// DocTypes is a case-insensitive set membership.
 func (f Filter) Match(p IndexPayload) bool {
 	relPath := p.RelPath
 	if f.ExcludeOrphans && strings.TrimSpace(relPath) == "" {
 		return false
 	}
-	if f.PathPrefix != "" && !strings.HasPrefix(relPath, f.PathPrefix) {
+	// Normalize path_prefix consistently with list_files / the store so search
+	// pushed down to a FilteringIndex agrees with list_files (issue #286 Bug B).
+	if !MatchesPathPrefix(relPath, f.PathPrefix) {
 		return false
 	}
 	if f.PathGlob != "" {
