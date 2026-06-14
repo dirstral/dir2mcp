@@ -2,6 +2,7 @@ package tests
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -57,5 +58,33 @@ func TestMediaVariants_RoundTripsThroughSaveLoad(t *testing.T) {
 	}
 	if loaded.MediaVariantsSelect != "first" {
 		t.Fatalf("media.variants.select did not round-trip: got %q", loaded.MediaVariantsSelect)
+	}
+}
+
+// TestMediaVariants_NestedYAMLApplies locks the nested spec-style block
+// (media: -> variants: -> group/select) so it is actually applied rather than
+// silently falling back to defaults (regression: isMapSectionKey must recognize
+// "media" and "media.variants").
+func TestMediaVariants_NestedYAMLApplies(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, strings.Join([]string{
+		"root_dir: /tmp/repo",
+		"state_dir: /tmp/repo/.dir2mcp",
+		"media:",
+		"  variants:",
+		"    group: true",
+		"    select: first",
+	}, "\n")+"\n")
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile(nested media.variants) = %v, want nil", err)
+	}
+	if !cfg.MediaVariantsGroup {
+		t.Errorf("nested media.variants.group not applied: got false, want true")
+	}
+	if cfg.MediaVariantsSelect != "first" {
+		t.Errorf("nested media.variants.select not applied: got %q, want first", cfg.MediaVariantsSelect)
 	}
 }

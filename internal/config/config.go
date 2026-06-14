@@ -1576,6 +1576,8 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
+	case "media", "media.variants":
+		return true
 	case "index.pgvector":
 		return true
 	case "ingest.extractor":
