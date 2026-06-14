@@ -259,6 +259,7 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	if cfg.IngestMaxFileMB > 0 {
 		options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * 1024 * 1024
 	}
+	options.MediaVariants = MediaVariantOptionsFromConfig(cfg)
 	return options
 }
 
