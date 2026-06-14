@@ -203,6 +203,13 @@ type Config struct {
 	STTElevenLabsModel        string
 	STTElevenLabsLanguageCode string
 
+	// MediaSidecarsDisabled opts OUT of subtitle sidecar ingestion (spec
+	// §8.6.4). Sidecar ingestion is enabled by default (spec default
+	// media.sidecars.enabled: true): a .vtt/.srt/.ttml file next to a media file
+	// is ingested as that media's transcript instead of running STT. Set this
+	// true to disable that and always run STT (the kill-switch opt-out).
+	MediaSidecarsDisabled bool
+
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
 	// screened for degenerate output (repetition loops, empty output,
@@ -305,6 +312,7 @@ type fileConfig struct {
 	STTElevenLabsModel        *string
 	STTElevenLabsLanguageCode *string
 	QualityGatesEnabled       *bool
+	MediaSidecarsDisabled     *bool
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -391,6 +399,7 @@ type persistedConfig struct {
 	STTElevenLabsModel        string        `yaml:"stt_elevenlabs_model"`
 	STTElevenLabsLanguageCode string        `yaml:"stt_elevenlabs_language_code"`
 	QualityGatesEnabled       bool          `yaml:"quality_gates_enabled"`
+	MediaSidecarsDisabled     bool          `yaml:"media_sidecars_disabled"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -608,6 +617,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		STTElevenLabsModel:        cfg.STTElevenLabsModel,
 		STTElevenLabsLanguageCode: cfg.STTElevenLabsLanguageCode,
 		QualityGatesEnabled:       cfg.QualityGatesEnabled,
+		MediaSidecarsDisabled:     cfg.MediaSidecarsDisabled,
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1213,6 +1223,9 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.QualityGatesEnabled != nil {
 		cfg.QualityGatesEnabled = *fc.QualityGatesEnabled
 	}
+	if fc.MediaSidecarsDisabled != nil {
+		cfg.MediaSidecarsDisabled = *fc.MediaSidecarsDisabled
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -1575,6 +1588,8 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.IngestWatch
 	case "quality_gates_enabled":
 		target = &cfg.QualityGatesEnabled
+	case "media_sidecars_disabled":
+		target = &cfg.MediaSidecarsDisabled
 	case "x402_tools_call_enabled":
 		target = &cfg.X402ToolsCallEnabled
 	case "retrieval.hybrid.enabled":
@@ -1937,6 +1952,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
 	writeBool("quality_gates_enabled", cfg.QualityGatesEnabled)
+	writeBool("media_sidecars_disabled", cfg.MediaSidecarsDisabled)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)

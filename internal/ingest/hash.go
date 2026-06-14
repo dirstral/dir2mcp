@@ -30,6 +30,24 @@ func ComputeRepHash(content []byte) string {
 	return ComputeContentHash(content)
 }
 
+// mediaContentHash returns the document content hash, folding in a sidecar
+// fingerprint when present. With an empty fingerprint it is exactly
+// computeContentHash(content), so non-media documents and media without sidecars
+// keep their historical hash. A non-empty fingerprint (sidecar paths + mtimes)
+// changes the hash whenever a sidecar is added, removed, or modified, which the
+// incremental gate (§7.6) uses to re-process the media even though its bytes are
+// unchanged.
+func mediaContentHash(content []byte, sidecarFingerprint string) string {
+	if sidecarFingerprint == "" {
+		return computeContentHash(content)
+	}
+	combined := make([]byte, 0, len(content)+len(sidecarFingerprint)+1)
+	combined = append(combined, content...)
+	combined = append(combined, '\x00')
+	combined = append(combined, sidecarFingerprint...)
+	return computeContentHash(combined)
+}
+
 // needsReprocessing determines if a document needs to be reprocessed based on
 // hash comparison. Returns true if the document should be reprocessed.
 func needsReprocessing(oldHash, newHash string, forceReindex bool) bool {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
 // transcriptTimestampBracketedRe matches leading timestamps in [mm:ss] or
@@ -979,6 +980,74 @@ func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []Ch
 // primarily provided so that tests can exercise the chunking logic directly.
 func ChunkTranscriptByTime(content string) []ChunkSegment {
 	raw := chunkTranscriptByTime(content)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// chunkSubtitleCues turns parsed subtitle cues into time-spanned transcript
+// chunks. Unlike chunkTranscriptByTime (which estimates timing from a flat text
+// transcript), the cues already carry authoritative [StartMS, EndMS] windows, so
+// timing is taken verbatim — the source of the deterministic, stable citations a
+// sidecar transcript provides. Adjacent cues are merged greedily until the
+// accumulated text would exceed TranscriptChunkMaxChars; the merged chunk's span
+// is [first cue start, last merged cue end]. Cues are processed in their given
+// order (callers sort by start time first), so the output is deterministic.
+func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
+	out := make([]chunkSegment, 0, len(cues))
+	var (
+		buf      []string
+		startMS  int
+		endMS    int
+		haveOpen bool
+		bufLen   int
+	)
+	flush := func() {
+		if !haveOpen {
+			return
+		}
+		text := strings.TrimSpace(strings.Join(buf, "\n"))
+		if text != "" {
+			span := model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
+			if span.EndMS <= span.StartMS {
+				span.EndMS = span.StartMS + 1
+			}
+			out = append(out, chunkSegment{Text: text, Span: span})
+		}
+		buf = buf[:0]
+		bufLen = 0
+		haveOpen = false
+	}
+
+	for _, cue := range cues {
+		text := strings.TrimSpace(cue.Text)
+		if text == "" {
+			continue
+		}
+		cueLen := utf8.RuneCountInString(text)
+		// Start a new chunk when the buffer would overflow the transcript chunk
+		// size; a single oversized cue still becomes its own chunk.
+		if haveOpen && bufLen+cueLen > TranscriptChunkMaxChars {
+			flush()
+		}
+		if !haveOpen {
+			startMS = cue.StartMS
+			haveOpen = true
+		}
+		buf = append(buf, text)
+		bufLen += cueLen
+		endMS = cue.EndMS
+	}
+	flush()
+	return out
+}
+
+// ChunkSubtitleCues exposes chunkSubtitleCues for tests, converting the
+// unexported segment type to the public ChunkSegment.
+func ChunkSubtitleCues(cues []subtitle.Cue) []ChunkSegment {
+	raw := chunkSubtitleCues(cues)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

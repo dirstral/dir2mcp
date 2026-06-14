@@ -140,6 +140,13 @@ type Service struct {
 	// convenient for tests.
 	ocrCacheWrites     int
 	ocrCachePruneEvery int
+
+	// sidecarIndex maps every discovered file's rel_path to its mtime, built once
+	// per scan (setSidecarIndex). The transcript path uses it to detect subtitle
+	// sidecars next to a media file and to mtime-gate their ingestion (§8.6.4).
+	// Nil until a scan sets it; direct callers fall back to a one-shot walk.
+	sidecarIndex map[string]int64
+	sidecarMu    sync.RWMutex
 }
 
 // ErrTranscriptProviderFailure marks failures originating from the transcript
@@ -574,6 +581,9 @@ func (s *Service) runScan(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Record discovered file mtimes so the transcript path can detect subtitle
+	// sidecars next to media files and mtime-gate their ingestion (§8.6.4).
+	s.setSidecarIndex(discovered)
 
 	compiledSecrets, err := compileSecretPatterns(s.cfg.SecretPatterns)
 	if err != nil {
@@ -685,7 +695,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return nil
 	}
 
-	if err := s.generateRepresentations(ctx, doc, content); err != nil {
+	if err := s.generateRepresentations(ctx, doc, content, forceReindex); err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -835,7 +845,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	if !needsProcessing || doc.Status != "ok" {
 		return nil
 	}
-	if err := s.generateRepresentations(ctx, doc, content); err != nil {
+	if err := s.generateRepresentations(ctx, doc, content, forceReindex); err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -867,7 +877,12 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 	if err != nil {
 		return doc, nil, fmt.Errorf("read %s: %w", f.RelPath, err)
 	}
-	doc.ContentHash = computeContentHash(content)
+	// Fold any subtitle sidecar fingerprint (sibling paths + mtimes) into the
+	// media document's content hash so the incremental gate (§7.6) re-processes
+	// the media when a sidecar is added, removed, or modified — even though the
+	// media bytes are unchanged. Empty for non-media docs or media with no
+	// sidecar, preserving the existing hash exactly.
+	doc.ContentHash = mediaContentHash(content, s.sidecarFingerprint(ctx, f.RelPath, docType))
 
 	// certain document types we don't want to ingest at all.
 	// "archive" and "binary_ignored" were already skipped.
@@ -1166,7 +1181,7 @@ func isEmbeddableAudio(relPath string) bool {
 	}
 }
 
-func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte) error {
+func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, forceReindex bool) error {
 	if s.repGen == nil {
 		return nil
 	}
@@ -1196,7 +1211,26 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// transcript when audio media chunks were produced (SPEC 8.1.7). `augment`
 	// and `off` keep the transcript path unchanged.
 	skipTranscript := s.embedMultimodal == "replace" && mediaProduced
-	if doc.DocType == "audio" && s.transcriber != nil && !skipTranscript {
+	if skipTranscript {
+		return nil
+	}
+
+	// Subtitle sidecar precedence (§8.6.4): a subtitle file (.vtt/.srt/.ttml)
+	// next to the media is ingested AS the transcript instead of running STT — an
+	// authored transcript is authoritative. `--force`/reindex overrides the gate
+	// and re-runs STT instead. Sidecar ingestion bypasses the quality gate
+	// (authored, not model-derived; §8.6.6/§8.6.7).
+	if !forceReindex {
+		ingested, err := s.ingestSidecarTranscripts(ctx, doc)
+		if err != nil {
+			return err
+		}
+		if ingested {
+			return nil
+		}
+	}
+
+	if doc.DocType == "audio" && s.transcriber != nil {
 		if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
 			// Provider/transient failures should not fail the entire ingest run.
 			// Persistence/cache failures should still propagate.
