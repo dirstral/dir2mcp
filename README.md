@@ -70,7 +70,56 @@ Or add it to a profile:
 nix profile install github:dirstral/dir2mcp
 ```
 
-The flake builds the lean binary only (no bundled docling runtime); for batteries-included structured extraction, use the `dir2mcp-full` Homebrew formula or the docling-full container. A `devShells.default` with the Go toolchain is also exposed (`nix develop`).
+The flake builds the lean binary only (no bundled docling runtime); for batteries-included structured extraction, use the `dir2mcp-full` Homebrew formula or the docling-full container. A `devShells.default` with the Go toolchain is also exposed (`nix develop`). The flake also exposes `overlays.default` (adds `pkgs.dir2mcp` to any nixpkgs), plus `darwinModules.default` and `homeManagerModules.default` for the declarative service below.
+
+#### Declarative service (nix-darwin / home-manager)
+
+The flake ships service modules that run `dir2mcp up --foreground` under a supervisor (launchd on macOS, systemd `--user` on Linux), so the corpus server starts at login and is restarted on failure. These require the flake's modules — they are not part of nixpkgs.
+
+Add the input and the module to your config. **nix-darwin:**
+
+```nix
+{
+  inputs.dir2mcp.url = "github:dirstral/dir2mcp";
+
+  # in your darwinConfiguration modules list:
+  modules = [
+    dir2mcp.darwinModules.default
+    {
+      services.dir2mcp = {
+        enable = true;
+        rootDir = "/Users/me/Documents/corpus";
+        # Secrets (MISTRAL_API_KEY, OPENAI_API_KEY, DIR2MCP_AUTH_TOKEN, ...)
+        # live in this file, NOT in the nix store. Manage it yourself with
+        # restrictive permissions.
+        environmentFile = "/Users/me/.config/dir2mcp/env";
+      };
+    }
+  ];
+}
+```
+
+**home-manager** (works on macOS via launchd and on Linux via systemd `--user`):
+
+```nix
+{
+  inputs.dir2mcp.url = "github:dirstral/dir2mcp";
+
+  # in your homeConfiguration modules list:
+  modules = [
+    dir2mcp.homeManagerModules.default
+    {
+      services.dir2mcp = {
+        enable = true;
+        rootDir = "/home/me/corpus";
+        environmentFile = "/home/me/.config/dir2mcp/env";
+      };
+    }
+  ];
+}
+```
+
+Optional knobs: `stateDir`, `listen`, `extraArgs` (e.g. `[ "--public" "--auth" "auto" ]`), and `package` (defaults to this flake's lean build). On macOS, launchd has no native `EnvironmentFile`, so the module sources `environmentFile` via a small wrapper script at start; on Linux it is wired to systemd's native `EnvironmentFile=`. Either way the secret values stay outside the world-readable nix store.
 
 Build-from-source remains available as an alternative:
 
