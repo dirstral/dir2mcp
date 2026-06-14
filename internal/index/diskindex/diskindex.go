@@ -238,14 +238,20 @@ func (d *DiskIndex) Search(ctx context.Context, vector []float32, k int, filter 
 		return []model.IndexHit{}, nil
 	}
 
+	// Lazily (re)open the mmap view under the write lock so the assignment to
+	// d.reader cannot race with a concurrent Search; the subsequent scan holds
+	// the read lock, during which no mutation can invalidate the view.
+	if err := d.ensureReader(); err != nil {
+		return nil, err
+	}
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	reader, err := d.readerLocked()
-	if err != nil {
-		return nil, err
-	}
+	reader := d.reader
 	if reader == nil {
+		// A concurrent mutation invalidated the view (or the segment is empty);
+		// with nothing mapped there is nothing to score.
 		return []model.IndexHit{}, nil
 	}
 
@@ -501,10 +507,22 @@ func (d *DiskIndex) Close() error {
 	return d.invalidateReaderLocked()
 }
 
+// ensureReader opens the mmap view if it is not already cached, taking the
+// write lock so the assignment to d.reader is exclusive (Search holds only the
+// read lock for its scan and must not write d.reader concurrently). A missing
+// segment file (fresh index) is not an error; d.reader simply stays nil.
+func (d *DiskIndex) ensureReader() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.readerLocked()
+	return err
+}
+
 // readerLocked returns the mmap reader, opening it lazily. Returns (nil, nil)
 // when no segment file exists yet (fresh index). The cached view is invalidated
 // on every mutation (appendRecord/Reset/Save), so a held view always reflects
-// the on-disk bytes the current locator offsets point at.
+// the on-disk bytes the current locator offsets point at. Callers must hold the
+// write lock (it may assign d.reader).
 func (d *DiskIndex) readerLocked() (*mmap.ReaderAt, error) {
 	if d.reader != nil {
 		return d.reader, nil

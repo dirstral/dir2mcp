@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/index"
@@ -311,6 +312,78 @@ func TestDiskIndex_UpsertRejectsEmptyVectorAndZeroID(t *testing.T) {
 	if err := idx.Upsert(ctx, []float32{1, 0}, model.IndexPayload{ChunkID: 0}); err == nil {
 		t.Fatal("expected error on zero chunk_id")
 	}
+}
+
+// TestDiskIndex_LoadBadMagicErrors verifies a segment whose header is not the
+// expected magic is reported as an error (graceful, not a panic), so a corrupt
+// or alien file is never silently treated as a valid index.
+func TestDiskIndex_LoadBadMagicErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	segPath := filepath.Join(dir, diskindex.SegmentFileName("text"))
+	if err := os.WriteFile(segPath, []byte("NOTMAGIC\x01\x00\x00\x00garbage"), 0o644); err != nil {
+		t.Fatalf("seed corrupt segment: %v", err)
+	}
+	idx := diskindex.New(segPath)
+	t.Cleanup(func() { _ = idx.Close() })
+	if err := idx.Load(ctx, segPath); err == nil {
+		t.Fatal("expected an error loading a segment with bad magic, got nil")
+	}
+}
+
+// TestDiskIndex_LoadTruncatedBodyErrors verifies a segment truncated mid-record
+// (a torn write) is reported as an error rather than panicking or silently
+// dropping data.
+func TestDiskIndex_LoadTruncatedBodyErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	segPath := filepath.Join(dir, diskindex.SegmentFileName("text"))
+
+	idx := diskindex.New(segPath)
+	mustUpsertDisk(t, idx, model.IndexPayload{ChunkID: 1, RelPath: "a.md"}, []float32{1, 2, 3})
+	if err := idx.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	info, err := os.Stat(segPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	// Lop bytes off the end so the final record's body is incomplete.
+	if err := os.Truncate(segPath, info.Size()-5); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+
+	reopened := diskindex.New(segPath)
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.Load(ctx, segPath); err == nil {
+		t.Fatal("expected an error loading a truncated segment, got nil")
+	}
+}
+
+// TestDiskIndex_ConcurrentSearch exercises Search from many goroutines after the
+// cached mmap view has been dropped, so the lazy re-open path runs concurrently.
+// It is meaningful under `go test -race`, guarding the d.reader assignment.
+func TestDiskIndex_ConcurrentSearch(t *testing.T) {
+	ctx := context.Background()
+	idx := newDiskIndex(t)
+	mustUpsertDisk(t, idx, model.IndexPayload{ChunkID: 1, RelPath: "a.md"}, []float32{1, 0})
+	mustUpsertDisk(t, idx, model.IndexPayload{ChunkID: 2, RelPath: "b.md"}, []float32{0, 1})
+	// Drop the cached reader so the first concurrent Search lazily re-opens it.
+	if err := idx.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := idx.Search(ctx, []float32{1, 0}, 5, model.Filter{}); err != nil {
+				t.Errorf("concurrent Search: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // TestNewBackend_Dispatch verifies the index.backend selection seam (issue
