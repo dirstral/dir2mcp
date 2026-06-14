@@ -76,14 +76,21 @@ func buildLargeCorpusService(tb testing.TB, total int) *Service {
 	textIdx := index.NewHNSWIndex("")
 	codeIdx := index.NewHNSWIndex("")
 
+	ctx := context.Background()
 	for i := 1; i <= total; i++ {
 		label := uint64(i)
 		vec := []float32{1, 0}
 		if i%2 == 0 {
 			vec = []float32{0.95, 0.05}
 		}
-		if err := textIdx.Add(label, vec); err != nil {
-			tb.Fatalf("textIdx.Add(%d) failed: %v", i, err)
+		textPayload := model.IndexPayload{
+			ChunkID: label,
+			RelPath: fmt.Sprintf("docs/%03d.md", i),
+			DocType: "md",
+			Snippet: fmt.Sprintf("snippet-%d", i),
+		}
+		if err := textIdx.Upsert(ctx, vec, textPayload); err != nil {
+			tb.Fatalf("textIdx.Upsert(%d) failed: %v", i, err)
 		}
 		if i%3 == 0 {
 			// we intentionally reuse the same `label` value here that was already
@@ -93,8 +100,8 @@ func buildLargeCorpusService(tb testing.TB, total int) *Service {
 			// hits coming from textIdx and codeIdx. documenting the design choice
 			// helps future readers understand why some labels appear in both
 			// indexes and ensures coverage of the deduplication logic.
-			if err := codeIdx.Add(label, []float32{1, 0}); err != nil {
-				tb.Fatalf("codeIdx.Add(%d) failed: %v", i, err)
+			if err := codeIdx.Upsert(ctx, []float32{1, 0}, textPayload); err != nil {
+				tb.Fatalf("codeIdx.Upsert(%d) failed: %v", i, err)
 			}
 		}
 	}

@@ -3,6 +3,8 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"path"
+	"strings"
 )
 
 type Document struct {
@@ -95,6 +97,111 @@ type BBox struct {
 	R           float64 `json:"r"`
 	B           float64 `json:"b"`
 	CoordOrigin string  `json:"coord_origin"`
+}
+
+// IndexPayload is the per-vector metadata an Index stores alongside the dense
+// vector (issue #247). It carries everything retrieval needs to materialise a
+// SearchHit and everything a Filter needs to predicate on, so an external or
+// on-disk backend can serve filtered search without dir2mcp re-fetching chunk
+// metadata from SQLite. Backends that cannot persist the full payload may store
+// a subset; retrieval falls back to its in-memory chunk metadata when a field
+// is empty.
+type IndexPayload struct {
+	ChunkID  uint64
+	RelPath  string
+	DocType  string
+	RepType  string
+	Modality string
+	Title    string
+	StartMS  int
+	EndMS    int
+	Language string
+	Speaker  string
+	Snippet  string
+	Span     Span
+	MediaRef string
+}
+
+// ToSearchHit materialises a SearchHit from the payload. Score is left zero;
+// the caller sets it from the IndexHit.
+func (p IndexPayload) ToSearchHit() SearchHit {
+	return SearchHit{
+		ChunkID:  p.ChunkID,
+		RelPath:  p.RelPath,
+		Title:    p.Title,
+		DocType:  p.DocType,
+		RepType:  p.RepType,
+		Snippet:  p.Snippet,
+		Span:     p.Span,
+		Modality: p.Modality,
+		MediaRef: p.MediaRef,
+	}
+}
+
+// IndexHit is one scored result from Index.Search. Score is the cosine
+// similarity (higher is better). Payload carries the stored metadata for the
+// matched vector.
+type IndexHit struct {
+	ChunkID uint64
+	Score   float32
+	Payload IndexPayload
+}
+
+// Filter expresses the predicates retrieval applies to candidate vectors. It is
+// the in-process, backend-agnostic shape of dir2mcp's overfetch-then-filter
+// logic (issue #247): a FilteringIndex that reports CanFilter true pushes these
+// predicates down to the backend; otherwise retrieval evaluates Match in Go.
+//
+//   - PathPrefix: keep only rel_paths with this prefix.
+//   - PathGlob:   keep only rel_paths matching this path.Match glob.
+//   - DocTypes:   keep only these doc types (case-insensitive).
+//   - ExcludeOrphans: drop chunks with an empty rel_path (orphaned/evicted).
+type Filter struct {
+	PathPrefix     string
+	PathGlob       string
+	DocTypes       []string
+	ExcludeOrphans bool
+}
+
+// IsZero reports whether the filter has no active predicate.
+func (f Filter) IsZero() bool {
+	return f.PathPrefix == "" &&
+		f.PathGlob == "" &&
+		len(f.DocTypes) == 0 &&
+		!f.ExcludeOrphans
+}
+
+// Match reports whether the payload satisfies every active predicate. It
+// reproduces the semantics of retrieval's matchFilters: an empty rel_path is
+// rejected when ExcludeOrphans is set; PathPrefix is a string prefix; PathGlob
+// uses path.Match; DocTypes is a case-insensitive set membership.
+func (f Filter) Match(p IndexPayload) bool {
+	relPath := p.RelPath
+	if f.ExcludeOrphans && strings.TrimSpace(relPath) == "" {
+		return false
+	}
+	if f.PathPrefix != "" && !strings.HasPrefix(relPath, f.PathPrefix) {
+		return false
+	}
+	if f.PathGlob != "" {
+		matched, err := path.Match(f.PathGlob, relPath)
+		if err != nil || !matched {
+			return false
+		}
+	}
+	if len(f.DocTypes) > 0 {
+		match := false
+		for _, dt := range f.DocTypes {
+			if strings.EqualFold(strings.TrimSpace(dt), strings.TrimSpace(p.DocType)) {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+	return true
 }
 
 type SearchQuery struct {

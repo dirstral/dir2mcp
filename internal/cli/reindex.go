@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -94,10 +95,12 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 		_ = st.Close()
 		return nil, code
 	}
-	for _, indexPath := range []string{
-		filepath.Join(cfg.StateDir, "vectors_text.hnsw"),
-		filepath.Join(cfg.StateDir, "vectors_code.hnsw"),
-	} {
+	// Remove both the current v2 snapshot files and the legacy pre-#247
+	// bare-map files so a stale snapshot of either shape cannot survive a
+	// reindex.
+	staleNames := append([]string{index.TextIndexFileName, index.CodeIndexFileName}, index.LegacyIndexFileNames...)
+	for _, name := range staleNames {
+		indexPath := filepath.Join(cfg.StateDir, name)
 		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			_ = st.Close()
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("remove stale index file %s: %v", indexPath, err))

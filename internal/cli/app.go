@@ -693,6 +693,24 @@ func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
 	ret.SetRerankEnabled(true)
 }
 
+// openHNSWForAsk constructs a persisted HNSW index, restores it from its v2
+// snapshot, and reconciles its recorded embed identity with the configured one
+// (issue #247). On any error it closes the index and returns the error.
+func openHNSWForAsk(ctx context.Context, path, identity string) (*index.HNSWIndex, error) {
+	ix := index.NewHNSWIndex(path)
+	if err := ix.Load(ctx, path); err != nil &&
+		!errors.Is(err, model.ErrNotImplemented) &&
+		!errors.Is(err, os.ErrNotExist) {
+		_ = ix.Close()
+		return nil, err
+	}
+	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
+		_ = ix.Close()
+		return nil, err
+	}
+	return ix, nil
+}
+
 // buildRetrieverForAsk constructs a retrieval service for the ask path:
 // it loads the text/code HNSW indexes, resolves the embed/chat clients,
 // wires reranking, and preloads embedded chunk metadata. It returns the
@@ -703,23 +721,16 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 		return a.newRetriever(cfg, st), nil, nil
 	}
 
-	textIndexPath := filepath.Join(cfg.StateDir, "vectors_text.hnsw")
-	codeIndexPath := filepath.Join(cfg.StateDir, "vectors_code.hnsw")
-
-	textIx := index.NewHNSWIndex(textIndexPath)
-	if err := textIx.Load(textIndexPath); err != nil &&
-		!errors.Is(err, model.ErrNotImplemented) &&
-		!errors.Is(err, os.ErrNotExist) {
-		_ = textIx.Close()
+	// v2 snapshot filenames + per-index embed-identity reconciliation (issue
+	// #247); see internal/index for the format rationale.
+	identity := cfg.Providers().EmbedIdentity()
+	textIx, err := openHNSWForAsk(ctx, filepath.Join(cfg.StateDir, index.TextIndexFileName), identity)
+	if err != nil {
 		return nil, nil, fmt.Errorf("load text index: %w", err)
 	}
-
-	codeIx := index.NewHNSWIndex(codeIndexPath)
-	if err := codeIx.Load(codeIndexPath); err != nil &&
-		!errors.Is(err, model.ErrNotImplemented) &&
-		!errors.Is(err, os.ErrNotExist) {
+	codeIx, err := openHNSWForAsk(ctx, filepath.Join(cfg.StateDir, index.CodeIndexFileName), identity)
+	if err != nil {
 		_ = textIx.Close()
-		_ = codeIx.Close()
 		return nil, nil, fmt.Errorf("load code index: %w", err)
 	}
 

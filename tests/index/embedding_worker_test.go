@@ -295,6 +295,51 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 	}
 }
 
+// TestEmbeddingWorker_RunOnce_ProjectsPayload pins issue #247: the worker
+// Upserts each vector with an IndexPayload projected from the chunk's metadata
+// (rel_path/doc_type/span/modality), so the index itself can serve filtered
+// search. We assert by querying the index and inspecting the returned payload.
+func TestEmbeddingWorker_RunOnce_ProjectsPayload(t *testing.T) {
+	source := &fakeChunkSource{
+		tasks: []model.ChunkTask{
+			model.NewChunkTask(31, "spoken", "", model.ChunkMetadata{
+				ChunkID: 31, RelPath: "audio/talk.mp3", DocType: "audio",
+				Snippet: "spoken words",
+				Span:    model.Span{Kind: "time", StartMS: 1000, EndMS: 5000},
+			}),
+		},
+	}
+	idx := index.NewHNSWIndex("")
+	worker := &index.EmbeddingWorker{
+		Source:       source,
+		Index:        idx,
+		Embedder:     &fakeEmbedder{vectors: [][]float32{{1, 0}}},
+		BatchSize:    4,
+		ModelForText: "mistral-embed",
+	}
+
+	if _, err := worker.RunOnce(context.Background(), "text"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// A doctype-filtered search proves the payload doc_type was stored, and the
+	// returned payload proves the rest of the projection round-tripped.
+	hits, err := idx.Search(context.Background(), []float32{1, 0}, 5, model.Filter{DocTypes: []string{"audio"}})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ChunkID != 31 {
+		t.Fatalf("expected chunk 31 via doctype-filtered search, got %v", hits)
+	}
+	p := hits[0].Payload
+	if p.RelPath != "audio/talk.mp3" || p.DocType != "audio" || p.Snippet != "spoken words" {
+		t.Fatalf("payload not projected from metadata: %#v", p)
+	}
+	if p.Span.Kind != "time" || p.StartMS != 1000 || p.EndMS != 5000 {
+		t.Fatalf("span/time bounds not projected: %#v", p)
+	}
+}
+
 func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 	source := &fakeChunkSource{
 		tasks: []model.ChunkTask{

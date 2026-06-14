@@ -63,10 +63,7 @@ func (m *PersistenceManager) LoadAll(ctx context.Context) error {
 		if idx.Index == nil {
 			continue
 		}
-		// always check the context *before* doing any work. load
-		// implementations currently have a simple `Load(path string)`
-		// signature and are therefore unable to observe the context
-		// directly, so this pre-flight check gives callers a chance to
+		// always check the context *before* doing any work, so callers can
 		// bail out early if cancellation has already been requested.
 		select {
 		case <-ctx.Done():
@@ -74,7 +71,14 @@ func (m *PersistenceManager) LoadAll(ctx context.Context) error {
 		default:
 		}
 
-		if err := idx.Index.Load(idx.Path); err != nil {
+		// Persistence is an optional capability (issue #247): networked
+		// backends (Qdrant, pgvector) own their storage and don't implement
+		// Persistable, so they are silently skipped here.
+		p, ok := idx.Index.(model.Persistable)
+		if !ok {
+			continue
+		}
+		if err := p.Load(ctx, idx.Path); err != nil {
 			return err
 		}
 
@@ -103,11 +107,39 @@ func (m *PersistenceManager) SaveAll() error {
 		if idx.Index == nil {
 			continue
 		}
-		if err := idx.Index.Save(idx.Path); err != nil {
+		// Save is an optional capability (issue #247); skip backends that own
+		// their own persistence.
+		p, ok := idx.Index.(model.Persistable)
+		if !ok {
+			continue
+		}
+		if err := p.Save(context.Background(), idx.Path); err != nil {
 			combined = errors.Join(combined, err)
 		}
 	}
 	return combined
+}
+
+// EnsureIdentity reconciles an index's recorded corpus-lifetime embed identity
+// (SPEC 8.1.4) with the configured one, per index (issue #247). When the index
+// is fresh (empty recorded identity) or the recorded identity differs from the
+// configured one, the index is Reset to the configured identity — discarding any
+// vectors built under a different embed provider/model/dimension so vector
+// spaces are never silently mixed. A match is a no-op. This complements the
+// process-level config.VerifyEmbedIdentity check, which fails the startup before
+// any index work when a populated corpus's snapshot identity changed.
+func EnsureIdentity(ctx context.Context, idx model.Index, configuredIdentity string) error {
+	if idx == nil {
+		return nil
+	}
+	recorded, err := idx.Identity(ctx)
+	if err != nil {
+		return err
+	}
+	if recorded == configuredIdentity {
+		return nil
+	}
+	return idx.Reset(ctx, configuredIdentity)
 }
 
 func (m *PersistenceManager) Start(ctx context.Context) {

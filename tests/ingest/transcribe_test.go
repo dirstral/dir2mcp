@@ -163,16 +163,17 @@ type fixedLabelsIndex struct {
 	labels []uint64
 }
 
-func (i *fixedLabelsIndex) Add(uint64, []float32) error { return nil }
-func (i *fixedLabelsIndex) Save(string) error           { return nil }
-func (i *fixedLabelsIndex) Load(string) error           { return nil }
-func (i *fixedLabelsIndex) Close() error                { return nil }
-func (i *fixedLabelsIndex) Search([]float32, int) ([]uint64, []float32, error) {
-	scores := make([]float32, len(i.labels))
-	for n := range scores {
-		scores[n] = float32(len(scores) - n)
+func (i *fixedLabelsIndex) Upsert(context.Context, []float32, model.IndexPayload) error { return nil }
+func (i *fixedLabelsIndex) Delete(context.Context, []uint64) error                      { return nil }
+func (i *fixedLabelsIndex) Identity(context.Context) (string, error)                    { return "", nil }
+func (i *fixedLabelsIndex) Reset(context.Context, string) error                         { return nil }
+func (i *fixedLabelsIndex) Close() error                                                { return nil }
+func (i *fixedLabelsIndex) Search(_ context.Context, _ []float32, _ int, _ model.Filter) ([]model.IndexHit, error) {
+	hits := make([]model.IndexHit, len(i.labels))
+	for n, label := range i.labels {
+		hits[n] = model.IndexHit{ChunkID: label, Score: float32(len(i.labels) - n)}
 	}
-	return append([]uint64(nil), i.labels...), scores, nil
+	return hits, nil
 }
 
 type staticEmbedder struct {

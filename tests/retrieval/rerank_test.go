@@ -50,9 +50,7 @@ func rerankTestService(t *testing.T) *retrieval.Service {
 	t.Helper()
 	idx := index.NewHNSWIndex("")
 	for id, vec := range map[uint64][]float32{1: {1, 0}, 2: {0.9, 0.1}, 3: {0.8, 0.2}} {
-		if err := idx.Add(id, vec); err != nil {
-			t.Fatalf("idx.Add: %v", err)
-		}
+		addVec(t, idx, id, vec)
 	}
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
@@ -200,13 +198,9 @@ func TestRerank_BothModeReranksOnceOnMergedPool(t *testing.T) {
 	// non-empty pools; without separate indices the assertion could pass
 	// on a single-index result.
 	textIdx := index.NewHNSWIndex("")
-	if err := textIdx.Add(1, []float32{1, 0}); err != nil {
-		t.Fatalf("textIdx.Add: %v", err)
-	}
+	addVec(t, textIdx, 1, []float32{1, 0})
 	codeIdx := index.NewHNSWIndex("")
-	if err := codeIdx.Add(2, []float32{0, 1}); err != nil {
-		t.Fatalf("codeIdx.Add: %v", err)
-	}
+	addVec(t, codeIdx, 2, []float32{0, 1})
 	svc := retrieval.NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0}, // text query -> matches id 1 in textIdx
 		"codestral-embed": {0, 1}, // code query -> matches id 2 in codeIdx

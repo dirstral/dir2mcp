@@ -1377,10 +1377,28 @@ func truncateSearchHits(hits []model.SearchHit, k int) []model.SearchHit {
 	return hits[:k]
 }
 
-// collectVectorCandidates runs the dense-vector search loop with overfetch and
-// filter-aware re-fetch behavior. Extracted from searchSingleIndex so the
-// outer function stays under the cyclomatic-complexity budget after hybrid
-// fusion was layered on top.
+// filterFromQuery projects the retrieval-level SearchQuery predicates into the
+// backend-agnostic model.Filter (issue #247). ExcludeOrphans is intentionally
+// NOT pushed down: orphan/eviction state lives in the retrieval service's
+// in-memory chunk metadata, not in the backend payload, so it is enforced by
+// the post-materialization matchFilters re-check instead (a backend payload
+// always carries a rel_path).
+func filterFromQuery(q model.SearchQuery) model.Filter {
+	return model.Filter{
+		PathPrefix: q.PathPrefix,
+		PathGlob:   q.FileGlob,
+		DocTypes:   q.DocTypes,
+	}
+}
+
+// collectVectorCandidates gathers up to k filtered dense-vector candidates. When
+// the index can evaluate the filter itself (FilteringIndex + CanFilter) the
+// filter is pushed down to narrow the backend's candidate pool; otherwise an
+// empty filter is passed and the predicates are evaluated in Go. In both cases
+// the same widening overfetch loop runs and matchFilters is re-applied so the
+// in-memory orphan/eviction state is honoured. Extracted from searchSingleIndex
+// so the outer function stays under the cyclomatic-complexity budget after
+// hybrid fusion was layered on top.
 func (s *Service) collectVectorCandidates(
 	ctx context.Context,
 	vector []float32,
@@ -1389,28 +1407,58 @@ func (s *Service) collectVectorCandidates(
 	filters model.SearchQuery,
 	k int,
 ) ([]model.SearchHit, error) {
+	filter := filterFromQuery(filters)
+	// Only push the filter down when the backend can evaluate it itself;
+	// otherwise pass an empty filter so payload-blind backends behave as
+	// before. Either way we run the same widening overfetch loop and re-apply
+	// matchFilters in Go: pushing the filter down narrows the candidate pool
+	// the backend returns, but the in-memory orphan/eviction state (which the
+	// backend payload does not know about, see searchHitFromIndexHit) is still
+	// enforced by the post-materialization re-check. Without the widening loop a
+	// pushed-down search would under-return whenever the re-check drops an
+	// evicted-but-still-indexed chunk.
+	backendFilter := model.Filter{}
+	if fi, ok := idx.(model.FilteringIndex); ok && fi.CanFilter(filter) {
+		backendFilter = filter
+	}
+	return s.collectFilteredCandidates(ctx, vector, idx, indexName, filters, backendFilter, k)
+}
+
+// collectFilteredCandidates runs the widening overfetch loop: it requests a
+// widening candidate pool from the backend (with backendFilter pushed down when
+// the backend supports it, or an empty filter otherwise) and applies
+// matchFilters in Go until k results are gathered or the backend is exhausted.
+func (s *Service) collectFilteredCandidates(
+	ctx context.Context,
+	vector []float32,
+	idx model.Index,
+	indexName string,
+	filters model.SearchQuery,
+	backendFilter model.Filter,
+	k int,
+) ([]model.SearchHit, error) {
 	// Read overfetch under lock to avoid races with SetOverfetchMultiplier.
 	// The multiplier is clamped to [1,100] at construction time so no further
 	// defensive checks are needed here.
 	s.metaMu.RLock()
 	overfetchMultiplier := s.overfetchMultiplier
 	s.metaMu.RUnlock()
-	cap := k
-	if cap > 1024 {
-		cap = 1024
+	capHint := k
+	if capHint > 1024 {
+		capHint = 1024
 	}
-	filtered := make([]model.SearchHit, 0, cap)
-	seen := make(map[uint64]struct{}, cap)
+	filtered := make([]model.SearchHit, 0, capHint)
+	seen := make(map[uint64]struct{}, capHint)
 	for n := initialSearchFanout(k, overfetchMultiplier); len(filtered) < k; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		labels, scores, err := idx.Search(vector, n)
+		hits, err := idx.Search(ctx, vector, n, backendFilter)
 		if err != nil {
 			return nil, err
 		}
-		s.collectFilteredHits(labels, scores, indexName, filters, k, seen, &filtered)
-		if searchExhausted(len(filtered), k, len(labels), n) {
+		s.collectFilteredHits(hits, indexName, filters, k, seen, &filtered)
+		if searchExhausted(len(filtered), k, len(hits), n) {
 			break
 		}
 		n = nextSearchFanout(n)
@@ -1418,26 +1466,64 @@ func (s *Service) collectVectorCandidates(
 	return filtered, nil
 }
 
-// collectFilteredHits walks one batch of (label, score) pairs returned by the
-// vector index and appends matching hits to dst until k results are gathered.
-// Hits already represented in `seen` are skipped to avoid duplicates across
-// fanout iterations.
+// searchHitFromIndexHit materialises a SearchHit from a backend IndexHit. It
+// prefers the in-memory chunk metadata (searchHitForLabel) when present so
+// existing fakes and the HNSW path keep their established behavior, and falls
+// back to the backend-supplied payload for fields the in-memory metadata lacks
+// (a non-default backend may be the only source of the rel_path/doc_type).
+func (s *Service) searchHitFromIndexHit(indexName string, h model.IndexHit) model.SearchHit {
+	hit := s.searchHitForLabel(indexName, h.ChunkID)
+	// The in-memory chunk metadata is authoritative for the default HNSW path:
+	// a missing entry there is the eviction/orphan signal (EvictDocuments
+	// deletes the entry), so we must NOT resurrect such a chunk from the backend
+	// payload. Only fall back to the payload when the service holds no in-memory
+	// metadata at all — i.e. a non-default backend is the sole source of truth.
+	if strings.TrimSpace(hit.RelPath) == "" && !s.hasInMemoryMetadata() {
+		if payloadHit := h.Payload.ToSearchHit(); strings.TrimSpace(payloadHit.RelPath) != "" {
+			hit = payloadHit
+			hit.ChunkID = h.ChunkID
+		}
+	}
+	hit.Score = float64(h.Score)
+	return hit
+}
+
+// hasInMemoryMetadata reports whether any chunk metadata has been registered in
+// the service (via SetChunkMetadata*). When true the in-memory maps are the
+// authoritative source for materialising hits; when false (e.g. an external
+// backend that never populated them) hits are materialised from the backend
+// payload instead.
+func (s *Service) hasInMemoryMetadata() bool {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	if len(s.chunkByLabel) > 0 {
+		return true
+	}
+	for _, byIndex := range s.chunkByIndex {
+		if len(byIndex) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// collectFilteredHits walks one batch of index hits and appends matching hits to
+// dst until k results are gathered. Hits already represented in `seen` are
+// skipped to avoid duplicates across fanout iterations.
 func (s *Service) collectFilteredHits(
-	labels []uint64,
-	scores []float32,
+	hits []model.IndexHit,
 	indexName string,
 	filters model.SearchQuery,
 	k int,
 	seen map[uint64]struct{},
 	dst *[]model.SearchHit,
 ) {
-	for i, label := range labels {
-		if _, ok := seen[label]; ok {
+	for _, h := range hits {
+		if _, ok := seen[h.ChunkID]; ok {
 			continue
 		}
-		seen[label] = struct{}{}
-		hit := s.searchHitForLabel(indexName, label)
-		hit.Score = float64(scores[i])
+		seen[h.ChunkID] = struct{}{}
+		hit := s.searchHitFromIndexHit(indexName, h)
 		if !matchFilters(hit, filters) {
 			continue
 		}
