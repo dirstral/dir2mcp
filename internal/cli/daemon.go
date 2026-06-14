@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/dirstral/dir2mcp/internal/ingest"
 )
 
 // daemonChildEnv carries a per-spawn nonce that the parent sets on the
@@ -50,11 +52,51 @@ const pidFileName = "server.pid"
 // stdout/stderr inside the state directory. Append mode; never truncated.
 const serverLogName = "server.log"
 
+// daemonReadinessHeadroom is the slack added on top of the document-extractor
+// probe ceiling to cover index load and the listener bind that follow the
+// probe before the child writes connection.json. 25s on top of the 20s probe
+// gives a 45s total readiness window.
+const daemonReadinessHeadroom = 25 * time.Second
+
 // daemonReadinessTimeout caps how long the parent will wait for the child
-// to write connection.json before giving up and reporting bind failure.
-// The server typically binds within ~1s; 15s is generous headroom for
-// loaded developer machines.
-const daemonReadinessTimeout = 15 * time.Second
+// to write connection.json before reporting the daemon as still-starting.
+//
+// The server itself binds within ~1s, but the child resolves the document
+// extractor during startup BEFORE it binds. On dir2mcp-full with the default
+// IngestExtractor="auto" and docling on PATH, that runs the docling
+// functional probe (`docling --version`, which imports torch) bounded by
+// ingest.doclingProbeTimeout (20s) on a cold first run. The readiness window
+// MUST therefore stay comfortably above that probe ceiling, otherwise a
+// healthy-but-slow first run trips a false "not ready" while the child is
+// still warming up.
+//
+// We derive it from the probe ceiling (+ headroom) rather than hard-coding a
+// figure so the ordering invariant — readiness window > probe ceiling — can't
+// silently regress if the probe timeout is ever raised. Evaluates to 45s with
+// today's 20s probe. Do NOT lower the probe timeout to "fix" a slow start.
+var daemonReadinessTimeout = ingest.DoclingProbeTimeout() + daemonReadinessHeadroom
+
+// DaemonReadinessTimeout exposes the readiness window so external tests can
+// assert it stays above the document-extractor probe ceiling
+// (ingest.DoclingProbeTimeout). Read-only accessor.
+func DaemonReadinessTimeout() time.Duration { return daemonReadinessTimeout }
+
+// errDaemonStillStarting is the sentinel waitForConnectionFile wraps when the
+// readiness deadline expires while the child process is still alive. It marks
+// the "healthy-but-slow" case (e.g. a cold dir2mcp-full first run warming up
+// the docling/torch probe) so callers can report a friendly "still starting"
+// message and succeed, rather than treating it as the hard bind failure used
+// for a child that actually crashed. Use IsDaemonStillStarting to test for it.
+var errDaemonStillStarting = errors.New("daemon still starting")
+
+// IsDaemonStillStarting reports whether err indicates the daemon child was
+// still alive but had not yet written connection.json when the readiness
+// deadline expired (as opposed to having crashed). Exported so the readiness
+// classification — still-starting vs crashed vs ready — can be unit-tested
+// from the external tests package without exposing waitForConnectionFile.
+func IsDaemonStillStarting(err error) bool {
+	return errors.Is(err, errDaemonStillStarting)
+}
 
 // daemonReadinessPoll is the interval between connection.json existence
 // checks during startup.
@@ -236,10 +278,31 @@ func waitForConnectionFile(path string, childPid int, timeout time.Duration) (co
 			return connectionPayload{}, fmt.Errorf("daemon (pid %d) exited before becoming ready", childPid)
 		}
 		if time.Now().After(deadline) {
-			return connectionPayload{}, fmt.Errorf("timed out after %s waiting for daemon readiness: %v", timeout, lastErr)
+			// The child was observed alive this iteration (the exited check
+			// above returned), so this is the healthy-but-slow case: it just
+			// hasn't bound and written connection.json within the window.
+			// Wrap the sentinel so the parent can report "still starting"
+			// rather than the hard bind-failure used for a crashed child.
+			return connectionPayload{}, fmt.Errorf(
+				"timed out after %s waiting for daemon readiness: %v: %w",
+				timeout, lastErr, errDaemonStillStarting,
+			)
 		}
 		time.Sleep(daemonReadinessPoll)
 	}
+}
+
+// WaitForConnectionReady is a thin exported wrapper over waitForConnectionFile
+// so the readiness classification — ready vs still-starting vs crashed — can be
+// exercised from the external tests package (waitForConnectionFile itself stays
+// unexported). It returns whether the connection became ready and the
+// classifying error; pair it with IsDaemonStillStarting to distinguish the
+// healthy-but-slow case from a child that exited before binding.
+func WaitForConnectionReady(path string, childPid int, timeout time.Duration) (bool, error) {
+	if _, err := waitForConnectionFile(path, childPid, timeout); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // stopDaemon sends SIGTERM to pid, polls every daemonShutdownPoll for the

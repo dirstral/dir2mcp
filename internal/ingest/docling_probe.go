@@ -16,6 +16,12 @@ import (
 // cannot stall startup or `dir2mcp doctor`.
 const doclingProbeTimeout = 20 * time.Second
 
+// DoclingProbeTimeout exposes the docling functional-probe ceiling so other
+// packages (and tests) can keep dependent timeouts — notably the daemon
+// readiness window — provably above it. Read-only accessor; the value itself
+// stays an internal constant.
+func DoclingProbeTimeout() time.Duration { return doclingProbeTimeout }
+
 // doclingProbeEntry memoizes one binary's functional-check result; the
 // sync.Once ensures the probe runs at most once per binary even under
 // concurrent callers.
