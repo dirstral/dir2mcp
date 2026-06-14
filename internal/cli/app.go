@@ -67,6 +67,7 @@ var commands = map[string]struct{}{
 	"open-file":      {},
 	"list-files":     {},
 	"reindex":        {},
+	"export":         {},
 	"bridge":         {},
 	"config":         {},
 	"install":        {},
@@ -467,6 +468,8 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runStatus(ctx, globalOpts, args), true
 	case "reindex":
 		return a.runReindex(ctx, globalOpts, args), true
+	case "export":
+		return a.runExport(ctx, globalOpts, args), true
 	case "config":
 		return a.runConfig(ctx, globalOpts, args), true
 	case "bridge":
@@ -528,6 +531,7 @@ func (a *App) printUsage() {
 		{"open-file", "legacy compatibility shim; prefer dirstral-cli for client UX"},
 		{"list-files", "legacy compatibility shim; prefer dirstral-cli for client UX"},
 		{"reindex", "force a full re-index of all documents"},
+		{"export", "render a transcript as VTT/SRT subtitles (export --format vtt|srt <path>)"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
 		{"install", "install dir2mcp into a client (e.g. dir2mcp install claude)"},
