@@ -36,6 +36,12 @@ var managedEnvVars = []string{
 	"GEMINI_API_KEY",
 	"COHERE_API_KEY",
 	"ELEVENLABS_API_KEY",
+	// S3 corpus-source credentials (issue #244). Stored under the standard AWS
+	// env var names so a keychain entry satisfies the same reference the
+	// environment/.env.local sources use.
+	"AWS_ACCESS_KEY_ID",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
 }
 
 // ErrNotFound indicates the requested secret is absent from the keychain.

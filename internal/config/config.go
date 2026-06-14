@@ -27,6 +27,33 @@ type SecretSourceMetadata struct {
 	AuthToken            string
 }
 
+// SourceConfig selects the corpus backend (issue #244, epic #250). The default
+// kind "local" reproduces the historical local-filesystem behavior exactly; an
+// NFS mount is just a local path so it shares the local backend. The s3 kind
+// reads the corpus from an object store. Credentials are never persisted: they
+// are resolved at runtime through the existing secret precedence (env → keychain
+// → file) from the standard AWS environment variables.
+type SourceConfig struct {
+	// Kind is one of "local", "nfs", or "s3". Empty normalizes to "local".
+	Kind string
+	// S3Bucket is the bucket name; required when Kind=s3.
+	S3Bucket string
+	// S3Prefix optionally scopes the corpus to a key prefix within the bucket.
+	S3Prefix string
+	// S3Region is the AWS region; empty falls back to the SDK's default chain.
+	S3Region string
+	// S3Endpoint optionally overrides the endpoint for S3-compatible stores
+	// (MinIO, R2, etc.). Empty uses the default AWS endpoint.
+	S3Endpoint string
+	// S3AccessKeyID/S3SecretAccessKey/S3SessionToken are runtime-only resolved
+	// credentials. They are populated from the environment (AWS_ACCESS_KEY_ID,
+	// AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN) during load and MUST NOT be
+	// persisted to the config file or the effective-config snapshot.
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+	S3SessionToken    string
+}
+
 type X402Config struct {
 	// Mode controls whether x402 payment gating is enabled.  Allowed values
 	// are "off", "on" and "required".  Validation will normalize the
@@ -183,6 +210,9 @@ type Config struct {
 
 	X402 X402Config
 
+	// Source selects the corpus backend (local/nfs/s3). See SourceConfig.
+	Source SourceConfig
+
 	// providersDoc holds the parsed `providers:`/`model:` subtree (SPEC
 	// 0.7.0 §8.1/§16.2), decoded with yaml.v3 separately from the
 	// bespoke flat parser. Unexported/runtime-derived: not persisted,
@@ -261,6 +291,11 @@ type fileConfig struct {
 	X402Scheme               *string
 	X402Asset                *string
 	X402PayTo                *string
+	SourceKind               *string
+	SourceS3Bucket           *string
+	SourceS3Prefix           *string
+	SourceS3Region           *string
+	SourceS3Endpoint         *string
 }
 
 type persistedConfig struct {
@@ -338,6 +373,13 @@ type persistedConfig struct {
 	X402Scheme           string `yaml:"x402_scheme"`
 	X402Asset            string `yaml:"x402_asset"`
 	X402PayTo            string `yaml:"x402_pay_to"`
+
+	// Corpus source selection (issue #244). Credentials are never persisted.
+	SourceKind       string `yaml:"source_kind"`
+	SourceS3Bucket   string `yaml:"source_s3_bucket"`
+	SourceS3Prefix   string `yaml:"source_s3_prefix"`
+	SourceS3Region   string `yaml:"source_s3_region"`
+	SourceS3Endpoint string `yaml:"source_s3_endpoint"`
 }
 
 // Default returns the baseline Config (used as the starting point
@@ -432,6 +474,9 @@ func Default() Config {
 			Asset:            "",
 			PayTo:            "",
 		},
+		Source: SourceConfig{
+			Kind: "local",
+		},
 	}
 }
 
@@ -520,6 +565,13 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		X402Scheme:           cfg.X402.Scheme,
 		X402Asset:            cfg.X402.Asset,
 		X402PayTo:            cfg.X402.PayTo,
+		// Source selection is safe to persist except the resolved credentials,
+		// which are intentionally omitted (env/keychain-only).
+		SourceKind:       cfg.Source.Kind,
+		SourceS3Bucket:   cfg.Source.S3Bucket,
+		SourceS3Prefix:   cfg.Source.S3Prefix,
+		SourceS3Region:   cfg.Source.S3Region,
+		SourceS3Endpoint: cfg.Source.S3Endpoint,
 	}
 }
 
@@ -745,7 +797,7 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if applyEnv {
 			applyEnvOverrides(&cfg, overrideEnv)
 		}
-		if err := cfg.Validate(); err != nil {
+		if err := cfg.finalizeLoaded(applyEnv); err != nil {
 			return Config{}, err
 		}
 		return cfg, nil
@@ -756,7 +808,7 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 			if applyEnv {
 				applyEnvOverrides(&cfg, overrideEnv)
 			}
-			if err := cfg.Validate(); err != nil {
+			if err := cfg.finalizeLoaded(applyEnv); err != nil {
 				return Config{}, err
 			}
 			return cfg, nil
@@ -770,7 +822,7 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	if applyEnv {
 		applyEnvOverrides(&cfg, overrideEnv)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.finalizeLoaded(applyEnv); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -816,6 +868,27 @@ func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 	applyModelFileParsed(cfg, fileCfg)
 	applyIngestFileParsed(cfg, fileCfg)
 	applyX402FileParsed(cfg, fileCfg)
+	applySourceFileParsed(cfg, fileCfg)
+}
+
+// applySourceFileParsed overlays parsed corpus-source file fields onto
+// cfg.Source. Credentials are never read from disk (env/keychain-only).
+func applySourceFileParsed(cfg *Config, fc fileConfig) {
+	if fc.SourceKind != nil {
+		cfg.Source.Kind = *fc.SourceKind
+	}
+	if fc.SourceS3Bucket != nil {
+		cfg.Source.S3Bucket = *fc.SourceS3Bucket
+	}
+	if fc.SourceS3Prefix != nil {
+		cfg.Source.S3Prefix = *fc.SourceS3Prefix
+	}
+	if fc.SourceS3Region != nil {
+		cfg.Source.S3Region = *fc.SourceS3Region
+	}
+	if fc.SourceS3Endpoint != nil {
+		cfg.Source.S3Endpoint = *fc.SourceS3Endpoint
+	}
 }
 
 // applyServerFileParsed overlays parsed server core and network file
@@ -1346,6 +1419,11 @@ var configKeyAliases = map[string]string{
 	"x402.route_policy.tools_call.scheme":  "x402_scheme",
 	"x402.route_policy.tools_call.asset":   "x402_asset",
 	"x402.route_policy.tools_call.pay_to":  "x402_pay_to",
+	"source.kind":                          "source_kind",
+	"source.s3.bucket":                     "source_s3_bucket",
+	"source.s3.prefix":                     "source_s3_prefix",
+	"source.s3.region":                     "source_s3_region",
+	"source.s3.endpoint":                   "source_s3_endpoint",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
@@ -1365,6 +1443,8 @@ func isMapSectionKey(key string) bool {
 	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere", "index":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets":
+		return true
+	case "source", "source.s3":
 		return true
 	case "ingest.extractor":
 		return false
@@ -1495,6 +1575,24 @@ func setStringFileScalar(cfg *fileConfig, key, value string) {
 	setModelStringFileScalar(cfg, key, value)
 	setIngestStringFileScalar(cfg, key, value)
 	setX402StringFileScalar(cfg, key, value)
+	setSourceStringFileScalar(cfg, key, value)
+}
+
+// setSourceStringFileScalar assigns corpus-source string keys onto the
+// fileConfig. Credential keys are deliberately not accepted from disk.
+func setSourceStringFileScalar(cfg *fileConfig, key, value string) {
+	switch key {
+	case "source_kind":
+		cfg.SourceKind = strPtr(value)
+	case "source_s3_bucket":
+		cfg.SourceS3Bucket = strPtr(value)
+	case "source_s3_prefix":
+		cfg.SourceS3Prefix = strPtr(value)
+	case "source_s3_region":
+		cfg.SourceS3Region = strPtr(value)
+	case "source_s3_endpoint":
+		cfg.SourceS3Endpoint = strPtr(value)
+	}
 }
 
 // setServerStringFileScalar assigns server-related string keys (paths,
@@ -1754,6 +1852,12 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("x402_scheme", cfg.X402Scheme)
 	writeScalar("x402_asset", cfg.X402Asset)
 	writeScalar("x402_pay_to", cfg.X402PayTo)
+	writeScalar("source_kind", cfg.SourceKind)
+	writeScalar("source_s3_bucket", cfg.SourceS3Bucket)
+	writeScalar("source_s3_prefix", cfg.SourceS3Prefix)
+	writeScalar("source_s3_region", cfg.SourceS3Region)
+	writeScalar("source_s3_endpoint", cfg.SourceS3Endpoint)
+	// S3 credentials are never written to disk (env/keychain-only).
 
 	return []byte(b.String()), nil
 }
@@ -1803,6 +1907,48 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	applyNetworkEnvOverrides(cfg, overrideEnv)
 	applySessionEnvOverrides(cfg, overrideEnv)
 	applyX402EnvOverrides(cfg, overrideEnv)
+	applySourceEnvOverrides(cfg, overrideEnv)
+}
+
+// applySourceEnvOverrides applies the corpus-source selection env overrides and
+// resolves S3 credentials. Non-secret settings come from DIR2MCP_SOURCE_* and
+// override file values when non-empty. Credentials are resolved at runtime only,
+// through the existing secret precedence (env → keychain → file/.env.local): the
+// loader has already layered keychain/.env.local values onto the standard AWS
+// env vars by the time this runs, so reading them here honors all three sources.
+// Credentials are never persisted to the snapshot.
+func applySourceEnvOverrides(cfg *Config, env map[string]string) {
+	setTrimmedEnv(env, "DIR2MCP_SOURCE_KIND", &cfg.Source.Kind)
+	setTrimmedEnv(env, "DIR2MCP_SOURCE_S3_BUCKET", &cfg.Source.S3Bucket)
+	setTrimmedEnv(env, "DIR2MCP_SOURCE_S3_PREFIX", &cfg.Source.S3Prefix)
+	setTrimmedEnv(env, "DIR2MCP_SOURCE_S3_ENDPOINT", &cfg.Source.S3Endpoint)
+	// Region prefers the dir2mcp-specific override, then the standard AWS var.
+	if !setTrimmedEnv(env, "DIR2MCP_SOURCE_S3_REGION", &cfg.Source.S3Region) {
+		setTrimmedEnv(env, "AWS_REGION", &cfg.Source.S3Region)
+	}
+	// Credentials are runtime-only (env/keychain/.env.local), never persisted.
+	// Secret values are stored raw (untrimmed) but only when non-blank.
+	setSecretEnv(env, "AWS_ACCESS_KEY_ID", &cfg.Source.S3AccessKeyID)
+	setSecretEnv(env, "AWS_SECRET_ACCESS_KEY", &cfg.Source.S3SecretAccessKey)
+	setSecretEnv(env, "AWS_SESSION_TOKEN", &cfg.Source.S3SessionToken)
+}
+
+// setTrimmedEnv assigns the trimmed value of env var key onto dst when present
+// and non-blank, returning whether an assignment occurred.
+func setTrimmedEnv(env map[string]string, key string, dst *string) bool {
+	if raw, ok := envLookup(key, env); ok && strings.TrimSpace(raw) != "" {
+		*dst = strings.TrimSpace(raw)
+		return true
+	}
+	return false
+}
+
+// setSecretEnv assigns the raw (untrimmed) value of env var key onto dst when
+// present and non-blank. Used for credentials, which must not be trimmed.
+func setSecretEnv(env map[string]string, key string, dst *string) {
+	if raw, ok := envLookup(key, env); ok && strings.TrimSpace(raw) != "" {
+		*dst = raw
+	}
 }
 
 // applyRerankEnvOverrides sources the Cohere key (secret) and
@@ -2041,6 +2187,9 @@ func (c *Config) Validate() error {
 	if err := c.validateNumericBounds(); err != nil {
 		return err
 	}
+	if err := c.validateSource(); err != nil {
+		return err
+	}
 	c.applyValidationDefaults()
 	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
@@ -2114,6 +2263,73 @@ func (c *Config) validateNumericBounds() error {
 	}
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
+	}
+	return nil
+}
+
+// validateSource normalizes Source.Kind (defaulting empty to "local") and
+// enforces the corpus-source invariants (issue #244): kind must be one of
+// local/nfs/s3; s3 requires a bucket and a resolved access key + secret. The
+// errors are CONFIG_INVALID-style (clear, actionable) so enabling s3 without
+// credentials fails loudly rather than at first request time.
+func (c *Config) validateSource() error {
+	kind := strings.ToLower(strings.TrimSpace(c.Source.Kind))
+	if kind == "" {
+		kind = "local"
+	}
+	switch kind {
+	case "local", "nfs":
+		c.Source.Kind = kind
+		return nil
+	case "s3":
+		c.Source.Kind = kind
+	default:
+		return fmt.Errorf("source.kind must be one of local, nfs, s3: %q", c.Source.Kind)
+	}
+
+	// s3-specific requirements.
+	c.Source.S3Bucket = strings.TrimSpace(c.Source.S3Bucket)
+	c.Source.S3Prefix = strings.TrimSpace(c.Source.S3Prefix)
+	c.Source.S3Region = strings.TrimSpace(c.Source.S3Region)
+	c.Source.S3Endpoint = strings.TrimSpace(c.Source.S3Endpoint)
+	if c.Source.S3Bucket == "" {
+		return errors.New("source.kind=s3 requires source.s3.bucket")
+	}
+	// Credential presence is NOT validated here: AWS credentials are never
+	// persisted and are only populated on env-aware load paths. Enforcing them
+	// in validateSource would break LoadFile/LoadEffectiveSnapshot for an
+	// otherwise-valid persisted s3 config. Credential presence is checked in
+	// validateSourceRuntimeSecrets, invoked only when env is applied.
+	return nil
+}
+
+// validateSourceRuntimeSecrets enforces that an s3 corpus source has resolved
+// AWS credentials. It runs only on env-aware load paths (where credentials from
+// environment/keychain/.env.local have been layered in), keeping validateSource
+// limited to persisted invariants so config-file-only loads do not spuriously
+// fail.
+func (c *Config) validateSourceRuntimeSecrets() error {
+	if strings.ToLower(strings.TrimSpace(c.Source.Kind)) != "s3" {
+		return nil
+	}
+	if strings.TrimSpace(c.Source.S3AccessKeyID) == "" || strings.TrimSpace(c.Source.S3SecretAccessKey) == "" {
+		return errors.New("source.kind=s3 requires AWS credentials " +
+			"(set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY via environment, keychain, or .env.local)")
+	}
+	return nil
+}
+
+// finalizeLoaded runs the standard post-load validation: Validate (persisted
+// invariants, always) plus, when env was applied, the runtime-secret checks
+// that depend on resolved credentials.
+func (c *Config) finalizeLoaded(applyEnv bool) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if applyEnv {
+		if err := c.validateSourceRuntimeSecrets(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
