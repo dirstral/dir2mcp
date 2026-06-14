@@ -75,6 +75,23 @@ type Span struct {
 	// bounding box, and section breadcrumb. nil for all other kinds, which
 	// keeps Span comparable for the scalar kinds.
 	Region *RegionSpan
+	// Words optionally carries per-word timing for a "time" span when the STT
+	// provider returned word-level timestamps (spec §8.6.1). It is metadata
+	// only: it never changes the chunk text and never creates extra chunks.
+	// Persisted in the span's extra_json as a `words` array. Nil/empty for
+	// every other span kind and for providers without word timing, which keeps
+	// behaviour identical to a words-absent transcript. Its presence makes Span
+	// non-comparable, so callers must not use Span as a map key.
+	Words []WordSpan
+}
+
+// WordSpan is one per-word timestamp on a "time" span (spec §8.6.1). The JSON
+// tags match the stored extra_json shape exactly: `t` = word start in ms, `d` =
+// word duration in ms, `w` = the word/token text.
+type WordSpan struct {
+	T int    `json:"t"`
+	D int    `json:"d"`
+	W string `json:"w"`
 }
 
 // RegionSpan localizes a chunk to a rectangular area within a page range of a

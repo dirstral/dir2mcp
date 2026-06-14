@@ -143,6 +143,38 @@ type Transcriber interface {
 	Transcribe(ctx context.Context, relPath string, data []byte) (string, error)
 }
 
+// TimedWord is one per-word timestamp returned by a structured transcriber.
+// StartMS/EndMS are absolute offsets from the start of the media (spec §8.6.1).
+type TimedWord struct {
+	Word    string
+	StartMS int
+	EndMS   int
+}
+
+// TranscriptResult is the structured output of a StructuredTranscriber: the
+// SAME `[mm:ss] text` segment string a plain Transcriber returns (so the
+// existing chunker is unaffected), PLUS optional per-word timing. Words is nil
+// when the provider returned no word-level timestamps.
+type TranscriptResult struct {
+	// Text is the segment-formatted transcript identical to Transcriber.Transcribe.
+	Text string
+	// Words is the flat, time-ordered list of per-word timestamps across the whole
+	// transcript. Empty/nil when unavailable.
+	Words []TimedWord
+}
+
+// StructuredTranscriber is an OPTIONAL capability a Transcriber MAY implement to
+// expose per-word timing alongside the segment text (spec §8.6.1, issue #252).
+// The ingest pipeline type-asserts the configured transcriber against this; a
+// transcriber that does not implement it simply yields no word timing and the
+// pipeline behaves exactly as before. Implementations MUST return a Text value
+// byte-for-byte equal to what Transcribe would return for the same input so the
+// downstream segment chunker is unchanged.
+type StructuredTranscriber interface {
+	Transcriber
+	TranscribeStructured(ctx context.Context, relPath string, data []byte) (TranscriptResult, error)
+}
+
 type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)
 }

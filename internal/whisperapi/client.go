@@ -80,9 +80,9 @@ type Client struct {
 	// DefaultLanguage optionally sets the `language` hint. Empty means
 	// provider auto-detection (no language field is sent).
 	DefaultLanguage string
-	// ResponseFormat selects the response schema: "json" (default,
-	// segments) or "verbose_json" (segments + word timestamps). Empty
-	// falls back to ResponseFormatJSON.
+	// ResponseFormat selects the response schema: "verbose_json" (default,
+	// segments + word timestamps per spec §8.6.1) or "json" (segments only).
+	// Empty falls back to ResponseFormatVerboseJSON.
 	ResponseFormat string
 }
 
@@ -101,7 +101,11 @@ func NewClient(baseURL, apiKey string) *Client {
 		MaxBackoff:      defaultMaxBackoff,
 		MaxPayloadBytes: defaultMaxPayloadBytes,
 		DefaultModel:    DefaultModel,
-		ResponseFormat:  ResponseFormatJSON,
+		// Default to verbose_json so the server returns per-word timestamps
+		// (spec §8.6.1, #252). Segment parsing is unaffected — verbose_json is a
+		// superset of json — and operators MAY override to "json" via the
+		// provider profile if their server omits or mishandles word timing.
+		ResponseFormat: ResponseFormatVerboseJSON,
 	}
 }
 
@@ -114,6 +118,10 @@ type transcribeResponse struct {
 	Language string              `json:"language,omitempty"`
 	Duration float64             `json:"duration,omitempty"`
 	Segments []transcriptSegment `json:"segments,omitempty"`
+	// Words is the top-level word array some verbose_json servers return
+	// instead of (or in addition to) per-segment words. Used as a fallback
+	// when no segment carries its own words (#252).
+	Words []transcriptWord `json:"words,omitempty"`
 }
 
 type transcriptSegment struct {
@@ -131,17 +139,30 @@ type transcriptWord struct {
 	End   float64 `json:"end"`
 }
 
-// Transcribe implements model.Transcriber.
+// Transcribe implements model.Transcriber. It returns only the segment text so
+// the contract is unchanged; per-word timing is available via
+// TranscribeStructured.
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
+	res, err := c.TranscribeStructured(ctx, relPath, data)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
+}
+
+// TranscribeStructured implements model.StructuredTranscriber: it returns the
+// same segment text as Transcribe plus per-word timing when the server provided
+// it (spec §8.6.1, #252). Words is nil when the response carried none.
+func (c *Client) TranscribeStructured(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	if len(data) == 0 {
-		return "", &model.ProviderError{Code: "WHISPER_FAILED", Message: "transcription input is empty", Retryable: false}
+		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "transcription input is empty", Retryable: false}
 	}
 	maxPayload := c.MaxPayloadBytes
 	if maxPayload <= 0 {
 		maxPayload = defaultMaxPayloadBytes
 	}
 	if len(data) > maxPayload {
-		return "", &model.ProviderError{
+		return model.TranscriptResult{}, &model.ProviderError{
 			Code:      "WHISPER_FAILED",
 			Message:   fmt.Sprintf("transcription input too large (%d bytes, limit %d)", len(data), maxPayload),
 			Retryable: false,
@@ -150,7 +171,10 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 	return c.transcribeWithRetry(ctx, relPath, data)
 }
 
-func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data []byte) (string, error) {
+// compile-time interface check for the optional word-timing capability.
+var _ model.StructuredTranscriber = (*Client)(nil)
+
+func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	maxAttempts := c.MaxRetries + 1
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -166,14 +190,14 @@ func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data [
 
 		var providerErr *model.ProviderError
 		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxAttempts-1 {
-			return "", err
+			return model.TranscriptResult{}, err
 		}
 
 		if waitErr := c.wait(ctx, c.backoffForAttempt(attempt)); waitErr != nil {
-			return "", waitErr
+			return model.TranscriptResult{}, waitErr
 		}
 	}
-	return "", lastErr
+	return model.TranscriptResult{}, lastErr
 }
 
 // buildBody builds the multipart form body. Returns the raw body bytes and
@@ -219,27 +243,28 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 }
 
 // responseFormat returns the configured response format, defaulting to
-// json. An unknown value is passed through unchanged so operators can
-// target server-specific formats; only the empty value is defaulted.
+// verbose_json (the word-timing superset). An unknown value is passed through
+// unchanged so operators can target server-specific formats; only the empty
+// value is defaulted.
 func (c *Client) responseFormat() string {
 	if f := strings.TrimSpace(c.ResponseFormat); f != "" {
 		return f
 	}
-	return ResponseFormatJSON
+	return ResponseFormatVerboseJSON
 }
 
-func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (string, error) {
+func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	if strings.TrimSpace(c.BaseURL) == "" {
-		return "", &model.ProviderError{Code: "WHISPER_FAILED", Message: "missing whisper base_url", Retryable: false}
+		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "missing whisper base_url", Retryable: false}
 	}
 	body, writer, err := c.buildBody(relPath, data)
 	if err != nil {
-		return "", err
+		return model.TranscriptResult{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/audio/transcriptions", bytes.NewReader(body))
 	if err != nil {
-		return "", &model.ProviderError{Code: "WHISPER_FAILED", Message: "failed to build transcription request", Retryable: false, Cause: err}
+		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "failed to build transcription request", Retryable: false, Cause: err}
 	}
 	// Bearer auth is optional: only set it for credentialed endpoints.
 	if key := strings.TrimSpace(c.APIKey); key != "" {
@@ -254,17 +279,17 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", &model.ProviderError{Code: "WHISPER_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
+		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", httpError(resp)
+		return model.TranscriptResult{}, httpError(resp)
 	}
 
 	var parsed transcribeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return "", &model.ProviderError{
+		return model.TranscriptResult{}, &model.ProviderError{
 			Code:      "WHISPER_FAILED",
 			Message:   "failed to decode transcription response",
 			Retryable: false,
@@ -273,17 +298,63 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	}
 
 	if segText, ok := parseTranscriptSegments(parsed); ok {
-		return segText, nil
+		return model.TranscriptResult{Text: segText, Words: parsed.timedWords()}, nil
 	}
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
-		return "", &model.ProviderError{
+		return model.TranscriptResult{}, &model.ProviderError{
 			Code:      "WHISPER_FAILED",
 			Message:   "transcription response had no text content",
 			Retryable: false,
 		}
 	}
-	return text, nil
+	// Flat-text fallback (no segments): words have no segment frame to anchor
+	// against, so emit text only.
+	return model.TranscriptResult{Text: text}, nil
+}
+
+// timedWords flattens the verbose_json word timestamps into a time-ordered
+// []model.TimedWord with absolute ms offsets (#252). It prefers per-segment
+// words and falls back to a top-level words array; returns nil when neither is
+// present or all words are empty/zero-length, so a words-absent response yields
+// no word timing.
+func (r transcribeResponse) timedWords() []model.TimedWord {
+	var raw []transcriptWord
+	for _, seg := range r.Segments {
+		raw = append(raw, seg.Words...)
+	}
+	if len(raw) == 0 {
+		raw = r.Words
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]model.TimedWord, 0, len(raw))
+	for _, w := range raw {
+		word := strings.TrimSpace(w.Word)
+		if word == "" {
+			continue
+		}
+		startMS := secondsToMS(w.Start)
+		endMS := secondsToMS(w.End)
+		if endMS < startMS {
+			endMS = startMS
+		}
+		out = append(out, model.TimedWord{Word: word, StartMS: startMS, EndMS: endMS})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// secondsToMS converts fractional seconds to whole milliseconds, clamping
+// negative values to 0.
+func secondsToMS(sec float64) int {
+	if sec <= 0 {
+		return 0
+	}
+	return int(sec*1000 + 0.5)
 }
 
 // parseTranscriptSegments converts timed segments into `[mm:ss] text`

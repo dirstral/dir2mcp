@@ -248,3 +248,73 @@ func TestTranscriptIngest_EndToEnd_AppearsInAskWithCitations(t *testing.T) {
 		t.Fatalf("expected transcript hit, got %+v", res.Hits)
 	}
 }
+
+// fakeStructuredTranscriber implements model.StructuredTranscriber, returning
+// segment text plus per-word timing (mirrors the whisper client #252).
+type fakeStructuredTranscriber struct {
+	text  string
+	words []model.TimedWord
+}
+
+func (f *fakeStructuredTranscriber) Transcribe(_ context.Context, _ string, _ []byte) (string, error) {
+	return f.text, nil
+}
+
+func (f *fakeStructuredTranscriber) TranscribeStructured(_ context.Context, _ string, _ []byte) (model.TranscriptResult, error) {
+	return model.TranscriptResult{Text: f.text, Words: f.words}, nil
+}
+
+// TestGenerateTranscriptRepresentation_AttachesWordSpans asserts a structured
+// transcriber's per-word timing is carried onto the persisted transcript chunk
+// spans (spec §8.6.1) without changing the chunk count or text.
+func TestGenerateTranscriptRepresentation_AttachesWordSpans(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
+	svc.SetTranscriber(&fakeStructuredTranscriber{
+		text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two",
+		words: []model.TimedWord{
+			{Word: "intro", StartMS: 0, EndMS: 800},
+			{Word: "chapter", StartMS: 2000, EndMS: 2500},
+			{Word: "one", StartMS: 2500, EndMS: 2900},
+			{Word: "chapter", StartMS: 5000, EndMS: 5400},
+			{Word: "two", StartMS: 5400, EndMS: 5800},
+		},
+	})
+
+	doc := model.Document{DocID: 88, RelPath: "audio/lecture.mp3", DocType: "audio"}
+	content := []byte("structured-audio-bytes")
+
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, content); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation failed: %v", err)
+	}
+
+	// Same three chunks/spans as the words-absent baseline.
+	if len(st.chunks) != 3 || len(st.spans) != 3 {
+		t.Fatalf("chunks=%d spans=%d, want 3/3 (words must not add chunks)", len(st.chunks), len(st.spans))
+	}
+
+	// Words land in the chunk whose time span contains them.
+	total := 0
+	for _, sp := range st.spans {
+		for _, w := range sp.Words {
+			total++
+			if w.T < sp.StartMS {
+				t.Errorf("word %q at %dms before span [%d,%d)", w.W, w.T, sp.StartMS, sp.EndMS)
+			}
+		}
+	}
+	if total != 5 {
+		t.Fatalf("attached %d words across spans, want 5", total)
+	}
+	if len(st.spans[0].Words) != 1 || st.spans[0].Words[0].W != "intro" || st.spans[0].Words[0].D != 800 {
+		t.Errorf("first span words = %+v, want [{0,800,intro}]", st.spans[0].Words)
+	}
+
+	// A per-language words sidecar cache is written next to the transcript.
+	wordsCache := filepath.Join(stateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".words.json")
+	if _, err := os.Stat(wordsCache); err != nil {
+		t.Fatalf("expected words sidecar cache at %s: %v", wordsCache, err)
+	}
+}
