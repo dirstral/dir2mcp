@@ -66,7 +66,8 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 		return exitGeneric
 	}
 
-	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts)
+	filter := subtitle.NewWordFilter(cfg.MediaFilterWords)
+	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, filter)
 	if code != exitSuccess {
 		return code
 	}
@@ -78,7 +79,7 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 // from its chunks, and renders them in the requested format. It returns the
 // serialized document, or an exit code on error (no transcript, no chunks,
 // unknown language, store failure).
-func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions) (string, int) {
+func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, filter *subtitle.WordFilter) (string, int) {
 	reps, err := ts.TranscriptRepresentations(ctx, opts.relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -110,6 +111,11 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 		chunks = append(chunks, subtitle.TranscriptChunk{Text: r.Text, Span: r.Span})
 	}
 	cues := subtitle.BuildCues(chunks)
+	// Apply the configured caption word filter (media.filter_words) on export so
+	// exported VTT/SRT never contain the boilerplate/credits/watermark phrases,
+	// consistent with how ingest strips them before embedding. Cues empty after
+	// filtering are dropped. An empty config leaves cues unchanged.
+	cues = subtitle.FilterCues(cues, filter)
 	if len(cues) == 0 {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("document %q transcript has no time-coded cues to export", opts.relPath))
 		return "", exitGeneric

@@ -632,12 +632,43 @@ func maxF(a, b float64) float64 {
 // produces output byte-for-byte identical to chunkTranscriptByTime, so a
 // provider without word timing is unaffected.
 func chunkTranscriptByTimeWithWords(content string, words []model.TimedWord) []chunkSegment {
+	return chunkTranscriptByTimeWithWordsFiltered(content, words, nil)
+}
+
+// chunkTranscriptByTimeWithWordsFiltered is chunkTranscriptByTimeWithWords with
+// an optional caption word filter (config media.filter_words) applied to each
+// chunk's text after chunking. A nil/inactive filter leaves the output
+// byte-for-byte identical. Word timing is attached after filtering so words tied
+// to a dropped (now-empty) chunk are not retained.
+func chunkTranscriptByTimeWithWordsFiltered(content string, words []model.TimedWord, filter *subtitle.WordFilter) []chunkSegment {
 	segs := chunkTranscriptByTime(content)
+	segs = applyWordFilterToSegments(segs, filter)
 	if len(words) == 0 || len(segs) == 0 {
 		return segs
 	}
 	attachWordsToTimeSpans(segs, words)
 	return segs
+}
+
+// applyWordFilterToSegments strips configured filter phrases from each segment's
+// text (case-insensitive substring removal) and drops segments whose text is
+// empty after filtering. A nil/inactive filter returns segs unchanged so the
+// empty-config path is a no-op. Spans (timing) are preserved verbatim on the
+// surviving segments.
+func applyWordFilterToSegments(segs []chunkSegment, filter *subtitle.WordFilter) []chunkSegment {
+	if !filter.Active() {
+		return segs
+	}
+	out := make([]chunkSegment, 0, len(segs))
+	for _, seg := range segs {
+		filtered := filter.Apply(seg.Text)
+		if strings.TrimSpace(filtered) == "" {
+			continue
+		}
+		seg.Text = filtered
+		out = append(out, seg)
+	}
+	return out
 }
 
 // attachWordsToTimeSpans assigns words to the chunk whose "time" span covers the
@@ -1070,6 +1101,18 @@ func ChunkTranscriptByTimeWithWords(content string, words []model.TimedWord) []C
 	return out
 }
 
+// ChunkTranscriptByTimeFiltered is the exported counterpart of
+// chunkTranscriptByTimeWithWordsFiltered (no word timing), exposed for tests in
+// the tests/ tree. A nil/inactive filter is identical to ChunkTranscriptByTime.
+func ChunkTranscriptByTimeFiltered(content string, filter *subtitle.WordFilter) []ChunkSegment {
+	raw := chunkTranscriptByTimeWithWordsFiltered(content, nil, filter)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
 // chunkSubtitleCues turns parsed subtitle cues into time-spanned transcript
 // chunks. Unlike chunkTranscriptByTime (which estimates timing from a flat text
 // transcript), the cues already carry authoritative [StartMS, EndMS] windows, so
@@ -1079,6 +1122,15 @@ func ChunkTranscriptByTimeWithWords(content string, words []model.TimedWord) []C
 // is [first cue start, last merged cue end]. Cues are processed in their given
 // order (callers sort by start time first), so the output is deterministic.
 func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
+	return chunkSubtitleCuesFiltered(cues, nil)
+}
+
+// chunkSubtitleCuesFiltered is chunkSubtitleCues with an optional caption word
+// filter (config media.filter_words) applied to each cue's text before merging.
+// A cue empty after filtering is dropped (it never contributes to a chunk), so
+// it neither adds text nor extends a merged chunk's time span. A nil/inactive
+// filter is a no-op, leaving the output identical to the unfiltered path.
+func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter) []chunkSegment {
 	out := make([]chunkSegment, 0, len(cues))
 	var (
 		buf      []string
@@ -1106,6 +1158,9 @@ func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
 
 	for _, cue := range cues {
 		text := strings.TrimSpace(cue.Text)
+		if filter.Active() {
+			text = strings.TrimSpace(filter.Apply(text))
+		}
 		if text == "" {
 			continue
 		}
@@ -1142,6 +1197,17 @@ func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
 // unexported segment type to the public ChunkSegment.
 func ChunkSubtitleCues(cues []subtitle.Cue) []ChunkSegment {
 	raw := chunkSubtitleCues(cues)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ChunkSubtitleCuesFiltered exposes chunkSubtitleCuesFiltered for tests. A
+// nil/inactive filter is identical to ChunkSubtitleCues.
+func ChunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter) []ChunkSegment {
+	raw := chunkSubtitleCuesFiltered(cues, filter)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

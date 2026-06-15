@@ -28,6 +28,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/quality"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
 // annotationChunk* constants mirror the hardcoded parameters previously
@@ -423,6 +424,14 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 // all of which cases the quality gate's language detector self-skips. Resolving
 // from the profile (rather than the legacy stt.elevenlabs_language_code field)
 // ensures Mistral/provider-profile setups still feed the gate a language.
+// captionWordFilter builds the shared caption word filter from
+// media.filter_words. The same filter is used for STT transcript chunking and
+// sidecar-cue chunking so configured phrases are stripped consistently before
+// embedding. An empty config yields an inactive filter (no-op).
+func (s *Service) captionWordFilter() *subtitle.WordFilter {
+	return subtitle.NewWordFilter(s.cfg.MediaFilterWords)
+}
+
 func sttExpectedLanguage(cfg config.Config) string {
 	sel := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
 	if sel == "" {
@@ -1794,7 +1803,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		return fmt.Errorf("upsert transcript representation: %w", err)
 	}
 
-	segments := chunkTranscriptByTimeWithWords(transcriptText, words)
+	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
 	if len(segments) == 0 {
 		return nil
 	}
