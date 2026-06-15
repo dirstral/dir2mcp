@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -207,6 +208,42 @@ func TestTranscriptTranslation_RealStoreSearchable(t *testing.T) {
 	}
 	if !sawTranslation {
 		t.Fatalf("translated transcript not surfaced by TranscriptRepresentations: %+v", reps)
+	}
+}
+
+// failingTranslator is a model.Generator that always errors, simulating a chat
+// provider failure during translation.
+type failingTranslator struct{}
+
+func (failingTranslator) Generate(_ context.Context, _ string) (string, error) {
+	return "", errors.New("chat provider unavailable")
+}
+
+// TestTranscriptTranslation_FailureIsNonFatal proves that a translation provider
+// failure does NOT fail the ingest of the document and does NOT prevent the
+// authoritative source transcript representation from being persisted. The
+// source transcript is written before translation is attempted, and a
+// translation error is swallowed (best-effort enrichment), so
+// GenerateTranscriptRepresentation returns nil with the single source rep intact.
+func TestTranscriptTranslation_FailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
+	svc.SetTranscriptLanguage("de")
+	svc.SetTranslator(failingTranslator{}, "mistral", "m", []string{"en"})
+
+	doc := model.Document{DocID: 21, RelPath: "audio/talk.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+		t.Fatalf("translation failure must be non-fatal, got error: %v", err)
+	}
+
+	if len(st.reps) != 1 {
+		t.Fatalf("expected only the source transcript rep to survive a failed translation, got %d (%+v)", len(st.reps), st.reps)
+	}
+	if st.reps[0].RepType != ingest.RepTypeTranscript {
+		t.Fatalf("expected surviving rep to be the source transcript %q, got %q", ingest.RepTypeTranscript, st.reps[0].RepType)
 	}
 }
 

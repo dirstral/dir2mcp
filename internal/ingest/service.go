@@ -1697,8 +1697,13 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// source transcript so a translation failure never blocks the authoritative
 	// transcript, and each translated transcript routes through the same quality
 	// gate (it IS model output, unlike sidecar transcripts which bypass it).
+	//
+	// Translation is a best-effort enrichment: any failure (chat provider error,
+	// translated-rep persistence) is logged and counted but NOT propagated, so a
+	// failed translation never marks the source transcript's document as errored.
 	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration); err != nil {
-		return err
+		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
+		s.addErrors(1)
 	}
 	return nil
 }
@@ -1718,6 +1723,7 @@ func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc mo
 		return nil
 	}
 	sourceLang := strings.TrimSpace(s.transcriptLanguage)
+	var firstErr error
 	for _, lang := range s.translateTargetLangs {
 		lang = strings.ToLower(strings.TrimSpace(lang))
 		if lang == "" || sameLanguage(lang, sourceLang) {
@@ -1725,10 +1731,17 @@ func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc mo
 			continue
 		}
 		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceLang, lang, duration); err != nil {
-			return err
+			// Best-effort per language: a failure on one target must not suppress
+			// the remaining targets. Log here and keep going; the first error is
+			// returned so the caller can log/count it (non-fatally).
+			s.getLogger().Printf("transcript translation failed for %s into %q: %v", doc.RelPath, lang, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // sameLanguage reports whether two language tags name the same language for the
