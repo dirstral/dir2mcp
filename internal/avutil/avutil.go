@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +103,11 @@ func ExtractSegment(ctx context.Context, path string, startMS, endMS int) ([]byt
 // ErrToolNotFound contract otherwise match ExtractSegment.
 func ExtractSegmentURL(ctx context.Context, url, srcExt string, startMS, endMS int) ([]byte, error) {
 	if !isHTTPURL(url) {
-		return nil, fmt.Errorf("avutil: ExtractSegmentURL requires an http(s) URL, got %q", url)
+		// Never echo the raw input here: although a non-http input has reached
+		// this guard, the same redaction discipline as the rest of this file
+		// applies so a leaked credential-bearing URL (e.g. with a wrong scheme)
+		// cannot surface in an error or log line.
+		return nil, fmt.Errorf("avutil: ExtractSegmentURL requires an http(s) URL, got %q", redactInput(url))
 	}
 	return extractSegment(ctx, url, srcExt, startMS, endMS)
 }
@@ -113,14 +118,59 @@ func isHTTPURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
+// redactInput returns a log/error-safe rendering of an extractSegment input.
+// Local filesystem paths are returned unchanged, but for an http(s) URL the
+// entire query string is stripped before the value is ever placed in an error
+// message or log line. An S3 (or any) presigned URL carries its credentials and
+// signature in the query (X-Amz-Signature, X-Amz-Credential, …); dropping the
+// query preserves enough for diagnostics (scheme + host + path) while ensuring
+// the secret never leaks into errors that are logged or persisted as a failure
+// reason (CLAUDE.md: never log secrets/raw sensitive payloads). If the URL fails
+// to parse it is replaced wholesale with a placeholder rather than risking a
+// partial leak.
+func redactInput(input string) string {
+	if !isHTTPURL(input) {
+		return input
+	}
+	u, err := neturl.Parse(input)
+	if err != nil {
+		return "[redacted-url]"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	return u.String()
+}
+
+// redactStderr makes ffmpeg's stderr safe to embed in a wrapped error. Some
+// ffmpeg builds echo the input URL in protocol errors (e.g. "Server returned
+// 403 Forbidden" with the full URL), which would reintroduce the signed query.
+// It replaces both the full input URL and its raw query string with the redacted
+// form so neither a whole-URL nor a query-only echo can leak the signature.
+func redactStderr(stderr, input string) string {
+	out := strings.TrimSpace(stderr)
+	if !isHTTPURL(input) {
+		return out
+	}
+	out = strings.ReplaceAll(out, input, redactInput(input))
+	if u, err := neturl.Parse(input); err == nil && u.RawQuery != "" {
+		out = strings.ReplaceAll(out, u.RawQuery, "[redacted]")
+	}
+	return out
+}
+
 // extractSegment is the shared ffmpeg stream-copy implementation behind both the
 // local-path (ExtractSegment) and http-URL (ExtractSegmentURL) entry points. The
 // input string is handed to ffmpeg's -i, which accepts both a filesystem path and
 // an http(s) URL; the only difference is how the container extension is derived
 // for the output muxer, so callers pass it explicitly via srcExt.
 func extractSegment(ctx context.Context, input, srcExt string, startMS, endMS int) ([]byte, error) {
+	// safeInput is the only rendering of input that may appear in an error or log
+	// line: for an http(s) URL it has the credential-bearing query stripped (see
+	// redactInput) so a presigned URL's signature never leaks.
+	safeInput := redactInput(input)
 	if startMS < 0 || endMS <= startMS {
-		return nil, fmt.Errorf("avutil: invalid segment [%d,%d) for %q", startMS, endMS, input)
+		return nil, fmt.Errorf("avutil: invalid segment [%d,%d) for %q", startMS, endMS, safeInput)
 	}
 	bin, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -153,14 +203,14 @@ func extractSegment(ctx context.Context, input, srcExt string, startMS, endMS in
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg segment %q [%d,%d): %w: %s", input, startMS, endMS, err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("ffmpeg segment %q [%d,%d): %w: %s", safeInput, startMS, endMS, err, redactStderr(stderr.String(), input))
 	}
 	data, err := os.ReadFile(outPath)
 	if err != nil {
 		return nil, fmt.Errorf("avutil: read extracted segment: %w", err)
 	}
 	if len(data) == 0 {
-		return nil, fmt.Errorf("avutil: ffmpeg produced an empty segment for %q [%d,%d)", input, startMS, endMS)
+		return nil, fmt.Errorf("avutil: ffmpeg produced an empty segment for %q [%d,%d)", safeInput, startMS, endMS)
 	}
 	return data, nil
 }

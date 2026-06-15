@@ -445,15 +445,22 @@ func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fs
 // a presigner) the worker falls back to Localize (a whole-object download for S3,
 // a no-op for LocalFS) because ffmpeg cannot read from an io.Reader — that path
 // is byte-for-byte the historical behavior.
+//
+// Failures on the range-read URL path (presign or extract) are wrapped retryable
+// (errRetryableMediaRead), not fatal: an expired/throttled presigned URL recovers
+// on the next cycle once a fresh URL is minted, so the chunk is left pending. The
+// fallback Localize/extract path keeps its historical ErrFatal classification.
 func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string, cache *mediaBatchCache) ([]byte, error) {
 	span := t.Metadata.Span
 	if !strings.EqualFold(strings.TrimSpace(span.Kind), "time") || span.StartMS < 0 || span.EndMS <= span.StartMS {
 		return nil, fmt.Errorf("%w: %s media chunk %d has invalid time span", ErrFatal, strings.ToLower(t.Modality), t.Metadata.ChunkID)
 	}
 
-	// Prefer a range-seekable URL when the backend can presign one.
+	// Prefer a range-seekable URL when the backend can presign one. A presign
+	// failure is transient (throttling, a momentary credential refresh), so it is
+	// marked retryable to keep the chunk pending rather than permanently failed.
 	if url, ok, uerr := cache.mediaURL(ctx, fsys, ref); uerr != nil {
-		return nil, fmt.Errorf("read media %q: %w", ref, uerr)
+		return nil, fmt.Errorf("%w: presign media %q: %v", errRetryableMediaRead, ref, uerr)
 	} else if ok {
 		return w.extractSegmentFromURL(ctx, url, ref, span)
 	}
@@ -465,6 +472,16 @@ func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTas
 // extractSegmentFromURL cuts the [start,end) window from a range-seekable URL via
 // ffmpeg-over-HTTP. srcExt is derived from the MediaRef so the clip keeps the
 // source container/MIME (a presigned URL's path/query is not a reliable hint).
+//
+// A failure here is NOT wrapped as ErrFatal (unlike the local-path extractor): a
+// range-read over HTTP can fail for transient reasons that a later cycle would
+// recover from — most importantly an expired presigned URL (the per-batch cache
+// memoizes one URL with a 15-min lifetime, issue #243/#279), but also throttling
+// or a network blip. Marking such a chunk permanently failed would silently lose
+// it; returning a retryable error leaves it pending so the next cycle presigns a
+// fresh URL. ref (the relPath, never the signed URL) is the only identifier put
+// in the error so the credential cannot leak (the inner avutil error is already
+// redacted).
 func (w *EmbeddingWorker) extractSegmentFromURL(ctx context.Context, url, ref string, span model.Span) ([]byte, error) {
 	extract := w.ExtractSegmentURLFunc
 	if extract == nil {
@@ -472,7 +489,7 @@ func (w *EmbeddingWorker) extractSegmentFromURL(ctx context.Context, url, ref st
 	}
 	data, err := extract(ctx, url, filepath.Ext(ref), span.StartMS, span.EndMS)
 	if err != nil {
-		return nil, fmt.Errorf("%w: extract %q segment [%d,%d): %v", ErrFatal, ref, span.StartMS, span.EndMS, err)
+		return nil, fmt.Errorf("%w: extract %q segment [%d,%d) over range-read URL: %v", errRetryableMediaRead, ref, span.StartMS, span.EndMS, err)
 	}
 	return data, nil
 }
@@ -766,6 +783,17 @@ func (w *EmbeddingWorker) logf(format string, args ...interface{}) {
 // or compare against it if they produce fatal conditions themselves.
 var ErrFatal = errors.New("fatal")
 
+// errRetryableMediaRead marks a media fetch/extract failure that a later cycle
+// could recover from, so the affected chunk must stay pending (not be marked
+// permanently failed). The canonical case is an S3-backed range-read whose
+// presigned URL expired or was throttled mid-batch (issue #243): the per-batch
+// cache holds one 15-min URL, and although that is comfortably longer than a
+// default batch of stream-copy windows takes, a slow network / clock skew / a
+// large batch override could outlast it — and re-presigning on the next cycle
+// fixes it. Recognized by isTransientEmbedError so it routes to the retry (keep
+// pending) path rather than MarkFailed.
+var errRetryableMediaRead = errors.New("retryable media read")
+
 // isRetryable determines whether RunOnce should be retried when it returns
 // the provided error. The predicate is intentionally conservative; context
 // cancellation, deadline errors, and ErrFatal are considered fatal because
@@ -793,6 +821,12 @@ func isRetryable(err error) bool {
 func isTransientEmbedError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A range-read media fetch/extract failure (e.g. an expired or throttled
+	// presigned URL, issue #243) is recoverable on a later cycle, so keep the
+	// chunk pending instead of marking it permanently failed.
+	if errors.Is(err, errRetryableMediaRead) {
+		return true
 	}
 	// context package errors are usually propagated from the caller and
 	// indicate the operation stopped; leave the chunk pending rather than

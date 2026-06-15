@@ -240,11 +240,12 @@ func TestEmbeddingWorker_AudioVideo_MediaURLErrorIsRetryable(t *testing.T) {
 	fsys := newURLCorpusFS(map[string][]byte{"clip.mp4": []byte("FULLVIDEO")})
 	fsys.mediaURLErr = errors.New("presign throttled")
 
+	src := &fakeChunkSource{tasks: []model.ChunkTask{
+		avTask(13, "clip.mp4", "video", model.Span{Kind: "time", StartMS: 0, EndMS: 1000}),
+	}}
 	worker := &index.EmbeddingWorker{
-		Source: &fakeChunkSource{tasks: []model.ChunkTask{
-			avTask(13, "clip.mp4", "video", model.Span{Kind: "time", StartMS: 0, EndMS: 1000}),
-		}},
-		Index: index.NewHNSWIndex(""), Embedder: &fakeMultimodalEmbedder{mediaVecs: [][]float32{{1, 0}}},
+		Source: src,
+		Index:  index.NewHNSWIndex(""), Embedder: &fakeMultimodalEmbedder{mediaVecs: [][]float32{{1, 0}}},
 		Corpus: fsys, RootDir: t.TempDir(), BatchSize: 4, ModelForText: "gemini-embedding-2",
 		ExtractSegmentURLFunc: func(context.Context, string, string, int, int) ([]byte, error) {
 			t.Fatal("extractor must not be called when MediaURL errors")
@@ -258,5 +259,41 @@ func TestEmbeddingWorker_AudioVideo_MediaURLErrorIsRetryable(t *testing.T) {
 	}
 	if errors.Is(err, index.ErrFatal) {
 		t.Fatalf("MediaURL failure should be retryable, got fatal: %v", err)
+	}
+	// Retryable means the chunk stays pending, NOT marked permanently failed,
+	// so a later cycle (with a fresh presigned URL) can embed it.
+	if len(src.failedLabels) != 0 {
+		t.Fatalf("chunk was marked failed %v on a transient presign error; want left pending", src.failedLabels)
+	}
+}
+
+// TestEmbeddingWorker_AudioVideo_URLExtractErrorIsRetryable pins that an
+// extraction failure over the presigned URL (e.g. the URL expired mid-batch and
+// ffmpeg gets a 403) leaves the chunk pending rather than permanently failed, so
+// the next cycle re-presigns and recovers it (issue #243).
+func TestEmbeddingWorker_AudioVideo_URLExtractErrorIsRetryable(t *testing.T) {
+	fsys := newURLCorpusFS(map[string][]byte{"clip.mp4": []byte("FULLVIDEO")})
+
+	src := &fakeChunkSource{tasks: []model.ChunkTask{
+		avTask(14, "clip.mp4", "video", model.Span{Kind: "time", StartMS: 0, EndMS: 1000}),
+	}}
+	worker := &index.EmbeddingWorker{
+		Source: src,
+		Index:  index.NewHNSWIndex(""), Embedder: &fakeMultimodalEmbedder{mediaVecs: [][]float32{{1, 0}}},
+		Corpus: fsys, RootDir: t.TempDir(), BatchSize: 4, ModelForText: "gemini-embedding-2",
+		ExtractSegmentURLFunc: func(context.Context, string, string, int, int) ([]byte, error) {
+			return nil, errors.New("Server returned 403 Forbidden")
+		},
+	}
+
+	_, err := worker.RunOnce(context.Background(), "text")
+	if err == nil {
+		t.Fatal("expected an error when URL extraction fails")
+	}
+	if errors.Is(err, index.ErrFatal) {
+		t.Fatalf("URL extract failure should be retryable, got fatal: %v", err)
+	}
+	if len(src.failedLabels) != 0 {
+		t.Fatalf("chunk was marked failed %v on an expired-URL extract error; want left pending", src.failedLabels)
 	}
 }
