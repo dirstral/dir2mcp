@@ -16,8 +16,15 @@ type Document struct {
 	SizeBytes   int64
 	MTimeUnix   int64
 	ContentHash string
-	Status      string
-	Deleted     bool
+	// ETag is the remote backend's cheap change token (S3 object ETag) when the
+	// document was discovered from an object store. It is empty for local/NFS
+	// corpora. The ETag MUST NOT be treated as a content hash (multipart and
+	// SSE-KMS ETags are not MD5 of the body); it only decides whether a re-read
+	// + content_hash recompute is warranted (SPEC §7.8.3). content_hash stays the
+	// canonical identity.
+	ETag    string
+	Status  string
+	Deleted bool
 	// ErrorMessage is populated when Status == "error" with a short
 	// human-readable description of why ingest failed (extraction
 	// crash, representation generation failure, etc.). Surfaced in
