@@ -84,6 +84,12 @@ type Client struct {
 	// segments + word timestamps per spec §8.6.1) or "json" (segments only).
 	// Empty falls back to ResponseFormatVerboseJSON.
 	ResponseFormat string
+
+	// VADFilter, when true, sends the OpenAI-compatible `vad_filter=true` form
+	// field so a server that supports voice-activity detection (e.g.
+	// faster-whisper) skips non-speech audio (dir2mcp#258, config `media.vad`).
+	// Servers without VAD support ignore the field. Default false.
+	VADFilter bool
 }
 
 // compile-time interface check.
@@ -234,6 +240,11 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 	if language := strings.TrimSpace(c.DefaultLanguage); language != "" {
 		if err := writer.WriteField("language", language); err != nil {
 			return fail("failed to write transcription language", err)
+		}
+	}
+	if c.VADFilter {
+		if err := writer.WriteField("vad_filter", "true"); err != nil {
+			return fail("failed to write transcription vad_filter", err)
 		}
 	}
 	if err := writer.Close(); err != nil {

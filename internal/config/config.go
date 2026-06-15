@@ -249,6 +249,31 @@ type Config struct {
 	// carries no language- or domain-specific phrases.
 	MediaFilterWords []string
 
+	// MediaTrimLeadingSilence opts IN to trimming leading silence from media
+	// transcripts (dir2mcp#258, config `media.trim_leading_silence`). When true
+	// and ffmpeg is available, the duration of dead air before the first speech
+	// is detected (ffmpeg silencedetect) and subtracted from every transcript
+	// segment/word timestamp (clamped at 0) so timings align to first speech.
+	//
+	// Default OFF. livevtt defaulted this on for its broadcast capture use case,
+	// but dir2mcp is general-purpose: silence trimming is a heuristic that can
+	// shift timestamps for media where the leading "silence" is intentional, so
+	// it is opt-in here. ffmpeg absent / detection failure -> no trim, no error.
+	MediaTrimLeadingSilence bool
+
+	// MediaSilenceThresholdDB is the noise floor (dBFS) below which audio counts
+	// as silence for leading-silence detection (config
+	// `media.silence_threshold_db`). Zero/positive falls back to the avutil
+	// default (-40 dB). Only consulted when MediaTrimLeadingSilence is true.
+	MediaSilenceThresholdDB float64
+
+	// MediaVAD enables a provider-side voice-activity-detection filter where the
+	// STT provider supports it (config `media.vad`). For the self-hosted whisper
+	// provider this sets the OpenAI-compatible `vad_filter` form field so the
+	// server skips non-speech audio. Providers without VAD support ignore it.
+	// Default OFF.
+	MediaVAD bool
+
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
 	// screened for degenerate output (repetition loops, empty output,
@@ -357,6 +382,9 @@ type fileConfig struct {
 	MediaTranslateEnabled     *bool
 	MediaTranslateTargetLangs []string
 	MediaFilterWords          []string
+	MediaTrimLeadingSilence   *bool
+	MediaSilenceThresholdDB   *float64
+	MediaVAD                  *bool
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -449,6 +477,9 @@ type persistedConfig struct {
 	MediaTranslateEnabled     bool          `yaml:"media_translate_enabled"`
 	MediaTranslateTargetLangs []string      `yaml:"media_translate_target_langs"`
 	MediaFilterWords          []string      `yaml:"media_filter_words"`
+	MediaTrimLeadingSilence   bool          `yaml:"media_trim_leading_silence"`
+	MediaSilenceThresholdDB   float64       `yaml:"media_silence_threshold_db"`
+	MediaVAD                  bool          `yaml:"media_vad"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -676,6 +707,9 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaTranslateEnabled:     cfg.MediaTranslateEnabled,
 		MediaTranslateTargetLangs: append([]string(nil), cfg.MediaTranslateTargetLangs...),
 		MediaFilterWords:          append([]string(nil), cfg.MediaFilterWords...),
+		MediaTrimLeadingSilence:   cfg.MediaTrimLeadingSilence,
+		MediaSilenceThresholdDB:   cfg.MediaSilenceThresholdDB,
+		MediaVAD:                  cfg.MediaVAD,
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1299,6 +1333,15 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
+	if fc.MediaTrimLeadingSilence != nil {
+		cfg.MediaTrimLeadingSilence = *fc.MediaTrimLeadingSilence
+	}
+	if fc.MediaSilenceThresholdDB != nil {
+		cfg.MediaSilenceThresholdDB = *fc.MediaSilenceThresholdDB
+	}
+	if fc.MediaVAD != nil {
+		cfg.MediaVAD = *fc.MediaVAD
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -1567,6 +1610,9 @@ var configKeyAliases = map[string]string{
 	"media_translate_target_langs":         "media.translate.target_langs",
 	"media_filter_words":                   "media.filter_words",
 	"filter_words":                         "media.filter_words",
+	"media_trim_leading_silence":           "media.trim_leading_silence",
+	"media_silence_threshold_db":           "media.silence_threshold_db",
+	"media_vad":                            "media.vad",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1644,6 +1690,9 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 	if err := setIntFileScalar(cfg, key, value); err != nil {
 		return err
 	}
+	if err := setFloatFileScalar(cfg, key, value); err != nil {
+		return err
+	}
 	if err := setDurationFileScalar(cfg, key, value); err != nil {
 		return err
 	}
@@ -1654,41 +1703,39 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 // setBoolFileScalar parses value as a bool and assigns it to the
 // fileConfig field selected by key; unknown keys are a no-op and an
 // unparseable value is an error.
+// boolFileScalarTargets maps a canonical config key to the accessor that
+// selects the corresponding *bool field on a fileConfig. Driving setBoolFileScalar
+// from a table (rather than a switch) keeps its cyclomatic complexity flat as
+// more boolean keys are added.
+var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
+	"public":                  func(c *fileConfig) **bool { return &c.Public },
+	"rag.generate_answer":     func(c *fileConfig) **bool { return &c.RAGGenerateAnswer },
+	"ingest.gitignore":        func(c *fileConfig) **bool { return &c.IngestGitignore },
+	"ingest.follow_symlinks":  func(c *fileConfig) **bool { return &c.IngestFollowSymlinks },
+	"ingest.watch":            func(c *fileConfig) **bool { return &c.IngestWatch },
+	"quality_gates_enabled":   func(c *fileConfig) **bool { return &c.QualityGatesEnabled },
+	"media_sidecars_disabled": func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
+	"media.variants.group":    func(c *fileConfig) **bool { return &c.MediaVariantsGroup },
+	"media.translate.enabled": func(c *fileConfig) **bool { return &c.MediaTranslateEnabled },
+	"media.trim_leading_silence": func(c *fileConfig) **bool {
+		return &c.MediaTrimLeadingSilence
+	},
+	"media.vad":                func(c *fileConfig) **bool { return &c.MediaVAD },
+	"x402_tools_call_enabled":  func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
+	"retrieval.hybrid.enabled": func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
+	"rerank.enabled":           func(c *fileConfig) **bool { return &c.RerankEnabled },
+}
+
 func setBoolFileScalar(cfg *fileConfig, key, value string) error {
-	var target **bool
-	switch key {
-	case "public":
-		target = &cfg.Public
-	case "rag.generate_answer":
-		target = &cfg.RAGGenerateAnswer
-	case "ingest.gitignore":
-		target = &cfg.IngestGitignore
-	case "ingest.follow_symlinks":
-		target = &cfg.IngestFollowSymlinks
-	case "ingest.watch":
-		target = &cfg.IngestWatch
-	case "quality_gates_enabled":
-		target = &cfg.QualityGatesEnabled
-	case "media_sidecars_disabled":
-		target = &cfg.MediaSidecarsDisabled
-	case "media.variants.group":
-		target = &cfg.MediaVariantsGroup
-	case "media.translate.enabled":
-		target = &cfg.MediaTranslateEnabled
-	case "x402_tools_call_enabled":
-		target = &cfg.X402ToolsCallEnabled
-	case "retrieval.hybrid.enabled":
-		target = &cfg.RetrievalHybridEnabled
-	case "rerank.enabled":
-		target = &cfg.RerankEnabled
-	default:
+	accessor, ok := boolFileScalarTargets[key]
+	if !ok {
 		return nil
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fmt.Errorf("invalid boolean for %s", key)
 	}
-	*target = boolPtr(parsed)
+	*accessor(cfg) = boolPtr(parsed)
 	return nil
 }
 
@@ -1724,6 +1771,25 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 		return fmt.Errorf("invalid integer for %s", key)
 	}
 	*target = intPtr(parsed)
+	return nil
+}
+
+// setFloatFileScalar parses value as a float64 and assigns it to the
+// fileConfig field selected by key; unknown keys are a no-op and an
+// unparseable value is an error.
+func setFloatFileScalar(cfg *fileConfig, key, value string) error {
+	var target **float64
+	switch key {
+	case "media.silence_threshold_db":
+		target = &cfg.MediaSilenceThresholdDB
+	default:
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fmt.Errorf("invalid number for %s", key)
+	}
+	*target = floatPtr(parsed)
 	return nil
 }
 
@@ -2049,6 +2115,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_translate_enabled", cfg.MediaTranslateEnabled)
 	writeList("media_translate_target_langs", cfg.MediaTranslateTargetLangs)
 	writeList("media_filter_words", cfg.MediaFilterWords)
+	writeBool("media_trim_leading_silence", cfg.MediaTrimLeadingSilence)
+	writeScalar("media_silence_threshold_db", strconv.FormatFloat(cfg.MediaSilenceThresholdDB, 'f', -1, 64))
+	writeBool("media_vad", cfg.MediaVAD)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)
@@ -2103,6 +2172,8 @@ func boolPtr(value bool) *bool { return &value }
 
 // intPtr returns a pointer to value.
 func intPtr(value int) *int { return &value }
+
+func floatPtr(value float64) *float64 { return &value }
 
 // applyEnvOverrides layers all supported environment-variable overrides
 // onto cfg. Env always wins when present (an empty DIR2MCP_SERVER_NAME

@@ -127,9 +127,15 @@ type Profile struct {
 	OCRModel        string
 	STTModel        string
 	STTLanguage     string // optional STT language hint (e.g. ElevenLabs)
-	TTSModel        string
-	TTSVoice        string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
-	RerankModel     string
+	// STTVAD requests a provider-side voice-activity-detection filter where
+	// supported (dir2mcp#258, config `media.vad`). For the self-hosted whisper
+	// provider this maps to the OpenAI-compatible `vad_filter` form field;
+	// providers without VAD support ignore it. It is not part of the STT
+	// identity, so toggling it is not reindex-bound.
+	STTVAD      bool
+	TTSModel    string
+	TTSVoice    string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
+	RerankModel string
 }
 
 // Eligible reports whether the profile may be selected/preflighted

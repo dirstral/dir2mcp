@@ -671,6 +671,39 @@ func applyWordFilterToSegments(segs []chunkSegment, filter *subtitle.WordFilter)
 	return out
 }
 
+// shiftTranscriptSpans subtracts offsetMS from every "time" span's bounds and
+// from every attached word timestamp, clamping at 0 (dir2mcp#258 leading-silence
+// trim). It mutates segs in place and is deterministic for a given input. A
+// non-positive offset is a no-op; non-time spans are left untouched. Bounds stay
+// valid (EndMS > StartMS); a span that would collapse keeps a 1ms width so the
+// downstream EndMS > StartMS invariant holds.
+func shiftTranscriptSpans(segs []chunkSegment, offsetMS int) {
+	if offsetMS <= 0 {
+		return
+	}
+	for i := range segs {
+		if segs[i].Span.Kind != "time" {
+			continue
+		}
+		segs[i].Span.StartMS = clampShift(segs[i].Span.StartMS, offsetMS)
+		segs[i].Span.EndMS = clampShift(segs[i].Span.EndMS, offsetMS)
+		if segs[i].Span.EndMS <= segs[i].Span.StartMS {
+			segs[i].Span.EndMS = segs[i].Span.StartMS + 1
+		}
+		for w := range segs[i].Span.Words {
+			segs[i].Span.Words[w].T = clampShift(segs[i].Span.Words[w].T, offsetMS)
+		}
+	}
+}
+
+// clampShift subtracts offsetMS from ms, never returning below 0.
+func clampShift(ms, offsetMS int) int {
+	if shifted := ms - offsetMS; shifted > 0 {
+		return shifted
+	}
+	return 0
+}
+
 // attachWordsToTimeSpans assigns words to the chunk whose "time" span covers the
 // word's start time, mutating each chunk's span.Words in place. Words are
 // processed in order; a word is placed in the first chunk for which
@@ -1109,6 +1142,26 @@ func ChunkTranscriptByTimeFiltered(content string, filter *subtitle.WordFilter) 
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ShiftTranscriptSpans is the exported counterpart of shiftTranscriptSpans,
+// exposed for tests in the tests/ tree. It subtracts offsetMS from every "time"
+// span's bounds and attached word timestamps (clamped at 0) and returns the
+// shifted segments; the input slice is not modified.
+func ShiftTranscriptSpans(segs []ChunkSegment, offsetMS int) []ChunkSegment {
+	raw := make([]chunkSegment, len(segs))
+	for i, seg := range segs {
+		raw[i] = chunkSegment(seg)
+		if seg.Span.Words != nil {
+			raw[i].Span.Words = append([]model.WordSpan(nil), seg.Span.Words...)
+		}
+	}
+	shiftTranscriptSpans(raw, offsetMS)
+	out := make([]ChunkSegment, len(raw))
+	for i, seg := range raw {
+		out[i] = ChunkSegment(seg)
 	}
 	return out
 }

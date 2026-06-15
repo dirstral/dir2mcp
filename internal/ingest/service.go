@@ -107,6 +107,14 @@ type Service struct {
 	// ffprobe binary.
 	ProbeDurationFunc func(ctx context.Context, path string) (time.Duration, error)
 
+	// DetectLeadingSilenceFunc overrides leading-silence detection used by the
+	// optional transcript trim (dir2mcp#258, config media.trim_leading_silence).
+	// Defaults to a thin wrapper over avutil.DetectLeadingSilence (ffmpeg
+	// silencedetect) when nil; tests set it to supply a deterministic offset
+	// without requiring the ffmpeg binary. It MUST be graceful: returning
+	// (0, err) is treated as "do not trim".
+	DetectLeadingSilenceFunc func(ctx context.Context, path string) (time.Duration, error)
+
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
 	// Access must go through the logger() helper or SetLogger; the field
@@ -387,6 +395,9 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 		if langOverride != "" {
 			prof.STTLanguage = langOverride
 		}
+		// media.vad (dir2mcp#258) is a global toggle, applied onto whichever STT
+		// profile resolves; providers without VAD support ignore it.
+		prof.STTVAD = cfg.MediaVAD
 		tr, berr := buildTranscriber(prof)
 		if berr != nil {
 			return nil, fmt.Errorf("stt provider %q: %w", sel, berr)
@@ -1345,6 +1356,38 @@ func (s *Service) probeDuration(ctx context.Context, doc model.Document) (time.D
 	return probe(ctx, localPath)
 }
 
+// detectLeadingSilence resolves the leading-silence duration for doc's media
+// using the configured detector (DetectLeadingSilenceFunc, defaulting to
+// avutil.DetectLeadingSilence with the configured threshold). It is graceful by
+// contract: any error, or ffmpeg being absent, yields a 0 offset (no trim).
+// Media is resolved through the CorpusFS (Localize) so non-local backends still
+// get the behavior; for LocalFS this is the real path with a no-op cleanup.
+func (s *Service) detectLeadingSilence(ctx context.Context, doc model.Document) time.Duration {
+	localPath, cleanup, err := s.corpusFS().Localize(ctx, doc.RelPath)
+	if err != nil {
+		s.getLogger().Printf("leading-silence trim: localize %s: %v (skipping trim)", doc.RelPath, err)
+		return 0
+	}
+	defer cleanup()
+
+	detect := s.DetectLeadingSilenceFunc
+	if detect == nil {
+		thresholdDB := s.cfg.MediaSilenceThresholdDB
+		detect = func(ctx context.Context, path string) (time.Duration, error) {
+			return avutil.DetectLeadingSilence(ctx, path, thresholdDB, 0)
+		}
+	}
+	offset, derr := detect(ctx, localPath)
+	if derr != nil {
+		s.getLogger().Printf("leading-silence trim: detect %s: %v (skipping trim)", doc.RelPath, derr)
+		return 0
+	}
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
 // mediaTimeSpans probes doc's duration and windows it into contiguous,
 // non-overlapping `time` spans of at most windowMS (SPEC 8.1.7). Returns nil
 // when the duration can't be determined (undecodable, or ffprobe absent),
@@ -1806,6 +1849,15 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
 	if len(segments) == 0 {
 		return nil
+	}
+	// Optional leading-silence trim (dir2mcp#258): when enabled, subtract the
+	// detected dead-air offset from every time span and word timestamp so the
+	// transcript aligns to first speech. Disabled (default) leaves spans
+	// untouched; ffmpeg absent / detection failure -> 0 offset -> no change.
+	if s.cfg.MediaTrimLeadingSilence {
+		if offset := s.detectLeadingSilence(ctx, doc); offset > 0 {
+			shiftTranscriptSpans(segments, int(offset.Milliseconds()))
+		}
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return fmt.Errorf("persist transcript chunks: %w", err)
