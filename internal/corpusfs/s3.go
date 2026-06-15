@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -24,6 +25,18 @@ type s3API interface {
 	HeadObject(ctx context.Context, in *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 }
 
+// presignFunc mints a presigned http(s) GetObject URL for a full object key. It
+// is a function rather than a concrete *s3.PresignClient so the s3API client can
+// stay an interface (the SDK's NewPresignClient needs a concrete *s3.Client) and
+// so tests can inject a deterministic, network-free presigner. A nil presignFunc
+// means the backend cannot presign and MediaURL reports ok=false.
+type presignFunc func(ctx context.Context, bucket, key string) (string, error)
+
+// s3PresignExpiry bounds the lifetime of presigned media URLs. It only needs to
+// outlast a single ffmpeg range-read of one segment, so it is kept short to limit
+// the blast radius if a URL leaks (e.g. into a log line of an ffmpeg invocation).
+const s3PresignExpiry = 15 * time.Minute
+
 // S3FS is a CorpusFS backed by an S3 bucket+prefix. AbsPath on discovered files
 // is empty (there is no local path); Localize downloads to a temp file under the
 // configured cache dir so ffmpeg/archive extraction can read a real path.
@@ -32,6 +45,11 @@ type S3FS struct {
 	bucket   string
 	prefix   string // normalized: no leading slash, trailing slash if non-empty
 	cacheDir string // temp download root for Localize (e.g. StateDir/cache)
+	// presign mints presigned GetObject URLs for the MediaURL capability. Nil
+	// when the backend was built without presign support (e.g. a stub client in a
+	// test that does not exercise the URL path); MediaURL then reports ok=false so
+	// callers fall back to Localize.
+	presign presignFunc
 }
 
 // S3Config configures an S3FS.
@@ -45,8 +63,15 @@ type S3Config struct {
 
 // NewS3FS constructs an S3FS over the provided client and config. The client is
 // injected so production code can pass a real *s3.Client and tests can pass a
-// stub.
+// stub. The resulting S3FS has no presigner (MediaURL reports ok=false); the
+// factory installs one via newS3FSWithPresign when building from real config.
 func NewS3FS(client s3API, cfg S3Config) (*S3FS, error) {
+	return newS3FSWithPresign(client, cfg, nil)
+}
+
+// newS3FSWithPresign is NewS3FS plus an explicit presigner so the factory can
+// wire S3 presigned-URL support and tests can inject a network-free presigner.
+func newS3FSWithPresign(client s3API, cfg S3Config, presign presignFunc) (*S3FS, error) {
 	if client == nil {
 		return nil, errors.New("corpusfs: nil s3 client")
 	}
@@ -59,7 +84,29 @@ func NewS3FS(client s3API, cfg S3Config) (*S3FS, error) {
 		bucket:   bucket,
 		prefix:   normalizeS3Prefix(cfg.Prefix),
 		cacheDir: cfg.CacheDir,
+		presign:  presign,
 	}, nil
+}
+
+// MediaURL implements MediaURLProvider: it presigns a short-lived GetObject URL
+// for relPath so a range-seeking consumer (avutil.ExtractSegmentURL → ffmpeg)
+// reads only the bytes it needs over HTTP instead of forcing a whole-object
+// Localize download. ok=false (nil error) means no presigner is configured and
+// the caller should fall back to Localize; a non-nil error means presigning
+// failed.
+func (s *S3FS) MediaURL(ctx context.Context, relPath string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	if s.presign == nil {
+		return "", false, nil
+	}
+	key := s.keyForRel(relPath)
+	url, err := s.presign(ctx, s.bucket, key)
+	if err != nil {
+		return "", false, fmt.Errorf("corpusfs: presign s3://%s/%s: %w", s.bucket, key, err)
+	}
+	return url, true, nil
 }
 
 // normalizeS3Prefix strips a leading slash and ensures a non-empty prefix ends

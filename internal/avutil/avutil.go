@@ -66,10 +66,10 @@ func Duration(ctx context.Context, path string) (time.Duration, error) {
 	return time.Duration(secs * float64(time.Second)), nil
 }
 
-// ExtractSegment cuts the window [startMS, endMS) from the media at path and
-// returns the resulting container bytes. It uses stream copy (no re-encode) so
-// the MIME type is unchanged, extraction is fast, and the output is
-// deterministic for a given input.
+// ExtractSegment cuts the window [startMS, endMS) from the media at a local
+// filesystem path and returns the resulting container bytes. It uses stream copy
+// (no re-encode) so the MIME type is unchanged, extraction is fast, and the
+// output is deterministic for a given input.
 //
 // Accuracy: audio is cut sample-accurately, but for video stream copy can only
 // start at the nearest preceding keyframe, so the clip is keyframe-aligned and
@@ -82,8 +82,45 @@ func Duration(ctx context.Context, path string) (time.Duration, error) {
 //
 // It returns ErrToolNotFound when ffmpeg is not installed.
 func ExtractSegment(ctx context.Context, path string, startMS, endMS int) ([]byte, error) {
+	// A local path: infer the container extension from the path so the extracted
+	// clip keeps the source muxer/MIME.
+	return extractSegment(ctx, path, filepath.Ext(path), startMS, endMS)
+}
+
+// ExtractSegmentURL cuts the window [startMS, endMS) from media at an http(s)
+// URL (e.g. an S3 presigned GetObject URL) and returns the container bytes. It
+// is the range-read counterpart of ExtractSegment: ffmpeg opens the URL over its
+// http protocol and, when the server advertises byte-range support (S3 does),
+// seeks to the requested window so only the bytes around [startMS, endMS) plus
+// the container's index are fetched — the whole object is NOT downloaded. This
+// is the audio/video analogue of CorpusFS.Open's range GETs, which is why the
+// worker prefers it over Localize (a whole-object download) for S3-backed media.
+//
+// srcExt supplies the container extension (e.g. ".mp4") so ffmpeg writes the clip
+// with the matching muxer, since a presigned URL's path/query is not a reliable
+// muxer hint. An empty srcExt falls back to ".bin". Behavior, accuracy, and the
+// ErrToolNotFound contract otherwise match ExtractSegment.
+func ExtractSegmentURL(ctx context.Context, url, srcExt string, startMS, endMS int) ([]byte, error) {
+	if !isHTTPURL(url) {
+		return nil, fmt.Errorf("avutil: ExtractSegmentURL requires an http(s) URL, got %q", url)
+	}
+	return extractSegment(ctx, url, srcExt, startMS, endMS)
+}
+
+// isHTTPURL reports whether s is an http or https URL, the only schemes ffmpeg
+// can range-seek for ExtractSegmentURL.
+func isHTTPURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// extractSegment is the shared ffmpeg stream-copy implementation behind both the
+// local-path (ExtractSegment) and http-URL (ExtractSegmentURL) entry points. The
+// input string is handed to ffmpeg's -i, which accepts both a filesystem path and
+// an http(s) URL; the only difference is how the container extension is derived
+// for the output muxer, so callers pass it explicitly via srcExt.
+func extractSegment(ctx context.Context, input, srcExt string, startMS, endMS int) ([]byte, error) {
 	if startMS < 0 || endMS <= startMS {
-		return nil, fmt.Errorf("avutil: invalid segment [%d,%d) for %q", startMS, endMS, path)
+		return nil, fmt.Errorf("avutil: invalid segment [%d,%d) for %q", startMS, endMS, input)
 	}
 	bin, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -98,7 +135,7 @@ func ExtractSegment(ctx context.Context, path string, startMS, endMS int) ([]byt
 
 	// Keep the source extension so ffmpeg infers the matching muxer and the
 	// extracted clip stays the same container/MIME as the source.
-	ext := filepath.Ext(path)
+	ext := srcExt
 	if ext == "" {
 		ext = ".bin"
 	}
@@ -109,21 +146,21 @@ func ExtractSegment(ctx context.Context, path string, startMS, endMS int) ([]byt
 		"-v", "error",
 		"-ss", msToSeconds(startMS),
 		"-to", msToSeconds(endMS),
-		"-i", path,
+		"-i", input,
 		"-c", "copy",
 		"-y", outPath,
 	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg segment %q [%d,%d): %w: %s", path, startMS, endMS, err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("ffmpeg segment %q [%d,%d): %w: %s", input, startMS, endMS, err, strings.TrimSpace(stderr.String()))
 	}
 	data, err := os.ReadFile(outPath)
 	if err != nil {
 		return nil, fmt.Errorf("avutil: read extracted segment: %w", err)
 	}
 	if len(data) == 0 {
-		return nil, fmt.Errorf("avutil: ffmpeg produced an empty segment for %q [%d,%d)", path, startMS, endMS)
+		return nil, fmt.Errorf("avutil: ffmpeg produced an empty segment for %q [%d,%d)", input, startMS, endMS)
 	}
 	return data, nil
 }
