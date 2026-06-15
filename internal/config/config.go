@@ -226,6 +226,20 @@ type Config struct {
 	// lexically-lowest path. Only consulted when MediaVariantsGroup is true.
 	MediaVariantsSelect string
 
+	// MediaTranslateEnabled opts IN to translating transcripts into one or more
+	// target languages (spec §8.6.2, config `media.translate.enabled`). Off by
+	// default. When enabled, each source transcript additionally yields one
+	// translated transcript representation per target language. Enabling this
+	// with an empty MediaTranslateTargetLangs is CONFIG_INVALID.
+	MediaTranslateEnabled bool
+
+	// MediaTranslateTargetLangs lists the target language tag(s) transcripts are
+	// translated into (spec §8.6.2, config `media.translate.target_langs`). There
+	// is NO built-in default (general-purpose: no language is assumed). Only
+	// consulted when MediaTranslateEnabled is true; enabling translation with an
+	// empty list is CONFIG_INVALID.
+	MediaTranslateTargetLangs []string
+
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
 	// screened for degenerate output (repetition loops, empty output,
@@ -331,6 +345,8 @@ type fileConfig struct {
 	MediaSidecarsDisabled     *bool
 	MediaVariantsGroup        *bool
 	MediaVariantsSelect       *string
+	MediaTranslateEnabled     *bool
+	MediaTranslateTargetLangs []string
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -420,6 +436,8 @@ type persistedConfig struct {
 	MediaSidecarsDisabled     bool          `yaml:"media_sidecars_disabled"`
 	MediaVariantsGroup        bool          `yaml:"media_variants_group"`
 	MediaVariantsSelect       string        `yaml:"media_variants_select"`
+	MediaTranslateEnabled     bool          `yaml:"media_translate_enabled"`
+	MediaTranslateTargetLangs []string      `yaml:"media_translate_target_langs"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -542,6 +560,8 @@ func Default() Config {
 		QualityGatesEnabled:       true,
 		MediaVariantsGroup:        false,
 		MediaVariantsSelect:       "best",
+		MediaTranslateEnabled:     false,
+		MediaTranslateTargetLangs: nil,
 		ServerTLSCertFile:         "",
 		ServerTLSKeyFile:          "",
 		X402: X402Config{
@@ -642,6 +662,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSidecarsDisabled:     cfg.MediaSidecarsDisabled,
 		MediaVariantsGroup:        cfg.MediaVariantsGroup,
 		MediaVariantsSelect:       cfg.MediaVariantsSelect,
+		MediaTranslateEnabled:     cfg.MediaTranslateEnabled,
+		MediaTranslateTargetLangs: append([]string(nil), cfg.MediaTranslateTargetLangs...),
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1256,6 +1278,12 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaVariantsSelect != nil {
 		cfg.MediaVariantsSelect = *fc.MediaVariantsSelect
 	}
+	if fc.MediaTranslateEnabled != nil {
+		cfg.MediaTranslateEnabled = *fc.MediaTranslateEnabled
+	}
+	if fc.MediaTranslateTargetLangs != nil {
+		cfg.MediaTranslateTargetLangs = normalizeStringSlice(fc.MediaTranslateTargetLangs)
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -1520,6 +1548,8 @@ var configKeyAliases = map[string]string{
 	"backend":                              "index.backend",
 	"media_variants_group":                 "media.variants.group",
 	"media_variants_select":                "media.variants.select",
+	"media_translate_enabled":              "media.translate.enabled",
+	"media_translate_target_langs":         "media.translate.target_langs",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1576,7 +1606,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
-	case "media", "media.variants":
+	case "media", "media.variants", "media.translate":
 		return true
 	case "index.pgvector":
 		return true
@@ -1626,6 +1656,8 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.MediaSidecarsDisabled
 	case "media.variants.group":
 		target = &cfg.MediaVariantsGroup
+	case "media.translate.enabled":
+		target = &cfg.MediaTranslateEnabled
 	case "x402_tools_call_enabled":
 		target = &cfg.X402ToolsCallEnabled
 	case "retrieval.hybrid.enabled":
@@ -1892,6 +1924,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendValue(&cfg.SecretPatterns, value)
 	case "allowed_origins":
 		appendValue(&cfg.AllowedOrigins, value)
+	case "media.translate.target_langs":
+		appendValue(&cfg.MediaTranslateTargetLangs, value)
 	}
 }
 
@@ -1900,7 +1934,7 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins":
+	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs":
 		return true
 	default:
 		return false
@@ -1993,6 +2027,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_sidecars_disabled", cfg.MediaSidecarsDisabled)
 	writeBool("media_variants_group", cfg.MediaVariantsGroup)
 	writeScalar("media_variants_select", cfg.MediaVariantsSelect)
+	writeBool("media_translate_enabled", cfg.MediaTranslateEnabled)
+	writeList("media_translate_target_langs", cfg.MediaTranslateTargetLangs)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)
@@ -2376,6 +2412,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateMediaTranslate(); err != nil {
+		return err
+	}
+
 	if err := c.validateNumericBounds(); err != nil {
 		return err
 	}
@@ -2406,6 +2446,38 @@ func (c *Config) validateMediaVariants() error {
 		return fmt.Errorf("media.variants.select must be one of best, first: %q", c.MediaVariantsSelect)
 	}
 	c.MediaVariantsSelect = sel
+	return nil
+}
+
+// validateMediaTranslate enforces the transcript-translation config invariants
+// (spec §8.6.2): translation is opt-in and off by default, and the target
+// language list has NO built-in default. Enabling translation with an empty (or
+// all-blank) target_langs is CONFIG_INVALID. When enabled the list is
+// normalized (trimmed, lower-cased, de-duplicated) so downstream keying via
+// TranscriptLangSuffix is stable. When translation is disabled the list is left
+// untouched, so toggling it back on restores any previously-saved targets.
+func (c *Config) validateMediaTranslate() error {
+	if !c.MediaTranslateEnabled {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(c.MediaTranslateTargetLangs))
+	out := make([]string, 0, len(c.MediaTranslateTargetLangs))
+	for _, lang := range c.MediaTranslateTargetLangs {
+		l := strings.ToLower(strings.TrimSpace(lang))
+		if l == "" {
+			continue
+		}
+		if _, dup := seen[l]; dup {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+	}
+	if len(out) == 0 {
+		return errors.New("media.translate.enabled=true requires a non-empty " +
+			"media.translate.target_langs (no default target language)")
+	}
+	c.MediaTranslateTargetLangs = out
 	return nil
 }
 
