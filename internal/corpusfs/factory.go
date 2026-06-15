@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -103,6 +104,15 @@ func SetS3ClientBuilderForTest(builder func(ctx context.Context, cfg Config) (S3
 	return func() { newS3Client = prev }
 }
 
+// NewS3FSWithPresignForTest builds an S3FS over a stub client with an explicit
+// presigner so external tests can exercise the MediaURL capability and the
+// worker's URL-based segment path without a concrete *s3.Client or the network.
+// presign maps (bucket, key) to a URL; a nil presign yields an S3FS whose
+// MediaURL reports ok=false. Production code uses New / NewS3FS instead.
+func NewS3FSWithPresignForTest(client S3API, cfg S3Config, presign func(ctx context.Context, bucket, key string) (string, error)) (*S3FS, error) {
+	return newS3FSWithPresign(client, cfg, presignFunc(presign))
+}
+
 // New builds the CorpusFS selected by cfg.Kind. Local and nfs both yield a
 // LocalFS rooted at cfg.RootDir (an NFS mount is just a local path). s3 builds an
 // aws-sdk-go-v2 S3 client and an S3FS whose Localize cache lives under the
@@ -121,7 +131,10 @@ func New(ctx context.Context, cfg Config) (CorpusFS, error) {
 }
 
 // newS3FromConfig constructs the S3-backed CorpusFS, building the client (real or
-// stubbed) and pointing the Localize cache at StateDir/corpus-cache.
+// stubbed) and pointing the Localize cache at StateDir/corpus-cache. When the
+// built client is a concrete *s3.Client it also wires a presigner so the MediaURL
+// capability can hand ffmpeg a range-seekable URL (issue #243); a stub client (no
+// concrete *s3.Client) yields no presigner and MediaURL falls back to Localize.
 func newS3FromConfig(ctx context.Context, cfg Config) (CorpusFS, error) {
 	if strings.TrimSpace(cfg.S3Bucket) == "" {
 		return nil, errors.New("corpusfs: source kind s3 requires a bucket")
@@ -134,9 +147,31 @@ func newS3FromConfig(ctx context.Context, cfg Config) (CorpusFS, error) {
 	if strings.TrimSpace(cfg.StateDir) != "" {
 		cacheDir = filepath.Join(cfg.StateDir, s3CacheSubdir)
 	}
-	return NewS3FS(client, S3Config{
+	return newS3FSWithPresign(client, S3Config{
 		Bucket:   cfg.S3Bucket,
 		Prefix:   cfg.S3Prefix,
 		CacheDir: cacheDir,
-	})
+	}, presignerForClient(client))
+}
+
+// presignerForClient returns a presignFunc backed by the SDK's PresignClient when
+// client is a concrete *s3.Client, or nil otherwise. The SDK's NewPresignClient
+// requires the concrete type, so a stub s3API (tests) cannot be presigned —
+// MediaURL then reports ok=false and the worker falls back to Localize.
+func presignerForClient(client s3API) presignFunc {
+	concrete, ok := client.(*s3.Client)
+	if !ok {
+		return nil
+	}
+	pc := s3.NewPresignClient(concrete)
+	return func(ctx context.Context, bucket, key string) (string, error) {
+		req, err := pc.PresignGetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		}, s3.WithPresignExpires(s3PresignExpiry))
+		if err != nil {
+			return "", err
+		}
+		return req.URL, nil
+	}
 }

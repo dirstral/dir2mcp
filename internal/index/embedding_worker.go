@@ -72,11 +72,19 @@ type EmbeddingWorker struct {
 	// Production code should rarely set this field.
 	RunOnceFunc func(ctx context.Context, indexKind string) (int, error)
 
-	// ExtractSegmentFunc overrides audio/video time-window extraction (SPEC
-	// 8.1.7). Defaults to avutil.ExtractSegment (ffmpeg) when nil; tests set it
-	// to avoid requiring the ffmpeg binary. Production code should rarely set
-	// this field.
+	// ExtractSegmentFunc overrides audio/video time-window extraction from a
+	// local filesystem path (SPEC 8.1.7). Defaults to avutil.ExtractSegment
+	// (ffmpeg) when nil; tests set it to avoid requiring the ffmpeg binary.
+	// Production code should rarely set this field.
 	ExtractSegmentFunc func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)
+
+	// ExtractSegmentURLFunc overrides audio/video time-window extraction from an
+	// http(s) URL (issue #243): when the corpus backend can presign a
+	// range-seekable URL, the worker cuts the window over HTTP so ffmpeg pulls
+	// only the needed bytes instead of forcing a whole-object download. Defaults
+	// to avutil.ExtractSegmentURL when nil; tests set it to avoid requiring the
+	// ffmpeg binary or network. Production code should rarely set this field.
+	ExtractSegmentURLFunc func(ctx context.Context, url, srcExt string, startMS, endMS int) ([]byte, error)
 }
 
 // validate checks that the worker is properly configured before use.
@@ -198,16 +206,19 @@ func (w *EmbeddingWorker) corpusFS() corpusfs.CorpusFS {
 // corpus root as defense-in-depth against a traversal in a stored ref.
 //
 // Image and PDF bytes are read whole via Open+io.ReadAll (pdfutil needs the full
-// file to extract a single page). Audio/video go through Localize because ffmpeg
-// (avutil.ExtractSegment) needs a real filesystem path, not an io.Reader — for
-// an object-store backend this downloads the whole object to a temp file.
+// file to extract a single page; see loadPDFPage for why a range-read ReadSeeker
+// path is counterproductive with pdfcpu). Audio/video range-read on S3 when the
+// backend can presign a URL — ffmpeg byte-range-seeks the window over HTTP — and
+// otherwise fall back to Localize (a whole-object download on S3, a no-op locally)
+// because ffmpeg cannot read from an io.Reader (see loadMediaSegment).
 //
-// Both fetch paths go through cache (issue #279), so sibling chunks of the same
+// All fetch paths go through cache (issue #279), so sibling chunks of the same
 // MediaRef in one batch (every page of a PDF, every time-window of a video)
-// share a single whole-file read or single Localize download instead of
-// re-fetching per chunk. For the default LocalFS this is behavior-preserving (a
-// local file is cheap to re-open and Localize is a no-op); it only removes
-// redundant range GETs / full-object downloads for remote backends such as S3.
+// share a single whole-file read, single Localize download, or single presigned
+// URL instead of re-fetching per chunk. For the default LocalFS this is
+// behavior-preserving (a local file is cheap to re-open and Localize is a no-op);
+// it only removes redundant range GETs / full-object downloads for remote
+// backends such as S3.
 func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask, cache *mediaBatchCache) (model.MediaInput, error) {
 	ref := strings.TrimSpace(t.MediaRef)
 	if ref == "" {
@@ -257,6 +268,10 @@ type mediaBatchCache struct {
 	// localized holds the materialized local path of a Localize'd MediaRef so
 	// every audio/video time-window of one source shares a single download.
 	localized map[string]string
+	// mediaURLs holds presigned range-seekable URLs (issue #243) keyed by
+	// MediaRef so every audio/video time-window of one S3 source presigns once
+	// per batch and ffmpeg reads each window over HTTP from the shared URL.
+	mediaURLs map[string]string
 	// cleanups are the Localize cleanup funcs to invoke at batch completion;
 	// holding them here (rather than deferring per call) keeps the materialized
 	// path alive for sibling chunks and removes temp files exactly once.
@@ -268,6 +283,7 @@ func newMediaBatchCache() *mediaBatchCache {
 	return &mediaBatchCache{
 		wholeFile: make(map[string][]byte),
 		localized: make(map[string]string),
+		mediaURLs: make(map[string]string),
 	}
 }
 
@@ -286,6 +302,7 @@ func (c *mediaBatchCache) cleanup() {
 	c.cleanups = nil
 	c.wholeFile = nil
 	c.localized = nil
+	c.mediaURLs = nil
 }
 
 // readWholeMedia returns the entire object at ref, reading it through the corpus
@@ -331,6 +348,32 @@ func (c *mediaBatchCache) localize(ctx context.Context, fsys corpusfs.CorpusFS, 
 	return path, func() {}, nil
 }
 
+// mediaURL returns a range-seekable URL for ref when the corpus backend supports
+// the MediaURLProvider capability (issue #243), presigning only on the first
+// request for that ref within the batch and reusing it for sibling time-windows.
+// ok=false means the backend cannot produce a URL (e.g. LocalFS) and the caller
+// must fall back to localize. A nil cache presigns per call (no memoization) so
+// the helper is usable without a batch context.
+func (c *mediaBatchCache) mediaURL(ctx context.Context, fsys corpusfs.CorpusFS, ref string) (string, bool, error) {
+	provider, ok := fsys.(corpusfs.MediaURLProvider)
+	if !ok {
+		return "", false, nil
+	}
+	if c != nil {
+		if url, hit := c.mediaURLs[ref]; hit {
+			return url, true, nil
+		}
+	}
+	url, ok, err := provider.MediaURL(ctx, ref)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	if c != nil {
+		c.mediaURLs[ref] = url
+	}
+	return url, true, nil
+}
+
 // fatalIfEscape promotes a corpus-root traversal error to ErrFatal so the worker
 // treats a stored ref that escapes the corpus root as a permanent, non-retryable
 // failure (preserving the pre-CorpusFS contract where the escape check returned
@@ -362,9 +405,17 @@ func readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string) ([]
 // one-page PDF (SPEC 8.1.7). A missing/invalid page span is a fatal task error
 // so a span/content mismatch surfaces instead of silently embedding page 1.
 //
-// pdfutil.ExtractPage operates on the whole file in memory, so the entire PDF is
-// read via Open even though only one page is embedded; this matches the prior
-// behavior (it previously read the whole file too).
+// Whole-object read (issue #243, deliberate): pdfutil.ExtractPage operates on the
+// whole file. Passing a CorpusFS.Open io.ReadSeeker straight through to pdfcpu to
+// let S3 range-GET only the page's objects was evaluated and rejected: pdfcpu's
+// Trim parses the full cross-reference table and re-reads the file many times over
+// (measured reaching 100% of the object and ~36x the file size in total bytes),
+// so a ReadSeeker path would issue a storm of range GETs each re-fetching most of
+// the object — strictly worse than one whole-object download. We therefore keep
+// the whole-file read, but it is read exactly once per PDF per batch via the
+// per-batch cache (issue #279), so every page of one PDF shares a single Open.
+// Audio/video, by contrast, DO range-read on S3 (see loadMediaSegment) because
+// ffmpeg can byte-range-seek a presigned URL.
 func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string, cache *mediaBatchCache) ([]byte, error) {
 	if !strings.EqualFold(strings.TrimSpace(t.Metadata.Span.Kind), "page") || t.Metadata.Span.Page < 1 {
 		return nil, fmt.Errorf("%w: pdf media chunk %d has invalid page span", ErrFatal, t.Metadata.ChunkID)
@@ -383,14 +434,69 @@ func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fs
 // loadMediaSegment cuts the chunk's single time window (from its `time` span)
 // out of the source media (SPEC 8.1.7). A missing/invalid time span is a fatal
 // task error so a span/content mismatch surfaces instead of embedding the wrong
-// segment. The source is Localized to a real path first (through the per-batch
-// cache so sibling time-windows reuse one download) because ffmpeg cannot read
-// from an io.Reader.
+// segment.
+//
+// Range-read (issue #243): when the corpus backend exposes a range-seekable URL
+// (S3FS via MediaURLProvider/presigned GetObject), ffmpeg reads the window over
+// HTTP and pulls only the bytes around [start,end) plus the container index — the
+// whole object is NOT downloaded. The presigned URL is memoized per MediaRef in
+// the per-batch cache (issue #279), so every time-window of one source presigns
+// once. When the backend cannot produce a URL (LocalFS, or an S3FS built without
+// a presigner) the worker falls back to Localize (a whole-object download for S3,
+// a no-op for LocalFS) because ffmpeg cannot read from an io.Reader — that path
+// is byte-for-byte the historical behavior.
+//
+// Failures on the range-read URL path (presign or extract) are wrapped retryable
+// (errRetryableMediaRead), not fatal: an expired/throttled presigned URL recovers
+// on the next cycle once a fresh URL is minted, so the chunk is left pending. The
+// fallback Localize/extract path keeps its historical ErrFatal classification.
 func (w *EmbeddingWorker) loadMediaSegment(ctx context.Context, t model.ChunkTask, fsys corpusfs.CorpusFS, ref string, cache *mediaBatchCache) ([]byte, error) {
 	span := t.Metadata.Span
 	if !strings.EqualFold(strings.TrimSpace(span.Kind), "time") || span.StartMS < 0 || span.EndMS <= span.StartMS {
 		return nil, fmt.Errorf("%w: %s media chunk %d has invalid time span", ErrFatal, strings.ToLower(t.Modality), t.Metadata.ChunkID)
 	}
+
+	// Prefer a range-seekable URL when the backend can presign one. A presign
+	// failure is transient (throttling, a momentary credential refresh), so it is
+	// marked retryable to keep the chunk pending rather than permanently failed.
+	if url, ok, uerr := cache.mediaURL(ctx, fsys, ref); uerr != nil {
+		return nil, fmt.Errorf("%w: presign media %q: %v", errRetryableMediaRead, ref, uerr)
+	} else if ok {
+		return w.extractSegmentFromURL(ctx, url, ref, span)
+	}
+
+	// Fall back to a localized path (whole-object download on S3, no-op locally).
+	return w.extractSegmentFromPath(ctx, fsys, ref, span, cache)
+}
+
+// extractSegmentFromURL cuts the [start,end) window from a range-seekable URL via
+// ffmpeg-over-HTTP. srcExt is derived from the MediaRef so the clip keeps the
+// source container/MIME (a presigned URL's path/query is not a reliable hint).
+//
+// A failure here is NOT wrapped as ErrFatal (unlike the local-path extractor): a
+// range-read over HTTP can fail for transient reasons that a later cycle would
+// recover from — most importantly an expired presigned URL (the per-batch cache
+// memoizes one URL with a 15-min lifetime, issue #243/#279), but also throttling
+// or a network blip. Marking such a chunk permanently failed would silently lose
+// it; returning a retryable error leaves it pending so the next cycle presigns a
+// fresh URL. ref (the relPath, never the signed URL) is the only identifier put
+// in the error so the credential cannot leak (the inner avutil error is already
+// redacted).
+func (w *EmbeddingWorker) extractSegmentFromURL(ctx context.Context, url, ref string, span model.Span) ([]byte, error) {
+	extract := w.ExtractSegmentURLFunc
+	if extract == nil {
+		extract = avutil.ExtractSegmentURL
+	}
+	data, err := extract(ctx, url, filepath.Ext(ref), span.StartMS, span.EndMS)
+	if err != nil {
+		return nil, fmt.Errorf("%w: extract %q segment [%d,%d) over range-read URL: %v", errRetryableMediaRead, ref, span.StartMS, span.EndMS, err)
+	}
+	return data, nil
+}
+
+// extractSegmentFromPath cuts the [start,end) window from a localized filesystem
+// path (the historical, whole-object-download-on-S3 fallback).
+func (w *EmbeddingWorker) extractSegmentFromPath(ctx context.Context, fsys corpusfs.CorpusFS, ref string, span model.Span, cache *mediaBatchCache) ([]byte, error) {
 	localPath, cleanup, err := cache.localize(ctx, fsys, ref)
 	if err != nil {
 		return nil, fmt.Errorf("read media %q: %w", ref, err)
@@ -677,6 +783,17 @@ func (w *EmbeddingWorker) logf(format string, args ...interface{}) {
 // or compare against it if they produce fatal conditions themselves.
 var ErrFatal = errors.New("fatal")
 
+// errRetryableMediaRead marks a media fetch/extract failure that a later cycle
+// could recover from, so the affected chunk must stay pending (not be marked
+// permanently failed). The canonical case is an S3-backed range-read whose
+// presigned URL expired or was throttled mid-batch (issue #243): the per-batch
+// cache holds one 15-min URL, and although that is comfortably longer than a
+// default batch of stream-copy windows takes, a slow network / clock skew / a
+// large batch override could outlast it — and re-presigning on the next cycle
+// fixes it. Recognized by isTransientEmbedError so it routes to the retry (keep
+// pending) path rather than MarkFailed.
+var errRetryableMediaRead = errors.New("retryable media read")
+
 // isRetryable determines whether RunOnce should be retried when it returns
 // the provided error. The predicate is intentionally conservative; context
 // cancellation, deadline errors, and ErrFatal are considered fatal because
@@ -704,6 +821,12 @@ func isRetryable(err error) bool {
 func isTransientEmbedError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A range-read media fetch/extract failure (e.g. an expired or throttled
+	// presigned URL, issue #243) is recoverable on a later cycle, so keep the
+	// chunk pending instead of marking it permanently failed.
+	if errors.Is(err, errRetryableMediaRead) {
+		return true
 	}
 	// context package errors are usually propagated from the caller and
 	// indicate the operation stopped; leave the chunk pending rather than

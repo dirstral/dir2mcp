@@ -86,3 +86,20 @@ type CorpusFS interface {
 	// file (extension preserved for muxer inference) and cleanup removes it.
 	Localize(ctx context.Context, relPath string) (localPath string, cleanup func(), err error)
 }
+
+// MediaURLProvider is an optional capability a CorpusFS backend may implement to
+// hand out a short-lived http(s) URL for an object so a range-seeking consumer
+// (notably ffmpeg via avutil.ExtractSegmentURL) can read only the bytes it needs
+// over HTTP instead of forcing a whole-object Localize download.
+//
+// It is deliberately separate from CorpusFS: only object stores that can mint a
+// presigned URL (S3FS) implement it. LocalFS does not — a local file has no URL,
+// so callers must type-assert and fall back to Localize when the assertion fails.
+// This keeps LocalFS behavior byte-for-byte unchanged.
+type MediaURLProvider interface {
+	// MediaURL returns a time-limited http(s) URL granting read access to the
+	// object at relPath. ok=false (with a nil error) means this backend cannot
+	// produce a URL for the object and the caller should fall back to Localize;
+	// a non-nil error means producing the URL failed and should be surfaced.
+	MediaURL(ctx context.Context, relPath string) (url string, ok bool, err error)
+}

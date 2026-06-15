@@ -37,6 +37,16 @@ func PageCount(data []byte) (int, error) {
 
 // ExtractPage returns a single-page PDF containing the given 1-based page of
 // data, so it can be embedded on its own with a precise page span.
+//
+// Whole-file input (issue #243, deliberate): this takes the full PDF bytes rather
+// than an io.ReadSeeker that an S3 backend could range-GET. A ReadSeeker path was
+// evaluated and rejected — pdfcpu's Trim parses the entire cross-reference table
+// and re-reads the source many times over (measured reaching 100% of the object
+// and ~36x the file size in total reads), so streaming it over range GETs would
+// be strictly worse than one whole-object download. The caller reads the whole
+// file once and caches it per PDF per batch (see the embedding worker's
+// loadPDFPage), which is the right shape for pdfcpu. Audio/video, by contrast, do
+// range-read on S3 via ffmpeg-over-HTTP (avutil.ExtractSegmentURL).
 func ExtractPage(data []byte, page int) ([]byte, error) {
 	if page < 1 {
 		return nil, fmt.Errorf("pdf page must be >= 1, got %d", page)
