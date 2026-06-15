@@ -262,6 +262,73 @@ func TestRunScan_S3ETagChangeDetection(t *testing.T) {
 	}
 }
 
+// TestRunScan_S3ETagSizeMismatchForcesReRead confirms the size guard in
+// etagUnchanged: when the stored ETag matches the discovered object but the size
+// differs (e.g. a truncated/legacy ETag collision), the object MUST be re-read
+// and re-hashed rather than silently skipped (SPEC §7.8.3 — content_hash stays
+// canonical). This is the highest-risk silent-staleness branch.
+func TestRunScan_S3ETagSizeMismatchForcesReRead(t *testing.T) {
+	fs := newFakeRemoteFS()
+	fs.add("doc.txt", "etag-collide", "fresh longer body")
+
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID:       1,
+		RelPath:     "doc.txt",
+		DocType:     "text",
+		SizeBytes:   int64(len("old body")), // deliberately different size
+		ContentHash: ingest.ComputeContentHash([]byte("old body")),
+		ETag:        "etag-collide", // same token as discovered object
+		Status:      "ok",
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got := fs.openCount("doc.txt"); got == 0 {
+		t.Errorf("ETag matched but size differed; object must be re-read (no skip)")
+	}
+	if doc, _ := st.get("doc.txt"); doc.ContentHash != ingest.ComputeContentHash([]byte("fresh longer body")) {
+		t.Errorf("content_hash not recomputed on size-mismatch re-read: %q", doc.ContentHash)
+	}
+}
+
+// TestRunScan_S3ETagErrorStatusForcesReprocess confirms that a document
+// previously recorded as status="error" is re-processed even when its ETag and
+// size still match the discovered object, so a transient ingest failure recovers
+// on the next incremental scan without a full reindex (SPEC §7.8.3).
+func TestRunScan_S3ETagErrorStatusForcesReprocess(t *testing.T) {
+	fs := newFakeRemoteFS()
+	fs.add("doc.txt", "etag-stable", "body")
+
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID:       1,
+		RelPath:     "doc.txt",
+		DocType:     "text",
+		SizeBytes:   int64(len("body")),
+		ContentHash: ingest.ComputeContentHash([]byte("body")),
+		ETag:        "etag-stable",
+		Status:      "error", // prior ingest failed
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got := fs.openCount("doc.txt"); got == 0 {
+		t.Errorf("error-status document with matching ETag was skipped; it must re-process")
+	}
+	if doc, _ := st.get("doc.txt"); doc.Status != "ok" {
+		t.Errorf("error-status document not recovered after re-process: status=%q", doc.Status)
+	}
+}
+
 // TestRunScan_S3ETagForceReindexBypassesSkip confirms that a forced reindex
 // re-reads even an object whose ETag is unchanged (the skip is incremental-only,
 // SPEC §7.8.3).
