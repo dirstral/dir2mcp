@@ -43,6 +43,8 @@ type parsedForm struct {
 	fileName       string
 	auth           string
 	hasAuth        bool
+	vadFilter      string
+	hasVADFilter   bool
 }
 
 func parseMultipart(t *testing.T, r *http.Request) parsedForm {
@@ -74,6 +76,9 @@ func parseMultipart(t *testing.T, r *http.Request) parsedForm {
 			out.responseFormat = string(data)
 		case "file":
 			out.fileName = part.FileName()
+		case "vad_filter":
+			out.vadFilter = string(data)
+			out.hasVADFilter = true
 		}
 	}
 	return out
@@ -145,6 +150,43 @@ func TestVerboseJSONResponseFormat(t *testing.T) {
 	}
 	if got.responseFormat != "verbose_json" {
 		t.Errorf("response_format = %q, want verbose_json", got.responseFormat)
+	}
+}
+
+// TestVADFilterField asserts the OpenAI-compatible vad_filter=true multipart
+// field is sent only when VADFilter is enabled (dir2mcp#258, config media.vad),
+// and is omitted entirely by default so non-VAD servers see no extra field.
+func TestVADFilterField(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		wantSet bool
+	}{
+		{"enabled sends vad_filter=true", true, true},
+		{"disabled omits vad_filter", false, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var got parsedForm
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = parseMultipart(t, r)
+				_, _ = io.WriteString(w, jsonSegments)
+			}))
+			defer srv.Close()
+
+			c := newClient(srv.URL, "")
+			c.VADFilter = tc.enabled
+
+			if _, err := c.Transcribe(context.Background(), "a.wav", []byte("x")); err != nil {
+				t.Fatalf("Transcribe: %v", err)
+			}
+			if got.hasVADFilter != tc.wantSet {
+				t.Fatalf("vad_filter present = %v, want %v", got.hasVADFilter, tc.wantSet)
+			}
+			if tc.wantSet && got.vadFilter != "true" {
+				t.Errorf("vad_filter = %q, want true", got.vadFilter)
+			}
+		})
 	}
 }
 
