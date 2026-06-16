@@ -1817,6 +1817,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	if err != nil {
 		return fmt.Errorf("upsert translated transcript representation: %w", err)
 	}
+	s.addRepresentations(1)
 
 	// Chunk the translated text with the same transcript chunker so its time
 	// spans line up with the source segments (the translation preserves each

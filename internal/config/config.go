@@ -2467,6 +2467,17 @@ func (c *Config) validateMediaTranslate() error {
 		if l == "" {
 			continue
 		}
+		// Reject tags outside the cache-safe alphabet (BCP-47 letters/digits/
+		// hyphen). TranscriptLangSuffix strips any other rune, so e.g. "en_us"
+		// and "enus" would collapse to the same translation-cache suffix and
+		// reuse the wrong translated text. Require an already-safe form.
+		for _, r := range l {
+			safe := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
+			if !safe {
+				return fmt.Errorf("media.translate.target_langs contains an invalid language tag %q "+
+					"(use BCP-47 letters/digits/hyphen, e.g. \"en\" or \"pt-br\")", lang)
+			}
+		}
 		if _, dup := seen[l]; dup {
 			continue
 		}

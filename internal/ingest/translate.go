@@ -21,7 +21,20 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 		return "", fmt.Errorf("create translate cache dir: %w", err)
 	}
 
-	base := computeContentHash(content) + TranscriptLangSuffix(targetLang)
+	// Key the cache on the full translation identity, not just the source media
+	// bytes: the same media re-translated after the source transcript text, the
+	// chat provider, or the model changes must NOT return stale text (the rep's
+	// meta_json records the new provider/model, so a stale body would be
+	// mislabeled). The TranscriptLangSuffix is retained on the filename so cache
+	// files stay human-identifiable by language.
+	cacheIdentity := strings.Join([]string{
+		computeContentHash(content),
+		computeContentHash([]byte(sourceText)),
+		strings.TrimSpace(s.translateProvider),
+		strings.TrimSpace(s.translateModel),
+		strings.ToLower(strings.TrimSpace(targetLang)),
+	}, "\x00")
+	base := computeContentHash([]byte(cacheIdentity)) + TranscriptLangSuffix(targetLang)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
@@ -59,7 +72,12 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 		if err != nil {
 			return "", err
 		}
-		translatedBody = strings.TrimSpace(translatedBody)
+		// Collapse any internal newlines/whitespace runs the chat provider may
+		// have returned into single spaces, so one source segment stays exactly
+		// one output line — otherwise an extra line would desync the translated
+		// transcript's time spans from the source (chunkTranscriptByTime keys on
+		// per-line [mm:ss] markers).
+		translatedBody = strings.Join(strings.Fields(translatedBody), " ")
 		switch {
 		case marker == "":
 			out = append(out, translatedBody)
