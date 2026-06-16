@@ -763,6 +763,16 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if !etagUnchanged(f, existing, forceReindex) {
 		return false, nil
 	}
+	// A media object's own ETag does not reflect changes to an adjacent subtitle
+	// sidecar (.srt/.vtt/.ttml): buildDocumentWithContent folds the sidecar
+	// fingerprint into ContentHash, but the ETag fast-path runs before that
+	// recompute. So a sidecar added/changed/removed while the media bytes are
+	// unchanged would be missed. Conservatively bypass the ETag skip for
+	// sidecar-capable media so the full read+hash path re-detects the sidecar
+	// (#253/#283 interaction). Non-media remote objects keep the fast path.
+	if isSidecarMediaType(ClassifyDocType(f.RelPath)) {
+		return false, nil
+	}
 	s.skipUnchangedRemoteDocument(ctx, f, existing, seen)
 	return true, nil
 }

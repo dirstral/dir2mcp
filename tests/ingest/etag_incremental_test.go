@@ -396,3 +396,51 @@ func TestRunScan_LocalEmptyETagUsesContentHash(t *testing.T) {
 		t.Errorf("local content_hash changed unexpectedly: %q", doc.ContentHash)
 	}
 }
+
+// TestRunScan_S3ETagSidecarMediaNotSkipped confirms the ETag fast-path does NOT
+// skip sidecar-capable media (audio/video): a subtitle sidecar (.srt/.vtt) can
+// be added/changed/removed while the media object's own ETag is unchanged, and
+// buildDocumentWithContent folds the sidecar fingerprint into ContentHash only
+// on the full read path. So such media must always be re-read incrementally
+// (#245/#253/#283 interaction). Non-media objects keep the cheap ETag skip.
+func TestRunScan_S3ETagSidecarMediaNotSkipped(t *testing.T) {
+	fs := newFakeRemoteFS()
+	fs.add("clip.mp4", "etag-stable", "media bytes") // sidecar-capable (video)
+	fs.add("notes.txt", "etag-stable", "text body")  // non-media control
+
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID:       1,
+		RelPath:     "clip.mp4",
+		DocType:     "video",
+		SizeBytes:   int64(len("media bytes")),
+		ContentHash: ingest.ComputeContentHash([]byte("media bytes")),
+		ETag:        "etag-stable",
+		Status:      "ok",
+	})
+	st.seed(model.Document{
+		DocID:       2,
+		RelPath:     "notes.txt",
+		DocType:     "text",
+		SizeBytes:   int64(len("text body")),
+		ContentHash: ingest.ComputeContentHash([]byte("text body")),
+		ETag:        "etag-stable",
+		Status:      "ok",
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	// Sidecar-capable media must be re-read even with an unchanged ETag so a
+	// changed/added/removed sidecar is detected via the content_hash recompute.
+	if got := fs.openCount("clip.mp4"); got == 0 {
+		t.Errorf("sidecar-capable media with matching ETag was ETag-skipped; it must be re-read")
+	}
+	// Non-media object keeps the cheap ETag skip (regression guard).
+	if got := fs.openCount("notes.txt"); got != 0 {
+		t.Errorf("non-media object with matching ETag was re-read; it should ETag-skip (got %d opens)", got)
+	}
+}
