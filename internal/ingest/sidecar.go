@@ -223,7 +223,7 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 
 	ingested := false
 	for _, lang := range langs {
-		segments := chunkSubtitleCues(groups[lang])
+		segments := chunkSubtitleCuesFiltered(groups[lang], s.captionWordFilter())
 		if len(segments) == 0 {
 			continue
 		}

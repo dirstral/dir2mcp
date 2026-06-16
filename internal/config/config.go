@@ -239,6 +239,15 @@ type Config struct {
 	// consulted when MediaTranslateEnabled is true; enabling translation with an
 	// empty list is CONFIG_INVALID.
 	MediaTranslateTargetLangs []string
+	// MediaFilterWords is an optional, general-purpose list of boilerplate /
+	// credits / watermark phrases stripped from transcript and subtitle text
+	// (config `media.filter_words`). Matching is case-insensitive substring
+	// removal; the same filter is applied during transcript chunking (so the
+	// phrases are never embedded) and on subtitle export (so VTT/SRT never
+	// contain them). Empty by default = off: behavior is unchanged everywhere
+	// when no phrases are configured. There are NO built-in defaults — the list
+	// carries no language- or domain-specific phrases.
+	MediaFilterWords []string
 
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
@@ -347,6 +356,7 @@ type fileConfig struct {
 	MediaVariantsSelect       *string
 	MediaTranslateEnabled     *bool
 	MediaTranslateTargetLangs []string
+	MediaFilterWords          []string
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -438,6 +448,7 @@ type persistedConfig struct {
 	MediaVariantsSelect       string        `yaml:"media_variants_select"`
 	MediaTranslateEnabled     bool          `yaml:"media_translate_enabled"`
 	MediaTranslateTargetLangs []string      `yaml:"media_translate_target_langs"`
+	MediaFilterWords          []string      `yaml:"media_filter_words"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -664,6 +675,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaVariantsSelect:       cfg.MediaVariantsSelect,
 		MediaTranslateEnabled:     cfg.MediaTranslateEnabled,
 		MediaTranslateTargetLangs: append([]string(nil), cfg.MediaTranslateTargetLangs...),
+		MediaFilterWords:          append([]string(nil), cfg.MediaFilterWords...),
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1284,6 +1296,9 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTranslateTargetLangs != nil {
 		cfg.MediaTranslateTargetLangs = normalizeStringSlice(fc.MediaTranslateTargetLangs)
 	}
+	if fc.MediaFilterWords != nil {
+		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -1550,6 +1565,8 @@ var configKeyAliases = map[string]string{
 	"media_variants_select":                "media.variants.select",
 	"media_translate_enabled":              "media.translate.enabled",
 	"media_translate_target_langs":         "media.translate.target_langs",
+	"media_filter_words":                   "media.filter_words",
+	"filter_words":                         "media.filter_words",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1926,6 +1943,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendValue(&cfg.AllowedOrigins, value)
 	case "media.translate.target_langs":
 		appendValue(&cfg.MediaTranslateTargetLangs, value)
+	case "media.filter_words":
+		appendValue(&cfg.MediaFilterWords, value)
 	}
 }
 
@@ -1934,7 +1953,7 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs":
+	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words":
 		return true
 	default:
 		return false
@@ -2029,6 +2048,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_variants_select", cfg.MediaVariantsSelect)
 	writeBool("media_translate_enabled", cfg.MediaTranslateEnabled)
 	writeList("media_translate_target_langs", cfg.MediaTranslateTargetLangs)
+	writeList("media_filter_words", cfg.MediaFilterWords)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)
