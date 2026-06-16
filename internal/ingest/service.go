@@ -1853,10 +1853,14 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// Optional leading-silence trim (dir2mcp#258): when enabled, subtract the
 	// detected dead-air offset from every time span and word timestamp so the
 	// transcript aligns to first speech. Disabled (default) leaves spans
-	// untouched; ffmpeg absent / detection failure -> 0 offset -> no change.
+	// untouched; ffmpeg absent / detection failure -> 0 offset -> no change. The
+	// offset is captured so the SAME shift is applied to any translated
+	// transcripts below, keeping source/translated time windows aligned.
+	trimOffsetMS := 0
 	if s.cfg.MediaTrimLeadingSilence {
 		if offset := s.detectLeadingSilence(ctx, doc); offset > 0 {
-			shiftTranscriptSpans(segments, int(offset.Milliseconds()))
+			trimOffsetMS = int(offset.Milliseconds())
+			shiftTranscriptSpans(segments, trimOffsetMS)
 		}
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
@@ -1873,7 +1877,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// Translation is a best-effort enrichment: any failure (chat provider error,
 	// translated-rep persistence) is logged and counted but NOT propagated, so a
 	// failed translation never marks the source transcript's document as errored.
-	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration); err != nil {
+	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
 		s.addErrors(1)
 	}
@@ -1890,7 +1894,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 // TranscriptRepType(lang) so it coexists with the source transcript and any
 // sidecar per-language reps; routes through the output quality gate; and records
 // source_language + translate provider/model in meta_json.
-func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration) error {
+func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration, trimOffsetMS int) error {
 	if s.translator == nil || len(s.translateTargetLangs) == 0 {
 		return nil
 	}
@@ -1902,7 +1906,7 @@ func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc mo
 			// Skip a no-op translation into the source language itself.
 			continue
 		}
-		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceLang, lang, duration); err != nil {
+		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceLang, lang, duration, trimOffsetMS); err != nil {
 			// Best-effort per language: a failure on one target must not suppress
 			// the remaining targets. Log here and keep going; the first error is
 			// returned so the caller can log/count it (non-fatally).
@@ -1944,7 +1948,7 @@ func sameLanguage(a, b string) bool {
 // is cached per-language (TranscriptLangSuffix) keyed by the SOURCE content hash
 // so re-ingesting an unchanged document reuses the cached translation instead of
 // re-calling the chat provider.
-func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration) error {
+func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration, trimOffsetMS int) error {
 	translated, err := s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
 	if err != nil {
 		return fmt.Errorf("translate transcript for %s into %q: %w", doc.RelPath, targetLang, err)
@@ -1997,6 +2001,12 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	segments := chunkTranscriptByTime(translated)
 	if len(segments) == 0 {
 		return nil
+	}
+	// Apply the same leading-silence trim offset as the source transcript so the
+	// translated time windows stay aligned with the source (dir2mcp#258). A zero
+	// offset (trim disabled / no silence detected) is a no-op.
+	if trimOffsetMS > 0 {
+		shiftTranscriptSpans(segments, trimOffsetMS)
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return fmt.Errorf("persist translated transcript chunks: %w", err)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
 	"net/url"
@@ -1785,8 +1786,11 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 	default:
 		return nil
 	}
+	// strconv.ParseFloat accepts "NaN"/"Inf"/"Infinity"; reject non-finite
+	// values here so a malformed threshold fails at config-parse time (explicit,
+	// deterministic) rather than surfacing later during ffmpeg execution.
 	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return fmt.Errorf("invalid number for %s", key)
 	}
 	*target = floatPtr(parsed)

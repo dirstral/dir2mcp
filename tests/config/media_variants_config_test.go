@@ -136,6 +136,25 @@ func TestMediaSilenceThreshold_NestedYAMLApplies(t *testing.T) {
 	}
 }
 
+// TestMediaSilenceThreshold_RejectsNonFinite asserts that NaN/Inf strings (which
+// strconv.ParseFloat accepts) are rejected at config-parse time rather than
+// surfacing later during ffmpeg execution.
+func TestMediaSilenceThreshold_RejectsNonFinite(t *testing.T) {
+	for _, bad := range []string{"NaN", "Inf", "+Inf", "-Inf", "Infinity"} {
+		tmp := t.TempDir()
+		path := filepath.Join(tmp, ".dir2mcp.yaml")
+		writeFile(t, path, strings.Join([]string{
+			"root_dir: /tmp/repo",
+			"state_dir: /tmp/repo/.dir2mcp",
+			"media_silence_threshold_db: " + bad,
+		}, "\n")+"\n")
+
+		if _, err := config.LoadFile(path); err == nil {
+			t.Errorf("LoadFile with media_silence_threshold_db=%q = nil error, want rejection", bad)
+		}
+	}
+}
+
 // TestMediaVariants_NestedYAMLApplies locks the nested spec-style block
 // (media: -> variants: -> group/select) so it is actually applied rather than
 // silently falling back to defaults (regression: isMapSectionKey must recognize

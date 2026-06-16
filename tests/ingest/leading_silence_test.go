@@ -115,6 +115,48 @@ func TestGenerateTranscript_LeadingSilenceTrimEnabled(t *testing.T) {
 	}
 }
 
+// TestGenerateTranscript_LeadingSilenceTrim_ShiftsTranslatedSpans asserts the
+// trim offset is propagated to translated transcripts (dir2mcp#258): with trim
+// enabled AND translation on, both the source and translated time windows are
+// shifted by the same detected offset so they stay aligned.
+func TestGenerateTranscript_LeadingSilenceTrim_ShiftsTranslatedSpans(t *testing.T) {
+	t.Parallel()
+	st := &fakeIngestStore{}
+	root, content := mediaDocRoot(t)
+	svc := mustNewIngestService(t, config.Config{
+		StateDir:                t.TempDir(),
+		RootDir:                 root,
+		MediaTrimLeadingSilence: true,
+	}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})
+	svc.SetTranscriptLanguage("de")
+	svc.SetTranslator(&fakeTranslator{}, "mistral", "m", []string{"en"})
+	svc.DetectLeadingSilenceFunc = func(context.Context, string) (time.Duration, error) {
+		return 2 * time.Second, nil
+	}
+
+	doc := model.Document{DocID: 104, RelPath: "audio/lecture.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, content); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation failed: %v", err)
+	}
+
+	// 3 source spans (shifted) + 3 translated spans (must be shifted identically).
+	if len(st.spans) != 6 {
+		t.Fatalf("expected 3 source + 3 translated spans, got %d", len(st.spans))
+	}
+	// Baseline [0,2000)[2000,5000)[5000,6000); a 2000ms trim -> [0,1)[0,3000)[3000,4000).
+	want := [][2]int{{0, 1}, {0, 3000}, {3000, 4000}}
+	for half, label := range []string{"source", "translated"} {
+		base := st.spans[half*3 : half*3+3]
+		for i, w := range want {
+			if base[i].StartMS != w[0] || base[i].EndMS != w[1] {
+				t.Errorf("%s span[%d] = [%d,%d), want [%d,%d)", label, i,
+					base[i].StartMS, base[i].EndMS, w[0], w[1])
+			}
+		}
+	}
+}
+
 // TestGenerateTranscript_LeadingSilenceTrimDisabled asserts spans are untouched
 // when the toggle is off, even if a detector would report silence.
 func TestGenerateTranscript_LeadingSilenceTrimDisabled(t *testing.T) {

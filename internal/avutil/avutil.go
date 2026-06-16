@@ -121,8 +121,12 @@ func DetectLeadingSilence(ctx context.Context, path string, thresholdDB, minDura
 		minDurationSec = DefaultSilenceMinDuration
 	}
 
+	// Always cap the probe at silenceProbeTimeout: apply it when the caller has
+	// no deadline, OR when the caller's deadline is further out than the probe
+	// cap, so a long-lived ingest context cannot let ffmpeg run unbounded. A
+	// nearer caller deadline is left in force (it is the stricter bound).
 	probeCtx := ctx
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+	if deadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(deadline) > silenceProbeTimeout {
 		var cancel context.CancelFunc
 		probeCtx, cancel = context.WithTimeout(ctx, silenceProbeTimeout)
 		defer cancel()
