@@ -356,6 +356,11 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// keep modality='text', media_ref=''.
 		`ALTER TABLE chunks ADD COLUMN modality TEXT NOT NULL DEFAULT 'text'`,
 		`ALTER TABLE chunks ADD COLUMN media_ref TEXT NOT NULL DEFAULT ''`,
+		// etag stores a remote object store's cheap change token (S3 object
+		// ETag) so an incremental scan can skip re-reading + re-hashing an
+		// unchanged object (SPEC §7.8.3, #245). Empty for local/NFS corpora,
+		// whose change detection keeps using (size, mtime) then content_hash.
+		`ALTER TABLE documents ADD COLUMN etag TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -402,6 +407,7 @@ CREATE TABLE IF NOT EXISTS documents (
   size_bytes INTEGER NOT NULL DEFAULT 0,
   mtime_unix INTEGER NOT NULL DEFAULT 0,
   content_hash TEXT NOT NULL DEFAULT '',
+  etag TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'ok',
   deleted INTEGER NOT NULL DEFAULT 0
 );
@@ -575,14 +581,15 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 	// such two-phase write, so the always-replace semantics are correct.
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rel_path) DO UPDATE SET
 		   doc_type=excluded.doc_type,
 		   source_type=excluded.source_type,
 		   size_bytes=excluded.size_bytes,
 		   mtime_unix=excluded.mtime_unix,
 		   content_hash=excluded.content_hash,
+		   etag=excluded.etag,
 		   status=excluded.status,
 		   deleted=excluded.deleted,
 		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END,
@@ -593,6 +600,7 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		doc.SizeBytes,
 		doc.MTimeUnix,
 		strings.TrimSpace(doc.ContentHash),
+		strings.TrimSpace(doc.ETag),
 		normalizeStatus(doc.Status),
 		boolToInt(doc.Deleted),
 		strings.TrimSpace(doc.Title),
@@ -1215,7 +1223,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	var deleted int
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message
 		 FROM documents WHERE rel_path = ?`,
 		normalizedPath,
 	)
@@ -1227,6 +1235,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 		&doc.SizeBytes,
 		&doc.MTimeUnix,
 		&doc.ContentHash,
+		&doc.ETag,
 		&doc.Status,
 		&deleted,
 		&doc.Title,
@@ -1257,7 +1266,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 
 	normalizedPrefix := model.NormalizePathPrefix(prefix)
 
-	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message FROM documents`
+	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message FROM documents`
 	where := []string{"deleted = 0"}
 	args := make([]any, 0, 4)
 	if normalizedPrefix != "" {
@@ -1290,6 +1299,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 			&doc.SizeBytes,
 			&doc.MTimeUnix,
 			&doc.ContentHash,
+			&doc.ETag,
 			&doc.Status,
 			&deleted,
 			&doc.Title,
@@ -1340,7 +1350,7 @@ func (s *SQLiteStore) RecentFailures(ctx context.Context, limit int) ([]model.Do
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted, title, error_message
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message
 		 FROM documents
 		 WHERE status = 'error' AND deleted = 0
 		 ORDER BY mtime_unix DESC, rel_path ASC
@@ -1364,6 +1374,7 @@ func (s *SQLiteStore) RecentFailures(ctx context.Context, limit int) ([]model.Do
 			&doc.SizeBytes,
 			&doc.MTimeUnix,
 			&doc.ContentHash,
+			&doc.ETag,
 			&doc.Status,
 			&deleted,
 			&doc.Title,

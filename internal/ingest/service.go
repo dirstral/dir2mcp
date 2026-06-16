@@ -715,24 +715,139 @@ func (s *Service) runScan(ctx context.Context) error {
 	return s.markMissingAsDeleted(ctx, existing, seen)
 }
 
+// etagUnchanged reports whether a remote (object-store) source object can be
+// treated as unchanged without re-reading its bytes (SPEC §7.8.3, #245). The
+// ETag is the cheap change token for S3: when the discovered object carries a
+// non-empty ETag, a prior document recorded the same ETag and size, and that
+// document is healthy (active, not in error status), the object body has not
+// changed and a full GET + content_hash recompute is unnecessary.
+//
+// It is deliberately conservative and a strict no-op for local/NFS corpora,
+// whose DiscoveredFile.ETag is always empty: there the (size, mtime) pre-check
+// plus content_hash confirm path is left entirely intact. A forced reindex
+// always bypasses the skip so an operator can recover regardless of token state.
+func etagUnchanged(f DiscoveredFile, existing model.Document, forceReindex bool) bool {
+	if forceReindex {
+		return false
+	}
+	if strings.TrimSpace(f.ETag) == "" {
+		return false
+	}
+	if existing.Deleted || existing.Status == "error" {
+		return false
+	}
+	if strings.TrimSpace(existing.ETag) != strings.TrimSpace(f.ETag) {
+		return false
+	}
+	// Size is part of the cheap S3 signal alongside the ETag; a mismatch means
+	// the object differs even if a (truncated/legacy) ETag happens to collide.
+	return existing.SizeBytes == f.SizeBytes
+}
+
+// trySkipUnchangedRemoteDocument implements the remote (S3) incremental fast
+// path (SPEC §7.8.3, #245). It looks up the recorded document and, when the
+// object's ETag+size signal an unchanged body, records run-progress counters and
+// returns handled=true so the caller skips the GET + content_hash recompute. It
+// returns handled=false (no error) when the object is new, changed, or local
+// (empty ETag), letting the normal read/hash path run; a genuine store failure
+// is returned as an error. content_hash stays the canonical identity and the
+// stored row is left untouched on the skip path.
+func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f DiscoveredFile, forceReindex bool, seen map[string]struct{}) (bool, error) {
+	existing, err := s.store.GetDocumentByPath(ctx, f.RelPath)
+	if err != nil {
+		if isUnexpectedStoreErr(err) {
+			return false, fmt.Errorf("get existing document: %w", err)
+		}
+		return false, nil
+	}
+	if !etagUnchanged(f, existing, forceReindex) {
+		return false, nil
+	}
+	// A media object's own ETag does not reflect changes to an adjacent subtitle
+	// sidecar (.srt/.vtt/.ttml): buildDocumentWithContent folds the sidecar
+	// fingerprint into ContentHash, but the ETag fast-path runs before that
+	// recompute. So a sidecar added/changed/removed while the media bytes are
+	// unchanged would be missed. Conservatively bypass the ETag skip for
+	// sidecar-capable media so the full read+hash path re-detects the sidecar
+	// (#253/#283 interaction). Non-media remote objects keep the fast path.
+	if isSidecarMediaType(ClassifyDocType(f.RelPath)) {
+		return false, nil
+	}
+	s.skipUnchangedRemoteDocument(ctx, f, existing, seen)
+	return true, nil
+}
+
+// skipUnchangedRemoteDocument records the run-progress counters for an object
+// whose ETag matched (so it was not re-read) and preserves the existing
+// behavior for archive containers, whose already-ingested members must be
+// retained in `seen` so markMissingAsDeleted does not tombstone them. The stored
+// document row is intentionally left untouched: its content_hash, ETag, and
+// representations are still valid. Counters mirror the unchanged-content path so
+// status totals stay consistent across runs.
+func (s *Service) skipUnchangedRemoteDocument(ctx context.Context, f DiscoveredFile, existing model.Document, seen map[string]struct{}) {
+	switch existing.Status {
+	case "ok":
+		s.addIndexed(1)
+	case "skipped", "secret_excluded":
+		s.addSkipped(1)
+	}
+	// An unchanged archive still owns its previously-extracted members; retain
+	// them so they are not treated as deletions this run.
+	if existing.DocType == "archive" && seen != nil {
+		s.retainArchiveMembers(ctx, f.RelPath, seen)
+	}
+}
+
+// persistBuildError records a document whose body could not be read/built as a
+// status="error" row (with the source ETag preserved) and returns the original
+// build error. The scan error counter is intentionally not incremented here:
+// runScan already counts any non-nil return value as an error.
+func (s *Service) persistBuildError(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, buildErr error) error {
+	doc := model.Document{
+		RelPath:      f.RelPath,
+		DocType:      ClassifyDocType(f.RelPath),
+		SizeBytes:    f.SizeBytes,
+		MTimeUnix:    f.MTimeUnix,
+		ETag:         f.ETag,
+		Status:       "error",
+		Deleted:      false,
+		ErrorMessage: RedactSecretsInMessage(buildErr.Error(), secretPatterns),
+	}
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		return fmt.Errorf("upsert error document: %w", err)
+	}
+	return buildErr
+}
+
+// refreshDocID re-reads the persisted document after an upsert to obtain the
+// store-assigned DocID needed for downstream representation creation
+// (UpsertDocument returns only an error). A not-found result is ignored — it
+// would be surprising immediately after a successful upsert and is already
+// handled by the store; any other error is propagated.
+func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
+	updated, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
+	if err == nil {
+		doc.DocID = updated.DocID
+		return nil
+	}
+	if isNotFoundError(err) {
+		return nil
+	}
+	return fmt.Errorf("fetch document after upsert: %w", err)
+}
+
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+	// Remote (S3) incremental fast path (SPEC §7.8.3, #245): when the object's
+	// ETag+size match the recorded document, the body is unchanged, so skip the
+	// full GET + content_hash recompute entirely. No-op for local/NFS corpora
+	// (empty ETag) and under --force/reindex.
+	if handled, err := s.trySkipUnchangedRemoteDocument(ctx, f, forceReindex, seen); err != nil || handled {
+		return err
+	}
+
 	doc, content, buildErr := s.buildDocumentWithContent(ctx, f, secretPatterns)
 	if buildErr != nil {
-		doc = model.Document{
-			RelPath:      f.RelPath,
-			DocType:      ClassifyDocType(f.RelPath),
-			SizeBytes:    f.SizeBytes,
-			MTimeUnix:    f.MTimeUnix,
-			Status:       "error",
-			Deleted:      false,
-			ErrorMessage: RedactSecretsInMessage(buildErr.Error(), secretPatterns),
-		}
-		if err := s.store.UpsertDocument(ctx, doc); err != nil {
-			return fmt.Errorf("upsert error document: %w", err)
-		}
-		// s.addErrors(1) is intentionally omitted here; runScan already
-		// increments the error counter for any non-nil return value.
-		return buildErr
+		return s.persistBuildError(ctx, f, secretPatterns, buildErr)
 	}
 
 	existingDoc, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
@@ -751,16 +866,8 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return fmt.Errorf("upsert document: %w", err)
 	}
 
-	// after upsert we need the persisted DocID for downstream
-	// representation creation.  The store implementation assigns the ID,
-	// but UpsertDocument only returns an error, so query the record again
-	// and update the local copy.  We ignore not-found errors because that
-	// would be surprising immediately after a successful upsert and is
-	// already handled by the store implementation.
-	if updated, err := s.store.GetDocumentByPath(ctx, doc.RelPath); err == nil {
-		doc.DocID = updated.DocID
-	} else if !isNotFoundError(err) {
-		return fmt.Errorf("fetch document after upsert: %w", err)
+	if err := s.refreshDocID(ctx, &doc); err != nil {
+		return err
 	}
 
 	switch doc.Status {
@@ -957,8 +1064,12 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 		DocType:   docType,
 		SizeBytes: f.SizeBytes,
 		MTimeUnix: f.MTimeUnix,
-		Status:    "ok",
-		Deleted:   false,
+		// Record the source's cheap change token (S3 ETag; empty for local/NFS)
+		// so a later incremental scan can skip the re-read when it is unchanged
+		// (SPEC §7.8.3, #245). content_hash below stays the canonical identity.
+		ETag:    f.ETag,
+		Status:  "ok",
+		Deleted: false,
 	}
 
 	rc, err := s.corpusFS().Open(ctx, f.RelPath)
