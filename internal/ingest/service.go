@@ -74,6 +74,26 @@ type Service struct {
 	// configured, in which case the language detector self-skips.
 	transcriptLanguage string
 
+	// translator is the chat/generation client used to translate transcripts
+	// into the configured target language(s) (SPEC §8.6.2). It is the chat
+	// capability binding resolved at construction, or nil when translation is
+	// disabled or no chat-capable provider resolves (in which case the optional
+	// translate step self-skips). It is a model.Generator so the same prompt
+	// path works for any chat provider (mistral/openai/gemini/cohere).
+	translator model.Generator
+
+	// translateTargetLangs holds the normalized target language tags transcripts
+	// are translated into when translation is enabled (SPEC §8.6.2). Empty when
+	// translation is off. Validation guarantees a non-empty list whenever
+	// translation is enabled (enabling with an empty list is CONFIG_INVALID).
+	translateTargetLangs []string
+
+	// translateProvider/translateModel record the resolved chat provider/model
+	// used for translation so each translated transcript representation can carry
+	// its translation derivation identity in meta_json (SPEC §5.2/§8.6.7).
+	translateProvider string
+	translateModel    string
+
 	// embedMultimodal is the resolved multimodal embedding mode (SPEC
 	// 8.1.7): "off" (default), "augment", or "replace". When augment/
 	// replace, media documents additionally (or exclusively) get a media
@@ -186,6 +206,20 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
 	}
 	svc.transcriptLanguage = sttExpectedLanguage(cfg)
+	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
+	// translation is enabled we resolve the chat capability and build a
+	// generator; when off (default), or no chat provider resolves, the field
+	// stays nil and the translate step self-skips so behaviour is unchanged.
+	svc.translateTargetLangs = append([]string(nil), cfg.MediaTranslateTargetLangs...)
+	if cfg.MediaTranslateEnabled && len(svc.translateTargetLangs) > 0 {
+		if tr, prof, terr := translatorFromConfig(cfg); terr == nil && tr != nil {
+			svc.translator = tr
+			svc.translateProvider = prof.Name
+			svc.translateModel = strings.TrimSpace(prof.ChatModel)
+		} else if terr != nil {
+			svc.getLogger().Printf("transcript translation disabled: %v", terr)
+		}
+	}
 	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
 	// unresolvable embed profile leaves it off (text-only).
 	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
@@ -420,6 +454,26 @@ func sttExpectedLanguage(cfg config.Config) string {
 	return strings.TrimSpace(prof.STTLanguage)
 }
 
+// translatorFromConfig resolves the chat-capability binding used to translate
+// transcripts (SPEC §8.6.2: "uses the chat capability unless a dedicated
+// binding is configured") and builds a model.Generator from it. A dedicated
+// translate provider/model can be configured by binding the chat capability to
+// a specific provider; with no explicit binding the resolver picks the first
+// eligible chat-capable profile in precedence order. Returns ErrNoProvider
+// (wrapped) when nothing eligible resolves so the caller can leave translation
+// off rather than failing ingest.
+func translatorFromConfig(cfg config.Config) (model.Generator, provider.Profile, error) {
+	prof, err := cfg.Providers().Resolve(provider.CapChat)
+	if err != nil {
+		return nil, provider.Profile{}, fmt.Errorf("resolve chat provider for translation: %w", err)
+	}
+	gen, err := providerfactory.Generator(prof)
+	if err != nil {
+		return nil, provider.Profile{}, fmt.Errorf("build translation generator (%s): %w", prof.Name, err)
+	}
+	return gen, prof, nil
+}
+
 // healthCheckInterval returns the configured base poll interval for connector
 // health probes. It mirrors the behaviour described in VISION.md: when the
 // configuration value is zero (or the receiver is nil) the default from
@@ -472,6 +526,30 @@ func (s *Service) SetOCR(ocr model.OCR) {
 
 func (s *Service) SetTranscriber(transcriber model.Transcriber) {
 	s.transcriber = transcriber
+}
+
+// SetTranslator overrides the transcript-translation binding and its target
+// languages, primarily for tests. Passing a nil generator (or empty langs)
+// disables translation. The recorded provider/model are written into translated
+// transcripts' meta_json. Target languages are normalized (trimmed/lower-cased).
+func (s *Service) SetTranslator(translator model.Generator, providerName, modelName string, targetLangs []string) {
+	s.translator = translator
+	s.translateProvider = strings.TrimSpace(providerName)
+	s.translateModel = strings.TrimSpace(modelName)
+	norm := make([]string, 0, len(targetLangs))
+	for _, l := range targetLangs {
+		if t := strings.ToLower(strings.TrimSpace(l)); t != "" {
+			norm = append(norm, t)
+		}
+	}
+	s.translateTargetLangs = norm
+}
+
+// SetTranscriptLanguage overrides the recorded source-transcript language,
+// primarily for tests that need a deterministic source_language without
+// resolving an STT provider profile.
+func (s *Service) SetTranscriptLanguage(language string) {
+	s.transcriptLanguage = strings.TrimSpace(language)
 }
 
 // SetCorpusFS overrides the corpus filesystem backend used for discovery and
@@ -1611,6 +1689,145 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return fmt.Errorf("persist transcript chunks: %w", err)
+	}
+
+	// Optional translation step (SPEC §8.6.2): after the source transcript
+	// representation is persisted, produce one additional per-language transcript
+	// representation for each configured target language. This sits AFTER the
+	// source transcript so a translation failure never blocks the authoritative
+	// transcript, and each translated transcript routes through the same quality
+	// gate (it IS model output, unlike sidecar transcripts which bypass it).
+	//
+	// Translation is a best-effort enrichment: any failure (chat provider error,
+	// translated-rep persistence) is logged and counted but NOT propagated, so a
+	// failed translation never marks the source transcript's document as errored.
+	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration); err != nil {
+		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
+		s.addErrors(1)
+	}
+	return nil
+}
+
+// translateTranscriptRepresentations produces, for each configured target
+// language, a translated transcript representation that is time-aligned to the
+// source transcript (SPEC §8.6.2). It self-skips (returns nil) when translation
+// is disabled, no translator resolved, or no target languages are configured —
+// so behaviour with translation off is identical to before. Each translated
+// transcript: is cached per-language via TranscriptLangSuffix so it is not
+// recomputed across re-ingests; carries a distinct rep_type via
+// TranscriptRepType(lang) so it coexists with the source transcript and any
+// sidecar per-language reps; routes through the output quality gate; and records
+// source_language + translate provider/model in meta_json.
+func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration) error {
+	if s.translator == nil || len(s.translateTargetLangs) == 0 {
+		return nil
+	}
+	sourceLang := strings.TrimSpace(s.transcriptLanguage)
+	var firstErr error
+	for _, lang := range s.translateTargetLangs {
+		lang = strings.ToLower(strings.TrimSpace(lang))
+		if lang == "" || sameLanguage(lang, sourceLang) {
+			// Skip a no-op translation into the source language itself.
+			continue
+		}
+		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceLang, lang, duration); err != nil {
+			// Best-effort per language: a failure on one target must not suppress
+			// the remaining targets. Log here and keep going; the first error is
+			// returned so the caller can log/count it (non-fatally).
+			s.getLogger().Printf("transcript translation failed for %s into %q: %v", doc.RelPath, lang, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+	}
+	return firstErr
+}
+
+// sameLanguage reports whether two language tags name the same language for the
+// purpose of skipping a no-op self-translation. The comparison is loose: a tag
+// matches if it equals the other or shares its primary subtag (so "en" matches
+// "en-US"). An empty source language never matches (auto-detected/unknown), so
+// translation always proceeds when the source language was not pinned.
+func sameLanguage(a, b string) bool {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	primary := func(s string) string {
+		if i := strings.IndexAny(s, "-_"); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	return primary(a) == primary(b)
+}
+
+// translateOneTranscript translates the source transcript into a single target
+// language and persists it as a transcript representation. The translated text
+// is cached per-language (TranscriptLangSuffix) keyed by the SOURCE content hash
+// so re-ingesting an unchanged document reuses the cached translation instead of
+// re-calling the chat provider.
+func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration) error {
+	translated, err := s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
+	if err != nil {
+		return fmt.Errorf("translate transcript for %s into %q: %w", doc.RelPath, targetLang, err)
+	}
+	translated = strings.TrimSpace(translated)
+	if translated == "" {
+		return nil
+	}
+
+	// A translated transcript is model output, so it routes through the output
+	// quality gate exactly like an STT transcript (anti-hallucination). The
+	// expected language is the TARGET language: the gate's language detector
+	// should accept the translated text, not the source.
+	decision := s.screenOutputQuality(doc.RelPath, "transcript-translation", translated, quality.Context{
+		Modality:         quality.ModalityTranscript,
+		ExpectedLanguage: targetLang,
+		Duration:         duration,
+	})
+
+	meta := transcriptMeta{
+		Source:            translationSource,
+		Language:          targetLang,
+		SourceLanguage:    sourceLang,
+		TranslateProvider: s.translateProvider,
+		TranslateModel:    s.translateModel,
+		Timestamps:        true,
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal translated transcript meta: %w", err)
+	}
+
+	rep := model.Representation{
+		DocID:       doc.DocID,
+		RepType:     TranscriptRepType(targetLang),
+		RepHash:     computeRepHash([]byte(translated)),
+		MetaJSON:    string(metaJSON),
+		CreatedUnix: time.Now().Unix(),
+		Deleted:     false,
+	}
+	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
+	if err != nil {
+		return fmt.Errorf("upsert translated transcript representation: %w", err)
+	}
+	s.addRepresentations(1)
+
+	// Chunk the translated text with the same transcript chunker so its time
+	// spans line up with the source segments (the translation preserves each
+	// segment's verbatim [mm:ss] marker).
+	segments := chunkTranscriptByTime(translated)
+	if len(segments) == 0 {
+		return nil
+	}
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
+		return fmt.Errorf("persist translated transcript chunks: %w", err)
 	}
 	return nil
 }

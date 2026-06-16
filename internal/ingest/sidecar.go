@@ -24,6 +24,12 @@ var sidecarExtensions = []string{".vtt", ".srt", ".ttml"}
 // NOT invalidated by an STT model change (spec §8.6.7).
 const sidecarSource = "sidecar"
 
+// translationSource is the meta_json source value recorded on a transcript
+// representation produced by translating another transcript (spec §8.6.2). It is
+// model-derived (unlike a sidecar), so it carries its translate provider/model
+// derivation identity and IS screened by the output quality gate.
+const translationSource = "translation"
+
 // sidecarFile is a discovered subtitle sidecar for a media document: its corpus
 // rel_path, the language tag parsed from the filename (empty when the sidecar is
 // undifferentiated, e.g. "clip.vtt"), the lowercased extension, and the sidecar
@@ -44,6 +50,14 @@ type transcriptMeta struct {
 	Language   string `json:"language,omitempty"`
 	Timestamps bool   `json:"timestamps"`
 	Format     string `json:"format,omitempty"`
+
+	// SourceLanguage / TranslateProvider / TranslateModel are recorded only on a
+	// translated transcript (Source == "translation", spec §8.6.2/§5.2): the
+	// language it was translated from plus the chat provider/model that produced
+	// it. Omitted (omitempty) on STT and sidecar transcripts.
+	SourceLanguage    string `json:"source_language,omitempty"`
+	TranslateProvider string `json:"translate_provider,omitempty"`
+	TranslateModel    string `json:"translate_model,omitempty"`
 }
 
 // setSidecarIndex records the mtime of every discovered file by rel_path so the
