@@ -212,6 +212,7 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 		if lang := strings.TrimSpace(p.STTLanguage); lang != "" {
 			c.DefaultLanguage = lang
 		}
+		c.VADFilter = p.STTVAD
 		return c, nil
 	case provider.KindMistral:
 		c := mistral.NewClient(p.BaseURL, p.APIKey)
