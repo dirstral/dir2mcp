@@ -787,10 +787,14 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	// sidecar (.srt/.vtt/.ttml): buildDocumentWithContent folds the sidecar
 	// fingerprint into ContentHash, but the ETag fast-path runs before that
 	// recompute. So a sidecar added/changed/removed while the media bytes are
-	// unchanged would be missed. Conservatively bypass the ETag skip for
-	// sidecar-capable media so the full read+hash path re-detects the sidecar
-	// (#253/#283 interaction). Non-media remote objects keep the fast path.
-	if isSidecarMediaType(ClassifyDocType(f.RelPath)) {
+	// unchanged would be missed by an ETag-only comparison. Recompute the current
+	// sidecar fingerprint cheaply (sibling paths + mtimes from the in-memory
+	// sidecar index — no media read) and skip only when it ALSO matches the
+	// persisted value; re-read when either the ETag or the fingerprint differs
+	// (SPEC §7.8.3, #298). For non-media objects and media with no sidecar the
+	// fingerprint is empty on both sides, so the fast path behaves as before.
+	currentFP := s.sidecarFingerprint(ctx, f.RelPath, ClassifyDocType(f.RelPath))
+	if currentFP != existing.SidecarFingerprint {
 		return false, nil
 	}
 	s.skipUnchangedRemoteDocument(ctx, f, existing, seen)
@@ -1105,8 +1109,13 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 	// media document's content hash so the incremental gate (§7.6) re-processes
 	// the media when a sidecar is added, removed, or modified — even though the
 	// media bytes are unchanged. Empty for non-media docs or media with no
-	// sidecar, preserving the existing hash exactly.
-	doc.ContentHash = mediaContentHash(content, s.sidecarFingerprint(ctx, f.RelPath, docType))
+	// sidecar, preserving the existing hash exactly. The same fingerprint is
+	// persisted separately on the row (SidecarFingerprint) so the remote ETag
+	// fast path can detect a sidecar change without re-reading the media bytes
+	// (SPEC §7.8.3, #298).
+	sidecarFP := s.sidecarFingerprint(ctx, f.RelPath, docType)
+	doc.SidecarFingerprint = sidecarFP
+	doc.ContentHash = mediaContentHash(content, sidecarFP)
 
 	// certain document types we don't want to ingest at all.
 	// "archive" and "binary_ignored" were already skipped.

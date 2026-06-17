@@ -22,9 +22,17 @@ type Document struct {
 	// SSE-KMS ETags are not MD5 of the body); it only decides whether a re-read
 	// + content_hash recompute is warranted (SPEC §7.8.3). content_hash stays the
 	// canonical identity.
-	ETag    string
-	Status  string
-	Deleted bool
+	ETag string
+	// SidecarFingerprint is a stable, cheaply-recomputed signature of the media
+	// document's adjacent subtitle sidecars (their sorted rel_paths + mtimes). It
+	// is the SAME value folded into ContentHash on the full read+hash path,
+	// persisted separately so the remote (S3) ETag fast path can detect a sidecar
+	// added/changed/removed while the media object's own ETag is unchanged —
+	// without re-reading the media bytes (SPEC §7.8.3, #298). Empty for non-media
+	// documents and media with no sidecar.
+	SidecarFingerprint string
+	Status             string
+	Deleted            bool
 	// ErrorMessage is populated when Status == "error" with a short
 	// human-readable description of why ingest failed (extraction
 	// crash, representation generation failure, etc.). Surfaced in

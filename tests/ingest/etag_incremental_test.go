@@ -45,6 +45,18 @@ func (f *fakeRemoteFS) add(relPath, etag, body string) {
 	f.bodies[relPath] = []byte(body)
 }
 
+// addWithMTime is add() with an explicit MTimeUnix so a test can pin the value
+// the sidecar fingerprint folds in ("rel_path@mtime").
+func (f *fakeRemoteFS) addWithMTime(relPath, etag, body string, mtime int64) {
+	f.files = append(f.files, corpusfs.DiscoveredFile{
+		RelPath:   relPath,
+		SizeBytes: int64(len(body)),
+		MTimeUnix: mtime,
+		ETag:      etag,
+	})
+	f.bodies[relPath] = []byte(body)
+}
+
 func (f *fakeRemoteFS) Walk(_ context.Context, _ string, _ corpusfs.Options) ([]corpusfs.DiscoveredFile, error) {
 	out := append([]corpusfs.DiscoveredFile(nil), f.files...)
 	sort.Slice(out, func(i, j int) bool { return out[i].RelPath < out[j].RelPath })
@@ -397,15 +409,14 @@ func TestRunScan_LocalEmptyETagUsesContentHash(t *testing.T) {
 	}
 }
 
-// TestRunScan_S3ETagSidecarMediaNotSkipped confirms the ETag fast-path does NOT
-// skip sidecar-capable media (audio/video): a subtitle sidecar (.srt/.vtt) can
-// be added/changed/removed while the media object's own ETag is unchanged, and
-// buildDocumentWithContent folds the sidecar fingerprint into ContentHash only
-// on the full read path. So such media must always be re-read incrementally
-// (#245/#253/#283 interaction). Non-media objects keep the cheap ETag skip.
-func TestRunScan_S3ETagSidecarMediaNotSkipped(t *testing.T) {
+// TestRunScan_S3ETagSidecarMediaNoSidecarSkips confirms that sidecar-capable
+// media (audio/video) WITHOUT any adjacent sidecar now keeps the cheap ETag fast
+// path: the persisted sidecar_fingerprint is empty and the cheaply-recomputed
+// current fingerprint is also empty, so an unchanged ETag skips the GET + re-hash
+// just like a non-media object (#298 replaces the conservative #295 carve-out).
+func TestRunScan_S3ETagSidecarMediaNoSidecarSkips(t *testing.T) {
 	fs := newFakeRemoteFS()
-	fs.add("clip.mp4", "etag-stable", "media bytes") // sidecar-capable (video)
+	fs.add("clip.mp4", "etag-stable", "media bytes") // sidecar-capable (video), no sidecar
 	fs.add("notes.txt", "etag-stable", "text body")  // non-media control
 
 	st := newRemoteScanStore()
@@ -416,7 +427,8 @@ func TestRunScan_S3ETagSidecarMediaNotSkipped(t *testing.T) {
 		SizeBytes:   int64(len("media bytes")),
 		ContentHash: ingest.ComputeContentHash([]byte("media bytes")),
 		ETag:        "etag-stable",
-		Status:      "ok",
+		// SidecarFingerprint intentionally empty: no sidecar at last scan.
+		Status: "ok",
 	})
 	st.seed(model.Document{
 		DocID:       2,
@@ -434,13 +446,127 @@ func TestRunScan_S3ETagSidecarMediaNotSkipped(t *testing.T) {
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	// Sidecar-capable media must be re-read even with an unchanged ETag so a
-	// changed/added/removed sidecar is detected via the content_hash recompute.
-	if got := fs.openCount("clip.mp4"); got == 0 {
-		t.Errorf("sidecar-capable media with matching ETag was ETag-skipped; it must be re-read")
+	// Sidecar-capable media with no sidecar and a matching empty fingerprint must
+	// ETag-skip (the whole point of #298: stop re-reading every media object).
+	if got := fs.openCount("clip.mp4"); got != 0 {
+		t.Errorf("sidecar-capable media without sidecar was re-read %d time(s); expected ETag skip (0)", got)
+	}
+	if got := st.upsertCalls["clip.mp4"]; got != 0 {
+		t.Errorf("sidecar-capable media without sidecar was upserted %d time(s); expected 0 (untouched on skip)", got)
 	}
 	// Non-media object keeps the cheap ETag skip (regression guard).
 	if got := fs.openCount("notes.txt"); got != 0 {
 		t.Errorf("non-media object with matching ETag was re-read; it should ETag-skip (got %d opens)", got)
+	}
+}
+
+// TestRunScan_S3ETagSidecarAddedForcesReRead confirms that adding a subtitle
+// sidecar next to a media object with an unchanged ETag breaks the ETag skip:
+// the cheaply-recomputed current fingerprint (now non-empty) no longer matches
+// the persisted (empty) fingerprint, so the media is re-read and re-hashed so the
+// sidecar transcript is ingested (#298).
+func TestRunScan_S3ETagSidecarAddedForcesReRead(t *testing.T) {
+	fs := newFakeRemoteFS()
+	fs.add("clip.mp4", "etag-stable", "media bytes")
+	// A subtitle sidecar appeared since the last scan (media ETag unchanged).
+	fs.add("clip.en.vtt", "etag-sub", "WEBVTT\n\n00:00.000 --> 00:01.000\nhi\n")
+
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID:       1,
+		RelPath:     "clip.mp4",
+		DocType:     "video",
+		SizeBytes:   int64(len("media bytes")),
+		ContentHash: ingest.ComputeContentHash([]byte("media bytes")),
+		ETag:        "etag-stable",
+		// SidecarFingerprint empty: no sidecar existed at last scan.
+		Status: "ok",
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got := fs.openCount("clip.mp4"); got == 0 {
+		t.Errorf("media with newly-added sidecar (ETag unchanged) was ETag-skipped; it must be re-read")
+	}
+	// The recomputed row must now carry a non-empty persisted fingerprint so the
+	// next scan can skip when nothing changes again.
+	if doc, _ := st.get("clip.mp4"); doc.SidecarFingerprint == "" {
+		t.Errorf("expected non-empty persisted sidecar_fingerprint after re-read; got empty")
+	}
+}
+
+// TestRunScan_S3ETagSidecarUnchangedSkips confirms that media whose sidecar is
+// unchanged since the last scan (persisted fingerprint == current fingerprint)
+// keeps the cheap ETag skip — no media read despite being sidecar-capable (#298).
+func TestRunScan_S3ETagSidecarUnchangedSkips(t *testing.T) {
+	fs := newFakeRemoteFS()
+	fs.add("clip.mp4", "etag-stable", "media bytes")
+	fs.addWithMTime("clip.en.vtt", "etag-sub", "WEBVTT\n", 4242)
+
+	// Seed the row with the SAME fingerprint the scan will recompute for the
+	// unchanged sidecar (sorted "rel_path@mtime"). This mirrors what a prior
+	// successful ingest persisted.
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID:              1,
+		RelPath:            "clip.mp4",
+		DocType:            "video",
+		SizeBytes:          int64(len("media bytes")),
+		ContentHash:        ingest.ComputeContentHash([]byte("media bytes")),
+		ETag:               "etag-stable",
+		SidecarFingerprint: "clip.en.vtt@4242",
+		Status:             "ok",
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got := fs.openCount("clip.mp4"); got != 0 {
+		t.Errorf("media with unchanged sidecar was re-read %d time(s); expected ETag skip (0)", got)
+	}
+	if got := st.upsertCalls["clip.mp4"]; got != 0 {
+		t.Errorf("media with unchanged sidecar was upserted %d time(s); expected 0 (untouched on skip)", got)
+	}
+}
+
+// TestRunScan_S3ETagSidecarChangedForcesReRead confirms that a sidecar whose
+// mtime changed since the last scan (persisted fingerprint differs from the
+// recomputed one) breaks the ETag skip even though the media object's ETag is
+// unchanged (#298).
+func TestRunScan_S3ETagSidecarChangedForcesReRead(t *testing.T) {
+	fs := newFakeRemoteFS()
+	fs.add("clip.mp4", "etag-stable", "media bytes")
+	fs.addWithMTime("clip.en.vtt", "etag-sub", "WEBVTT\n\n00:00.000 --> 00:01.000\nhi\n", 9999)
+
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID:              1,
+		RelPath:            "clip.mp4",
+		DocType:            "video",
+		SizeBytes:          int64(len("media bytes")),
+		ContentHash:        ingest.ComputeContentHash([]byte("media bytes")),
+		ETag:               "etag-stable",
+		SidecarFingerprint: "clip.en.vtt@1111", // stale mtime
+		Status:             "ok",
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got := fs.openCount("clip.mp4"); got == 0 {
+		t.Errorf("media with changed sidecar (ETag unchanged) was ETag-skipped; it must be re-read")
+	}
+	if doc, _ := st.get("clip.mp4"); doc.SidecarFingerprint != "clip.en.vtt@9999" {
+		t.Errorf("persisted sidecar_fingerprint not refreshed: got %q", doc.SidecarFingerprint)
 	}
 }
