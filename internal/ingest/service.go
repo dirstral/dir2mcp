@@ -903,6 +903,29 @@ func (s *Service) persistBuildError(ctx context.Context, f DiscoveredFile, secre
 	return buildErr
 }
 
+// resolveNeedsProcessing decides whether a document's representations must be
+// (re)generated. content_hash is the primary trigger (or --force, or a brand-new
+// document, via needsReprocessing). Two further triggers apply on otherwise
+// unchanged content:
+//   - a document that previously failed representation generation is retried so
+//     a transient error recovers without a full reindex;
+//   - a derived representation whose recorded derivation identity no longer
+//     matches the active STT/OCR model is stale and must be re-derived (spec
+//     §8.6.7). The identity probe runs only when the content gate did not already
+//     trigger and the new document is ok, so it adds no work on the common path.
+func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc model.Document, forceReindex bool) bool {
+	if needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex) {
+		return true
+	}
+	if existingDoc.Status == "error" {
+		return true
+	}
+	if doc.Status == "ok" && s.derivationIdentityStale(ctx, doc.RelPath) {
+		return true
+	}
+	return false
+}
+
 // refreshDocID re-reads the persisted document after an upsert to obtain the
 // store-assigned DocID needed for downstream representation creation
 // (UpsertDocument returns only an error). A not-found result is ignored — it
@@ -939,19 +962,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return fmt.Errorf("get existing document: %w", err)
 	}
 
-	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
-	// Documents that previously failed representation generation should be
-	// retried on the next run even if their content has not changed, so the
-	// operator does not need a full reindex to recover from a transient error.
-	if existingDoc.Status == "error" {
-		needsProcessing = true
-	}
-	// Derivation-identity gate (spec §8.6.7): even with identical content_hash, a
-	// derived representation (transcript/OCR) whose recorded provider/model no
-	// longer matches the active model is stale and must be re-derived.
-	if !needsProcessing && doc.Status == "ok" && s.derivationIdentityStale(ctx, doc.RelPath) {
-		needsProcessing = true
-	}
+	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
@@ -1118,17 +1129,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	if err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("get existing document: %w", err)
 	}
-	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
-	if existingDoc.Status == "error" {
-		needsProcessing = true
-	}
-	// Derivation-identity gate (spec §8.6.7): re-derive a stale transcript/OCR
-	// representation when its recorded model differs from the active one, even on
-	// unchanged content. Archive members carry the same derived representations as
-	// top-level documents, so they observe the same rule.
-	if !needsProcessing && doc.Status == "ok" && s.derivationIdentityStale(ctx, relPath) {
-		needsProcessing = true
-	}
+	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
