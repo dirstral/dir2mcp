@@ -361,6 +361,14 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// unchanged object (SPEC §7.8.3, #245). Empty for local/NFS corpora,
 		// whose change detection keeps using (size, mtime) then content_hash.
 		`ALTER TABLE documents ADD COLUMN etag TEXT NOT NULL DEFAULT ''`,
+		// sidecar_fingerprint persists the same subtitle-sidecar signature
+		// (sorted rel_paths + mtimes) that buildDocumentWithContent folds into
+		// content_hash. Persisting it separately lets the remote (S3) ETag fast
+		// path detect a sidecar added/changed/removed while the media object's
+		// own ETag is unchanged, without re-reading the media bytes (SPEC
+		// §7.8.3, #298). Empty for local/NFS corpora, non-media docs, and media
+		// with no sidecar — preserving the historical fast-path behavior.
+		`ALTER TABLE documents ADD COLUMN sidecar_fingerprint TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -408,6 +416,7 @@ CREATE TABLE IF NOT EXISTS documents (
   mtime_unix INTEGER NOT NULL DEFAULT 0,
   content_hash TEXT NOT NULL DEFAULT '',
   etag TEXT NOT NULL DEFAULT '',
+  sidecar_fingerprint TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'ok',
   deleted INTEGER NOT NULL DEFAULT 0
 );
@@ -581,8 +590,8 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 	// such two-phase write, so the always-replace semantics are correct.
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rel_path) DO UPDATE SET
 		   doc_type=excluded.doc_type,
 		   source_type=excluded.source_type,
@@ -590,6 +599,7 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		   mtime_unix=excluded.mtime_unix,
 		   content_hash=excluded.content_hash,
 		   etag=excluded.etag,
+		   sidecar_fingerprint=excluded.sidecar_fingerprint,
 		   status=excluded.status,
 		   deleted=excluded.deleted,
 		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END,
@@ -601,6 +611,7 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		doc.MTimeUnix,
 		strings.TrimSpace(doc.ContentHash),
 		strings.TrimSpace(doc.ETag),
+		doc.SidecarFingerprint,
 		normalizeStatus(doc.Status),
 		boolToInt(doc.Deleted),
 		strings.TrimSpace(doc.Title),
@@ -1223,7 +1234,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	var deleted int
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message
 		 FROM documents WHERE rel_path = ?`,
 		normalizedPath,
 	)
@@ -1236,6 +1247,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 		&doc.MTimeUnix,
 		&doc.ContentHash,
 		&doc.ETag,
+		&doc.SidecarFingerprint,
 		&doc.Status,
 		&deleted,
 		&doc.Title,
@@ -1266,7 +1278,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 
 	normalizedPrefix := model.NormalizePathPrefix(prefix)
 
-	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message FROM documents`
+	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message FROM documents`
 	where := []string{"deleted = 0"}
 	args := make([]any, 0, 4)
 	if normalizedPrefix != "" {
@@ -1300,6 +1312,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 			&doc.MTimeUnix,
 			&doc.ContentHash,
 			&doc.ETag,
+			&doc.SidecarFingerprint,
 			&doc.Status,
 			&deleted,
 			&doc.Title,
@@ -1350,7 +1363,7 @@ func (s *SQLiteStore) RecentFailures(ctx context.Context, limit int) ([]model.Do
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, status, deleted, title, error_message
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message
 		 FROM documents
 		 WHERE status = 'error' AND deleted = 0
 		 ORDER BY mtime_unix DESC, rel_path ASC
@@ -1375,6 +1388,7 @@ func (s *SQLiteStore) RecentFailures(ctx context.Context, limit int) ([]model.Do
 			&doc.MTimeUnix,
 			&doc.ContentHash,
 			&doc.ETag,
+			&doc.SidecarFingerprint,
 			&doc.Status,
 			&deleted,
 			&doc.Title,
