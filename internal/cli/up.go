@@ -144,7 +144,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer a.stopPersistenceWithLog(persistence)
 
 	embedErrCh := make(chan error, 4)
-	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS)
+	startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS)
 
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
@@ -967,8 +967,11 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 }
 
 // startEmbeddingIfNotReadOnly starts embedding workers when readOnly is false
-// and the store exposes the ChunkSource interface.
-func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS) {
+// and the store exposes the ChunkSource interface. When distributed embedding is
+// enabled (issue #248, SPEC §8.7) it instead starts the in-process degenerate
+// case of the coordinator+worker topology; otherwise it keeps the historical
+// in-process embedding loop unchanged (local-first single-binary default, §1.2).
+func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS) {
 	if readOnly {
 		return
 	}
@@ -977,6 +980,10 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.St
 		return
 	}
 	embedLogger := pickEmbedLogger(stderr, jsonOutput)
+	if cfg.DistributedEmbed.Enabled {
+		startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
+		return
+	}
 	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
 }
 

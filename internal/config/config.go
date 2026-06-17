@@ -64,6 +64,40 @@ type SourceConfig struct {
 	S3SessionToken    string
 }
 
+// DistributedEmbedConfig configures the optional distributed-embedding job queue
+// (issue #248, SPEC §8.7). It is capability-driven and off by default: the
+// distributed mode activates only when Enabled is true. When off, the pipeline
+// runs the in-process embedding loop unchanged (SPEC §1.2, §8.7.4).
+//
+// The broker transport is implementation-defined (SPEC §8.7.4): Broker selects a
+// shipped default ("memory" in-process, or "sqlite" persistent) or an external
+// adapter. Connection parameters that are secrets (e.g. a broker URL with
+// embedded credentials) follow SPEC §16.1.1 and are NEVER persisted to the
+// config snapshot — only the non-sensitive Broker selector and the SQLite path
+// are persisted.
+type DistributedEmbedConfig struct {
+	// Enabled turns on the distributed coordinator+worker mode. When true the
+	// coordinator enqueues pending chunks and workers drain the queue; the
+	// in-process loop is not started. Requires a shared external (Tier C) vector
+	// store (SPEC §8.7.4) — validation rejects an embedded Tier A/B backend.
+	Enabled bool
+	// Broker selects the queue implementation: "memory" (default, in-process,
+	// single-node degenerate case) or "sqlite" (persistent, pure-Go). External
+	// adapters MAY define additional values.
+	Broker string
+	// BrokerSQLitePath is the SQLite queue file path when Broker=="sqlite".
+	// Empty defaults to <state_dir>/embed-queue.db. Non-sensitive; persisted.
+	BrokerSQLitePath string
+	// BrokerURL is the connection URL for an external broker (NATS/Redis/SQS).
+	// It MAY embed credentials, so it is treated as a runtime-only secret
+	// (SPEC §16.1.1): sourced from the environment / secret store and NEVER
+	// persisted to the snapshot. Empty for the built-in brokers.
+	BrokerURL string
+	// MaxAttempts bounds redelivery before a job is dead-lettered (SPEC §8.7.3).
+	// Non-positive falls back to the broker default (5).
+	MaxAttempts int
+}
+
 // QdrantConfig configures the optional Qdrant vector index backend (issue #268),
 // selected via index.backend=qdrant. URL and Collection are persisted invariants;
 // APIKey is a runtime-only secret resolved through the existing env/keychain/
@@ -385,6 +419,11 @@ type Config struct {
 	// Source selects the corpus backend (local/nfs/s3). See SourceConfig.
 	Source SourceConfig
 
+	// DistributedEmbed configures the optional distributed-embedding job queue
+	// (issue #248, SPEC §8.7). Off by default: when disabled the in-process
+	// embedding loop runs unchanged (local-first single-binary default, §1.2).
+	DistributedEmbed DistributedEmbedConfig
+
 	// providersDoc holds the parsed `providers:`/`model:` subtree (SPEC
 	// 0.7.0 §8.1/§16.2), decoded with yaml.v3 separately from the
 	// bespoke flat parser. Unexported/runtime-derived: not persisted,
@@ -490,6 +529,12 @@ type fileConfig struct {
 	IndexPgvectorDSN         *string
 	IndexPgvectorSchema      *string
 	IndexPgvectorTable       *string
+	// Distributed embedding (issue #248, SPEC §8.7). BrokerURL is a runtime-only
+	// secret and is intentionally absent so it can never be written to disk.
+	DistributedEmbedEnabled     *bool
+	DistributedEmbedBroker      *string
+	DistributedEmbedSQLitePath  *string
+	DistributedEmbedMaxAttempts *int
 }
 
 type persistedConfig struct {
@@ -606,6 +651,16 @@ type persistedConfig struct {
 	// secret store) at runtime. Schema/table are non-sensitive invariants.
 	IndexPgvectorSchema string `yaml:"index_pgvector_schema"`
 	IndexPgvectorTable  string `yaml:"index_pgvector_table"`
+
+	// Distributed embedding (issue #248, SPEC §8.7). The broker URL is sensitive
+	// (may embed credentials) and is intentionally NOT declared here so it can
+	// never be written to disk; it is sourced from DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL
+	// at runtime (SPEC §16.1.1). The enable flag, broker selector, SQLite path,
+	// and max-attempts are non-sensitive invariants.
+	DistributedEmbedEnabled     bool   `yaml:"distributed_embed_enabled"`
+	DistributedEmbedBroker      string `yaml:"distributed_embed_broker"`
+	DistributedEmbedSQLitePath  string `yaml:"distributed_embed_sqlite_path"`
+	DistributedEmbedMaxAttempts int    `yaml:"distributed_embed_max_attempts"`
 }
 
 // Default returns the baseline Config (used as the starting point
@@ -841,6 +896,14 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		// and intentionally omitted (sourced from env/secret store at runtime).
 		IndexPgvectorSchema: cfg.IndexPgvectorSchema,
 		IndexPgvectorTable:  cfg.IndexPgvectorTable,
+		// Distributed embedding (issue #248): enable flag, broker selector,
+		// SQLite path, and max-attempts are persistable invariants. BrokerURL is a
+		// secret (may embed credentials) and is intentionally omitted so it never
+		// lands in the YAML/snapshot (SPEC §16.1.1).
+		DistributedEmbedEnabled:     cfg.DistributedEmbed.Enabled,
+		DistributedEmbedBroker:      cfg.DistributedEmbed.Broker,
+		DistributedEmbedSQLitePath:  cfg.DistributedEmbed.BrokerSQLitePath,
+		DistributedEmbedMaxAttempts: cfg.DistributedEmbed.MaxAttempts,
 	}
 }
 
@@ -1172,6 +1235,18 @@ func applySourceFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.IndexPgvectorTable != nil {
 		cfg.IndexPgvectorTable = *fc.IndexPgvectorTable
+	}
+	if fc.DistributedEmbedEnabled != nil {
+		cfg.DistributedEmbed.Enabled = *fc.DistributedEmbedEnabled
+	}
+	if fc.DistributedEmbedBroker != nil {
+		cfg.DistributedEmbed.Broker = *fc.DistributedEmbedBroker
+	}
+	if fc.DistributedEmbedSQLitePath != nil {
+		cfg.DistributedEmbed.BrokerSQLitePath = *fc.DistributedEmbedSQLitePath
+	}
+	if fc.DistributedEmbedMaxAttempts != nil {
+		cfg.DistributedEmbed.MaxAttempts = *fc.DistributedEmbedMaxAttempts
 	}
 }
 
@@ -1793,6 +1868,11 @@ var configKeyAliases = map[string]string{
 	"index.pgvector.dsn":                   "index_pgvector_dsn",
 	"index.pgvector.schema":                "index_pgvector_schema",
 	"index.pgvector.table":                 "index_pgvector_table",
+	"distributed_embed.enabled":            "distributed_embed_enabled",
+	"distributed_embed.broker":             "distributed_embed_broker",
+	"distributed_embed.sqlite_path":        "distributed_embed_sqlite_path",
+	"distributed_embed.broker_url":         "distributed_embed_broker_url",
+	"distributed_embed.max_attempts":       "distributed_embed_max_attempts",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
@@ -1873,6 +1953,9 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"retrieval.hybrid.enabled": func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
 	"dedup.retrieval":          func(c *fileConfig) **bool { return &c.DedupRetrieval },
 	"rerank.enabled":           func(c *fileConfig) **bool { return &c.RerankEnabled },
+	"distributed_embed_enabled": func(c *fileConfig) **bool {
+		return &c.DistributedEmbedEnabled
+	},
 }
 
 func setBoolFileScalar(cfg *fileConfig, key, value string) error {
@@ -1909,6 +1992,9 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"media.video_window_sec":     func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
 	"media.clip.max_duration_ms": func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
 	"media.clip.max_bytes":       func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
+	"distributed_embed_max_attempts": func(c *fileConfig) **int {
+		return &c.DistributedEmbedMaxAttempts
+	},
 }
 
 func setIntFileScalar(cfg *fileConfig, key, value string) error {
@@ -2025,6 +2111,10 @@ func setSourceStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IndexPgvectorSchema = strPtr(value)
 	case "index_pgvector_table":
 		cfg.IndexPgvectorTable = strPtr(value)
+	case "distributed_embed_broker":
+		cfg.DistributedEmbedBroker = strPtr(value)
+	case "distributed_embed_sqlite_path":
+		cfg.DistributedEmbedSQLitePath = strPtr(value)
 	}
 }
 
@@ -2325,6 +2415,12 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("index_pgvector_schema", cfg.IndexPgvectorSchema)
 	writeScalar("index_pgvector_table", cfg.IndexPgvectorTable)
 	// index_pgvector_dsn is a secret and never written to disk (env/keychain/.env.local-only).
+	writeBool("distributed_embed_enabled", cfg.DistributedEmbedEnabled)
+	writeScalar("distributed_embed_broker", cfg.DistributedEmbedBroker)
+	writeScalar("distributed_embed_sqlite_path", cfg.DistributedEmbedSQLitePath)
+	writeInt("distributed_embed_max_attempts", cfg.DistributedEmbedMaxAttempts)
+	// distributed_embed_broker_url is a secret (may embed credentials) and is
+	// never written to disk (env/keychain/.env.local-only, SPEC §16.1.1).
 
 	return []byte(b.String()), nil
 }
@@ -2390,6 +2486,28 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	applySourceEnvOverrides(cfg, overrideEnv)
 	applyQdrantEnvOverrides(cfg, overrideEnv)
 	applyIndexEnvOverrides(cfg, overrideEnv)
+	applyDistributedEmbedEnvOverrides(cfg, overrideEnv)
+}
+
+// applyDistributedEmbedEnvOverrides applies the distributed-embedding env
+// overrides (issue #248, SPEC §8.7). Enabled/broker/sqlite_path/max_attempts are
+// non-secret settings. The broker URL is a runtime-only secret (it may embed
+// credentials): resolved through the existing precedence (env → keychain →
+// file/.env.local) and NEVER persisted to the snapshot (SPEC §16.1.1).
+func applyDistributedEmbedEnvOverrides(cfg *Config, env map[string]string) {
+	if raw, ok := envLookup("DIR2MCP_DISTRIBUTED_EMBED_ENABLED", env); ok {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			cfg.DistributedEmbed.Enabled = parsed
+		}
+	}
+	setTrimmedEnv(env, "DIR2MCP_DISTRIBUTED_EMBED_BROKER", &cfg.DistributedEmbed.Broker)
+	setTrimmedEnv(env, "DIR2MCP_DISTRIBUTED_EMBED_SQLITE_PATH", &cfg.DistributedEmbed.BrokerSQLitePath)
+	if raw, ok := envLookup("DIR2MCP_DISTRIBUTED_EMBED_MAX_ATTEMPTS", env); ok {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+			cfg.DistributedEmbed.MaxAttempts = parsed
+		}
+	}
+	setSecretEnv(env, "DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL", &cfg.DistributedEmbed.BrokerURL)
 }
 
 // applyIndexEnvOverrides sources vector-index backend settings from the
@@ -2715,6 +2833,9 @@ func (c *Config) Validate() error {
 	if err := c.validateSource(); err != nil {
 		return err
 	}
+	if err := c.validateDistributedEmbed(); err != nil {
+		return err
+	}
 	c.applyValidationDefaults()
 	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
@@ -2967,6 +3088,55 @@ func (c *Config) validateSourceRuntimeSecrets() error {
 			"(set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY via environment, keychain, or .env.local)")
 	}
 	return nil
+}
+
+// validateDistributedEmbed enforces the distributed-embedding invariants
+// (issue #248, SPEC §8.7). It is a no-op when distributed mode is off (the
+// in-process loop runs, §1.2). When enabled it: (1) normalizes/validates the
+// broker selector (memory|sqlite, or an external value), and (2) REQUIRES a
+// shared external Tier-C vector store (qdrant/pgvector, §8.7.4) — the embedded
+// Tier A/B backends are single-node and cannot be shared across workers, so a
+// distributed pool over an embedded backend is rejected as CONFIG_INVALID. The
+// broker URL credential is never validated here (it is a runtime-only secret
+// resolved per §16.1.1, absent on file/snapshot loads).
+func (c *Config) validateDistributedEmbed() error {
+	if !c.DistributedEmbed.Enabled {
+		return nil
+	}
+	broker := strings.ToLower(strings.TrimSpace(c.DistributedEmbed.Broker))
+	if broker == "" {
+		broker = "memory"
+	}
+	switch broker {
+	case "memory", "sqlite":
+		// built-in, dependency-free brokers (SPEC §8.7.4 default impl)
+	default:
+		// An external adapter value is allowed but MUST carry a connection URL so
+		// the topology is actually reachable.
+		if strings.TrimSpace(c.DistributedEmbed.BrokerURL) == "" {
+			return fmt.Errorf("distributed_embed.broker=%q requires distributed_embed.broker_url "+
+				"(set DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL)", c.DistributedEmbed.Broker)
+		}
+	}
+	c.DistributedEmbed.Broker = broker
+	if c.DistributedEmbed.MaxAttempts < 0 {
+		return fmt.Errorf("distributed_embed.max_attempts must be non-negative: %d", c.DistributedEmbed.MaxAttempts)
+	}
+
+	// Tier C is a PREREQUISITE of the distributed mode (SPEC §8.7.4): the embedded
+	// Tier A/B backends (memory/disk) are single-node and not a shared store.
+	backend := strings.ToLower(strings.TrimSpace(c.IndexBackend))
+	if backend == "" {
+		backend = Default().IndexBackend
+	}
+	switch backend {
+	case "qdrant", "pgvector":
+		return nil
+	default:
+		return fmt.Errorf("distributed_embed.enabled requires an external Tier C vector store "+
+			"(index.backend=qdrant or pgvector); the embedded backend %q is single-node and cannot be "+
+			"shared across distributed workers (SPEC §8.7.4)", backend)
+	}
 }
 
 // finalizeLoaded runs the standard post-load validation: Validate (persisted

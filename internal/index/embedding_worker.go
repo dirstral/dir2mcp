@@ -648,6 +648,24 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	if len(tasks) == 0 {
 		return 0, nil
 	}
+	return w.EmbedAndIndex(ctx, indexKind, tasks)
+}
+
+// EmbedAndIndex embeds the supplied chunk tasks for indexKind, upserts their
+// vectors into the index, and marks them embedded (or failed) in the source —
+// the shared embed→index→mark step extracted from RunOnce so a distributed
+// embed-worker (SPEC §8.7) can reuse the exact same path on jobs it leases from
+// a broker instead of polling NextPending. Writes are idempotent because the
+// index upserts by chunk_id (SPEC §8.7.3), so re-running on an already-embedded
+// chunk overwrites the same vector and re-sets the same terminal status — no
+// duplicate vectors. Returns the number of chunks successfully indexed.
+func (w *EmbeddingWorker) EmbedAndIndex(ctx context.Context, indexKind string, tasks []model.ChunkTask) (int, error) {
+	if err := w.validate(); err != nil {
+		return 0, err
+	}
+	if len(tasks) == 0 {
+		return 0, nil
+	}
 	// sanity-check tasks returned by the source.  they should already be
 	// consistent, but validating here guards against misbehaving or
 	// hand‑constructed implementations.
