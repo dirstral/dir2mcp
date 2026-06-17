@@ -1309,12 +1309,14 @@ func (s *Service) resolveMediaWindowMS(cfgSec, defaultMS, capMS int, modality st
 	if cfgSec <= 0 {
 		return defaultMS
 	}
-	windowMS := cfgSec * 1000
-	if windowMS > capMS {
+	// Compare in seconds before converting to ms: a huge cfgSec would overflow
+	// cfgSec*1000 (wrapping negative and slipping past the cap), so the cap
+	// check must run first on the un-multiplied value.
+	if cfgSec > capMS/1000 {
 		s.getLogger().Printf("multimodal: configured %s window %ds exceeds the per-modality cap (%ds); clamping to the cap", modality, cfgSec, capMS/1000)
 		return capMS
 	}
-	return windowMS
+	return cfgSec * 1000
 }
 
 // mediaSpansFor returns the per-chunk spans to embed directly for doc under the

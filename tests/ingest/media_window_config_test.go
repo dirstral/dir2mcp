@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,5 +114,18 @@ func TestMediaWindow_VideoClampedToCap(t *testing.T) {
 	}
 	if last != 240000 {
 		t.Errorf("last video window end = %dms, want 240000", last)
+	}
+}
+
+// TestMediaWindow_OverflowClampedToCap asserts that an absurdly large configured
+// window (math.MaxInt) clamps to the cap rather than overflowing cfgSec*1000 to a
+// negative window. Over 360 s of audio at the 180 s cap => 2 windows.
+func TestMediaWindow_OverflowClampedToCap(t *testing.T) {
+	windows, last := processMediaWithWindowCfg(t, "talk.mp3", "audio", 360*time.Second, math.MaxInt, 0)
+	if windows != 2 {
+		t.Fatalf("audio windows = %d, want 2 (MaxInt window clamped to 180s, not overflowed)", windows)
+	}
+	if last != 360000 {
+		t.Errorf("last audio window end = %dms, want 360000", last)
 	}
 }
