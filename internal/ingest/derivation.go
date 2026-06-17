@@ -158,22 +158,32 @@ func (s *Service) transcriptCacheKey(content []byte) string {
 
 // ocrCacheKey returns the on-disk OCR cache filename stem for the given content,
 // folding the active OCR derivation identity into the key (SPEC §8.6.7). Keying
-// on the bytes alone would return the previous extractor's cached text after an
-// OCR model swap that the re-ingest gate forced re-extraction for, silently
-// defeating the re-derivation. An empty active identity (no extractor / no
-// model concept) folds in "", preserving the historical bytes-only key.
+// on the bytes alone would return the PREVIOUS extractor's cached text after an
+// OCR model/provider swap that the re-ingest gate forced re-extraction for,
+// silently defeating the re-derivation.
+//
+// The identity is folded whenever it is non-empty — which includes PROVIDER-only
+// identities (docling / docling-serve / custom commands, which have no model).
+// All extractors share one `cache/ocr` directory, so a docling↔docling-serve
+// swap (which ocrStale treats as stale, since the provider differs) MUST land on
+// a different cache key; folding the provider-bearing identity guarantees that.
+// An empty active identity (no extractor configured) folds in nothing, preserving
+// the historical bytes-only key for the no-OCR path.
 func (s *Service) ocrCacheKey(content []byte) string {
-	// Only model-bearing extractors (e.g. mistral OCR) need the identity folded
-	// in: model-less extractors (docling / docling-serve / custom commands) are
-	// deterministic for the same bytes and use a distinct cache directory per
-	// provider, so their historical bytes-only key is preserved and a swap between
-	// them already lands in a different cache tree.
-	_, modelName := s.extractorProviderModel()
-	if strings.TrimSpace(modelName) == "" {
+	identity := s.activeOCRIdentity()
+	if identity == "" {
 		return computeContentHash(content)
 	}
-	combined := strings.Join([]string{computeContentHash(content), s.activeOCRIdentity()}, "\x00")
+	combined := strings.Join([]string{computeContentHash(content), identity}, "\x00")
 	return computeContentHash([]byte(combined))
+}
+
+// OCRCacheKey exposes ocrCacheKey for tests in the tests/ tree, so the
+// provider/model → cache-key binding (SPEC §8.6.7) can be asserted directly —
+// in particular that a provider-only swap (docling↔docling-serve) yields a
+// distinct key even though neither extractor carries a model.
+func (s *Service) OCRCacheKey(content []byte) string {
+	return s.ocrCacheKey(content)
 }
 
 // derivationIdentity builds the canonical, order-stable derivation-identity

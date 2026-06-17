@@ -408,3 +408,45 @@ func (g *recordingGenerator) Generate(_ context.Context, _ string) (string, erro
 	g.calls++
 	return g.out, nil
 }
+
+// TestOCRCacheKey_ProviderOnlySwapDiffersKey locks the fix for the provider-only
+// OCR cache collision (CodeRabbit on #301): all extractors share one cache/ocr
+// directory, and docling / docling-serve carry no model, so a bytes-only key
+// would let a docling↔docling-serve swap read the previous provider's cached
+// output even though ocrStale correctly marks it stale. The cache key MUST fold
+// the provider-bearing identity so the two land on distinct keys, while the same
+// provider keeps a stable key.
+func TestOCRCacheKey_ProviderOnlySwapDiffersKey(t *testing.T) {
+	t.Parallel()
+	content := []byte("identical-pdf-bytes")
+	st := newRealStore(t)
+	cfg := config.Config{RootDir: t.TempDir(), StateDir: t.TempDir(), STTProvider: "off"}
+
+	newSvc := func(ex model.DocumentExtractor) *ingest.Service {
+		s := mustNewIngestService(t, cfg, st)
+		s.SetDocumentExtractor(ex)
+		return s
+	}
+
+	docling := newSvc(ingest.NewDoclingExtractor("docling"))
+	doclingServe := newSvc(ingest.NewDoclingServeExtractor("http://example.test"))
+	doclingAgain := newSvc(ingest.NewDoclingExtractor("docling"))
+
+	kDocling := docling.OCRCacheKey(content)
+	kServe := doclingServe.OCRCacheKey(content)
+	kDoclingAgain := doclingAgain.OCRCacheKey(content)
+
+	if kDocling == kServe {
+		t.Fatalf("docling and docling-serve must not share an OCR cache key (got %q for both)", kDocling)
+	}
+	if kDocling != kDoclingAgain {
+		t.Fatalf("same provider must yield a stable OCR cache key: %q != %q", kDocling, kDoclingAgain)
+	}
+
+	// No extractor configured -> empty identity -> historical bytes-only key,
+	// distinct from any provider-folded key.
+	none := mustNewIngestService(t, cfg, st)
+	if kNone := none.OCRCacheKey(content); kNone == kDocling || kNone == kServe {
+		t.Fatalf("no-extractor key %q must differ from provider-folded keys", kNone)
+	}
+}

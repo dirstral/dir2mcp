@@ -119,7 +119,7 @@ func TestGenerateOCRMarkdownRepresentation_PersistsPagedChunks(t *testing.T) {
 		t.Fatalf("expected stale chunk cleanup call")
 	}
 
-	cachePath := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(content)+".md")
+	cachePath := filepath.Join(stateDir, "cache", "ocr", svc.OCRCacheKey(content)+".md")
 	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("expected OCR cache file at %s: %v", cachePath, err)
 	}
@@ -128,18 +128,21 @@ func TestGenerateOCRMarkdownRepresentation_PersistsPagedChunks(t *testing.T) {
 func TestReadOrComputeOCR_UsesCache(t *testing.T) {
 	stateDir := t.TempDir()
 	content := []byte("same bytes")
-	cachePath := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(content)+".md")
+
+	ocr := &fakeOCR{text: "fresh ocr"}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
+	svc.SetOCR(ocr)
+	doc := model.Document{RelPath: "docs/spec.pdf"}
+
+	// Seed the cache at the key the configured extractor actually uses (the OCR
+	// derivation identity is folded into the key, §8.6.7), not the bytes-only hash.
+	cachePath := filepath.Join(stateDir, "cache", "ocr", svc.OCRCacheKey(content)+".md")
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
 	if err := os.WriteFile(cachePath, []byte("cached ocr"), 0o644); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
-
-	ocr := &fakeOCR{text: "fresh ocr"}
-	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
-	svc.SetOCR(ocr)
-	doc := model.Document{RelPath: "docs/spec.pdf"}
 
 	got, err := svc.ReadOrComputeOCR(context.Background(), doc, content)
 	if err != nil {
