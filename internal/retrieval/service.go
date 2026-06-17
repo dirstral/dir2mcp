@@ -1674,6 +1674,13 @@ func (s *Service) searchBothIndices(ctx context.Context, query string, k int, te
 		}
 		return out[i].Score > out[j].Score
 	})
+	// Cross-file dedup applies to the MERGED pool too (SPEC 9.2): each
+	// searchSingleIndex call above deduped within its own axis, but a
+	// byte-identical duplicate can still surface once in the text pool and once
+	// in the code pool. Collapse across the merged, normalized, score-sorted
+	// pool (keeping the best-ranked survivor) before rerank/truncation, so
+	// index=both matches single-index behavior.
+	out = s.dedupCrossFileCandidates(out)
 	// index=both: rerank once on the merged, normalized pool (SPEC 9.1.1).
 	return s.rerankPool(ctx, query, out, k), nil
 }

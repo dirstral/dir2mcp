@@ -130,3 +130,42 @@ func TestSearch_CrossFileDedup_NoMapIsPassThrough(t *testing.T) {
 		t.Fatalf("no hash map must pass through; got %v", got)
 	}
 }
+
+// TestSearch_CrossFileDedup_IndexBothMergedPool pins SPEC 9.2 for index=both:
+// a byte-identical duplicate that surfaces once in the text pool and once in the
+// code pool (as distinct chunks) must collapse to a single survivor in the
+// merged pool, not just within each axis.
+func TestSearch_CrossFileDedup_IndexBothMergedPool(t *testing.T) {
+	textIdx := index.NewHNSWIndex("")
+	codeIdx := index.NewHNSWIndex("")
+	addVec(t, textIdx, 1, []float32{1, 0})       // a.md      (hash H1) in text axis
+	addVec(t, codeIdx, 2, []float32{0.99, 0.01}) // copy/a.md (hash H1) in code axis
+
+	svc := retrieval.NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed":   {1, 0},
+		"codestral-embed": {1, 0},
+	}}, nil)
+	svc.SetCodeIndex(codeIdx)
+	svc.SetCrossFileDedupEnabled(true)
+	svc.SetDocumentHashes([]model.DocumentHash{
+		{RelPath: "a.md", ContentHash: "H1"},
+		{RelPath: "copy/a.md", ContentHash: "H1"},
+	})
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "a.md", Snippet: "alpha"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "copy/a.md", Snippet: "alpha"})
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "alpha", K: 10, Index: "both"})
+	if err != nil {
+		t.Fatalf("Search(index=both): %v", err)
+	}
+	if len(hits) != 1 {
+		ids := make([]uint64, 0, len(hits))
+		for _, h := range hits {
+			ids = append(ids, h.ChunkID)
+		}
+		t.Fatalf("index=both cross-file dedup: expected 1 survivor, got %v", ids)
+	}
+	if hits[0].ChunkID != 1 {
+		t.Fatalf("expected best-ranked survivor chunk 1, got %d", hits[0].ChunkID)
+	}
+}
