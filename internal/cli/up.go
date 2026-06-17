@@ -77,6 +77,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 	a.configureReranker(ret, cfg)
+	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
+	a.loadCrossFileDedupHashes(ctx, cfg, st, ret)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
@@ -859,6 +861,27 @@ func warnConfigSnapshotErr(stderr io.Writer, quiet bool, err error) {
 	if err != nil && !quiet {
 		writef(stderr, "warning: write config snapshot: %v\n", err)
 	}
+}
+
+// loadCrossFileDedupHashes wires the rel_path → content_hash map used by
+// retrieval-time cross-file de-duplication (SPEC 9.2) onto the retrieval
+// service. It is a no-op when dedup is disabled, or when the store does not
+// implement model.DocumentHashLister; a load error is non-fatal (dedup simply
+// stays a pass-through) since it must never block server startup.
+func (a *App) loadCrossFileDedupHashes(ctx context.Context, cfg config.Config, st model.Store, ret *retrieval.Service) {
+	if !cfg.DedupRetrieval || st == nil || ret == nil {
+		return
+	}
+	lister, ok := st.(model.DocumentHashLister)
+	if !ok {
+		return
+	}
+	hashes, err := lister.ListDocumentHashes(ctx)
+	if err != nil {
+		writef(a.stderr, "warning: load document hashes for retrieval dedup: %v\n", err)
+		return
+	}
+	ret.SetDocumentHashes(hashes)
 }
 
 // initIndexingState creates a new IndexingState and optionally preloads
