@@ -55,6 +55,58 @@ type Options struct {
 	MaxSizeBytes   int64
 	UseGitIgnore   bool
 	FollowSymlinks bool
+	// ScanCache, when non-nil, is an optional directory-discovery cache (issue
+	// #267 item 5) consulted by the LocalFS walker. It lets an unchanged
+	// directory skip re-reading and re-sorting its entries while still detecting
+	// added/removed/modified files. nil disables it (a full re-walk every run);
+	// only the local-filesystem backend honors it.
+	ScanCache ScanCache
+}
+
+// CachedDirEntry is a directory child's identity recorded in the scan cache: its
+// name, whether it is a directory, and (for regular files) the size/mtime used
+// to detect an in-place modification. It is the minimal stat fingerprint the
+// walker compares against the live filesystem on a cache hit.
+type CachedDirEntry struct {
+	Name      string
+	IsDir     bool
+	SizeBytes int64
+	MTimeUnix int64
+	// Mode is the file mode bits recorded for a regular file so a cache hit can
+	// reconstruct the DiscoveredFile.Mode without re-stat beyond the size/mtime
+	// confirmation the walker already performs.
+	Mode uint32
+}
+
+// CachedDirSignature is the persisted fingerprint of a single directory: the
+// directory's own mtime (which POSIX bumps on any add/remove/rename of a direct
+// child) plus the sorted list of its direct children. A live directory whose
+// mtime equals DirMTimeUnix has the same set of children as when the signature
+// was stored, so the walker can validate the cached children with per-file stats
+// instead of re-reading the directory.
+type CachedDirSignature struct {
+	DirMTimeUnix int64
+	Entries      []CachedDirEntry
+}
+
+// ScanCache persists per-directory discovery signatures keyed by a directory's
+// rel path (the corpus-root-relative slash path; "" is the root). It is a cheap,
+// correctness-preserving optimization: the walker only ever trusts it after
+// confirming the directory's own mtime is unchanged AND re-stat'ing every cached
+// child, so a stale or wrong cache can never cause a changed file to be missed —
+// at worst it triggers a full re-walk of the affected directory.
+//
+// Implementations must be safe for the walker's usage (sequential within one
+// Walk). Lookup returning ok=false (or any inconsistency) must make the walker
+// fall back to a full directory read.
+type ScanCache interface {
+	// LookupDir returns the cached signature for relDir, or ok=false when none is
+	// recorded. An error is treated by the walker as a cache miss (full re-walk).
+	LookupDir(relDir string) (sig CachedDirSignature, ok bool, err error)
+	// StoreDir records the freshly observed signature for relDir, replacing any
+	// previous entry. Errors are non-fatal to discovery (the walk still returns
+	// correct results; the cache simply does not improve next time).
+	StoreDir(relDir string, sig CachedDirSignature) error
 }
 
 // DefaultOptions returns discovery defaults: the 10 MiB cap, gitignore off, and

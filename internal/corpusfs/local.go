@@ -224,6 +224,40 @@ func (w *discoverWalker) walkDir(ctx context.Context, absDir, relDir string, par
 		return err
 	}
 
+	// Fast path: when a scan cache is configured and this directory's own mtime
+	// is unchanged, its set of direct children is unchanged too (POSIX bumps a
+	// directory's mtime on any add/remove/rename of a direct child). Validate the
+	// cached children with cheap per-file stats — which still catches an in-place
+	// file modification — and skip re-reading and re-sorting the directory. Any
+	// inconsistency makes served become false so we fall through to a full read.
+	if served, err := w.walkDirFromCache(ctx, absDir, relDir, rules); err != nil {
+		return err
+	} else if served {
+		return nil
+	}
+
+	return w.walkDirFull(ctx, absDir, relDir, rules)
+}
+
+// walkDirFull performs the authoritative directory read: it lists, sorts, and
+// processes every entry, and (when caching is enabled and the read is clean)
+// persists a fresh signature for next time.
+func (w *discoverWalker) walkDirFull(ctx context.Context, absDir, relDir string, rules []gitIgnoreRule) error {
+	// Capture the directory mtime BEFORE reading its entries. Storing the
+	// pre-read mtime (and re-confirming it is unchanged after the read) closes a
+	// TOCTOU: if a child is added concurrently with the read, the mtime bumps and
+	// we decline to cache a possibly-partial snapshot rather than risk recording a
+	// new mtime against a stale child set (which a later run would wrongly trust).
+	caching := w.options.ScanCache != nil && !w.options.FollowSymlinks
+	var preReadMTime int64
+	if caching {
+		if info, statErr := os.Stat(absDir); statErr == nil {
+			preReadMTime = info.ModTime().Unix()
+		} else {
+			caching = false
+		}
+	}
+
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
 		return err
@@ -232,43 +266,78 @@ func (w *discoverWalker) walkDir(ctx context.Context, absDir, relDir string, par
 		return entries[i].Name() < entries[j].Name()
 	})
 
+	// sigEntries accumulates the freshly observed children so the directory's
+	// signature can be persisted for the next run. Only populated when caching is
+	// enabled and the directory is fully readable (no per-entry error aborts).
+	var sigEntries []CachedDirEntry
+
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-
-		name := entry.Name()
-		relPath := name
-		if relDir != "" {
-			relPath = relDir + "/" + name
-		}
-		fullPath := filepath.Join(absDir, name)
-
-		lstat, err := os.Lstat(fullPath)
+		sigEntry, ok, err := w.processFullEntry(ctx, absDir, relDir, entry.Name(), rules)
 		if err != nil {
 			return err
 		}
-
-		if lstat.Mode()&os.ModeSymlink != 0 {
-			if !w.options.FollowSymlinks {
-				continue
-			}
-			if err := w.handleSymlink(ctx, fullPath, relPath, rules); err != nil {
-				return err
-			}
+		if !ok {
+			// A symlink child makes the cached signature ambiguous (resolution and
+			// cycle-detection are stateful), so do not persist a signature for this
+			// directory: the next run re-reads it fully.
+			caching = false
 			continue
 		}
-
-		if lstat.IsDir() {
-			if err := w.visitDir(ctx, fullPath, relPath, name, rules); err != nil {
-				return err
-			}
-			continue
+		if caching {
+			sigEntries = append(sigEntries, sigEntry)
 		}
+	}
 
-		if !w.shouldAddFile(lstat, relPath, rules) {
-			continue
+	if caching {
+		w.storeDirSignature(absDir, relDir, preReadMTime, sigEntries)
+	}
+	return nil
+}
+
+// processFullEntry handles a single freshly-read child of a directory: it stats
+// it, recurses into directories, appends regular files that pass policy, and
+// follows symlinks per options. It returns the entry's cache signature plus
+// cacheable=false when the child (a symlink) makes the directory ineligible for
+// caching.
+func (w *discoverWalker) processFullEntry(ctx context.Context, absDir, relDir, name string, rules []gitIgnoreRule) (CachedDirEntry, bool, error) {
+	relPath := name
+	if relDir != "" {
+		relPath = relDir + "/" + name
+	}
+	fullPath := filepath.Join(absDir, name)
+
+	lstat, err := os.Lstat(fullPath)
+	if err != nil {
+		return CachedDirEntry{}, false, err
+	}
+
+	if lstat.Mode()&os.ModeSymlink != 0 {
+		if !w.options.FollowSymlinks {
+			return CachedDirEntry{}, false, nil
 		}
+		if err := w.handleSymlink(ctx, fullPath, relPath, rules); err != nil {
+			return CachedDirEntry{}, false, err
+		}
+		return CachedDirEntry{}, false, nil
+	}
+
+	if lstat.IsDir() {
+		if err := w.visitDir(ctx, fullPath, relPath, name, rules); err != nil {
+			return CachedDirEntry{}, false, err
+		}
+		return CachedDirEntry{Name: name, IsDir: true}, true, nil
+	}
+
+	sig := CachedDirEntry{
+		Name:      name,
+		SizeBytes: lstat.Size(),
+		MTimeUnix: lstat.ModTime().Unix(),
+		Mode:      uint32(lstat.Mode()),
+	}
+	if w.shouldAddFile(lstat, relPath, rules) {
 		*w.files = append(*w.files, DiscoveredFile{
 			AbsPath:   fullPath,
 			RelPath:   relPath,
@@ -277,8 +346,140 @@ func (w *discoverWalker) walkDir(ctx context.Context, absDir, relDir string, par
 			Mode:      lstat.Mode(),
 		})
 	}
+	return sig, true, nil
+}
 
+// cachedChild pairs a validated cache entry with the live stat used to confirm
+// it, so the emit pass can reuse the stat without re-calling Lstat.
+type cachedChild struct {
+	entry    CachedDirEntry
+	relPath  string
+	fullPath string
+	lstat    os.FileInfo
+}
+
+// walkDirFromCache attempts to serve absDir from the scan cache. It returns
+// served=true only when the cache holds a signature whose recorded directory
+// mtime equals the live directory mtime AND every cached child still matches the
+// live filesystem (a regular file's size+mtime unchanged, a directory still a
+// directory). On a hit it appends the surviving files (applying the same
+// gitignore/size policies) and recurses into child directories exactly as the
+// full path would. served=false means the caller must perform a full read; the
+// cache is never trusted without these confirmations, so a stale entry can only
+// cost a re-walk, never a missed change.
+func (w *discoverWalker) walkDirFromCache(ctx context.Context, absDir, relDir string, rules []gitIgnoreRule) (bool, error) {
+	if w.options.ScanCache == nil || w.options.FollowSymlinks {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	info, err := os.Stat(absDir)
+	if err != nil {
+		return false, nil //nolint:nilerr // unreadable dir is a miss; full path reports the error
+	}
+	sig, ok, err := w.options.ScanCache.LookupDir(relDir)
+	if err != nil || !ok || sig.DirMTimeUnix != info.ModTime().Unix() {
+		return false, nil //nolint:nilerr // a cache error/miss/mtime drift is a full-read fallback
+	}
+
+	confirmed, ok, err := w.validateCachedChildren(ctx, absDir, relDir, sig.Entries)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	if err := w.emitCachedChildren(ctx, confirmed, rules); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// validateCachedChildren confirms every cached child still matches the live
+// filesystem WITHOUT mutating walker state, so a late mismatch leaves nothing
+// half-applied before the full-read fallback. ok=false means the directory must
+// be re-read in full.
+func (w *discoverWalker) validateCachedChildren(ctx context.Context, absDir, relDir string, entries []CachedDirEntry) ([]cachedChild, bool, error) {
+	confirmed := make([]cachedChild, 0, len(entries))
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		fullPath := filepath.Join(absDir, e.Name)
+		lstat, statErr := os.Lstat(fullPath)
+		if statErr != nil || lstat.Mode()&os.ModeSymlink != 0 {
+			return nil, false, nil // child vanished/changed identity or is a symlink.
+		}
+		if !cachedChildMatches(e, lstat) {
+			return nil, false, nil
+		}
+		relPath := e.Name
+		if relDir != "" {
+			relPath = relDir + "/" + e.Name
+		}
+		confirmed = append(confirmed, cachedChild{entry: e, relPath: relPath, fullPath: fullPath, lstat: lstat})
+	}
+	return confirmed, true, nil
+}
+
+// cachedChildMatches reports whether a live stat is consistent with the cached
+// entry: a directory must still be a directory; a regular file must still be a
+// regular file with the same size and mtime (so an in-place modification fails).
+func cachedChildMatches(e CachedDirEntry, lstat os.FileInfo) bool {
+	if e.IsDir {
+		return lstat.IsDir()
+	}
+	if lstat.IsDir() || !lstat.Mode().IsRegular() {
+		return false
+	}
+	return lstat.Size() == e.SizeBytes && lstat.ModTime().Unix() == e.MTimeUnix
+}
+
+// emitCachedChildren appends the confirmed files and recurses into confirmed
+// subdirectories using the identical policy as the full path.
+func (w *discoverWalker) emitCachedChildren(ctx context.Context, confirmed []cachedChild, rules []gitIgnoreRule) error {
+	for _, p := range confirmed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if p.entry.IsDir {
+			if err := w.visitDir(ctx, p.fullPath, p.relPath, p.entry.Name, rules); err != nil {
+				return err
+			}
+			continue
+		}
+		if !w.shouldAddFile(p.lstat, p.relPath, rules) {
+			continue
+		}
+		*w.files = append(*w.files, DiscoveredFile{
+			AbsPath:   p.fullPath,
+			RelPath:   p.relPath,
+			SizeBytes: p.lstat.Size(),
+			MTimeUnix: p.lstat.ModTime().Unix(),
+			Mode:      p.lstat.Mode(),
+		})
+	}
 	return nil
+}
+
+// storeDirSignature persists the freshly observed directory signature, but only
+// if the directory's mtime has not changed since it was sampled before the read
+// (preReadMTime). A changed mtime means a child was added/removed/renamed during
+// the read, so the captured child set may be partial; in that case we skip the
+// store rather than record a new mtime against a stale set (which a later run
+// would wrongly trust). Errors are non-fatal: discovery already produced correct
+// results; a failed store only forgoes the optimization next run.
+func (w *discoverWalker) storeDirSignature(absDir, relDir string, preReadMTime int64, entries []CachedDirEntry) {
+	info, err := os.Stat(absDir)
+	if err != nil || info.ModTime().Unix() != preReadMTime {
+		return
+	}
+	_ = w.options.ScanCache.StoreDir(relDir, CachedDirSignature{
+		DirMTimeUnix: preReadMTime,
+		Entries:      entries,
+	})
 }
 
 func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath string, rules []gitIgnoreRule) error {

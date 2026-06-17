@@ -214,6 +214,18 @@ type Config struct {
 	// (#268 Qdrant, #269 pgvector) extend.
 	IndexBackend string
 
+	// IngestScanCache opts IN to a directory-discovery scan cache (issue #267
+	// item 5, config `ingest.scan_cache`). For large local archives the corpus is
+	// re-walked from scratch on every run; the cache persists a per-directory
+	// signature (the directory's own mtime plus its direct children's
+	// name/size/mtime/mode) so an unchanged directory skips re-reading and
+	// re-sorting its entries. Correctness is never traded for speed: every cached
+	// child file is still stat'd so an in-place modification is detected, and any
+	// add/remove/rename (which bumps the parent directory mtime) or stat failure
+	// falls the directory back to a full re-walk. Default OFF: discovery behaves
+	// exactly as before. Only consulted for the local-filesystem backend.
+	IngestScanCache bool
+
 	// IngestWatch enables a filesystem watcher so a running server keeps
 	// indexing added/changed/deleted files after the initial scan. Opt-in.
 	IngestWatch bool
@@ -426,6 +438,7 @@ type fileConfig struct {
 	IngestArchivesMode        *string
 	IngestExtractor           *string
 	IndexBackend              *string
+	IngestScanCache           *bool
 	IngestWatch               *bool
 	IngestWatchDebounce       *time.Duration
 	STTProvider               *string
@@ -528,6 +541,7 @@ type persistedConfig struct {
 	IngestArchivesMode        string        `yaml:"ingest_archives_mode"`
 	IngestExtractor           string        `yaml:"ingest_extractor"`
 	IndexBackend              string        `yaml:"index_backend"`
+	IngestScanCache           bool          `yaml:"ingest_scan_cache"`
 	IngestWatch               bool          `yaml:"ingest_watch"`
 	IngestWatchDebounce       time.Duration `yaml:"ingest_watch_debounce"`
 	STTProvider               string        `yaml:"stt_provider"`
@@ -671,6 +685,7 @@ func Default() Config {
 		IngestArchivesMode:        "deep",
 		IngestExtractor:           "auto",
 		IndexBackend:              "memory",
+		IngestScanCache:           false,
 		IngestWatch:               false,
 		IngestWatchDebounce:       500 * time.Millisecond,
 		STTProvider:               "mistral",
@@ -776,6 +791,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestArchivesMode:        cfg.IngestArchivesMode,
 		IngestExtractor:           cfg.IngestExtractor,
 		IndexBackend:              cfg.IndexBackend,
+		IngestScanCache:           cfg.IngestScanCache,
 		IngestWatch:               cfg.IngestWatch,
 		IngestWatchDebounce:       cfg.IngestWatchDebounce,
 		STTProvider:               cfg.STTProvider,
@@ -1382,6 +1398,9 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IndexBackend != nil {
 		cfg.IndexBackend = *fc.IndexBackend
 	}
+	if fc.IngestScanCache != nil {
+		cfg.IngestScanCache = *fc.IngestScanCache
+	}
 	if fc.IngestWatch != nil {
 		cfg.IngestWatch = *fc.IngestWatch
 	}
@@ -1710,6 +1729,8 @@ var configKeyAliases = map[string]string{
 	"follow_symlinks":                      "ingest.follow_symlinks",
 	"ingest_max_file_mb":                   "ingest.max_file_mb",
 	"max_file_mb":                          "ingest.max_file_mb",
+	"ingest_scan_cache":                    "ingest.scan_cache",
+	"scan_cache":                           "ingest.scan_cache",
 	"ingest_watch":                         "ingest.watch",
 	"ingest_watch_debounce":                "ingest.watch_debounce",
 	"ingest_pdf_mode":                      "ingest.pdf.mode",
@@ -1837,6 +1858,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"rag.generate_answer":     func(c *fileConfig) **bool { return &c.RAGGenerateAnswer },
 	"ingest.gitignore":        func(c *fileConfig) **bool { return &c.IngestGitignore },
 	"ingest.follow_symlinks":  func(c *fileConfig) **bool { return &c.IngestFollowSymlinks },
+	"ingest.scan_cache":       func(c *fileConfig) **bool { return &c.IngestScanCache },
 	"ingest.watch":            func(c *fileConfig) **bool { return &c.IngestWatch },
 	"quality_gates_enabled":   func(c *fileConfig) **bool { return &c.QualityGatesEnabled },
 	"media_sidecars_disabled": func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
@@ -2251,6 +2273,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
 	writeScalar("ingest_extractor", cfg.IngestExtractor)
 	writeScalar("index_backend", cfg.IndexBackend)
+	writeBool("ingest_scan_cache", cfg.IngestScanCache)
 	writeBool("ingest_watch", cfg.IngestWatch)
 	writeScalar("ingest_watch_debounce", cfg.IngestWatchDebounce.String())
 	writeScalar("stt_provider", cfg.STTProvider)
@@ -2478,6 +2501,11 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	} {
 		if raw, ok := envLookup(o.key, env); ok && strings.TrimSpace(raw) != "" {
 			*o.field = strings.TrimSpace(raw)
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_INGEST_SCAN_CACHE", env); ok && strings.TrimSpace(raw) != "" {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			cfg.IngestScanCache = parsed
 		}
 	}
 	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH", env); ok && strings.TrimSpace(raw) != "" {
