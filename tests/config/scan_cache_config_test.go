@@ -67,6 +67,9 @@ func TestScanCache_NestedAndFlatKeys(t *testing.T) {
 
 // TestScanCache_EnvOverride verifies DIR2MCP_INGEST_SCAN_CACHE flips the flag.
 func TestScanCache_EnvOverride(t *testing.T) {
+	// Pin source/index so ambient DIR2MCP_* in CI/dev shells can't perturb the load.
+	t.Setenv("DIR2MCP_SOURCE_KIND", "local")
+	t.Setenv("DIR2MCP_INDEX_BACKEND", "memory")
 	t.Setenv("DIR2MCP_INGEST_SCAN_CACHE", "true")
 	cfg, err := config.Load("")
 	if err != nil {

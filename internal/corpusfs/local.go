@@ -384,7 +384,10 @@ func (w *discoverWalker) walkDirFromCache(ctx context.Context, absDir, relDir st
 		return false, nil //nolint:nilerr // a cache error/miss/mtime drift is a full-read fallback
 	}
 
-	confirmed, ok := w.validateCachedChildren(absDir, relDir, sig.Entries)
+	confirmed, ok, err := w.validateCachedChildren(ctx, absDir, relDir, sig.Entries)
+	if err != nil {
+		return false, err
+	}
 	if !ok {
 		return false, nil
 	}
@@ -398,16 +401,19 @@ func (w *discoverWalker) walkDirFromCache(ctx context.Context, absDir, relDir st
 // filesystem WITHOUT mutating walker state, so a late mismatch leaves nothing
 // half-applied before the full-read fallback. ok=false means the directory must
 // be re-read in full.
-func (w *discoverWalker) validateCachedChildren(absDir, relDir string, entries []CachedDirEntry) ([]cachedChild, bool) {
+func (w *discoverWalker) validateCachedChildren(ctx context.Context, absDir, relDir string, entries []CachedDirEntry) ([]cachedChild, bool, error) {
 	confirmed := make([]cachedChild, 0, len(entries))
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		fullPath := filepath.Join(absDir, e.Name)
 		lstat, statErr := os.Lstat(fullPath)
 		if statErr != nil || lstat.Mode()&os.ModeSymlink != 0 {
-			return nil, false // child vanished/changed identity or is a symlink.
+			return nil, false, nil // child vanished/changed identity or is a symlink.
 		}
 		if !cachedChildMatches(e, lstat) {
-			return nil, false
+			return nil, false, nil
 		}
 		relPath := e.Name
 		if relDir != "" {
@@ -415,7 +421,7 @@ func (w *discoverWalker) validateCachedChildren(absDir, relDir string, entries [
 		}
 		confirmed = append(confirmed, cachedChild{entry: e, relPath: relPath, fullPath: fullPath, lstat: lstat})
 	}
-	return confirmed, true
+	return confirmed, true, nil
 }
 
 // cachedChildMatches reports whether a live stat is consistent with the cached
