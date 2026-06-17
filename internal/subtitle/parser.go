@@ -114,11 +114,14 @@ func (c *cueScanner) addLine(line string) {
 }
 
 // flush emits the in-progress cue (if any) and resets the buffer. A cue with
-// empty text after trimming/tag-stripping is dropped.
+// empty text after trimming/tag-stripping is dropped. The cue's speaker is the
+// first WebVTT <v Name> voice tag found in its text lines (SPEC §8.6.8); empty
+// when the cue carries no voice markup, preserving prior behaviour.
 func (c *cueScanner) flush() {
 	if c.haveTiming {
 		if text := joinCueText(c.textLines); text != "" {
-			c.cues = append(c.cues, Cue{Index: len(c.cues) + 1, StartMS: c.start, EndMS: c.end, Text: text})
+			speaker := voiceTagName(c.textLines)
+			c.cues = append(c.cues, Cue{Index: len(c.cues) + 1, StartMS: c.start, EndMS: c.end, Text: text, Speaker: speaker})
 		}
 	}
 	c.haveTiming = false
@@ -209,6 +212,32 @@ func isMetadataBlockStart(line string) bool {
 // inlineTagRe matches WebVTT/TTML inline markup (e.g. <c.color>, <v Speaker>,
 // <00:00:01.000>, </i>) that should not appear in indexed cue text.
 var inlineTagRe = regexp.MustCompile(`</?[^>]+>`)
+
+// voiceTagRe matches a WebVTT voice span start tag and captures the speaker
+// name (SPEC §8.6.8). The tag is `<v Name>` or `<v.class1.class2 Name>`: the
+// `v` tag name is optionally followed by `.`-separated classes, then required
+// whitespace, then the annotation (speaker name) up to the closing `>`. The
+// name capture is non-greedy and trimmed by the caller. Case-insensitive on the
+// tag name only.
+var voiceTagRe = regexp.MustCompile(`(?i)<v(?:\.[^\s.>]+)*\s+([^>]*)>`)
+
+// voiceTagName returns the speaker name from the first WebVTT <v Name> voice tag
+// across a cue's text lines, or "" when none is present. Voice tags without a
+// name (`<v>`) yield "". The returned name is trimmed; it is metadata only and
+// never alters the cue text (which has all inline tags stripped separately).
+func voiceTagName(lines []string) string {
+	for _, l := range lines {
+		if !strings.Contains(l, "<v") && !strings.Contains(l, "<V") {
+			continue
+		}
+		if m := voiceTagRe.FindStringSubmatch(l); m != nil {
+			if name := strings.TrimSpace(m[1]); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
 
 // stripInlineTags removes inline markup from cue text so the indexed transcript
 // is plain text. It is deterministic and leaves non-tag angle content untouched
