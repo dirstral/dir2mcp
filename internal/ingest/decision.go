@@ -140,10 +140,26 @@ func describeAutoWithoutDoclingCLI(ctx context.Context, cfg config.Config, docli
 // "no secrets in diagnostics" contract enforced by the support-bundle
 // tests. The exec.LookPath result is also redacted for symmetry.
 
-// mistralOCRAvailable reports whether the mistral-ocr provider profile
-// resolves to a usable credential. Used by DescribeDocumentExtractor to
-// distinguish "fallback selected" from "no extractor at all".
+// ocrProviderName returns the bespoke-OCR provider PROFILE that ingest will
+// resolve: the explicit `model.ocr.provider` binding (SPEC §16.2) when set,
+// otherwise the built-in `mistral-ocr` profile (the historical default). This
+// is what lets an operator point OCR at a self-hosted bespoke-OCR endpoint —
+// a `kind: mistral` profile on a custom `base_url` (dir2mcp#240) — by binding
+// `model.ocr.provider` to it, instead of OCR always assuming `mistral-ocr`.
+func ocrProviderName(cfg config.Config) string {
+	if name := cfg.Providers().OCRProviderName(); name != "" {
+		return name
+	}
+	return "mistral-ocr"
+}
+
+// mistralOCRAvailable reports whether the configured bespoke-OCR provider
+// profile (see ocrProviderName) resolves to a usable, OCR-capable profile.
+// Used by DescribeDocumentExtractor to distinguish "fallback selected" from
+// "no extractor at all". A self-hosted profile may be credential-less, so this
+// reports availability whenever the profile is eligible and OCR-capable — not
+// only when an API key is present.
 func mistralOCRAvailable(cfg config.Config) bool {
-	_, err := cfg.Providers().ResolveExplicit(provider.CapOCR, "mistral-ocr", true)
+	_, err := cfg.Providers().ResolveExplicit(provider.CapOCR, ocrProviderName(cfg), true)
 	return err == nil
 }

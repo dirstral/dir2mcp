@@ -260,6 +260,16 @@ func (r ProviderResolution) ByName() map[string]provider.Profile {
 	return r.byName
 }
 
+// OCRProviderName returns the explicit `model.ocr.provider` binding (SPEC
+// §16.2), trimmed, or "" when unset (auto). The ingest OCR resolution uses
+// it to honor a self-hosted bespoke-OCR profile (a `kind: mistral` profile on
+// a custom `base_url`, dir2mcp#240) instead of always assuming the built-in
+// `mistral-ocr` profile. An empty result means "use the historical default
+// profile".
+func (r ProviderResolution) OCRProviderName() string {
+	return strings.TrimSpace(r.doc.Model.OCR.Provider)
+}
+
 func (r ProviderResolution) explicit(cap provider.Capability) string {
 	switch cap {
 	case provider.CapEmbed:
