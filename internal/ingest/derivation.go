@@ -22,20 +22,76 @@ import (
 // passes so a pre-upgrade corpus (reps written before provenance was persisted)
 // is never mass re-derived on first upgrade.
 
+// Diarizer is the injectable model-driven speaker-diarization seam (SPEC §8.6.8).
+// Given the source media bytes and the transcript's time-spanned segments, it
+// returns a speaker id (and optional label) per segment ordinal. dir2mcp ships no
+// default implementation: the diarization-capable backend (self-hosted
+// WhisperX/pyannote) is integrated out-of-band and injected via SetDiarizer. The
+// returned ids MUST be stable and deterministic across re-runs of the same media
+// with the same backend (§8.6.8); an implementation that cannot attribute a
+// segment returns an empty id for it (that segment degrades to un-attributed).
+type Diarizer interface {
+	Diarize(ctx context.Context, media []byte, segments []SpeakerSegment) ([]SpeakerAttribution, error)
+}
+
+// SpeakerSegment is one transcript segment handed to a Diarizer: its [start,end]
+// in ms and its text. It is a stable, dependency-light shape so the seam does not
+// expose internal chunk types.
+type SpeakerSegment struct {
+	StartMS int
+	EndMS   int
+	Text    string
+}
+
+// SpeakerAttribution is a Diarizer's result for one segment (by position): the
+// stable speaker id and an optional human-readable label. An empty ID means the
+// segment is left un-attributed.
+type SpeakerAttribution struct {
+	ID    string
+	Label string
+}
+
+// activeDiarizeIdentity is the diarization derivation identity of the currently
+// configured diarizer (SPEC §8.6.7/§8.6.8), in the canonical derivationIdentity
+// form. Empty when diarization is inactive, so it folds nothing into the
+// transcript identity and never forces a re-derivation on a non-diarized corpus.
+func (s *Service) activeDiarizeIdentity() string {
+	if !s.diarizeActive {
+		return ""
+	}
+	return derivationIdentity(string(provider.CapDiarize),
+		s.diarizeProvider, s.diarizeModel, "", "")
+}
+
 // sttTranscriptMetaJSON builds the meta_json persisted on a bare
 // machine-transcribed transcript representation. It records source=stt plus the
 // active STT derivation identity (provider/model/language, §5.2/§8.6.7) so a
-// later STT model swap can be detected and the transcript re-derived. Fields are
+// later STT model swap can be detected and the transcript re-derived. When
+// diarization is active it additionally records diarized + the diarize
+// provider/model (§8.6.8) so a diarize-backend swap re-derives too. Fields are
 // omitted (omitempty) when unset, so a setup with no resolved STT identity still
 // produces valid meta_json (and an empty recorded identity that the gate treats
 // as "always passes").
-func (s *Service) sttTranscriptMetaJSON() (string, error) {
+func (s *Service) sttTranscriptMetaJSON(speakers []Speaker) (string, error) {
 	meta := transcriptMeta{
 		Source:     sttSource,
 		Language:   strings.TrimSpace(s.transcriptLanguage),
 		Timestamps: true,
 		Provider:   strings.TrimSpace(s.sttProvider),
 		Model:      strings.TrimSpace(s.sttModel),
+	}
+	if s.diarizeActive {
+		// Record the diarize backend identity whenever diarization is active so a
+		// backend/model swap re-derives the transcript (§8.6.7), even before any
+		// attribution lands. `diarized` and the speakers set reflect the
+		// attribution actually present on the segments (§5.2): a capable backend
+		// with no diarizer wired yet yields no speakers, so diarized stays false.
+		meta.DiarizeProvider = strings.TrimSpace(s.diarizeProvider)
+		meta.DiarizeModel = strings.TrimSpace(s.diarizeModel)
+		if len(speakers) > 0 {
+			meta.Diarized = true
+			meta.Speakers = speakers
+		}
 	}
 	encoded, err := json.Marshal(meta)
 	if err != nil {
@@ -44,14 +100,28 @@ func (s *Service) sttTranscriptMetaJSON() (string, error) {
 	return string(encoded), nil
 }
 
-// activeTranscriptIdentity is the STT derivation identity of the currently
-// configured transcriber, in the same canonical form derivationIdentity emits
-// for a recorded transcript representation. It is compared against the identity
-// read from a stored transcript to decide whether an STT model swap has made the
-// transcript stale (§8.6.7).
+// activeTranscriptIdentity is the STT (+ diarize, when active) derivation
+// identity of the currently configured transcriber, in the same canonical form
+// derivationIdentity emits for a recorded transcript representation. It is
+// compared against the identity read from a stored transcript to decide whether
+// an STT — or diarization (§8.6.8) — model swap has made the transcript stale
+// (§8.6.7). The diarize identity is appended only when diarization is active, so
+// a non-diarized corpus's identity is unchanged.
 func (s *Service) activeTranscriptIdentity() string {
-	return derivationIdentity(string(provider.CapSTT),
-		s.sttProvider, s.sttModel, "", s.transcriptLanguage)
+	return joinTranscriptIdentity(
+		derivationIdentity(string(provider.CapSTT), s.sttProvider, s.sttModel, "", s.transcriptLanguage),
+		s.activeDiarizeIdentity())
+}
+
+// joinTranscriptIdentity appends a non-empty diarize identity to the STT
+// identity with a stable separator, so a diarize-backend change re-derives the
+// transcript (§8.6.7/§8.6.8). An empty diarize identity returns the STT identity
+// unchanged, keeping a non-diarized transcript's recorded identity byte-stable.
+func joinTranscriptIdentity(sttIdentity, diarizeIdentity string) string {
+	if strings.TrimSpace(diarizeIdentity) == "" {
+		return sttIdentity
+	}
+	return sttIdentity + "#" + diarizeIdentity
 }
 
 // activeOCRIdentity is the OCR/extraction derivation identity of the currently
@@ -238,8 +308,20 @@ func transcriptIdentityFromMeta(metaJSON string) (string, bool) {
 	if strings.TrimSpace(meta.Provider) == "" && strings.TrimSpace(meta.Model) == "" {
 		return "", false
 	}
-	return derivationIdentity(string(provider.CapSTT),
-		meta.Provider, meta.Model, meta.ModelVersion, meta.Language), true
+	sttIdentity := derivationIdentity(string(provider.CapSTT),
+		meta.Provider, meta.Model, meta.ModelVersion, meta.Language)
+	// Fold the recorded diarize identity (§8.6.8) into the transcript identity so
+	// a diarize provider/model change is detected as stale. Only model-derived
+	// diarization records a provider/model; a sidecar-supplied <v> attribution
+	// records diarized:true with NO provider/model, so it folds in nothing and is
+	// never invalidated by a diarize-backend change (mirrors §8.6.7 for authored
+	// sources). A pre-upgrade transcript with neither field is unchanged.
+	diarizeIdentity := ""
+	if strings.TrimSpace(meta.DiarizeProvider) != "" || strings.TrimSpace(meta.DiarizeModel) != "" {
+		diarizeIdentity = derivationIdentity(string(provider.CapDiarize),
+			meta.DiarizeProvider, meta.DiarizeModel, "", "")
+	}
+	return joinTranscriptIdentity(sttIdentity, diarizeIdentity), true
 }
 
 // ocrIdentityFromMeta builds the recorded OCR/extraction derivation identity of

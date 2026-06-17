@@ -32,6 +32,14 @@ func canFilter(filter model.Filter) bool {
 	if filter.PathPrefix != "" || filter.PathGlob != "" {
 		return false
 	}
+	// Speaker (diarized transcript filter, SPEC §8.6.8) is evaluated by the
+	// Go-side matchFilters re-check, mirroring the path predicates: decline
+	// push-down so retrieval applies it after materialisation. Declining is
+	// always safe (overfetch-then-filter), and it keeps speaker filtering on the
+	// single, authoritative model.Filter.Match path.
+	if strings.TrimSpace(filter.Speaker) != "" {
+		return false
+	}
 	return true
 }
 

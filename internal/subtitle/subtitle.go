@@ -21,6 +21,13 @@ type Cue struct {
 	StartMS int
 	EndMS   int
 	Text    string
+	// Speaker is the human-readable voice/speaker name parsed from a WebVTT
+	// <v Name> voice tag on the cue (SPEC §8.6.8). It is metadata only: it never
+	// appears in Text (voice tags are stripped) and is empty for cues with no
+	// voice markup, so a transcript without <v> tags is unchanged. A sidecar
+	// that carries voice tags can populate speaker attribution WITHOUT a
+	// diarization model.
+	Speaker string
 }
 
 // TranscriptChunk pairs a transcript chunk's text with its time span. It is the
@@ -38,9 +45,10 @@ type TranscriptChunk struct {
 // A chunk whose span is non-time is dropped, since subtitles require timing.
 func BuildCues(chunks []TranscriptChunk) []Cue {
 	type timed struct {
-		start int
-		end   int
-		text  string
+		start   int
+		end     int
+		text    string
+		speaker string
 	}
 	timedChunks := make([]timed, 0, len(chunks))
 	for _, ch := range chunks {
@@ -59,7 +67,14 @@ func BuildCues(chunks []TranscriptChunk) []Cue {
 		if end < start {
 			end = start
 		}
-		timedChunks = append(timedChunks, timed{start: start, end: end, text: text})
+		// Prefer the human-readable label, falling back to the stable id, so a
+		// diarized transcript exports voice markup (SPEC §8.6.3); empty for a
+		// non-diarized transcript so the export is unchanged.
+		speaker := strings.TrimSpace(ch.Span.SpeakerLabel)
+		if speaker == "" {
+			speaker = strings.TrimSpace(ch.Span.Speaker)
+		}
+		timedChunks = append(timedChunks, timed{start: start, end: end, text: text, speaker: speaker})
 	}
 
 	sort.SliceStable(timedChunks, func(i, j int) bool {
@@ -76,6 +91,7 @@ func BuildCues(chunks []TranscriptChunk) []Cue {
 			StartMS: tc.start,
 			EndMS:   tc.end,
 			Text:    tc.text,
+			Speaker: tc.speaker,
 		})
 	}
 	return cues
@@ -98,10 +114,30 @@ func RenderVTT(cues []Cue) string {
 		b.WriteString(" --> ")
 		b.WriteString(formatTimestampVTT(cue.EndMS))
 		b.WriteByte('\n')
+		// Carry speaker as a WebVTT <v Name> voice tag when present (SPEC §8.6.3);
+		// a cue with no speaker renders exactly as before. The name is sanitised
+		// so it can never break out of the tag.
+		if speaker := sanitizeVoiceName(cue.Speaker); speaker != "" {
+			b.WriteString("<v ")
+			b.WriteString(speaker)
+			b.WriteByte('>')
+		}
 		b.WriteString(text)
 		b.WriteString("\n\n")
 	}
 	return b.String()
+}
+
+// sanitizeVoiceName makes a speaker name safe to embed in a WebVTT <v Name> tag:
+// it trims whitespace and strips '<' and '>' so the name cannot terminate the
+// tag or inject markup. Returns "" for an empty/blank name so the caller omits
+// the voice tag entirely.
+func sanitizeVoiceName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.NewReplacer("<", "", ">", "").Replace(name))
 }
 
 // RenderSRT serializes cues as a SubRip (SRT) document: a 1-based index line,

@@ -98,6 +98,14 @@ type Span struct {
 	// behaviour identical to a words-absent transcript. Its presence makes Span
 	// non-comparable, so callers must not use Span as a map key.
 	Words []WordSpan
+	// Speaker is the stable per-transcript speaker identifier (e.g. "S1") on a
+	// diarized transcript's "time" span (spec §8.6.8). SpeakerLabel is an
+	// optional human-readable name (e.g. a WebVTT <v Name> voice tag). Both are
+	// metadata only and additive: they never change the chunk text or span
+	// bounds, and they are empty on every non-diarized transcript so behaviour
+	// is byte-identical to today. Persisted in the "time" span's extra_json.
+	Speaker      string
+	SpeakerLabel string
 }
 
 // WordSpan is one per-word timestamp on a "time" span (spec §8.6.1). The JSON
@@ -139,24 +147,36 @@ type BBox struct {
 // a subset; retrieval falls back to its in-memory chunk metadata when a field
 // is empty.
 type IndexPayload struct {
-	ChunkID  uint64
-	RelPath  string
-	DocType  string
-	RepType  string
-	Modality string
-	Title    string
-	StartMS  int
-	EndMS    int
-	Language string
-	Speaker  string
-	Snippet  string
-	Span     Span
-	MediaRef string
+	ChunkID      uint64
+	RelPath      string
+	DocType      string
+	RepType      string
+	Modality     string
+	Title        string
+	StartMS      int
+	EndMS        int
+	Language     string
+	Speaker      string
+	SpeakerLabel string
+	Snippet      string
+	Span         Span
+	MediaRef     string
 }
 
 // ToSearchHit materialises a SearchHit from the payload. Score is left zero;
 // the caller sets it from the IndexHit.
 func (p IndexPayload) ToSearchHit() SearchHit {
+	span := p.Span
+	// Some backends (e.g. Qdrant) store the diarized speaker as a flat payload
+	// field but do not persist the nested Span (SPEC §8.6.8): bridge the flat
+	// Speaker/SpeakerLabel onto a "time" span so the Go-side speaker filter and
+	// the citation surface still see the attribution. The Span value is
+	// authoritative when it already carries a speaker (e.g. pgvector round-trips
+	// the full Span), so we only fill in the gap.
+	if strings.EqualFold(strings.TrimSpace(span.Kind), "time") && strings.TrimSpace(span.Speaker) == "" {
+		span.Speaker = p.Speaker
+		span.SpeakerLabel = p.SpeakerLabel
+	}
 	return SearchHit{
 		ChunkID:  p.ChunkID,
 		RelPath:  p.RelPath,
@@ -164,7 +184,7 @@ func (p IndexPayload) ToSearchHit() SearchHit {
 		DocType:  p.DocType,
 		RepType:  p.RepType,
 		Snippet:  p.Snippet,
-		Span:     p.Span,
+		Span:     span,
 		Modality: p.Modality,
 		MediaRef: p.MediaRef,
 	}
@@ -190,11 +210,15 @@ type IndexHit struct {
 //   - PathGlob:   keep only rel_paths matching this path.Match glob.
 //   - DocTypes:   keep only these doc types (case-insensitive).
 //   - ExcludeOrphans: drop chunks with an empty rel_path (orphaned/evicted).
+//   - Speaker: keep only time-spanned transcript chunks attributed to this
+//     stable speaker id (case-insensitive). Empty disables the predicate. A
+//     corpus without diarized transcripts simply matches nothing (SPEC §8.6.8).
 type Filter struct {
 	PathPrefix     string
 	PathGlob       string
 	DocTypes       []string
 	ExcludeOrphans bool
+	Speaker        string
 }
 
 // IsZero reports whether the filter has no active predicate.
@@ -202,7 +226,8 @@ func (f Filter) IsZero() bool {
 	return f.PathPrefix == "" &&
 		f.PathGlob == "" &&
 		len(f.DocTypes) == 0 &&
-		!f.ExcludeOrphans
+		!f.ExcludeOrphans &&
+		strings.TrimSpace(f.Speaker) == ""
 }
 
 // Match reports whether the payload satisfies every active predicate. It
@@ -238,6 +263,16 @@ func (f Filter) Match(p IndexPayload) bool {
 			return false
 		}
 	}
+	// Speaker restricts to time-spanned transcript segments attributed to the
+	// requested stable speaker id (SPEC §8.6.8). A payload that carries no
+	// speaker (non-diarized transcript or any non-time chunk) never matches a
+	// non-empty speaker filter, so a corpus without diarized transcripts returns
+	// no speaker-filtered hits.
+	if speaker := strings.TrimSpace(f.Speaker); speaker != "" {
+		if !strings.EqualFold(speaker, strings.TrimSpace(p.Speaker)) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -248,6 +283,11 @@ type SearchQuery struct {
 	PathPrefix string
 	FileGlob   string
 	DocTypes   []string
+	// Speaker optionally restricts time-spanned transcript hits to segments
+	// attributed to this stable speaker id (SPEC §8.6.8/§15.2). Empty disables
+	// the filter; a corpus without diarized transcripts returns no
+	// speaker-filtered hits.
+	Speaker string
 }
 
 type SearchHit struct {

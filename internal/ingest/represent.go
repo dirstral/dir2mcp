@@ -1183,14 +1183,26 @@ func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
 // A cue empty after filtering is dropped (it never contributes to a chunk), so
 // it neither adds text nor extends a merged chunk's time span. A nil/inactive
 // filter is a no-op, leaving the output identical to the unfiltered path.
+//
+// When cues carry WebVTT <v Name> speaker attribution (SPEC §8.6.8) the merge is
+// additionally split on speaker boundary so every produced chunk has a single
+// speaker, and the chunk's "time" span carries a stable per-transcript speaker
+// id (S1, S2, …) plus the human-readable label. Speaker ids are assigned in
+// first-appearance order over the (caller-sorted, by start time) cues, so they
+// are deterministic and stable across re-indexing. Speaker attribution is
+// metadata only: it never changes chunk text or span bounds, and a transcript
+// with no <v> tags produces byte-identical output to before.
 func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter) []chunkSegment {
 	out := make([]chunkSegment, 0, len(cues))
+	ids := newSpeakerIDAssigner()
 	var (
-		buf      []string
-		startMS  int
-		endMS    int
-		haveOpen bool
-		bufLen   int
+		buf          []string
+		startMS      int
+		endMS        int
+		haveOpen     bool
+		bufLen       int
+		speaker      string // stable id (S1…) of the open chunk; "" when undiarized
+		speakerLabel string // human-readable name of the open chunk
 	)
 	flush := func() {
 		if !haveOpen {
@@ -1198,7 +1210,7 @@ func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter)
 		}
 		text := strings.TrimSpace(strings.Join(buf, "\n"))
 		if text != "" {
-			span := model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
+			span := model.Span{Kind: "time", StartMS: startMS, EndMS: endMS, Speaker: speaker, SpeakerLabel: speakerLabel}
 			if span.EndMS <= span.StartMS {
 				span.EndMS = span.StartMS + 1
 			}
@@ -1207,6 +1219,8 @@ func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter)
 		buf = buf[:0]
 		bufLen = 0
 		haveOpen = false
+		speaker = ""
+		speakerLabel = ""
 	}
 
 	for _, cue := range cues {
@@ -1217,6 +1231,7 @@ func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter)
 		if text == "" {
 			continue
 		}
+		cueID, cueLabel := ids.assign(cue.Speaker)
 		cueLen := utf8.RuneCountInString(text)
 		// flush() joins buffered cue texts with "\n", so budget one rune for the
 		// separator that will precede this cue when the buffer is non-empty;
@@ -1228,15 +1243,18 @@ func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter)
 			sepLen = 1
 		}
 		// Start a new chunk when the buffer (plus the join separator) would
-		// overflow the transcript chunk size; a single oversized cue still becomes
+		// overflow the transcript chunk size OR when the speaker changes (so a
+		// chunk never mixes two speakers); a single oversized cue still becomes
 		// its own chunk.
-		if haveOpen && bufLen+sepLen+cueLen > TranscriptChunkMaxChars {
+		if haveOpen && (bufLen+sepLen+cueLen > TranscriptChunkMaxChars || cueID != speaker) {
 			flush()
 			sepLen = 0
 		}
 		if !haveOpen {
 			startMS = cue.StartMS
 			haveOpen = true
+			speaker = cueID
+			speakerLabel = cueLabel
 		}
 		buf = append(buf, text)
 		bufLen += sepLen + cueLen
@@ -1244,6 +1262,37 @@ func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter)
 	}
 	flush()
 	return out
+}
+
+// speakerIDAssigner maps a human-readable WebVTT voice name to a stable
+// per-transcript speaker id (S1, S2, …) in first-appearance order (SPEC §8.6.8).
+// Because the cues it is fed are sorted by start time, the mapping is
+// deterministic and reproducible across re-indexing of the same transcript.
+type speakerIDAssigner struct {
+	byName map[string]string
+	next   int
+}
+
+func newSpeakerIDAssigner() *speakerIDAssigner {
+	return &speakerIDAssigner{byName: map[string]string{}}
+}
+
+// assign returns the stable id and the human-readable label for a cue's voice
+// name. An empty name yields ("", "") so an undiarized cue carries no
+// attribution. The first time a name is seen it is allocated the next S-id; the
+// same name always maps to the same id thereafter.
+func (a *speakerIDAssigner) assign(name string) (id, label string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", ""
+	}
+	if existing, ok := a.byName[name]; ok {
+		return existing, name
+	}
+	a.next++
+	id = fmt.Sprintf("S%d", a.next)
+	a.byName[name] = id
+	return id, name
 }
 
 // ChunkSubtitleCues exposes chunkSubtitleCues for tests, converting the

@@ -1471,6 +1471,7 @@ func filterFromQuery(q model.SearchQuery) model.Filter {
 		PathPrefix: q.PathPrefix,
 		PathGlob:   q.FileGlob,
 		DocTypes:   q.DocTypes,
+		Speaker:    q.Speaker,
 	}
 }
 
@@ -1924,6 +1925,57 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 	return answer + "\n\nSources: " + strings.Join(missing[:limit], ", ")
 }
 
+// FormatCitation renders a human-readable citation string for a span (SPEC §9.3).
+// The base forms are path-only ([rel_path]), page ([rel_path@p=N]), line range
+// ([rel_path@L12-48]), and time ([rel_path@t=02:13-02:41]). On a diarized
+// transcript a time span MAY append the speaker — preferring the human-readable
+// label, falling back to the stable id — as " › Speaker" (§8.6.8), e.g.
+// [interview.mp4@t=02:13-02:41 › S2]. The base form is used unchanged when no
+// speaker is present, so a non-diarized transcript citation is byte-identical to
+// before.
+func FormatCitation(relPath string, span model.Span) string {
+	relPath = strings.TrimSpace(relPath)
+	suffix := ""
+	speaker := ""
+	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
+	case "page":
+		if span.Page > 0 {
+			suffix = fmt.Sprintf("@p=%d", span.Page)
+		}
+	case "lines":
+		if span.StartLine > 0 && span.EndLine >= span.StartLine {
+			suffix = fmt.Sprintf("@L%d-%d", span.StartLine, span.EndLine)
+		}
+	case "time":
+		suffix = "@t=" + formatCitationTime(span.StartMS) + "-" + formatCitationTime(span.EndMS)
+		// Prefer the label, fall back to the stable id (SPEC §9.3 example uses S2).
+		if speaker = strings.TrimSpace(span.SpeakerLabel); speaker == "" {
+			speaker = strings.TrimSpace(span.Speaker)
+		}
+	}
+	out := "[" + relPath + suffix
+	if speaker != "" {
+		out += " › " + speaker
+	}
+	return out + "]"
+}
+
+// formatCitationTime renders a millisecond offset as mm:ss (or hh:mm:ss past one
+// hour) for the §9.3 time-span citation form. Negative input clamps to zero.
+func formatCitationTime(ms int) string {
+	if ms < 0 {
+		ms = 0
+	}
+	totalSeconds := ms / 1000
+	seconds := totalSeconds % 60
+	minutes := (totalSeconds / 60) % 60
+	hours := totalSeconds / 3600
+	if hours > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+}
+
 func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	// Orphaned or evicted chunks have an empty RelPath and must never be
 	// surfaced to callers regardless of any other filter criteria.
@@ -1954,6 +2006,18 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 			}
 		}
 		if !docTypeMatch {
+			return false
+		}
+	}
+
+	// Optional speaker filter (SPEC §8.6.8/§15.2): restrict to time-spanned
+	// transcript hits attributed to the requested stable speaker id
+	// (case-insensitive). A hit whose span carries no speaker — every non-time
+	// chunk and every non-diarized transcript — never matches a non-empty
+	// speaker filter, so a corpus without diarized transcripts returns no
+	// speaker-filtered hits. Empty filter is a no-op (behaviour unchanged).
+	if speaker := strings.TrimSpace(query.Speaker); speaker != "" {
+		if !strings.EqualFold(speaker, strings.TrimSpace(hit.Span.Speaker)) {
 			return false
 		}
 	}

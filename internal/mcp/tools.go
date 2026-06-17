@@ -706,7 +706,7 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {},
+		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -729,11 +729,15 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	speaker, err := parseOptionalString(args, "speaker")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
-		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes,
+		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker,
 	})
 	if searchErr != nil {
 		return toolCallResult{}, mapSearchError(searchErr)
@@ -2251,11 +2255,22 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 			"page": span.Page,
 		}
 	case "time":
-		return map[string]interface{}{
+		out := map[string]interface{}{
 			"kind":     "time",
 			"start_ms": span.StartMS,
 			"end_ms":   span.EndMS,
 		}
+		// Additive (SPEC §8.6.8/§9.2): a diarized transcript's time span surfaces
+		// the stable speaker id and optional label. Omitted when absent, so a
+		// non-diarized span is byte-identical to before and consumers degrade to
+		// a flat citation.
+		if speaker := strings.TrimSpace(span.Speaker); speaker != "" {
+			out["speaker"] = speaker
+			if label := strings.TrimSpace(span.SpeakerLabel); label != "" {
+				out["speaker_label"] = label
+			}
+		}
+		return out
 	case "region":
 		return buildRegionSpan(span)
 	default:
@@ -2539,6 +2554,14 @@ func spanDefinitionSchema() map[string]interface{} {
 					"kind":     map[string]interface{}{"const": "time"},
 					"start_ms": map[string]interface{}{"type": "integer"},
 					"end_ms":   map[string]interface{}{"type": "integer"},
+					"speaker": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional (SPEC §8.6.8): stable per-transcript speaker id on a diarized transcript.",
+					},
+					"speaker_label": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional human-readable speaker name (SPEC §8.6.8).",
+					},
 				},
 				"required": []string{"kind", "start_ms", "end_ms"},
 			},
@@ -2617,6 +2640,10 @@ func searchInputSchema() map[string]interface{} {
 			"path_prefix": map[string]interface{}{"type": "string"},
 			"file_glob":   map[string]interface{}{"type": "string"},
 			"doc_types":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"speaker": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional (SPEC §8.6.8): restrict time-spanned transcript hits to this speaker id. A corpus without diarized transcripts returns no speaker-filtered hits.",
+			},
 		},
 		"required": []string{"query"},
 	}

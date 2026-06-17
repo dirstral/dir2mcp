@@ -40,6 +40,12 @@ const (
 	CapSTT    Capability = "stt"
 	CapTTS    Capability = "tts"
 	CapRerank Capability = "rerank"
+	// CapDiarize is speaker diarization on a transcript (SPEC §8.6.8). It is
+	// optional and provider-dependent: only a diarization-capable STT backend
+	// (a self-hosted WhisperX / pyannote-backed endpoint, KindWhisper) advertises
+	// it. Binding diarization to a backend that lacks the capability is rejected
+	// as CONFIG_INVALID, consistent with the capability matrix (8.1.2).
+	CapDiarize Capability = "diarize"
 )
 
 // Support is a capability-matrix cell state.
@@ -84,8 +90,12 @@ var matrix = map[Kind]map[Capability]Support{
 		// Self-hosted OpenAI-compatible STT (dir2mcp#240). Statically
 		// STT-capable: the standard /v1/audio/transcriptions contract is
 		// fixed, so unlike kind:openai (EndpointDependent) we mark it
-		// Supported.
-		CapSTT: Supported,
+		// Supported. A self-hosted WhisperX / pyannote-backed endpoint is the
+		// diarization-capable backend (SPEC §8.6.8), so it advertises
+		// CapDiarize; no other kind does, which keeps diarization opt-in and
+		// provider-dependent.
+		CapSTT:     Supported,
+		CapDiarize: Supported,
 	},
 }
 

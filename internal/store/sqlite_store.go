@@ -1816,7 +1816,13 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 		if start < 0 || end < 0 || end < start {
 			return model.Span{Kind: "lines"}
 		}
-		return model.Span{Kind: "time", StartMS: start, EndMS: end, Words: wordsFromExtraJSON(extraJSON)}
+		speaker, speakerLabel := speakerFromExtraJSON(extraJSON)
+		return model.Span{
+			Kind: "time", StartMS: start, EndMS: end,
+			Words:        wordsFromExtraJSON(extraJSON),
+			Speaker:      speaker,
+			SpeakerLabel: speakerLabel,
+		}
 	case "region":
 		return regionSpanFromRow(start, end, extraJSON)
 	case "lines":
@@ -1856,6 +1862,30 @@ func wordsFromExtraJSON(extraJSON string) []model.WordSpan {
 		return nil
 	}
 	return out
+}
+
+// speakerFromExtraJSON reconstructs the diarized speaker attribution of a "time"
+// span from its stored extra_json (spec §8.6.8). It tolerates a NULL/empty/
+// malformed payload by returning empty strings so a non-diarized transcript span
+// degrades to a flat, un-attributed citation (the behaviour for a transcript
+// without diarization). A speaker_label with no stable speaker id is dropped:
+// the id is the canonical attribution and a label alone is not a valid speaker.
+func speakerFromExtraJSON(extraJSON string) (speaker, speakerLabel string) {
+	if strings.TrimSpace(extraJSON) == "" {
+		return "", ""
+	}
+	var payload struct {
+		Speaker      string `json:"speaker"`
+		SpeakerLabel string `json:"speaker_label"`
+	}
+	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil {
+		return "", ""
+	}
+	speaker = strings.TrimSpace(payload.Speaker)
+	if speaker == "" {
+		return "", ""
+	}
+	return speaker, strings.TrimSpace(payload.SpeakerLabel)
 }
 
 // regionSpanFromRow reconstructs a region span from its stored columns. A
@@ -2362,7 +2392,7 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 		if span.StartMS < 0 || span.EndMS < 0 || span.EndMS < span.StartMS {
 			return "", 0, 0, "", errors.New("invalid time span")
 		}
-		extra, eErr := timeSpanExtraJSON(span.Words)
+		extra, eErr := timeSpanExtraJSON(span.Words, span.Speaker, span.SpeakerLabel)
 		if eErr != nil {
 			return "", 0, 0, "", eErr
 		}
@@ -2374,20 +2404,32 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 	}
 }
 
-// timeSpanExtraJSON marshals per-word timing for a "time" span into the stored
-// extra_json shape `{"words":[{"t":..,"d":..,"w":".."}]}` (spec §8.6.1).
-// Returns the empty string (stored as SQL NULL, preserving prior behaviour) when
-// there is no word timing, so words-absent transcripts round-trip unchanged.
-func timeSpanExtraJSON(words []model.WordSpan) (string, error) {
-	if len(words) == 0 {
+// timeSpanExtraJSON marshals the optional metadata of a "time" span into the
+// stored extra_json object: per-word timing (`words`, spec §8.6.1) plus the
+// diarized speaker attribution (`speaker`/`speaker_label`, spec §8.6.8). Each
+// field is emitted only when present (omitempty), so a transcript with neither
+// returns the empty string (stored as SQL NULL) and round-trips byte-identically
+// to before diarization existed. speaker/speaker_label are trimmed; an empty
+// speaker drops both (a label without a stable id is not a valid attribution).
+func timeSpanExtraJSON(words []model.WordSpan, speaker, speakerLabel string) (string, error) {
+	speaker = strings.TrimSpace(speaker)
+	speakerLabel = strings.TrimSpace(speakerLabel)
+	if speaker == "" {
+		// A label with no stable id is not a valid attribution; drop both so the
+		// stored shape never carries a dangling speaker_label.
+		speakerLabel = ""
+	}
+	if len(words) == 0 && speaker == "" {
 		return "", nil
 	}
 	payload := struct {
-		Words []model.WordSpan `json:"words"`
-	}{Words: words}
+		Words        []model.WordSpan `json:"words,omitempty"`
+		Speaker      string           `json:"speaker,omitempty"`
+		SpeakerLabel string           `json:"speaker_label,omitempty"`
+	}{Words: words, Speaker: speaker, SpeakerLabel: speakerLabel}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal time span words: %w", err)
+		return "", fmt.Errorf("marshal time span extra_json: %w", err)
 	}
 	return string(encoded), nil
 }
