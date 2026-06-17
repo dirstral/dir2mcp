@@ -1289,8 +1289,11 @@ func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]in
 	data, extractErr := extract(ctx, absPath, req.startMS, req.endMS)
 	if extractErr != nil {
 		// Bytes/URLs are never echoed; map every extraction failure (including a
-		// missing ffmpeg) to the non-secret MEDIA_CLIP_FAILED contract.
-		return toolCallResult{}, &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip extraction failed", Retryable: errors.Is(extractErr, avutil.ErrToolNotFound)}
+		// missing ffmpeg) to the non-secret MEDIA_CLIP_FAILED contract. It is
+		// non-retryable: re-issuing the same request will not change the outcome
+		// (a missing ffmpeg needs operator action; a decode failure for these
+		// bytes/span is deterministic) — distinct from OCR_NOT_READY.
+		return toolCallResult{}, &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip extraction failed", Retryable: false}
 	}
 	if len(data) > maxBytes {
 		return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("extracted clip is %d bytes, exceeds max %d; request a shorter span", len(data), maxBytes), Retryable: false}
