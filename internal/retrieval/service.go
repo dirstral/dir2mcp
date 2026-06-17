@@ -113,6 +113,16 @@ type Service struct {
 	rerankEnabled       bool
 	rerankModel         string
 	rerankCandidatePool int
+	// crossFileDedupEnabled toggles retrieval-time cross-file de-duplication
+	// (SPEC 9.2): when true, candidate hits whose source documents share an
+	// identical content_hash collapse to one best-ranked survivor. Default
+	// false (pass-through). Wired from config.DedupRetrieval at construction.
+	crossFileDedupEnabled bool
+	// groupKeyByRelPath maps a document rel_path to its content_hash (SPEC
+	// 7.6), populated at startup from a model.DocumentHashLister. It is the
+	// grouping key for cross-file dedup; an empty/absent value disables
+	// grouping for that path (entries are never collapsed together).
+	groupKeyByRelPath map[string]string
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -189,6 +199,36 @@ func (s *Service) SetRerankEnabled(enabled bool) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.rerankEnabled = enabled
+}
+
+// SetCrossFileDedupEnabled toggles retrieval-time cross-file de-duplication
+// (SPEC 9.2). The engine wires this from config.DedupRetrieval at construction
+// time. Default off ⇒ search returns the pre-dedup candidate set unchanged.
+func (s *Service) SetCrossFileDedupEnabled(enabled bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.crossFileDedupEnabled = enabled
+}
+
+// SetDocumentHashes installs the rel_path → content_hash map used to group
+// candidate hits for cross-file dedup (SPEC 9.2). Entries with an empty
+// content_hash are ignored (never grouped together). The map is copied so the
+// caller may reuse its slice/map. Passing nil clears the map (pass-through).
+func (s *Service) SetDocumentHashes(hashes []model.DocumentHash) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	if len(hashes) == 0 {
+		s.groupKeyByRelPath = nil
+		return
+	}
+	m := make(map[string]string, len(hashes))
+	for _, h := range hashes {
+		if strings.TrimSpace(h.ContentHash) == "" {
+			continue
+		}
+		m[h.RelPath] = h.ContentHash
+	}
+	s.groupKeyByRelPath = m
 }
 
 func (s *Service) SetLogger(l *log.Logger) {
@@ -1201,12 +1241,14 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	}
 	if fused, ok := s.runHybridSearch(ctx, query, k, indexName, filtered); ok {
 		fused = dedupMediaCandidates(fused)
+		fused = s.dedupCrossFileCandidates(fused)
 		if allowRerank {
 			return s.rerankPool(ctx, query, fused, k), nil
 		}
 		return truncateSearchHits(fused, k), nil
 	}
 	filtered = dedupMediaCandidates(filtered)
+	filtered = s.dedupCrossFileCandidates(filtered)
 	if allowRerank {
 		return s.rerankPool(ctx, query, filtered, k), nil
 	}
@@ -1271,6 +1313,47 @@ func dedupMediaCandidates(hits []model.SearchHit) []model.SearchHit {
 				}
 			}
 		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// dedupCrossFileCandidates implements SPEC 9.2 retrieval-time cross-file
+// de-duplication: collapse candidate hits whose source documents share an
+// identical content_hash (SPEC 7.6) to a single best-ranked survivor, keeping
+// the (already canonical) rel_path of the first survivor in the group. It runs
+// AFTER candidate generation/fusion and dedupMediaCandidates, and BEFORE rerank
+// (SPEC 9.1.1) and truncation to k — so the candidate POOL shrinks, preserving
+// the no-result-loss guarantee (a query MAY then return fewer than k hits).
+//
+// Grouping is by content_hash directly. Hits whose rel_path has no known (or an
+// empty) content_hash are passed through untouched and NEVER grouped together.
+// The first (best pre-rerank) survivor per group is kept and the relative order
+// of survivors is preserved, so the result is deterministic. When disabled or
+// when no hash map is loaded, this is a pass-through.
+func (s *Service) dedupCrossFileCandidates(hits []model.SearchHit) []model.SearchHit {
+	s.metaMu.RLock()
+	enabled := s.crossFileDedupEnabled
+	groupKeyByRelPath := s.groupKeyByRelPath
+	s.metaMu.RUnlock()
+
+	if !enabled || len(groupKeyByRelPath) == 0 || len(hits) == 0 {
+		return hits
+	}
+
+	seen := make(map[string]struct{}, len(hits))
+	out := make([]model.SearchHit, 0, len(hits))
+	for _, h := range hits {
+		contentHash := groupKeyByRelPath[h.RelPath]
+		if contentHash == "" {
+			// Unknown/empty content_hash: never grouped, always kept.
+			out = append(out, h)
+			continue
+		}
+		if _, dup := seen[contentHash]; dup {
+			continue
+		}
+		seen[contentHash] = struct{}{}
 		out = append(out, h)
 	}
 	return out
@@ -1591,6 +1674,13 @@ func (s *Service) searchBothIndices(ctx context.Context, query string, k int, te
 		}
 		return out[i].Score > out[j].Score
 	})
+	// Cross-file dedup applies to the MERGED pool too (SPEC 9.2): each
+	// searchSingleIndex call above deduped within its own axis, but a
+	// byte-identical duplicate can still surface once in the text pool and once
+	// in the code pool. Collapse across the merged, normalized, score-sorted
+	// pool (keeping the best-ranked survivor) before rerank/truncation, so
+	// index=both matches single-index behavior.
+	out = s.dedupCrossFileCandidates(out)
 	// index=both: rerank once on the merged, normalized pool (SPEC 9.1.1).
 	return s.rerankPool(ctx, query, out, k), nil
 }

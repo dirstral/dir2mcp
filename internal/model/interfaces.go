@@ -24,6 +24,25 @@ type LexicalSearcher interface {
 	SearchBM25(ctx context.Context, query string, k int, indexKind string) ([]SearchHit, error)
 }
 
+// DocumentHash pairs a document's canonical rel_path with its content_hash
+// (SPEC §7.6). Retrieval-time cross-file de-duplication (SPEC §9.2) uses these
+// to group candidate hits whose source documents are byte-identical.
+type DocumentHash struct {
+	RelPath     string
+	ContentHash string
+}
+
+// DocumentHashLister is an optional capability stores may implement so the
+// retrieval service can map a hit's rel_path to its content_hash for
+// retrieval-time cross-file de-duplication (SPEC §9.2). The retrieval service
+// type-asserts against this interface, mirroring the LexicalSearcher
+// optional-capability pattern; stores that do not implement it simply yield no
+// dedup map and search behaves exactly as before (pass-through). Only
+// non-deleted documents are returned.
+type DocumentHashLister interface {
+	ListDocumentHashes(ctx context.Context) ([]DocumentHash, error)
+}
+
 // Index is the core vector-store contract every backend must satisfy (issue
 // #247). The in-memory HNSW is the conforming default; external/on-disk
 // backends (Qdrant #268, pgvector #269, on-disk #246) implement the same

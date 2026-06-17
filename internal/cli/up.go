@@ -77,11 +77,17 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 	a.configureReranker(ret, cfg)
+	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
 	// bootstrap step as structured events (see dirstral-spec/docs/SPEC.md for NDJSON schema).
 	emitter := newNDJSONEmitter(a.stdout, opts.jsonOutput)
+
+	// Load the cross-file dedup hash map AFTER the emitter exists so a load
+	// failure is reported as a structured NDJSON warning event (machine-parseable
+	// in JSON/automation flows), consistent with other bootstrap steps.
+	a.loadCrossFileDedupHashes(ctx, cfg, st, ret, emitter)
 
 	indexingState := initIndexingState(ctx, st, ret, emitter, a.stderr)
 	ret.SetIndexingCompleteProvider(func() bool {
@@ -859,6 +865,34 @@ func warnConfigSnapshotErr(stderr io.Writer, quiet bool, err error) {
 	if err != nil && !quiet {
 		writef(stderr, "warning: write config snapshot: %v\n", err)
 	}
+}
+
+// loadCrossFileDedupHashes wires the rel_path → content_hash map used by
+// retrieval-time cross-file de-duplication (SPEC 9.2) onto the retrieval
+// service. It is a no-op when dedup is disabled, or when the store does not
+// implement model.DocumentHashLister; a load error is non-fatal (dedup simply
+// stays a pass-through) since it must never block server startup. A load failure
+// is reported as a structured NDJSON warning event (machine-parseable in
+// JSON/automation flows), mirroring the embedded-chunk-metadata bootstrap step.
+func (a *App) loadCrossFileDedupHashes(ctx context.Context, cfg config.Config, st model.Store, ret *retrieval.Service, emitter *ndjsonEmitter) {
+	if !cfg.DedupRetrieval || st == nil || ret == nil {
+		return
+	}
+	lister, ok := st.(model.DocumentHashLister)
+	if !ok {
+		return
+	}
+	hashes, err := lister.ListDocumentHashes(ctx)
+	if err != nil {
+		if emitter != nil {
+			emitter.Emit("warning", "bootstrap_cross_file_dedup_hashes", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		writef(a.stderr, "warning: load document hashes for retrieval dedup: %v\n", err)
+		return
+	}
+	ret.SetDocumentHashes(hashes)
 }
 
 // initIndexingState creates a new IndexingState and optionally preloads

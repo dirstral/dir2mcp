@@ -153,6 +153,11 @@ type Config struct {
 	// is true for new deployments; existing indexes auto-backfill the FTS
 	// table on first start.
 	RetrievalHybridEnabled bool
+	// DedupRetrieval enables retrieval-time cross-file de-duplication (SPEC
+	// 9.2): when true, search collapses candidate hits whose source documents
+	// share an identical content_hash to a single best-ranked survivor before
+	// rerank/truncation. Default false (every candidate is returned as before).
+	DedupRetrieval bool
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -362,6 +367,7 @@ type fileConfig struct {
 	RAGMaxContextChars        *int
 	RAGOversampleFactor       *int
 	RetrievalHybridEnabled    *bool
+	DedupRetrieval            *bool
 	RerankEnabled             *bool
 	RerankProvider            *string
 	CohereAPIKey              *string
@@ -460,6 +466,7 @@ type persistedConfig struct {
 	RAGMaxContextChars        int           `yaml:"rag_max_context_chars"`
 	RAGOversampleFactor       int           `yaml:"rag_oversample_factor"`
 	RetrievalHybridEnabled    bool          `yaml:"retrieval_hybrid_enabled"`
+	DedupRetrieval            bool          `yaml:"dedup_retrieval"`
 	RerankEnabled             bool          `yaml:"rerank_enabled"`
 	RerankProvider            string        `yaml:"rerank_provider"`
 	CohereBaseURL             string        `yaml:"cohere_base_url"`
@@ -589,6 +596,9 @@ func Default() Config {
 		RAGMaxContextChars:     20000,
 		RAGOversampleFactor:    5,
 		RetrievalHybridEnabled: true,
+		// DedupRetrieval defaults to false (SPEC 9.2): retrieval-time
+		// cross-file de-duplication is off unless explicitly enabled.
+		DedupRetrieval: false,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -692,6 +702,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RAGMaxContextChars:        cfg.RAGMaxContextChars,
 		RAGOversampleFactor:       cfg.RAGOversampleFactor,
 		RetrievalHybridEnabled:    cfg.RetrievalHybridEnabled,
+		DedupRetrieval:            cfg.DedupRetrieval,
 		RerankEnabled:             rerankEnabledEffective(cfg),
 		RerankProvider:            cfg.RerankProvider,
 		CohereBaseURL:             cfg.CohereBaseURL,
@@ -1243,6 +1254,9 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalHybridEnabled != nil {
 		cfg.RetrievalHybridEnabled = *fc.RetrievalHybridEnabled
 	}
+	if fc.DedupRetrieval != nil {
+		cfg.DedupRetrieval = *fc.DedupRetrieval
+	}
 	if fc.SessionInactivityTimeout != nil {
 		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
 	}
@@ -1604,6 +1618,7 @@ var configKeyAliases = map[string]string{
 	"oversample_factor":                    "rag.oversample_factor",
 	"retrieval_hybrid_enabled":             "retrieval.hybrid.enabled",
 	"hybrid_enabled":                       "retrieval.hybrid.enabled",
+	"dedup_retrieval":                      "dedup.retrieval",
 	"rerank_enabled":                       "rerank.enabled",
 	"rerank.cohere.api_key":                "cohere_api_key",
 	"rerank.cohere.base_url":               "cohere_base_url",
@@ -1695,7 +1710,7 @@ func canonicalizeConfigKey(key string) string {
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere", "index":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -1755,6 +1770,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"media.vad":                func(c *fileConfig) **bool { return &c.MediaVAD },
 	"x402_tools_call_enabled":  func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
 	"retrieval.hybrid.enabled": func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
+	"dedup.retrieval":          func(c *fileConfig) **bool { return &c.DedupRetrieval },
 	"rerank.enabled":           func(c *fileConfig) **bool { return &c.RerankEnabled },
 }
 
@@ -2135,6 +2151,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("rag_max_context_chars", cfg.RAGMaxContextChars)
 	writeInt("rag_oversample_factor", cfg.RAGOversampleFactor)
 	writeBool("retrieval_hybrid_enabled", cfg.RetrievalHybridEnabled)
+	writeBool("dedup_retrieval", cfg.DedupRetrieval)
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)

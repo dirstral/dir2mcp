@@ -786,6 +786,39 @@ func (s *SQLiteStore) ClearDocumentContentHashes(ctx context.Context) error {
 	return err
 }
 
+// ListDocumentHashes returns the (rel_path, content_hash) pair for every
+// non-deleted document. It backs retrieval-time cross-file de-duplication
+// (SPEC §9.2): the retrieval service maps a hit's rel_path to its content_hash
+// to collapse byte-identical duplicate sources. Implements
+// model.DocumentHashLister.
+func (s *SQLiteStore) ListDocumentHashes(ctx context.Context) ([]model.DocumentHash, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT rel_path, content_hash FROM documents WHERE deleted = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	hashes := make([]model.DocumentHash, 0)
+	for rows.Next() {
+		var h model.DocumentHash
+		if err := rows.Scan(&h.RelPath, &h.ContentHash); err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return hashes, nil
+}
+
 // WithTx begins a new database transaction and passes a transaction-bound
 // representation store to the supplied callback. If the callback returns an
 // error the transaction is rolled back; otherwise it is committed.  The
