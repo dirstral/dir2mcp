@@ -1217,6 +1217,50 @@ func (s *SQLiteStore) TranscriptSpanChunks(ctx context.Context, repID int64) ([]
 	return out, nil
 }
 
+// ChunkMediaSpanByID resolves a chunk id to its source media (rel_path,
+// doc_type) and its time span, for the dir2mcp_open_media_clip tool (SPEC
+// §15.11). The chunk's source is read straight from the chunks row (which
+// carries rel_path/doc_type) and the span from the joined spans row. A missing
+// chunk (or a chunk with no span / a deleted chunk) is reported as
+// model.ErrNotFound so the caller can map it to FILE_NOT_FOUND. The returned
+// span has whatever kind the chunk carries; callers that require a time span
+// validate doc_type/span.Kind themselves.
+func (s *SQLiteStore) ChunkMediaSpanByID(ctx context.Context, chunkID int64) (relPath, docType string, span model.Span, err error) {
+	if chunkID <= 0 {
+		return "", "", model.Span{}, model.ErrNotFound
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return "", "", model.Span{}, err
+	}
+	defer s.ReleaseDB()
+
+	row := db.QueryRowContext(
+		ctx,
+		`SELECT c.rel_path, c.doc_type, sp.span_kind, sp.start, sp.end, COALESCE(sp.extra_json, '')
+		 FROM chunks c
+		 JOIN spans sp ON sp.chunk_id = c.chunk_id
+		 WHERE c.chunk_id = ? AND c.deleted = 0
+		 ORDER BY sp.start ASC, sp.end ASC
+		 LIMIT 1`,
+		chunkID,
+	)
+	var (
+		kind      string
+		start     int
+		end       int
+		extraJSON string
+	)
+	if err := row.Scan(&relPath, &docType, &kind, &start, &end, &extraJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", model.Span{}, model.ErrNotFound
+		}
+		return "", "", model.Span{}, err
+	}
+	return relPath, docType, spanFromRow(kind, start, end, extraJSON), nil
+}
+
 func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) error {
 	normalizedPath, err := normalizeRelPath(relPath)
 	if err != nil {

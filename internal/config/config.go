@@ -21,6 +21,15 @@ const DefaultProtocolVersion = "2025-11-25"
 
 const EffectiveConfigSnapshotFile = ".dir2mcp.yaml.snapshot"
 
+// DefaultMediaClipMaxDurationMS / DefaultMediaClipMaxBytes are the built-in
+// bounds for the dir2mcp_open_media_clip tool (SPEC §15.11): a 2-minute span
+// cap and a 25 MiB inline byte cap. Both are overridable via
+// media.clip.max_duration_ms / media.clip.max_bytes.
+const (
+	DefaultMediaClipMaxDurationMS = 120000
+	DefaultMediaClipMaxBytes      = 26214400
+)
+
 type SecretSourceMetadata struct {
 	ElevenLabsAPIKey     string
 	CohereAPIKey         string
@@ -290,6 +299,15 @@ type Config struct {
 	MediaAudioWindowSec int
 	MediaVideoWindowSec int
 
+	// MediaClipMaxDurationMS / MediaClipMaxBytes bound the
+	// dir2mcp_open_media_clip tool (SPEC §15.11; config `media.clip.max_duration_ms`
+	// / `media.clip.max_bytes`). A requested span whose duration exceeds
+	// MediaClipMaxDurationMS, or an extracted clip whose size exceeds
+	// MediaClipMaxBytes, is rejected with the non-retryable CLIP_TOO_LARGE error.
+	// Defaults: 120000 ms (2 min) and 26214400 bytes (25 MiB).
+	MediaClipMaxDurationMS int
+	MediaClipMaxBytes      int
+
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
 	// screened for degenerate output (repetition loops, empty output,
@@ -404,6 +422,8 @@ type fileConfig struct {
 	MediaVAD                  *bool
 	MediaAudioWindowSec       *int
 	MediaVideoWindowSec       *int
+	MediaClipMaxDurationMS    *int
+	MediaClipMaxBytes         *int
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -502,6 +522,8 @@ type persistedConfig struct {
 	MediaVAD                  bool          `yaml:"media_vad"`
 	MediaAudioWindowSec       int           `yaml:"media_audio_window_sec"`
 	MediaVideoWindowSec       int           `yaml:"media_video_window_sec"`
+	MediaClipMaxDurationMS    int           `yaml:"media_clip_max_duration_ms"`
+	MediaClipMaxBytes         int           `yaml:"media_clip_max_bytes"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -625,6 +647,8 @@ func Default() Config {
 		STTElevenLabsModel:        "scribe_v1",
 		STTElevenLabsLanguageCode: "",
 		QualityGatesEnabled:       true,
+		MediaClipMaxDurationMS:    DefaultMediaClipMaxDurationMS,
+		MediaClipMaxBytes:         DefaultMediaClipMaxBytes,
 		MediaVariantsGroup:        false,
 		MediaVariantsSelect:       "best",
 		MediaTranslateEnabled:     false,
@@ -738,6 +762,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaVAD:                  cfg.MediaVAD,
 		MediaAudioWindowSec:       cfg.MediaAudioWindowSec,
 		MediaVideoWindowSec:       cfg.MediaVideoWindowSec,
+		MediaClipMaxDurationMS:    cfg.MediaClipMaxDurationMS,
+		MediaClipMaxBytes:         cfg.MediaClipMaxBytes,
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1386,6 +1412,12 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaVideoWindowSec != nil {
 		cfg.MediaVideoWindowSec = *fc.MediaVideoWindowSec
 	}
+	if fc.MediaClipMaxDurationMS != nil {
+		cfg.MediaClipMaxDurationMS = *fc.MediaClipMaxDurationMS
+	}
+	if fc.MediaClipMaxBytes != nil {
+		cfg.MediaClipMaxBytes = *fc.MediaClipMaxBytes
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -1660,6 +1692,8 @@ var configKeyAliases = map[string]string{
 	"media_vad":                            "media.vad",
 	"media_audio_window_sec":               "media.audio_window_sec",
 	"media_video_window_sec":               "media.video_window_sec",
+	"media_clip_max_duration_ms":           "media.clip.max_duration_ms",
+	"media_clip_max_bytes":                 "media.clip.max_bytes",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1716,7 +1750,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
-	case "media", "media.variants", "media.translate":
+	case "media", "media.variants", "media.translate", "media.clip":
 		return true
 	case "index.pgvector":
 		return true
@@ -1790,34 +1824,32 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 // setIntFileScalar parses value as an int and assigns it to the
 // fileConfig field selected by key; returns an error for an unknown key
 // or a non-integer value.
+// intFileScalarTargets maps a canonical integer config key to an accessor that
+// returns the address of the matching *int fileConfig field. Using a table
+// keeps setIntFileScalar a flat dispatch (one new entry per key) rather than an
+// ever-growing switch that trips the cyclomatic-complexity gate.
+var intFileScalarTargets = map[string]func(*fileConfig) **int{
+	"rate_limit_rps":             func(c *fileConfig) **int { return &c.RateLimitRPS },
+	"rate_limit_burst":           func(c *fileConfig) **int { return &c.RateLimitBurst },
+	"rag.k_default":              func(c *fileConfig) **int { return &c.RAGKDefault },
+	"rag.max_context_chars":      func(c *fileConfig) **int { return &c.RAGMaxContextChars },
+	"rag.oversample_factor":      func(c *fileConfig) **int { return &c.RAGOversampleFactor },
+	"chunking.max_tokens":        func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
+	"chunking.overlap_tokens":    func(c *fileConfig) **int { return &c.ChunkingOverlapTokens },
+	"ingest.max_file_mb":         func(c *fileConfig) **int { return &c.IngestMaxFileMB },
+	"rerank.candidate_pool":      func(c *fileConfig) **int { return &c.RerankCandidatePool },
+	"media.audio_window_sec":     func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
+	"media.video_window_sec":     func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
+	"media.clip.max_duration_ms": func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
+	"media.clip.max_bytes":       func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
+}
+
 func setIntFileScalar(cfg *fileConfig, key, value string) error {
-	var target **int
-	switch key {
-	case "rate_limit_rps":
-		target = &cfg.RateLimitRPS
-	case "rate_limit_burst":
-		target = &cfg.RateLimitBurst
-	case "rag.k_default":
-		target = &cfg.RAGKDefault
-	case "rag.max_context_chars":
-		target = &cfg.RAGMaxContextChars
-	case "rag.oversample_factor":
-		target = &cfg.RAGOversampleFactor
-	case "chunking.max_tokens":
-		target = &cfg.ChunkingMaxTokens
-	case "chunking.overlap_tokens":
-		target = &cfg.ChunkingOverlapTokens
-	case "ingest.max_file_mb":
-		target = &cfg.IngestMaxFileMB
-	case "rerank.candidate_pool":
-		target = &cfg.RerankCandidatePool
-	case "media.audio_window_sec":
-		target = &cfg.MediaAudioWindowSec
-	case "media.video_window_sec":
-		target = &cfg.MediaVideoWindowSec
-	default:
+	accessor, ok := intFileScalarTargets[key]
+	if !ok {
 		return nil
 	}
+	target := accessor(cfg)
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return fmt.Errorf("invalid integer for %s", key)
@@ -1833,8 +1865,10 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 // be negative. A negative value is rejected at config-parse time (explicit,
 // deterministic) rather than being silently clamped later.
 var nonNegativeIntKeys = map[string]bool{
-	"media.audio_window_sec": true,
-	"media.video_window_sec": true,
+	"media.audio_window_sec":     true,
+	"media.video_window_sec":     true,
+	"media.clip.max_duration_ms": true,
+	"media.clip.max_bytes":       true,
 }
 
 // setFloatFileScalar parses value as a float64 and assigns it to the
@@ -2187,6 +2221,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_vad", cfg.MediaVAD)
 	writeInt("media_audio_window_sec", cfg.MediaAudioWindowSec)
 	writeInt("media_video_window_sec", cfg.MediaVideoWindowSec)
+	writeInt("media_clip_max_duration_ms", cfg.MediaClipMaxDurationMS)
+	writeInt("media_clip_max_bytes", cfg.MediaClipMaxBytes)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)
