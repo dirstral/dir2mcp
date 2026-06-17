@@ -71,6 +71,10 @@ type DiscoverOptions struct {
 	UseGitIgnore   bool
 	FollowSymlinks bool
 	MediaVariants  MediaVariantOptions
+	// ScanCache, when non-nil, is the optional directory-discovery cache (issue
+	// #267 item 5) passed through to the local-filesystem walker. nil = disabled
+	// (a full re-walk every run). See corpusfs.ScanCache.
+	ScanCache corpusfs.ScanCache
 }
 
 // DefaultDiscoverOptions returns discovery defaults used by ingestion.
@@ -92,6 +96,7 @@ func (o DiscoverOptions) corpusfsOptions() corpusfs.Options {
 		MaxSizeBytes:   o.MaxSizeBytes,
 		UseGitIgnore:   o.UseGitIgnore,
 		FollowSymlinks: o.FollowSymlinks,
+		ScanCache:      o.ScanCache,
 	}
 }
 

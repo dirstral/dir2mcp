@@ -27,6 +27,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/quality"
+	"github.com/dirstral/dir2mcp/internal/scancache"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
@@ -687,6 +688,30 @@ func (s *Service) corpusFS() corpusfs.CorpusFS {
 	return corpusfs.NewLocalFS(s.cfg.RootDir)
 }
 
+// openScanCache returns an opened directory-discovery scan cache (issue #267
+// item 5) when the feature is enabled in config AND the active corpus backend is
+// the local filesystem; otherwise it returns nil so discovery performs an
+// unoptimized full walk. The cache only benefits (and is only honored by) the
+// local-filesystem walker — object-store backends key change detection off the
+// ETag instead — so it is never opened for a remote source. The caller owns the
+// returned cache's lifetime and must Close it.
+func (s *Service) openScanCache() *scancache.SQLiteCache {
+	if !s.cfg.IngestScanCache {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(s.cfg.Source.Kind)) {
+	case "", "local", "nfs":
+		// local-filesystem backends only.
+	default:
+		return nil
+	}
+	stateDir := strings.TrimSpace(s.cfg.StateDir)
+	if stateDir == "" {
+		return nil
+	}
+	return scancache.Open(scancache.DefaultPath(stateDir))
+}
+
 // SetQualityGate overrides the output quality gate (spec 0.16.0). A nil gate
 // disables screening so generated transcript/OCR text is chunked and embedded
 // without quarantine. Mirrors SetTranscriber for tests.
@@ -781,6 +806,16 @@ func (s *Service) runScan(ctx context.Context) error {
 	}
 
 	discoverOpts := DiscoverOptionsFromConfig(s.cfg)
+	// Attach the optional directory-discovery scan cache (issue #267 item 5) for
+	// the local-filesystem backend only. It is opened for the duration of this
+	// scan and closed afterward; a failure to open it is non-fatal (we just walk
+	// without the optimization). The walker only ever trusts it after confirming
+	// each directory's mtime and re-stat'ing its children, so it cannot cause a
+	// changed file to be missed.
+	if cache := s.openScanCache(); cache != nil {
+		defer func() { _ = cache.Close() }()
+		discoverOpts.ScanCache = cache
+	}
 	discovered, err := s.corpusFS().Walk(ctx, s.cfg.RootDir, discoverOpts.corpusfsOptions())
 	if err != nil {
 		return err
