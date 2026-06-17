@@ -86,6 +86,9 @@ func decodeClipResult(t *testing.T, resp *http.Response) map[string]interface{} 
 	if envelope.Result.IsError {
 		t.Fatalf("expected success, got error: %#v", envelope.Result.StructuredContent)
 	}
+	if envelope.Result.StructuredContent == nil {
+		t.Fatalf("expected structuredContent in successful response, got nil")
+	}
 	// Carry the content array through for the bytes-channel assertion.
 	envelope.Result.StructuredContent["__content"] = envelope.Result.Content
 	return envelope.Result.StructuredContent
