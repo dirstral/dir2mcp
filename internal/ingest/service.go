@@ -364,13 +364,17 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	return options
 }
 
-// mistralExtractor resolves the OCR provider (the bespoke mistral kind)
-// via the provider model and adapts it to model.DocumentExtractor.
-// Returns nil when no Mistral OCR credential is available (matching the
-// prior "no key -> no extractor" behavior). Docling is handled
-// separately below — it is a local tool, not a provider profile.
+// mistralExtractor resolves the bespoke-OCR provider (the `kind: mistral`
+// /v1/ocr surface) via the provider model and adapts it to
+// model.DocumentExtractor. It honors the explicit `model.ocr.provider`
+// binding (ocrProviderName) so an operator can point OCR at a self-hosted
+// bespoke-OCR endpoint — a `kind: mistral` profile on a custom `base_url`
+// (dir2mcp#240) — falling back to the built-in `mistral-ocr` profile when the
+// binding is unset. Returns nil when no OCR-capable profile resolves (matching
+// the prior "no key -> no extractor" behavior). Docling is handled separately
+// below — it is a local tool / docling-serve endpoint, not a provider profile.
 func mistralExtractor(cfg config.Config) model.DocumentExtractor {
-	prof, err := cfg.Providers().ResolveExplicit(provider.CapOCR, "mistral-ocr", true)
+	prof, err := cfg.Providers().ResolveExplicit(provider.CapOCR, ocrProviderName(cfg), true)
 	if err != nil {
 		return nil
 	}

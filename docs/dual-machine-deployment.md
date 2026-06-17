@@ -74,10 +74,21 @@ contract for self-hosted STT, so any server implementing those endpoints works
 (vLLM, Ollama, LM Studio, a whisper OpenAI shim, etc.). A self-hosted server on
 a trusted network may be **credential-less** — no API key required.
 
-> OCR note: OCR is **not** part of the OpenAI-compatible surface. A self-hosted
-> `kind: openai` profile is eligible for embed/chat/STT but not for OCR (OCR is a
-> native `mistral`-kind capability). If you need OCR, point the `ocr` capability
-> at a provider that supports it. (`dirstral-spec/docs/SPEC.md` §8.5.)
+> OCR note: OCR is **not** part of the OpenAI-compatible surface (SPEC §8.5: OCR
+> has no OpenAI analog). A self-hosted `kind: openai` profile is eligible for
+> embed/chat/STT but **not** for OCR — binding `model.ocr.provider` to a
+> `kind: openai` profile is rejected as `CONFIG_INVALID`. There are two
+> self-hosted OCR routes:
+>
+> 1. **docling-serve** (recommended) — run a [docling-serve](https://github.com/docling-project/docling-serve)
+>    container on the VPS and point `ingest.docling.serve_url` at it (e.g.
+>    `http://localhost:5001`). This is a distinct extractor, not a provider
+>    profile; see [Document extraction over HTTP](../README.md#docling-extraction-over-http-docling-serve).
+> 2. **A self-hosted `kind: mistral` `/v1/ocr` endpoint** — declare a
+>    `kind: mistral` profile whose `base_url` is the local OCR host and bind it
+>    via `model.ocr.provider` (shown below). dir2mcp will POST the bespoke
+>    `{base_url}/v1/ocr` request to that endpoint instead of the hosted Mistral
+>    default.
 
 ### 2.2 Point provider `base_url`s at localhost
 
@@ -102,11 +113,22 @@ providers:
     base_url: http://localhost:9000
     stt_model: <your-whisper-model>   # optional; servers often accept whisper-1
 
+  # Self-hosted OCR via a kind: mistral /v1/ocr endpoint (optional — see the OCR
+  # note above; docling-serve is the other route). base_url is the host ROOT:
+  # the bespoke OCR client appends /v1/ocr itself (unlike kind: openai base_urls,
+  # which already include /v1). A trusted-network endpoint may be credential-less.
+  gpu-ocr:
+    kind: mistral
+    base_url: http://localhost:9100
+    ocr_model: <your-ocr-model>
+
 model:
   embed:
     provider: vllm
   chat:
     provider: vllm
+  ocr:
+    provider: gpu-ocr               # omit to use the hosted mistral-ocr default
 
 # Self-hosted STT is reached via the legacy stt_provider selector.
 stt_provider: whisper

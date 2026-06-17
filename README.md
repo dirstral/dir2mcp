@@ -315,6 +315,37 @@ ingest:
 - Under `extractor: auto`, docling-serve is used only when the docling CLI isn't on `PATH` (local CLI is preferred); an empty `serve_url` means the HTTP transport isn't considered, and an unreachable one is skipped in favor of another available extractor (for example Mistral OCR).
 - Env equivalent: `DIR2MCP_DOCLING_SERVE_URL=http://127.0.0.1:5001`.
 
+### Self-hosted / GPU-VPS provider endpoints (embed / OCR / STT)
+
+A self-hosted model server (on a GPU VPS or a trusted LAN) is a first-class provider: declare it under `providers:` with a custom `base_url` and bind it per capability (spec §8.5). No new provider `kind` is introduced, and a trusted-network endpoint may be **credential-less** (no `api_key`).
+
+```yaml
+providers:
+  gpu-embed:                 # OpenAI-compatible embed/chat (TEI, vLLM, Infinity, …)
+    kind: openai
+    base_url: http://gpu-vps:8080/v1
+    embed_text_model: bge-m3
+  whisper:                   # self-hosted STT (POST {base_url}/v1/audio/transcriptions)
+    kind: whisper
+    base_url: http://gpu-vps:9001/v1
+    stt_model: large-v3
+  gpu-ocr:                   # self-hosted bespoke OCR (POST {base_url}/v1/ocr)
+    kind: mistral            # base_url is the host ROOT; /v1/ocr is appended
+    base_url: http://gpu-vps:9100
+    ocr_model: my-ocr
+model:
+  embed:
+    provider: gpu-embed      # reindex-bound (the embed identity includes it)
+  ocr:
+    provider: gpu-ocr        # omit to keep the hosted mistral-ocr default
+stt_provider: whisper        # STT uses the legacy selector
+```
+
+- **Capability mapping** (which route serves each capability, spec §8.5): embed → `POST {base_url}/v1/embeddings`; chat → `/v1/chat/completions`; STT → `/v1/audio/transcriptions` (endpoint-dependent, validated at first use). **OCR has no OpenAI analog** — bind it only to a `kind: mistral` `/v1/ocr` endpoint (or use [docling-serve](#docling-extraction-over-http-docling-serve)); binding `model.ocr.provider` to a `kind: openai` profile is rejected as `CONFIG_INVALID`.
+- **`base_url` shape differs by kind:** a `kind: openai` `base_url` already includes `/v1`; a `kind: mistral` OCR `base_url` is the **host root** (the client appends `/v1/ocr`).
+- No shipped self-hosted defaults — you must declare the profile and bind it explicitly; nothing silently auto-selects a self-hosted endpoint.
+- For a full GPU-VPS topology (corpus over NFS/S3, vector backend, systemd), see [docs/dual-machine-deployment.md](docs/dual-machine-deployment.md).
+
 ### Continuous incremental indexing (optional)
 
 By default `dir2mcp up` scans the directory once at startup. Enable the **filesystem watcher** to keep the index continuously in sync with on-disk changes for the life of the process — added files are indexed, edited files are re-indexed, and removed files are tombstoned (evicted from retrieval).
