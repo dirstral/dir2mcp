@@ -143,6 +143,19 @@ func (s *Service) ocrStale(ctx context.Context, reader representationMetaReader,
 	return true
 }
 
+// transcriptCacheKey returns the on-disk transcript cache filename stem for the
+// given media bytes, folding the active STT derivation identity into the key
+// (SPEC §8.6.7) so a model swap does not return the previous model's cached
+// transcript. When no STT provider/model is resolved (no transcriber, or an
+// identity with empty provider+model) the historical bytes-only key is preserved.
+func (s *Service) transcriptCacheKey(content []byte) string {
+	if strings.TrimSpace(s.sttProvider) == "" && strings.TrimSpace(s.sttModel) == "" {
+		return computeContentHash(content)
+	}
+	combined := strings.Join([]string{computeContentHash(content), s.activeTranscriptIdentity()}, "\x00")
+	return computeContentHash([]byte(combined))
+}
+
 // ocrCacheKey returns the on-disk OCR cache filename stem for the given content,
 // folding the active OCR derivation identity into the key (SPEC §8.6.7). Keying
 // on the bytes alone would return the previous extractor's cached text after an
@@ -150,11 +163,16 @@ func (s *Service) ocrStale(ctx context.Context, reader representationMetaReader,
 // defeating the re-derivation. An empty active identity (no extractor / no
 // model concept) folds in "", preserving the historical bytes-only key.
 func (s *Service) ocrCacheKey(content []byte) string {
-	active := s.activeOCRIdentity()
-	if active == "" {
+	// Only model-bearing extractors (e.g. mistral OCR) need the identity folded
+	// in: model-less extractors (docling / docling-serve / custom commands) are
+	// deterministic for the same bytes and use a distinct cache directory per
+	// provider, so their historical bytes-only key is preserved and a swap between
+	// them already lands in a different cache tree.
+	_, modelName := s.extractorProviderModel()
+	if strings.TrimSpace(modelName) == "" {
 		return computeContentHash(content)
 	}
-	combined := strings.Join([]string{computeContentHash(content), active}, "\x00")
+	combined := strings.Join([]string{computeContentHash(content), s.activeOCRIdentity()}, "\x00")
 	return computeContentHash([]byte(combined))
 }
 

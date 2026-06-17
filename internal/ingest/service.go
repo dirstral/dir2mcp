@@ -613,6 +613,16 @@ func (s *Service) SetTranscriptLanguage(language string) {
 	s.transcriptLanguage = strings.TrimSpace(language)
 }
 
+// SetSTTIdentity overrides the recorded STT derivation identity (provider name
+// and model) written into machine transcript meta_json and compared by the
+// re-ingest gate (spec §8.6.7). It mirrors SetTranscriptLanguage / SetTranslator
+// for tests that need a deterministic STT identity without resolving a real STT
+// provider profile. Values are trimmed.
+func (s *Service) SetSTTIdentity(providerName, model string) {
+	s.sttProvider = strings.TrimSpace(providerName)
+	s.sttModel = strings.TrimSpace(model)
+}
+
 // SetCorpusFS overrides the corpus filesystem backend used for discovery and
 // byte reads. Passing nil restores the default local-filesystem backend rooted
 // at cfg.RootDir.
@@ -2419,13 +2429,9 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	// re-ingest gate forces re-transcription, and a bytes-only key would return
 	// the previous model's cached text — silently defeating the re-derivation. The
 	// TranscriptLangSuffix is retained on the filename so cache files stay
-	// human-identifiable by language. A setup with no resolved STT identity folds
-	// in the empty string, preserving the historical key for that case.
-	cacheKey := strings.Join([]string{
-		computeContentHash(content),
-		s.activeTranscriptIdentity(),
-	}, "\x00")
-	base := computeContentHash([]byte(cacheKey)) + TranscriptLangSuffix(language)
+	// human-identifiable by language. With no resolved STT identity the historical
+	// bytes-only key is preserved.
+	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	if cached, err := os.ReadFile(cachePath); err == nil {
