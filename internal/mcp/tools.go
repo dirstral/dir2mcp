@@ -16,6 +16,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dirstral/dir2mcp/internal/avutil"
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -49,6 +51,7 @@ var toolOrder = []string{
 	protocol.ToolNameAnnotate,
 	protocol.ToolNameTranscribeAndAsk,
 	protocol.ToolNameOpenFile,
+	protocol.ToolNameOpenMediaClip,
 	protocol.ToolNameListFiles,
 	protocol.ToolNameStats,
 }
@@ -89,6 +92,14 @@ type toolExecutionError struct {
 
 type retrieverOpenFileWithMeta interface {
 	OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error)
+}
+
+// storeChunkMediaSpan is the optional store capability that resolves a chunk id
+// to its source media (rel_path/doc_type) and time span for
+// dir2mcp_open_media_clip (SPEC §15.11). It is type-asserted on s.store so a
+// store without media-chunk support degrades to the rel_path+range input path.
+type storeChunkMediaSpan interface {
+	ChunkMediaSpanByID(ctx context.Context, chunkID int64) (relPath, docType string, span model.Span, err error)
 }
 
 type voiceAwareTTSSynthesizer interface {
@@ -145,6 +156,13 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 			InputSchema:  openFileInputSchema(),
 			OutputSchema: openFileOutputSchema(),
 			handler:      s.handleOpenFileTool,
+		},
+		protocol.ToolNameOpenMediaClip: {
+			Name:         protocol.ToolNameOpenMediaClip,
+			Description:  "Extract the audio/video snippet for a media hit (time span); the media analogue of open_file.",
+			InputSchema:  openMediaClipInputSchema(),
+			OutputSchema: openMediaClipOutputSchema(),
+			handler:      s.handleOpenMediaClipTool,
 		},
 		protocol.ToolNameListFiles: {
 			Name:         protocol.ToolNameListFiles,
@@ -1210,6 +1228,242 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		Content:           []toolContentItem{{Type: "text", Text: content}},
 		StructuredContent: structured,
 	}, nil
+}
+
+// mediaClipRequest is the resolved target of an open_media_clip call: the
+// source media rel_path/doc_type and the [startMS, endMS) span to extract.
+type mediaClipRequest struct {
+	relPath string
+	docType string
+	startMS int
+	endMS   int
+}
+
+// handleOpenMediaClipTool implements dir2mcp_open_media_clip (SPEC §15.11): the
+// time-media analogue of open_file. It resolves a chunk_id (or rel_path + range)
+// to a source media file and time span, enforces the configured clip bounds,
+// extracts the snippet via the injectable extractSegment seam, and returns the
+// bytes inline (base64 + an audio/video content item). reference mode is not yet
+// materialized, so it falls back to inline and notes it.
+func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, map[string]struct{}{
+		"chunk_id": {}, "rel_path": {}, "start_ms": {}, "end_ms": {}, "return": {},
+	}); err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	returnMode, toolErr := parseMediaClipReturnArg(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	req, toolErr := s.resolveMediaClipRequest(ctx, args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	if !isMediaDocType(req.docType) {
+		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "open_media_clip requires an audio/video document; " + req.relPath + " is " + req.docType, Retryable: false}
+	}
+	if req.startMS >= req.endMS {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "start_ms must be < end_ms", Retryable: false}
+	}
+
+	maxDurationMS := s.cfg.MediaClipMaxDurationMS
+	if maxDurationMS <= 0 {
+		maxDurationMS = config.DefaultMediaClipMaxDurationMS
+	}
+	maxBytes := s.cfg.MediaClipMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = config.DefaultMediaClipMaxBytes
+	}
+	if req.endMS-req.startMS > maxDurationMS {
+		return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("requested clip duration %dms exceeds max %dms; request a shorter span", req.endMS-req.startMS, maxDurationMS), Retryable: false}
+	}
+
+	absPath, pathErr := s.resolveDocumentPath(req.relPath)
+	if pathErr != nil {
+		return toolCallResult{}, mapPathError(pathErr)
+	}
+	extract := s.extractSegment
+	if extract == nil {
+		extract = avutil.ExtractSegment
+	}
+	data, extractErr := extract(ctx, absPath, req.startMS, req.endMS)
+	if extractErr != nil {
+		// Bytes/URLs are never echoed; map every extraction failure (including a
+		// missing ffmpeg) to the non-secret MEDIA_CLIP_FAILED contract.
+		return toolCallResult{}, &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip extraction failed", Retryable: errors.Is(extractErr, avutil.ErrToolNotFound)}
+	}
+	if len(data) > maxBytes {
+		return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("extracted clip is %d bytes, exceeds max %d; request a shorter span", len(data), maxBytes), Retryable: false}
+	}
+
+	mimeType := mediaClipMIMEForPath(req.relPath, req.docType)
+	encoded := base64.StdEncoding.EncodeToString(data)
+	structured := map[string]interface{}{
+		"rel_path":    req.relPath,
+		"doc_type":    req.docType,
+		"span":        buildOpenFileSpan(model.Span{Kind: "time", StartMS: req.startMS, EndMS: req.endMS}),
+		"mime_type":   mimeType,
+		"duration_ms": req.endMS - req.startMS,
+		"size_bytes":  len(data),
+		"return":      "inline",
+		"data":        encoded,
+	}
+	// reference was requested but is not yet supported: fall back to inline and
+	// note it (never error solely because reference was asked for, per §15.11).
+	if returnMode == "reference" {
+		structured["reference_fallback"] = "reference return not supported; falling back to inline"
+	}
+	contentType := "audio"
+	if strings.EqualFold(strings.TrimSpace(req.docType), "video") {
+		contentType = "video"
+	}
+	return toolCallResult{
+		// Media bytes travel only via the typed data item, never a text item.
+		Content:           []toolContentItem{{Type: contentType, Data: encoded, MIMEType: mimeType}},
+		StructuredContent: structured,
+	}, nil
+}
+
+// parseMediaClipReturnArg parses the optional "return" argument (inline|reference).
+func parseMediaClipReturnArg(args map[string]interface{}) (string, *toolExecutionError) {
+	mode, err := parseOptionalString(args, "return")
+	if err != nil {
+		return "", &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "inline"
+	}
+	switch mode {
+	case "inline", "reference":
+		return mode, nil
+	default:
+		return "", &toolExecutionError{Code: "INVALID_FIELD", Message: "return must be one of inline,reference", Retryable: false}
+	}
+}
+
+// resolveMediaClipRequest resolves the open_media_clip selection rules into a
+// concrete media target + span. A chunk_id resolves to its source media and
+// chunk span; an explicit start_ms/end_ms provided alongside chunk_id overrides
+// the chunk span. Otherwise rel_path + start_ms + end_ms must all be provided.
+func (s *Server) resolveMediaClipRequest(ctx context.Context, args map[string]interface{}) (mediaClipRequest, *toolExecutionError) {
+	chunkID, hasChunkID, err := parseOptionalIntegerWithPresence(args, "chunk_id")
+	if err != nil {
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	relPath, err := parseOptionalString(args, "rel_path")
+	if err != nil {
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	relPath = strings.TrimSpace(relPath)
+	startMS, hasStart, err := parseOptionalIntegerWithPresence(args, "start_ms")
+	if err != nil {
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	endMS, hasEnd, err := parseOptionalIntegerWithPresence(args, "end_ms")
+	if err != nil {
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if (hasStart && startMS < 0) || (hasEnd && endMS < 0) {
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "start_ms/end_ms must be >= 0", Retryable: false}
+	}
+	if hasStart != hasEnd {
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "both start_ms and end_ms must be provided together", Retryable: false}
+	}
+
+	if hasChunkID {
+		return s.resolveMediaClipByChunk(ctx, chunkID, hasStart, startMS, endMS)
+	}
+
+	// rel_path + range path.
+	if relPath == "" {
+		return mediaClipRequest{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "provide chunk_id, or rel_path with start_ms and end_ms", Retryable: false}
+	}
+	if !hasStart {
+		return mediaClipRequest{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "rel_path requires start_ms and end_ms", Retryable: false}
+	}
+	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
+	if toolErr != nil {
+		return mediaClipRequest{}, toolErr
+	}
+	docType := strings.TrimSpace(doc.DocType)
+	if docType == "" {
+		docType = ingest.ClassifyDocType(doc.RelPath)
+	}
+	return mediaClipRequest{relPath: doc.RelPath, docType: docType, startMS: startMS, endMS: endMS}, nil
+}
+
+// resolveMediaClipByChunk resolves a chunk_id to its source media and span,
+// applying an explicit start_ms/end_ms override (still bounded to that media).
+func (s *Server) resolveMediaClipByChunk(ctx context.Context, chunkID int, hasRange bool, startMS, endMS int) (mediaClipRequest, *toolExecutionError) {
+	if chunkID <= 0 {
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "chunk_id must be > 0", Retryable: false}
+	}
+	resolver, ok := s.store.(storeChunkMediaSpan)
+	if !ok || s.store == nil {
+		return mediaClipRequest{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "chunk_id resolution is not supported by this store; pass rel_path with start_ms and end_ms", Retryable: false}
+	}
+	relPath, docType, span, err := resolver.ChunkMediaSpanByID(ctx, int64(chunkID))
+	if err != nil {
+		if errors.Is(err, model.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return mediaClipRequest{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "chunk not found", Retryable: false}
+		}
+		return mediaClipRequest{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
+	}
+	req := mediaClipRequest{
+		relPath: strings.TrimSpace(relPath),
+		docType: strings.TrimSpace(docType),
+		startMS: span.StartMS,
+		endMS:   span.EndMS,
+	}
+	if req.docType == "" {
+		req.docType = ingest.ClassifyDocType(req.relPath)
+	}
+	// An explicit range overrides the chunk's span (still bounded to this media).
+	if hasRange {
+		req.startMS = startMS
+		req.endMS = endMS
+	} else if strings.TrimSpace(span.Kind) != "time" {
+		// Non-time chunk with no explicit range: there is no span to clip.
+		return mediaClipRequest{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "chunk has no time span; provide start_ms and end_ms", Retryable: false}
+	}
+	return req, nil
+}
+
+// isMediaDocType reports whether docType is a clip-able audio/video type.
+func isMediaDocType(docType string) bool {
+	switch strings.ToLower(strings.TrimSpace(docType)) {
+	case "audio", "video":
+		return true
+	default:
+		return false
+	}
+}
+
+// mediaClipMIMEForPath picks a container MIME type for an extracted clip from
+// the source file extension (stream-copy keeps the source muxer), falling back
+// to a generic audio/video type by doc_type when the extension is unknown.
+func mediaClipMIMEForPath(relPath, docType string) string {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wav":
+		return "audio/wav"
+	case ".m4a", ".aac":
+		return "audio/mp4"
+	case ".flac":
+		return "audio/flac"
+	case ".ogg", ".opus":
+		return "audio/ogg"
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	}
+	if strings.EqualFold(strings.TrimSpace(docType), "video") {
+		return "video/mp4"
+	}
+	return "audio/mpeg"
 }
 
 // isBinaryDocTypeForOpenFile reports whether docType is one whose default
@@ -2616,6 +2870,56 @@ func openFileOutputSchema() map[string]interface{} {
 			"truncated": map[string]interface{}{"type": "boolean"},
 		},
 		"required":    []string{"rel_path", "doc_type", "content", "truncated"},
+		"definitions": sharedDefinitions(),
+	}
+}
+
+func openMediaClipInputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"chunk_id": map[string]interface{}{"type": "integer", "description": "Hit chunk id; resolved to its source media and time span."},
+			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
+			"start_ms": map[string]interface{}{"type": "integer", "minimum": 0},
+			"end_ms":   map[string]interface{}{"type": "integer", "minimum": 0},
+			"return":   map[string]interface{}{"type": "string", "enum": []string{"inline", "reference"}, "default": "inline"},
+		},
+		"anyOf": []interface{}{
+			map[string]interface{}{"required": []string{"chunk_id"}},
+			map[string]interface{}{"required": []string{"rel_path", "start_ms", "end_ms"}},
+		},
+	}
+}
+
+func openMediaClipOutputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"rel_path":           map[string]interface{}{"type": "string"},
+			"doc_type":           map[string]interface{}{"type": "string"},
+			"span":               map[string]interface{}{"$ref": "#/definitions/Span"},
+			"mime_type":          map[string]interface{}{"type": "string"},
+			"duration_ms":        map[string]interface{}{"type": "integer"},
+			"size_bytes":         map[string]interface{}{"type": "integer"},
+			"return":             map[string]interface{}{"type": "string", "enum": []string{"inline", "reference"}},
+			"data":               map[string]interface{}{"type": "string", "contentEncoding": "base64", "description": "Present when return=inline: base64 clip bytes."},
+			"uri":                map[string]interface{}{"type": "string", "description": "Present when return=reference: short-lived fetch URI."},
+			"expires_unix":       map[string]interface{}{"type": "integer", "description": "Present when return=reference: expiry of uri."},
+			"reference_fallback": map[string]interface{}{"type": "string", "description": "Set when reference was requested but inline was returned instead."},
+		},
+		"required": []string{"rel_path", "doc_type", "span", "mime_type", "return"},
+		"allOf": []interface{}{
+			map[string]interface{}{
+				"if":   map[string]interface{}{"properties": map[string]interface{}{"return": map[string]interface{}{"const": "inline"}}, "required": []string{"return"}},
+				"then": map[string]interface{}{"required": []string{"data"}},
+			},
+			map[string]interface{}{
+				"if":   map[string]interface{}{"properties": map[string]interface{}{"return": map[string]interface{}{"const": "reference"}}, "required": []string{"return"}},
+				"then": map[string]interface{}{"required": []string{"uri", "expires_unix"}},
+			},
+		},
 		"definitions": sharedDefinitions(),
 	}
 }

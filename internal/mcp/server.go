@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
+	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/identity"
@@ -120,6 +121,12 @@ type Server struct {
 	execKeyMu map[string]*keyMutex
 
 	eventEmitter func(level, event string, data interface{})
+
+	// extractSegment cuts [startMS, endMS) from a local media file and returns
+	// the container bytes for dir2mcp_open_media_clip (SPEC §15.11). It defaults
+	// to avutil.ExtractSegment and is an injectable seam so tests can stub
+	// extraction without ffmpeg on PATH.
+	extractSegment func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)
 }
 
 type rpcRequest struct {
@@ -195,6 +202,16 @@ func WithTTS(tts TTSSynthesizer) ServerOption {
 	}
 }
 
+// WithExtractSegment overrides the media-clip extraction function used by
+// dir2mcp_open_media_clip (SPEC §15.11). Production leaves it unset so the
+// server falls back to avutil.ExtractSegment; tests inject a stub to exercise
+// the handler without ffmpeg on PATH.
+func WithExtractSegment(fn func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)) ServerOption {
+	return func(s *Server) {
+		s.extractSegment = fn
+	}
+}
+
 func WithEventEmitter(fn func(level, event string, data interface{})) ServerOption {
 	return func(s *Server) {
 		s.eventEmitter = fn
@@ -232,6 +249,9 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	}
 	if s.indexing == nil {
 		s.indexing = appstate.NewIndexingState(appstate.ModeIncremental)
+	}
+	if s.extractSegment == nil {
+		s.extractSegment = avutil.ExtractSegment
 	}
 	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
 		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)

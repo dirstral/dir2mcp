@@ -16,6 +16,7 @@ const (
 	ToolNameTranscribe       = "dir2mcp_transcribe"
 	ToolNameAnnotate         = "dir2mcp_annotate"
 	ToolNameTranscribeAndAsk = "dir2mcp_transcribe_and_ask"
+	ToolNameOpenMediaClip    = "dir2mcp_open_media_clip"
 )
 
 const (
