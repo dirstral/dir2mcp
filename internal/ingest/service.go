@@ -83,6 +83,27 @@ type Service struct {
 	sttProvider string
 	sttModel    string
 
+	// diarizeActive reports whether speaker diarization is active for
+	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
+	// enabled (tri-state) AND the active STT backend advertises CapDiarize.
+	// When active, diarizeProvider/diarizeModel record the diarization-capable
+	// backend's profile name and STT model so a model-derived transcript carries
+	// its diarize derivation identity (§8.6.7) and a backend change re-derives.
+	// All three are zero when diarization is off (the default), making the STT
+	// transcript path byte-identical to today.
+	diarizeActive   bool
+	diarizeProvider string
+	diarizeModel    string
+
+	// diarizer is the optional, injectable model-driven diarization seam
+	// (SPEC §8.6.8). dir2mcp ships NO default diarizer: the capable backend
+	// (self-hosted WhisperX/pyannote) is integrated out-of-band and wired in via
+	// SetDiarizer. When nil and diarization is active, model-derived transcripts
+	// remain un-attributed (sidecar <v> attribution still works); the config gate
+	// guarantees diarize:true without a capable backend is CONFIG_INVALID, so a
+	// nil diarizer here is never a silent partial-config.
+	diarizer Diarizer
+
 	// translator is the chat/generation client used to translate transcripts
 	// into the configured target language(s) (SPEC §8.6.2). It is the chat
 	// capability binding resolved at construction, or nil when translation is
@@ -240,6 +261,16 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	if prof, ok := resolveSTTProfile(cfg); ok {
 		svc.sttProvider = strings.TrimSpace(prof.Name)
 		svc.sttModel = strings.TrimSpace(prof.STTModel)
+		// Resolve the diarization binding (SPEC §8.6.8) from the SAME STT profile:
+		// diarization is active when enabled (tri-state) AND the backend advertises
+		// CapDiarize. The diarize derivation identity (§8.6.7) is the backend's
+		// provider name + STT model, so a backend/model swap re-derives. When
+		// inactive the fields stay empty and the STT path is unchanged.
+		if config.DiarizationActive(cfg, prof) {
+			svc.diarizeActive = true
+			svc.diarizeProvider = strings.TrimSpace(prof.Name)
+			svc.diarizeModel = strings.TrimSpace(prof.STTModel)
+		}
 	}
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
 	// translation is enabled we resolve the chat capability and build a
@@ -621,6 +652,21 @@ func (s *Service) SetTranscriptLanguage(language string) {
 func (s *Service) SetSTTIdentity(providerName, model string) {
 	s.sttProvider = strings.TrimSpace(providerName)
 	s.sttModel = strings.TrimSpace(model)
+}
+
+// SetDiarizer wires the optional model-driven diarization seam (SPEC §8.6.8) and
+// records the diarize derivation identity (provider name + model, §8.6.7). It is
+// the injection point for an out-of-band diarization-capable backend (dir2mcp
+// ships no default diarizer). Passing a non-nil diarizer activates the
+// model-driven attribution path; the provider/model are written into a diarized
+// transcript's meta_json and folded into its derivation identity. Values are
+// trimmed. Primarily for wiring and tests; production resolution happens in
+// NewService from the STT profile + diarize config.
+func (s *Service) SetDiarizer(d Diarizer, providerName, modelName string) {
+	s.diarizer = d
+	s.diarizeActive = d != nil
+	s.diarizeProvider = strings.TrimSpace(providerName)
+	s.diarizeModel = strings.TrimSpace(modelName)
 }
 
 // SetCorpusFS overrides the corpus filesystem backend used for discovery and
@@ -1970,7 +2016,20 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		Duration:         duration,
 	})
 
-	metaJSON, err := s.sttTranscriptMetaJSON()
+	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
+	if len(segments) == 0 {
+		return nil
+	}
+	// Optional model-driven speaker diarization (SPEC §8.6.8): when active and a
+	// diarizer is injected, attribute each segment to a speaker. This is metadata
+	// only — it stamps span.Speaker/SpeakerLabel and never changes chunk text or
+	// span bounds. With no diarizer (the default), this is a no-op and the
+	// transcript is un-attributed exactly as today (sidecar <v> attribution is
+	// unaffected). Run BEFORE the meta is built so diarized/speakers reflect the
+	// attribution that is actually present on the segments.
+	s.applyDiarization(ctx, doc, content, segments)
+
+	metaJSON, err := s.sttTranscriptMetaJSON(distinctSpeakers(segments))
 	if err != nil {
 		return fmt.Errorf("marshal transcript meta: %w", err)
 	}
@@ -1987,10 +2046,6 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		return fmt.Errorf("upsert transcript representation: %w", err)
 	}
 
-	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
-	if len(segments) == 0 {
-		return nil
-	}
 	// Optional leading-silence trim (dir2mcp#258): when enabled, subtract the
 	// detected dead-air offset from every time span and word timestamp so the
 	// transcript aligns to first speech. Disabled (default) leaves spans
@@ -2023,6 +2078,41 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		s.addErrors(1)
 	}
 	return nil
+}
+
+// applyDiarization stamps speaker attribution onto the transcript segments via
+// the injected diarizer (SPEC §8.6.8). It self-skips when diarization is
+// inactive or no diarizer is wired, leaving segments un-attributed (the default,
+// byte-identical to a non-diarized transcript). It is best-effort and fail-open:
+// a diarizer error degrades to a flat transcript rather than failing ingest
+// (§8.6.8 degenerate-output rule). Attribution is metadata only — it sets
+// span.Speaker/SpeakerLabel and never alters chunk text or span bounds.
+func (s *Service) applyDiarization(ctx context.Context, doc model.Document, content []byte, segments []chunkSegment) {
+	if !s.diarizeActive || s.diarizer == nil || len(segments) == 0 {
+		return
+	}
+	in := make([]SpeakerSegment, 0, len(segments))
+	for _, seg := range segments {
+		in = append(in, SpeakerSegment{StartMS: seg.Span.StartMS, EndMS: seg.Span.EndMS, Text: seg.Text})
+	}
+	attrs, err := s.diarizer.Diarize(ctx, content, in)
+	if err != nil {
+		s.getLogger().Printf("diarization skipped for %s (degrading to flat transcript): %v", doc.RelPath, err)
+		return
+	}
+	if len(attrs) != len(segments) {
+		s.getLogger().Printf("diarization skipped for %s: diarizer returned %d attributions for %d segments",
+			doc.RelPath, len(attrs), len(segments))
+		return
+	}
+	for i := range segments {
+		id := strings.TrimSpace(attrs[i].ID)
+		if id == "" {
+			continue // un-attributed segment degrades to flat
+		}
+		segments[i].Span.Speaker = id
+		segments[i].Span.SpeakerLabel = strings.TrimSpace(attrs[i].Label)
+	}
 }
 
 // translateTranscriptRepresentations produces, for each configured target

@@ -289,6 +289,19 @@ type Config struct {
 	// Default OFF.
 	MediaVAD bool
 
+	// MediaDiarizeEnabled is the TRI-STATE speaker-diarization opt-out/in
+	// (config `media.diarize.enabled`, SPEC §8.6.8). It is a *bool to distinguish
+	// the three states the spec requires:
+	//   - nil (omitted): AUTO — diarization auto-enables when the active STT
+	//     backend advertises CapDiarize (capability-driven activation).
+	//   - false: force OFF regardless of backend capability (the kill switch).
+	//   - true: REQUIRE diarization — CONFIG_INVALID if no configured STT backend
+	//     advertises the capability.
+	// Default OFF (a backend without the capability never auto-enables). It is a
+	// *bool here (not in the overrides block) because the tri-state must survive
+	// all the way to runtime, not be flattened to a plain bool at merge time.
+	MediaDiarizeEnabled *bool
+
 	// MediaAudioWindowSec / MediaVideoWindowSec configure the direct-embedding
 	// media chunk window length, in seconds, for audio and video respectively
 	// (SPEC 8.1.7; config `media.audio_window_sec` / `media.video_window_sec`).
@@ -420,6 +433,7 @@ type fileConfig struct {
 	MediaTrimLeadingSilence   *bool
 	MediaSilenceThresholdDB   *float64
 	MediaVAD                  *bool
+	MediaDiarizeEnabled       *bool
 	MediaAudioWindowSec       *int
 	MediaVideoWindowSec       *int
 	MediaClipMaxDurationMS    *int
@@ -524,8 +538,12 @@ type persistedConfig struct {
 	MediaVideoWindowSec       int           `yaml:"media_video_window_sec"`
 	MediaClipMaxDurationMS    int           `yaml:"media_clip_max_duration_ms"`
 	MediaClipMaxBytes         int           `yaml:"media_clip_max_bytes"`
-	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
-	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
+	// MediaDiarizeEnabled is the tri-state diarization opt (SPEC §8.6.8): a
+	// *bool so the snapshot can round-trip omitted (nil) vs. false vs. true
+	// without collapsing the auto/off distinction.
+	MediaDiarizeEnabled *bool  `yaml:"media_diarize_enabled,omitempty"`
+	ServerTLSCertFile   string `yaml:"server_tls_cert_file"`
+	ServerTLSKeyFile    string `yaml:"server_tls_key_file"`
 
 	// The following fields configure optional x402 payment gating.  The
 	// facilitator token itself is treated like any other sensitive API key:
@@ -760,6 +778,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaTrimLeadingSilence:   cfg.MediaTrimLeadingSilence,
 		MediaSilenceThresholdDB:   cfg.MediaSilenceThresholdDB,
 		MediaVAD:                  cfg.MediaVAD,
+		MediaDiarizeEnabled:       copyBoolPtr(cfg.MediaDiarizeEnabled),
 		MediaAudioWindowSec:       cfg.MediaAudioWindowSec,
 		MediaVideoWindowSec:       cfg.MediaVideoWindowSec,
 		MediaClipMaxDurationMS:    cfg.MediaClipMaxDurationMS,
@@ -1406,6 +1425,11 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaVAD != nil {
 		cfg.MediaVAD = *fc.MediaVAD
 	}
+	if fc.MediaDiarizeEnabled != nil {
+		// Tri-state: copy the pointer (a fresh copy) so an explicit false/true
+		// from the file is preserved as a distinct state from omitted (nil).
+		cfg.MediaDiarizeEnabled = copyBoolPtr(fc.MediaDiarizeEnabled)
+	}
 	if fc.MediaAudioWindowSec != nil {
 		cfg.MediaAudioWindowSec = *fc.MediaAudioWindowSec
 	}
@@ -1690,6 +1714,7 @@ var configKeyAliases = map[string]string{
 	"media_trim_leading_silence":           "media.trim_leading_silence",
 	"media_silence_threshold_db":           "media.silence_threshold_db",
 	"media_vad":                            "media.vad",
+	"media_diarize_enabled":                "media.diarize.enabled",
 	"media_audio_window_sec":               "media.audio_window_sec",
 	"media_video_window_sec":               "media.video_window_sec",
 	"media_clip_max_duration_ms":           "media.clip.max_duration_ms",
@@ -1750,7 +1775,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
-	case "media", "media.variants", "media.translate", "media.clip":
+	case "media", "media.variants", "media.translate", "media.clip", "media.diarize":
 		return true
 	case "index.pgvector":
 		return true
@@ -1802,6 +1827,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 		return &c.MediaTrimLeadingSilence
 	},
 	"media.vad":                func(c *fileConfig) **bool { return &c.MediaVAD },
+	"media.diarize.enabled":    func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
 	"x402_tools_call_enabled":  func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
 	"retrieval.hybrid.enabled": func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
 	"dedup.retrieval":          func(c *fileConfig) **bool { return &c.DedupRetrieval },
@@ -2219,6 +2245,12 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_trim_leading_silence", cfg.MediaTrimLeadingSilence)
 	writeScalar("media_silence_threshold_db", strconv.FormatFloat(cfg.MediaSilenceThresholdDB, 'f', -1, 64))
 	writeBool("media_vad", cfg.MediaVAD)
+	// Tri-state (SPEC §8.6.8): only emit when explicitly set so an omitted
+	// (auto) diarization config round-trips as omitted rather than collapsing to
+	// false. nil means auto-enable when the backend advertises the capability.
+	if cfg.MediaDiarizeEnabled != nil {
+		writeBool("media_diarize_enabled", *cfg.MediaDiarizeEnabled)
+	}
 	writeInt("media_audio_window_sec", cfg.MediaAudioWindowSec)
 	writeInt("media_video_window_sec", cfg.MediaVideoWindowSec)
 	writeInt("media_clip_max_duration_ms", cfg.MediaClipMaxDurationMS)
@@ -2274,6 +2306,17 @@ func strPtr(value string) *string { return &value }
 
 // boolPtr returns a pointer to value.
 func boolPtr(value bool) *bool { return &value }
+
+// copyBoolPtr returns a new pointer to the same bool value, or nil when the
+// input is nil. It preserves a tri-state *bool (nil / false / true) across a
+// snapshot copy without aliasing the original pointer.
+func copyBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	v := *value
+	return &v
+}
 
 // intPtr returns a pointer to value.
 func intPtr(value int) *int { return &value }
@@ -2609,6 +2652,10 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.validateMediaTranslate(); err != nil {
+		return err
+	}
+
+	if err := c.validateMediaDiarize(); err != nil {
 		return err
 	}
 

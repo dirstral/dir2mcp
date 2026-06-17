@@ -76,6 +76,50 @@ type transcriptMeta struct {
 	SourceLanguage    string `json:"source_language,omitempty"`
 	TranslateProvider string `json:"translate_provider,omitempty"`
 	TranslateModel    string `json:"translate_model,omitempty"`
+
+	// Diarized / DiarizeProvider / DiarizeModel / Speakers record speaker
+	// attribution on a diarized transcript (Source any; spec §8.6.8/§5.2).
+	// Diarized is true when the transcript carries per-segment speakers. A
+	// model-derived diarization additionally records DiarizeProvider/DiarizeModel
+	// (part of the derivation identity, §8.6.7); a sidecar that supplied <v>
+	// voice tags is diarized WITHOUT a model, so those stay empty (omitempty).
+	// Speakers is the distinct set of {id,label} present, for discovery. All
+	// fields are omitted on a non-diarized transcript so meta_json is unchanged.
+	Diarized        bool      `json:"diarized,omitempty"`
+	DiarizeProvider string    `json:"diarize_provider,omitempty"`
+	DiarizeModel    string    `json:"diarize_model,omitempty"`
+	Speakers        []Speaker `json:"speakers,omitempty"`
+}
+
+// Speaker is one distinct speaker recorded in a diarized transcript's meta_json
+// (spec §8.6.8): the stable per-transcript id (e.g. "S1") and an optional
+// human-readable label. The per-segment attribution lives on the segment "time"
+// span's extra_json.speaker (§5.4); this set is for discovery/listing.
+type Speaker struct {
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
+}
+
+// distinctSpeakers returns the distinct speakers present across the transcript
+// segments in first-appearance order (deterministic, matching the S-id
+// allocation order in chunkSubtitleCuesFiltered), for the transcript meta_json
+// speakers set (SPEC §8.6.8). Segments with no speaker contribute nothing, so an
+// undiarized transcript yields an empty slice (and meta omits the field).
+func distinctSpeakers(segments []chunkSegment) []Speaker {
+	seen := make(map[string]struct{})
+	var out []Speaker
+	for _, seg := range segments {
+		id := strings.TrimSpace(seg.Span.Speaker)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, Speaker{ID: id, Label: strings.TrimSpace(seg.Span.SpeakerLabel)})
+	}
+	return out
 }
 
 // setSidecarIndex records the mtime of every discovered file by rel_path so the
@@ -321,6 +365,14 @@ func parseSidecar(sc sidecarFile, content string) map[string][]subtitle.Cue {
 // and the language so retrieval and re-derivation treat it as authored.
 func (s *Service) persistSidecarTranscript(ctx context.Context, doc model.Document, lang string, cues []subtitle.Cue, segments []chunkSegment) error {
 	meta := transcriptMeta{Source: sidecarSource, Language: lang, Timestamps: true}
+	// A sidecar that carried <v> voice tags yields speaker-attributed segments
+	// (SPEC §8.6.8). Such a transcript is diarized WITHOUT a model, so it records
+	// diarized:true and the speakers set but NO diarize_provider/model (mirrors
+	// §8.6.7 for authored sources). A sidecar with no voice tags is unchanged.
+	if speakers := distinctSpeakers(segments); len(speakers) > 0 {
+		meta.Diarized = true
+		meta.Speakers = speakers
+	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal sidecar transcript meta: %w", err)
@@ -352,7 +404,10 @@ func sidecarRepHash(lang string, cues []subtitle.Cue) string {
 	b.WriteString(lang)
 	b.WriteByte('\n')
 	for _, c := range cues {
-		fmt.Fprintf(&b, "%d-%d:%s\n", c.StartMS, c.EndMS, c.Text)
+		// Fold the voice/speaker name into the hash so a sidecar edit that changes
+		// ONLY a <v Name> tag (which is stripped from the cue text) still yields a
+		// new representation identity and re-derives the attribution (SPEC §8.6.8).
+		fmt.Fprintf(&b, "%d-%d:%s\t%s\n", c.StartMS, c.EndMS, c.Speaker, c.Text)
 	}
 	return computeRepHash([]byte(b.String()))
 }

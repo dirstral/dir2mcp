@@ -325,6 +325,106 @@ func (r ProviderResolution) ResolveExplicit(cap provider.Capability, explicit st
 	return r.applyModelOverrides(cap, p), nil
 }
 
+// resolveSTTProfileForCapability resolves the active STT provider profile the
+// same way the ingest service does (SPEC 8.1.3), so config-time diarization
+// gating observes the exact backend that will actually transcribe. It returns
+// ok=false when STT is off, when no STT-capable profile resolves, or when the
+// selector is unrecognised. Kept package-local and selector-table-driven so its
+// cyclomatic complexity stays flat.
+func resolveSTTProfileForCapability(cfg Config) (provider.Profile, bool) {
+	sel := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
+	if sel == "" {
+		sel = "auto"
+	}
+	switch sel {
+	case "off", "none", "disabled":
+		return provider.Profile{}, false
+	}
+	r := cfg.Providers()
+	explicitBySelector := map[string]string{
+		"mistral":    "mistral-ocr",
+		"elevenlabs": "elevenlabs",
+		"whisper":    "whisper",
+	}
+	var (
+		prof provider.Profile
+		err  error
+	)
+	if sel == "auto" {
+		prof, err = r.Resolve(provider.CapSTT)
+	} else if explicit, ok := explicitBySelector[sel]; ok {
+		prof, err = r.ResolveExplicit(provider.CapSTT, explicit, true)
+	} else {
+		return provider.Profile{}, false
+	}
+	if err != nil {
+		return provider.Profile{}, false
+	}
+	return prof, true
+}
+
+// diarizeStateForProfile resolves the effective diarization activation for the
+// given (already-resolved) STT profile under the tri-state config (SPEC §8.6.8):
+//
+//   - enabled == nil (auto): active iff the backend advertises CapDiarize
+//     (capability-driven activation).
+//   - enabled == false: always inactive (the kill switch).
+//   - enabled == true: REQUIRED — active when the backend is capable; when it is
+//     NOT, capable is false and the caller (ValidateDiarization) maps that to
+//     CONFIG_INVALID.
+//
+// It returns (active, capable): active is the resolved on/off; capable reports
+// whether the backend advertises the capability (used to detect the
+// required-but-incapable error).
+func diarizeStateForProfile(enabled *bool, prof provider.Profile) (active, capable bool) {
+	capable = provider.Can(prof.Kind, provider.CapDiarize) != provider.Unsupported
+	switch {
+	case enabled != nil && !*enabled:
+		return false, capable
+	case enabled != nil && *enabled:
+		return capable, capable
+	default: // auto
+		return capable, capable
+	}
+}
+
+// DiarizationActive reports whether speaker diarization is active for
+// model-derived transcripts given the config and the resolved STT profile (SPEC
+// §8.6.8). It is the single decision point the ingest service uses to decide
+// whether to record diarize provenance and fold the diarize identity into the
+// transcript derivation identity. It never errors: the required-but-incapable
+// case is surfaced as CONFIG_INVALID by ValidateDiarization at startup, not here.
+func DiarizationActive(cfg Config, prof provider.Profile) bool {
+	active, _ := diarizeStateForProfile(cfg.MediaDiarizeEnabled, prof)
+	return active
+}
+
+// validateMediaDiarize enforces the diarization config invariants (SPEC §8.6.8):
+// diarization requires a diarization-capable STT backend. When
+// media.diarize.enabled is true but no configured STT backend advertises the
+// capability, startup MUST fail CONFIG_INVALID with remediation. The auto (nil)
+// and explicit-false states never fail: auto simply stays off on an incapable
+// backend, and false forces it off. With STT off entirely, an explicit true is
+// also CONFIG_INVALID (there is no backend to diarize).
+func (c *Config) validateMediaDiarize() error {
+	enabled := c.MediaDiarizeEnabled
+	// Only an explicit `true` can fail validation; auto/false are always valid.
+	if enabled == nil || !*enabled {
+		return nil
+	}
+	prof, ok := resolveSTTProfileForCapability(*c)
+	if !ok {
+		return fmt.Errorf(
+			"CONFIG_INVALID: media.diarize.enabled=true requires a diarization-capable STT backend, but speech-to-text is not configured; set stt.provider to a diarization-capable backend (e.g. a self-hosted WhisperX/pyannote endpoint via stt.provider=whisper) or remove media.diarize.enabled")
+	}
+	if _, capable := diarizeStateForProfile(enabled, prof); !capable {
+		return fmt.Errorf(
+			"CONFIG_INVALID: media.diarize.enabled=true but the active STT provider %q (kind %q) does not advertise speaker diarization; use a diarization-capable backend (e.g. a self-hosted WhisperX/pyannote endpoint via stt.provider=whisper), set media.diarize.enabled=false, or omit it to auto-enable only when supported",
+			prof.Name, prof.Kind)
+	}
+	return nil
+}
+
 // readSnapshotEmbedIdentity returns the embed_identity recorded in the
 // effective snapshot for stateDir, or "" if there is no snapshot / no
 // recorded identity (a fresh index — VerifyEmbedIdentity treats that as
