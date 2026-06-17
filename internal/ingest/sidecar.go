@@ -24,6 +24,12 @@ var sidecarExtensions = []string{".vtt", ".srt", ".ttml"}
 // NOT invalidated by an STT model change (spec §8.6.7).
 const sidecarSource = "sidecar"
 
+// sttSource is the meta_json source value recorded on a machine-transcribed
+// transcript representation (spec §5.2 `source: stt`). Unlike a sidecar it is
+// model-derived, so it carries an STT provider/model derivation identity and IS
+// re-derived when the active STT model changes (§8.6.7).
+const sttSource = "stt"
+
 // translationSource is the meta_json source value recorded on a transcript
 // representation produced by translating another transcript (spec §8.6.2). It is
 // model-derived (unlike a sidecar), so it carries its translate provider/model
@@ -50,6 +56,18 @@ type transcriptMeta struct {
 	Language   string `json:"language,omitempty"`
 	Timestamps bool   `json:"timestamps"`
 	Format     string `json:"format,omitempty"`
+
+	// Provider / Model / ModelVersion record the STT derivation identity on a
+	// machine-transcribed transcript (Source == "stt", spec §5.2/§8.6.7): the
+	// resolved STT provider profile name, its model, and an optional model
+	// version. They are the runtime analogue of the embed identity (§8.1.4) and
+	// drive per-representation re-derivation when the active STT model changes.
+	// Omitted (omitempty) on sidecar transcripts (Source == "sidecar"), which are
+	// authored — not model-derived — and MUST NOT be invalidated by an STT model
+	// change (§8.6.7).
+	Provider     string `json:"provider,omitempty"`
+	Model        string `json:"model,omitempty"`
+	ModelVersion string `json:"model_version,omitempty"`
 
 	// SourceLanguage / TranslateProvider / TranslateModel are recorded only on a
 	// translated transcript (Source == "translation", spec §8.6.2/§5.2): the

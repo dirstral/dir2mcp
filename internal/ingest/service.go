@@ -75,6 +75,14 @@ type Service struct {
 	// configured, in which case the language detector self-skips.
 	transcriptLanguage string
 
+	// sttProvider/sttModel record the resolved STT provider profile name and
+	// model so each machine-transcribed transcript representation can carry its
+	// STT derivation identity in meta_json (SPEC §5.2/§8.6.7) and the re-ingest
+	// gate can invalidate a stale transcript when the active STT model changes.
+	// Empty when STT is off or no STT-capable profile resolves.
+	sttProvider string
+	sttModel    string
+
 	// translator is the chat/generation client used to translate transcripts
 	// into the configured target language(s) (SPEC §8.6.2). It is the chat
 	// capability binding resolved at construction, or nil when translation is
@@ -193,6 +201,17 @@ type sidecarTranscriptRetirer interface {
 	SoftDeleteSidecarTranscripts(ctx context.Context, relPath string) (int, error)
 }
 
+// representationMetaReader is the optional store capability used by the
+// derivation-identity re-ingest gate (spec §8.6.7): it reads the recorded
+// meta_json of a document's active representation of a given rep_type so the
+// ingest service can compare its STT/OCR derivation identity to the active
+// model's identity. A store that does not implement it disables identity-driven
+// re-derivation (content_hash remains the only reprocess trigger), preserving
+// prior behaviour.
+type representationMetaReader interface {
+	RepresentationMetaByType(ctx context.Context, relPath, repType string) (string, error)
+}
+
 func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc := &Service{
 		cfg:                             cfg,
@@ -215,6 +234,13 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
 	}
 	svc.transcriptLanguage = sttExpectedLanguage(cfg)
+	// Resolve the STT derivation identity (SPEC §8.6.7) from the same profile the
+	// transcriber uses, so a recorded transcript identity can be compared against
+	// the active one to detect a model swap. Empty when STT is off.
+	if prof, ok := resolveSTTProfile(cfg); ok {
+		svc.sttProvider = strings.TrimSpace(prof.Name)
+		svc.sttModel = strings.TrimSpace(prof.STTModel)
+	}
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
 	// translation is enabled we resolve the chat capability and build a
 	// generator; when off (default), or no chat provider resolves, the field
@@ -444,12 +470,27 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 }
 
 func sttExpectedLanguage(cfg config.Config) string {
+	prof, ok := resolveSTTProfile(cfg)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(prof.STTLanguage)
+}
+
+// resolveSTTProfile resolves the active STT provider profile (SPEC 8.1.3),
+// mirroring the provider selection in TranscriberFromConfigWithLanguage. It
+// returns ok=false when STT is off, when no STT-capable profile resolves, or
+// when the selector is unrecognised — in all of which cases callers treat STT as
+// having no derivation identity. It is the single resolution point shared by the
+// expected-language hint and the STT derivation identity recorded on transcript
+// representations (§8.6.7), so both observe the exact same profile.
+func resolveSTTProfile(cfg config.Config) (provider.Profile, bool) {
 	sel := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
 	if sel == "" {
 		sel = transcriberProviderAuto
 	}
 	if sel == transcriberProviderOff || sel == "none" || sel == "disabled" {
-		return ""
+		return provider.Profile{}, false
 	}
 	r := cfg.Providers()
 	var (
@@ -466,12 +507,12 @@ func sttExpectedLanguage(cfg config.Config) string {
 	case transcriberProviderAuto:
 		prof, err = r.Resolve(provider.CapSTT)
 	default:
-		return ""
+		return provider.Profile{}, false
 	}
 	if err != nil {
-		return ""
+		return provider.Profile{}, false
 	}
-	return strings.TrimSpace(prof.STTLanguage)
+	return prof, true
 }
 
 // translatorFromConfig resolves the chat-capability binding used to translate
@@ -797,6 +838,15 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if currentFP != existing.SidecarFingerprint {
 		return false, nil
 	}
+	// Derivation-identity gate (spec §8.6.7): the ETag/fingerprint fast path
+	// proves the BYTES are unchanged, but a transcript/OCR representation may
+	// still be stale because the active STT/OCR model changed since it was
+	// derived. When the recorded derivation identity no longer matches, fall back
+	// to the full read/hash path so the stale representation is re-derived rather
+	// than silently skipped. Only meaningful for an existing ok document.
+	if existing.Status == "ok" && s.derivationIdentityStale(ctx, f.RelPath) {
+		return false, nil
+	}
 	s.skipUnchangedRemoteDocument(ctx, f, existing, seen)
 	return true, nil
 }
@@ -884,6 +934,12 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// retried on the next run even if their content has not changed, so the
 	// operator does not need a full reindex to recover from a transient error.
 	if existingDoc.Status == "error" {
+		needsProcessing = true
+	}
+	// Derivation-identity gate (spec §8.6.7): even with identical content_hash, a
+	// derived representation (transcript/OCR) whose recorded provider/model no
+	// longer matches the active model is stale and must be re-derived.
+	if !needsProcessing && doc.Status == "ok" && s.derivationIdentityStale(ctx, doc.RelPath) {
 		needsProcessing = true
 	}
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
@@ -1054,6 +1110,13 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	}
 	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
 	if existingDoc.Status == "error" {
+		needsProcessing = true
+	}
+	// Derivation-identity gate (spec §8.6.7): re-derive a stale transcript/OCR
+	// representation when its recorded model differs from the active one, even on
+	// unchanged content. Archive members carry the same derived representations as
+	// top-level documents, so they observe the same rule.
+	if !needsProcessing && doc.Status == "ok" && s.derivationIdentityStale(ctx, relPath) {
 		needsProcessing = true
 	}
 
@@ -1699,7 +1762,7 @@ func (s *Service) readOrComputeStructured(ctx context.Context, doc model.Documen
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return StructuredExtraction{}, fmt.Errorf("create docling cache dir: %w", err)
 	}
-	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".json")
+	cachePath := filepath.Join(cacheDir, s.ocrCacheKey(content)+".json")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		var res StructuredExtraction
 		if json.Unmarshal(cached, &res) == nil && len(res.Blocks) > 0 {
@@ -1737,21 +1800,21 @@ func (s *Service) extractionMetaJSON() string {
 	if s == nil || s.extractor == nil {
 		return ""
 	}
-	meta := map[string]string{}
+	prov, modelName := s.extractorProviderModel()
+	meta := map[string]string{"provider": prov}
+	if modelName != "" {
+		meta["model"] = modelName
+	}
 	switch ex := s.extractor.(type) {
 	case *doclingExtractor:
-		meta["provider"] = "docling"
 		meta["command"] = strings.TrimSpace(ex.commandTemplate)
 	case *doclingServeExtractor:
-		meta["provider"] = "docling-serve"
 		// Sanitized (scheme/host/path only): this is persisted per-document, so
 		// any userinfo/query in the URL must not become durable metadata.
 		meta["serve_url"] = SanitizeServeURL(ex.baseURL)
 	case *mistral.Client:
-		meta["provider"] = "mistral"
-		meta["model"] = strings.TrimSpace(ex.DefaultOCRModel)
+		// provider/model already set from extractorProviderModel.
 	default:
-		meta["provider"] = "custom"
 		meta["type"] = fmt.Sprintf("%T", s.extractor)
 	}
 	encoded, err := json.Marshal(meta)
@@ -1759,6 +1822,28 @@ func (s *Service) extractionMetaJSON() string {
 		return ""
 	}
 	return string(encoded)
+}
+
+// extractorProviderModel returns the provider name and model recorded for the
+// active OCR/extraction backend, the structured fields that form its OCR
+// derivation identity (§8.6.7). model is empty for backends that have no model
+// concept (docling / docling-serve / custom commands), so their identity is
+// provider-only and stable across runs. Returns ("","") when no extractor is
+// configured.
+func (s *Service) extractorProviderModel() (providerName string, modelName string) {
+	if s == nil || s.extractor == nil {
+		return "", ""
+	}
+	switch ex := s.extractor.(type) {
+	case *doclingExtractor:
+		return "docling", ""
+	case *doclingServeExtractor:
+		return "docling-serve", ""
+	case *mistral.Client:
+		return "mistral", strings.TrimSpace(ex.DefaultOCRModel)
+	default:
+		return "custom", ""
+	}
 }
 
 // GenerateOCRMarkdownRepresentation exposes OCR representation generation for tests.
@@ -1843,10 +1928,15 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		Duration:         duration,
 	})
 
+	metaJSON, err := s.sttTranscriptMetaJSON()
+	if err != nil {
+		return fmt.Errorf("marshal transcript meta: %w", err)
+	}
 	rep := model.Representation{
 		DocID:       doc.DocID,
 		RepType:     RepTypeTranscript,
 		RepHash:     computeRepHash([]byte(transcriptText)),
+		MetaJSON:    metaJSON,
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,
 	}
@@ -2237,7 +2327,7 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 		return "", fmt.Errorf("create ocr cache dir: %w", err)
 	}
 
-	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
+	cachePath := filepath.Join(cacheDir, s.ocrCacheKey(content)+".md")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
@@ -2324,7 +2414,18 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
-	base := computeContentHash(content) + TranscriptLangSuffix(language)
+	// Key the cache on the media bytes AND the active STT derivation identity
+	// (SPEC §8.6.7), not the bytes alone: when the STT provider/model changes the
+	// re-ingest gate forces re-transcription, and a bytes-only key would return
+	// the previous model's cached text — silently defeating the re-derivation. The
+	// TranscriptLangSuffix is retained on the filename so cache files stay
+	// human-identifiable by language. A setup with no resolved STT identity folds
+	// in the empty string, preserving the historical key for that case.
+	cacheKey := strings.Join([]string{
+		computeContentHash(content),
+		s.activeTranscriptIdentity(),
+	}, "\x00")
+	base := computeContentHash([]byte(cacheKey)) + TranscriptLangSuffix(language)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	if cached, err := os.ReadFile(cachePath); err == nil {

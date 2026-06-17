@@ -993,6 +993,61 @@ func (s *SQLiteStore) TranscriptRepresentations(ctx context.Context, relPath str
 	return out, nil
 }
 
+// RepresentationMetaByType returns the meta_json of the active (non-deleted)
+// representation of repType for the document at relPath. It is the read side of
+// the derivation-identity re-ingest gate (spec §8.6.7): the ingest service reads
+// the stored transcript/OCR representation's recorded provider/model identity
+// and compares it to the active model's identity to decide whether the
+// representation is stale and must be re-derived. An empty string (with a nil
+// error) means the document exists but has no such representation (or it carries
+// no meta_json); the document-missing case is reported as os.ErrNotExist so the
+// caller can distinguish it. repType is matched exactly, so passing
+// "transcript" returns only the bare machine/translated transcript identity row,
+// never a language-suffixed sidecar rep_type.
+func (s *SQLiteStore) RepresentationMetaByType(ctx context.Context, relPath, repType string) (string, error) {
+	normalizedPath, err := normalizeRelPath(relPath)
+	if err != nil {
+		return "", err
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer s.ReleaseDB()
+
+	var docID int64
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT doc_id FROM documents WHERE rel_path = ? AND deleted = 0 LIMIT 1`,
+		normalizedPath,
+	).Scan(&docID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", os.ErrNotExist
+		}
+		return "", err
+	}
+
+	var metaJSON string
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT meta_json
+		 FROM representations
+		 WHERE doc_id = ? AND rep_type = ? AND deleted = 0
+		 ORDER BY rep_id ASC
+		 LIMIT 1`,
+		docID,
+		strings.TrimSpace(repType),
+	).Scan(&metaJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Document exists but has no representation of this type yet.
+			return "", nil
+		}
+		return "", err
+	}
+	return metaJSON, nil
+}
+
 // SoftDeleteSidecarTranscripts tombstones (deleted = 1) the document's
 // sidecar-sourced transcript representations and their chunks, returning the
 // number of representations retired. A representation is treated as
