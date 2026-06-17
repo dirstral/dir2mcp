@@ -201,6 +201,7 @@ The launchd job starts from a clean environment and will **not** inherit a `MIST
 | `dir2mcp_annotate` | Structured annotation of a document |
 | `dir2mcp_transcribe_and_ask` | Transcribe then ask over the result |
 | `dir2mcp_open_file` | Retrieve a file by path with span context |
+| `dir2mcp_open_media_clip` | Extract the audio/video snippet for a media hit (time span) |
 | `dir2mcp_list_files` | List indexed files with metadata |
 | `dir2mcp_stats` | Corpus statistics |
 

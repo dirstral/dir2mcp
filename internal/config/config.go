@@ -1824,38 +1824,32 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 // setIntFileScalar parses value as an int and assigns it to the
 // fileConfig field selected by key; returns an error for an unknown key
 // or a non-integer value.
+// intFileScalarTargets maps a canonical integer config key to an accessor that
+// returns the address of the matching *int fileConfig field. Using a table
+// keeps setIntFileScalar a flat dispatch (one new entry per key) rather than an
+// ever-growing switch that trips the cyclomatic-complexity gate.
+var intFileScalarTargets = map[string]func(*fileConfig) **int{
+	"rate_limit_rps":             func(c *fileConfig) **int { return &c.RateLimitRPS },
+	"rate_limit_burst":           func(c *fileConfig) **int { return &c.RateLimitBurst },
+	"rag.k_default":              func(c *fileConfig) **int { return &c.RAGKDefault },
+	"rag.max_context_chars":      func(c *fileConfig) **int { return &c.RAGMaxContextChars },
+	"rag.oversample_factor":      func(c *fileConfig) **int { return &c.RAGOversampleFactor },
+	"chunking.max_tokens":        func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
+	"chunking.overlap_tokens":    func(c *fileConfig) **int { return &c.ChunkingOverlapTokens },
+	"ingest.max_file_mb":         func(c *fileConfig) **int { return &c.IngestMaxFileMB },
+	"rerank.candidate_pool":      func(c *fileConfig) **int { return &c.RerankCandidatePool },
+	"media.audio_window_sec":     func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
+	"media.video_window_sec":     func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
+	"media.clip.max_duration_ms": func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
+	"media.clip.max_bytes":       func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
+}
+
 func setIntFileScalar(cfg *fileConfig, key, value string) error {
-	var target **int
-	switch key {
-	case "rate_limit_rps":
-		target = &cfg.RateLimitRPS
-	case "rate_limit_burst":
-		target = &cfg.RateLimitBurst
-	case "rag.k_default":
-		target = &cfg.RAGKDefault
-	case "rag.max_context_chars":
-		target = &cfg.RAGMaxContextChars
-	case "rag.oversample_factor":
-		target = &cfg.RAGOversampleFactor
-	case "chunking.max_tokens":
-		target = &cfg.ChunkingMaxTokens
-	case "chunking.overlap_tokens":
-		target = &cfg.ChunkingOverlapTokens
-	case "ingest.max_file_mb":
-		target = &cfg.IngestMaxFileMB
-	case "rerank.candidate_pool":
-		target = &cfg.RerankCandidatePool
-	case "media.audio_window_sec":
-		target = &cfg.MediaAudioWindowSec
-	case "media.video_window_sec":
-		target = &cfg.MediaVideoWindowSec
-	case "media.clip.max_duration_ms":
-		target = &cfg.MediaClipMaxDurationMS
-	case "media.clip.max_bytes":
-		target = &cfg.MediaClipMaxBytes
-	default:
+	accessor, ok := intFileScalarTargets[key]
+	if !ok {
 		return nil
 	}
+	target := accessor(cfg)
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return fmt.Errorf("invalid integer for %s", key)

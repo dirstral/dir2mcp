@@ -133,13 +133,20 @@ func TestOpenMediaClip_ByChunkID_InlineBase64Shape(t *testing.T) {
 	if clip.gotFrom != 1000 || clip.gotTo != 4000 {
 		t.Fatalf("extract called with [%d,%d), want [1000,4000)", clip.gotFrom, clip.gotTo)
 	}
-	// Bytes MUST travel via a typed data item, never a text item.
+	assertSingleMediaContentItem(t, sc, "audio", wantData)
+}
+
+// assertSingleMediaContentItem verifies the tool returned exactly one typed
+// media content item carrying the base64 bytes, and never a text item (media
+// bytes must travel via data/uri only, per SPEC §15.11).
+func assertSingleMediaContentItem(t *testing.T, sc map[string]interface{}, wantType, wantData string) {
+	t.Helper()
 	content, _ := sc["__content"].([]map[string]interface{})
 	if len(content) != 1 {
 		t.Fatalf("content items = %d, want 1: %#v", len(content), content)
 	}
-	if content[0]["type"] != "audio" {
-		t.Fatalf("content item type = %#v, want audio", content[0]["type"])
+	if content[0]["type"] != wantType {
+		t.Fatalf("content item type = %#v, want %s", content[0]["type"], wantType)
 	}
 	if content[0]["data"] != wantData {
 		t.Fatalf("content item data mismatch")
