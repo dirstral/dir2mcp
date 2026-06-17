@@ -69,10 +69,18 @@ func assertListFilesFingerprint(t *testing.T, ctx context.Context, st *store.SQL
 	if err != nil {
 		t.Fatalf("ListFiles: %v", err)
 	}
+	found := false
 	for _, d := range docs {
-		if d.RelPath == withSidecar.RelPath && d.SidecarFingerprint != withSidecar.SidecarFingerprint {
+		if d.RelPath != withSidecar.RelPath {
+			continue
+		}
+		found = true
+		if d.SidecarFingerprint != withSidecar.SidecarFingerprint {
 			t.Errorf("ListFiles: sidecar_fingerprint mismatch: got %q want %q", d.SidecarFingerprint, withSidecar.SidecarFingerprint)
 		}
+	}
+	if !found {
+		t.Fatalf("ListFiles did not return %q", withSidecar.RelPath)
 	}
 }
 
