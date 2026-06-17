@@ -1299,6 +1299,35 @@ const (
 	videoWindowMS = 60 * 1000
 )
 
+// Per-modality window caps (SPEC 8.1.7): the maximum window length the
+// keyframe-drift logic in avutil.ExtractSegment can serve without a clip
+// exceeding the per-request duration cap (audio ≤ 180 s, video ≤ 120 s). A
+// configured window (media.audio_window_sec / media.video_window_sec) is
+// clamped to these so a misconfiguration can never push a clip over the cap.
+const (
+	audioWindowCapMS = 180 * 1000
+	videoWindowCapMS = 120 * 1000
+)
+
+// resolveMediaWindowMS returns the window length (ms) to use for windowing
+// media of the given doc type. A positive configured value (cfgSec seconds)
+// overrides the default; values exceeding the per-modality cap are clamped
+// (with a warning); zero/negative values fall back to the default. This keeps
+// behavior identical to the hardcoded constants when unconfigured (SPEC 8.1.7).
+func (s *Service) resolveMediaWindowMS(cfgSec, defaultMS, capMS int, modality string) int {
+	if cfgSec <= 0 {
+		return defaultMS
+	}
+	// Compare in seconds before converting to ms: a huge cfgSec would overflow
+	// cfgSec*1000 (wrapping negative and slipping past the cap), so the cap
+	// check must run first on the un-multiplied value.
+	if cfgSec > capMS/1000 {
+		s.getLogger().Printf("multimodal: configured %s window %ds exceeds the per-modality cap (%ds); clamping to the cap", modality, cfgSec, capMS/1000)
+		return capMS
+	}
+	return cfgSec * 1000
+}
+
 // mediaSpansFor returns the per-chunk spans to embed directly for doc under the
 // multimodal mode (SPEC 8.1.7): nil when media embedding is off or doc is not
 // an embeddable media type; one `page` span for an image; one `page` span per
@@ -1319,9 +1348,11 @@ func (s *Service) mediaSpansFor(ctx context.Context, doc model.Document, content
 		if !isEmbeddableAudio(doc.RelPath) {
 			return nil
 		}
-		return s.mediaTimeSpans(ctx, doc, audioWindowMS)
+		windowMS := s.resolveMediaWindowMS(s.cfg.MediaAudioWindowSec, audioWindowMS, audioWindowCapMS, "audio")
+		return s.mediaTimeSpans(ctx, doc, windowMS)
 	case "video":
-		return s.mediaTimeSpans(ctx, doc, videoWindowMS)
+		windowMS := s.resolveMediaWindowMS(s.cfg.MediaVideoWindowSec, videoWindowMS, videoWindowCapMS, "video")
+		return s.mediaTimeSpans(ctx, doc, windowMS)
 	default:
 		return nil
 	}
