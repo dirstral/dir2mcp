@@ -275,6 +275,16 @@ type Config struct {
 	// Default OFF.
 	MediaVAD bool
 
+	// MediaAudioWindowSec / MediaVideoWindowSec configure the direct-embedding
+	// media chunk window length, in seconds, for audio and video respectively
+	// (SPEC 8.1.7; config `media.audio_window_sec` / `media.video_window_sec`).
+	// A positive value overrides the built-in default (audio 120 s, video 60 s);
+	// a value exceeding the per-modality cap (audio 180 s, video 120 s) is
+	// clamped to the cap (with a warning). Zero/unset falls back to the default,
+	// so behavior is identical to the hardcoded constants when unconfigured.
+	MediaAudioWindowSec int
+	MediaVideoWindowSec int
+
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
 	// screened for degenerate output (repetition loops, empty output,
@@ -386,6 +396,8 @@ type fileConfig struct {
 	MediaTrimLeadingSilence   *bool
 	MediaSilenceThresholdDB   *float64
 	MediaVAD                  *bool
+	MediaAudioWindowSec       *int
+	MediaVideoWindowSec       *int
 	ElevenLabsAPIKey          *string
 	ServerTLSCertFile         *string
 	ServerTLSKeyFile          *string
@@ -481,6 +493,8 @@ type persistedConfig struct {
 	MediaTrimLeadingSilence   bool          `yaml:"media_trim_leading_silence"`
 	MediaSilenceThresholdDB   float64       `yaml:"media_silence_threshold_db"`
 	MediaVAD                  bool          `yaml:"media_vad"`
+	MediaAudioWindowSec       int           `yaml:"media_audio_window_sec"`
+	MediaVideoWindowSec       int           `yaml:"media_video_window_sec"`
 	ServerTLSCertFile         string        `yaml:"server_tls_cert_file"`
 	ServerTLSKeyFile          string        `yaml:"server_tls_key_file"`
 
@@ -711,6 +725,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaTrimLeadingSilence:   cfg.MediaTrimLeadingSilence,
 		MediaSilenceThresholdDB:   cfg.MediaSilenceThresholdDB,
 		MediaVAD:                  cfg.MediaVAD,
+		MediaAudioWindowSec:       cfg.MediaAudioWindowSec,
+		MediaVideoWindowSec:       cfg.MediaVideoWindowSec,
 		ServerTLSCertFile:         cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
@@ -1316,6 +1332,13 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.QualityGatesEnabled != nil {
 		cfg.QualityGatesEnabled = *fc.QualityGatesEnabled
 	}
+	applyMediaFileParsed(cfg, fc)
+}
+
+// applyMediaFileParsed copies the set media.* file fields onto cfg. It is split
+// out of applySTTFileParsed so each apply helper stays under the cyclomatic
+// complexity budget as more media scalars are added.
+func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSidecarsDisabled != nil {
 		cfg.MediaSidecarsDisabled = *fc.MediaSidecarsDisabled
 	}
@@ -1342,6 +1365,12 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.MediaVAD != nil {
 		cfg.MediaVAD = *fc.MediaVAD
+	}
+	if fc.MediaAudioWindowSec != nil {
+		cfg.MediaAudioWindowSec = *fc.MediaAudioWindowSec
+	}
+	if fc.MediaVideoWindowSec != nil {
+		cfg.MediaVideoWindowSec = *fc.MediaVideoWindowSec
 	}
 }
 
@@ -1614,6 +1643,8 @@ var configKeyAliases = map[string]string{
 	"media_trim_leading_silence":           "media.trim_leading_silence",
 	"media_silence_threshold_db":           "media.silence_threshold_db",
 	"media_vad":                            "media.vad",
+	"media_audio_window_sec":               "media.audio_window_sec",
+	"media_video_window_sec":               "media.video_window_sec",
 	"stt_provider":                         "stt.provider",
 	"stt_mistral_model":                    "stt.mistral.model",
 	"stt_elevenlabs_model":                 "stt.elevenlabs.model",
@@ -1764,6 +1795,10 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.IngestMaxFileMB
 	case "rerank.candidate_pool":
 		target = &cfg.RerankCandidatePool
+	case "media.audio_window_sec":
+		target = &cfg.MediaAudioWindowSec
+	case "media.video_window_sec":
+		target = &cfg.MediaVideoWindowSec
 	default:
 		return nil
 	}
@@ -1771,8 +1806,19 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 	if err != nil {
 		return fmt.Errorf("invalid integer for %s", key)
 	}
+	if nonNegativeIntKeys[key] && parsed < 0 {
+		return fmt.Errorf("invalid integer for %s: must not be negative", key)
+	}
 	*target = intPtr(parsed)
 	return nil
+}
+
+// nonNegativeIntKeys lists canonical integer config keys whose value must not
+// be negative. A negative value is rejected at config-parse time (explicit,
+// deterministic) rather than being silently clamped later.
+var nonNegativeIntKeys = map[string]bool{
+	"media.audio_window_sec": true,
+	"media.video_window_sec": true,
 }
 
 // setFloatFileScalar parses value as a float64 and assigns it to the
@@ -2122,6 +2168,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_trim_leading_silence", cfg.MediaTrimLeadingSilence)
 	writeScalar("media_silence_threshold_db", strconv.FormatFloat(cfg.MediaSilenceThresholdDB, 'f', -1, 64))
 	writeBool("media_vad", cfg.MediaVAD)
+	writeInt("media_audio_window_sec", cfg.MediaAudioWindowSec)
+	writeInt("media_video_window_sec", cfg.MediaVideoWindowSec)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)
