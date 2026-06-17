@@ -555,22 +555,28 @@ func mediaMIMEType(relPath string) string {
 // payloadFromTask projects a chunk task's metadata into the IndexPayload the
 // index stores alongside the vector (issue #247). The span's time bounds are
 // surfaced as StartMS/EndMS so a backend filtering on media windows has them
-// without re-reading the span; Language/Speaker are not carried on ChunkMetadata
-// today and are left empty for backends to populate when available.
+// without re-reading the span; Speaker/SpeakerLabel are likewise surfaced from a
+// diarized transcript's "time" span (SPEC §8.6.8) so a FilteringIndex can push
+// down a speaker filter without re-reading the span. They are empty on every
+// non-diarized transcript, so payloads are byte-identical to today. Language is
+// not carried on ChunkMetadata today and is left empty for backends to populate
+// when available.
 func payloadFromTask(t model.ChunkTask) model.IndexPayload {
 	meta := t.Metadata
 	return model.IndexPayload{
-		ChunkID:  meta.ChunkID,
-		RelPath:  meta.RelPath,
-		DocType:  meta.DocType,
-		RepType:  meta.RepType,
-		Modality: meta.Modality,
-		Title:    meta.Title,
-		StartMS:  meta.Span.StartMS,
-		EndMS:    meta.Span.EndMS,
-		Snippet:  meta.Snippet,
-		Span:     meta.Span,
-		MediaRef: meta.MediaRef,
+		ChunkID:      meta.ChunkID,
+		RelPath:      meta.RelPath,
+		DocType:      meta.DocType,
+		RepType:      meta.RepType,
+		Modality:     meta.Modality,
+		Title:        meta.Title,
+		StartMS:      meta.Span.StartMS,
+		EndMS:        meta.Span.EndMS,
+		Speaker:      meta.Span.Speaker,
+		SpeakerLabel: meta.Span.SpeakerLabel,
+		Snippet:      meta.Snippet,
+		Span:         meta.Span,
+		MediaRef:     meta.MediaRef,
 	}
 }
 
