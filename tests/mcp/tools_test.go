@@ -1729,6 +1729,177 @@ func assertAdversarialPaths(t *testing.T, rootDir string, gotPaths map[string]bo
 	}
 }
 
+// TestMCPToolsCallListFiles_SymlinkedRootStillLists is the regression test for
+// issue #286 Bug A: list_files must keep surfacing real files when the
+// configured root is reached through a symlink (the macOS shape where
+// /Users↔/private or /tmp→/private/tmp, or a corpus directory itself, is a
+// symlink). The older filter resolved both root and candidate with EvalSymlinks
+// and then fail-CLOSED on any resolution error, which silently emptied the whole
+// listing for files that actually exist. The fix is fail-OPEN: only exclude when
+// a source is provably gone/outside-root. A genuinely stale row (no backing
+// file) must still be excluded so the round-trip-through-open_file contract from
+// issue #176 holds.
+func TestMCPToolsCallListFiles_SymlinkedRootStillLists(t *testing.T) {
+	// realRoot holds the actual corpus; linkRoot is a symlink pointing at it and
+	// is what the daemon is configured with. The store still records rel_paths
+	// relative to the root (same shape either way).
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real-corpus")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatalf("mkdir real root: %v", err)
+	}
+	linkRoot := filepath.Join(base, "linked-corpus")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	stateDir := filepath.Join(realRoot, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	present := []string{
+		"normal.pdf",
+		"acts/foo.pdf",
+		"acts/sub/bar.pdf",
+	}
+	stalePath := "ghost/missing.pdf"
+
+	// The shared helper writes files with os.WriteFile (no mkdir), so create the
+	// nested parents up front for the files that live in subdirectories.
+	for _, name := range present {
+		if dir := filepath.Dir(name); dir != "." {
+			if err := os.MkdirAll(filepath.Join(realRoot, dir), 0o755); err != nil {
+				t.Fatalf("mkdir parent for %s: %v", name, err)
+			}
+		}
+	}
+
+	// setupAdversarialListFilesStore writes the present files to realRoot and
+	// registers all of them plus the stale (file-less) row in the store.
+	st := setupAdversarialListFilesStore(t, realRoot, stateDir, present, stalePath)
+
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	// Configure the daemon with the SYMLINK path, not the real directory.
+	cfg.RootDir = linkRoot
+	cfg.StateDir = stateDir
+	cfg.MCPPath = protocol.DefaultMCPPath
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	gotPaths := callListFilesAndExtractPaths(t, server.URL+cfg.MCPPath, sessionID)
+
+	if len(gotPaths) == 0 {
+		t.Fatalf("list_files returned nothing under symlinked root %q (Bug A)", linkRoot)
+	}
+	for _, name := range present {
+		if !gotPaths[name] {
+			t.Fatalf("expected list_files to surface real file %q under symlinked root; got %#v", name, gotPaths)
+		}
+	}
+	if gotPaths[stalePath] {
+		t.Fatalf("stale rel_path %q (no backing file) must not surface even under symlinked root; got %#v", stalePath, gotPaths)
+	}
+}
+
+// TestMCPToolsCallListFiles_FailsOpenOnInconclusiveResolution is the
+// deterministic regression for issue #286 Bug A's core: list_files must INCLUDE
+// a document when its source cannot be conclusively resolved, rather than
+// silently dropping it. The old filter excluded a doc whenever EvalSymlinks
+// returned ANY error; here we make EvalSymlinks fail with a permission error
+// (EACCES, not ErrNotExist) for a file that genuinely exists by removing search
+// permission on its parent directory. Under the old fail-CLOSED behavior the
+// file vanished from the listing; the fix fails OPEN and keeps it. A genuinely
+// missing file (ErrNotExist) must still be excluded.
+func TestMCPToolsCallListFiles_FailsOpenOnInconclusiveResolution(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root bypasses directory permission checks")
+	}
+
+	rootDir := t.TempDir()
+	stateDir := filepath.Join(rootDir, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	// "open.pdf" resolves normally. "locked/inside.pdf" exists on disk but its
+	// parent has its search bit stripped, so EvalSymlinks returns EACCES — an
+	// inconclusive error that must NOT cause exclusion.
+	plainName := "open.pdf"
+	lockedDir := "locked"
+	lockedName := filepath.ToSlash(filepath.Join(lockedDir, "inside.pdf"))
+	stalePath := "ghost/missing.pdf"
+
+	body := []byte("hello world\n")
+	if err := os.WriteFile(filepath.Join(rootDir, plainName), body, 0o644); err != nil {
+		t.Fatalf("write plain file: %v", err)
+	}
+	lockedAbsDir := filepath.Join(rootDir, lockedDir)
+	if err := os.MkdirAll(lockedAbsDir, 0o755); err != nil {
+		t.Fatalf("mkdir locked dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(lockedAbsDir, "inside.pdf"), body, 0o644); err != nil {
+		t.Fatalf("write locked file: %v", err)
+	}
+
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	for _, rel := range []string{plainName, lockedName, stalePath} {
+		if err := st.UpsertDocument(context.Background(), model.Document{
+			RelPath:     rel,
+			DocType:     "pdf",
+			SourceType:  "filesystem",
+			SizeBytes:   int64(len(body)),
+			MTimeUnix:   1,
+			ContentHash: "h",
+			Status:      "ok",
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", rel, err)
+		}
+	}
+
+	// Strip search permission on the locked parent so EvalSymlinks on its child
+	// fails with EACCES. Restore before cleanup so t.TempDir can remove it.
+	if err := os.Chmod(lockedAbsDir, 0o000); err != nil {
+		t.Fatalf("chmod locked dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockedAbsDir, 0o755) })
+
+	// Confirm the platform actually denies traversal; if not (e.g. some CI
+	// filesystems), the scenario is moot and we skip rather than assert wrongly.
+	if _, err := filepath.EvalSymlinks(filepath.Join(lockedAbsDir, "inside.pdf")); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Skipf("platform does not enforce directory search permission (EvalSymlinks err=%v); cannot exercise inconclusive-resolution path", err)
+	}
+
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.RootDir = rootDir
+	cfg.StateDir = stateDir
+	cfg.MCPPath = protocol.DefaultMCPPath
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	gotPaths := callListFilesAndExtractPaths(t, server.URL+cfg.MCPPath, sessionID)
+
+	if !gotPaths[plainName] {
+		t.Fatalf("expected list_files to surface normally-resolvable %q; got %#v", plainName, gotPaths)
+	}
+	if !gotPaths[lockedName] {
+		t.Fatalf("list_files dropped %q on inconclusive (EACCES) resolution; filter must fail OPEN (Bug A); got %#v", lockedName, gotPaths)
+	}
+	if gotPaths[stalePath] {
+		t.Fatalf("genuinely missing %q must still be excluded; got %#v", stalePath, gotPaths)
+	}
+}
+
 // TestMCPToolsCallOpenFile_PDFNoSpan_DocumentSpan asserts that calling
 // open_file on a .pdf without span arguments returns the OCR text and tags
 // the structured content with span.kind=document so callers can distinguish

@@ -679,26 +679,54 @@ func (s *Server) canResolveRoot() bool {
 	return ok
 }
 
-// isResolvableSourceWithRoot reports whether doc's rel_path can be opened via
-// the open_file contract, using caller-cached rootAbs/rootReal values to avoid
-// re-running filepath.Abs + EvalSymlinks(root) per document. Archive members
-// are virtual paths (the backing file is the archive itself) so they're always
-// considered resolvable; everything else must point to a real file under root.
+// isResolvableSourceWithRoot reports whether doc's rel_path should be surfaced
+// by list_files, using caller-cached rootAbs/rootReal values to avoid re-running
+// filepath.Abs + EvalSymlinks(root) per document. Archive members are virtual
+// paths (the backing file is the archive itself) so they're always considered
+// resolvable.
+//
+// The filter is deliberately fail-OPEN (issue #286 Bug A): a document is only
+// excluded when we can AFFIRMATIVELY determine its source is gone (the path does
+// not exist) or genuinely lives outside the configured root. On any resolution
+// ambiguity — EvalSymlinks failing for a reason other than "not exist", or a
+// filepath.Rel error — we INCLUDE the document. This keeps real corpora visible
+// under symlinked roots (macOS /Users↔/private, /tmp→/private/tmp, or a corpus
+// reached through a symlinked path component), where the older fail-closed check
+// silently emptied the whole listing for files that actually exist.
+//
+// Both the root (rootReal, already EvalSymlinks-resolved by resolveRoot) and the
+// candidate target are compared in their symlink-resolved form so equivalent
+// symlinked paths match.
 func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bool {
 	if strings.EqualFold(strings.TrimSpace(doc.SourceType), "archive_member") {
 		return true
 	}
 	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(doc.RelPath)))
 	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(doc.RelPath) {
+		// An affirmatively malformed rel_path (traversal / absolute) can never
+		// round-trip through open_file, so excluding it is safe.
 		return false
 	}
 	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
 	targetReal, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		return false
+		// Only treat a definitive "does not exist" as proof the source is gone.
+		// Any other error (permissions, transient I/O, symlink-evaluation
+		// ambiguity) is inconclusive, so we fail open and keep the document.
+		if errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		return true
 	}
 	rel, err := filepath.Rel(rootReal, targetReal)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if err != nil {
+		// We could not compute a relationship to the root; that is ambiguous,
+		// not proof the file is outside the root, so fail open and include it.
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// The resolved target sits outside the resolved root: affirmatively
+		// out-of-bounds, so exclude it.
 		return false
 	}
 	return true
