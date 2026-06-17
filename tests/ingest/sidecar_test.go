@@ -265,8 +265,16 @@ func TestSidecar_ForceReindex_RunsSTTInsteadOfSidecar(t *testing.T) {
 	if stt.calls != 1 {
 		t.Fatalf("expected STT to run once under --force, got %d call(s)", stt.calls)
 	}
-	if len(st.reps) != 1 || st.reps[0].MetaJSON != "" {
-		t.Fatalf("expected one STT transcript rep with no sidecar meta, got %+v", st.reps)
+	if len(st.reps) != 1 || st.reps[0].RepType != ingest.RepTypeTranscript {
+		t.Fatalf("expected one bare STT transcript rep, got %+v", st.reps)
+	}
+	// The STT transcript now records source=stt (not sidecar) and an STT
+	// derivation identity (spec §8.6.7); it must NOT be a sidecar rep.
+	if strings.Contains(st.reps[0].MetaJSON, `"source":"sidecar"`) {
+		t.Fatalf("STT transcript must not carry sidecar source, got meta %q", st.reps[0].MetaJSON)
+	}
+	if !strings.Contains(st.reps[0].MetaJSON, `"source":"stt"`) {
+		t.Fatalf("STT transcript must record source=stt, got meta %q", st.reps[0].MetaJSON)
 	}
 }
 
@@ -371,8 +379,11 @@ func TestSidecar_PathExcludes_NotUsedAsSidecar(t *testing.T) {
 	if stt.calls != 1 {
 		t.Fatalf("expected STT to run once (excluded .vtt must not suppress it), got %d call(s)", stt.calls)
 	}
-	if len(st.reps) != 1 || st.reps[0].MetaJSON != "" {
-		t.Fatalf("expected one STT transcript rep with no sidecar meta, got %+v", st.reps)
+	if len(st.reps) != 1 || st.reps[0].RepType != ingest.RepTypeTranscript {
+		t.Fatalf("expected one bare STT transcript rep, got %+v", st.reps)
+	}
+	if strings.Contains(st.reps[0].MetaJSON, `"source":"sidecar"`) {
+		t.Fatalf("STT transcript must not carry sidecar source, got meta %q", st.reps[0].MetaJSON)
 	}
 }
 
