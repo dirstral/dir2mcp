@@ -123,6 +123,12 @@ type Service struct {
 	// grouping key for cross-file dedup; an empty/absent value disables
 	// grouping for that path (entries are never collapsed together).
 	groupKeyByRelPath map[string]string
+	// minScore is a server-side relevance floor (config retrieval.min_score):
+	// hits whose final (authoritative) Score is strictly below it are dropped
+	// from Search results, after scoring/fusion/rerank/dedup/truncation. It is
+	// config-only (never an MCP tool parameter). Default 0 ⇒ disabled
+	// (pass-through). Wired from config.RetrievalMinScore at construction.
+	minScore float64
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -208,6 +214,17 @@ func (s *Service) SetCrossFileDedupEnabled(enabled bool) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.crossFileDedupEnabled = enabled
+}
+
+// SetMinScore wires the server-side relevance floor (config retrieval.min_score).
+// Hits whose final authoritative Score is strictly below floor are dropped from
+// Search results, after scoring/fusion/rerank and after dedup/truncation. A
+// floor <= 0 disables the cutoff (pass-through). The engine wires this from
+// config.RetrievalMinScore at construction time, mirroring SetCrossFileDedupEnabled.
+func (s *Service) SetMinScore(floor float64) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.minScore = floor
 }
 
 // SetDocumentHashes installs the rel_path → content_hash map used to group
@@ -527,21 +544,56 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 	if mode == "" {
 		mode = "auto"
 	}
+	var (
+		hits []model.SearchHit
+		err  error
+	)
 	switch mode {
 	case "text":
-		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
+		hits, err = s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
 	case "code":
-		return s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
+		hits, err = s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
 	case "both":
-		return s.searchBothIndices(ctx, query.Query, k, textModel, codeModel, textIndex, codeIndex, query)
+		hits, err = s.searchBothIndices(ctx, query.Query, k, textModel, codeModel, textIndex, codeIndex, query)
 	case "auto":
 		if looksLikeCodeQuery(query.Query) {
-			return s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
+			hits, err = s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
+		} else {
+			hits, err = s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
 		}
-		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
 	default:
-		return s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
+		hits, err = s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
 	}
+	if err != nil {
+		return nil, err
+	}
+	// Apply the server-side relevance floor LAST: after scoring/fusion/rerank
+	// (the per-mode searches above) and after their dedup/truncation, using each
+	// hit's final authoritative Score. Config-only; default 0 ⇒ pass-through.
+	return s.applyMinScoreFloor(hits), nil
+}
+
+// applyMinScoreFloor drops hits whose final authoritative Score is strictly
+// below the configured relevance floor (config retrieval.min_score). A floor
+// <= 0 disables the cutoff and returns hits unchanged (pass-through), preserving
+// the slice identity so callers see no allocation when unconfigured. Order is
+// preserved. This runs as the very last retrieval step so the comparison uses
+// the post-rerank score (or, when rerank is off, the fused score).
+func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
+	s.metaMu.RLock()
+	floor := s.minScore
+	s.metaMu.RUnlock()
+	if floor <= 0 || len(hits) == 0 {
+		return hits
+	}
+	out := make([]model.SearchHit, 0, len(hits))
+	for _, h := range hits {
+		if h.Score < floor {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 func (s *Service) Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error) {

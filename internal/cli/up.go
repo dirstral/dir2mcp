@@ -78,6 +78,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 	a.configureReranker(ret, cfg)
 	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
+	ret.SetMinScore(cfg.RetrievalMinScore)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that

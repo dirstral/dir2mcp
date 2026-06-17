@@ -167,6 +167,14 @@ type Config struct {
 	// share an identical content_hash to a single best-ranked survivor before
 	// rerank/truncation. Default false (every candidate is returned as before).
 	DedupRetrieval bool
+	// RetrievalMinScore is a server-side relevance floor (config
+	// `retrieval.min_score`): candidate hits whose final (authoritative) score is
+	// strictly below this value are dropped after scoring/fusion/rerank and after
+	// dedup/truncation, before results reach the model. It is config-only (NOT an
+	// MCP tool parameter) so no tool input/output schema changes. Default 0 =
+	// disabled (no floor): behavior is unchanged unless configured, preserving the
+	// local-first, no-surprises default. Negative values are CONFIG_INVALID.
+	RetrievalMinScore float64
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -399,6 +407,7 @@ type fileConfig struct {
 	RAGOversampleFactor       *int
 	RetrievalHybridEnabled    *bool
 	DedupRetrieval            *bool
+	RetrievalMinScore         *float64
 	RerankEnabled             *bool
 	RerankProvider            *string
 	CohereAPIKey              *string
@@ -501,6 +510,7 @@ type persistedConfig struct {
 	RAGOversampleFactor       int           `yaml:"rag_oversample_factor"`
 	RetrievalHybridEnabled    bool          `yaml:"retrieval_hybrid_enabled"`
 	DedupRetrieval            bool          `yaml:"dedup_retrieval"`
+	RetrievalMinScore         float64       `yaml:"retrieval_min_score"`
 	RerankEnabled             bool          `yaml:"rerank_enabled"`
 	RerankProvider            string        `yaml:"rerank_provider"`
 	CohereBaseURL             string        `yaml:"cohere_base_url"`
@@ -639,6 +649,9 @@ func Default() Config {
 		// DedupRetrieval defaults to false (SPEC 9.2): retrieval-time
 		// cross-file de-duplication is off unless explicitly enabled.
 		DedupRetrieval: false,
+		// RetrievalMinScore defaults to 0 (disabled): no relevance floor is
+		// applied unless explicitly configured.
+		RetrievalMinScore: 0,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -745,6 +758,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RAGOversampleFactor:       cfg.RAGOversampleFactor,
 		RetrievalHybridEnabled:    cfg.RetrievalHybridEnabled,
 		DedupRetrieval:            cfg.DedupRetrieval,
+		RetrievalMinScore:         cfg.RetrievalMinScore,
 		RerankEnabled:             rerankEnabledEffective(cfg),
 		RerankProvider:            cfg.RerankProvider,
 		CohereBaseURL:             cfg.CohereBaseURL,
@@ -1302,6 +1316,9 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.DedupRetrieval != nil {
 		cfg.DedupRetrieval = *fc.DedupRetrieval
 	}
+	if fc.RetrievalMinScore != nil {
+		cfg.RetrievalMinScore = *fc.RetrievalMinScore
+	}
 	if fc.SessionInactivityTimeout != nil {
 		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
 	}
@@ -1675,6 +1692,8 @@ var configKeyAliases = map[string]string{
 	"retrieval_hybrid_enabled":             "retrieval.hybrid.enabled",
 	"hybrid_enabled":                       "retrieval.hybrid.enabled",
 	"dedup_retrieval":                      "dedup.retrieval",
+	"retrieval_min_score":                  "retrieval.min_score",
+	"min_score":                            "retrieval.min_score",
 	"rerank_enabled":                       "rerank.enabled",
 	"rerank.cohere.api_key":                "cohere_api_key",
 	"rerank.cohere.base_url":               "cohere_base_url",
@@ -1905,6 +1924,8 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 	switch key {
 	case "media.silence_threshold_db":
 		target = &cfg.MediaSilenceThresholdDB
+	case "retrieval.min_score":
+		target = &cfg.RetrievalMinScore
 	default:
 		return nil
 	}
@@ -2212,6 +2233,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("rag_oversample_factor", cfg.RAGOversampleFactor)
 	writeBool("retrieval_hybrid_enabled", cfg.RetrievalHybridEnabled)
 	writeBool("dedup_retrieval", cfg.DedupRetrieval)
+	writeScalar("retrieval_min_score", strconv.FormatFloat(cfg.RetrievalMinScore, 'f', -1, 64))
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -2855,6 +2877,14 @@ func (c *Config) validateNumericBounds() error {
 	}
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
+	}
+	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor is
+	// meaningless (it would never drop anything) so reject it explicitly. NaN/Inf
+	// are already rejected at parse time in setFloatFileScalar, but guard here too
+	// so a value injected programmatically (not via the file parser) still fails
+	// validation rather than silently corrupting the floor comparison.
+	if c.RetrievalMinScore < 0 || math.IsNaN(c.RetrievalMinScore) || math.IsInf(c.RetrievalMinScore, 0) {
+		return fmt.Errorf("retrieval.min_score must be a non-negative finite number: %v", c.RetrievalMinScore)
 	}
 	return nil
 }

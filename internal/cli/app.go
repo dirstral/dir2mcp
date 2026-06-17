@@ -750,6 +750,7 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 	a.configureReranker(ret, cfg)
+	ret.SetMinScore(cfg.RetrievalMinScore)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {
