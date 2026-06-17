@@ -406,6 +406,18 @@ An optional post-fusion **reranking** stage can re-score retrieval candidates wi
 - Env overrides: `COHERE_API_KEY=...` auto-enables; `DIR2MCP_RERANK_ENABLED=false` opts out even with a credential; `DIR2MCP_RERANK_MODEL=...` overrides the model. Env wins over YAML for the key; the key is a secret and is never written to the config snapshot.
 - For `index=both`, reranking is applied once to the merged candidate pool. Ordering is deterministic (relevance desc, then `chunk_id`).
 
+### Relevance floor (optional)
+
+An optional **relevance floor** drops low-similarity candidate hits before they reach the model, so a query with no strongly-relevant chunks returns fewer (or zero) results instead of diluting the answer with weak context. It is **server-side and config-only** — not an MCP tool parameter, so it changes no tool input/output schema.
+
+- The floor is applied **last**, after scoring/fusion, reranking, and dedup/truncation, using each hit's final (post-rerank) score. A hit whose score equals the floor is **kept** (strict less-than drops).
+- **Default `0` = disabled** (pass-through): behavior is unchanged unless you configure it. A negative value is rejected as invalid config.
+
+  ```yaml
+  retrieval:
+    min_score: 0.0   # 0 disables; e.g. 0.4 drops hits scoring below 0.4
+  ```
+
 ### Auth token behavior
 
 `dir2mcp` bearer auth can come from:
