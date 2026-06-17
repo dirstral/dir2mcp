@@ -147,14 +147,14 @@ type BBox struct {
 // a subset; retrieval falls back to its in-memory chunk metadata when a field
 // is empty.
 type IndexPayload struct {
-	ChunkID  uint64
-	RelPath  string
-	DocType  string
-	RepType  string
-	Modality string
-	Title    string
-	StartMS  int
-	EndMS    int
+	ChunkID      uint64
+	RelPath      string
+	DocType      string
+	RepType      string
+	Modality     string
+	Title        string
+	StartMS      int
+	EndMS        int
 	Language     string
 	Speaker      string
 	SpeakerLabel string

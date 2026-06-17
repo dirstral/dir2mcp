@@ -203,18 +203,28 @@ func TestSidecar_VoiceTags_DiarizedMeta(t *testing.T) {
 		t.Fatalf("expected one ingested transcript rep, got ingested=%v reps=%d", ingested, len(st.reps))
 	}
 
-	var meta struct {
-		Source          string `json:"source"`
-		Diarized        bool   `json:"diarized"`
-		DiarizeProvider string `json:"diarize_provider"`
-		DiarizeModel    string `json:"diarize_model"`
-		Speakers        []struct {
-			ID    string `json:"id"`
-			Label string `json:"label"`
-		} `json:"speakers"`
-	}
-	if err := json.Unmarshal([]byte(st.reps[0].MetaJSON), &meta); err != nil {
-		t.Fatalf("meta json: %v (%q)", err, st.reps[0].MetaJSON)
+	assertDiarizedSidecarMeta(t, st.reps[0].MetaJSON)
+	assertSpanSpeakers(t, st.spans, "S1", "S2")
+}
+
+type diarizedMeta struct {
+	Source          string `json:"source"`
+	Diarized        bool   `json:"diarized"`
+	DiarizeProvider string `json:"diarize_provider"`
+	DiarizeModel    string `json:"diarize_model"`
+	Speakers        []struct {
+		ID    string `json:"id"`
+		Label string `json:"label"`
+	} `json:"speakers"`
+}
+
+// assertDiarizedSidecarMeta checks that a sidecar transcript's meta_json marks it
+// diarized with the {S1:Host, S2:Guest} speakers set and NO model provenance.
+func assertDiarizedSidecarMeta(t *testing.T, metaJSON string) {
+	t.Helper()
+	var meta diarizedMeta
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		t.Fatalf("meta json: %v (%q)", err, metaJSON)
 	}
 	if meta.Source != "sidecar" {
 		t.Errorf("source = %q, want sidecar", meta.Source)
@@ -226,17 +236,27 @@ func TestSidecar_VoiceTags_DiarizedMeta(t *testing.T) {
 		t.Errorf("sidecar diarization must record NO provider/model, got %q/%q",
 			meta.DiarizeProvider, meta.DiarizeModel)
 	}
-	if len(meta.Speakers) != 2 || meta.Speakers[0].ID != "S1" || meta.Speakers[0].Label != "Host" ||
-		meta.Speakers[1].ID != "S2" || meta.Speakers[1].Label != "Guest" {
-		t.Errorf("unexpected speakers set: %+v", meta.Speakers)
+	want := []struct{ id, label string }{{"S1", "Host"}, {"S2", "Guest"}}
+	if len(meta.Speakers) != len(want) {
+		t.Fatalf("speakers = %+v, want %d entries", meta.Speakers, len(want))
 	}
+	for i, w := range want {
+		if meta.Speakers[i].ID != w.id || meta.Speakers[i].Label != w.label {
+			t.Errorf("speakers[%d] = %+v, want {%s,%s}", i, meta.Speakers[i], w.id, w.label)
+		}
+	}
+}
 
-	// Each chunk's time span must carry its speaker (per-segment attribution).
-	if len(st.spans) != 2 {
-		t.Fatalf("expected 2 spans, got %d", len(st.spans))
+// assertSpanSpeakers checks each recorded span carries the expected speaker id.
+func assertSpanSpeakers(t *testing.T, spans []model.Span, want ...string) {
+	t.Helper()
+	if len(spans) != len(want) {
+		t.Fatalf("expected %d spans, got %d", len(want), len(spans))
 	}
-	if st.spans[0].Speaker != "S1" || st.spans[1].Speaker != "S2" {
-		t.Errorf("span speakers = %q,%q want S1,S2", st.spans[0].Speaker, st.spans[1].Speaker)
+	for i, w := range want {
+		if spans[i].Speaker != w {
+			t.Errorf("span[%d].Speaker = %q, want %q", i, spans[i].Speaker, w)
+		}
 	}
 }
 
