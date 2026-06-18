@@ -256,6 +256,60 @@ func (s *Service) OCRCacheKey(content []byte) string {
 	return s.ocrCacheKey(content)
 }
 
+// activeTranslateIdentity is the translation derivation identity of the
+// currently configured translator for a given target language, in the canonical
+// derivationIdentity form (capability=translate, §8.6.2/§8.6.7). The target
+// language is folded as the identity's language field so a different target lands
+// on a different identity (and cache key). Empty when no translate provider/model
+// is resolved, so the historical bytes+text-only key is preserved for the
+// no-translate path.
+func (s *Service) activeTranslateIdentity(targetLang string) string {
+	if strings.TrimSpace(s.translateProvider) == "" && strings.TrimSpace(s.translateModel) == "" {
+		return ""
+	}
+	return derivationIdentity(string(provider.CapTranslate),
+		s.translateProvider, s.translateModel, "", targetLang)
+}
+
+// translateCacheKey returns the on-disk translation cache filename stem for the
+// given source media bytes, source transcript text, and target language. It folds
+// the canonical translate derivation identity (provider/model/target-language)
+// into the key (SPEC §8.6.7), exactly mirroring transcriptCacheKey/ocrCacheKey,
+// so the same source in two corpora derives the translation once (cross-corpus
+// reuse) while a provider, model, or target-language change MISSES the cache and
+// never returns another derivation's bytes.
+//
+// The SOURCE TRANSCRIPT TEXT is folded in addition to the media bytes because the
+// translation is of that text: if an upstream STT/model swap changes the source
+// transcript, the cached translation of the OLD text is stale and must miss. When
+// no translate provider/model is resolved the historical bytes+text-only key is
+// preserved.
+func (s *Service) translateCacheKey(content []byte, sourceText, targetLang string) string {
+	parts := []string{
+		computeContentHash(content),
+		computeContentHash([]byte(sourceText)),
+	}
+	if identity := s.activeTranslateIdentity(targetLang); identity != "" {
+		parts = append(parts, identity)
+	} else {
+		// Preserve the historical behaviour of keying on the lower-cased target
+		// language even with no resolved provider/model identity, so two distinct
+		// targets never collide on the no-identity path.
+		parts = append(parts, strings.ToLower(strings.TrimSpace(targetLang)))
+	}
+	combined := strings.Join(parts, "\x00")
+	return computeContentHash([]byte(combined))
+}
+
+// TranslateCacheKey exposes translateCacheKey for tests in the tests/ tree, so
+// the provider/model/target-language → cache-key binding (SPEC §8.6.7) can be
+// asserted directly — in particular that a provider, model, or target-language
+// change yields a distinct key (no cross-identity bleed) while the same identity
+// over the same source yields a stable key (cross-corpus reuse).
+func (s *Service) TranslateCacheKey(content []byte, sourceText, targetLang string) string {
+	return s.translateCacheKey(content, sourceText, targetLang)
+}
+
 // derivationIdentity builds the canonical, order-stable derivation-identity
 // string from the structured fields the spec defines (§8.6.7:
 // {capability, provider, model, version, language}). It is intentionally NOT an
