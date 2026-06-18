@@ -40,6 +40,15 @@ func canFilter(filter model.Filter) bool {
 	if strings.TrimSpace(filter.Speaker) != "" {
 		return false
 	}
+	// Languages (per-language retrieval filter, SPEC §9.5) is likewise evaluated
+	// by the Go-side matchFilters re-check: BCP-47 primary-subtag matching has no
+	// faithful native Qdrant equivalent (keyword match is whole-value, so "en"
+	// would miss "en-US"). Decline push-down so it stays on the single,
+	// authoritative model.Filter.Match path. Declining is always safe
+	// (overfetch-then-filter).
+	if len(filter.Languages) != 0 {
+		return false
+	}
 	return true
 }
 

@@ -784,14 +784,11 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 				return total, err
 			}
 			for _, task := range tasks {
-				ret.SetChunkMetadataForIndex(kind, task.Metadata.ChunkID, model.SearchHit{
-					ChunkID: task.Metadata.ChunkID,
-					RelPath: task.Metadata.RelPath,
-					DocType: task.Metadata.DocType,
-					RepType: task.Metadata.RepType,
-					Snippet: task.Metadata.Snippet,
-					Span:    task.Metadata.Span,
-				})
+				// ToSearchHit carries every field the in-memory metadata needs,
+				// including the representation Language (SPEC §5.2/§8.8) so the
+				// per-language retrieval filter (§9.5) works against warm-loaded
+				// metadata after a restart, not just freshly-indexed chunks.
+				ret.SetChunkMetadataForIndex(kind, task.Metadata.ChunkID, task.Metadata.ToSearchHit())
 				total++
 			}
 			if len(tasks) < pageSize {

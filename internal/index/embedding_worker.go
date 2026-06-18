@@ -559,8 +559,9 @@ func mediaMIMEType(relPath string) string {
 // diarized transcript's "time" span (SPEC §8.6.8) so a FilteringIndex can push
 // down a speaker filter without re-reading the span. They are empty on every
 // non-diarized transcript, so payloads are byte-identical to today. Language is
-// not carried on ChunkMetadata today and is left empty for backends to populate
-// when available.
+// the representation's effective BCP-47 language (SPEC §5.2/§8.8) so a
+// FilteringIndex can push down the per-language filter (§9.5); it is empty on a
+// representation that recorded no language (unknown), preserving prior payloads.
 func payloadFromTask(t model.ChunkTask) model.IndexPayload {
 	meta := t.Metadata
 	return model.IndexPayload{
@@ -577,6 +578,7 @@ func payloadFromTask(t model.ChunkTask) model.IndexPayload {
 		Snippet:      meta.Snippet,
 		Span:         meta.Span,
 		MediaRef:     meta.MediaRef,
+		Language:     meta.Language,
 	}
 }
 

@@ -191,24 +191,54 @@ func upsertRepresentationWith(ctx context.Context, exec dbExecutor, rep model.Re
 	return repID, nil
 }
 
-func lookupChunkDocContext(ctx context.Context, exec dbExecutor, repID int64) (relPath, docType, repType string, err error) {
+func lookupChunkDocContext(ctx context.Context, exec dbExecutor, repID int64) (relPath, docType, repType, language string, err error) {
+	var metaJSON string
 	err = exec.QueryRowContext(
 		ctx,
-		`SELECT d.rel_path, d.doc_type, r.rep_type
+		`SELECT d.rel_path, d.doc_type, r.rep_type, COALESCE(r.meta_json, '')
 		 FROM representations r
 		 JOIN documents d ON d.doc_id = r.doc_id
 		 WHERE r.rep_id = ?
 		 LIMIT 1`,
 		repID,
-	).Scan(&relPath, &docType, &repType)
-	return relPath, docType, repType, err
+	).Scan(&relPath, &docType, &repType, &metaJSON)
+	if err != nil {
+		return relPath, docType, repType, "", err
+	}
+	// Denormalize the representation's recorded effective language (SPEC §5.2/§8.8)
+	// onto the chunk so the per-language retrieval filter (§9.5) can predicate at
+	// candidate selection. The recorded `language` is already the resolved
+	// effective value (precedence applied at the ingest write per §8.8), so the
+	// store merely reads it; absent ⇒ unknown (empty), never an error.
+	return relPath, docType, repType, languageFromRepMeta(metaJSON), err
 }
 
-func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType string) (int64, error) {
+// languageFromRepMeta extracts the effective BCP-47 language a representation
+// recorded in its meta_json (SPEC §5.2 `language`). It is intentionally tolerant:
+// a representation with no meta, unparseable meta, or no `language` field is
+// "unknown language" (returns ""), which never matches a specific per-language
+// filter (§9.5). The recorded value is returned verbatim (trimmed); §9.5
+// matching normalizes to the primary subtag, so both full-tag and primary-subtag
+// recordings filter correctly.
+func languageFromRepMeta(metaJSON string) string {
+	metaJSON = strings.TrimSpace(metaJSON)
+	if metaJSON == "" {
+		return ""
+	}
+	var meta struct {
+		Language string `json:"language"`
+	}
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(meta.Language)
+}
+
+func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType, language string) (int64, error) {
 	_, err := exec.ExecContext(
 		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, embedding_status, embedding_error, error_category, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, language, embedding_status, embedding_error, error_category, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -219,6 +249,7 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		   index_kind=excluded.index_kind,
 		   modality=excluded.modality,
 		   media_ref=excluded.media_ref,
+		   language=excluded.language,
 		   embedding_status=excluded.embedding_status,
 		   embedding_error=excluded.embedding_error,
 		   error_category=excluded.error_category,
@@ -234,6 +265,7 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		normalizeIndexKind(chunk.IndexKind),
 		normalizeModality(chunk.Modality),
 		strings.TrimSpace(chunk.MediaRef),
+		strings.TrimSpace(language),
 		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
 		strings.TrimSpace(chunk.EmbeddingError),
 		strings.TrimSpace(chunk.ErrorCategory),
@@ -369,6 +401,15 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// §7.8.3, #298). Empty for local/NFS corpora, non-media docs, and media
 		// with no sidecar — preserving the historical fast-path behavior.
 		`ALTER TABLE documents ADD COLUMN sidecar_fingerprint TEXT NOT NULL DEFAULT ''`,
+		// language denormalizes the effective BCP-47 language of a chunk's source
+		// representation (SPEC §5.2/§8.8) onto the chunk so the per-language
+		// retrieval filter (§9.5) can predicate at candidate selection without a
+		// per-chunk representation meta_json lookup. Populated at chunk insert from
+		// the representation's recorded meta language; empty means the
+		// representation recorded no language (unknown) — which never matches a
+		// specific filter, so a corpus indexed before any language was recorded
+		// simply has empty values here (no migration of existing rows needed, §9.5).
+		`ALTER TABLE chunks ADD COLUMN language TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -446,6 +487,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   index_kind TEXT NOT NULL DEFAULT 'text',
   modality TEXT NOT NULL DEFAULT 'text',
   media_ref TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT '',
   embedding_status TEXT NOT NULL DEFAULT 'pending',
   embedding_error TEXT NOT NULL DEFAULT '',
   error_category TEXT NOT NULL DEFAULT '',
@@ -731,11 +773,11 @@ func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chun
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	relPath, docType, repType, err := lookupChunkDocContext(ctx, tx, chunk.RepID)
+	relPath, docType, repType, language, err := lookupChunkDocContext(ctx, tx, chunk.RepID)
 	if err != nil {
 		return 0, err
 	}
-	chunkID, err := insertChunkWithSpansWith(ctx, tx, chunk, spans, relPath, docType, repType)
+	chunkID, err := insertChunkWithSpansWith(ctx, tx, chunk, spans, relPath, docType, repType, language)
 	if err != nil {
 		return 0, err
 	}
@@ -870,11 +912,11 @@ func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Ch
 		return 0, err
 	}
 
-	relPath, docType, repType, err := lookupChunkDocContext(ctx, t.tx, chunk.RepID)
+	relPath, docType, repType, language, err := lookupChunkDocContext(ctx, t.tx, chunk.RepID)
 	if err != nil {
 		return 0, err
 	}
-	return insertChunkWithSpansWith(ctx, t.tx, chunk, spans, relPath, docType, repType)
+	return insertChunkWithSpansWith(ctx, t.tx, chunk, spans, relPath, docType, repType, language)
 }
 
 func (t *txSQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error {
@@ -1319,7 +1361,7 @@ func (s *SQLiteStore) ChunkTaskByID(ctx context.Context, chunkID uint64) (task m
 
 	row := db.QueryRowContext(ctx, `
 WITH the_chunk AS (
-  SELECT chunk_id, rel_path, doc_type, rep_type, text, text_hash, index_kind, modality, media_ref
+  SELECT chunk_id, rel_path, doc_type, rep_type, text, text_hash, index_kind, modality, media_ref, language
   FROM chunks
   WHERE chunk_id = ? AND deleted = 0
 ),
@@ -1329,7 +1371,7 @@ ranked_spans AS (
   FROM spans s
   JOIN the_chunk tc ON tc.chunk_id = s.chunk_id
 )
-SELECT tc.chunk_id, tc.rel_path, tc.doc_type, tc.rep_type, tc.text, tc.text_hash, tc.index_kind, tc.modality, tc.media_ref,
+SELECT tc.chunk_id, tc.rel_path, tc.doc_type, tc.rep_type, tc.text, tc.text_hash, tc.index_kind, tc.modality, tc.media_ref, tc.language,
        COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, '')
 FROM the_chunk tc
 LEFT JOIN ranked_spans sp ON sp.chunk_id = tc.chunk_id AND sp.rn = 1`, int64(chunkID))
@@ -1344,12 +1386,13 @@ LEFT JOIN ranked_spans sp ON sp.chunk_id = tc.chunk_id AND sp.rn = 1`, int64(chu
 		idxKind   string
 		modality  string
 		mediaRef  string
+		language  string
 		spanK     string
 		spanS     int
 		spanE     int
 		spanExtra string
 	)
-	if scanErr := row.Scan(&cid, &relPath, &docType, &repType, &text, &thash, &idxKind, &modality, &mediaRef,
+	if scanErr := row.Scan(&cid, &relPath, &docType, &repType, &text, &thash, &idxKind, &modality, &mediaRef, &language,
 		&spanK, &spanS, &spanE, &spanExtra); scanErr != nil {
 		if errors.Is(scanErr, sql.ErrNoRows) {
 			return model.ChunkTask{}, "", model.ErrNotFound
@@ -1370,6 +1413,7 @@ LEFT JOIN ranked_spans sp ON sp.chunk_id = tc.chunk_id AND sp.rn = 1`, int64(chu
 		Span:     span,
 		Modality: modality,
 		MediaRef: mediaRef,
+		Language: language,
 	})
 	t.Modality = modality
 	t.MediaRef = mediaRef
@@ -1736,7 +1780,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 
 	args := []any{"pending"}
 	query := `WITH filtered_chunks AS (
-	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language
 	            FROM chunks c
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
 	          ),
@@ -1746,7 +1790,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	            FROM spans s
 	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
 	          )
-	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind, fc.modality, fc.media_ref,
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind, fc.modality, fc.media_ref, fc.language,
 	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, '')
 	          FROM filtered_chunks fc
 	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
@@ -1774,12 +1818,13 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			idxKind   string
 			modality  string
 			mediaRef  string
+			language  string
 			spanK     string
 			spanS     int
 			spanE     int
 			spanExtra string
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &modality, &mediaRef, &spanK, &spanS, &spanE, &spanExtra); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &modality, &mediaRef, &language, &spanK, &spanS, &spanE, &spanExtra); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -1796,6 +1841,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			Span:     span,
 			Modality: modality,
 			MediaRef: mediaRef,
+			Language: language,
 		})
 		task.Modality = modality
 		task.MediaRef = mediaRef
@@ -1844,7 +1890,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 
 	args := []any{"ok"}
 	query := `WITH filtered_chunks AS (
-	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language
 	            FROM chunks c
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
 	          ),
@@ -1856,7 +1902,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	          )
 	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
 	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''),
-	                 COALESCE(d.title, ''), fc.modality, fc.media_ref
+	                 COALESCE(d.title, ''), fc.modality, fc.media_ref, fc.language
 	          FROM filtered_chunks fc
 	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1
 	          LEFT JOIN documents d ON d.rel_path = fc.rel_path`
@@ -1889,8 +1935,9 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			title     string
 			modality  string
 			mediaRef  string
+			language  string
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &spanExtra, &title, &modality, &mediaRef); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &spanExtra, &title, &modality, &mediaRef, &language); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -1914,6 +1961,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 				Span:     span,
 				Modality: modality,
 				MediaRef: mediaRef,
+				Language: language,
 			},
 		})
 	}
