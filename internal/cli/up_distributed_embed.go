@@ -68,13 +68,7 @@ func startDistributedEmbedding(
 
 	// Build a per-kind embedder reusing the in-process embedding path so the
 	// distributed worker shares all embed/media-load/index/mark logic.
-	embedders := make(map[string]embedqueue.Embedder)
-	if textIndex != nil {
-		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger, "text")
-	}
-	if codeIndex != nil {
-		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger, "code")
-	}
+	embedders := buildAxisEmbedders(chunkSource, textIndex, codeIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger)
 	if len(embedders) == 0 {
 		// Post-open abort: close the broker so its SQLite handle is not leaked.
 		_ = broker.Close()
@@ -186,6 +180,32 @@ func newEmbedStep(
 			}
 		},
 	}
+}
+
+// buildAxisEmbedders builds the per-axis (text/code) embed→index→mark steps a
+// distributed worker drains jobs into, reusing newEmbedStep so each axis shares
+// the exact in-process embed/media-load/index/mark path. A nil index for an axis
+// is skipped (that axis has no embedder); a job whose index_kind has no embedder
+// is dead-lettered by embedqueue.Run rather than mis-written. Shared by the
+// in-process distributed coordinator (up) and the standalone embed-worker (#249).
+func buildAxisEmbedders(
+	chunkSource index.ChunkSource,
+	textIndex, codeIndex model.Index,
+	embedder model.Embedder,
+	ret *retrieval.Service,
+	indexingState *appstate.IndexingState,
+	textModel, codeModel, rootDir string,
+	corpusFS corpusfs.CorpusFS,
+	logger *log.Logger,
+) map[string]embedqueue.Embedder {
+	embedders := make(map[string]embedqueue.Embedder)
+	if textIndex != nil {
+		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger, "text")
+	}
+	if codeIndex != nil {
+		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger, "code")
+	}
+	return embedders
 }
 
 // buildEmbedBroker constructs the configured broker (SPEC §8.7.4). The built-in
