@@ -134,9 +134,20 @@ func (a *App) runEmbedWorkerLoop(ctx context.Context, cfg config.Config, global 
 		return code
 	}
 	defer func() { _ = st.Close() }()
+	// A single-axis config (text-only or code-only) leaves the other index nil
+	// (buildAxisEmbedders skips a nil axis), so guard before closing — calling
+	// Close on a nil model.Index interface would panic.
 	textIx, codeIx := textBuilt.index, codeBuilt.index
-	defer func() { _ = textIx.Close() }()
-	defer func() { _ = codeIx.Close() }()
+	defer func() {
+		if textIx != nil {
+			_ = textIx.Close()
+		}
+	}()
+	defer func() {
+		if codeIx != nil {
+			_ = codeIx.Close()
+		}
+	}()
 
 	// The shared store must expose read-by-id (ChunkTaskByID) so the worker can
 	// load the authoritative chunk for a leased job (§8.7.4), and the chunk

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ import (
 // and requires DIR2MCP_INDEX_PGVECTOR_DSN (shared Tier-C store, §8.7.4) plus a
 // resolvable embed credential (e.g. MISTRAL_API_KEY).
 func TestEmbedWorkerEndToEnd_LiveInfra(t *testing.T) {
-	if os.Getenv("RUN_INTEGRATION_TESTS") == "" {
+	if os.Getenv("RUN_INTEGRATION_TESTS") != "1" {
 		t.Skip("set RUN_INTEGRATION_TESTS=1 to run integration tests")
 	}
 	dsn := os.Getenv("DIR2MCP_INDEX_PGVECTOR_DSN")
@@ -76,12 +77,20 @@ func TestEmbedWorkerEndToEnd_LiveInfra(t *testing.T) {
 			done <- app.RunWithContext(ctx, []string{"embed-worker", "--poll-interval", "50ms"})
 		}()
 
-		// Poll the store until the chunk drains or the deadline fires.
-		drained := waitForChunkDrain(t, stateDir, 45*time.Second)
+		// Poll the store until the chunk drains, the worker exits early, or the
+		// deadline fires — racing `done` so a fail-fast worker exit surfaces
+		// immediately instead of burning the whole timeout.
+		drained, earlyExit, earlyCode := awaitDrainOrExit(t, stateDir, done, 45*time.Second)
 		cancel()
-		<-done
+		if !earlyExit {
+			<-done
+		}
+		if earlyExit && !drained {
+			t.Fatalf("embed-worker exited early (code=%d) before draining chunk %d; stderr=%s",
+				earlyCode, chunkID, redactSecrets(stderr.String(), dsn))
+		}
 		if !drained {
-			t.Fatalf("chunk %d did not drain within deadline; stderr=%s", chunkID, stderr.String())
+			t.Fatalf("chunk %d did not drain within deadline; stderr=%s", chunkID, redactSecrets(stderr.String(), dsn))
 		}
 	})
 }
@@ -149,22 +158,56 @@ func enqueueJobForChunk(t *testing.T, stateDir string, chunkID uint64) {
 
 // waitForChunkDrain polls CorpusStats until at least one chunk is embedded or
 // the deadline fires.
-func waitForChunkDrain(t *testing.T, stateDir string, within time.Duration) bool {
+// awaitDrainOrExit polls until a chunk reaches embedded_ok, the worker exits
+// (done), or the deadline fires. It returns whether a chunk drained, whether the
+// worker exited early, and the early-exit code — so a fail-fast worker exit is
+// surfaced immediately instead of waiting out the full deadline.
+func awaitDrainOrExit(t *testing.T, stateDir string, done <-chan int, within time.Duration) (bool, bool, int) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
-		if err := st.Init(context.Background()); err != nil {
-			t.Fatalf("init store for poll: %v", err)
+	deadline := time.After(within)
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if chunkEmbedded(t, stateDir) {
+			return true, false, 0
 		}
-		stats, err := st.CorpusStats(context.Background())
-		_ = st.Close()
-		if err == nil && stats.EmbeddedOK >= 1 {
-			return true
+		select {
+		case code := <-done:
+			return chunkEmbedded(t, stateDir), true, code
+		case <-deadline:
+			return false, false, 0
+		case <-tick.C:
 		}
-		time.Sleep(250 * time.Millisecond)
 	}
-	return false
+}
+
+// chunkEmbedded reports whether at least one chunk has reached embedded_ok in the
+// shared store (a single, non-blocking check the poll loop races against worker
+// exit).
+func chunkEmbedded(t *testing.T, stateDir string) bool {
+	t.Helper()
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store for poll: %v", err)
+	}
+	stats, err := st.CorpusStats(context.Background())
+	_ = st.Close()
+	return err == nil && stats.EmbeddedOK >= 1
+}
+
+// redactSecrets strips known runtime secrets (the pgvector DSN and any resolved
+// *_API_KEY values) from captured stderr before it is logged in a test failure,
+// so CI logs never carry credentials (SPEC §16.1.1).
+func redactSecrets(s, dsn string) string {
+	if dsn != "" {
+		s = strings.ReplaceAll(s, dsn, "***")
+	}
+	for _, k := range []string{"MISTRAL_API_KEY", "OPENAI_API_KEY"} {
+		if v := os.Getenv(k); v != "" {
+			s = strings.ReplaceAll(s, v, "***")
+		}
+	}
+	return s
 }
 
 // capBuf is a tiny concurrency-safe buffer so the background subcommand
