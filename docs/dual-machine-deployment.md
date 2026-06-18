@@ -11,6 +11,7 @@ referenced here, see the canonical spec in the `dirstral-spec` submodule:
 - Self-hosted / OpenAI-compatible provider endpoints — `dirstral-spec/docs/SPEC.md` §8.5
 - Remote corpus sources — `dirstral-spec/docs/SPEC.md` §7.8
 - Vector index backends and identity — `dirstral-spec/docs/SPEC.md` §6
+- Distributed embedding (coordinator + workers + broker) — `dirstral-spec/docs/SPEC.md` §8.7
 - Credential resolution (env → keychain → `.env.local`, never persisted) — `dirstral-spec/docs/SPEC.md` §16.1.1
 - Config schema (`source:`, `index:`, `providers:`, `model:`) — `dirstral-spec/docs/SPEC.md` §16.2
 
