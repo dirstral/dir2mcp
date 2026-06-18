@@ -67,6 +67,7 @@ var commands = map[string]struct{}{
 	"open-file":      {},
 	"list-files":     {},
 	"reindex":        {},
+	"embed-worker":   {},
 	"export":         {},
 	"bridge":         {},
 	"config":         {},
@@ -468,6 +469,8 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runStatus(ctx, globalOpts, args), true
 	case "reindex":
 		return a.runReindex(ctx, globalOpts, args), true
+	case "embed-worker":
+		return a.runEmbedWorker(ctx, globalOpts, args), true
 	case "export":
 		return a.runExport(ctx, globalOpts, args), true
 	case "config":
@@ -531,6 +534,7 @@ func (a *App) printUsage() {
 		{"open-file", "legacy compatibility shim; prefer dirstral-cli for client UX"},
 		{"list-files", "legacy compatibility shim; prefer dirstral-cli for client UX"},
 		{"reindex", "force a full re-index of all documents"},
+		{"embed-worker", "run a standalone distributed embed worker (no MCP serving; requires Tier-C store + broker)"},
 		{"export", "render a transcript as VTT/SRT subtitles (export --format vtt|srt <path>)"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
