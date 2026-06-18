@@ -54,13 +54,18 @@ Why this shape:
   page rendering) re-reads media. Putting the daemon next to where the corpus is
   read avoids pulling the same bytes across the wire twice. This matters most for
   **video**, which is large and, for time-window extraction, currently
-  materializes the whole object locally (see [§4 caveats](#4-caveats-and-current-limitations)).
+  materializes the whole object locally (see [§5 caveats](#5-caveats-and-current-limitations)).
 - **StateDir stays local — always.** Regardless of where the corpus lives, the
   state directory (SQLite metadata, the embedded vector index, and caches) is
   kept on the VPS's local disk. dir2mcp never writes its index or state back to
   the remote source; only the corpus *content* is remote. (`dirstral-spec/docs/SPEC.md`
   §7.8, §1.2.) When the corpus is on S3, the per-object download cache lives
   under `StateDir/corpus-cache`.
+
+The single-daemon shape above is the default and the recommended starting point.
+If embedding throughput becomes the bottleneck, you can optionally fan the embed
+work out across several worker processes on the VPS while keeping one daemon as the
+coordinator — see [§4 Optional: distributed embedding](#4-optional-distributed-embedding-coordinator--workers).
 
 ---
 
@@ -242,14 +247,124 @@ auth unless `--force-insecure` is explicitly set.
 
 ---
 
-## 4. Caveats and current limitations
+## 4. Optional: distributed embedding (coordinator + workers)
+
+Everything above runs embedding **inside the daemon process**. For a large corpus
+or a slow embed model, you can instead let the daemon act as a **coordinator** that
+enqueues embedding jobs onto a shared queue, and run one or more standalone
+**`dir2mcp embed-worker`** processes that lease jobs, embed, and write vectors
+directly to a shared store. This is opt-in (`distributed_embed.enabled: true`) and
+governed by `dirstral-spec/docs/SPEC.md` §8.7.
+
+This is a different axis from the single-machine "daemon on the GPU VPS" topology
+above — you only need it when one embedder cannot keep up. The corpus-read and
+StateDir rules from §1 still apply: corpus content is read where each worker runs,
+and each process keeps its own local StateDir.
+
+### 4.1 What this requires
+
+Distributed mode has two hard prerequisites, both enforced at config load /
+worker startup:
+
+- **A shared Tier-C vector store.** `distributed_embed.enabled: true` requires
+  `index.backend: qdrant` or `index.backend: pgvector`. The embedded Tier-A
+  (`memory`) and Tier-B (`disk`) backends are single-node and cannot be shared
+  across processes, so the daemon and `embed-worker` **reject** them with a
+  `CONFIG_INVALID`-style error at startup (SPEC §8.7.4). All coordinator and
+  worker processes must point at the **same** Tier-C collection/table.
+- **A broker** that holds the job queue (below).
+
+Every process — coordinator and all workers — must also share the **same embed
+identity** (provider / model / dims; see §5). They are embedding into one vector
+space, so their embed config must agree.
+
+### 4.2 Broker (job queue)
+
+Pick the broker with `distributed_embed.broker`. Only the two **built-in** brokers
+are shipped today; external broker adapters (Redis, NATS, etc.) are **not yet
+implemented** and are rejected with `unsupported distributed_embed.broker` if
+named:
+
+| `distributed_embed.broker` | Backing | Scope | When |
+|---|---|---|---|
+| `memory` (default) | in-process queue | single process only | Degenerate / testing; the queue lives inside one process and is not visible to separate worker processes. |
+| `sqlite` | a SQLite queue file | multi-process on one host | Persistent, pure-Go, file-backed queue. Workers on the **same host** share it via `distributed_embed.sqlite_path` (defaults to `<state_dir>/embed-queue.db`). |
+
+> The `memory` broker is in-process only, so it does **not** connect a separate
+> `embed-worker` to the coordinator. The `sqlite` broker shares a queue **file**,
+> which means coordinator and workers must run on the **same host** (or a host
+> where they all see the same path). A broker that fans work out across *different*
+> hosts needs an external broker adapter, which is on the SPEC §8.7 roadmap but not
+> shipped — so today's distributed topology scales workers **on the GPU VPS
+> itself**, not across machines.
+
+```yaml
+index:
+  backend: qdrant
+  qdrant:
+    url: http://localhost:6334
+    collection: my-corpus
+
+distributed_embed:
+  enabled: true
+  broker: sqlite                 # memory | sqlite (built-ins only)
+  sqlite_path: /var/lib/dir2mcp/embed-queue.db   # optional; defaults to <state_dir>/embed-queue.db
+  max_attempts: 5                # optional; redelivery bound before dead-lettering (default 5)
+```
+
+> The runtime-only broker connection string for a future external broker is read
+> **only** from the `DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL` environment variable and
+> is never persisted to the config file. With only built-in brokers shipped today
+> it has no effect.
+
+### 4.3 Run the coordinator and the workers
+
+1. **Coordinator** — start the daemon as usual (`dir2mcp up …`) with
+   `distributed_embed.enabled: true`. It enumerates the corpus and enqueues embed
+   jobs onto the broker instead of embedding inline.
+2. **Workers** — on the same host, run one or more:
+
+   ```bash
+   dir2mcp embed-worker
+   ```
+
+   `embed-worker` serves no MCP traffic; it leases embed jobs, calls the (localhost)
+   embed server, and writes vectors to the shared Tier-C store. It uses the same
+   config file as the coordinator (same Tier-C store, same broker, same embed
+   identity). Optional tuning flags:
+
+   - `--lease-duration` — visibility timeout for a leased job (default `30s`).
+   - `--poll-interval` — wait after an empty queue before leasing again (default `500ms`).
+   - `--retry-after` — delay before a transiently-failed job is redelivered (default `2s`).
+
+Run as many `embed-worker` processes as your GPU(s) can feed. Because all workers
+write to the same Tier-C collection under the same embed identity, the result is a
+single coherent index.
+
+---
+
+## 5. Caveats and current limitations
 
 - **FUSE-over-S3 listing cost.** If you mount S3 as a filesystem (mountpoint-s3,
   goofys, etc.) instead of using `source.kind: s3`, directory listings over a
   large object tree can be slow and request-expensive, because a filesystem walk
   turns into many `LIST`/`HEAD` calls. Prefer the native `source.kind: s3`
   backend (a flat object listing) for large corpora; reserve FUSE for cases where
-  you specifically need a real mountpoint.
+  you specifically need a real mountpoint. The same listing cost applies to a deep
+  **NFS** tree. For a large local-filesystem-style backend (including NFS and FUSE
+  mounts) where most directories are unchanged between runs, you can opt into the
+  directory-discovery **scan cache** so an unchanged directory skips re-reading and
+  re-sorting its entries:
+
+  ```yaml
+  ingest:
+    scan_cache: true   # default OFF; opt-in. Local-filesystem backend only.
+  ```
+
+  The cache keys each directory on its own mtime plus its direct children's
+  name/size/mtime/mode, so a changed directory is still rescanned. It is only
+  consulted for the local-filesystem backend (not the native `source.kind: s3`
+  object listing).
 
 - **Video time-window reads currently download the whole object.** Range reads
   over S3 avoid whole-object downloads for plain byte-slice reads, but the
@@ -269,11 +384,12 @@ auth unless `--force-insecure` is explicitly set.
 
 ---
 
-## 5. Related docs
+## 6. Related docs
 
 - [`SPEC.md`](SPEC.md) — pointer to the canonical, normative spec (this guide's
   references resolve there): §6 (vector backends), §7.8 (remote corpus), §8.5
-  (self-hosted endpoints), §16.1.1 (credentials), §16.2 (config schema).
+  (self-hosted endpoints), §8.7 (distributed embedding), §16.1.1 (credentials),
+  §16.2 (config schema).
 - [`VISION.md`](VISION.md), [`ECOSYSTEM.md`](ECOSYSTEM.md) — product and ecosystem context.
 - [`x402-payment-adapter-spec.md`](x402-payment-adapter-spec.md) — request-gating
   adapter contract, if you gate the exposed MCP endpoint.
