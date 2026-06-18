@@ -2989,18 +2989,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateMediaBatch enforces the media.batch (SPEC §8.6.11) invariants. The
-// JSONL run manifest and side-channel progress are implemented; the two-phase
-// pass split (media.batch.two_phase) is NOT yet implemented, so enabling it is
-// rejected up front rather than silently behaving as single-pass — an honest
-// error beats a no-op flag. (The single-pass path already produces the same
-// representations/chunks/citations, so manifest + progress are fully usable
-// today.)
+// validateMediaBatch enforces the media.batch (SPEC §8.6.11) invariants. All
+// three features — the two-phase pass split (media.batch.two_phase), the JSONL
+// run manifest, and side-channel progress — are implemented. The two-phase split
+// is observably equivalent to single-pass for the resulting
+// representations/chunks/embeddings/citations (it reorders work into a
+// transcription pass then a derivation pass, never changing output), so it has no
+// config interdependencies to reject here; it is a self-contained ordering toggle.
 func (c *Config) validateMediaBatch() error {
-	if c.MediaBatchTwoPhase {
-		return fmt.Errorf("media.batch.two_phase is not yet implemented; " +
-			"use media.batch.manifest and media.batch.progress (single-pass) for now")
-	}
 	return nil
 }
 

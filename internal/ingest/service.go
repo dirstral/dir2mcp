@@ -219,6 +219,51 @@ type Service struct {
 	// generators stamp produced outputs onto it via recordOutput. Nil when no
 	// batch run is active, making recordOutput a no-op on the hot path.
 	activeOutcome *assetOutcome
+
+	// activePass selects which work the representation generators perform for the
+	// asset currently being processed under the optional two-phase pass split
+	// (SPEC §8.6.11). runScan sets it around each per-asset call (the scan loop is
+	// sequential). passSingle (the zero value) is the default single-pass pipeline
+	// — byte-identical to before the split existed. passTranscription produces
+	// every representation EXCEPT translated transcripts; passDerivation produces
+	// ONLY translated transcripts from the already-computed (cached) source
+	// transcript. The split changes ordering and reporting only, never the final
+	// representations/chunks/embeddings/citations.
+	activePass processPass
+}
+
+// processPass is the per-asset work selector for the optional two-phase pass
+// split (SPEC §8.6.11). The two ordered passes together produce exactly the same
+// representations as a single pass; each pass is independently resumable via the
+// existing identity/cache state (§7.6/§8.6.7).
+type processPass int
+
+const (
+	// passSingle runs the full per-document pipeline (transcription THEN
+	// derivation) in one go. It is the default and is observably identical to the
+	// pipeline before the two-phase split was introduced.
+	passSingle processPass = iota
+	// passTranscription runs every representation step EXCEPT translated
+	// transcripts: raw text, OCR/extracted markdown, direct media chunks, and the
+	// source (STT/sidecar) transcript with its chunks.
+	passTranscription
+	// passDerivation runs ONLY the derivation step (translation §8.6.2) for media
+	// documents, reusing the cached source transcript so it never re-transcribes.
+	passDerivation
+)
+
+// passLabel maps a pass to its manifest/progress label (SPEC §8.6.11). The
+// single pass carries no label so its manifest records stay identical to the
+// pre-split single-pass output.
+func (p processPass) label() string {
+	switch p {
+	case passTranscription:
+		return "transcription"
+	case passDerivation:
+		return "derivation"
+	default:
+		return ""
+	}
 }
 
 // recordContentHash stamps the resolved content_hash (§7.6) onto the asset
@@ -886,16 +931,60 @@ func (s *Service) runScan(ctx context.Context) error {
 	defer func() {
 		s.batch.close()
 		s.batch = nil
+		s.activePass = passSingle
 	}()
-	s.batch.startPass("", len(discovered))
 
 	seen := make(map[string]struct{}, len(discovered))
+
+	// Optional two-phase pass split (SPEC §8.6.11): run media ingest as two ordered
+	// passes over the corpus — a transcription pass (STT/sidecar → source
+	// transcript, plus all non-media representations) followed by a derivation pass
+	// (translation §8.6.2). It is observably equivalent to single-pass for the
+	// resulting representations/chunks/embeddings/citations (it changes ordering and
+	// reporting only), and each pass is independently resumable via the existing
+	// identity/cache state (§7.6/§8.6.7) so an interrupted transcription pass does
+	// not force re-transcription of completed assets. Default (off) is the single
+	// pass below, byte-identical to before the split existed.
+	if s.cfg.MediaBatchTwoPhase {
+		if err := s.scanPass(ctx, passTranscription, discovered, compiledSecrets, forceReindex, seen); err != nil {
+			return err
+		}
+		if err := s.scanPass(ctx, passDerivation, discovered, compiledSecrets, forceReindex, seen); err != nil {
+			return err
+		}
+		return s.markMissingAsDeleted(ctx, existing, seen)
+	}
+
+	if err := s.scanPass(ctx, passSingle, discovered, compiledSecrets, forceReindex, seen); err != nil {
+		return err
+	}
+	return s.markMissingAsDeleted(ctx, existing, seen)
+}
+
+// scanPass processes every discovered asset once under the given pass (SPEC
+// §8.6.11). passSingle runs the full pipeline; passTranscription and
+// passDerivation are the two ordered halves of the two-phase split. The same
+// per-asset processing is reused across all three passes — only the work each
+// representation generator performs differs, governed by s.activePass. The seen
+// set is shared across passes so markMissingAsDeleted sees the union of assets
+// observed in either pass.
+func (s *Service) scanPass(ctx context.Context, pass processPass, discovered []DiscoveredFile, compiledSecrets []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+	s.activePass = pass
+	s.batch.startPass(pass.label(), len(discovered))
+
 	for _, f := range discovered {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		s.addScanned(1)
+		// Scan/skip counters reflect the corpus, not the pass: count them only on the
+		// first (or only) pass so a two-phase run reports the same totals as
+		// single-pass. The derivation pass reuses the same per-asset processing but
+		// must not double-count.
+		countCorpus := pass != passDerivation
+		if countCorpus {
+			s.addScanned(1)
+		}
 
 		var outcome *assetOutcome
 		if s.batch != nil {
@@ -904,7 +993,9 @@ func (s *Service) runScan(ctx context.Context) error {
 		}
 
 		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
-			s.addSkipped(1)
+			if countCorpus {
+				s.addSkipped(1)
+			}
 			if outcome != nil {
 				outcome.markSkipped()
 				s.batch.finalize(outcome)
@@ -925,7 +1016,9 @@ func (s *Service) runScan(ctx context.Context) error {
 		}
 
 		if err != nil {
-			s.addErrors(1)
+			if countCorpus {
+				s.addErrors(1)
+			}
 			// record that we saw the file even if processing failed so
 			// markMissingAsDeleted does not treat it as removed
 			seen[f.RelPath] = struct{}{}
@@ -933,8 +1026,7 @@ func (s *Service) runScan(ctx context.Context) error {
 		}
 		seen[f.RelPath] = struct{}{}
 	}
-
-	return s.markMissingAsDeleted(ctx, existing, seen)
+	return nil
 }
 
 // recordAssetOutputs records the rep_types persisted for a successfully-processed
@@ -1118,6 +1210,16 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 }
 
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+	// Two-phase derivation pass (SPEC §8.6.11): the transcription pass already did
+	// all document building, upserting, counting, and source-transcript work for
+	// this asset; the derivation pass runs ONLY translation (§8.6.2) and re-doing
+	// the full document pipeline here would either double-count or be gated out by
+	// the unchanged-content check (the document is identical to what the
+	// transcription pass just wrote). Route to the lean derivation-only path.
+	if s.activePass == passDerivation {
+		return s.deriveDocument(ctx, f, secretPatterns)
+	}
+
 	// Remote (S3) incremental fast path (SPEC §7.8.3, #245): when the object's
 	// ETag+size match the recorded document, the body is unchanged, so skip the
 	// full GET + content_hash recompute entirely. No-op for local/NFS corpora
@@ -1187,6 +1289,106 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return fmt.Errorf("generate representations: %w", err)
 	}
 	return nil
+}
+
+// deriveDocument runs the derivation pass for a single asset under the two-phase
+// split (SPEC §8.6.11): it produces ONLY translated transcripts (§8.6.2) from the
+// already-persisted source transcript, reusing the cached transcript text so it
+// never re-transcribes — which is what makes the derivation pass independently
+// resumable (§7.6/§8.6.7). All document building, upserting, counting, and
+// source-transcript work was already done by the transcription pass.
+//
+// It mirrors the gating of the single-pass translation step exactly so the final
+// set of representations is observably identical: translation applies only to a
+// model-derived (STT) transcript of an audio document, and only when translation
+// is configured. Non-media documents, sidecar-transcript documents, and assets
+// with no source transcript are recorded as skipped and produce nothing — keeping
+// the derivation pass's per-asset manifest/progress totals faithful (§8.6.11).
+func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) error {
+	// No translation configured, or the multimodal "replace" mode that stands in
+	// for STT→text (so no transcript exists to translate): nothing to derive. This
+	// matches the single-pass gates so the corpus-wide output is identical.
+	if s.translator == nil || len(s.translateTargetLangs) == 0 {
+		s.markActiveSkipped()
+		return nil
+	}
+
+	docType := ClassifyDocType(f.RelPath)
+	if docType != "audio" || s.transcriber == nil {
+		s.markActiveSkipped()
+		return nil
+	}
+
+	doc, err := s.store.GetDocumentByPath(ctx, f.RelPath)
+	if isUnexpectedStoreErr(err) {
+		return fmt.Errorf("get existing document: %w", err)
+	}
+	// A document the transcription pass did not record as a healthy media asset has
+	// no source transcript to translate; skip it.
+	if isNotFoundError(err) || doc.Status != "ok" {
+		s.markActiveSkipped()
+		return nil
+	}
+	s.recordContentHash(doc.ContentHash)
+
+	content, err := s.readDocumentContent(ctx, f.RelPath)
+	if err != nil {
+		// A read failure in the derivation pass must not fail the run: the source
+		// transcript already exists. Record skipped and move on.
+		s.getLogger().Printf("two-phase derivation: read %s: %v (skipping translation)", f.RelPath, err)
+		s.markActiveSkipped()
+		return nil
+	}
+
+	if err := s.deriveTranscriptTranslations(ctx, doc, content); err != nil {
+		s.getLogger().Printf("two-phase derivation translation skipped for %s: %v", f.RelPath, err)
+		s.addErrors(1)
+	}
+	return nil
+}
+
+// deriveTranscriptTranslations recomputes the source transcript (a cache hit, so
+// no re-transcription) and translates it, reusing the SAME derivation logic and
+// trim/alignment as the single-pass path so the resulting translated transcript
+// representations and chunks are byte-identical to single-pass (SPEC §8.6.11).
+func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Document, content []byte) error {
+	transcriptText, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
+	if err != nil {
+		return err
+	}
+	transcriptText = strings.TrimSpace(transcriptText)
+	if transcriptText == "" {
+		return nil
+	}
+
+	var duration time.Duration
+	if d, derr := s.probeDuration(ctx, doc); derr == nil {
+		duration = d
+	}
+
+	// Recompute the same leading-silence trim offset the transcription pass applied
+	// to the source transcript so translated time windows stay aligned (dir2mcp#258
+	// / SPEC §8.6.2). Detection is deterministic for an unchanged asset.
+	trimOffsetMS := 0
+	if s.cfg.MediaTrimLeadingSilence {
+		if offset := s.detectLeadingSilence(ctx, doc); offset > 0 {
+			trimOffsetMS = int(offset.Milliseconds())
+		}
+	}
+	return s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS)
+}
+
+// readDocumentContent reads an asset's bytes through the corpus filesystem,
+// localizing remote (object-store) objects as needed. Used by the two-phase
+// derivation pass, which needs the source bytes only to key the per-language
+// translation cache.
+func (s *Service) readDocumentContent(ctx context.Context, relPath string) ([]byte, error) {
+	rc, err := s.corpusFS().Open(ctx, relPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(rc)
 }
 
 // handleArchiveDocument handles an archive-type document: if the archive
@@ -2208,6 +2410,15 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// Translation is a best-effort enrichment: any failure (chat provider error,
 	// translated-rep persistence) is logged and counted but NOT propagated, so a
 	// failed translation never marks the source transcript's document as errored.
+	//
+	// Under the two-phase split (SPEC §8.6.11) translation is the derivation pass's
+	// job and runs in a later corpus-wide pass (see deriveDocument), so the
+	// transcription pass stops here after persisting the source transcript. The
+	// final set of representations is identical either way — only the ordering
+	// differs. In single-pass mode (the default) it runs inline as before.
+	if s.activePass == passTranscription {
+		return nil
+	}
 	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
 		s.addErrors(1)
