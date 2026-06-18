@@ -144,7 +144,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer a.stopPersistenceWithLog(persistence)
 
 	embedErrCh := make(chan error, 4)
-	startEmbeddingIfNotReadOnly(runCtx, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS)
+	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS); err != nil {
+		// A distributed-embedding setup failure is fatal: refuse to run a server
+		// that would silently never drain its pending queue.
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("start embedding: %v", err))
+		return exitConfigInvalid
+	}
 
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
@@ -967,17 +972,27 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 }
 
 // startEmbeddingIfNotReadOnly starts embedding workers when readOnly is false
-// and the store exposes the ChunkSource interface.
-func startEmbeddingIfNotReadOnly(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS) {
+// and the store exposes the ChunkSource interface. When distributed embedding is
+// enabled (issue #248, SPEC §8.7) it instead starts the in-process degenerate
+// case of the coordinator+worker topology; otherwise it keeps the historical
+// in-process embedding loop unchanged (local-first single-binary default, §1.2).
+// It returns an error only for a distributed-mode SETUP failure (broker cannot be
+// built, store lacks ChunkTaskByID, no embed identity), which the caller treats as
+// fatal — the historical in-process path never errors here.
+func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS) error {
 	if readOnly {
-		return
+		return nil
 	}
 	chunkSource, ok := st.(index.ChunkSource)
 	if !ok {
-		return
+		return nil
 	}
 	embedLogger := pickEmbedLogger(stderr, jsonOutput)
+	if cfg.DistributedEmbed.Enabled {
+		return startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
+	}
 	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
+	return nil
 }
 
 // printHumanConnectionIfVerbose prints the human-readable connection block

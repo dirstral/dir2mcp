@@ -1261,6 +1261,83 @@ func (s *SQLiteStore) ChunkMediaSpanByID(ctx context.Context, chunkID int64) (re
 	return relPath, docType, spanFromRow(kind, start, end, extraJSON), nil
 }
 
+// ChunkTaskByID returns the full embedding task for a single LIVE chunk
+// (SPEC §5.3), with its text, span, modality, and media ref — everything a
+// distributed embed-worker (SPEC §8.7) needs to embed a leased job without the
+// coordinator relaying payload bytes. It returns model.ErrNotFound when the
+// chunk does not exist OR has been tombstoned (deleted=1): a worker treats that
+// as a safe skip, honoring the tombstone so a job cannot resurrect a deleted
+// chunk (SPEC §6.6, §8.7.3 tombstone safety). textHash is returned separately so
+// a worker can detect a job enqueued for a since-changed chunk.
+func (s *SQLiteStore) ChunkTaskByID(ctx context.Context, chunkID uint64) (task model.ChunkTask, textHash string, err error) {
+	if chunkID == 0 {
+		return model.ChunkTask{}, "", model.ErrNotFound
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return model.ChunkTask{}, "", err
+	}
+	defer s.ReleaseDB()
+
+	row := db.QueryRowContext(ctx, `
+WITH the_chunk AS (
+  SELECT chunk_id, rel_path, doc_type, rep_type, text, text_hash, index_kind, modality, media_ref
+  FROM chunks
+  WHERE chunk_id = ? AND deleted = 0
+),
+ranked_spans AS (
+  SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
+         ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
+  FROM spans s
+  JOIN the_chunk tc ON tc.chunk_id = s.chunk_id
+)
+SELECT tc.chunk_id, tc.rel_path, tc.doc_type, tc.rep_type, tc.text, tc.text_hash, tc.index_kind, tc.modality, tc.media_ref,
+       COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, '')
+FROM the_chunk tc
+LEFT JOIN ranked_spans sp ON sp.chunk_id = tc.chunk_id AND sp.rn = 1`, int64(chunkID))
+
+	var (
+		cid       int64
+		relPath   string
+		docType   string
+		repType   string
+		text      string
+		thash     string
+		idxKind   string
+		modality  string
+		mediaRef  string
+		spanK     string
+		spanS     int
+		spanE     int
+		spanExtra string
+	)
+	if scanErr := row.Scan(&cid, &relPath, &docType, &repType, &text, &thash, &idxKind, &modality, &mediaRef,
+		&spanK, &spanS, &spanE, &spanExtra); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return model.ChunkTask{}, "", model.ErrNotFound
+		}
+		return model.ChunkTask{}, "", scanErr
+	}
+	if cid <= 0 {
+		return model.ChunkTask{}, "", model.ErrNotFound
+	}
+	uid := uint64(cid)
+	span := spanFromRow(spanK, spanS, spanE, spanExtra)
+	t := model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
+		ChunkID:  uid,
+		RelPath:  relPath,
+		DocType:  docType,
+		RepType:  repType,
+		Snippet:  snippet(text, 240),
+		Span:     span,
+		Modality: modality,
+		MediaRef: mediaRef,
+	})
+	t.Modality = modality
+	t.MediaRef = mediaRef
+	return t, thash, nil
+}
+
 func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) error {
 	normalizedPath, err := normalizeRelPath(relPath)
 	if err != nil {
