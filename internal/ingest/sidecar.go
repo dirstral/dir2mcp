@@ -398,13 +398,17 @@ func parseSidecar(sc sidecarFile, content string) map[string][]subtitle.Cue {
 // screened by the quality gate (§8.6.6/§8.6.7). meta_json records source=sidecar
 // and the language so retrieval and re-derivation treat it as authored.
 func (s *Service) persistSidecarTranscript(ctx context.Context, doc model.Document, lang string, cues []subtitle.Cue, segments []chunkSegment) error {
+	// Normalize once so the recorded language and its provenance are derived from
+	// the same value (no padded/non-canonical language stored alongside a trimmed
+	// provenance decision).
+	lang = strings.TrimSpace(lang)
 	meta := transcriptMeta{Source: sidecarSource, Language: lang, Timestamps: true}
 	// A sidecar's language is asserted by the source itself — the filename suffix
 	// (clip.en.vtt §8.6.4) or a TTML xml:lang — so its provenance is "declared"
 	// (SPEC §5.2/§8.8). An undifferentiated sidecar (clip.vtt) carries no language
 	// tag: lang is empty (unknown), so we leave language_source unset rather than
 	// asserting a declaration that was never made.
-	if strings.TrimSpace(lang) != "" {
+	if lang != "" {
 		meta.LanguageSource = langSourceDeclared
 	}
 	// A sidecar that carried <v> voice tags yields speaker-attributed segments
