@@ -1571,15 +1571,7 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
-	if fc.MediaSubtitlesTTMLEnabled != nil {
-		cfg.MediaSubtitlesTTMLEnabled = *fc.MediaSubtitlesTTMLEnabled
-	}
-	if fc.MediaSubtitlesTTMLAlignToleranceMS != nil {
-		cfg.MediaSubtitlesTTMLAlignToleranceMS = *fc.MediaSubtitlesTTMLAlignToleranceMS
-	}
-	if fc.MediaSubtitlesSMILEnabled != nil {
-		cfg.MediaSubtitlesSMILEnabled = *fc.MediaSubtitlesSMILEnabled
-	}
+	applyMediaSubtitlesFileParsed(cfg, fc)
 	if fc.MediaTrimLeadingSilence != nil {
 		cfg.MediaTrimLeadingSilence = *fc.MediaTrimLeadingSilence
 	}
@@ -1605,6 +1597,21 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.MediaClipMaxBytes != nil {
 		cfg.MediaClipMaxBytes = *fc.MediaClipMaxBytes
+	}
+}
+
+// applyMediaSubtitlesFileParsed copies the set media.subtitles.* file fields
+// (SPEC §8.6.10) onto cfg. Split out of applyMediaFileParsed so each apply
+// helper stays under the cyclomatic-complexity budget.
+func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
+	if fc.MediaSubtitlesTTMLEnabled != nil {
+		cfg.MediaSubtitlesTTMLEnabled = *fc.MediaSubtitlesTTMLEnabled
+	}
+	if fc.MediaSubtitlesTTMLAlignToleranceMS != nil {
+		cfg.MediaSubtitlesTTMLAlignToleranceMS = *fc.MediaSubtitlesTTMLAlignToleranceMS
+	}
+	if fc.MediaSubtitlesSMILEnabled != nil {
+		cfg.MediaSubtitlesSMILEnabled = *fc.MediaSubtitlesSMILEnabled
 	}
 }
 
