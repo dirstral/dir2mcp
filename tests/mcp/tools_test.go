@@ -2162,6 +2162,9 @@ type askAudioRetrieverStub struct {
 	// callback to compute a custom question string.
 	EchoQuestion bool
 	OnAsk        func(question string) string
+	// OnAskQuery, when set, is invoked with the full SearchQuery passed to Ask so
+	// a test can assert additive filters (e.g. Languages, SPEC §9.5) are forwarded.
+	OnAskQuery func(query model.SearchQuery)
 
 	// tracking for assertions (read from HTTP handler goroutines)
 	searchCalled atomic.Bool
@@ -2195,8 +2198,11 @@ func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) (
 	return nil, model.ErrNotImplemented
 }
 
-func (s *askAudioRetrieverStub) Ask(_ context.Context, question string, _ model.SearchQuery) (model.AskResult, error) {
+func (s *askAudioRetrieverStub) Ask(_ context.Context, question string, q model.SearchQuery) (model.AskResult, error) {
 	s.askCalled.Store(true)
+	if s.OnAskQuery != nil {
+		s.OnAskQuery(q)
+	}
 	if s.askErr != nil {
 		return model.AskResult{}, s.askErr
 	}

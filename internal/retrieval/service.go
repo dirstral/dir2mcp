@@ -1524,6 +1524,7 @@ func filterFromQuery(q model.SearchQuery) model.Filter {
 		PathGlob:   q.FileGlob,
 		DocTypes:   q.DocTypes,
 		Speaker:    q.Speaker,
+		Languages:  q.Languages,
 	}
 }
 
@@ -2070,6 +2071,19 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	// speaker-filtered hits. Empty filter is a no-op (behaviour unchanged).
 	if speaker := strings.TrimSpace(query.Speaker); speaker != "" {
 		if !strings.EqualFold(speaker, strings.TrimSpace(hit.Span.Speaker)) {
+			return false
+		}
+	}
+
+	// Optional per-language filter (SPEC §9.5/§15.2-3): restrict to candidates
+	// whose source representation recorded any of the requested BCP-47 languages,
+	// matched on the primary subtag case-insensitively (logical OR). Applied here
+	// at candidate selection — before cross-file de-dup, reranking, and truncation
+	// to k — so it only removes non-matching candidates and never reorders or
+	// changes the result/citation structure. A hit with no recorded language
+	// (unknown, §8.8) never matches a non-empty filter; an empty filter is a no-op.
+	if len(query.Languages) > 0 {
+		if !model.LanguageMatchesAny(hit.Language, query.Languages) {
 			return false
 		}
 	}

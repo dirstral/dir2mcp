@@ -2553,6 +2553,14 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		TranslateModel:    s.translateModel,
 		Timestamps:        true,
 	}
+	// A translated transcript's effective language is its TARGET language (SPEC
+	// §5.2/§8.8), which the operator chose (media.translate.target_langs, §16.2) —
+	// an operator pin — so its provenance is "configured". It is recorded
+	// independently of the §8.8 source precedence and is the value the §9.5 filter
+	// matches (a request for the target language returns translations into it).
+	if strings.TrimSpace(meta.Language) != "" {
+		meta.LanguageSource = langSourceConfigured
+	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal translated transcript meta: %w", err)
