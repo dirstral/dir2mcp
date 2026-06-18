@@ -1623,6 +1623,13 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaClipMaxBytes != nil {
 		cfg.MediaClipMaxBytes = *fc.MediaClipMaxBytes
 	}
+	applyMediaBatchFileParsed(cfg, fc)
+}
+
+// applyMediaBatchFileParsed copies the set media.batch file fields (SPEC §8.6.11)
+// onto cfg. Split from applyMediaFileParsed to keep that function under the
+// cyclomatic-complexity budget.
+func applyMediaBatchFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaBatchTwoPhase != nil {
 		cfg.MediaBatchTwoPhase = *fc.MediaBatchTwoPhase
 	}
@@ -2971,10 +2978,28 @@ func (c *Config) Validate() error {
 	if err := c.validateDistributedEmbed(); err != nil {
 		return err
 	}
+	if err := c.validateMediaBatch(); err != nil {
+		return err
+	}
 	c.applyValidationDefaults()
 	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
 			c.SessionMaxLifetime, c.SessionInactivityTimeout)
+	}
+	return nil
+}
+
+// validateMediaBatch enforces the media.batch (SPEC §8.6.11) invariants. The
+// JSONL run manifest and side-channel progress are implemented; the two-phase
+// pass split (media.batch.two_phase) is NOT yet implemented, so enabling it is
+// rejected up front rather than silently behaving as single-pass — an honest
+// error beats a no-op flag. (The single-pass path already produces the same
+// representations/chunks/citations, so manifest + progress are fully usable
+// today.)
+func (c *Config) validateMediaBatch() error {
+	if c.MediaBatchTwoPhase {
+		return fmt.Errorf("media.batch.two_phase is not yet implemented; " +
+			"use media.batch.manifest and media.batch.progress (single-pass) for now")
 	}
 	return nil
 }

@@ -1081,6 +1081,44 @@ func (s *SQLiteStore) RepresentationMetaByType(ctx context.Context, relPath, rep
 	return metaJSON, nil
 }
 
+// RepresentationTypesByPath returns the distinct rep_types of the active
+// (non-deleted) representations for the document at relPath, sorted for
+// deterministic output. Used by the batch run manifest (SPEC §8.6.11) to record
+// the "outputs produced" for an asset. A missing document yields an empty slice
+// and a nil error (no outputs, not an error).
+func (s *SQLiteStore) RepresentationTypesByPath(ctx context.Context, relPath string) ([]string, error) {
+	normalizedPath, err := normalizeRelPath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(ctx, `
+SELECT DISTINCT r.rep_type
+  FROM representations r
+  JOIN documents d ON d.doc_id = r.doc_id
+ WHERE d.rel_path = ? AND d.deleted = 0 AND r.deleted = 0
+ ORDER BY r.rep_type ASC`, normalizedPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var types []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		types = append(types, t)
+	}
+	return types, rows.Err()
+}
+
 // SoftDeleteSidecarTranscripts tombstones (deleted = 1) the document's
 // sidecar-sourced transcript representations and their chunks, returning the
 // number of representations retired. A representation is treated as
