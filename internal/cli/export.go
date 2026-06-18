@@ -27,10 +27,14 @@ type transcriptStore interface {
 }
 
 type exportOptions struct {
-	format  string
-	lang    string
-	out     string
-	relPath string
+	format string
+	lang   string
+	// secondaryLang selects a second transcript language for bilingual TTML
+	// export (SPEC §8.6.10). Empty = monolingual. Only meaningful with
+	// --format ttml.
+	secondaryLang string
+	out           string
+	relPath       string
 }
 
 // runExport renders a document's stored transcript as a WebVTT or SRT subtitle
@@ -64,6 +68,14 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 	if !ok {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, "configured store does not support transcript export")
 		return exitGeneric
+	}
+
+	// TTML (and its companion SMIL) is the optional broadcast-packaging surface
+	// (SPEC §8.6.10), gated by config and OFF by default. It has its own
+	// resolve+render+emit path because it MAY select two transcript languages
+	// (bilingual) and MAY emit two sidecars (TTML + SMIL).
+	if opts.format == "ttml" {
+		return a.runTTMLExport(ctx, global, cfg, ts, opts)
 	}
 
 	filter := subtitle.NewWordFilter(cfg.MediaFilterWords)
@@ -152,20 +164,25 @@ func parseExportOptions(args []string) (exportOptions, error) {
 	opts := exportOptions{}
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.format, "format", "", "subtitle format: vtt|srt (required)")
+	fs.StringVar(&opts.format, "format", "", "subtitle format: vtt|srt|ttml (required)")
 	fs.StringVar(&opts.lang, "lang", "", "language code selecting which transcript to export (default: the document's transcript)")
-	fs.StringVar(&opts.out, "out", "", "output file path (default: stdout)")
+	fs.StringVar(&opts.secondaryLang, "secondary-lang", "", "second language code for bilingual TTML export (only with --format ttml)")
+	fs.StringVar(&opts.out, "out", "", "output file path (default: stdout). For ttml the companion .smil is written alongside")
 	if err := fs.Parse(args); err != nil {
 		return exportOptions{}, err
 	}
 
 	opts.format = strings.ToLower(strings.TrimSpace(opts.format))
 	switch opts.format {
-	case "vtt", "srt":
+	case "vtt", "srt", "ttml":
 	case "":
-		return exportOptions{}, errors.New("--format is required (vtt|srt)")
+		return exportOptions{}, errors.New("--format is required (vtt|srt|ttml)")
 	default:
-		return exportOptions{}, fmt.Errorf("unsupported format %q (want vtt|srt)", opts.format)
+		return exportOptions{}, fmt.Errorf("unsupported format %q (want vtt|srt|ttml)", opts.format)
+	}
+	opts.secondaryLang = strings.TrimSpace(opts.secondaryLang)
+	if opts.secondaryLang != "" && opts.format != "ttml" {
+		return exportOptions{}, errors.New("--secondary-lang is only valid with --format ttml")
 	}
 
 	rest := fs.Args()

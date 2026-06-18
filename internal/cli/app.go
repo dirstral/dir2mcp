@@ -535,7 +535,7 @@ func (a *App) printUsage() {
 		{"list-files", "legacy compatibility shim; prefer dirstral-cli for client UX"},
 		{"reindex", "force a full re-index of all documents"},
 		{"embed-worker", "run a standalone distributed embed worker (no MCP serving; requires Tier-C store + broker)"},
-		{"export", "render a transcript as VTT/SRT subtitles (export --format vtt|srt <path>)"},
+		{"export", "render a transcript as VTT/SRT/TTML subtitles (export --format vtt|srt|ttml <path>)"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
 		{"install", "install dir2mcp into a client (e.g. dir2mcp install claude)"},
