@@ -55,16 +55,23 @@ func TestDistributedEmbed_TierCAllowed(t *testing.T) {
 	}
 }
 
-// TestDistributedEmbed_ExternalBrokerRequiresURL pins that selecting an external
-// broker without a connection URL is rejected (the topology must be reachable).
-func TestDistributedEmbed_ExternalBrokerRequiresURL(t *testing.T) {
+// TestDistributedEmbed_UnsupportedBrokerRejected pins that an external broker
+// (e.g. nats) is rejected at validation, in sync with buildEmbedBroker which can
+// only construct the built-in memory/sqlite brokers — a value it cannot build
+// must not validate (even with a broker_url), or startup would fail later.
+func TestDistributedEmbed_UnsupportedBrokerRejected(t *testing.T) {
 	cfg := config.Default()
 	cfg.IndexBackend = "qdrant"
 	cfg.Qdrant.URL = "http://localhost:6334"
 	cfg.DistributedEmbed.Enabled = true
 	cfg.DistributedEmbed.Broker = "nats"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("external broker without broker_url must fail validation")
+	cfg.DistributedEmbed.BrokerURL = "nats://broker:4222"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("an unsupported (external) broker must fail validation in this build")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("error should explain the broker is unsupported, got: %v", err)
 	}
 }
 
@@ -106,6 +113,56 @@ func TestDistributedEmbed_FileRoundTrip(t *testing.T) {
 	if cfg.DistributedEmbed.BrokerURL != "nats://secret@broker:4222" {
 		t.Fatalf("broker url = %q, want env-resolved value (file value must be ignored)", cfg.DistributedEmbed.BrokerURL)
 	}
+}
+
+// TestDistributedEmbed_NestedYAMLSection pins that the nested YAML form
+// (distributed_embed: with child keys) is honored, not just the dotted/flat
+// aliases — distributed_embed must be a recognized map section.
+func TestDistributedEmbed_NestedYAMLSection(t *testing.T) {
+	tmp := t.TempDir()
+	path := tmp + "/.dir2mcp.yaml"
+	writeFile(t, path, ""+
+		"root_dir: ./repo\n"+
+		"index_backend: qdrant\n"+
+		"qdrant_url: http://localhost:6334\n"+
+		"distributed_embed:\n"+
+		"  enabled: true\n"+
+		"  broker: sqlite\n"+
+		"  max_attempts: 9\n")
+
+	t.Setenv("DIR2MCP_DISABLE_KEYCHAIN", "1")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.DistributedEmbed.Enabled {
+		t.Fatal("nested distributed_embed.enabled was ignored")
+	}
+	if cfg.DistributedEmbed.Broker != "sqlite" {
+		t.Fatalf("broker = %q, want sqlite", cfg.DistributedEmbed.Broker)
+	}
+	if cfg.DistributedEmbed.MaxAttempts != 9 {
+		t.Fatalf("max_attempts = %d, want 9", cfg.DistributedEmbed.MaxAttempts)
+	}
+}
+
+// TestDistributedEmbed_MalformedEnvRejected pins that an invalid distributed-embed
+// env override is reported, not silently ignored, so automation cannot believe an
+// override applied when it did not.
+func TestDistributedEmbed_MalformedEnvRejected(t *testing.T) {
+	t.Setenv("DIR2MCP_DISABLE_KEYCHAIN", "1")
+	t.Run("max_attempts", func(t *testing.T) {
+		t.Setenv("DIR2MCP_DISTRIBUTED_EMBED_MAX_ATTEMPTS", "not-a-number")
+		if _, err := config.Load(""); err == nil {
+			t.Fatal("malformed DIR2MCP_DISTRIBUTED_EMBED_MAX_ATTEMPTS must fail Load")
+		}
+	})
+	t.Run("enabled", func(t *testing.T) {
+		t.Setenv("DIR2MCP_DISTRIBUTED_EMBED_ENABLED", "yepyep")
+		if _, err := config.Load(""); err == nil {
+			t.Fatal("malformed DIR2MCP_DISTRIBUTED_EMBED_ENABLED must fail Load")
+		}
+	})
 }
 
 // TestDistributedEmbed_SnapshotOmitsBrokerURL pins SPEC §16.1.1: the broker URL

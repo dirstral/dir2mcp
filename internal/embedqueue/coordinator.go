@@ -32,12 +32,17 @@ type Coordinator struct {
 	BatchSize int
 }
 
-// EnqueuePending drains every pending chunk of indexKind ("text"/"code", or ""
-// for both) into the broker and returns the number of jobs enqueued. It reads in
-// batches until the store reports no more pending chunks, so one call enqueues
-// the full backlog. Re-running it is safe: a chunk already enqueued and embedded
-// is no longer pending, and a duplicate job is idempotent at the embed layer
-// (vector writes keyed by chunk_id, §8.7.3).
+// EnqueuePending enqueues the currently-pending chunks of indexKind ("text"/
+// "code", or "" for both) into the broker and returns the number of jobs
+// submitted. NextPending keeps returning the same pending head until those chunks
+// leave the pending state (a worker marks them ok/error out-of-band), and the
+// interface has no offset cursor, so one call enqueues the head it observes — NOT
+// necessarily the entire backlog. The coordinator loop (runCoordinatorLoop) calls
+// this on a ticker, so as the head drains the next pending chunks are picked up;
+// the broker dedups by chunk_id+index_kind, so repeated ticks never pile up
+// duplicate live jobs (SPEC §8.7.3). Re-running is always safe: an already-
+// embedded chunk is no longer pending, and a duplicate job is idempotent at the
+// embed layer (vector writes keyed by chunk_id).
 func (c *Coordinator) EnqueuePending(ctx context.Context, indexKind string) (int, error) {
 	if c.Source == nil || c.Broker == nil {
 		return 0, fmt.Errorf("embedqueue: coordinator requires a source and broker")

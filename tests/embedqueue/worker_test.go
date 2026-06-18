@@ -124,25 +124,16 @@ func TestWorker_LeaseEmbedAck(t *testing.T) {
 	}
 }
 
-// TestWorker_IdempotentRedelivery pins idempotency (SPEC §8.7.3): a duplicate /
-// redelivered job for the same chunk_id is safe — the vector write is keyed by
-// chunk_id so re-running does not create a duplicate vector. With the real index
-// the second write overwrites the same vector; here we assert the worker drains
-// both deliveries without error and each is keyed by the same chunk_id.
+// TestWorker_IdempotentRedelivery pins idempotency (SPEC §8.7.3): re-processing
+// the same chunk_id is safe — the vector write is keyed by chunk_id so re-running
+// does not create a duplicate vector. The broker dedups LIVE jobs, so a duplicate
+// enqueue while one is still queued is collapsed; once the first delivery drains,
+// re-enqueuing the same chunk (a later coordinator pass / at-least-once
+// redelivery) is permitted and embeds chunk_id 8 again, idempotently.
 func TestWorker_IdempotentRedelivery(t *testing.T) {
-	ctx := context.Background()
 	broker := embedqueue.NewMemBroker(3)
 	fetch := &fakeFetcher{tasks: map[uint64]model.ChunkTask{8: textTask(8, "dup")}}
 	step := &fakeEmbedStep{}
-
-	// Enqueue the SAME chunk twice (at-least-once delivery / duplicate enqueue).
-	for i := 0; i < 2; i++ {
-		if err := broker.Enqueue(ctx, embedqueue.Job{
-			ChunkID: 8, IndexKind: "text", EmbedIdentity: testIdentity,
-		}); err != nil {
-			t.Fatalf("Enqueue %d: %v", i, err)
-		}
-	}
 
 	cfg := embedqueue.Config{
 		Broker:        broker,
@@ -151,10 +142,44 @@ func TestWorker_IdempotentRedelivery(t *testing.T) {
 		EmbedIdentity: testIdentity,
 		PollInterval:  2 * time.Millisecond,
 	}
-	runWorkerUntil(t, cfg, func() bool {
-		st, _ := broker.Stats(ctx)
-		return st.Pending == 0 && st.InFlight == 0 && len(step.writes()) >= 2
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan struct{})
+	go func() { _ = embedqueue.Run(ctx, cfg); close(finished) }()
+
+	enqueue := func() {
+		if err := broker.Enqueue(context.Background(), embedqueue.Job{
+			ChunkID: 8, IndexKind: "text", EmbedIdentity: testIdentity,
+		}); err != nil {
+			t.Errorf("Enqueue: %v", err)
+		}
+	}
+	waitForWrites := func(n int) {
+		deadline := time.After(3 * time.Second)
+		for {
+			st, _ := broker.Stats(context.Background())
+			if st.Pending == 0 && st.InFlight == 0 && len(step.writes()) >= n {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("worker did not reach %d writes within 3s (have %d)", n, len(step.writes()))
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+
+	// First delivery embeds chunk 8 once and drains.
+	enqueue()
+	waitForWrites(1)
+	// Re-enqueue the SAME chunk after it drained — dedup permits this (the prior
+	// job was acked). The embed write is keyed by chunk_id, so re-processing
+	// produces no duplicate vector (the real index upserts).
+	enqueue()
+	waitForWrites(2)
+
+	cancel()
+	<-finished
 
 	for _, id := range step.writes() {
 		if id != 8 {

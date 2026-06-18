@@ -1126,24 +1126,12 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		}
 	}
 	if path == "" {
-		if applyEnv {
-			applyEnvOverrides(&cfg, overrideEnv)
-		}
-		if err := cfg.finalizeLoaded(applyEnv); err != nil {
-			return Config{}, err
-		}
-		return cfg, nil
+		return finalizeLoadedConfig(cfg, overrideEnv, applyEnv)
 	}
 
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if applyEnv {
-				applyEnvOverrides(&cfg, overrideEnv)
-			}
-			if err := cfg.finalizeLoaded(applyEnv); err != nil {
-				return Config{}, err
-			}
-			return cfg, nil
+			return finalizeLoadedConfig(cfg, overrideEnv, applyEnv)
 		}
 		return Config{}, fmt.Errorf("stat config: %w", err)
 	}
@@ -1151,8 +1139,18 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	if err := applyFileOverrides(&cfg, path); err != nil {
 		return Config{}, err
 	}
+	return finalizeLoadedConfig(cfg, overrideEnv, applyEnv)
+}
+
+// finalizeLoadedConfig applies env overrides (when applyEnv) and runs the
+// post-load validation, returning the resolved config. Shared by every load
+// branch (no-path, missing-file, and file-present) so the env-apply + validate
+// sequence — and its error handling — lives in one place.
+func finalizeLoadedConfig(cfg Config, overrideEnv map[string]string, applyEnv bool) (Config, error) {
 	if applyEnv {
-		applyEnvOverrides(&cfg, overrideEnv)
+		if err := applyEnvOverrides(&cfg, overrideEnv); err != nil {
+			return Config{}, err
+		}
 	}
 	if err := cfg.finalizeLoaded(applyEnv); err != nil {
 		return Config{}, err
@@ -1899,6 +1897,8 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "index.pgvector":
 		return true
+	case "distributed_embed":
+		return true
 	case "ingest.extractor":
 		return false
 	default:
@@ -2467,9 +2467,9 @@ func floatPtr(value float64) *float64 { return &value }
 // applyEnvOverrides layers all supported environment-variable overrides
 // onto cfg. Env always wins when present (an empty DIR2MCP_SERVER_NAME
 // clears a YAML-set name).
-func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
+func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) error {
 	if cfg == nil {
-		return
+		return nil
 	}
 	// Env always wins when present so DIR2MCP_SERVER_NAME="" can clear a
 	// YAML-set server.name and fall through to the auto-derived name at
@@ -2486,28 +2486,35 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	applySourceEnvOverrides(cfg, overrideEnv)
 	applyQdrantEnvOverrides(cfg, overrideEnv)
 	applyIndexEnvOverrides(cfg, overrideEnv)
-	applyDistributedEmbedEnvOverrides(cfg, overrideEnv)
+	return applyDistributedEmbedEnvOverrides(cfg, overrideEnv)
 }
 
 // applyDistributedEmbedEnvOverrides applies the distributed-embedding env
 // overrides (issue #248, SPEC §8.7). Enabled/broker/sqlite_path/max_attempts are
 // non-secret settings. The broker URL is a runtime-only secret (it may embed
 // credentials): resolved through the existing precedence (env → keychain →
-// file/.env.local) and NEVER persisted to the snapshot (SPEC §16.1.1).
-func applyDistributedEmbedEnvOverrides(cfg *Config, env map[string]string) {
+// file/.env.local) and NEVER persisted to the snapshot (SPEC §16.1.1). A
+// malformed boolean/integer override is reported rather than silently ignored, so
+// automation cannot believe an override applied when it did not.
+func applyDistributedEmbedEnvOverrides(cfg *Config, env map[string]string) error {
 	if raw, ok := envLookup("DIR2MCP_DISTRIBUTED_EMBED_ENABLED", env); ok {
-		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
-			cfg.DistributedEmbed.Enabled = parsed
+		parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("invalid DIR2MCP_DISTRIBUTED_EMBED_ENABLED %q: want a boolean", raw)
 		}
+		cfg.DistributedEmbed.Enabled = parsed
 	}
 	setTrimmedEnv(env, "DIR2MCP_DISTRIBUTED_EMBED_BROKER", &cfg.DistributedEmbed.Broker)
 	setTrimmedEnv(env, "DIR2MCP_DISTRIBUTED_EMBED_SQLITE_PATH", &cfg.DistributedEmbed.BrokerSQLitePath)
 	if raw, ok := envLookup("DIR2MCP_DISTRIBUTED_EMBED_MAX_ATTEMPTS", env); ok {
-		if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
-			cfg.DistributedEmbed.MaxAttempts = parsed
+		parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("invalid DIR2MCP_DISTRIBUTED_EMBED_MAX_ATTEMPTS %q: want an integer", raw)
 		}
+		cfg.DistributedEmbed.MaxAttempts = parsed
 	}
 	setSecretEnv(env, "DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL", &cfg.DistributedEmbed.BrokerURL)
+	return nil
 }
 
 // applyIndexEnvOverrides sources vector-index backend settings from the
@@ -3093,7 +3100,8 @@ func (c *Config) validateSourceRuntimeSecrets() error {
 // validateDistributedEmbed enforces the distributed-embedding invariants
 // (issue #248, SPEC §8.7). It is a no-op when distributed mode is off (the
 // in-process loop runs, §1.2). When enabled it: (1) normalizes/validates the
-// broker selector (memory|sqlite, or an external value), and (2) REQUIRES a
+// broker selector (only the built-in memory|sqlite brokers are constructible in
+// this build), and (2) REQUIRES a
 // shared external Tier-C vector store (qdrant/pgvector, §8.7.4) — the embedded
 // Tier A/B backends are single-node and cannot be shared across workers, so a
 // distributed pool over an embedded backend is rejected as CONFIG_INVALID. The
@@ -3111,12 +3119,14 @@ func (c *Config) validateDistributedEmbed() error {
 	case "memory", "sqlite":
 		// built-in, dependency-free brokers (SPEC §8.7.4 default impl)
 	default:
-		// An external adapter value is allowed but MUST carry a connection URL so
-		// the topology is actually reachable.
-		if strings.TrimSpace(c.DistributedEmbed.BrokerURL) == "" {
-			return fmt.Errorf("distributed_embed.broker=%q requires distributed_embed.broker_url "+
-				"(set DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL)", c.DistributedEmbed.Broker)
-		}
+		// Stay in sync with buildEmbedBroker (internal/cli), which can only
+		// construct the built-in brokers: an external adapter value would validate
+		// here but then fail at startup. Reject it up front. External brokers
+		// (NATS/Redis/SQS) plug in behind the Broker interface but ship in a
+		// follow-up, not this build.
+		return fmt.Errorf("distributed_embed.broker=%q is not supported in this build "+
+			"(built-in brokers: memory, sqlite); external broker adapters are not yet implemented",
+			c.DistributedEmbed.Broker)
 	}
 	c.DistributedEmbed.Broker = broker
 	if c.DistributedEmbed.MaxAttempts < 0 {

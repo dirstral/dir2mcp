@@ -2,10 +2,11 @@ package embedqueue
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (CGO_ENABLED=0, SPEC §6.5)
@@ -26,7 +27,6 @@ type SQLiteBroker struct {
 	db          *sql.DB
 	ownsDB      bool
 	maxAttempts int
-	tokenSeq    atomic.Uint64
 	now         func() time.Time
 }
 
@@ -52,6 +52,9 @@ func NewSQLiteBrokerWithDB(ctx context.Context, db *sql.DB, maxAttempts int) (*S
 }
 
 func newSQLiteBroker(ctx context.Context, db *sql.DB, ownsDB bool, maxAttempts int) (*SQLiteBroker, error) {
+	if db == nil {
+		return nil, errors.New("embedqueue: sqlite broker requires a non-nil *sql.DB")
+	}
 	if maxAttempts <= 0 {
 		maxAttempts = 5
 	}
@@ -100,17 +103,40 @@ CREATE INDEX IF NOT EXISTS idx_embed_jobs_token ON embed_jobs(token);
 	return nil
 }
 
+// newLeaseToken builds a globally unique lease token: a random 128-bit suffix so
+// tokens never collide across SQLiteBroker instances sharing one DB file. Without
+// this, two instances reusing a row id + a process-local counter could mint the
+// same token, letting a stale Ack/Nack from one instance's expired lease match a
+// different instance's current lease for the same job (SPEC §8.7.3). The row id
+// is included only for readability. crypto/rand failure is surfaced, never masked.
+func newLeaseToken(id int64) (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("embedqueue: generate lease token: %w", err)
+	}
+	return fmt.Sprintf("sql-%d-%s", id, hex.EncodeToString(buf[:])), nil
+}
+
 // Enqueue inserts a job in the pending state.
 func (b *SQLiteBroker) Enqueue(ctx context.Context, job Job) error {
 	if err := job.Validate(); err != nil {
 		return err
 	}
+	// Dedup: do not insert when a LIVE (pending or in-flight) job already exists
+	// for this chunk_id+index_kind, so re-enqueuing the same still-pending head
+	// across coordinator ticks cannot pile up duplicate jobs (SPEC §8.7.3). A
+	// dead-lettered job does NOT block a fresh enqueue (a later retry is allowed).
 	_, err := b.db.ExecContext(ctx, `
 INSERT INTO embed_jobs(corpus_id, source, chunk_id, index_kind, text_hash, modality,
   rel_path, span_kind, span_page, span_start_ms, span_end_ms, embed_identity, state)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'pending')`,
+SELECT ?,?,?,?,?,?,?,?,?,?,?,?, 'pending'
+WHERE NOT EXISTS (
+  SELECT 1 FROM embed_jobs
+   WHERE chunk_id = ? AND index_kind = ? AND state IN ('pending','inflight')
+)`,
 		job.CorpusID, job.Source, int64(job.ChunkID), job.IndexKind, job.TextHash, job.Modality,
-		job.RelPath, job.Span.Kind, job.Span.Page, job.Span.StartMS, job.Span.EndMS, job.EmbedIdentity)
+		job.RelPath, job.Span.Kind, job.Span.Page, job.Span.StartMS, job.Span.EndMS, job.EmbedIdentity,
+		int64(job.ChunkID), job.IndexKind)
 	if err != nil {
 		return fmt.Errorf("embedqueue: enqueue: %w", err)
 	}
@@ -159,7 +185,10 @@ SELECT id, corpus_id, source, chunk_id, index_kind, text_hash, modality, rel_pat
 	}
 	job.ChunkID = uint64(chunkID)
 
-	token := fmt.Sprintf("sql-%d-%d", id, b.tokenSeq.Add(1))
+	token, err := newLeaseToken(id)
+	if err != nil {
+		return Lease{}, err
+	}
 	deadline := b.now().Add(visibility)
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE embed_jobs SET state='inflight', token=?, deadline_ns=?, attempts=attempts+1

@@ -199,3 +199,104 @@ func TestSQLiteBroker_Durable(t *testing.T) {
 		t.Fatalf("reopened lease chunk = %d, want 42", lease.Job.ChunkID)
 	}
 }
+
+// TestBroker_EnqueueDedupsLiveJob pins that enqueuing the same chunk_id+index_kind
+// while a job for it is still LIVE (pending/in-flight) is collapsed, so a
+// coordinator re-enqueuing the same still-pending head across ticks does not pile
+// up duplicate jobs (SPEC §8.7.3). A different chunk is not deduped, and once the
+// live job drains (ack) the chunk may be enqueued again. Runs against both default
+// broker impls.
+func TestBroker_EnqueueDedupsLiveJob(t *testing.T) {
+	for _, f := range brokerFactories() {
+		t.Run(f.name, func(t *testing.T) {
+			ctx := context.Background()
+			b := f.make(t)
+			defer func() { _ = b.Close() }()
+
+			for i := 0; i < 3; i++ {
+				if err := b.Enqueue(ctx, sampleJob(11)); err != nil {
+					t.Fatalf("Enqueue %d: %v", i, err)
+				}
+			}
+			st, err := b.Stats(ctx)
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			if st.Pending != 1 {
+				t.Fatalf("Pending = %d, want 1 (duplicate live jobs must be deduped)", st.Pending)
+			}
+
+			// A different chunk is NOT deduped.
+			if err := b.Enqueue(ctx, sampleJob(12)); err != nil {
+				t.Fatalf("Enqueue other chunk: %v", err)
+			}
+			if st, _ = b.Stats(ctx); st.Pending != 2 {
+				t.Fatalf("Pending = %d, want 2 (distinct chunk must enqueue)", st.Pending)
+			}
+
+			// Drain chunk 11, then re-enqueuing it is allowed (no live job remains).
+			lease, err := b.Lease(ctx, time.Minute)
+			if err != nil {
+				t.Fatalf("Lease: %v", err)
+			}
+			if err := b.Ack(ctx, lease.Token); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+			if err := b.Enqueue(ctx, sampleJob(lease.Job.ChunkID)); err != nil {
+				t.Fatalf("re-enqueue after drain: %v", err)
+			}
+		})
+	}
+}
+
+// TestSQLiteBroker_LeaseTokensUniqueAcrossInstances pins that lease tokens are
+// globally unique: when two broker instances share one DB file and the same job
+// row is re-leased after a lease expiry, the second lease gets a DIFFERENT token,
+// so a stale Ack from the first instance cannot delete the second instance's
+// current lease (SPEC §8.7.3).
+func TestSQLiteBroker_LeaseTokensUniqueAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "queue.db")
+	base := time.Unix(1_700_000_000, 0)
+
+	b1, err := embedqueue.NewSQLiteBroker(ctx, path, 5)
+	if err != nil {
+		t.Fatalf("open b1: %v", err)
+	}
+	defer func() { _ = b1.Close() }()
+	b1.SetClock(func() time.Time { return base })
+
+	b2, err := embedqueue.NewSQLiteBroker(ctx, path, 5)
+	if err != nil {
+		t.Fatalf("open b2: %v", err)
+	}
+	defer func() { _ = b2.Close() }()
+	// b2's clock is far ahead, so it sees b1's lease as expired and reclaims it.
+	b2.SetClock(func() time.Time { return base.Add(time.Hour) })
+
+	if err := b1.Enqueue(ctx, sampleJob(7)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	l1, err := b1.Lease(ctx, time.Minute) // deadline = base + 1m
+	if err != nil {
+		t.Fatalf("b1 Lease: %v", err)
+	}
+	l2, err := b2.Lease(ctx, time.Minute) // base+1h > deadline -> reclaim + re-lease same row
+	if err != nil {
+		t.Fatalf("b2 Lease (reclaim): %v", err)
+	}
+	if l1.Token == l2.Token {
+		t.Fatalf("lease tokens collided across instances for the same job row: %q", l1.Token)
+	}
+	// A stale Ack from b1 must NOT delete b2's now-current lease.
+	if err := b1.Ack(ctx, l1.Token); err != nil {
+		t.Fatalf("stale Ack: %v", err)
+	}
+	st, err := b2.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if st.InFlight != 1 {
+		t.Fatalf("stale Ack removed the live lease: %+v", st)
+	}
+}

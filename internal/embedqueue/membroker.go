@@ -64,6 +64,19 @@ func (b *MemBroker) Enqueue(_ context.Context, job Job) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// Dedup: skip when a LIVE (pending or in-flight) job for this chunk_id+
+	// index_kind already exists, so re-enqueuing the same still-pending head
+	// across coordinator ticks does not pile up duplicate jobs (SPEC §8.7.3).
+	for _, mj := range b.pending {
+		if mj.job.ChunkID == job.ChunkID && mj.job.IndexKind == job.IndexKind {
+			return nil
+		}
+	}
+	for _, mj := range b.inflight {
+		if mj.job.ChunkID == job.ChunkID && mj.job.IndexKind == job.IndexKind {
+			return nil
+		}
+	}
 	b.pending = append(b.pending, &memJob{job: job})
 	return nil
 }

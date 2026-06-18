@@ -152,7 +152,8 @@ func Run(ctx context.Context, cfg Config) error {
 func (cfg Config) process(ctx context.Context, lease Lease) {
 	job := lease.Job
 	if err := job.Validate(); err != nil {
-		cfg.logf("embedqueue: invalid job (token=%s): %v", lease.Token, err)
+		// Never log lease.Token — it is an opaque lease credential (§16.1.1).
+		cfg.logf("embedqueue: invalid job for chunk %d: %v", job.ChunkID, err)
 		_ = cfg.Broker.Nack(ctx, lease.Token, cfg.retryAfter())
 		return
 	}

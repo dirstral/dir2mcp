@@ -47,23 +47,23 @@ func startDistributedEmbedding(
 	logger *log.Logger,
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
-) {
+) error {
+	// Setup failures are returned (not sent to errCh) so the caller can FAIL FAST:
+	// a server that cannot start its embedding topology would otherwise run
+	// silently with nothing draining the pending queue.
 	fetcher, ok := st.(distributedTaskFetcher)
 	if !ok {
-		errCh <- errors.New("distributed embedding: store does not support ChunkTaskByID")
-		return
+		return errors.New("distributed embedding: store does not support ChunkTaskByID")
 	}
 
 	identityStr := cfg.Providers().EmbedIdentity()
 	if identityStr == "" {
-		errCh <- errors.New("distributed embedding: embed identity could not be resolved")
-		return
+		return errors.New("distributed embedding: embed identity could not be resolved")
 	}
 
 	broker, err := buildEmbedBroker(ctx, cfg)
 	if err != nil {
-		errCh <- fmt.Errorf("distributed embedding: build broker: %v", err)
-		return
+		return fmt.Errorf("distributed embedding: build broker: %w", err)
 	}
 
 	// Build a per-kind embedder reusing the in-process embedding path so the
@@ -76,8 +76,9 @@ func startDistributedEmbedding(
 		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger, "code")
 	}
 	if len(embedders) == 0 {
-		errCh <- errors.New("distributed embedding: no index axis configured")
-		return
+		// Post-open abort: close the broker so its SQLite handle is not leaked.
+		_ = broker.Close()
+		return errors.New("distributed embedding: no index axis configured")
 	}
 
 	coord := &embedqueue.Coordinator{
@@ -96,10 +97,18 @@ func startDistributedEmbedding(
 		Logger:        logger,
 	}
 
-	// Coordinator: periodically enqueue chunks that are still pending. A single
-	// pass drains the current backlog; a ticker picks up chunks added later
-	// (incremental ingest) without a global ordering requirement (SPEC §8.7.3).
-	go runCoordinatorLoop(ctx, coord, logger)
+	// Close the broker when the run context ends so its handle (e.g. a SQLite DB)
+	// is released on shutdown.
+	go func() {
+		<-ctx.Done()
+		_ = broker.Close()
+	}()
+
+	// Coordinator: periodically enqueue chunks that are still pending. Each pass
+	// enqueues the current pending head; the ticker drives the full drain as the
+	// head clears and picks up chunks added later (incremental ingest), with no
+	// global ordering requirement (SPEC §8.7.3).
+	go runCoordinatorLoop(ctx, coord, errCh, logger)
 
 	// Worker: drain the queue. Errors are surfaced on errCh (cancellation is not
 	// an error), mirroring startEmbeddingWorkers.
@@ -109,12 +118,13 @@ func startDistributedEmbedding(
 			errCh <- fmt.Errorf("distributed embed worker: %w", rerr)
 		}
 	}()
+	return nil
 }
 
 // runCoordinatorLoop enqueues pending chunks on a fixed interval until ctx is
 // cancelled. Re-enqueuing is safe: already-embedded chunks are no longer pending,
 // and a duplicate job is idempotent at the embed layer (SPEC §8.7.3).
-func runCoordinatorLoop(ctx context.Context, coord *embedqueue.Coordinator, logger *log.Logger) {
+func runCoordinatorLoop(ctx context.Context, coord *embedqueue.Coordinator, errCh chan<- error, logger *log.Logger) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -122,6 +132,13 @@ func runCoordinatorLoop(ctx context.Context, coord *embedqueue.Coordinator, logg
 			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			if logger != nil {
 				logger.Printf("distributed embedding: enqueue pending: %v", err)
+			}
+			// Also surface it as a structured event (the human logger is discarded
+			// in JSON mode). Non-blocking: a transient enqueue error must not stall
+			// the loop if errCh is full.
+			select {
+			case errCh <- fmt.Errorf("distributed embedding: enqueue pending: %w", err):
+			default:
 			}
 		}
 		select {
