@@ -206,6 +206,39 @@ type Service struct {
 	// Nil until a scan sets it; direct callers fall back to a one-shot walk.
 	sidecarIndex map[string]int64
 	sidecarMu    sync.RWMutex
+
+	// batch holds the optional per-scan batch-ergonomics state (SPEC §8.6.11):
+	// the JSONL run manifest writer and the side-channel progress reporter. It is
+	// created in runScan only when a media.batch feature is enabled and torn down
+	// when the scan ends; nil otherwise, so the default ingest path is unchanged.
+	batch *batchRun
+
+	// activeOutcome is the manifest/progress accumulator for the asset currently
+	// being processed. runScan sets it around each per-asset processing call (the
+	// scan loop is sequential, so at most one asset is in flight); the rep
+	// generators stamp produced outputs onto it via recordOutput. Nil when no
+	// batch run is active, making recordOutput a no-op on the hot path.
+	activeOutcome *assetOutcome
+}
+
+// recordContentHash stamps the resolved content_hash (§7.6) onto the asset
+// currently being processed under an active batch run, for the run manifest (SPEC
+// §8.6.11). No-op when no batch run is active.
+func (s *Service) recordContentHash(hash string) {
+	if s == nil {
+		return
+	}
+	s.activeOutcome.setContentHash(hash)
+}
+
+// markActiveSkipped marks the asset currently being processed under an active
+// batch run as "skipped" — no work performed (cache hit, unchanged content, or a
+// non-ingestable type), SPEC §8.6.11. No-op when no batch run is active.
+func (s *Service) markActiveSkipped() {
+	if s == nil {
+		return
+	}
+	s.activeOutcome.markSkipped()
 }
 
 // ErrTranscriptProviderFailure marks failures originating from the transcript
@@ -846,6 +879,16 @@ func (s *Service) runScan(ctx context.Context) error {
 
 	forceReindex := s.indexingState != nil && s.indexingState.Snapshot().Mode == appstate.ModeFull
 
+	// Optional batch-ergonomics run (SPEC §8.6.11): a JSONL run manifest and/or a
+	// side-channel progress reporter. nil (and inert) unless a media.batch feature
+	// is enabled, so the default ingest path is unchanged.
+	s.batch = newBatchRun(s.cfg.MediaBatchProgress, s.cfg.MediaBatchManifest != "", s.cfg.MediaBatchManifest, s.getLogger())
+	defer func() {
+		s.batch.close()
+		s.batch = nil
+	}()
+	s.batch.startPass("", len(discovered))
+
 	seen := make(map[string]struct{}, len(discovered))
 	for _, f := range discovered {
 		if err := ctx.Err(); err != nil {
@@ -853,12 +896,35 @@ func (s *Service) runScan(ctx context.Context) error {
 		}
 
 		s.addScanned(1)
+
+		var outcome *assetOutcome
+		if s.batch != nil {
+			outcome = newAssetOutcome(f.RelPath)
+			s.activeOutcome = outcome
+		}
+
 		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
 			s.addSkipped(1)
+			if outcome != nil {
+				outcome.markSkipped()
+				s.batch.finalize(outcome)
+				s.activeOutcome = nil
+			}
 			continue
 		}
 
-		if err := s.processDocument(ctx, f, compiledSecrets, forceReindex, seen); err != nil {
+		err := s.processDocument(ctx, f, compiledSecrets, forceReindex, seen)
+		if outcome != nil {
+			if err != nil {
+				outcome.markErrorIfUnset(manifestErrorCode(err), RedactSecretsInMessage(err.Error(), compiledSecrets))
+			} else {
+				s.recordAssetOutputs(ctx, outcome, f.RelPath)
+			}
+			s.batch.finalize(outcome)
+			s.activeOutcome = nil
+		}
+
+		if err != nil {
 			s.addErrors(1)
 			// record that we saw the file even if processing failed so
 			// markMissingAsDeleted does not treat it as removed
@@ -869,6 +935,29 @@ func (s *Service) runScan(ctx context.Context) error {
 	}
 
 	return s.markMissingAsDeleted(ctx, existing, seen)
+}
+
+// recordAssetOutputs records the rep_types persisted for a successfully-processed
+// asset onto its batch manifest outcome (SPEC §8.6.11 "outputs produced"). It is
+// best-effort: a store that cannot list rep_types, or a lookup error, leaves
+// outputs empty — the manifest is advisory and must never fail an ingest.
+func (s *Service) recordAssetOutputs(ctx context.Context, outcome *assetOutcome, relPath string) {
+	if outcome == nil {
+		return
+	}
+	lister, ok := s.store.(interface {
+		RepresentationTypesByPath(context.Context, string) ([]string, error)
+	})
+	if !ok {
+		return
+	}
+	types, err := lister.RepresentationTypesByPath(ctx, relPath)
+	if err != nil {
+		return
+	}
+	for _, t := range types {
+		outcome.addOutput(t)
+	}
 }
 
 // etagUnchanged reports whether a remote (object-store) source object can be
@@ -1041,6 +1130,9 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if buildErr != nil {
 		return s.persistBuildError(ctx, f, secretPatterns, buildErr)
 	}
+	// Stamp the resolved content_hash onto the batch manifest outcome (§8.6.11);
+	// no-op when no batch run is active.
+	s.recordContentHash(doc.ContentHash)
 
 	existingDoc, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
 	if isUnexpectedStoreErr(err) {
@@ -1061,6 +1153,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		s.addIndexed(1)
 	case "skipped", "secret_excluded":
 		s.addSkipped(1)
+		s.markActiveSkipped()
 	case "error":
 		// although buildDocumentWithContent will never return a document with
 		// Status="error" (the error case returns early above), we leave this
@@ -1078,6 +1171,9 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	}
 
 	if !needsProcessing || doc.Status != "ok" {
+		// No representation work performed this run (cache hit / unchanged content
+		// / non-ok status): record it as skipped for the batch manifest (§8.6.11).
+		s.markActiveSkipped()
 		return nil
 	}
 
