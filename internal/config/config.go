@@ -406,6 +406,22 @@ type Config struct {
 	MediaClipMaxDurationMS int
 	MediaClipMaxBytes      int
 
+	// MediaBatchTwoPhase / MediaBatchProgress / MediaBatchManifest configure the
+	// optional batch-ergonomics surface for large-archive media ingests (SPEC
+	// §8.6.11; config block `media.batch`). All default OFF/empty so behavior is
+	// byte-identical to today when unconfigured.
+	//   - MediaBatchTwoPhase (media.batch.two_phase): run media ingest as two
+	//     ordered passes (transcription, then derivation) instead of single-pass.
+	//     Observably output-equivalent to single-pass — ordering/reporting only.
+	//   - MediaBatchProgress (media.batch.progress): emit side-channel, monotonic
+	//     progress against a per-pass total. Never alters outputs or ordering.
+	//   - MediaBatchManifest (media.batch.manifest): path of a JSONL run manifest
+	//     (one record per asset). Empty disables the manifest. The manifest is
+	//     advisory for resume only — the live identity/cache/mtime gates always win.
+	MediaBatchTwoPhase bool
+	MediaBatchProgress bool
+	MediaBatchManifest string
+
 	// QualityGatesEnabled is the master switch for the output quality gate
 	// (spec 0.16.0): when true (default), generated transcript/OCR text is
 	// screened for degenerate output (repetition loops, empty output,
@@ -536,6 +552,9 @@ type fileConfig struct {
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
 	ServerTLSKeyFile                   *string
+	MediaBatchTwoPhase                 *bool
+	MediaBatchProgress                 *bool
+	MediaBatchManifest                 *string
 	// session timings expressed as YAML duration strings.  populated by
 	// parseConfigYAML's custom parser via setFileScalarValue rather than the
 	// standard yaml.Unmarshal machinery.  struct tags are therefore omitted
@@ -644,6 +663,9 @@ type persistedConfig struct {
 	MediaVideoWindowSec                int           `yaml:"media_video_window_sec"`
 	MediaClipMaxDurationMS             int           `yaml:"media_clip_max_duration_ms"`
 	MediaClipMaxBytes                  int           `yaml:"media_clip_max_bytes"`
+	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
+	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
+	MediaBatchManifest                 string        `yaml:"media_batch_manifest"`
 	// MediaDiarizeEnabled is the tri-state diarization opt (SPEC §8.6.8): a
 	// *bool so the snapshot can round-trip omitted (nil) vs. false vs. true
 	// without collapsing the auto/off distinction.
@@ -918,6 +940,9 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
 		X402Mode:                           cfg.X402.Mode,
 		X402FacilitatorURL:                 cfg.X402.FacilitatorURL,
+		MediaBatchTwoPhase:                 cfg.MediaBatchTwoPhase,
+		MediaBatchProgress:                 cfg.MediaBatchProgress,
+		MediaBatchManifest:                 cfg.MediaBatchManifest,
 		// token intentionally omitted to avoid persisting secrets
 		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
 		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
@@ -1598,6 +1623,15 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaClipMaxBytes != nil {
 		cfg.MediaClipMaxBytes = *fc.MediaClipMaxBytes
 	}
+	if fc.MediaBatchTwoPhase != nil {
+		cfg.MediaBatchTwoPhase = *fc.MediaBatchTwoPhase
+	}
+	if fc.MediaBatchProgress != nil {
+		cfg.MediaBatchProgress = *fc.MediaBatchProgress
+	}
+	if fc.MediaBatchManifest != nil {
+		cfg.MediaBatchManifest = strings.TrimSpace(*fc.MediaBatchManifest)
+	}
 }
 
 // applyMediaSubtitlesFileParsed copies the set media.subtitles.* file fields
@@ -1936,6 +1970,9 @@ var configKeyAliases = map[string]string{
 	"distributed_embed.sqlite_path":           "distributed_embed_sqlite_path",
 	"distributed_embed.broker_url":            "distributed_embed_broker_url",
 	"distributed_embed.max_attempts":          "distributed_embed_max_attempts",
+	"media_batch_two_phase":                   "media.batch.two_phase",
+	"media_batch_progress":                    "media.batch.progress",
+	"media_batch_manifest":                    "media.batch.manifest",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
@@ -1958,7 +1995,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
-	case "media", "media.variants", "media.translate", "media.clip", "media.diarize":
+	case "media", "media.variants", "media.translate", "media.clip", "media.diarize", "media.batch":
 		return true
 	case "media.subtitles", "media.subtitles.ttml", "media.subtitles.smil":
 		return true
@@ -2022,6 +2059,8 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	},
 	"media.vad":                func(c *fileConfig) **bool { return &c.MediaVAD },
 	"media.diarize.enabled":    func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
+	"media.batch.two_phase":    func(c *fileConfig) **bool { return &c.MediaBatchTwoPhase },
+	"media.batch.progress":     func(c *fileConfig) **bool { return &c.MediaBatchProgress },
 	"x402_tools_call_enabled":  func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
 	"retrieval.hybrid.enabled": func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
 	"dedup.retrieval":          func(c *fileConfig) **bool { return &c.DedupRetrieval },
@@ -2291,6 +2330,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
+	case "media.batch.manifest":
+		cfg.MediaBatchManifest = strPtr(value)
 	}
 }
 
@@ -2470,6 +2511,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_video_window_sec", cfg.MediaVideoWindowSec)
 	writeInt("media_clip_max_duration_ms", cfg.MediaClipMaxDurationMS)
 	writeInt("media_clip_max_bytes", cfg.MediaClipMaxBytes)
+	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
+	writeBool("media_batch_progress", cfg.MediaBatchProgress)
+	writeScalar("media_batch_manifest", cfg.MediaBatchManifest)
 	writeScalar("server_tls_cert_file", cfg.ServerTLSCertFile)
 	writeScalar("server_tls_key_file", cfg.ServerTLSKeyFile)
 	writeScalar("x402_mode", cfg.X402Mode)
