@@ -21,20 +21,18 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 		return "", fmt.Errorf("create translate cache dir: %w", err)
 	}
 
-	// Key the cache on the full translation identity, not just the source media
-	// bytes: the same media re-translated after the source transcript text, the
-	// chat provider, or the model changes must NOT return stale text (the rep's
-	// meta_json records the new provider/model, so a stale body would be
-	// mislabeled). The TranscriptLangSuffix is retained on the filename so cache
-	// files stay human-identifiable by language.
-	cacheIdentity := strings.Join([]string{
-		computeContentHash(content),
-		computeContentHash([]byte(sourceText)),
-		strings.TrimSpace(s.translateProvider),
-		strings.TrimSpace(s.translateModel),
-		strings.ToLower(strings.TrimSpace(targetLang)),
-	}, "\x00")
-	base := computeContentHash([]byte(cacheIdentity)) + TranscriptLangSuffix(targetLang)
+	// Key the cache on the canonical translate derivation identity, not just the
+	// source media bytes (SPEC §8.6.7): the same media re-translated after the
+	// source transcript text, the translate provider, the model, or the TARGET
+	// LANGUAGE changes must NOT return stale text (the rep's meta_json records the
+	// new provider/model, so a stale body would be mislabeled). translateCacheKey
+	// folds {content, source-text, capability=translate|provider|model|target-lang}
+	// via the same derivationIdentity scheme as transcriptCacheKey/ocrCacheKey, so
+	// the same source in two corpora derives once (cross-corpus reuse) while an
+	// identity change misses without reading another derivation's bytes. The
+	// TranscriptLangSuffix is retained on the filename so cache files stay
+	// human-identifiable by language.
+	base := s.translateCacheKey(content, sourceText, targetLang) + TranscriptLangSuffix(targetLang)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil

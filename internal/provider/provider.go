@@ -46,6 +46,15 @@ const (
 	// it. Binding diarization to a backend that lacks the capability is rejected
 	// as CONFIG_INVALID, consistent with the capability matrix (8.1.2).
 	CapDiarize Capability = "diarize"
+	// CapTranslate is transcript translation (SPEC §8.6.2). It is not a distinct
+	// provider capability in the matrix — translation runs on a chat provider
+	// (CapChat) — but it is a distinct DERIVATION kind: a translated transcript's
+	// provenance and content-addressed cache key fold {translate, provider, model,
+	// target-language} so a provider/model/target-language change re-derives and
+	// never reads another derivation's cached bytes (§8.6.7). It is defined here so
+	// translation reuses the one canonical derivationIdentity scheme rather than a
+	// parallel ad-hoc one.
+	CapTranslate Capability = "translate"
 )
 
 // Support is a capability-matrix cell state.
