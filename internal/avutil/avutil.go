@@ -12,6 +12,7 @@ package avutil
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	neturl "net/url"
@@ -65,6 +66,119 @@ func Duration(ctx context.Context, path string) (time.Duration, error) {
 		return 0, fmt.Errorf("ffprobe %q: non-positive duration %g", path, secs)
 	}
 	return time.Duration(secs * float64(time.Second)), nil
+}
+
+// MediaInfo holds the subset of ffprobe track metadata used to package a media
+// presentation (SPEC §8.6.10 SMIL). It is best-effort: any field may be zero/
+// empty when ffprobe does not report it, and callers MUST fail open (omit the
+// metadata-dependent output) rather than treat a missing field as an error.
+type MediaInfo struct {
+	// Container is the demuxer/format name reported by ffprobe (e.g. "mov,mp4,
+	// m4a,3gp,3g2,mj2"). Empty when unknown.
+	Container string
+	// VideoCodec / AudioCodec are the codec_name of the first video/audio stream
+	// (e.g. "h264", "aac"). Empty when the corresponding stream is absent.
+	VideoCodec string
+	AudioCodec string
+	// BitRateBPS is the overall container bit rate in bits per second, 0 when not
+	// reported.
+	BitRateBPS int
+	// Width / Height are the first video stream's pixel dimensions, 0 for
+	// audio-only media or when not reported.
+	Width  int
+	Height int
+}
+
+// HasVideo reports whether the probed media carries a video stream with usable
+// dimensions, the precondition for emitting video width/height in SMIL.
+func (m MediaInfo) HasVideo() bool {
+	return m.Width > 0 && m.Height > 0
+}
+
+// ffprobeStream is the per-stream shape decoded from ffprobe -show_streams JSON.
+type ffprobeStream struct {
+	CodecType string `json:"codec_type"`
+	CodecName string `json:"codec_name"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+}
+
+// ffprobeFormat is the container shape decoded from ffprobe -show_format JSON.
+type ffprobeFormat struct {
+	FormatName string `json:"format_name"`
+	BitRate    string `json:"bit_rate"`
+}
+
+// ffprobeOutput is the top-level JSON ffprobe emits with -of json.
+type ffprobeOutput struct {
+	Streams []ffprobeStream `json:"streams"`
+	Format  ffprobeFormat   `json:"format"`
+}
+
+// ProbeMediaInfo probes container/codec/bitrate/dimension metadata for the media
+// at path via ffprobe's JSON output. It returns ErrToolNotFound when ffprobe is
+// not installed so callers can fail open (omit SMIL, keep text subtitles per
+// SPEC §8.6.10). A successful probe with some fields unreported yields a partial
+// MediaInfo rather than an error: SMIL packaging is best-effort. The probe is
+// deterministic for a given input.
+func ProbeMediaInfo(ctx context.Context, path string) (MediaInfo, error) {
+	bin, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return MediaInfo{}, ErrToolNotFound
+	}
+	cmd := exec.CommandContext(ctx, bin,
+		"-v", "error",
+		"-show_entries", "format=format_name,bit_rate:stream=codec_type,codec_name,width,height",
+		"-of", "json",
+		"--", path,
+	)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return MediaInfo{}, fmt.Errorf("ffprobe %q: %w: %s", path, err, strings.TrimSpace(stderr.String()))
+	}
+	return parseMediaInfo(out.Bytes())
+}
+
+// parseMediaInfo decodes ffprobe -of json output into a MediaInfo. It is split
+// out (and exported via ParseMediaInfo) so the JSON mapping can be unit-tested
+// from the tests/ tree against captured ffprobe output without the binary. The
+// first video and first audio stream win; later streams are ignored.
+func parseMediaInfo(raw []byte) (MediaInfo, error) {
+	var probed ffprobeOutput
+	if err := json.Unmarshal(raw, &probed); err != nil {
+		return MediaInfo{}, fmt.Errorf("avutil: parse ffprobe json: %w", err)
+	}
+	info := MediaInfo{Container: strings.TrimSpace(probed.Format.FormatName)}
+	if br := strings.TrimSpace(probed.Format.BitRate); br != "" && br != "N/A" {
+		if n, err := strconv.Atoi(br); err == nil && n > 0 {
+			info.BitRateBPS = n
+		}
+	}
+	for _, s := range probed.Streams {
+		switch strings.ToLower(strings.TrimSpace(s.CodecType)) {
+		case "video":
+			if info.VideoCodec == "" {
+				info.VideoCodec = strings.TrimSpace(s.CodecName)
+				if s.Width > 0 && s.Height > 0 {
+					info.Width = s.Width
+					info.Height = s.Height
+				}
+			}
+		case "audio":
+			if info.AudioCodec == "" {
+				info.AudioCodec = strings.TrimSpace(s.CodecName)
+			}
+		}
+	}
+	return info, nil
+}
+
+// ParseMediaInfo is the exported counterpart of parseMediaInfo, exposed so tests
+// in the tests/ tree can verify ffprobe JSON decoding without the ffprobe binary.
+func ParseMediaInfo(ffprobeJSON []byte) (MediaInfo, error) {
+	return parseMediaInfo(ffprobeJSON)
 }
 
 // DefaultSilenceThresholdDB is the noise floor (in dBFS) below which audio is
