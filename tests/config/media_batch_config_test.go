@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -45,18 +44,15 @@ func TestMediaBatch_NestedYAMLApplies(t *testing.T) {
 	}
 }
 
-// TestMediaBatch_TwoPhaseRejected pins that enabling the not-yet-implemented
-// two-phase pass split is rejected up front rather than silently behaving as
-// single-pass.
-func TestMediaBatch_TwoPhaseRejected(t *testing.T) {
+// TestMediaBatch_TwoPhaseAccepted pins that enabling the two-phase pass split
+// (SPEC §8.6.11) validates: it is a self-contained ordering toggle with no config
+// interdependencies, observably equivalent to single-pass for the resulting
+// representations/chunks/embeddings/citations.
+func TestMediaBatch_TwoPhaseAccepted(t *testing.T) {
 	cfg := config.Default()
 	cfg.MediaBatchTwoPhase = true
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("media.batch.two_phase=true must fail validation (not yet implemented)")
-	}
-	if !strings.Contains(err.Error(), "two_phase") {
-		t.Fatalf("error should name two_phase, got: %v", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("media.batch.two_phase=true must validate: %v", err)
 	}
 }
 
