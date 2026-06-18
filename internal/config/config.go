@@ -1953,6 +1953,8 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "media", "media.variants", "media.translate", "media.clip", "media.diarize":
 		return true
+	case "media.subtitles", "media.subtitles.ttml", "media.subtitles.smil":
+		return true
 	case "index.pgvector":
 		return true
 	case "distributed_embed":
