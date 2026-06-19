@@ -1,0 +1,76 @@
+# -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
+#
+# SKELETON — NOT YET BUILDABLE. dir2mcp MacPorts Portfile (lean binary), issue #273.
+#
+# This is a reference/starting Portfile for distributing the lean `dir2mcp`
+# binary via MacPorts (build-from-source), primarily for older macOS where
+# Homebrew no longer ships support. It builds locally with MacPorts' Go toolchain
+# (pure Go, CGO disabled), so it works on the OS versions MacPorts targets.
+#
+# Before this can build / be submitted to macports-ports, fill the THREE
+# go2port-generated pieces against a real tag (recommended: v0.8.0):
+#
+#   go install github.com/sebres/go2port@latest    # or a maintained fork
+#   go2port -o Portfile.gen github.com/dirstral/dir2mcp v0.8.0
+#
+# From Portfile.gen, copy in:
+#   1. the exact `go.setup` line (author/project/version/tag-prefix),
+#   2. the full `go.vendors { ... }` block (every dependency + checksum),
+#   3. the source `checksums` (rmd160/sha256/size of the v0.8.0 tarball).
+#
+# Keep the hand-tuned build/destroot/test/meta below (the lean CGO-off build with
+# the version ldflag and the cmd/dir2mcp subpackage — go2port does not produce
+# these). Then validate on a MacPorts host:
+#
+#   port lint --nitpick ./Portfile
+#   sudo port -v test ./Portfile
+
+PortSystem          1.0
+PortGroup           golang 1.0
+
+# TODO(go2port): replace with the generated go.setup for the chosen tag.
+go.setup            github.com/dirstral/dir2mcp 0.8.0 v
+
+# TODO(go2port): paste the generated go.vendors { ... } block here.
+
+name                dir2mcp
+categories          textproc devel
+platforms           darwin
+license             MIT
+# TODO: set your MacPorts maintainer handle.
+maintainers         {github.com:REPLACE-with-your-handle} openmaintainer
+
+description         Deploy a local directory as an MCP knowledge server (lean binary)
+long_description    dir2mcp turns any local directory into a Model Context \
+                    Protocol knowledge server with indexing, retrieval, and \
+                    citations. This is the lean build; structured PDF/image \
+                    extraction via docling is optional (bring-your-own, \
+                    docling-serve, or Mistral OCR).
+
+homepage            https://github.com/dirstral/dir2mcp
+
+# TODO(go2port): replace with the generated checksums for the v0.8.0 tarball.
+checksums           rmd160  0 \
+                    sha256  0 \
+                    size    0
+
+# Lean, pure-Go build: no CGO and no bundled docling runtime. The version is
+# injected into the symbol the runtime reads (internal/buildinfo.Version),
+# mirroring .goreleaser.yaml and the Makefile.
+build {
+    system -W ${worksrcpath} \
+        "CGO_ENABLED=0 ${go.bin} build \
+            -ldflags \"-s -w -X github.com/dirstral/dir2mcp/internal/buildinfo.Version=v${version}\" \
+            -o ${name} ./cmd/dir2mcp"
+}
+
+destroot {
+    xinstall -m 0755 ${worksrcpath}/${name} ${destroot}${prefix}/bin/${name}
+}
+
+# Smoke check: the built binary runs. dir2mcp has no `help` subcommand, so use
+# `version` (printing usage on no-args would exit non-zero).
+test.run            yes
+test {
+    system "${destroot}${prefix}/bin/${name} version"
+}
