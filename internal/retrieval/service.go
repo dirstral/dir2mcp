@@ -145,6 +145,19 @@ type Service struct {
 	// Ask/Search (issue #327). nil ⇒ metrics collection is skipped entirely
 	// (zero overhead). It never alters tool results.
 	metricsEmit func(level, event string, data interface{})
+	// recencyHalfLife is an opt-in server-side time-decay half-life (config
+	// retrieval.recency_half_life): when > 0, each hit's final authoritative
+	// Score is multiplied by exp(-ln2 * age / half_life) where age is the hit's
+	// source document mtime relative to a fixed "now" captured at query start.
+	// Newer content therefore ranks higher; a hit with no resolvable date is
+	// neither boosted nor penalized. Applied after scoring/fusion/rerank and just
+	// before the min_score floor. Config-only (never an MCP tool parameter).
+	// Default 0 ⇒ disabled (pass-through). Wired from
+	// config.RetrievalRecencyHalfLife at construction.
+	recencyHalfLife time.Duration
+	// nowFn returns the reference instant for recency decay; overridable in
+	// tests for determinism. Defaults to time.Now.
+	nowFn func() time.Time
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -332,6 +345,39 @@ func (s *Service) SetMinScore(floor float64) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.minScore = floor
+}
+
+// SetRecencyHalfLife wires the opt-in server-side time-decay (config
+// retrieval.recency_half_life). When halfLife > 0, each hit's final
+// authoritative Score is multiplied by exp(-ln2 * age / half_life) using the
+// hit's source document mtime relative to a fixed "now" captured at query
+// start, after scoring/fusion/rerank and just before the min_score floor. A
+// halfLife <= 0 disables the decay (pass-through). The engine wires this from
+// config.RetrievalRecencyHalfLife at construction time, mirroring SetMinScore.
+func (s *Service) SetRecencyHalfLife(halfLife time.Duration) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.recencyHalfLife = halfLife
+}
+
+// SetNowFunc overrides the reference clock used by recency decay. Intended for
+// deterministic tests; passing nil restores time.Now.
+func (s *Service) SetNowFunc(fn func() time.Time) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.nowFn = fn
+}
+
+// now returns the reference instant for recency decay, defaulting to time.Now
+// when no override is installed.
+func (s *Service) now() time.Time {
+	s.metaMu.RLock()
+	fn := s.nowFn
+	s.metaMu.RUnlock()
+	if fn == nil {
+		return time.Now()
+	}
+	return fn()
 }
 
 // SetDocumentHashes installs the rel_path → content_hash map used to group
@@ -690,10 +736,82 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	if err != nil {
 		return nil, err
 	}
+	// Apply the opt-in recency time-decay just BEFORE the relevance floor: it
+	// re-scores each hit by its source-document age, so the floor compares the
+	// decayed score and newer content survives a tie. Config-only; default 0 ⇒
+	// pass-through (no allocation, no lookups).
+	hits = s.applyRecencyDecay(ctx, hits)
 	// Apply the server-side relevance floor LAST: after scoring/fusion/rerank
-	// (the per-mode searches above) and after their dedup/truncation, using each
-	// hit's final authoritative Score. Config-only; default 0 ⇒ pass-through.
+	// (the per-mode searches above), after their dedup/truncation, and after the
+	// recency decay, using each hit's final authoritative Score. Config-only;
+	// default 0 ⇒ pass-through.
 	return s.applyMinScoreFloor(hits), nil
+}
+
+// applyRecencyDecay multiplies each hit's final authoritative Score by an
+// exponential time-decay exp(-ln2 * age / half_life), where age is the hit's
+// source document mtime relative to a fixed "now" captured once at the start of
+// this call (so a single Search is deterministic regardless of wall-clock drift
+// across hits). A half-life <= 0 disables the decay and returns hits unchanged
+// (pass-through), preserving slice identity so callers see no allocation when
+// unconfigured. A hit whose source date cannot be resolved (unknown rel_path,
+// store error, or mtime <= 0) is left untouched — never boosted, never
+// penalized. A future-dated hit (age < 0) is clamped to age 0 (factor 1) so a
+// skewed mtime can never amplify a score above its undecayed value. Because the
+// re-scoring can reorder candidates, hits are re-sorted best-first with a
+// stable, deterministic tiebreak (rel_path then chunk id) so output ordering is
+// reproducible.
+func (s *Service) applyRecencyDecay(ctx context.Context, hits []model.SearchHit) []model.SearchHit {
+	s.metaMu.RLock()
+	halfLife := s.recencyHalfLife
+	store := s.store
+	s.metaMu.RUnlock()
+	if halfLife <= 0 || len(hits) == 0 || store == nil {
+		return hits
+	}
+	now := s.now()
+	halfLifeSec := halfLife.Seconds()
+	// Cache document lookups by rel_path: many hits can share one source
+	// document, and a single Search should stat each document at most once.
+	mtimeByPath := make(map[string]int64, len(hits))
+	resolveMtime := func(relPath string) int64 {
+		if relPath == "" {
+			return 0
+		}
+		if mt, ok := mtimeByPath[relPath]; ok {
+			return mt
+		}
+		var mt int64
+		if doc, err := store.GetDocumentByPath(ctx, relPath); err == nil {
+			mt = doc.MTimeUnix
+		}
+		mtimeByPath[relPath] = mt
+		return mt
+	}
+	out := make([]model.SearchHit, len(hits))
+	copy(out, hits)
+	for i := range out {
+		mtime := resolveMtime(out[i].RelPath)
+		if mtime <= 0 {
+			continue
+		}
+		ageSec := now.Sub(time.Unix(mtime, 0)).Seconds()
+		if ageSec <= 0 {
+			continue
+		}
+		factor := math.Exp(-math.Ln2 * ageSec / halfLifeSec)
+		out[i].Score *= factor
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		if out[i].RelPath != out[j].RelPath {
+			return out[i].RelPath < out[j].RelPath
+		}
+		return out[i].ChunkID < out[j].ChunkID
+	})
+	return out
 }
 
 // applyMinScoreFloor drops hits whose final authoritative Score is strictly

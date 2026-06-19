@@ -79,6 +79,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	a.configureReranker(ret, cfg)
 	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
 	ret.SetMinScore(cfg.RetrievalMinScore)
+	ret.SetRecencyHalfLife(cfg.RetrievalRecencyHalfLife)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
