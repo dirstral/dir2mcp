@@ -84,6 +84,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetAdaptiveRetrieval(cfg.RetrievalAdaptiveEnabled, cfg.RetrievalAdaptiveKMin, cfg.RetrievalAdaptiveKMax)
 	ret.SetMMR(cfg.RetrievalMMREnabled, cfg.RetrievalMMRLambda)
 	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
+	a.configureCrossLingual(ret, cfg, st, generator)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
@@ -908,6 +909,32 @@ func (a *App) loadCrossFileDedupHashes(ctx context.Context, cfg config.Config, s
 		return
 	}
 	ret.SetDocumentHashes(hashes)
+}
+
+// configureCrossLingual wires server-side cross-lingual query expansion (#325)
+// onto the retrieval service. It reuses the chat generator as the translate
+// primitive (SPEC §8.6.2 uses the chat capability for translation) and, for the
+// "auto" target set, registers a corpus-languages provider backed by the store's
+// optional model.CorpusLanguageLister (resolving to the corpus's detected
+// languages, #267). It is a no-op for behavior when disabled in config — the
+// service then leaves search unchanged regardless of the wiring. Mirrors how
+// SetMinScore / SetCrossFileDedupEnabled are wired from config; config-only, so
+// no MCP tool-schema change.
+func (a *App) configureCrossLingual(ret *retrieval.Service, cfg config.Config, st model.Store, translator model.Generator) {
+	if ret == nil {
+		return
+	}
+	ret.SetCrossLingual(cfg.CrossLingualEnabled, cfg.CrossLingualTargetLangs, translator)
+	if lister, ok := st.(model.CorpusLanguageLister); ok && lister != nil {
+		ret.SetCorpusLanguagesProvider(func() []string {
+			langs, err := lister.ListCorpusLanguages(context.Background())
+			if err != nil {
+				writef(a.stderr, "warning: list corpus languages for cross-lingual expansion: %v\n", err)
+				return nil
+			}
+			return langs
+		})
+	}
 }
 
 // initIndexingState creates a new IndexingState and optionally preloads

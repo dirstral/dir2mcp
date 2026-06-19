@@ -43,6 +43,18 @@ type DocumentHashLister interface {
 	ListDocumentHashes(ctx context.Context) ([]DocumentHash, error)
 }
 
+// CorpusLanguageLister is an optional capability stores may implement so the
+// retrieval service can resolve the "auto" cross-lingual query-expansion target
+// set (#325) to the corpus's detected languages (#267). It returns the distinct
+// non-empty effective languages recorded across non-deleted chunks (SPEC
+// §5.2/§8.8), as BCP-47 tags. The retrieval service type-asserts against this
+// interface, mirroring DocumentHashLister/LexicalSearcher; stores that do not
+// implement it simply yield no auto targets and cross-lingual expansion is a
+// no-op unless an explicit target list is configured.
+type CorpusLanguageLister interface {
+	ListCorpusLanguages(ctx context.Context) ([]string, error)
+}
+
 // Index is the core vector-store contract every backend must satisfy (issue
 // #247). The in-memory HNSW is the conforming default; external/on-disk
 // backends (Qdrant #268, pgvector #269, on-disk #246) implement the same

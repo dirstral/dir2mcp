@@ -311,6 +311,23 @@ type Config struct {
 	// hypothetical-document embedding alone. Ignored when RetrievalHyDEEnabled is
 	// false. An empty value normalizes to "fuse".
 	RetrievalHyDEMode string
+	// CrossLingualEnabled enables server-side cross-lingual query expansion
+	// (config `retrieval.cross_lingual.enabled`): when true and a translator is
+	// available, the query is translated into the corpus's other languages, each
+	// variant is retrieved independently, and the per-language result sets are
+	// RRF-fused (reusing the hybrid fusion machinery) so an EN query surfaces RU
+	// content (and vice versa). Config-only (NOT an MCP tool parameter) so no
+	// tool input/output schema changes. Default false = disabled: search behavior
+	// is unchanged unless configured. A translation failure for one language is
+	// skipped, never fatal.
+	CrossLingualEnabled bool
+	// CrossLingualTargetLangs lists the language tag(s) the query is expanded
+	// into (config `retrieval.cross_lingual.target_langs`). The sentinel "auto"
+	// (the default when the list is empty) means "the corpus's detected languages"
+	// (#267) resolved at startup; an explicit list pins the targets. The detected
+	// query language is skipped (no self-translation). Has no built-in fixed
+	// language pair (general-purpose).
+	CrossLingualTargetLangs []string
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -626,6 +643,8 @@ type fileConfig struct {
 	RetrievalMMRLambda                 *float64
 	RetrievalHyDEEnabled               *bool
 	RetrievalHyDEMode                  *string
+	CrossLingualEnabled                *bool
+	CrossLingualTargetLangs            []string
 	RerankEnabled                      *bool
 	RerankProvider                     *string
 	CohereAPIKey                       *string
@@ -753,6 +772,8 @@ type persistedConfig struct {
 	RetrievalMMRLambda                 float64       `yaml:"retrieval_mmr_lambda"`
 	RetrievalHyDEEnabled               bool          `yaml:"retrieval_hyde_enabled"`
 	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
+	CrossLingualEnabled                bool          `yaml:"cross_lingual_enabled"`
+	CrossLingualTargetLangs            []string      `yaml:"cross_lingual_target_langs"`
 	RerankEnabled                      bool          `yaml:"rerank_enabled"`
 	RerankProvider                     string        `yaml:"rerank_provider"`
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
@@ -940,6 +961,11 @@ func Default() Config {
 		// RetrievalHyDEMode defaults to "fuse": when HyDE is enabled the
 		// hypothetical-document hits are RRF-fused with the raw-query hits.
 		RetrievalHyDEMode: HyDEModeFuse,
+		// CrossLingualEnabled defaults to false (disabled): cross-lingual query
+		// expansion is off unless explicitly enabled. The target-langs list is
+		// left empty, which means "auto" (the corpus's detected languages).
+		CrossLingualEnabled:     false,
+		CrossLingualTargetLangs: nil,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -1065,6 +1091,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalMMRLambda:                 cfg.RetrievalMMRLambda,
 		RetrievalHyDEEnabled:               cfg.RetrievalHyDEEnabled,
 		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
+		CrossLingualEnabled:                cfg.CrossLingualEnabled,
+		CrossLingualTargetLangs:            append([]string(nil), cfg.CrossLingualTargetLangs...),
 		RerankEnabled:                      rerankEnabledEffective(cfg),
 		RerankProvider:                     cfg.RerankProvider,
 		CohereBaseURL:                      cfg.CohereBaseURL,
@@ -1681,9 +1709,10 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 
 // applyRetrievalTuningFileParsed overlays the opt-in retrieval-tuning file
 // fields (recency time-decay #323, context compression #335, the adaptive
-// gate #338, MMR diversity #340, and the HyDE query transform #333) onto cfg.
-// Split out of applyModelRAGFileParsed to keep that function within the gocyclo
-// budget as tuning knobs are added.
+// gate #338, MMR diversity #340, the HyDE query transform #333, and
+// cross-lingual query expansion #325) onto cfg. Split out of
+// applyModelRAGFileParsed to keep that function within the gocyclo budget as
+// tuning knobs are added.
 func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalRecencyHalfLife != nil {
 		cfg.RetrievalRecencyHalfLife = *fc.RetrievalRecencyHalfLife
@@ -1714,6 +1743,12 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.RetrievalHyDEMode != nil {
 		cfg.RetrievalHyDEMode = *fc.RetrievalHyDEMode
+	}
+	if fc.CrossLingualEnabled != nil {
+		cfg.CrossLingualEnabled = *fc.CrossLingualEnabled
+	}
+	if fc.CrossLingualTargetLangs != nil {
+		cfg.CrossLingualTargetLangs = normalizeStringSlice(fc.CrossLingualTargetLangs)
 	}
 }
 
@@ -2138,6 +2173,9 @@ var configKeyAliases = map[string]string{
 	"hyde_enabled":                            "retrieval.hyde.enabled",
 	"retrieval_hyde_mode":                     "retrieval.hyde.mode",
 	"hyde_mode":                               "retrieval.hyde.mode",
+	"cross_lingual_enabled":                   "retrieval.cross_lingual.enabled",
+	"cross_lingual":                           "retrieval.cross_lingual.enabled",
+	"cross_lingual_target_langs":              "retrieval.cross_lingual.target_langs",
 	"rerank_enabled":                          "rerank.enabled",
 	"rerank.cohere.api_key":                   "cohere_api_key",
 	"rerank.cohere.base_url":                  "cohere_base_url",
@@ -2247,7 +2285,7 @@ func canonicalizeConfigKey(key string) string {
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.cross_lingual", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -2316,16 +2354,17 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"media.trim_leading_silence": func(c *fileConfig) **bool {
 		return &c.MediaTrimLeadingSilence
 	},
-	"media.vad":                  func(c *fileConfig) **bool { return &c.MediaVAD },
-	"media.diarize.enabled":      func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
-	"media.batch.two_phase":      func(c *fileConfig) **bool { return &c.MediaBatchTwoPhase },
-	"media.batch.progress":       func(c *fileConfig) **bool { return &c.MediaBatchProgress },
-	"x402_tools_call_enabled":    func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
-	"retrieval.hybrid.enabled":   func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
-	"retrieval.adaptive.enabled": func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
-	"retrieval.mmr.enabled":      func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
-	"retrieval.hyde.enabled":     func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
-	"dedup.retrieval":            func(c *fileConfig) **bool { return &c.DedupRetrieval },
+	"media.vad":                       func(c *fileConfig) **bool { return &c.MediaVAD },
+	"media.diarize.enabled":           func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
+	"media.batch.two_phase":           func(c *fileConfig) **bool { return &c.MediaBatchTwoPhase },
+	"media.batch.progress":            func(c *fileConfig) **bool { return &c.MediaBatchProgress },
+	"x402_tools_call_enabled":         func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
+	"retrieval.hybrid.enabled":        func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
+	"retrieval.adaptive.enabled":      func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
+	"retrieval.mmr.enabled":           func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
+	"retrieval.hyde.enabled":          func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
+	"retrieval.cross_lingual.enabled": func(c *fileConfig) **bool { return &c.CrossLingualEnabled },
+	"dedup.retrieval":                 func(c *fileConfig) **bool { return &c.DedupRetrieval },
 	"retrieval.context_compression.enabled": func(c *fileConfig) **bool {
 		return &c.ContextCompressionEnabled
 	},
@@ -2665,6 +2704,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendValue(&cfg.MediaTranslateTargetLangs, value)
 	case "media.filter_words":
 		appendValue(&cfg.MediaFilterWords, value)
+	case "retrieval.cross_lingual.target_langs":
+		appendValue(&cfg.CrossLingualTargetLangs, value)
 	}
 }
 
@@ -2673,7 +2714,7 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words":
+	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "retrieval.cross_lingual.target_langs":
 		return true
 	default:
 		return false
@@ -2751,6 +2792,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("retrieval_mmr_lambda", strconv.FormatFloat(cfg.RetrievalMMRLambda, 'f', -1, 64))
 	writeBool("retrieval_hyde_enabled", cfg.RetrievalHyDEEnabled)
 	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
+	writeBool("cross_lingual_enabled", cfg.CrossLingualEnabled)
+	writeList("cross_lingual_target_langs", cfg.CrossLingualTargetLangs)
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -3292,6 +3335,9 @@ func (c *Config) Validate() error {
 	if err := c.validateMediaBatch(); err != nil {
 		return err
 	}
+	if err := c.validateCrossLingual(); err != nil {
+		return err
+	}
 	c.applyValidationDefaults()
 	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
@@ -3370,6 +3416,51 @@ func (c *Config) validateMediaTranslate() error {
 			"media.translate.target_langs (no default target language)")
 	}
 	c.MediaTranslateTargetLangs = out
+	return nil
+}
+
+// crossLingualAutoSentinel is the target-langs value meaning "expand into the
+// corpus's detected languages (#267)" rather than an explicit pinned list. It is
+// resolved at startup against the live corpus, so it is accepted by validation
+// even though it is not a BCP-47 tag.
+const crossLingualAutoSentinel = "auto"
+
+// validateCrossLingual enforces the cross-lingual query-expansion config
+// invariants (#325). The feature is opt-in and off by default. The target-langs
+// list is normalized (trimmed, lower-cased, de-duplicated). An empty list is
+// valid and means "auto" (the corpus's detected languages, resolved at startup).
+// An explicit list may contain the "auto" sentinel and/or BCP-47 tags; any other
+// tag must use the cache-safe BCP-47 alphabet (letters/digits/hyphen), matching
+// validateMediaTranslate. Validation runs regardless of the enable flag so a
+// saved-but-disabled list round-trips and re-enabling restores it.
+func (c *Config) validateCrossLingual() error {
+	seen := make(map[string]struct{}, len(c.CrossLingualTargetLangs))
+	out := make([]string, 0, len(c.CrossLingualTargetLangs))
+	for _, lang := range c.CrossLingualTargetLangs {
+		l := strings.ToLower(strings.TrimSpace(lang))
+		if l == "" {
+			continue
+		}
+		if l != crossLingualAutoSentinel {
+			for _, r := range l {
+				safe := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
+				if !safe {
+					return fmt.Errorf("retrieval.cross_lingual.target_langs contains an invalid language tag %q "+
+						"(use \"auto\" or BCP-47 letters/digits/hyphen, e.g. \"en\" or \"pt-br\")", lang)
+				}
+			}
+		}
+		if _, dup := seen[l]; dup {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+	}
+	if len(out) == 0 {
+		c.CrossLingualTargetLangs = nil
+	} else {
+		c.CrossLingualTargetLangs = out
+	}
 	return nil
 }
 

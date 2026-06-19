@@ -196,6 +196,27 @@ type Service struct {
 	// ("fuse" = RRF-fuse the two; "replace" = use the hypothetical-document hits
 	// alone). Default "fuse". Wired from config.RetrievalHyDEMode.
 	hydeMode string
+	// crossLingualEnabled toggles server-side cross-lingual query expansion
+	// (#325): when true and crossLingualTranslator is set, Search translates the
+	// query into each resolved target language, retrieves per variant, and
+	// RRF-fuses the per-language result sets. Default false ⇒ unchanged behavior.
+	// Wired from config.CrossLingualEnabled at construction.
+	crossLingualEnabled bool
+	// crossLingualTargetLangs is the configured target-language list
+	// (config retrieval.cross_lingual.target_langs). Empty, or the "auto"
+	// sentinel, resolves to the corpus's detected languages via
+	// crossLingualCorpusLangsFn at query time. Tags are lower-cased.
+	crossLingualTargetLangs []string
+	// crossLingualTranslator is the reusable translate primitive (the chat
+	// Generator, SPEC §8.6.2). When nil, cross-lingual expansion is inert even if
+	// enabled (it degrades to the un-expanded search). Wired from the same
+	// translatorFromConfig binding the ingest pipeline uses.
+	crossLingualTranslator model.Generator
+	// crossLingualCorpusLangsFn returns the corpus's detected languages (#267)
+	// for the "auto" target resolution. nil ⇒ auto resolves to no targets (the
+	// expansion is a no-op), so an explicit list is required to expand on a store
+	// that cannot enumerate languages.
+	crossLingualCorpusLangsFn func() []string
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -507,6 +528,47 @@ func (s *Service) SetHyDE(enabled bool, mode string) {
 	defer s.metaMu.Unlock()
 	s.hydeEnabled = enabled
 	s.hydeMode = mode
+}
+
+// SetCrossLingual wires server-side cross-lingual query expansion (#325). When
+// enabled and translator is non-nil, Search translates the query into each
+// resolved target language, retrieves per variant, and RRF-fuses the result
+// sets so a query in one language surfaces content in the others. targetLangs is
+// the configured list (config retrieval.cross_lingual.target_langs); an empty
+// list or the "auto" sentinel resolves to the corpus's detected languages via
+// the provider registered with SetCorpusLanguagesProvider. Tags are lower-cased
+// and de-duplicated. Passing enabled=false or a nil translator leaves search
+// behavior unchanged. The engine wires this from config.CrossLingualEnabled /
+// config.CrossLingualTargetLangs at construction, mirroring SetMinScore.
+func (s *Service) SetCrossLingual(enabled bool, targetLangs []string, translator model.Generator) {
+	norm := make([]string, 0, len(targetLangs))
+	seen := make(map[string]struct{}, len(targetLangs))
+	for _, l := range targetLangs {
+		t := strings.ToLower(strings.TrimSpace(l))
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; dup {
+			continue
+		}
+		seen[t] = struct{}{}
+		norm = append(norm, t)
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.crossLingualEnabled = enabled
+	s.crossLingualTargetLangs = norm
+	s.crossLingualTranslator = translator
+}
+
+// SetCorpusLanguagesProvider registers a callback returning the corpus's
+// detected languages (#267), used to resolve the "auto" cross-lingual target
+// set. Passing nil clears it (auto then resolves to no targets). The callback is
+// invoked at query time so it always reflects the live corpus.
+func (s *Service) SetCorpusLanguagesProvider(fn func() []string) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.crossLingualCorpusLangsFn = fn
 }
 
 // SetDocumentHashes installs the rel_path → content_hash map used to group
@@ -831,7 +893,11 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 		k = 15
 	}
 
-	hits, err := s.searchWithHyDE(ctx, query, k)
+	// Cross-lingual query expansion (#325) wraps the HyDE/per-mode pipeline: when
+	// active it runs that pipeline once per query-language variant and RRF-fuses
+	// the result sets; when inactive it reduces to a single searchWithHyDE call,
+	// so the un-expanded path is unchanged.
+	hits, err := s.searchExpanded(ctx, query, k)
 	if err != nil {
 		return nil, err
 	}
@@ -841,16 +907,16 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// pass-through (no allocation, no lookups).
 	hits = s.applyRecencyDecay(ctx, hits)
 	// Apply the server-side relevance floor LAST: after scoring/fusion/rerank,
-	// the optional HyDE fusion, their dedup/truncation, and the recency decay,
-	// using each hit's final authoritative Score. Config-only; default 0 ⇒
-	// pass-through.
+	// the optional HyDE fusion, any cross-lingual fusion, their dedup/truncation,
+	// and the recency decay, using each hit's final authoritative Score.
+	// Config-only; default 0 ⇒ pass-through.
 	return s.applyMinScoreFloor(hits), nil
 }
 
 // searchByMode runs the index-mode dispatch (text/code/both/auto) for one query
 // text, returning up to k ranked hits. It is the shared retrieval primitive used
-// by both the raw query and — when the HyDE transform is enabled — the
-// hypothetical-document variant, so the two go through identical
+// by the raw query, the HyDE hypothetical-document variant (#333), and each
+// cross-lingual translated variant (#325), so all go through identical
 // fusion/rerank/dedup logic. allowRerank is forwarded to the single-index path
 // (the "both" path reranks internally on its merged pool regardless).
 func (s *Service) searchByMode(ctx context.Context, queryText string, k int, query model.SearchQuery, allowRerank bool) ([]model.SearchHit, error) {
