@@ -3550,7 +3550,7 @@ func (c *Config) validateRetrievalNumericBounds() error {
 		math.IsNaN(c.RetrievalMMRLambda) || math.IsInf(c.RetrievalMMRLambda, 0) {
 		return fmt.Errorf("retrieval.mmr.lambda must be within [0,1]: %v", c.RetrievalMMRLambda)
 	}
-	if err := c.validateHyDEMode(); err != nil {
+	if err := c.normalizeHyDEMode(); err != nil {
 		return err
 	}
 	if err := c.validateAdaptiveBounds(); err != nil {
@@ -3559,12 +3559,14 @@ func (c *Config) validateRetrievalNumericBounds() error {
 	return nil
 }
 
-// validateHyDEMode normalizes retrieval.hyde.mode (empty ⇒ "fuse") and rejects
-// any value other than "fuse"/"replace" so a typo fails at config time
-// (explicit, deterministic) rather than silently behaving like "fuse" at query
-// time. It runs regardless of RetrievalHyDEEnabled so a stale/misspelled mode is
-// caught even when HyDE is currently off.
-func (c *Config) validateHyDEMode() error {
+// normalizeHyDEMode normalizes retrieval.hyde.mode in place: empty becomes
+// "fuse" (the default) and a recognized value is lowercased; any other value is
+// CONFIG_INVALID so a typo fails at config time (explicit, deterministic) rather
+// than silently behaving like "fuse" at query time. It runs regardless of
+// RetrievalHyDEEnabled so a stale/misspelled mode is caught even when HyDE is
+// currently off. Extracted to keep validateRetrievalNumericBounds under the
+// cyclomatic budget.
+func (c *Config) normalizeHyDEMode() error {
 	switch mode := strings.ToLower(strings.TrimSpace(c.RetrievalHyDEMode)); mode {
 	case "":
 		c.RetrievalHyDEMode = HyDEModeFuse

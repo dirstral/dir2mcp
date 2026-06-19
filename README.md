@@ -607,6 +607,23 @@ An optional **recency time-decay** boosts newer content for dated corpora (news,
     recency_half_life: 0   # 0/empty disables; e.g. 720h halves a 30-day-old hit's score
   ```
 
+### HyDE query transform (optional)
+
+**HyDE** (Hypothetical Document Embeddings) generates a short hypothetical answer to the query, embeds *that*, and retrieves with it — often improving recall for terse or keyword-style queries by closing the query↔document style gap. It is **server-side and config-only** (not an MCP tool parameter), so it changes no tool input/output schema.
+
+- **Default off**: behavior is unchanged unless you enable it. Enabling it adds one generation call per search to produce the hypothetical answer.
+- **Graceful degradation**: a generation failure (or no configured generator) falls back to the raw query — HyDE is an optimization, never a hard dependency.
+- **Modes**:
+  - `fuse` (default): RRF-fuses the hypothetical-document hits with the raw-query hits.
+  - `replace`: retrieves with the hypothetical-document embedding alone.
+
+  ```yaml
+  retrieval:
+    hyde:
+      enabled: false   # set true to opt in
+      mode: fuse       # fuse (default) | replace
+  ```
+
 ### Auth token behavior
 
 `dir2mcp` bearer auth can come from:
