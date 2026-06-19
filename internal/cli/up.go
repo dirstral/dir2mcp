@@ -80,6 +80,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
 	ret.SetMinScore(cfg.RetrievalMinScore)
 	ret.SetRecencyHalfLife(cfg.RetrievalRecencyHalfLife)
+	ret.SetContextCompression(cfg.ContextCompressionEnabled, cfg.ContextCompressionTargetRatio)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that

@@ -823,6 +823,7 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	// to avoid contaminating that output; it never alters the result itself.
 	askMetricsEmitter := newNDJSONEmitter(a.stderr, true)
 	a.configureQueryMetrics(ret, cfg, askMetricsEmitter.Emit)
+	ret.SetContextCompression(cfg.ContextCompressionEnabled, cfg.ContextCompressionTargetRatio)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {

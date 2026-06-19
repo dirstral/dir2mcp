@@ -239,6 +239,23 @@ type Config struct {
 	// disabled (no decay): behavior is unchanged unless configured. Negative
 	// values are CONFIG_INVALID.
 	RetrievalRecencyHalfLife time.Duration
+	// ContextCompressionEnabled toggles evidence-guided context compression
+	// (config `retrieval.context_compression.enabled`): when true, the Ask path
+	// compresses the per-hit text that is sent to the generator — keeping only
+	// query-relevant sentences and dropping redundant ones — to cut prompt
+	// tokens and fit more evidence inside `rag.max_context_chars`. It is
+	// config-only (NOT an MCP tool parameter) so no tool input/output schema
+	// changes. It compresses ONLY the model-facing context: citations and the
+	// returned hits/snippets are never altered, so citation fidelity is
+	// preserved. Default false ⇒ unchanged behavior (raw snippets are sent).
+	ContextCompressionEnabled bool
+	// ContextCompressionTargetRatio bounds how aggressively a hit's text is
+	// compressed: the keeper keeps at most this fraction of the hit's original
+	// rune length (rounded up), always retaining at least the single most
+	// query-relevant sentence. Valid range (0,1]; 0 selects the built-in
+	// default (0.5). Values >1 or non-finite are CONFIG_INVALID. Ignored when
+	// ContextCompressionEnabled is false.
+	ContextCompressionTargetRatio float64
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -545,6 +562,8 @@ type fileConfig struct {
 	DedupRetrieval                     *bool
 	RetrievalMinScore                  *float64
 	RetrievalRecencyHalfLife           *time.Duration
+	ContextCompressionEnabled          *bool
+	ContextCompressionTargetRatio      *float64
 	RerankEnabled                      *bool
 	RerankProvider                     *string
 	CohereAPIKey                       *string
@@ -663,6 +682,8 @@ type persistedConfig struct {
 	DedupRetrieval                     bool          `yaml:"dedup_retrieval"`
 	RetrievalMinScore                  float64       `yaml:"retrieval_min_score"`
 	RetrievalRecencyHalfLife           time.Duration `yaml:"retrieval_recency_half_life"`
+	ContextCompressionEnabled          bool          `yaml:"context_compression_enabled"`
+	ContextCompressionTargetRatio      float64       `yaml:"context_compression_target_ratio"`
 	RerankEnabled                      bool          `yaml:"rerank_enabled"`
 	RerankProvider                     string        `yaml:"rerank_provider"`
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
@@ -825,6 +846,12 @@ func Default() Config {
 		// RetrievalRecencyHalfLife defaults to 0 (disabled): no time-decay is
 		// applied unless explicitly configured.
 		RetrievalRecencyHalfLife: 0,
+		// ContextCompressionEnabled defaults to false: the Ask path sends raw
+		// snippets unchanged unless compression is explicitly enabled.
+		ContextCompressionEnabled: false,
+		// ContextCompressionTargetRatio defaults to 0 (use the built-in 0.5
+		// keep-ratio); it only takes effect when compression is enabled.
+		ContextCompressionTargetRatio: 0,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -941,6 +968,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		DedupRetrieval:                     cfg.DedupRetrieval,
 		RetrievalMinScore:                  cfg.RetrievalMinScore,
 		RetrievalRecencyHalfLife:           cfg.RetrievalRecencyHalfLife,
+		ContextCompressionEnabled:          cfg.ContextCompressionEnabled,
+		ContextCompressionTargetRatio:      cfg.ContextCompressionTargetRatio,
 		RerankEnabled:                      rerankEnabledEffective(cfg),
 		RerankProvider:                     cfg.RerankProvider,
 		CohereBaseURL:                      cfg.CohereBaseURL,
@@ -1546,6 +1575,12 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalRecencyHalfLife != nil {
 		cfg.RetrievalRecencyHalfLife = *fc.RetrievalRecencyHalfLife
 	}
+	if fc.ContextCompressionEnabled != nil {
+		cfg.ContextCompressionEnabled = *fc.ContextCompressionEnabled
+	}
+	if fc.ContextCompressionTargetRatio != nil {
+		cfg.ContextCompressionTargetRatio = *fc.ContextCompressionTargetRatio
+	}
 	if fc.SessionInactivityTimeout != nil {
 		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
 	}
@@ -1961,6 +1996,9 @@ var configKeyAliases = map[string]string{
 	"min_score":                               "retrieval.min_score",
 	"retrieval_recency_half_life":             "retrieval.recency_half_life",
 	"recency_half_life":                       "retrieval.recency_half_life",
+	"context_compression_enabled":             "retrieval.context_compression.enabled",
+	"context_compression":                     "retrieval.context_compression.enabled",
+	"context_compression_target_ratio":        "retrieval.context_compression.target_ratio",
 	"rerank_enabled":                          "rerank.enabled",
 	"rerank.cohere.api_key":                   "cohere_api_key",
 	"rerank.cohere.base_url":                  "cohere_base_url",
@@ -2146,7 +2184,10 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"x402_tools_call_enabled":  func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
 	"retrieval.hybrid.enabled": func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
 	"dedup.retrieval":          func(c *fileConfig) **bool { return &c.DedupRetrieval },
-	"rerank.enabled":           func(c *fileConfig) **bool { return &c.RerankEnabled },
+	"retrieval.context_compression.enabled": func(c *fileConfig) **bool {
+		return &c.ContextCompressionEnabled
+	},
+	"rerank.enabled": func(c *fileConfig) **bool { return &c.RerankEnabled },
 	"distributed_embed_enabled": func(c *fileConfig) **bool {
 		return &c.DistributedEmbedEnabled
 	},
@@ -2232,6 +2273,8 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.MediaSilenceThresholdDB
 	case "retrieval.min_score":
 		target = &cfg.RetrievalMinScore
+	case "retrieval.context_compression.target_ratio":
+		target = &cfg.ContextCompressionTargetRatio
 	default:
 		return nil
 	}
@@ -2549,6 +2592,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("dedup_retrieval", cfg.DedupRetrieval)
 	writeScalar("retrieval_min_score", strconv.FormatFloat(cfg.RetrievalMinScore, 'f', -1, 64))
 	writeScalar("retrieval_recency_half_life", cfg.RetrievalRecencyHalfLife.String())
+	writeBool("context_compression_enabled", cfg.ContextCompressionEnabled)
+	writeScalar("context_compression_target_ratio", strconv.FormatFloat(cfg.ContextCompressionTargetRatio, 'f', -1, 64))
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -3287,19 +3332,34 @@ func (c *Config) validateNumericBounds() error {
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
 	}
-	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor is
-	// meaningless (it would never drop anything) so reject it explicitly. NaN/Inf
-	// are already rejected at parse time in setFloatFileScalar, but guard here too
-	// so a value injected programmatically (not via the file parser) still fails
-	// validation rather than silently corrupting the floor comparison.
+	if err := c.validateRetrievalNumericBounds(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateRetrievalNumericBounds validates the retrieval-tuning numeric knobs —
+// the min_score relevance floor (#305), the recency time-decay half-life (#323),
+// and the context-compression keep-ratio (#335) — extracted from
+// validateNumericBounds to keep it within the gocyclo budget. NaN/Inf are also
+// rejected at parse time, but are re-guarded here so a programmatically-injected
+// value still fails validation rather than silently corrupting behavior.
+func (c *Config) validateRetrievalNumericBounds() error {
+	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor
+	// would never drop anything, so reject it explicitly.
 	if c.RetrievalMinScore < 0 || math.IsNaN(c.RetrievalMinScore) || math.IsInf(c.RetrievalMinScore, 0) {
 		return fmt.Errorf("retrieval.min_score must be a non-negative finite number: %v", c.RetrievalMinScore)
 	}
 	// retrieval.recency_half_life is a time-decay half-life; 0 disables it. A
-	// negative half-life is meaningless (it would amplify rather than decay older
-	// content) so reject it explicitly, mirroring the min_score guard.
+	// negative half-life would amplify rather than decay older content.
 	if c.RetrievalRecencyHalfLife < 0 {
 		return fmt.Errorf("retrieval.recency_half_life must be non-negative: %v", c.RetrievalRecencyHalfLife)
+	}
+	// retrieval.context_compression.target_ratio is a keep-fraction in (0,1];
+	// 0 selects the built-in default at the retrieval layer.
+	if math.IsNaN(c.ContextCompressionTargetRatio) || math.IsInf(c.ContextCompressionTargetRatio, 0) ||
+		c.ContextCompressionTargetRatio < 0 || c.ContextCompressionTargetRatio > 1 {
+		return fmt.Errorf("retrieval.context_compression.target_ratio must be in [0,1] (0 = default): %v", c.ContextCompressionTargetRatio)
 	}
 	return nil
 }
