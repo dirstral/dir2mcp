@@ -57,6 +57,15 @@ func newContextCompressor(enabled bool, targetRatio float64) contextCompressor {
 	return contextCompressor{enabled: enabled, targetRatio: targetRatio}
 }
 
+// scoredSentence pairs a sentence with its original position, token set, and
+// query-relevance score.
+type scoredSentence struct {
+	idx    int
+	text   string
+	tokens map[string]struct{}
+	score  float64
+}
+
 // compressSnippet returns an evidence-filtered version of text relevant to
 // query. When compression is disabled, the input is too short to benefit, or no
 // query terms are available, the original text is returned unchanged. The result
@@ -66,18 +75,13 @@ func (c contextCompressor) compressSnippet(query, text string) string {
 		return text
 	}
 	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
+	if trimmed == "" || len([]rune(trimmed)) <= minSentenceRunes {
 		return text
 	}
-	if len([]rune(trimmed)) <= minSentenceRunes {
-		return text
-	}
-
 	sentences := splitSentences(trimmed)
 	if len(sentences) <= 1 {
 		return text
 	}
-
 	queryTerms := tokenSet(query)
 	if len(queryTerms) == 0 {
 		// Without query signal we cannot rank by relevance; leave the text as is
@@ -85,63 +89,9 @@ func (c contextCompressor) compressSnippet(query, text string) string {
 		return text
 	}
 
-	type scored struct {
-		idx    int
-		text   string
-		tokens map[string]struct{}
-		score  float64
-	}
-	ranked := make([]scored, 0, len(sentences))
-	for i, s := range sentences {
-		toks := tokenSet(s)
-		ranked = append(ranked, scored{
-			idx:    i,
-			text:   s,
-			tokens: toks,
-			score:  overlapScore(queryTerms, toks),
-		})
-	}
-
-	// Rank by descending relevance; ties keep original order for determinism.
-	sort.SliceStable(ranked, func(i, j int) bool {
-		if ranked[i].score == ranked[j].score {
-			return ranked[i].idx < ranked[j].idx
-		}
-		return ranked[i].score > ranked[j].score
-	})
-
-	budget := int(float64(len([]rune(trimmed)))*c.targetRatio + 0.999)
-	if budget < 1 {
-		budget = 1
-	}
-
-	keptIdx := make([]int, 0, len(ranked))
-	keptTokens := make([]map[string]struct{}, 0, len(ranked))
-	used := 0
-	for _, cand := range ranked {
-		// Always keep the single most relevant sentence (first in ranked order)
-		// so compression never drops all evidence, even if it overruns budget.
-		mostRelevant := len(keptIdx) == 0
-		if !mostRelevant {
-			// Beyond the guaranteed most-relevant sentence, only keep sentences
-			// that carry at least some query signal. Pure filler (score 0) is
-			// dropped even if budget remains — that is the whole point of
-			// evidence-guided compression. ranked is score-descending, so once
-			// we hit a zero-score candidate every remaining one is also zero.
-			if cand.score <= 0 {
-				break
-			}
-			if used >= budget {
-				break
-			}
-			if isRedundant(cand.tokens, keptTokens) {
-				continue
-			}
-		}
-		keptIdx = append(keptIdx, cand.idx)
-		keptTokens = append(keptTokens, cand.tokens)
-		used += len([]rune(cand.text)) + 1 // +1 for the joining space
-	}
+	ranked := rankSentences(sentences, queryTerms)
+	budget := c.budgetRunes(trimmed)
+	keptIdx := selectKeptSentences(ranked, budget)
 
 	// Re-emit kept sentences in original order for readability/fidelity.
 	sort.Ints(keptIdx)
@@ -155,6 +105,64 @@ func (c contextCompressor) compressSnippet(query, text string) string {
 		return text
 	}
 	return out
+}
+
+// budgetRunes returns the rune budget for kept sentences (ceil of ratio * len),
+// always at least 1.
+func (c contextCompressor) budgetRunes(trimmed string) int {
+	budget := int(float64(len([]rune(trimmed)))*c.targetRatio + 0.999)
+	if budget < 1 {
+		budget = 1
+	}
+	return budget
+}
+
+// rankSentences scores each sentence by query-relevance and returns them sorted
+// descending; ties keep original order for determinism.
+func rankSentences(sentences []string, queryTerms map[string]struct{}) []scoredSentence {
+	ranked := make([]scoredSentence, 0, len(sentences))
+	for i, s := range sentences {
+		toks := tokenSet(s)
+		ranked = append(ranked, scoredSentence{
+			idx:    i,
+			text:   s,
+			tokens: toks,
+			score:  overlapScore(queryTerms, toks),
+		})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score == ranked[j].score {
+			return ranked[i].idx < ranked[j].idx
+		}
+		return ranked[i].score > ranked[j].score
+	})
+	return ranked
+}
+
+// selectKeptSentences walks the score-descending ranking and returns the
+// original indices to keep. It always keeps the single most relevant sentence
+// (so evidence is never fully dropped); beyond that it keeps only sentences with
+// query signal, within the rune budget, that are not redundant with a kept one.
+func selectKeptSentences(ranked []scoredSentence, budget int) []int {
+	keptIdx := make([]int, 0, len(ranked))
+	keptTokens := make([]map[string]struct{}, 0, len(ranked))
+	used := 0
+	for _, cand := range ranked {
+		if len(keptIdx) > 0 {
+			// ranked is score-descending: once a zero-score candidate appears,
+			// every remaining one is filler too, so stop.
+			if cand.score <= 0 || used >= budget {
+				break
+			}
+			if isRedundant(cand.tokens, keptTokens) {
+				continue
+			}
+		}
+		keptIdx = append(keptIdx, cand.idx)
+		keptTokens = append(keptTokens, cand.tokens)
+		used += len([]rune(cand.text)) + 1 // +1 for the joining space
+	}
+	return keptIdx
 }
 
 // isRedundant reports whether cand's token set is mostly contained in any
