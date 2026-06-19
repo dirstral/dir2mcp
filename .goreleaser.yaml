@@ -75,23 +75,19 @@ brews:
 
 # Nix flake publisher (lean dir2mcp binary only; docling-full is out of
 # scope and ships via container/Homebrew). GoReleaser regenerates a versioned
-# flake derivation on every tag and pushes it to a flake repository, mirroring
-# how the Homebrew `brews` block above pushes to homebrew-tap.
+# flake derivation on every tag and pushes it to dirstral/nix-user-repository,
+# mirroring how the Homebrew `brews` block above pushes to homebrew-tap.
 #
-# TODO(maintainer): before the first real release with Nix enabled, confirm
-# the target flake repository below exists and that
-# NIX_USER_REPOSITORY_GITHUB_TOKEN (a PAT with `repo` scope on that repo) is
-# set as a repository secret, exactly like HOMEBREW_TAP_GITHUB_TOKEN. The repo
-# name `nix-user-repository` is a placeholder convention -- adjust owner/name
-# to the actual flake repo.
+# REQUIRED before the first release with this block on `main`:
+# set NIX_USER_REPOSITORY_GITHUB_TOKEN (a PAT with `repo` scope on
+# dirstral/nix-user-repository) as a repository secret on dir2mcp, exactly like
+# HOMEBREW_TAP_GITHUB_TOKEN. Without it, the nix publish step fails the release.
 nix:
   - name: dir2mcp
     ids:
       - dir2mcp-archive
     repository:
       owner: dirstral
-      # TODO(maintainer): create this repo (or rename to the real target) and
-      # provision the token below before enabling Nix publishing on a tag.
       name: nix-user-repository
       token: "{{ .Env.NIX_USER_REPOSITORY_GITHUB_TOKEN }}"
     homepage: https://github.com/dirstral/dir2mcp
