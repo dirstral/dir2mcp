@@ -22,7 +22,7 @@ go.setup            github.com/dirstral/dir2mcp 0.8.1 v
 categories          textproc devel
 platforms           darwin
 license             MIT
-maintainers         {github.com:REPLACE-with-your-handle} openmaintainer
+maintainers         @yidakra openmaintainer
 
 description         Deploy a local directory as an MCP knowledge server (lean binary)
 long_description    dir2mcp turns any local directory into a Model Context \
