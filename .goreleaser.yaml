@@ -73,6 +73,32 @@ brews:
       command cache, or open a new terminal.
 
 
+# Nix flake publisher (lean dir2mcp binary only; docling-full is out of
+# scope and ships via container/Homebrew). GoReleaser regenerates a versioned
+# flake derivation on every tag and pushes it to dirstral/nix-user-repository,
+# mirroring how the Homebrew `brews` block above pushes to homebrew-tap.
+#
+# REQUIRED before the first release with this block on `main`:
+# set NIX_USER_REPOSITORY_GITHUB_TOKEN (a PAT with `repo` scope on
+# dirstral/nix-user-repository) as a repository secret on dir2mcp, exactly like
+# HOMEBREW_TAP_GITHUB_TOKEN. Without it, the nix publish step fails the release.
+nix:
+  - name: dir2mcp
+    ids:
+      - dir2mcp-archive
+    repository:
+      owner: dirstral
+      name: nix-user-repository
+      token: "{{ .Env.NIX_USER_REPOSITORY_GITHUB_TOKEN }}"
+    homepage: https://github.com/dirstral/dir2mcp
+    description: Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations (lean binary).
+    license: mit
+    # Lean binary install; no docling runtime bundled.
+    install: |
+      mkdir -p $out/bin
+      cp -vr ./dir2mcp $out/bin/dir2mcp
+
+
 changelog:
   sort: asc
   filters:
