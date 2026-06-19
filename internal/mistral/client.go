@@ -230,6 +230,15 @@ type generateResponse struct {
 	Usage usage.OpenAIUsage `json:"usage"`
 }
 
+// reportUsage forwards a provider-reported usage object to the per-query sink
+// when present (issue #327). A missing usage object leaves the stage unknown
+// (not zero). Inert when no sink is attached to ctx.
+func reportUsage(ctx context.Context, stage usage.Stage, u usage.OpenAIUsage) {
+	if !u.Empty() {
+		usage.Report(ctx, stage, u.ToUsage())
+	}
+}
+
 func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
 	maxRetries := c.MaxRetries
 	if maxRetries < 0 {
@@ -320,9 +329,7 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		}
 	}
 
-	if !parsed.Usage.Empty() {
-		usage.Report(ctx, usage.StageEmbed, parsed.Usage.ToUsage())
-	}
+	reportUsage(ctx, usage.StageEmbed, parsed.Usage)
 
 	if len(parsed.Data) != len(inputs) {
 		return nil, &model.ProviderError{
@@ -936,9 +943,7 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 			Cause:     err,
 		}
 	}
-	if !parsed.Usage.Empty() {
-		usage.Report(ctx, usage.StageGenerate, parsed.Usage.ToUsage())
-	}
+	reportUsage(ctx, usage.StageGenerate, parsed.Usage)
 	if len(parsed.Choices) == 0 {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
