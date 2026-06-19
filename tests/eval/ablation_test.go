@@ -43,7 +43,10 @@ func runAblation(t *testing.T, corpus evalCorpus) []configMetrics {
 	t.Helper()
 	rows := make([]configMetrics, 0, len(ablationMatrix()))
 	for _, cfg := range ablationMatrix() {
-		svc := corpus.buildService(cfg)
+		svc, err := corpus.buildService(cfg)
+		if err != nil {
+			t.Fatalf("buildService(%s): %v", cfg.name, err)
+		}
 		perQuery := make([]RankedMetrics, 0, len(corpus.queries))
 		var totalHits int
 		for _, q := range corpus.queries {

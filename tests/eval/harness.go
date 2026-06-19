@@ -315,7 +315,7 @@ type knobConfig struct {
 // or cross-file dedup is requested (both rely on optional store capabilities);
 // otherwise the store is nil so the vector-only path is exercised exactly as in
 // the existing retrieval tests.
-func (c evalCorpus) buildService(cfg knobConfig) *retrieval.Service {
+func (c evalCorpus) buildService(cfg knobConfig) (*retrieval.Service, error) {
 	idx := index.NewHNSWIndex("")
 	for _, d := range c.docs {
 		payload := model.IndexPayload{
@@ -324,9 +324,9 @@ func (c evalCorpus) buildService(cfg knobConfig) *retrieval.Service {
 			DocType:  d.DocType,
 			Language: d.Language,
 		}
-		// Upsert errors are impossible for well-formed fixtures (validated in
-		// loadCorpus); ignore to keep buildService allocation-free of *testing.T.
-		_ = idx.Upsert(context.Background(), normalizeVec(d.Vector), payload)
+		if err := idx.Upsert(context.Background(), normalizeVec(d.Vector), payload); err != nil {
+			return nil, fmt.Errorf("upsert fixture chunk %d (%s): %w", d.ChunkID, d.RelPath, err)
+		}
 	}
 
 	var store model.Store
@@ -342,9 +342,11 @@ func (c evalCorpus) buildService(cfg knobConfig) *retrieval.Service {
 	svc.SetHybridEnabled(cfg.hybrid)
 	svc.SetCrossFileDedupEnabled(cfg.crossFileDD)
 	if cfg.crossFileDD {
-		if hashes, err := newBM25Store(c.docs).ListDocumentHashes(context.Background()); err == nil {
-			svc.SetDocumentHashes(hashes)
+		hashes, err := newBM25Store(c.docs).ListDocumentHashes(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("list document hashes for dedup: %w", err)
 		}
+		svc.SetDocumentHashes(hashes)
 	}
 	svc.SetMinScore(cfg.minScore)
 	if cfg.rerank {
@@ -362,7 +364,7 @@ func (c evalCorpus) buildService(cfg knobConfig) *retrieval.Service {
 			Language: d.Language,
 		})
 	}
-	return svc
+	return svc, nil
 }
 
 // runQuery executes one labeled query against svc and returns the retrieved
