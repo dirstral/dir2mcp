@@ -27,7 +27,7 @@ maintainers         @yidakra openmaintainer
 description         Deploy a local directory as an MCP knowledge server (lean binary)
 long_description    dir2mcp turns any local directory into a Model Context \
                     Protocol knowledge server with indexing, retrieval, and \
-                    citations. This is the lean build; structured PDF/image \
+                    citations. This is the lean build. Structured PDF/image \
                     extraction via docling is optional (bring-your-own, \
                     docling-serve, or Mistral OCR).
 
