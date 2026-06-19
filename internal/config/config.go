@@ -256,6 +256,22 @@ type Config struct {
 	// default (0.5). Values >1 or non-finite are CONFIG_INVALID. Ignored when
 	// ContextCompressionEnabled is false.
 	ContextCompressionTargetRatio float64
+	// RetrievalAdaptiveEnabled toggles the opt-in, training-free adaptive
+	// retrieval gate (config `retrieval.adaptive.enabled`). When false
+	// (default) Ask uses today's fixed-k behavior unchanged. When true a
+	// cheap, deterministic per-query heuristic decides whether retrieval is
+	// needed (skip trivial queries) and adjusts k within
+	// [RetrievalAdaptiveKMin, RetrievalAdaptiveKMax] (narrow easy queries,
+	// widen hard ones). It is config-only (NOT an MCP tool parameter): no tool
+	// input/output schema change, so it is ungated. See SPEC 9 (retrieval).
+	RetrievalAdaptiveEnabled bool
+	// RetrievalAdaptiveKMin / RetrievalAdaptiveKMax bound the dynamic k chosen
+	// by the adaptive gate when enabled. The gate never returns k outside
+	// [k_min, k_max]; the base k (rag.k_default or a caller-supplied k) is
+	// clamped into this window. 0 means "use the built-in default" (see
+	// defaultConfig). Ignored entirely when RetrievalAdaptiveEnabled is false.
+	RetrievalAdaptiveKMin int
+	RetrievalAdaptiveKMax int
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -564,6 +580,9 @@ type fileConfig struct {
 	RetrievalRecencyHalfLife           *time.Duration
 	ContextCompressionEnabled          *bool
 	ContextCompressionTargetRatio      *float64
+	RetrievalAdaptiveEnabled           *bool
+	RetrievalAdaptiveKMin              *int
+	RetrievalAdaptiveKMax              *int
 	RerankEnabled                      *bool
 	RerankProvider                     *string
 	CohereAPIKey                       *string
@@ -684,6 +703,9 @@ type persistedConfig struct {
 	RetrievalRecencyHalfLife           time.Duration `yaml:"retrieval_recency_half_life"`
 	ContextCompressionEnabled          bool          `yaml:"context_compression_enabled"`
 	ContextCompressionTargetRatio      float64       `yaml:"context_compression_target_ratio"`
+	RetrievalAdaptiveEnabled           bool          `yaml:"retrieval_adaptive_enabled"`
+	RetrievalAdaptiveKMin              int           `yaml:"retrieval_adaptive_k_min"`
+	RetrievalAdaptiveKMax              int           `yaml:"retrieval_adaptive_k_max"`
 	RerankEnabled                      bool          `yaml:"rerank_enabled"`
 	RerankProvider                     string        `yaml:"rerank_provider"`
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
@@ -852,6 +874,14 @@ func Default() Config {
 		// ContextCompressionTargetRatio defaults to 0 (use the built-in 0.5
 		// keep-ratio); it only takes effect when compression is enabled.
 		ContextCompressionTargetRatio: 0,
+		// RetrievalAdaptiveEnabled defaults to false: the adaptive retrieval
+		// gate is opt-in, so behavior is today's fixed-k path unless enabled.
+		RetrievalAdaptiveEnabled: false,
+		// RetrievalAdaptiveKMin / RetrievalAdaptiveKMax bound the dynamic k the
+		// gate may choose. These defaults give the heuristic room to narrow easy
+		// queries and widen hard ones around the typical rag.k_default (10).
+		RetrievalAdaptiveKMin: 4,
+		RetrievalAdaptiveKMax: 30,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -970,6 +1000,9 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalRecencyHalfLife:           cfg.RetrievalRecencyHalfLife,
 		ContextCompressionEnabled:          cfg.ContextCompressionEnabled,
 		ContextCompressionTargetRatio:      cfg.ContextCompressionTargetRatio,
+		RetrievalAdaptiveEnabled:           cfg.RetrievalAdaptiveEnabled,
+		RetrievalAdaptiveKMin:              cfg.RetrievalAdaptiveKMin,
+		RetrievalAdaptiveKMax:              cfg.RetrievalAdaptiveKMax,
 		RerankEnabled:                      rerankEnabledEffective(cfg),
 		RerankProvider:                     cfg.RerankProvider,
 		CohereBaseURL:                      cfg.CohereBaseURL,
@@ -1581,6 +1614,15 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.ContextCompressionTargetRatio != nil {
 		cfg.ContextCompressionTargetRatio = *fc.ContextCompressionTargetRatio
 	}
+	if fc.RetrievalAdaptiveEnabled != nil {
+		cfg.RetrievalAdaptiveEnabled = *fc.RetrievalAdaptiveEnabled
+	}
+	if fc.RetrievalAdaptiveKMin != nil {
+		cfg.RetrievalAdaptiveKMin = *fc.RetrievalAdaptiveKMin
+	}
+	if fc.RetrievalAdaptiveKMax != nil {
+		cfg.RetrievalAdaptiveKMax = *fc.RetrievalAdaptiveKMax
+	}
 	if fc.SessionInactivityTimeout != nil {
 		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
 	}
@@ -1999,6 +2041,12 @@ var configKeyAliases = map[string]string{
 	"context_compression_enabled":             "retrieval.context_compression.enabled",
 	"context_compression":                     "retrieval.context_compression.enabled",
 	"context_compression_target_ratio":        "retrieval.context_compression.target_ratio",
+	"retrieval_adaptive_enabled":              "retrieval.adaptive.enabled",
+	"adaptive_enabled":                        "retrieval.adaptive.enabled",
+	"retrieval_adaptive_k_min":                "retrieval.adaptive.k_min",
+	"adaptive_k_min":                          "retrieval.adaptive.k_min",
+	"retrieval_adaptive_k_max":                "retrieval.adaptive.k_max",
+	"adaptive_k_max":                          "retrieval.adaptive.k_max",
 	"rerank_enabled":                          "rerank.enabled",
 	"rerank.cohere.api_key":                   "cohere_api_key",
 	"rerank.cohere.base_url":                  "cohere_base_url",
@@ -2108,7 +2156,7 @@ func canonicalizeConfigKey(key string) string {
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -2177,13 +2225,14 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"media.trim_leading_silence": func(c *fileConfig) **bool {
 		return &c.MediaTrimLeadingSilence
 	},
-	"media.vad":                func(c *fileConfig) **bool { return &c.MediaVAD },
-	"media.diarize.enabled":    func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
-	"media.batch.two_phase":    func(c *fileConfig) **bool { return &c.MediaBatchTwoPhase },
-	"media.batch.progress":     func(c *fileConfig) **bool { return &c.MediaBatchProgress },
-	"x402_tools_call_enabled":  func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
-	"retrieval.hybrid.enabled": func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
-	"dedup.retrieval":          func(c *fileConfig) **bool { return &c.DedupRetrieval },
+	"media.vad":                  func(c *fileConfig) **bool { return &c.MediaVAD },
+	"media.diarize.enabled":      func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
+	"media.batch.two_phase":      func(c *fileConfig) **bool { return &c.MediaBatchTwoPhase },
+	"media.batch.progress":       func(c *fileConfig) **bool { return &c.MediaBatchProgress },
+	"x402_tools_call_enabled":    func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
+	"retrieval.hybrid.enabled":   func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
+	"retrieval.adaptive.enabled": func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
+	"dedup.retrieval":            func(c *fileConfig) **bool { return &c.DedupRetrieval },
 	"retrieval.context_compression.enabled": func(c *fileConfig) **bool {
 		return &c.ContextCompressionEnabled
 	},
@@ -2217,6 +2266,8 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"rate_limit_rps":             func(c *fileConfig) **int { return &c.RateLimitRPS },
 	"rate_limit_burst":           func(c *fileConfig) **int { return &c.RateLimitBurst },
 	"rag.k_default":              func(c *fileConfig) **int { return &c.RAGKDefault },
+	"retrieval.adaptive.k_min":   func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMin },
+	"retrieval.adaptive.k_max":   func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMax },
 	"rag.max_context_chars":      func(c *fileConfig) **int { return &c.RAGMaxContextChars },
 	"rag.oversample_factor":      func(c *fileConfig) **int { return &c.RAGOversampleFactor },
 	"chunking.max_tokens":        func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
@@ -2256,6 +2307,8 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 // be negative. A negative value is rejected at config-parse time (explicit,
 // deterministic) rather than being silently clamped later.
 var nonNegativeIntKeys = map[string]bool{
+	"retrieval.adaptive.k_min":                true,
+	"retrieval.adaptive.k_max":                true,
 	"media.audio_window_sec":                  true,
 	"media.video_window_sec":                  true,
 	"media.clip.max_duration_ms":              true,
@@ -2594,6 +2647,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("retrieval_recency_half_life", cfg.RetrievalRecencyHalfLife.String())
 	writeBool("context_compression_enabled", cfg.ContextCompressionEnabled)
 	writeScalar("context_compression_target_ratio", strconv.FormatFloat(cfg.ContextCompressionTargetRatio, 'f', -1, 64))
+	writeBool("retrieval_adaptive_enabled", cfg.RetrievalAdaptiveEnabled)
+	writeInt("retrieval_adaptive_k_min", cfg.RetrievalAdaptiveKMin)
+	writeInt("retrieval_adaptive_k_max", cfg.RetrievalAdaptiveKMax)
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -2908,6 +2964,21 @@ func applyBoolEnvField(field *bool, key string, env map[string]string) {
 	if raw, ok := envLookup(key, env); ok && strings.TrimSpace(raw) != "" {
 		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
 			*field = parsed
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_ADAPTIVE_ENABLED", env); ok && strings.TrimSpace(raw) != "" {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			cfg.RetrievalAdaptiveEnabled = parsed
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_ADAPTIVE_K_MIN", env); ok && strings.TrimSpace(raw) != "" {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+			cfg.RetrievalAdaptiveKMin = parsed
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_ADAPTIVE_K_MAX", env); ok && strings.TrimSpace(raw) != "" {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+			cfg.RetrievalAdaptiveKMax = parsed
 		}
 	}
 }
@@ -3360,6 +3431,23 @@ func (c *Config) validateRetrievalNumericBounds() error {
 	if math.IsNaN(c.ContextCompressionTargetRatio) || math.IsInf(c.ContextCompressionTargetRatio, 0) ||
 		c.ContextCompressionTargetRatio < 0 || c.ContextCompressionTargetRatio > 1 {
 		return fmt.Errorf("retrieval.context_compression.target_ratio must be in [0,1] (0 = default): %v", c.ContextCompressionTargetRatio)
+	}
+	// Adaptive-gate k bounds: negative values are meaningless and an inverted
+	// window (k_min > k_max) would make clamping ill-defined. Reject both at
+	// validation time (explicit, deterministic) rather than silently clamping.
+	// A bound of 0 is allowed and means "use the built-in default" at apply
+	// time, so it is not flagged here. Only checked when the gate is enabled so
+	// disabled deployments are never affected.
+	if c.RetrievalAdaptiveEnabled {
+		if c.RetrievalAdaptiveKMin < 0 {
+			return fmt.Errorf("retrieval.adaptive.k_min must be non-negative: %d", c.RetrievalAdaptiveKMin)
+		}
+		if c.RetrievalAdaptiveKMax < 0 {
+			return fmt.Errorf("retrieval.adaptive.k_max must be non-negative: %d", c.RetrievalAdaptiveKMax)
+		}
+		if c.RetrievalAdaptiveKMin > 0 && c.RetrievalAdaptiveKMax > 0 && c.RetrievalAdaptiveKMin > c.RetrievalAdaptiveKMax {
+			return fmt.Errorf("retrieval.adaptive.k_min (%d) must not exceed retrieval.adaptive.k_max (%d)", c.RetrievalAdaptiveKMin, c.RetrievalAdaptiveKMax)
+		}
 	}
 	return nil
 }
