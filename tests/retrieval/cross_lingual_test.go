@@ -71,8 +71,8 @@ func (v *vectorRoutingIndex) Close() error                             { return 
 // translation fail (to exercise graceful degradation). callsByLang records how
 // many times each target language was requested.
 type fakeTranslator struct {
-	byLang     map[string]string
-	errForLang map[string]error
+	byLang      map[string]string
+	errForLang  map[string]error
 	callsByLang map[string]int
 }
 
