@@ -12,6 +12,7 @@ package usage
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // Stage identifies one provider-backed phase of a query.
@@ -56,19 +57,54 @@ func (u *Usage) add(other Usage) {
 	u.Reported = true
 }
 
-// Sink is a thread-safe, per-query accumulator of provider token usage keyed
-// by stage. It is attached to a context so provider clients can report usage
-// without any change to the model interfaces. A nil Sink (the default) makes
-// Report a no-op, so providers behave exactly as before when observability is
-// not wired.
+// Sink is a thread-safe, per-query accumulator of provider token usage and
+// per-stage wall-clock latency, keyed by stage. It is attached to a context so
+// provider clients can report usage without any change to the model
+// interfaces, and so the retrieval service can record stage latency near each
+// provider call. A nil Sink (the default) makes all methods no-ops, so the
+// system behaves exactly as before when observability is not wired.
 type Sink struct {
-	mu      sync.Mutex
-	byStage map[Stage]Usage
+	mu        sync.Mutex
+	byStage   map[Stage]Usage
+	latencies map[Stage]time.Duration
 }
 
 // NewSink returns an empty Sink ready for concurrent use.
 func NewSink() *Sink {
-	return &Sink{byStage: make(map[Stage]Usage)}
+	return &Sink{
+		byStage:   make(map[Stage]Usage),
+		latencies: make(map[Stage]time.Duration),
+	}
+}
+
+// AddLatency accumulates wall-clock latency for a stage. Safe on a nil Sink.
+func (s *Sink) AddLatency(stage Stage, d time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latencies[stage] += d
+}
+
+// Latency returns the accumulated latency recorded for a stage.
+func (s *Sink) Latency(stage Stage) time.Duration {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latencies[stage]
+}
+
+// TimeStage runs fn, recording its wall-clock duration against stage. The
+// stage is recorded even when fn returns an error so a failed provider call
+// still contributes latency. Safe on a nil Sink (fn still runs).
+func (s *Sink) TimeStage(stage Stage, fn func() error) error {
+	start := time.Now()
+	err := fn()
+	s.AddLatency(stage, time.Since(start))
+	return err
 }
 
 // Report records usage for a stage. Safe to call concurrently and on a nil
@@ -126,4 +162,11 @@ func SinkFrom(ctx context.Context) *Sink {
 // call sites a single line and inert when no sink is attached.
 func Report(ctx context.Context, stage Stage, u Usage) {
 	SinkFrom(ctx).Report(stage, u)
+}
+
+// TimeStage runs fn, recording its wall-clock duration against stage on the
+// Sink attached to ctx (if any). Inert (but still runs fn) when no sink is
+// attached.
+func TimeStage(ctx context.Context, stage Stage, fn func() error) error {
+	return SinkFrom(ctx).TimeStage(stage, fn)
 }

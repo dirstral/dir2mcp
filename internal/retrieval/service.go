@@ -17,8 +17,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 var (
@@ -129,6 +131,17 @@ type Service struct {
 	// config-only (never an MCP tool parameter). Default 0 ⇒ disabled
 	// (pass-through). Wired from config.RetrievalMinScore at construction.
 	minScore float64
+	// genModel is the resolved chat/generation model name, used only to label
+	// and price the generate stage in per-query metrics (issue #327). Empty
+	// when no generator is configured. Never affects retrieval behavior.
+	genModel string
+	// priceTable maps model names to approximate USD prices for the
+	// query_metrics event (issue #327). nil ⇒ cost is always omitted.
+	priceTable *usage.PriceTable
+	// metricsEmit, when set, receives one structured query_metrics event per
+	// Ask/Search (issue #327). nil ⇒ metrics collection is skipped entirely
+	// (zero overhead). It never alters tool results.
+	metricsEmit func(level, event string, data interface{})
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -205,6 +218,87 @@ func (s *Service) SetRerankEnabled(enabled bool) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.rerankEnabled = enabled
+}
+
+// SetGenerationModel records the resolved chat/generation model name used to
+// label and price the generate stage in per-query metrics (issue #327). It has
+// no effect on retrieval or generation behavior.
+func (s *Service) SetGenerationModel(modelName string) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.genModel = strings.TrimSpace(modelName)
+}
+
+// SetMetricsEmitter wires per-query cost/latency observability (issue #327).
+// emit receives a single structured `query_metrics` event per Ask/Search;
+// prices maps model names to USD costs (nil ⇒ cost omitted). Passing a nil
+// emit disables metrics collection entirely. Metrics never change tool results.
+func (s *Service) SetMetricsEmitter(emit func(level, event string, data interface{}), prices *usage.PriceTable) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.metricsEmit = emit
+	s.priceTable = prices
+}
+
+// metricsEnabled reports whether a metrics emitter is wired.
+func (s *Service) metricsEnabled() bool {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	return s.metricsEmit != nil
+}
+
+// emitQueryMetrics builds a query_metrics event from the per-query sink and
+// surfaces it via the structured emitter plus a concise log line. It records
+// per-stage latency (always) and token usage + cost (where the provider
+// reported usage and the model is priced). It records counts/costs/latency
+// only — never prompts, documents, or keys. A nil sink or unset emitter is a
+// no-op. This is observability only; it never affects tool results (#327).
+func (s *Service) emitQueryMetrics(op string, sink *usage.Sink, total time.Duration) {
+	if sink == nil {
+		return
+	}
+	s.metaMu.RLock()
+	emit := s.metricsEmit
+	prices := s.priceTable
+	textModel := s.textModel
+	codeModel := s.codeModel
+	rerankModel := s.rerankModel
+	genModel := s.genModel
+	s.metaMu.RUnlock()
+	if emit == nil {
+		return
+	}
+
+	qm := usage.NewQueryMetrics(op, prices)
+
+	// Embed: prefer the text model label; fall back to code model. Embedding is
+	// symmetric across the two for pricing purposes here.
+	embedModel := textModel
+	if embedModel == "" {
+		embedModel = codeModel
+	}
+	if lat := sink.Latency(usage.StageEmbed); lat > 0 || hasStageUsage(sink, usage.StageEmbed) {
+		u, reported := sink.Stage(usage.StageEmbed)
+		qm.RecordStage(usage.StageEmbed, embedModel, lat, u, reported)
+	}
+	if lat := sink.Latency(usage.StageRerank); lat > 0 {
+		u, reported := sink.Stage(usage.StageRerank)
+		qm.RecordStage(usage.StageRerank, rerankModel, lat, u, reported)
+	}
+	if lat := sink.Latency(usage.StageGenerate); lat > 0 || hasStageUsage(sink, usage.StageGenerate) {
+		u, reported := sink.Stage(usage.StageGenerate)
+		qm.RecordStage(usage.StageGenerate, genModel, lat, u, reported)
+	}
+	qm.SetTotalLatency(total)
+
+	emit("info", "query_metrics", qm.Event())
+	s.logf("%s", qm.LogLine())
+}
+
+// hasStageUsage reports whether the sink recorded provider usage for a stage.
+func hasStageUsage(sink *usage.Sink, stage usage.Stage) bool {
+	_, ok := sink.Stage(stage)
+	return ok
 }
 
 // SetCrossFileDedupEnabled toggles retrieval-time cross-file de-duplication
@@ -528,6 +622,22 @@ func (s *Service) SetOverfetchMultiplier(m int) {
 }
 
 func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, error) {
+	// When metrics are enabled, attach a per-query usage sink and emit one
+	// query_metrics event for the search. When Ask calls Search internally it
+	// installs its own sink first; we detect that and skip double-emitting so a
+	// single `ask` produces exactly one event (issue #327).
+	if s.metricsEnabled() && usage.SinkFrom(ctx) == nil {
+		sink := usage.NewSink()
+		ctx = usage.WithSink(ctx, sink)
+		start := time.Now()
+		hits, err := s.search(ctx, query)
+		s.emitQueryMetrics("search", sink, time.Since(start))
+		return hits, err
+	}
+	return s.search(ctx, query)
+}
+
+func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, error) {
 	s.metaMu.RLock()
 	textModel := s.textModel
 	codeModel := s.codeModel
@@ -609,7 +719,22 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		query.K = 15
 	}
 
-	hits, err := s.Search(ctx, query)
+	// Install a per-query usage sink so embed/rerank/generate token usage and
+	// latency for this ask are accumulated and emitted as a single
+	// query_metrics event. Calling s.search (not s.Search) keeps the sink
+	// owned here, so the nested search does not emit its own event (#327).
+	var (
+		sink     *usage.Sink
+		askStart time.Time
+	)
+	if s.metricsEnabled() {
+		sink = usage.NewSink()
+		ctx = usage.WithSink(ctx, sink)
+		askStart = time.Now()
+		defer func() { s.emitQueryMetrics("ask", sink, time.Since(askStart)) }()
+	}
+
+	hits, err := s.search(ctx, query)
 	if err != nil {
 		return model.AskResult{}, err
 	}
@@ -631,7 +756,12 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		maxContextChars := s.ragMaxContextChars
 		s.metaMu.RUnlock()
 		prompt := buildRAGPrompt(question, hits, systemPrompt, maxContextChars)
-		generated, genErr := s.gen.Generate(ctx, prompt)
+		var generated string
+		genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
+			var gErr error
+			generated, gErr = s.gen.Generate(ctx, prompt)
+			return gErr
+		})
 		if genErr != nil {
 			// log the error so callers have visibility; fall back to the
 			// precomputed answer when generation fails.  avoid recording the
@@ -1275,7 +1405,12 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 		// error rather than letting the nil dereference panic later.
 		return nil, ErrMissingEmbedder
 	}
-	vectors, err := s.embedder.Embed(ctx, modelName, model.EmbedQuery, []string{query})
+	var vectors [][]float32
+	err := usage.TimeStage(ctx, usage.StageEmbed, func() error {
+		var embErr error
+		vectors, embErr = s.embedder.Embed(ctx, modelName, model.EmbedQuery, []string{query})
+		return embErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1471,7 +1606,12 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	for i, h := range cand {
 		docs[i] = h.Snippet
 	}
-	results, err := rr.Rerank(ctx, rmodel, query, docs, k)
+	var results []model.Reranked
+	err := usage.TimeStage(ctx, usage.StageRerank, func() error {
+		var rerr error
+		results, rerr = rr.Rerank(ctx, rmodel, query, docs, k)
+		return rerr
+	})
 	if err != nil || len(results) == 0 {
 		if err != nil {
 			s.logf("rerank: provider error, falling back to fused order: %v", err)

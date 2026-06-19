@@ -31,6 +31,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const (
@@ -654,6 +655,29 @@ func (a *App) resolveModelClients(cfg config.Config) (model.Embedder, model.Gene
 	return embedder, gen, textModel, codeModel
 }
 
+// resolveChatModel returns the resolved chat/generation model name, used only
+// to label and price the generate stage in per-query metrics (issue #327).
+// Returns "" when no chat provider resolves.
+func (a *App) resolveChatModel(cfg config.Config) string {
+	cp, err := cfg.Providers().Resolve(provider.CapChat)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cp.ChatModel)
+}
+
+// configureQueryMetrics wires per-query cost/latency observability onto the
+// retrieval service (issue #327): a structured query_metrics emitter, the
+// configured price table, and the resolved generation model label. Additive
+// and always-on; it never alters tool results. Shared by `up` and `ask`.
+func (a *App) configureQueryMetrics(ret *retrieval.Service, cfg config.Config, emit func(level, event string, data interface{})) {
+	if emit == nil {
+		return
+	}
+	ret.SetGenerationModel(a.resolveChatModel(cfg))
+	ret.SetMetricsEmitter(emit, usage.NewPriceTable(cfg.CostPriceOverrides))
+}
+
 // configureReranker wires the optional Cohere rerank stage onto the
 // retrieval service through the resolver (SPEC 8.1.3). cfg.RerankEnabled
 // is a tri-state override:
@@ -755,6 +779,12 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 	a.configureReranker(ret, cfg)
 	ret.SetMinScore(cfg.RetrievalMinScore)
+
+	// Per-query cost/latency observability (issue #327). The ask CLI writes its
+	// result (often JSON) to stdout, so route the query_metrics event to stderr
+	// to avoid contaminating that output; it never alters the result itself.
+	askMetricsEmitter := newNDJSONEmitter(a.stderr, true)
+	a.configureQueryMetrics(ret, cfg, askMetricsEmitter.Emit)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {

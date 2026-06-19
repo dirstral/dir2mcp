@@ -85,6 +85,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// bootstrap step as structured events (see dirstral-spec/docs/SPEC.md for NDJSON schema).
 	emitter := newNDJSONEmitter(a.stdout, opts.jsonOutput)
 
+	// Wire per-query cost/latency observability (issue #327): always-on,
+	// additive, never alters tool results. Emits one query_metrics event per
+	// ask/search via the structured emitter plus a concise log line.
+	a.configureQueryMetrics(ret, cfg, emitter.Emit)
+
 	// Load the cross-file dedup hash map AFTER the emitter exists so a load
 	// failure is reported as a structured NDJSON warning event (machine-parseable
 	// in JSON/automation flows), consistent with other bootstrap steps.
