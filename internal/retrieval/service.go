@@ -942,7 +942,7 @@ func (s *Service) generateHyDEDocument(ctx context.Context, gen model.Generator,
 	prompt := buildHyDEPrompt(queryText)
 	generated, err := gen.Generate(ctx, prompt)
 	if err != nil {
-		s.logf("hyde: generation failed for query %q, falling back to raw query: %v", truncateQuestion(queryText), err)
+		s.logf("hyde: generation failed, falling back to raw query: %v", err)
 		return ""
 	}
 	return truncateHyDEAnswer(generated)
