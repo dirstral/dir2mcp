@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const (
@@ -327,6 +328,29 @@ type chatResponse struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"message"`
+	// Cohere v2 reports token usage nested under usage.tokens (input/output).
+	Usage struct {
+		Tokens struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"tokens"`
+	} `json:"usage"`
+}
+
+// tokenUsage normalizes the nested Cohere usage into the shared Usage shape,
+// returning ok=false when no counts were present.
+func (r chatResponse) tokenUsage() (usage.Usage, bool) {
+	in := r.Usage.Tokens.InputTokens
+	out := r.Usage.Tokens.OutputTokens
+	if in == 0 && out == 0 {
+		return usage.Usage{}, false
+	}
+	return usage.Usage{
+		PromptTokens:     in,
+		CompletionTokens: out,
+		TotalTokens:      in + out,
+		Reported:         true,
+	}, true
 }
 
 // Generate implements model.Generator via Cohere's v2 /v2/chat endpoint.
@@ -367,6 +391,9 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 	var parsed chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return "", &model.ProviderError{Code: "COHERE_FAILED", Message: "failed to decode generation response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if u, ok := parsed.tokenUsage(); ok {
+		usage.Report(ctx, usage.StageGenerate, u)
 	}
 	var b strings.Builder
 	for _, p := range parsed.Message.Content {

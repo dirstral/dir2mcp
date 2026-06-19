@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const (
@@ -403,6 +404,7 @@ type generateResponse struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage usage.OpenAIUsage `json:"usage"`
 }
 
 // Generate implements model.Generator via {base}/chat/completions.
@@ -467,6 +469,9 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 	var parsed generateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode generation response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if !parsed.Usage.Empty() {
+		usage.Report(ctx, usage.StageGenerate, parsed.Usage.ToUsage())
 	}
 	if len(parsed.Choices) == 0 {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "generation response had no choices", Retryable: false, StatusCode: resp.StatusCode}

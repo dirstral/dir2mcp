@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const (
@@ -176,7 +177,8 @@ type embedDataItem struct {
 }
 
 type embedResponse struct {
-	Data []embedDataItem `json:"data"`
+	Data  []embedDataItem   `json:"data"`
+	Usage usage.OpenAIUsage `json:"usage"`
 }
 
 type ocrRequest struct {
@@ -225,6 +227,7 @@ type generateResponse struct {
 			Content interface{} `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage usage.OpenAIUsage `json:"usage"`
 }
 
 func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
@@ -315,6 +318,10 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 			StatusCode: resp.StatusCode,
 			Cause:      err,
 		}
+	}
+
+	if !parsed.Usage.Empty() {
+		usage.Report(ctx, usage.StageEmbed, parsed.Usage.ToUsage())
 	}
 
 	if len(parsed.Data) != len(inputs) {
@@ -928,6 +935,9 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 			Retryable: false,
 			Cause:     err,
 		}
+	}
+	if !parsed.Usage.Empty() {
+		usage.Report(ctx, usage.StageGenerate, parsed.Usage.ToUsage())
 	}
 	if len(parsed.Choices) == 0 {
 		return "", &model.ProviderError{
