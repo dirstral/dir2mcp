@@ -163,6 +163,18 @@ type Service struct {
 	// citations. Default disabled ⇒ raw snippets are sent unchanged. Wired from
 	// config.ContextCompression* via SetContextCompression at construction.
 	compressor contextCompressor
+	// adaptiveEnabled toggles the opt-in, training-free retrieval gate
+	// (config retrieval.adaptive.enabled). Default false ⇒ Ask uses today's
+	// fixed-k path. When true, Ask consults adaptiveGate to decide whether to
+	// retrieve and what k to use, bounded by [adaptiveKMin, adaptiveKMax].
+	// Config-only — never an MCP tool parameter. Wired via SetAdaptiveRetrieval.
+	adaptiveEnabled bool
+	// adaptiveKMin / adaptiveKMax bound the dynamic k chosen by the gate. They
+	// are sanitized at wiring time (SetAdaptiveRetrieval) to 1 <= min <= max so
+	// the gate never emits an out-of-range k. Ignored when adaptiveEnabled is
+	// false.
+	adaptiveKMin int
+	adaptiveKMax int
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -398,6 +410,41 @@ func (s *Service) SetContextCompression(enabled bool, targetRatio float64) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.compressor = newContextCompressor(enabled, targetRatio)
+}
+
+// adaptiveKFloor / adaptiveKCeil are the built-in fallbacks used when the
+// operator leaves a bound at 0 ("use the default"). They give the gate a sane
+// window around the typical rag.k_default without requiring explicit tuning.
+const (
+	adaptiveKFloor = 4
+	adaptiveKCeil  = 30
+)
+
+// SetAdaptiveRetrieval wires the opt-in adaptive retrieval gate (config
+// retrieval.adaptive.*). When enabled is false the service keeps today's
+// fixed-k behavior and kMin/kMax are ignored. When enabled, kMin/kMax bound the
+// dynamic k the gate may choose; a bound <= 0 falls back to the built-in
+// default (adaptiveKFloor / adaptiveKCeil), and an inverted window is corrected
+// to kMax = kMin so the gate always sees 1 <= min <= max. The engine wires this
+// from config at construction time, mirroring SetMinScore.
+func (s *Service) SetAdaptiveRetrieval(enabled bool, kMin, kMax int) {
+	if kMin <= 0 {
+		kMin = adaptiveKFloor
+	}
+	if kMax <= 0 {
+		kMax = adaptiveKCeil
+	}
+	if kMin < 1 {
+		kMin = 1
+	}
+	if kMax < kMin {
+		kMax = kMin
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.adaptiveEnabled = enabled
+	s.adaptiveKMin = kMin
+	s.adaptiveKMax = kMax
 }
 
 // SetDocumentHashes installs the rel_path → content_hash map used to group
@@ -885,9 +932,38 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		defer func() { s.emitQueryMetrics("ask", sink, time.Since(askStart)) }()
 	}
 
-	hits, err := s.search(ctx, query)
-	if err != nil {
-		return model.AskResult{}, err
+	// Adaptive retrieval gate (config retrieval.adaptive.*, opt-in). When
+	// enabled, a cheap deterministic heuristic decides whether to retrieve at
+	// all and what k to use; when disabled this is a no-op so the fixed-k path
+	// below is unchanged. The gate uses the question text (the effective query)
+	// and never alters the MCP tool contract.
+	skipRetrieval := false
+	s.metaMu.RLock()
+	adaptiveEnabled := s.adaptiveEnabled
+	adaptiveKMin := s.adaptiveKMin
+	adaptiveKMax := s.adaptiveKMax
+	s.metaMu.RUnlock()
+	if adaptiveEnabled {
+		decision := adaptiveGate(query.Query, query.K, adaptiveKMin, adaptiveKMax)
+		s.logf("adaptive gate: class=%s retrieve=%t k=%d (q=%q)", decision.Class, decision.Retrieve, decision.K, truncateQuestion(query.Query))
+		if decision.Retrieve {
+			query.K = decision.K
+		} else {
+			skipRetrieval = true
+		}
+	}
+
+	var (
+		hits []model.SearchHit
+		err  error
+	)
+	if !skipRetrieval {
+		// s.search (not s.Search) keeps the #327 usage sink owned by this Ask,
+		// so the nested search does not emit its own query_metrics event.
+		hits, err = s.search(ctx, query)
+		if err != nil {
+			return model.AskResult{}, err
+		}
 	}
 
 	citations := make([]model.Citation, 0, len(hits))
