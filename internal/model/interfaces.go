@@ -130,6 +130,51 @@ type Embedder interface {
 	Embed(ctx context.Context, model string, role EmbedRole, inputs []string) ([][]float32, error)
 }
 
+// TokenEmbedding is the token-level output of a long-context embedder for a
+// single input string (issue #332, late chunking). Vectors[i] is the
+// contextualized embedding of the token spanning runes [Offsets[i], Ends[i]) of
+// the ORIGINAL input string. Offsets/Ends are rune offsets (not byte offsets) so
+// they line up with the rune-based chunk spans the ingest chunkers produce
+// (chunkTextByChars et al. operate on []rune). len(Vectors) == len(Offsets) ==
+// len(Ends), every vector has the same provider dimension, and the tokens are in
+// reading order. A provider that tokenizes on bytes MUST convert to rune offsets
+// before returning so the contract is uniform.
+type TokenEmbedding struct {
+	// Vectors holds one contextualized embedding per token, in reading order.
+	Vectors [][]float32
+	// Offsets[i] is the inclusive start rune offset of token i in the input.
+	Offsets []int
+	// Ends[i] is the exclusive end rune offset of token i in the input.
+	Ends []int
+}
+
+// TokenEmbedder is an OPTIONAL capability an Embedder MAY implement to expose
+// token-level (a.k.a. long-context) embeddings (issue #332, Jina "late
+// chunking"). When the configured embedder implements it AND ingest.late_chunking
+// is enabled, the ingest pipeline embeds the whole document ONCE via
+// EmbedDocumentTokens, then mean-pools the token vectors within each chunk's rune
+// span to produce that chunk's embedding — so each chunk carries document
+// context. The pipeline type-asserts the active Embedder against this interface,
+// mirroring the MultimodalEmbedder / StructuredTranscriber optional-capability
+// pattern; an embedder that does NOT implement it makes late chunking fall back
+// to today's chunk-then-embed (see latechunk.Decide). No shipped provider
+// (Mistral/OpenAI/Cohere/Gemini) returns token embeddings today — this interface
+// is the seam a future self-hosted token-embedding backend (e.g. TEI/Infinity)
+// plugs into.
+//
+// Vectors returned here MUST be comparable to those from Embed (same provider/
+// model/dimension/vector space) so a late-chunked corpus and a query embedded via
+// Embed share one space.
+type TokenEmbedder interface {
+	Embedder
+	// EmbedDocumentTokens returns the per-token contextualized embeddings for
+	// each input document, aligned 1:1 with inputs. role is EmbedDocument at
+	// index time. An input that exceeds the model's context window is the
+	// implementation's concern (it MAY window/error); callers treat an error as
+	// "fall back to chunk-then-embed".
+	EmbedDocumentTokens(ctx context.Context, model string, role EmbedRole, inputs []string) ([]TokenEmbedding, error)
+}
+
 // MediaInput is one non-text item to embed (SPEC 8.1.7): the media bytes
 // plus their MIME type (e.g. "image/png", "audio/mp3", "application/pdf").
 type MediaInput struct {
