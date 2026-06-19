@@ -9,12 +9,13 @@ buildGoModule {
   pname = "dir2mcp";
   inherit version src;
 
-  # NOTE (maintainer / CI): replace `lib.fakeHash` with the real vendor hash on
-  # the first build. Run `nix build`, then copy the `got:` hash from the
-  # mismatch error into this field. GoReleaser's nix publisher computes this
+  # Hash of the vendored Go module set (go.mod/go.sum). Recompute on any
+  # dependency change: set this to `lib.fakeHash`, run `nix build .#dir2mcp`,
+  # and copy the `got:` sha256 from the mismatch error back here. It is
+  # independent of the version/ldflags. GoReleaser's nix publisher computes this
   # automatically for the derivation it generates; this value only matters when
   # building this hand-written flake directly.
-  vendorHash = lib.fakeHash;
+  vendorHash = "sha256-Dl04jHfBLoG5yPykhUAX+jGS18PQoI+x2AwgIat11Oo=";
 
   subPackages = [ "cmd/dir2mcp" ];
 

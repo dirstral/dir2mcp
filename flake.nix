@@ -63,7 +63,12 @@
       overlays.default = final: prev: {
         dir2mcp = final.callPackage ./nix/package.nix {
           src = self;
-          version = "0.0.0-dev";
+          # Identify a from-source build by the flake's git revision so
+          # `dir2mcp version` isn't a bare "0.0.0-dev". A clean checkout yields
+          # the short rev, a dirty tree the dirty short rev, and a non-git source
+          # falls back to "0.0.0-dev". A tagged release ships via GoReleaser's nix
+          # publisher with the real version, independent of this.
+          version = "0.0.0-dev+g${self.shortRev or self.dirtyShortRev or "unknown"}";
         };
       };
 
