@@ -88,6 +88,14 @@ func builtinProfiles() map[string]providerProfileYAML {
 		// wins embed auto-selection; reach it via model.embed.provider:
 		// omniembed. Multimodal embedding is opt-in via model.embed.multimodal.
 		"omniembed": {Kind: "omniembed", BaseURL: "${OMNIEMBED_BASE_URL}"},
+		// colbert: self-hosted late-interaction / multi-vector reranker
+		// (dir2mcp#337). Credential-less by default (no api_key); operators
+		// point base_url (and optionally set api_key/rerank_model) via a
+		// providers: entry or the COLBERT_BASE_URL env default. Excluded from
+		// builtinPrecedence (like `local`/`whisper`) so it never silently wins
+		// rerank auto-selection over the hosted cohere path; reach it via
+		// rerank.provider: colbert.
+		"colbert": {Kind: "colbert", BaseURL: "${COLBERT_BASE_URL}"},
 	}
 }
 

@@ -37,6 +37,15 @@ const (
 	// embed-capable and credential-optional, and the embed factory builds
 	// the multimodal-capable adapter for it.
 	KindOmniEmbed Kind = "omniembed"
+	// KindColBERT is a self-hosted late-interaction / multi-vector
+	// (ColBERT-style) reranking endpoint (dir2mcp#337): POST
+	// {base_url}/rerank with a query + candidate documents, returning a
+	// relevance score per document. Distinct from KindCohere so rerank
+	// selection and the matrix can treat it as statically rerank-capable
+	// (Supported) and credential-optional — the same self-hosted shape as
+	// KindWhisper for STT. It pairs with self-hosted embeddings (#334) for a
+	// fully-offline high-precision retrieval pipeline.
+	KindColBERT Kind = "colbert"
 )
 
 // Capability is a model capability bound to a provider profile.
@@ -123,6 +132,14 @@ var matrix = map[Kind]map[Capability]Support{
 		// kind:whisper for STT — it is marked Supported rather than
 		// EndpointDependent.
 		CapEmbed: Supported,
+	},
+	KindColBERT: {
+		// Self-hosted late-interaction (ColBERT-style) reranker (dir2mcp#337).
+		// Statically rerank-capable: the self-hosted endpoint speaks a fixed
+		// JSON rerank contract (query + documents -> per-document score), so
+		// like KindWhisper for STT we mark it Supported and credential-optional
+		// (a box on a private network needs no api_key).
+		CapRerank: Supported,
 	},
 }
 

@@ -684,8 +684,42 @@ func (a *App) configureQueryMetrics(ret *retrieval.Service, cfg config.Config, e
 	))
 }
 
-// configureReranker wires the optional Cohere rerank stage onto the
-// retrieval service through the resolver (SPEC 8.1.3). cfg.RerankEnabled
+// rerankSelectorProfiles maps a non-default rerank.provider selector onto
+// the built-in provider profile that serves it. `cohere` (and the empty
+// selector) take the auto-resolution path instead and are intentionally
+// absent. `colbert` is the self-hosted late-interaction backend
+// (dir2mcp#337); it is reached by an explicit selector, like the whisper
+// STT path, so it never wins rerank auto-selection over hosted cohere.
+var rerankSelectorProfiles = map[string]string{
+	"colbert": "colbert",
+}
+
+// resolveRerankProfile resolves the rerank provider profile for the legacy
+// flat rerank.provider selector (SPEC 8.1.3). An empty selector or `cohere`
+// uses auto-resolution; a known self-hosted selector (e.g. `colbert`)
+// resolves its named profile explicitly. ok=false means "no rerank backend"
+// (an unknown selector, or no eligible profile) — the caller fails open.
+func resolveRerankProfile(cfg config.Config, asked bool) (provider.Profile, error, bool) {
+	r := cfg.Providers()
+	sel := strings.ToLower(strings.TrimSpace(cfg.RerankProvider))
+	switch sel {
+	case "", "cohere":
+		p, err := r.Resolve(provider.CapRerank)
+		return p, err, true
+	default:
+		name, known := rerankSelectorProfiles[sel]
+		if !known {
+			return provider.Profile{}, nil, false
+		}
+		p, err := r.ResolveExplicit(provider.CapRerank, name, asked)
+		return p, err, true
+	}
+}
+
+// configureReranker wires the optional rerank stage onto the retrieval
+// service through the resolver (SPEC 8.1.3). The backend is either the
+// hosted Cohere cross-encoder or a self-hosted late-interaction (ColBERT)
+// endpoint (dir2mcp#337), selected by rerank.provider. cfg.RerankEnabled
 // is a tri-state override:
 //
 //	nil    -> auto: on iff a rerank provider resolves
@@ -700,18 +734,15 @@ func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
 	}
 	asked := explicit && *cfg.RerankEnabled
 
-	// Honor the legacy flat rerank_provider during the transition: a
-	// non-cohere value preserves the prior "unsupported provider
-	// disables rerank" behavior (only cohere serves rerank — SPEC
-	// 8.1.2).
-	if rpName := strings.ToLower(strings.TrimSpace(cfg.RerankProvider)); rpName != "" && rpName != "cohere" {
+	rp, err, ok := resolveRerankProfile(cfg, asked)
+	if !ok {
+		// Unrecognised rerank.provider selector: preserve the prior
+		// "unsupported provider disables rerank" behavior.
 		if asked {
 			writef(a.stderr, "warning: rerank.provider %q unsupported; reranking disabled\n", cfg.RerankProvider)
 		}
 		return
 	}
-
-	rp, err := cfg.Providers().Resolve(provider.CapRerank)
 	if err != nil {
 		// No eligible rerank provider (or an invalid explicit binding).
 		// Auto mode stays silent; only warn when explicitly asked.
