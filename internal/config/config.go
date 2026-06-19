@@ -1605,6 +1605,23 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalMinScore != nil {
 		cfg.RetrievalMinScore = *fc.RetrievalMinScore
 	}
+	applyRetrievalTuningFileParsed(cfg, fc)
+	if fc.SessionInactivityTimeout != nil {
+		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
+	}
+	if fc.SessionMaxLifetime != nil {
+		cfg.SessionMaxLifetime = *fc.SessionMaxLifetime
+	}
+	if fc.HealthCheckInterval != nil {
+		cfg.HealthCheckInterval = *fc.HealthCheckInterval
+	}
+}
+
+// applyRetrievalTuningFileParsed overlays the opt-in retrieval-tuning file
+// fields (recency time-decay #323, context compression #335, and the adaptive
+// gate #338) onto cfg. Split out of applyModelRAGFileParsed to keep that
+// function within the gocyclo budget as tuning knobs are added.
+func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalRecencyHalfLife != nil {
 		cfg.RetrievalRecencyHalfLife = *fc.RetrievalRecencyHalfLife
 	}
@@ -1622,15 +1639,6 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.RetrievalAdaptiveKMax != nil {
 		cfg.RetrievalAdaptiveKMax = *fc.RetrievalAdaptiveKMax
-	}
-	if fc.SessionInactivityTimeout != nil {
-		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
-	}
-	if fc.SessionMaxLifetime != nil {
-		cfg.SessionMaxLifetime = *fc.SessionMaxLifetime
-	}
-	if fc.HealthCheckInterval != nil {
-		cfg.HealthCheckInterval = *fc.HealthCheckInterval
 	}
 }
 
@@ -2949,12 +2957,14 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 		{"DIR2MCP_INGEST_LATE_CHUNKING", &cfg.IngestLateChunking},
 		{"DIR2MCP_INGEST_WATCH", &cfg.IngestWatch},
 		{"DIR2MCP_RETRIEVAL_HYBRID_ENABLED", &cfg.RetrievalHybridEnabled},
+		{"DIR2MCP_RETRIEVAL_ADAPTIVE_ENABLED", &cfg.RetrievalAdaptiveEnabled},
 	} {
 		applyBoolEnvField(o.field, o.key, env)
 	}
 	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH_DEBOUNCE", env); ok && strings.TrimSpace(raw) != "" {
 		applyDurationEnvField(cfg, raw, "DIR2MCP_INGEST_WATCH_DEBOUNCE", &cfg.IngestWatchDebounce)
 	}
+	applyRetrievalAdaptiveKEnv(cfg, env)
 }
 
 // applyBoolEnvField sets *field from env[key] when the variable is set, non-empty,
@@ -2966,19 +2976,23 @@ func applyBoolEnvField(field *bool, key string, env map[string]string) {
 			*field = parsed
 		}
 	}
-	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_ADAPTIVE_ENABLED", env); ok && strings.TrimSpace(raw) != "" {
-		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
-			cfg.RetrievalAdaptiveEnabled = parsed
-		}
-	}
-	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_ADAPTIVE_K_MIN", env); ok && strings.TrimSpace(raw) != "" {
-		if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
-			cfg.RetrievalAdaptiveKMin = parsed
-		}
-	}
-	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_ADAPTIVE_K_MAX", env); ok && strings.TrimSpace(raw) != "" {
-		if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
-			cfg.RetrievalAdaptiveKMax = parsed
+}
+
+// applyRetrievalAdaptiveKEnv applies the opt-in adaptive-gate k-bound int env
+// overrides (DIR2MCP_RETRIEVAL_ADAPTIVE_K_MIN / _K_MAX), each only when set and
+// non-empty. A table keeps the cyclomatic complexity flat as bounds are added.
+func applyRetrievalAdaptiveKEnv(cfg *Config, env map[string]string) {
+	for _, o := range []struct {
+		key   string
+		field *int
+	}{
+		{"DIR2MCP_RETRIEVAL_ADAPTIVE_K_MIN", &cfg.RetrievalAdaptiveKMin},
+		{"DIR2MCP_RETRIEVAL_ADAPTIVE_K_MAX", &cfg.RetrievalAdaptiveKMax},
+	} {
+		if raw, ok := envLookup(o.key, env); ok && strings.TrimSpace(raw) != "" {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+				*o.field = parsed
+			}
 		}
 	}
 }
@@ -3432,22 +3446,30 @@ func (c *Config) validateRetrievalNumericBounds() error {
 		c.ContextCompressionTargetRatio < 0 || c.ContextCompressionTargetRatio > 1 {
 		return fmt.Errorf("retrieval.context_compression.target_ratio must be in [0,1] (0 = default): %v", c.ContextCompressionTargetRatio)
 	}
-	// Adaptive-gate k bounds: negative values are meaningless and an inverted
-	// window (k_min > k_max) would make clamping ill-defined. Reject both at
-	// validation time (explicit, deterministic) rather than silently clamping.
-	// A bound of 0 is allowed and means "use the built-in default" at apply
-	// time, so it is not flagged here. Only checked when the gate is enabled so
-	// disabled deployments are never affected.
-	if c.RetrievalAdaptiveEnabled {
-		if c.RetrievalAdaptiveKMin < 0 {
-			return fmt.Errorf("retrieval.adaptive.k_min must be non-negative: %d", c.RetrievalAdaptiveKMin)
-		}
-		if c.RetrievalAdaptiveKMax < 0 {
-			return fmt.Errorf("retrieval.adaptive.k_max must be non-negative: %d", c.RetrievalAdaptiveKMax)
-		}
-		if c.RetrievalAdaptiveKMin > 0 && c.RetrievalAdaptiveKMax > 0 && c.RetrievalAdaptiveKMin > c.RetrievalAdaptiveKMax {
-			return fmt.Errorf("retrieval.adaptive.k_min (%d) must not exceed retrieval.adaptive.k_max (%d)", c.RetrievalAdaptiveKMin, c.RetrievalAdaptiveKMax)
-		}
+	if err := c.validateAdaptiveBounds(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAdaptiveBounds enforces the adaptive-gate k window when the gate is
+// enabled: negative bounds are meaningless and an inverted window (k_min >
+// k_max) would make clamping ill-defined, so both are rejected explicitly
+// rather than silently clamped. A bound of 0 is allowed and means "use the
+// built-in default" at apply time. When the gate is disabled the bounds are
+// ignored, so a stale window never blocks startup.
+func (c *Config) validateAdaptiveBounds() error {
+	if !c.RetrievalAdaptiveEnabled {
+		return nil
+	}
+	if c.RetrievalAdaptiveKMin < 0 {
+		return fmt.Errorf("retrieval.adaptive.k_min must be non-negative: %d", c.RetrievalAdaptiveKMin)
+	}
+	if c.RetrievalAdaptiveKMax < 0 {
+		return fmt.Errorf("retrieval.adaptive.k_max must be non-negative: %d", c.RetrievalAdaptiveKMax)
+	}
+	if c.RetrievalAdaptiveKMin > 0 && c.RetrievalAdaptiveKMax > 0 && c.RetrievalAdaptiveKMin > c.RetrievalAdaptiveKMax {
+		return fmt.Errorf("retrieval.adaptive.k_min (%d) must not exceed retrieval.adaptive.k_max (%d)", c.RetrievalAdaptiveKMin, c.RetrievalAdaptiveKMax)
 	}
 	return nil
 }

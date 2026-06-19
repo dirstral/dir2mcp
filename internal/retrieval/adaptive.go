@@ -86,79 +86,104 @@ var (
 // base <= 0 is treated as "unspecified" and replaced by the midpoint-ish base
 // before clamping; callers normally pass rag.k_default.
 func adaptiveGate(query string, base, kMin, kMax int) adaptiveDecision {
-	// Defensive normalization so the gate is correct even if bounds arrive
-	// unsanitized; the engine also clamps these at wiring time.
+	kMin, kMax = normalizeAdaptiveBounds(kMin, kMax)
+	if base <= 0 {
+		base = kMin + (kMax-kMin)/2
+	}
+
+	sig := computeQuerySignals(query)
+
+	// SKIP: empty queries, or short conversational filler with no information
+	// need. Avoids an embedding+search when there is nothing to retrieve.
+	if sig.tokens == 0 || isTrivialSkip(sig) {
+		return adaptiveDecision{Retrieve: false, K: 0, Class: "skip"}
+	}
+	// HARD: long or multi-clause/comparative queries widen k toward kMax.
+	if isHardQuery(sig) {
+		return adaptiveDecision{Retrieve: true, K: kMax, Class: "widen"}
+	}
+	// EASY: short single-clause questions narrow k toward kMin.
+	if isEasyQuery(sig) {
+		return adaptiveDecision{Retrieve: true, K: kMin, Class: "narrow"}
+	}
+	// DEFAULT: clamp the caller's base k into the configured window.
+	return adaptiveDecision{Retrieve: true, K: clampInt(base, kMin, kMax), Class: "default"}
+}
+
+// querySignals holds the cheap, local features the gate derives from a query.
+type querySignals struct {
+	tokens           int  // word-like token count
+	hasInterrogative bool // a question word is present
+	hasQuestionMark  bool // a literal '?' is present
+	codey            bool // looks code-oriented (LooksLikeCodeQuery)
+	hardConnectors   int  // count of multi-clause/comparative connectors
+	allTrivial       bool // every token is conversational filler
+}
+
+// computeQuerySignals extracts the gate's decision features from query in a
+// single pass over its tokens.
+func computeQuerySignals(query string) querySignals {
+	toks := adaptiveWordRe.FindAllString(strings.ToLower(query), -1)
+	sig := querySignals{
+		tokens:          len(toks),
+		hasQuestionMark: strings.Contains(query, "?"),
+		codey:           LooksLikeCodeQuery(query),
+		allTrivial:      len(toks) > 0,
+	}
+	for _, t := range toks {
+		if adaptiveInterrogatives[t] {
+			sig.hasInterrogative = true
+		}
+		if adaptiveHardConnectors[t] {
+			sig.hardConnectors++
+		}
+		if !adaptiveTrivialTokens[t] {
+			sig.allTrivial = false
+		}
+	}
+	return sig
+}
+
+// isTrivialSkip reports whether a query is short conversational filler with no
+// information need (≤3 filler-only tokens, no question/code signal).
+func isTrivialSkip(sig querySignals) bool {
+	return sig.tokens <= 3 && sig.allTrivial &&
+		!sig.hasInterrogative && !sig.hasQuestionMark && !sig.codey
+}
+
+// isHardQuery reports whether a query is long or multi-clause/comparative and so
+// benefits from a wider evidence pool.
+func isHardQuery(sig querySignals) bool {
+	return sig.tokens >= 16 || sig.hardConnectors >= 2 ||
+		(sig.hardConnectors >= 1 && sig.tokens >= 10)
+}
+
+// isEasyQuery reports whether a query is a short, single-clause question that
+// can be answered from a narrow evidence pool.
+func isEasyQuery(sig querySignals) bool {
+	return sig.tokens <= 6 && sig.hardConnectors == 0 &&
+		(sig.hasInterrogative || sig.hasQuestionMark)
+}
+
+// normalizeAdaptiveBounds repairs a possibly-unsanitized [kMin, kMax] window to
+// 1 <= kMin <= kMax so the gate never emits an out-of-range k.
+func normalizeAdaptiveBounds(kMin, kMax int) (int, int) {
 	if kMin < 1 {
 		kMin = 1
 	}
 	if kMax < kMin {
 		kMax = kMin
 	}
-	if base <= 0 {
-		base = kMin + (kMax-kMin)/2
-	}
+	return kMin, kMax
+}
 
-	tokens := adaptiveWordRe.FindAllString(strings.ToLower(query), -1)
-	n := len(tokens)
-
-	// Empty/whitespace-only query: nothing to act on. Skip retrieval rather
-	// than burn an embedding+search on no signal.
-	if n == 0 {
-		return adaptiveDecision{Retrieve: false, K: 0, Class: "skip"}
+// clampInt clamps v into [lo, hi] (assumes lo <= hi).
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
 	}
-
-	hasInterrogative := false
-	hardConnectors := 0
-	for _, t := range tokens {
-		if adaptiveInterrogatives[t] {
-			hasInterrogative = true
-		}
-		if adaptiveHardConnectors[t] {
-			hardConnectors++
-		}
+	if v > hi {
+		return hi
 	}
-	hasQuestionMark := strings.Contains(query, "?")
-	codey := LooksLikeCodeQuery(query)
-
-	// SKIP: only for short queries with no information need. A query qualifies
-	// when every token is conversational filler and there is no interrogative
-	// word, no question mark, and no code signal. Capped at 3 tokens so a real
-	// short question is never skipped.
-	if n <= 3 && !hasInterrogative && !hasQuestionMark && !codey {
-		allTrivial := true
-		for _, t := range tokens {
-			if !adaptiveTrivialTokens[t] {
-				allTrivial = false
-				break
-			}
-		}
-		if allTrivial {
-			return adaptiveDecision{Retrieve: false, K: 0, Class: "skip"}
-		}
-	}
-
-	// HARD: long queries or multi-clause/comparative ones widen k toward kMax.
-	// Two independent signals (length OR connectors/length combos) keep this
-	// robust without a trained model.
-	hard := n >= 16 || hardConnectors >= 2 || (hardConnectors >= 1 && n >= 10)
-	if hard {
-		return adaptiveDecision{Retrieve: true, K: kMax, Class: "widen"}
-	}
-
-	// EASY: a short, single-clause question narrows k toward kMin. Requires a
-	// question signal so we don't aggressively narrow ambiguous statements.
-	easy := n <= 6 && hardConnectors == 0 && (hasInterrogative || hasQuestionMark)
-	if easy {
-		return adaptiveDecision{Retrieve: true, K: kMin, Class: "narrow"}
-	}
-
-	// DEFAULT: clamp the caller's base k into the configured window.
-	k := base
-	if k < kMin {
-		k = kMin
-	}
-	if k > kMax {
-		k = kMax
-	}
-	return adaptiveDecision{Retrieve: true, K: k, Class: "default"}
+	return v
 }
