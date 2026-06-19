@@ -54,7 +54,7 @@ dir2mcp ships in two Homebrew formulas that install the **same binary** but diff
 | **Lean** (default) | `brew install dirstral/tap/dir2mcp` | **Not bundled** — bring your own | You already have `docling`, run a `docling-serve` container, extract via Mistral OCR, or index docling-free corpora |
 | **Full** | `brew install dirstral/tap/dir2mcp-full` | **Bundled** (docling runtime included) | You want local structured PDF/image extraction with zero extra setup |
 
-The two formulas are mutually exclusive (Homebrew refuses to install both at once). Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)).
+The two formulas are mutually exclusive (Homebrew refuses to install both at once). Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)). To move from lean to full (or to a shared docling-serve) in stages without a re-index flag day, see [Migration & rollout](#migration--rollout-adopting-docling-in-stages).
 
 Build-from-source remains available as an alternative:
 
@@ -297,6 +297,8 @@ An extractor counts as *available* only when it can actually **run**, not merely
 - *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
 - *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
 - *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.
+- *Expected docling but the banner shows `mistral-ocr (fallback ...)`* — docling either isn't on `PATH` or is present-but-broken (it failed the `docling --version` functional check, e.g. an ABI-incompatible venv). Under `auto` a non-functional docling is skipped and the cascade continues to docling-serve/Mistral; fix the install (or use the `-full` track), or pin `extractor: docling` to turn the broken install into a loud error instead of a silent fallback.
+- *Wrong host's docling chosen / pointing at a custom binary* — set `ingest.docling.command` (`DIR2MCP_DOCLING_COMMAND`) to the command template; the resolved path is redacted from diagnostics. Confirm via the `extractor` row of `dir2mcp doctor` or `routing.json` in a support bundle.
 
 ### docling extraction over HTTP (docling-serve)
 
