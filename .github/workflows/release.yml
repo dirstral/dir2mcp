@@ -52,6 +52,16 @@ jobs:
             exit 1
           fi
 
+      # GoReleaser's nix publisher needs `nix-hash` on PATH to compute the
+      # source hash for the generated flake; without Nix it skips the nix pipe
+      # ("nix-hash is not available"). Install Nix before the release step so the
+      # flake is published to dirstral/nix-user-repository.
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
       - name: GoReleaser release
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -61,6 +71,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Required by the `nix:` publisher in .goreleaser.yaml to push the
+          # generated flake to dirstral/nix-user-repository.
+          NIX_USER_REPOSITORY_GITHUB_TOKEN: ${{ secrets.NIX_USER_REPOSITORY_GITHUB_TOKEN }}
 
       # GoReleaser auto-bumps the lean dir2mcp.rb but cannot regenerate
       # dir2mcp-full.rb (it carries hand-written docling install logic).
