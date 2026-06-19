@@ -1,0 +1,30 @@
+{
+  "_comment": "Labeled query set for the retrieval ablation harness (issue #322). `vector` is the deterministic query embedding the fake embedder returns for this query's text (harness L2-normalizes it); `text` drives the in-memory BM25 store. `relevant` lists the canonical rel_paths that should be retrieved (a byte-identical alias is intentionally NOT labeled relevant, so cross-file dedup trims it without hurting recall). `languages` (optional) is passed as the per-language retrieval filter. Designed so individual knobs move the metrics: q_photosynthesis ranks its target mid on the dense axis but top on the lexical axis (hybrid lift); q_gardening_en_only exercises the language filter; the gardening alias exercises cross-file dedup.",
+  "queries": [
+    {
+      "id": "q_gardening",
+      "text": "how to grow tomatoes and water plants in a garden",
+      "vector": [1.0, 0.0, 0.0, 0.0],
+      "relevant": ["guides/gardening.md"]
+    },
+    {
+      "id": "q_gardening_en_only",
+      "text": "how to grow tomatoes and water plants in a garden",
+      "vector": [1.0, 0.0, 0.0, 0.0],
+      "languages": ["en"],
+      "relevant": ["guides/gardening.md"]
+    },
+    {
+      "id": "q_photosynthesis",
+      "text": "plants convert sunlight into energy through photosynthesis",
+      "vector": [0.5, 0.5, 0.5, 0.0],
+      "relevant": ["misc/photosynthesis.md"]
+    },
+    {
+      "id": "q_telescope",
+      "text": "observing planets and stars through a telescope at night",
+      "vector": [0.0, 0.0, 1.0, 0.0],
+      "relevant": ["notes/astronomy.md"]
+    }
+  ]
+}
