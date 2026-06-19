@@ -18,7 +18,7 @@ type fakeRecencyStore struct {
 	mtimes map[string]int64
 }
 
-func (f *fakeRecencyStore) Init(context.Context) error                       { return nil }
+func (f *fakeRecencyStore) Init(context.Context) error                           { return nil }
 func (f *fakeRecencyStore) UpsertDocument(context.Context, model.Document) error { return nil }
 func (f *fakeRecencyStore) GetDocumentByPath(_ context.Context, relPath string) (model.Document, error) {
 	mt, ok := f.mtimes[relPath]

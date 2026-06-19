@@ -596,6 +596,17 @@ An optional **relevance floor** drops low-similarity candidate hits before they 
     min_score: 0.0   # 0 disables; e.g. 0.4 drops hits scoring below 0.4
   ```
 
+An optional **recency time-decay** boosts newer content for dated corpora (news, logs, changelogs, meeting notes). It is **server-side and config-only** — not an MCP tool parameter, so it changes no tool input/output schema.
+
+- When configured, each hit's final score is multiplied by an exponential decay `exp(-ln2 * age / half_life)`, where `age` is the hit's source-document mtime relative to a fixed "now" captured at query start. The decay is applied just **before** the relevance floor; re-scored hits are re-sorted deterministically.
+- A hit whose date cannot be resolved is **never boosted nor penalized**, and a future-dated hit (clock skew) is clamped so it cannot be amplified above its raw score.
+- **Default empty/`0` = disabled** (pass-through): behavior is unchanged unless you configure it. A negative half-life is rejected as invalid config.
+
+  ```yaml
+  retrieval:
+    recency_half_life: 0   # 0/empty disables; e.g. 720h halves a 30-day-old hit's score
+  ```
+
 ### Auth token behavior
 
 `dir2mcp` bearer auth can come from:
