@@ -28,9 +28,10 @@ const (
 	// defaultCompressionTargetRatio is the keep-fraction used when the operator
 	// enables compression without specifying a ratio (config 0 ⇒ default).
 	defaultCompressionTargetRatio = 0.5
-	// redundancyOverlapThreshold is the token-set containment above which a
-	// candidate sentence is considered redundant with an already-kept one.
-	redundancyOverlapThreshold = 0.9
+	// redundancyOverlapThreshold is the token-set containment at or above which
+	// a candidate sentence is considered redundant with an already-kept one
+	// (i.e. most of its words already appear in a kept sentence).
+	redundancyOverlapThreshold = 0.8
 	// minSentenceRunes guards against compressing already-tiny text: snippets at
 	// or below this rune length are returned unchanged (compression cannot
 	// meaningfully help and risks dropping the only evidence).
@@ -122,6 +123,14 @@ func (c contextCompressor) compressSnippet(query, text string) string {
 		// so compression never drops all evidence, even if it overruns budget.
 		mostRelevant := len(keptIdx) == 0
 		if !mostRelevant {
+			// Beyond the guaranteed most-relevant sentence, only keep sentences
+			// that carry at least some query signal. Pure filler (score 0) is
+			// dropped even if budget remains — that is the whole point of
+			// evidence-guided compression. ranked is score-descending, so once
+			// we hit a zero-score candidate every remaining one is also zero.
+			if cand.score <= 0 {
+				break
+			}
 			if used >= budget {
 				break
 			}
