@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/gemini"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/omniembed"
 	"github.com/dirstral/dir2mcp/internal/openai"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/whisperapi"
@@ -51,41 +52,68 @@ func validateEmbedDim(p provider.Profile) error {
 	return nil
 }
 
-// multimodalEmbedModel is the only model that serves multimodal embeddings
-// today (SPEC 8.1.7).
-const multimodalEmbedModel = "gemini-embedding-2"
+// geminiMultimodalEmbedModel is the Gemini model that serves multimodal
+// embeddings (SPEC 8.1.7). The self-hosted OmniEmbed backend
+// (KindOmniEmbed) serves an operator-chosen model name instead, so its
+// model string is not pinned here.
+const geminiMultimodalEmbedModel = "gemini-embedding-2"
 
 // validateEmbedMultimodal enforces SPEC 8.1.7. The mode must be a known
 // value; `augment`/`replace` map every modality into one shared vector
-// space, so the ENTIRE binding — provider and BOTH the text and code model
-// axes — must resolve to the multimodal model on Gemini, else CONFIG_INVALID
-// (mixing incomparable vectors in one index is forbidden, §8.1.4).
+// space, so the ENTIRE binding — provider AND both the text and code model
+// axes — must resolve to a multimodal-capable backend with a single shared
+// model on both axes, else CONFIG_INVALID (mixing incomparable vectors in
+// one index is forbidden, §8.1.4). Two backends are multimodal-capable:
+// Gemini (pinned to geminiMultimodalEmbedModel) and the self-hosted
+// OmniEmbed endpoint (dir2mcp#334, operator-chosen model name).
 func validateEmbedMultimodal(p provider.Profile) error {
 	mode := provider.NormalizeEmbedMultimodal(p.EmbedMultimodal)
 	switch mode {
 	case "off":
 		return nil
 	case "augment", "replace":
-		// Trim the model fields to match provider.EmbedIdentity (which
-		// trims), so a value with incidental whitespace isn't rejected as
-		// CONFIG_INVALID when it is treated as equivalent for identity.
-		textModel := strings.TrimSpace(p.EmbedTextModel)
-		codeModel := strings.TrimSpace(p.EmbedCodeModel)
-		if p.Kind != provider.KindGemini ||
-			textModel != multimodalEmbedModel ||
-			codeModel != multimodalEmbedModel {
-			return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q requires provider=gemini with embed.text_model and embed.code_model both set to %q (got kind=%q text_model=%q code_model=%q)",
-				mode, multimodalEmbedModel, p.Kind, textModel, codeModel)
-		}
-		return nil
+		return validateMultimodalBinding(p, mode)
 	default:
 		return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q is invalid (expected off, augment, or replace)", mode)
 	}
 }
 
+// validateMultimodalBinding checks the single-shared-space constraint for an
+// augment/replace binding. It is split out of validateEmbedMultimodal to keep
+// cyclomatic complexity flat as more multimodal backends are added.
+func validateMultimodalBinding(p provider.Profile, mode string) error {
+	// Trim the model fields to match provider.EmbedIdentity (which trims),
+	// so incidental whitespace isn't rejected when it is identity-equivalent.
+	textModel := strings.TrimSpace(p.EmbedTextModel)
+	codeModel := strings.TrimSpace(p.EmbedCodeModel)
+	switch p.Kind {
+	case provider.KindGemini:
+		if textModel != geminiMultimodalEmbedModel || codeModel != geminiMultimodalEmbedModel {
+			return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q on provider kind=gemini requires embed.text_model and embed.code_model both set to %q (got text_model=%q code_model=%q)",
+				mode, geminiMultimodalEmbedModel, textModel, codeModel)
+		}
+		return nil
+	case provider.KindOmniEmbed:
+		// Self-hosted OmniEmbed serves one unified model whose name the
+		// operator chooses; the only invariant is that BOTH axes embed with
+		// the SAME non-empty model so the index never mixes vector spaces
+		// (§8.1.4). An empty model is allowed only when both are empty (the
+		// server's default model on both axes).
+		if textModel != codeModel {
+			return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q on provider kind=omniembed requires embed.text_model and embed.code_model to be the same model (got text_model=%q code_model=%q)",
+				mode, textModel, codeModel)
+		}
+		return nil
+	default:
+		return fmt.Errorf("CONFIG_INVALID: embed.multimodal=%q requires a multimodal-capable provider (gemini or omniembed); got kind=%q",
+			mode, p.Kind)
+	}
+}
+
 // Embedder builds a model.Embedder for the profile (kinds: openai,
-// mistral, cohere, gemini). The per-call model still comes from the
-// caller; Default*Model is only a fallback for empty model names.
+// cohere, gemini, omniembed). gemini and omniembed additionally satisfy
+// model.MultimodalEmbedder (SPEC 8.1.7). The per-call model still comes
+// from the caller; Default*Model is only a fallback for empty model names.
 //
 // The embedding output-dimension knob (EmbedTextDim/EmbedCodeDim, SPEC
 // 8.1.6) is only honored by Gemini today; requesting it on any other
@@ -119,6 +147,15 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 		return c, nil
 	case provider.KindCohere:
 		c := cohere.NewClient(p.BaseURL, p.APIKey)
+		if p.EmbedTextModel != "" {
+			c.DefaultEmbedModel = p.EmbedTextModel
+		}
+		return c, nil
+	case provider.KindOmniEmbed:
+		// Self-hosted unified multimodal embedder (dir2mcp#334). Returns a
+		// model.MultimodalEmbedder so the embedding worker can embed media
+		// chunks (SPEC 8.1.7) off-API. Credential-optional (private box).
+		c := omniembed.NewClient(p.BaseURL, p.APIKey)
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
 		}

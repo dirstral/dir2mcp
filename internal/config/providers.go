@@ -79,6 +79,14 @@ func builtinProfiles() map[string]providerProfileYAML {
 		// builtinPrecedence (like `local`) so it never silently wins auto
 		// selection; reach it via stt_provider: whisper.
 		"whisper": {Kind: "whisper", BaseURL: "${WHISPER_BASE_URL}"},
+		// omniembed: self-hosted OpenAI-compatible UNIFIED MULTIMODAL embed
+		// (dir2mcp#334). Credential-less by default (no api_key); operators
+		// point base_url (and optionally api_key/embed models) via a
+		// providers: entry or the OMNIEMBED_BASE_URL env default. Excluded
+		// from builtinPrecedence (like `local`/`whisper`) so it never silently
+		// wins embed auto-selection; reach it via model.embed.provider:
+		// omniembed. Multimodal embedding is opt-in via model.embed.multimodal.
+		"omniembed": {Kind: "omniembed", BaseURL: "${OMNIEMBED_BASE_URL}"},
 	}
 }
 

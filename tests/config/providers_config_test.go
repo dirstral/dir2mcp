@@ -184,6 +184,70 @@ func TestProviders_EmbedMultimodalKnob(t *testing.T) {
 	}
 }
 
+// TestProviders_OmniEmbedSelfHosted pins dir2mcp#334: the built-in
+// omniembed profile (a) takes its base_url from ${OMNIEMBED_BASE_URL},
+// (b) is selectable via an explicit model.embed.provider binding for a
+// multimodal corpus, and (c) is EXCLUDED from auto-precedence so it never
+// silently wins embed selection (mirrors `whisper`/`local`).
+func TestProviders_OmniEmbedSelfHosted(t *testing.T) {
+	// Blank every credentialed embed-capable provider so an explicit
+	// omniembed binding is the only way embed resolves here.
+	for _, k := range []string{
+		"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+		"GEMINI_API_KEY", "COHERE_API_KEY",
+	} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("OMNIEMBED_BASE_URL", "http://gpu-vps:8000")
+
+	yaml := "version: 1\n" +
+		"model:\n" +
+		"  embed:\n" +
+		"    provider: omniembed\n" +
+		"    text_model: omniembed-v0.1\n" +
+		"    code_model: omniembed-v0.1\n" +
+		"    multimodal: replace\n"
+	r := loadCfg(t, yaml).Providers()
+
+	p, err := r.Resolve(provider.CapEmbed)
+	if err != nil {
+		t.Fatalf("resolve omniembed embed: %v", err)
+	}
+	if p.Kind != provider.KindOmniEmbed {
+		t.Fatalf("kind = %q, want omniembed", p.Kind)
+	}
+	if p.BaseURL != "http://gpu-vps:8000" {
+		t.Fatalf("base_url = %q, want ${OMNIEMBED_BASE_URL} expansion", p.BaseURL)
+	}
+	if !p.CredentialLess {
+		t.Fatal("omniembed builtin must be credential-less (no api_key)")
+	}
+	if p.EmbedMultimodal != "replace" {
+		t.Fatalf("multimodal = %q, want replace", p.EmbedMultimodal)
+	}
+	if !strings.HasSuffix(r.EmbedIdentity(), "|replace") {
+		t.Fatalf("embed identity %q must encode the multimodal mode", r.EmbedIdentity())
+	}
+}
+
+// TestProviders_OmniEmbedNotInAutoPrecedence pins that the credential-less
+// omniembed profile never wins embed auto-selection: with no real
+// credentials and no explicit binding, embed must fail (preflight surfaces
+// it) rather than silently fall through to omniembed.
+func TestProviders_OmniEmbedNotInAutoPrecedence(t *testing.T) {
+	for _, k := range []string{
+		"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+		"GEMINI_API_KEY", "COHERE_API_KEY", "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY",
+	} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("OMNIEMBED_BASE_URL", "http://gpu-vps:8000")
+	cfg := loadCfg(t, "version: 1\n")
+	if _, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+		t.Fatal("omniembed must not win embed auto-selection (excluded from precedence)")
+	}
+}
+
 func TestProviders_EnvVarRefs(t *testing.T) {
 	// Default config (no custom providers): built-in profiles reference
 	// the standard credential env vars.
