@@ -169,9 +169,9 @@ func newBM25Store(docs []evalDoc) *bm25Store {
 	return &bm25Store{docs: append([]evalDoc(nil), docs...)}
 }
 
-func (s *bm25Store) Init(context.Context) error                            { return nil }
-func (s *bm25Store) UpsertDocument(context.Context, model.Document) error  { return nil }
-func (s *bm25Store) Close() error                                          { return nil }
+func (s *bm25Store) Init(context.Context) error                           { return nil }
+func (s *bm25Store) UpsertDocument(context.Context, model.Document) error { return nil }
+func (s *bm25Store) Close() error                                         { return nil }
 func (s *bm25Store) GetDocumentByPath(context.Context, string) (model.Document, error) {
 	return model.Document{}, model.ErrNotImplemented
 }
@@ -238,7 +238,7 @@ func (s *bm25Store) SearchBM25(_ context.Context, query string, k int, _ string)
 
 func tokenize(s string) []string {
 	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
 	})
 	return fields
 }
