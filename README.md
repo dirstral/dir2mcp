@@ -54,7 +54,7 @@ dir2mcp ships in two Homebrew formulas that install the **same binary** but diff
 | **Lean** (default) | `brew install dirstral/tap/dir2mcp` | **Not bundled** — bring your own | You already have `docling`, run a `docling-serve` container, extract via Mistral OCR, or index docling-free corpora |
 | **Full** | `brew install dirstral/tap/dir2mcp-full` | **Bundled** (docling runtime included) | You want local structured PDF/image extraction with zero extra setup |
 
-The two formulas are mutually exclusive (Homebrew refuses to install both at once). Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)).
+The two formulas are mutually exclusive (Homebrew refuses to install both at once). Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)). To move from lean to full (or to a shared docling-serve) in stages without a re-index flag day, see [Migration & rollout](#migration--rollout-adopting-docling-in-stages).
 
 Build-from-source remains available as an alternative:
 
@@ -297,6 +297,8 @@ An extractor counts as *available* only when it can actually **run**, not merely
 - *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
 - *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
 - *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.
+- *Expected docling but the banner shows `mistral-ocr (fallback ...)`* — docling either isn't on `PATH` or is present-but-broken (it failed the `docling --version` functional check, e.g. an ABI-incompatible venv). Under `auto` a non-functional docling is skipped and the cascade continues to docling-serve/Mistral; fix the install (or use the `-full` track), or pin `extractor: docling` to turn the broken install into a loud error instead of a silent fallback.
+- *Wrong host's docling chosen / pointing at a custom binary* — set `ingest.docling.command` (`DIR2MCP_DOCLING_COMMAND`) to the command template; the resolved path is redacted from diagnostics. Confirm via the `extractor` row of `dir2mcp doctor` or `routing.json` in a support bundle.
 
 ### docling extraction over HTTP (docling-serve)
 
@@ -314,6 +316,86 @@ ingest:
 - `dir2mcp doctor` reports the same availability decision, so a dead `docling-serve` endpoint shows up as an unavailable extractor instead of surfacing only later as per-document runtime failures.
 - Under `extractor: auto`, docling-serve is used only when the docling CLI isn't on `PATH` (local CLI is preferred); an empty `serve_url` means the HTTP transport isn't considered, and an unreachable one is skipped in favor of another available extractor (for example Mistral OCR).
 - Env equivalent: `DIR2MCP_DOCLING_SERVE_URL=http://127.0.0.1:5001`.
+
+### Extractor observability: which provider ran, and why
+
+The extractor decision (which engine was chosen, and whether it was a fallback)
+is surfaced consistently on three diagnostic surfaces — they all read the same
+resolution logic, so they never disagree:
+
+| Surface | How to see it | What it shows |
+|---|---|---|
+| Startup banner | printed by `dir2mcp up` in the **Models** section | `OCR: <provider> (<reason>)`, e.g. `OCR: docling (auto-detected on PATH)` or `OCR: mistral-ocr (fallback; docling not found on PATH; falling back to Mistral OCR)` |
+| `dir2mcp doctor` | run against the daemon | an `extractor` check whose detail is `<provider> (<reason>)`; status is `ok` normally, **`warn`** when the choice is a fallback or when extraction is disabled |
+| Support bundle | `dir2mcp support-bundle` → `routing.json` inside the tarball | machine-readable routing decisions (the same `provider` + `reason` data the banner shows), so a maintainer can confirm the backend without re-running `up` |
+
+The decision carries three fields internally:
+
+- **provider name** — `docling`, `docling-serve`, `mistral-ocr`, or empty (disabled);
+- **source** — `explicit` (you pinned `ingest.extractor`), `auto` (auto-detected as the preferred path), `fallback` (preferred path unavailable), or `disabled`;
+- **reason** — a human-readable explanation (e.g. `docling not found on PATH; falling back to Mistral OCR`). User-supplied docling command templates and resolved paths are intentionally **redacted** from the reason so no secret-bearing flag leaks into the banner or `routing.json`.
+
+**Per-document extraction errors** are recorded in the optional **batch run
+manifest** (a JSONL file, one record per asset, enabled with
+`media.batch.manifest: <path>`). Each error record carries a canonical
+`error_code` — `EXTRACT_FAILED` for a representation/derivation failure (this
+covers OCR/docling extraction failures) or `TRANSCRIBE_FAILED` for a transcript
+provider failure — plus a redacted `error_message`. Aggregate the manifest to
+count failures per run.
+
+> **Gap (no per-provider counters yet):** dir2mcp does **not** currently expose
+> numeric counters/metrics broken down by extractor provider, fallback events,
+> or error type. The only running numeric counter is an **aggregate**
+> document-level error count in indexing status (it does not distinguish
+> extraction failures from other errors, nor which provider produced them). For
+> per-provider / per-error breakdowns today, parse the batch manifest. Finer
+> error classification (e.g. `OCR_FAILED`) is also a tracked follow-up rather
+> than something emitted today.
+
+### Migration & rollout: adopting docling in stages
+
+You can move from a lean, docling-free setup to local structured extraction (or
+to a shared `docling-serve`) without a flag day — switching extractors across
+re-indexes is safe because every engine produces the same `extracted_markdown`
+representation (only span-provenance richness differs: structured `region` spans
+vs. flat `page` spans). Suggested phases:
+
+1. **Baseline (lean, no extraction or Mistral OCR).** Install
+   `dir2mcp` (lean). With no docling on `PATH`, `extractor: auto` resolves to
+   Mistral OCR when `MISTRAL_API_KEY` is set, else `disabled`. Confirm the
+   active path on the `dir2mcp up` banner / `dir2mcp doctor` `extractor` check
+   before indexing — a `disabled` extractor silently drops PDF/image text.
+2. **Pilot docling on one host.** Either `brew install dirstral/tap/dir2mcp-full`
+   (bundled, version-locked runtime) **or** install your own `docling` on
+   `PATH`. Leave `extractor: auto`: docling is now preferred automatically and
+   the banner should read `OCR: docling (...)`. Re-index a sample and spot-check
+   region citations.
+3. **Centralize via `docling-serve` (optional).** Stand up a long-running
+   [docling-serve](#docling-extraction-over-http-docling-serve) container and
+   point clients at it with `ingest.docling.serve_url`
+   (`DIR2MCP_DOCLING_SERVE_URL`). Under `auto`, a host without the docling CLI
+   uses the endpoint; pin `extractor: docling-serve` to require it (no silent
+   fallback). Output is byte-identical to the CLI.
+4. **Pin once you are confident.** Replace `auto` with an explicit
+   `extractor: docling` (or `docling-serve`) so a host that loses its docling
+   install **fails loudly** (extraction disabled) instead of silently degrading
+   to Mistral OCR. Keep `auto` if a graceful Mistral fallback is what you want.
+
+**Staged-enablement checklist:**
+
+- [ ] Decide the track per host: lean (`dir2mcp`) if you bring docling /
+      docling-serve / Mistral yourself, full (`dir2mcp-full`) for batteries-included local docling.
+- [ ] Set `MISTRAL_API_KEY` if (and only if) you want a Mistral OCR fallback or use it as the primary extractor.
+- [ ] After each change, verify the chosen extractor on the `up` banner or via
+      `dir2mcp doctor` (watch for `warn`/`disabled`).
+- [ ] Re-index a representative sample and confirm citations resolve as expected.
+- [ ] Enable `media.batch.manifest` during the rollout to capture per-asset
+      `EXTRACT_FAILED` / `TRANSCRIBE_FAILED` records, then review the manifest.
+- [ ] Once stable, consider pinning `ingest.extractor` (drop `auto`) so missing
+      docling is a loud error rather than a silent fallback.
+
+For a multi-host / GPU-VPS topology (self-hosted extractor + remote corpus), see
+[docs/dual-machine-deployment.md](docs/dual-machine-deployment.md).
 
 ### Self-hosted / GPU-VPS provider endpoints (embed / OCR / STT)
 
