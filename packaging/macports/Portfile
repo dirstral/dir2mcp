@@ -1,27 +1,25 @@
 # -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
 #
-# SKELETON — NOT YET BUILDABLE. dir2mcp MacPorts Portfile (lean binary), issue #273.
+# WIP — one piece remaining (go.vendors). dir2mcp MacPorts Portfile (lean), #273.
 #
-# This is a reference/starting Portfile for distributing the lean `dir2mcp`
-# binary via MacPorts (build-from-source), primarily for older macOS where
-# Homebrew no longer ships support. It builds locally with MacPorts' Go toolchain
-# (pure Go, CGO disabled), so it works on the OS versions MacPorts targets.
+# Reference/starting Portfile for distributing the lean `dir2mcp` binary via
+# MacPorts (build-from-source), primarily for older macOS where Homebrew no
+# longer ships support. It builds locally with MacPorts' Go toolchain (pure Go,
+# CGO disabled), so it works on the OS versions MacPorts targets.
 #
-# Before this can build / be submitted to macports-ports, fill the THREE
-# go2port-generated pieces against a real tag (recommended: v0.8.0):
+# Targets v0.8.0. Already filled: go.setup, the verified source `checksums`, and
+# the hand-tuned lean build / version ldflag / cmd/dir2mcp subpackage / smoke
+# test / meta (none of which go2port produces).
 #
-#   go install github.com/sebres/go2port@latest    # or a maintained fork
-#   go2port -o Portfile.gen github.com/dirstral/dir2mcp v0.8.0
+# REMAINING before it builds / can be submitted to macports-ports:
+#   1. the `go.vendors { ... }` block (every dependency + checksum) — generate it
+#      against v0.8.0 with go2port on a MacPorts host:
+#        go install github.com/sebres/go2port@latest   # or a maintained fork
+#        go2port -o Portfile.gen github.com/dirstral/dir2mcp v0.8.0
+#      then paste its `go.vendors { ... }` here (ignore its build/meta/checksums).
+#   2. a real `maintainers` handle (below).
 #
-# From Portfile.gen, copy in:
-#   1. the exact `go.setup` line (author/project/version/tag-prefix),
-#   2. the full `go.vendors { ... }` block (every dependency + checksum),
-#   3. the source `checksums` (rmd160/sha256/size of the v0.8.0 tarball).
-#
-# Keep the hand-tuned build/destroot/test/meta below (the lean CGO-off build with
-# the version ldflag and the cmd/dir2mcp subpackage — go2port does not produce
-# these). Then validate on a MacPorts host:
-#
+# Then validate on a MacPorts host:
 #   port lint --nitpick ./Portfile
 #   sudo port -v test ./Portfile
 
@@ -49,10 +47,11 @@ long_description    dir2mcp turns any local directory into a Model Context \
 
 homepage            https://github.com/dirstral/dir2mcp
 
-# TODO(go2port): replace with the generated checksums for the v0.8.0 tarball.
-checksums           rmd160  0 \
-                    sha256  0 \
-                    size    0
+# Source tarball checksums for the v0.8.0 GitHub tag archive (verified). If you
+# bump go.setup to a newer tag, regenerate these (port checksum / go2port).
+checksums           rmd160  90cb908ce63f7fe06cbac5b9757102f6747d0762 \
+                    sha256  0cb633d5ab891366c92720071c55541330e45496b181b020be3b634635ea778a \
+                    size    5259535
 
 # Lean, pure-Go build: no CGO and no bundled docling runtime. The version is
 # injected into the symbol the runtime reads (internal/buildinfo.Version),
