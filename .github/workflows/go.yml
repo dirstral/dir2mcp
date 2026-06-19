@@ -81,3 +81,27 @@ jobs:
 
       - name: Run inspector smoke test
         run: make inspector-smoke
+
+  # Named, fast-failing coverage for the docling adapter contract and the
+  # provider-selection / fallback decision matrix (#145). These cases also run
+  # under `make check` (the `checks` job); this job runs them in isolation so an
+  # adapter-protocol regression or a broken fallback path is surfaced as its own
+  # red check rather than buried in the full suite. It needs no docling binary,
+  # no docling-serve container, and no network (deterministic fakes/seams only).
+  docling-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Docling adapter contract + provider-selection matrix
+        run: >-
+          go test -v ./tests/ingest/
+          -run 'Docling|DescribeDocumentExtractor|DocumentExtractorFromConfig|DescribeAndBuild'
