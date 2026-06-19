@@ -36,6 +36,25 @@ const sttSource = "stt"
 // derivation identity and IS screened by the output quality gate.
 const translationSource = "translation"
 
+// language_source values for transcriptMeta.LanguageSource (SPEC §5.2/§8.8).
+// They record which signal won the §8.8 precedence (configured > declared >
+// detected) for a representation's effective language.
+//
+// The third precedence rank, "detected" (a best-effort auto-detector's result),
+// is part of the §8.8 contract but is intentionally NOT emitted yet: dir2mcp's
+// transcribers do not currently report a detected language and §8.8 forbids
+// assuming a default, so a representation with no pin and no declaration stays
+// unknown. The "detected" value will be wired here when a detector that reports
+// a language becomes available; recording it now would be dead code.
+const (
+	// langSourceConfigured: the language was pinned by an operator (e.g.
+	// media.language / a per-provider stt_language). It always wins (§8.8).
+	langSourceConfigured = "configured"
+	// langSourceDeclared: the language was asserted by the source itself (a
+	// sidecar's language suffix §8.6.4, a track/document language tag).
+	langSourceDeclared = "declared"
+)
+
 // sidecarFile is a discovered subtitle sidecar for a media document: its corpus
 // rel_path, the language tag parsed from the filename (empty when the sidecar is
 // undifferentiated, e.g. "clip.vtt"), the lowercased extension, and the sidecar
@@ -52,10 +71,25 @@ type sidecarFile struct {
 // the STT provider/model fields are omitted (omitempty) so the representation
 // carries no model derivation identity (§8.6.7).
 type transcriptMeta struct {
-	Source     string `json:"source,omitempty"`
-	Language   string `json:"language,omitempty"`
-	Timestamps bool   `json:"timestamps"`
-	Format     string `json:"format,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Language string `json:"language,omitempty"`
+	// LanguageSource records how Language was obtained (SPEC §5.2/§8.8):
+	// "configured" (an operator pin, e.g. media.language / per-provider
+	// stt_language), "declared" (asserted by the source itself, e.g. a sidecar's
+	// language suffix or track tag), or "detected" (an auto-detector's best-effort
+	// result). Omitted (omitempty) when no language was recorded (unknown) or the
+	// provenance is unspecified, so meta_json is unchanged for a transcript that
+	// records no language. The recorded Language is the EFFECTIVE value resolved
+	// by §8.8 precedence (configured > declared > detected); LanguageSource names
+	// the signal that won.
+	LanguageSource string `json:"language_source,omitempty"`
+	// LanguageConfidence is a detector-reported confidence in [0,1] for an
+	// auto-"detected" Language (SPEC §5.2/§8.8). Informational only — it MUST NOT
+	// be re-applied as a filter at query time (§9.5). Omitted unless a detector
+	// produced it; a pointer so a genuine 0.0 is distinguishable from "absent".
+	LanguageConfidence *float64 `json:"language_confidence,omitempty"`
+	Timestamps         bool     `json:"timestamps"`
+	Format             string   `json:"format,omitempty"`
 
 	// Provider / Model / ModelVersion record the STT derivation identity on a
 	// machine-transcribed transcript (Source == "stt", spec §5.2/§8.6.7): the
@@ -364,7 +398,19 @@ func parseSidecar(sc sidecarFile, content string) map[string][]subtitle.Cue {
 // screened by the quality gate (§8.6.6/§8.6.7). meta_json records source=sidecar
 // and the language so retrieval and re-derivation treat it as authored.
 func (s *Service) persistSidecarTranscript(ctx context.Context, doc model.Document, lang string, cues []subtitle.Cue, segments []chunkSegment) error {
+	// Normalize once so the recorded language and its provenance are derived from
+	// the same value (no padded/non-canonical language stored alongside a trimmed
+	// provenance decision).
+	lang = strings.TrimSpace(lang)
 	meta := transcriptMeta{Source: sidecarSource, Language: lang, Timestamps: true}
+	// A sidecar's language is asserted by the source itself — the filename suffix
+	// (clip.en.vtt §8.6.4) or a TTML xml:lang — so its provenance is "declared"
+	// (SPEC §5.2/§8.8). An undifferentiated sidecar (clip.vtt) carries no language
+	// tag: lang is empty (unknown), so we leave language_source unset rather than
+	// asserting a declaration that was never made.
+	if lang != "" {
+		meta.LanguageSource = langSourceDeclared
+	}
 	// A sidecar that carried <v> voice tags yields speaker-attributed segments
 	// (SPEC §8.6.8). Such a transcript is diarized WITHOUT a model, so it records
 	// diarized:true and the speakers set but NO diarize_provider/model (mirrors

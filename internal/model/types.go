@@ -76,6 +76,15 @@ type Chunk struct {
 	// chunk; the embedding worker reads those bytes and embeds them
 	// directly. Empty for text chunks.
 	MediaRef string
+	// Language is the effective BCP-47 language of the chunk's source
+	// representation (SPEC §5.2/§8.8), denormalized onto the chunk so the
+	// per-language retrieval filter (§9.5) can predicate at candidate selection
+	// without re-reading representation meta_json. It is populated at chunk
+	// insert time from the representation's recorded meta language; empty means
+	// the representation recorded no language (unknown), which never matches a
+	// specific filter. Additive: a corpus indexed before any language was
+	// recorded simply has empty values here (no migration, §9.5).
+	Language string
 }
 
 type Span struct {
@@ -187,6 +196,7 @@ func (p IndexPayload) ToSearchHit() SearchHit {
 		Span:     span,
 		Modality: p.Modality,
 		MediaRef: p.MediaRef,
+		Language: p.Language,
 	}
 }
 
@@ -219,6 +229,12 @@ type Filter struct {
 	DocTypes       []string
 	ExcludeOrphans bool
 	Speaker        string
+	// Languages restricts candidates to representations whose recorded effective
+	// language (SPEC §5.2/§8.8) matches any requested BCP-47 tag on the
+	// primary-subtag axis, case-insensitively (logical OR, SPEC §9.5). Empty
+	// disables the predicate (no language filtering). A candidate with no
+	// recorded language (unknown) never matches a non-empty Languages filter.
+	Languages []string
 }
 
 // IsZero reports whether the filter has no active predicate.
@@ -227,7 +243,8 @@ func (f Filter) IsZero() bool {
 		f.PathGlob == "" &&
 		len(f.DocTypes) == 0 &&
 		!f.ExcludeOrphans &&
-		strings.TrimSpace(f.Speaker) == ""
+		strings.TrimSpace(f.Speaker) == "" &&
+		len(f.Languages) == 0
 }
 
 // Match reports whether the payload satisfies every active predicate. It
@@ -273,6 +290,16 @@ func (f Filter) Match(p IndexPayload) bool {
 			return false
 		}
 	}
+	// Languages restricts to representations recorded in any of the requested
+	// BCP-47 languages, matched on the primary subtag case-insensitively (SPEC
+	// §9.5). A payload with no recorded language (unknown, §8.8) never matches a
+	// non-empty filter, so a corpus indexed before any language was recorded
+	// returns nothing for a specific language filter. Empty filter is a no-op.
+	if len(f.Languages) > 0 {
+		if !LanguageMatchesAny(p.Language, f.Languages) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -288,6 +315,11 @@ type SearchQuery struct {
 	// the filter; a corpus without diarized transcripts returns no
 	// speaker-filtered hits.
 	Speaker string
+	// Languages optionally restricts hits to representations recorded in any of
+	// these BCP-47 languages (SPEC §9.5/§15.2-3): case-insensitive primary-subtag
+	// match, logical OR. Absent/empty disables the filter (unchanged behavior).
+	// An unknown-language representation never matches a non-empty filter.
+	Languages []string
 }
 
 type SearchHit struct {
@@ -305,6 +337,12 @@ type SearchHit struct {
 	// retrieval dedup page-image candidates and mark media-only hits.
 	Modality string
 	MediaRef string
+	// Language is the effective BCP-47 language of the hit's source
+	// representation (SPEC §5.2/§8.8), carried so the per-language retrieval
+	// filter (§9.5) can predicate on candidates. It is internal to retrieval and
+	// is NOT serialized into the tool result (the §9.2 hit structure is
+	// unchanged); empty means unknown.
+	Language string
 }
 
 type ChunkMetadata struct {
@@ -317,6 +355,10 @@ type ChunkMetadata struct {
 	Span     Span
 	Modality string
 	MediaRef string
+	// Language is the effective BCP-47 language of the chunk's source
+	// representation (SPEC §5.2/§8.8), denormalized from representation meta_json
+	// at chunk insert so retrieval can apply the per-language filter (§9.5).
+	Language string
 }
 
 // ToSearchHit converts the lightweight chunk metadata back into a full
@@ -333,6 +375,7 @@ func (m ChunkMetadata) ToSearchHit() SearchHit {
 		Span:     m.Span,
 		Modality: m.Modality,
 		MediaRef: m.MediaRef,
+		Language: m.Language,
 	}
 }
 

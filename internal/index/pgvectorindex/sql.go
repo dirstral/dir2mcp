@@ -249,14 +249,15 @@ LIMIT %s`, q, qualifiedTable(schema, table), where, q, limitPH)
 }
 
 // CanFilterFilter reports whether every active predicate of the filter is
-// expressible in SQL. PathGlob and Speaker are the unsupported predicates; when
-// either is set the backend cannot push down and retrieval must filter in Go.
-// Speaker (diarized transcript filter, SPEC §8.6.8) is intentionally left to the
-// Go-side matchFilters re-check so speaker filtering stays on the single,
-// authoritative model.Filter.Match path. This is the pure decision function
-// behind the FilteringIndex.CanFilter method.
+// expressible in SQL. PathGlob, Speaker, and Languages are the unsupported
+// predicates; when any is set the backend cannot push down and retrieval must
+// filter in Go. Speaker (diarized transcript filter, SPEC §8.6.8) and Languages
+// (per-language retrieval filter, SPEC §9.5) are intentionally left to the
+// Go-side matchFilters re-check so they stay on the single, authoritative
+// model.Filter.Match path (the BCP-47 primary-subtag matching lives there).
+// This is the pure decision function behind the FilteringIndex.CanFilter method.
 func CanFilterFilter(f model.Filter) bool {
-	return f.PathGlob == "" && strings.TrimSpace(f.Speaker) == ""
+	return f.PathGlob == "" && strings.TrimSpace(f.Speaker) == "" && len(f.Languages) == 0
 }
 
 // MarshalPayload serialises the full IndexPayload (including the nested Span)

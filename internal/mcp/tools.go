@@ -734,7 +734,7 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {},
+		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -761,11 +761,15 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
+	languages, toolErr := parseLanguagesArg(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
-		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker,
+		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages,
 	})
 	if searchErr != nil {
 		return toolCallResult{}, mapSearchError(searchErr)
@@ -793,7 +797,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 
 func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {},
+		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -820,10 +824,14 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	languages, toolErr := parseLanguagesArg(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes}
+	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages}
 	if mode == "search_only" {
 		return s.runSearchOnlyMode(ctx, question, sq)
 	}
@@ -1654,6 +1662,34 @@ func parseSearchFilters(args map[string]interface{}) (pathPrefix, fileGlob strin
 		return "", "", nil, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 	return pathPrefix, fileGlob, docTypes, nil
+}
+
+// parseLanguagesArg parses the optional per-language retrieval filter (SPEC
+// §9.5): an array of BCP-47 language tags. Absent or empty ⇒ nil (no filtering,
+// behaviour unchanged). Each entry must be a syntactically valid BCP-47 tag
+// (model.IsValidLanguageTag); a malformed tag is INVALID_FIELD (§9.5/§14). A
+// syntactically valid tag that simply matches nothing in the corpus is NOT an
+// error — that is handled downstream by returning an empty hit list. The parsed
+// tags are returned verbatim (trimmed); the retrieval filter normalizes to the
+// primary subtag for case-insensitive matching.
+func parseLanguagesArg(args map[string]interface{}) ([]string, *toolExecutionError) {
+	languages, err := parseOptionalStringSlice(args, "languages")
+	if err != nil {
+		return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if len(languages) == 0 {
+		return nil, nil
+	}
+	for _, tag := range languages {
+		if !model.IsValidLanguageTag(tag) {
+			return nil, &toolExecutionError{
+				Code:      "INVALID_FIELD",
+				Message:   fmt.Sprintf("languages contains an invalid BCP-47 language tag %q", tag),
+				Retryable: false,
+			}
+		}
+	}
+	return languages, nil
 }
 
 // mapSearchError converts a search/ask error into a toolExecutionError.
@@ -2672,6 +2708,11 @@ func searchInputSchema() map[string]interface{} {
 				"type":        "string",
 				"description": "Optional (SPEC §8.6.8): restrict time-spanned transcript hits to this speaker id. A corpus without diarized transcripts returns no speaker-filtered hits.",
 			},
+			"languages": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (SPEC §9.5): restrict hits to representations recorded in any of these BCP-47 languages (case-insensitive primary-subtag match). Absent/empty = no filtering; unknown-language representations never match a specific filter.",
+			},
 		},
 		"required": []string{"query"},
 	}
@@ -2705,6 +2746,11 @@ func askInputSchema() map[string]interface{} {
 			"path_prefix": map[string]interface{}{"type": "string"},
 			"file_glob":   map[string]interface{}{"type": "string"},
 			"doc_types":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"languages": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (SPEC §9.5): restrict retrieved contexts to representations recorded in any of these BCP-47 languages (case-insensitive primary-subtag match). Absent/empty = no filtering; unknown-language representations never match a specific filter.",
+			},
 		},
 		"required": []string{"question"},
 	}

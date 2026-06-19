@@ -80,6 +80,15 @@ func (s *Service) sttTranscriptMetaJSON(speakers []Speaker) (string, error) {
 		Provider:   strings.TrimSpace(s.sttProvider),
 		Model:      strings.TrimSpace(s.sttModel),
 	}
+	// transcriptLanguage is an operator pin (media.language / per-provider
+	// stt_language, SPEC §16.2), so when present it is the effective language with
+	// provenance "configured" — the top of the §8.8 precedence. When unset the STT
+	// path records no language (unknown): dir2mcp's transcribers do not currently
+	// report a detected language, and §8.8 forbids assuming a default, so the
+	// representation stays unknown until a detector that reports one is wired.
+	if meta.Language != "" {
+		meta.LanguageSource = langSourceConfigured
+	}
 	if s.diarizeActive {
 		// Record the diarize backend identity whenever diarization is active so a
 		// backend/model swap re-derives the transcript (§8.6.7), even before any
