@@ -826,6 +826,7 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetContextCompression(cfg.ContextCompressionEnabled, cfg.ContextCompressionTargetRatio)
 	ret.SetAdaptiveRetrieval(cfg.RetrievalAdaptiveEnabled, cfg.RetrievalAdaptiveKMin, cfg.RetrievalAdaptiveKMax)
 	ret.SetMMR(cfg.RetrievalMMREnabled, cfg.RetrievalMMRLambda)
+	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {

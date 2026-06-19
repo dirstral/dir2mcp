@@ -83,6 +83,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetContextCompression(cfg.ContextCompressionEnabled, cfg.ContextCompressionTargetRatio)
 	ret.SetAdaptiveRetrieval(cfg.RetrievalAdaptiveEnabled, cfg.RetrievalAdaptiveKMin, cfg.RetrievalAdaptiveKMax)
 	ret.SetMMR(cfg.RetrievalMMREnabled, cfg.RetrievalMMRLambda)
+	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
