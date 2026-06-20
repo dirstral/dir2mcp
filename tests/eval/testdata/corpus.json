@@ -1,0 +1,77 @@
+{
+  "_comment": "General-purpose labeled eval corpus for the retrieval ablation harness (issue #322). Each document carries a deterministic 4-D embedding `vector` (the harness L2-normalizes it before indexing), the lexical `text` used by the in-memory BM25 store, an optional BCP-47 `language`, and a `content_hash` used by cross-file dedup. No broadcaster/domain-specific data. chunk_id must be unique and > 0. Vectors are hand-chosen so individual knobs measurably move the metrics (see queries.json).",
+  "documents": [
+    {
+      "chunk_id": 1,
+      "rel_path": "guides/gardening.md",
+      "doc_type": "md",
+      "language": "en",
+      "content_hash": "H_GARDEN",
+      "vector": [1.0, 0.0, 0.0, 0.0],
+      "text": "How to grow tomatoes and water plants in a home vegetable garden."
+    },
+    {
+      "chunk_id": 2,
+      "rel_path": "guides/gardening-copy.md",
+      "doc_type": "md",
+      "language": "en",
+      "content_hash": "H_GARDEN",
+      "vector": [0.999, 0.045, 0.0, 0.0],
+      "text": "How to grow tomatoes and water plants in a home vegetable garden."
+    },
+    {
+      "chunk_id": 3,
+      "rel_path": "guides/cooking.md",
+      "doc_type": "md",
+      "language": "en",
+      "content_hash": "H_COOK",
+      "vector": [0.0, 1.0, 0.0, 0.0],
+      "text": "A recipe for roasting tomatoes with olive oil and herbs in the oven."
+    },
+    {
+      "chunk_id": 4,
+      "rel_path": "notes/astronomy.md",
+      "doc_type": "md",
+      "language": "en",
+      "content_hash": "H_ASTRO",
+      "vector": [0.0, 0.0, 1.0, 0.0],
+      "text": "Observing planets and stars through a backyard telescope at night."
+    },
+    {
+      "chunk_id": 5,
+      "rel_path": "notes/finance.md",
+      "doc_type": "md",
+      "language": "en",
+      "content_hash": "H_FIN",
+      "vector": [0.5, 0.5, 0.5, 0.0],
+      "text": "Budgeting tips and how to track monthly household spending."
+    },
+    {
+      "chunk_id": 6,
+      "rel_path": "i18n/jardin.md",
+      "doc_type": "md",
+      "language": "es",
+      "content_hash": "H_JARDIN",
+      "vector": [0.9, 0.0, 0.0, 0.44],
+      "text": "Como cultivar tomates y regar las plantas en un huerto casero."
+    },
+    {
+      "chunk_id": 7,
+      "rel_path": "i18n/jardim.md",
+      "doc_type": "md",
+      "language": "pt-BR",
+      "content_hash": "H_JARDIM",
+      "vector": [0.88, 0.0, 0.0, 0.47],
+      "text": "Como cultivar tomates e regar as plantas em uma horta caseira."
+    },
+    {
+      "chunk_id": 8,
+      "rel_path": "misc/photosynthesis.md",
+      "doc_type": "md",
+      "language": "en",
+      "content_hash": "H_PHOTO",
+      "vector": [0.4, 0.55, 0.0, 0.0],
+      "text": "Plants convert sunlight into energy through the process of photosynthesis."
+    }
+  ]
+}
