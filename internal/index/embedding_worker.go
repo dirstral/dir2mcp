@@ -13,6 +13,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/latechunk"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/pdfutil"
 	"github.com/dirstral/dir2mcp/internal/store"
@@ -39,6 +40,22 @@ type EmbeddingWorker struct {
 	ModelForCode   string
 	BatchSize      int
 	OnIndexedChunk func(label uint64, metadata model.ChunkMetadata)
+
+	// LateChunking is the resolved value of config.IngestLateChunking (issue
+	// #332). When true AND the configured Embedder implements model.TokenEmbedder,
+	// the worker is on the late-chunking path (embed whole documents, mean-pool
+	// token vectors per chunk span). When the embedder lacks that capability — as
+	// every shipped provider does today — the worker logs the fallback once and
+	// embeds chunks the existing way. Default false: the worker behaves
+	// byte-for-byte as before. The pure embed/mean-pool step lives in
+	// internal/latechunk; the worker holds the resolved capability gate
+	// (latechunk.Decide) so the decision and any fallback are observable
+	// end-to-end.
+	LateChunking bool
+
+	// lateChunkLogged guards the one-time late-chunking decision log so the
+	// message is emitted once per worker, not on every RunOnce cycle.
+	lateChunkLogged bool
 
 	// RootDir is the corpus root used to resolve a media chunk's MediaRef
 	// (a corpus rel_path) to bytes for multimodal embedding (SPEC 8.1.7).
@@ -638,6 +655,8 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		return 0, err
 	}
 
+	w.logLateChunkDecisionOnce()
+
 	batchSize := w.BatchSize
 	if batchSize <= 0 {
 		batchSize = 32
@@ -899,4 +918,32 @@ func (w *EmbeddingWorker) modelForKind(indexKind string) string {
 		}
 		return "mistral-embed"
 	}
+}
+
+// LateChunkDecision resolves the late-chunking capability gate (issue #332) for
+// this worker's configured embedder: it returns whether late chunking is active
+// (enabled AND the embedder exposes token-level embeddings via
+// model.TokenEmbedder) and, when not, the fallback reason. It is the single
+// routing point so the embed step and tests agree on the decision.
+func (w *EmbeddingWorker) LateChunkDecision() latechunk.Decision {
+	return latechunk.Decide(w.LateChunking, w.Embedder)
+}
+
+// logLateChunkDecisionOnce emits a single informational line describing the
+// late-chunking decision the first time the worker runs with the feature
+// enabled, so an operator who turned on ingest.late_chunking can see whether it
+// actually engaged or silently fell back to chunk-then-embed (issue #332: never
+// fail silently). It is a no-op when late chunking is disabled (the default), so
+// stock runs log nothing new.
+func (w *EmbeddingWorker) logLateChunkDecisionOnce() {
+	if !w.LateChunking || w.lateChunkLogged {
+		return
+	}
+	w.lateChunkLogged = true
+	dec := w.LateChunkDecision()
+	if dec.Active {
+		w.logf("late chunking: enabled and active (embedder %T exposes token embeddings)", w.Embedder)
+		return
+	}
+	w.logf("late chunking: enabled but falling back to chunk-then-embed (%s; embedder %T)", dec.Fallback, w.Embedder)
 }

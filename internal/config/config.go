@@ -278,6 +278,20 @@ type Config struct {
 	// exactly as before. Only consulted for the local-filesystem backend.
 	IngestScanCache bool
 
+	// IngestLateChunking opts IN to "late chunking" (issue #332, Jina's
+	// technique): instead of today's chunk-then-embed, the WHOLE document is
+	// embedded once through a long-context model to obtain contextually-enriched
+	// token embeddings, then the existing chunk boundaries are applied and the
+	// token vectors within each chunk's span are mean-pooled — so every chunk
+	// embedding carries document-level context (BEIR gains grow with document
+	// length). It is provider/model-dependent: it requires the configured
+	// embedder to expose token-level / long-context embeddings (the optional
+	// model.TokenEmbedder capability). When the active embedder cannot supply
+	// them, ingestion GRACEFULLY FALLS BACK to today's chunk-then-embed and
+	// records that fallback; nothing changes silently. Default OFF: the pipeline
+	// chunks-then-embeds exactly as before.
+	IngestLateChunking bool
+
 	// IngestWatch enables a filesystem watcher so a running server keeps
 	// indexing added/changed/deleted files after the initial scan. Opt-in.
 	IngestWatch bool
@@ -537,6 +551,7 @@ type fileConfig struct {
 	IngestExtractor                    *string
 	IndexBackend                       *string
 	IngestScanCache                    *bool
+	IngestLateChunking                 *bool
 	IngestWatch                        *bool
 	IngestWatchDebounce                *time.Duration
 	STTProvider                        *string
@@ -652,6 +667,7 @@ type persistedConfig struct {
 	IngestExtractor                    string        `yaml:"ingest_extractor"`
 	IndexBackend                       string        `yaml:"index_backend"`
 	IngestScanCache                    bool          `yaml:"ingest_scan_cache"`
+	IngestLateChunking                 bool          `yaml:"ingest_late_chunking"`
 	IngestWatch                        bool          `yaml:"ingest_watch"`
 	IngestWatchDebounce                time.Duration `yaml:"ingest_watch_debounce"`
 	STTProvider                        string        `yaml:"stt_provider"`
@@ -812,6 +828,7 @@ func Default() Config {
 		IngestExtractor:           "auto",
 		IndexBackend:              "memory",
 		IngestScanCache:           false,
+		IngestLateChunking:        false,
 		IngestWatch:               false,
 		IngestWatchDebounce:       500 * time.Millisecond,
 		STTProvider:               "mistral",
@@ -924,6 +941,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestExtractor:                    cfg.IngestExtractor,
 		IndexBackend:                       cfg.IndexBackend,
 		IngestScanCache:                    cfg.IngestScanCache,
+		IngestLateChunking:                 cfg.IngestLateChunking,
 		IngestWatch:                        cfg.IngestWatch,
 		IngestWatchDebounce:                cfg.IngestWatchDebounce,
 		STTProvider:                        cfg.STTProvider,
@@ -1573,6 +1591,9 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestScanCache != nil {
 		cfg.IngestScanCache = *fc.IngestScanCache
 	}
+	if fc.IngestLateChunking != nil {
+		cfg.IngestLateChunking = *fc.IngestLateChunking
+	}
 	if fc.IngestWatch != nil {
 		cfg.IngestWatch = *fc.IngestWatch
 	}
@@ -1935,6 +1956,8 @@ var configKeyAliases = map[string]string{
 	"max_file_mb":                             "ingest.max_file_mb",
 	"ingest_scan_cache":                       "ingest.scan_cache",
 	"scan_cache":                              "ingest.scan_cache",
+	"ingest_late_chunking":                    "ingest.late_chunking",
+	"late_chunking":                           "ingest.late_chunking",
 	"ingest_watch":                            "ingest.watch",
 	"ingest_watch_debounce":                   "ingest.watch_debounce",
 	"ingest_pdf_mode":                         "ingest.pdf.mode",
@@ -2078,6 +2101,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"ingest.gitignore":        func(c *fileConfig) **bool { return &c.IngestGitignore },
 	"ingest.follow_symlinks":  func(c *fileConfig) **bool { return &c.IngestFollowSymlinks },
 	"ingest.scan_cache":       func(c *fileConfig) **bool { return &c.IngestScanCache },
+	"ingest.late_chunking":    func(c *fileConfig) **bool { return &c.IngestLateChunking },
 	"ingest.watch":            func(c *fileConfig) **bool { return &c.IngestWatch },
 	"quality_gates_enabled":   func(c *fileConfig) **bool { return &c.QualityGatesEnabled },
 	"media_sidecars_disabled": func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
@@ -2517,6 +2541,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_extractor", cfg.IngestExtractor)
 	writeScalar("index_backend", cfg.IndexBackend)
 	writeBool("ingest_scan_cache", cfg.IngestScanCache)
+	writeBool("ingest_late_chunking", cfg.IngestLateChunking)
 	writeBool("ingest_watch", cfg.IngestWatch)
 	writeScalar("ingest_watch_debounce", cfg.IngestWatchDebounce.String())
 	writeScalar("stt_provider", cfg.STTProvider)
@@ -2787,22 +2812,31 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 			*o.field = strings.TrimSpace(raw)
 		}
 	}
-	if raw, ok := envLookup("DIR2MCP_INGEST_SCAN_CACHE", env); ok && strings.TrimSpace(raw) != "" {
-		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
-			cfg.IngestScanCache = parsed
-		}
-	}
-	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH", env); ok && strings.TrimSpace(raw) != "" {
-		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
-			cfg.IngestWatch = parsed
-		}
+	// Boolean overrides applied only when the variable is set and parses; a table
+	// keeps this linear in cyclomatic complexity as boolean keys are added.
+	for _, o := range []struct {
+		key   string
+		field *bool
+	}{
+		{"DIR2MCP_INGEST_SCAN_CACHE", &cfg.IngestScanCache},
+		{"DIR2MCP_INGEST_LATE_CHUNKING", &cfg.IngestLateChunking},
+		{"DIR2MCP_INGEST_WATCH", &cfg.IngestWatch},
+		{"DIR2MCP_RETRIEVAL_HYBRID_ENABLED", &cfg.RetrievalHybridEnabled},
+	} {
+		applyBoolEnvField(o.field, o.key, env)
 	}
 	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH_DEBOUNCE", env); ok && strings.TrimSpace(raw) != "" {
 		applyDurationEnvField(cfg, raw, "DIR2MCP_INGEST_WATCH_DEBOUNCE", &cfg.IngestWatchDebounce)
 	}
-	if raw, ok := envLookup("DIR2MCP_RETRIEVAL_HYBRID_ENABLED", env); ok && strings.TrimSpace(raw) != "" {
+}
+
+// applyBoolEnvField sets *field from env[key] when the variable is set, non-empty,
+// and parses as a boolean; an unset/empty/unparseable value leaves field
+// unchanged (preserving the prior best-effort, silently-ignore-garbage behavior).
+func applyBoolEnvField(field *bool, key string, env map[string]string) {
+	if raw, ok := envLookup(key, env); ok && strings.TrimSpace(raw) != "" {
 		if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
-			cfg.RetrievalHybridEnabled = parsed
+			*field = parsed
 		}
 	}
 }

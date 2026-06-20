@@ -817,6 +817,7 @@ func startEmbeddingWorkers(
 	logger *log.Logger,
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
+	lateChunking bool,
 ) {
 	if st == nil || embedder == nil {
 		return
@@ -837,6 +838,7 @@ func startEmbeddingWorkers(
 			Corpus:       corpusFS,
 			BatchSize:    32,
 			Logger:       logger,
+			LateChunking: lateChunking,
 			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
 				if ret != nil {
 					ret.SetChunkMetadataForIndex(workerKind, label, metadata.ToSearchHit())
@@ -993,7 +995,7 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnl
 	if cfg.DistributedEmbed.Enabled {
 		return startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
 	}
-	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
+	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, cfg.IngestLateChunking)
 	return nil
 }
 
