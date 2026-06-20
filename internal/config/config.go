@@ -227,6 +227,18 @@ type Config struct {
 	// `carbon:` YAML block. Disabled by default. Observability-only: never
 	// affects retrieval or tool results, and records only counts/estimates.
 	Carbon CarbonConfig
+	// RetrievalRecencyHalfLife is an OPT-IN server-side time-decay half-life
+	// (config `retrieval.recency_half_life`): when > 0, each candidate hit's
+	// final (authoritative) score is multiplied by an exponential decay
+	// `exp(-ln2 * age / half_life)`, where age is the hit's source document
+	// mtime relative to a fixed "now" captured at query start. Newer content
+	// therefore ranks higher in dated corpora; a hit with no resolvable date is
+	// never boosted nor penalized. The decay is applied after scoring/fusion/
+	// rerank and just before the relevance floor. It is config-only (NOT an MCP
+	// tool parameter) so no tool input/output schema changes. Default 0 =
+	// disabled (no decay): behavior is unchanged unless configured. Negative
+	// values are CONFIG_INVALID.
+	RetrievalRecencyHalfLife time.Duration
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -532,6 +544,7 @@ type fileConfig struct {
 	RetrievalHybridEnabled             *bool
 	DedupRetrieval                     *bool
 	RetrievalMinScore                  *float64
+	RetrievalRecencyHalfLife           *time.Duration
 	RerankEnabled                      *bool
 	RerankProvider                     *string
 	CohereAPIKey                       *string
@@ -649,6 +662,7 @@ type persistedConfig struct {
 	RetrievalHybridEnabled             bool          `yaml:"retrieval_hybrid_enabled"`
 	DedupRetrieval                     bool          `yaml:"dedup_retrieval"`
 	RetrievalMinScore                  float64       `yaml:"retrieval_min_score"`
+	RetrievalRecencyHalfLife           time.Duration `yaml:"retrieval_recency_half_life"`
 	RerankEnabled                      bool          `yaml:"rerank_enabled"`
 	RerankProvider                     string        `yaml:"rerank_provider"`
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
@@ -808,6 +822,9 @@ func Default() Config {
 		// RetrievalMinScore defaults to 0 (disabled): no relevance floor is
 		// applied unless explicitly configured.
 		RetrievalMinScore: 0,
+		// RetrievalRecencyHalfLife defaults to 0 (disabled): no time-decay is
+		// applied unless explicitly configured.
+		RetrievalRecencyHalfLife: 0,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -923,6 +940,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalHybridEnabled:             cfg.RetrievalHybridEnabled,
 		DedupRetrieval:                     cfg.DedupRetrieval,
 		RetrievalMinScore:                  cfg.RetrievalMinScore,
+		RetrievalRecencyHalfLife:           cfg.RetrievalRecencyHalfLife,
 		RerankEnabled:                      rerankEnabledEffective(cfg),
 		RerankProvider:                     cfg.RerankProvider,
 		CohereBaseURL:                      cfg.CohereBaseURL,
@@ -1525,6 +1543,9 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalMinScore != nil {
 		cfg.RetrievalMinScore = *fc.RetrievalMinScore
 	}
+	if fc.RetrievalRecencyHalfLife != nil {
+		cfg.RetrievalRecencyHalfLife = *fc.RetrievalRecencyHalfLife
+	}
 	if fc.SessionInactivityTimeout != nil {
 		cfg.SessionInactivityTimeout = *fc.SessionInactivityTimeout
 	}
@@ -1938,6 +1959,8 @@ var configKeyAliases = map[string]string{
 	"dedup_retrieval":                         "dedup.retrieval",
 	"retrieval_min_score":                     "retrieval.min_score",
 	"min_score":                               "retrieval.min_score",
+	"retrieval_recency_half_life":             "retrieval.recency_half_life",
+	"recency_half_life":                       "retrieval.recency_half_life",
 	"rerank_enabled":                          "rerank.enabled",
 	"rerank.cohere.api_key":                   "cohere_api_key",
 	"rerank.cohere.base_url":                  "cohere_base_url",
@@ -2237,6 +2260,8 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.HealthCheckInterval
 	case "ingest.watch_debounce":
 		target = &cfg.IngestWatchDebounce
+	case "retrieval.recency_half_life":
+		target = &cfg.RetrievalRecencyHalfLife
 	default:
 		return nil
 	}
@@ -2523,6 +2548,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("retrieval_hybrid_enabled", cfg.RetrievalHybridEnabled)
 	writeBool("dedup_retrieval", cfg.DedupRetrieval)
 	writeScalar("retrieval_min_score", strconv.FormatFloat(cfg.RetrievalMinScore, 'f', -1, 64))
+	writeScalar("retrieval_recency_half_life", cfg.RetrievalRecencyHalfLife.String())
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -3268,6 +3294,12 @@ func (c *Config) validateNumericBounds() error {
 	// validation rather than silently corrupting the floor comparison.
 	if c.RetrievalMinScore < 0 || math.IsNaN(c.RetrievalMinScore) || math.IsInf(c.RetrievalMinScore, 0) {
 		return fmt.Errorf("retrieval.min_score must be a non-negative finite number: %v", c.RetrievalMinScore)
+	}
+	// retrieval.recency_half_life is a time-decay half-life; 0 disables it. A
+	// negative half-life is meaningless (it would amplify rather than decay older
+	// content) so reject it explicitly, mirroring the min_score guard.
+	if c.RetrievalRecencyHalfLife < 0 {
+		return fmt.Errorf("retrieval.recency_half_life must be non-negative: %v", c.RetrievalRecencyHalfLife)
 	}
 	return nil
 }

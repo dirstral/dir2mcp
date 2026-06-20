@@ -816,6 +816,7 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
 	a.configureReranker(ret, cfg)
 	ret.SetMinScore(cfg.RetrievalMinScore)
+	ret.SetRecencyHalfLife(cfg.RetrievalRecencyHalfLife)
 
 	// Per-query cost/latency observability (issue #327). The ask CLI writes its
 	// result (often JSON) to stdout, so route the query_metrics event to stderr
