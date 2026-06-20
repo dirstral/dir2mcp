@@ -3,6 +3,7 @@ package tests
 import (
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/colbertrerank"
 	"github.com/dirstral/dir2mcp/internal/gemini"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/omniembed"
@@ -79,13 +80,32 @@ func TestTTS(t *testing.T) {
 }
 
 func TestReranker(t *testing.T) {
-	if r, err := providerfactory.Reranker(prof(provider.KindCohere)); err != nil || r == nil {
-		t.Fatalf("Reranker(cohere) = %v, %v", r, err)
+	for _, k := range []provider.Kind{provider.KindCohere, provider.KindColBERT} {
+		if r, err := providerfactory.Reranker(prof(k)); err != nil || r == nil {
+			t.Fatalf("Reranker(%s) = %v, %v", k, r, err)
+		}
 	}
 	for _, k := range []provider.Kind{provider.KindOpenAI, provider.KindMistral, provider.KindGemini, provider.KindAnthropic, provider.KindElevenLabs} {
 		if _, err := providerfactory.Reranker(prof(k)); err == nil {
 			t.Errorf("Reranker(%s) must error", k)
 		}
+	}
+}
+
+// TestReranker_ColBERTModelPropagates verifies the profile's rerank_model
+// overrides the colbert client's default (parity with the cohere path).
+func TestReranker_ColBERTModelPropagates(t *testing.T) {
+	p := provider.Profile{Name: "colbert", Kind: provider.KindColBERT, BaseURL: "http://localhost:9000", RerankModel: "gte-moderncolbert"}
+	r, err := providerfactory.Reranker(p)
+	if err != nil || r == nil {
+		t.Fatalf("Reranker(colbert) = %v, %v", r, err)
+	}
+	c, ok := r.(*colbertrerank.Client)
+	if !ok {
+		t.Fatalf("expected *colbertrerank.Client, got %T", r)
+	}
+	if c.DefaultModel != "gte-moderncolbert" {
+		t.Fatalf("rerank_model not propagated: %q", c.DefaultModel)
 	}
 }
 

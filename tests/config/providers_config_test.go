@@ -20,6 +20,47 @@ func loadCfg(t *testing.T, yaml string) config.Config {
 	return cfg
 }
 
+// TestProviders_ColBERTRerankProfileResolves verifies the built-in
+// self-hosted ColBERT reranker profile (dir2mcp#337) resolves explicitly,
+// is credential-less (eligible without an api_key), and is rerank-capable.
+// It is excluded from auto-precedence, so auto rerank resolution never
+// silently picks it over the hosted cohere path.
+func TestProviders_ColBERTRerankProfileResolves(t *testing.T) {
+	t.Setenv("COLBERT_BASE_URL", "http://colbert.internal:9000")
+	r := loadCfg(t, "version: 1\n").Providers()
+
+	p, err := r.ResolveExplicit(provider.CapRerank, "colbert", true)
+	if err != nil {
+		t.Fatalf("ResolveExplicit(rerank, colbert) error: %v", err)
+	}
+	if p.Kind != provider.KindColBERT {
+		t.Fatalf("kind = %q, want colbert", p.Kind)
+	}
+	if p.BaseURL != "http://colbert.internal:9000" {
+		t.Fatalf("base_url = %q, want env-expanded value", p.BaseURL)
+	}
+	if !p.Eligible() {
+		t.Fatal("colbert profile must be credential-less (eligible without api_key)")
+	}
+	if provider.Can(provider.KindColBERT, provider.CapRerank) != provider.Supported {
+		t.Fatal("colbert must be statically rerank-capable")
+	}
+}
+
+// TestProviders_ColBERTNotAutoSelectedForRerank verifies that, with no
+// rerank credential, auto rerank resolution still does NOT pick the
+// credential-less colbert profile (it is excluded from precedence) — auto
+// stays off, exactly as it did before #337.
+func TestProviders_ColBERTNotAutoSelectedForRerank(t *testing.T) {
+	for _, k := range []string{"COHERE_API_KEY", "COLBERT_BASE_URL"} {
+		t.Setenv(k, "")
+	}
+	r := loadCfg(t, "version: 1\n").Providers()
+	if _, err := r.Resolve(provider.CapRerank); err == nil {
+		t.Fatal("auto rerank must not silently select the colbert profile")
+	}
+}
+
 func TestProviders_BuiltinAutoSelectByCredential(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "mk")
 	cfg := loadCfg(t, "rag:\n  generate_answer: true\n")

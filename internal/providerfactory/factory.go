@@ -15,6 +15,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/anthropic"
 	"github.com/dirstral/dir2mcp/internal/cohere"
+	"github.com/dirstral/dir2mcp/internal/colbertrerank"
 	"github.com/dirstral/dir2mcp/internal/elevenlabs"
 	"github.com/dirstral/dir2mcp/internal/gemini"
 	"github.com/dirstral/dir2mcp/internal/mistral"
@@ -327,14 +328,26 @@ func TTS(p provider.Profile) (TTSSynthesizer, error) {
 	}
 }
 
-// Reranker builds a model.Reranker (only `cohere`).
+// Reranker builds a model.Reranker for rerank-capable kinds: `cohere`
+// (hosted cross-encoder, SPEC 8.1.2) and `colbert` (self-hosted
+// late-interaction / multi-vector endpoint, dir2mcp#337). The colbert
+// client is credential-optional (a self-hosted box on a private network),
+// mirroring the whisper STT path.
 func Reranker(p provider.Profile) (model.Reranker, error) {
-	if p.Kind != provider.KindCohere {
+	switch p.Kind {
+	case provider.KindCohere:
+		c := cohere.NewClient(p.BaseURL, p.APIKey)
+		if p.RerankModel != "" {
+			c.DefaultModel = p.RerankModel
+		}
+		return c, nil
+	case provider.KindColBERT:
+		c := colbertrerank.NewClient(p.BaseURL, p.APIKey)
+		if p.RerankModel != "" {
+			c.DefaultModel = p.RerankModel
+		}
+		return c, nil
+	default:
 		return nil, unsupported(p, provider.CapRerank)
 	}
-	c := cohere.NewClient(p.BaseURL, p.APIKey)
-	if p.RerankModel != "" {
-		c.DefaultModel = p.RerankModel
-	}
-	return c, nil
 }
