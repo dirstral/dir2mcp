@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/gemini"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/omniembed"
 	"github.com/dirstral/dir2mcp/internal/openai"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
@@ -170,6 +172,53 @@ func TestEmbedder_Multimodal(t *testing.T) {
 		if _, err := providerfactory.Embedder(p); err == nil {
 			t.Errorf("bad multimodal config #%d must be CONFIG_INVALID, got nil", i)
 		}
+	}
+}
+
+// TestEmbedder_OmniEmbed pins dir2mcp#334: the self-hosted omniembed kind
+// builds a model.Embedder that also satisfies model.MultimodalEmbedder, so
+// the embedding worker can embed media chunks off-API (SPEC 8.1.7). It is
+// credential-optional (a bare base_url is enough).
+func TestEmbedder_OmniEmbed(t *testing.T) {
+	p := provider.Profile{
+		Name: "omniembed", Kind: provider.KindOmniEmbed,
+		BaseURL: "http://gpu-vps:8000", CredentialLess: true,
+		EmbedTextModel: "omniembed-v0.1",
+	}
+	e, err := providerfactory.Embedder(p)
+	if err != nil {
+		t.Fatalf("Embedder(omniembed) error: %v", err)
+	}
+	if _, ok := e.(*omniembed.Client); !ok {
+		t.Fatalf("Embedder(omniembed) = %T, want *omniembed.Client", e)
+	}
+	if _, ok := e.(model.MultimodalEmbedder); !ok {
+		t.Fatal("omniembed embedder must satisfy model.MultimodalEmbedder (SPEC 8.1.7)")
+	}
+}
+
+// TestEmbedder_OmniEmbedMultimodal pins dir2mcp#334: augment/replace is
+// valid on omniembed when both axes share one (operator-chosen) model, and
+// CONFIG_INVALID when the axes diverge — never mixing vector spaces (§8.1.4).
+func TestEmbedder_OmniEmbedMultimodal(t *testing.T) {
+	base := provider.Profile{
+		Name: "omniembed", Kind: provider.KindOmniEmbed,
+		BaseURL: "http://gpu-vps:8000", CredentialLess: true,
+	}
+	for _, mode := range []string{"augment", "replace"} {
+		p := base
+		p.EmbedTextModel, p.EmbedCodeModel = "omniembed-v0.1", "omniembed-v0.1"
+		p.EmbedMultimodal = mode
+		if _, err := providerfactory.Embedder(p); err != nil {
+			t.Errorf("mode %q with one shared omniembed model must be valid: %v", mode, err)
+		}
+	}
+	// Diverging models on the two axes is CONFIG_INVALID (incomparable spaces).
+	bad := base
+	bad.EmbedTextModel, bad.EmbedCodeModel = "omniembed-v0.1", "other-model"
+	bad.EmbedMultimodal = "augment"
+	if _, err := providerfactory.Embedder(bad); err == nil {
+		t.Error("omniembed multimodal with mismatched text/code models must be CONFIG_INVALID")
 	}
 }
 

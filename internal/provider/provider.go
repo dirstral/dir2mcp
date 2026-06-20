@@ -28,6 +28,15 @@ const (
 	// Distinct from KindOpenAI so STT auto-selection and the matrix can
 	// treat it as statically STT-capable (Supported) and credential-optional.
 	KindWhisper Kind = "whisper"
+	// KindOmniEmbed is a self-hosted, OpenAI-compatible UNIFIED MULTIMODAL
+	// embedding endpoint (dir2mcp#334): POST {base_url}/v1/embeddings serving
+	// an OmniEmbed / Qwen2.5-Omni model (vLLM). Distinct from KindOpenAI
+	// because, unlike a plain OpenAI-compatible embed endpoint, it embeds
+	// text AND non-text media (images/audio/video/PDFs) into one shared
+	// vector space (SPEC 8.1.7), so the matrix marks it statically
+	// embed-capable and credential-optional, and the embed factory builds
+	// the multimodal-capable adapter for it.
+	KindOmniEmbed Kind = "omniembed"
 )
 
 // Capability is a model capability bound to a provider profile.
@@ -105,6 +114,15 @@ var matrix = map[Kind]map[Capability]Support{
 		// provider-dependent.
 		CapSTT:     Supported,
 		CapDiarize: Supported,
+	},
+	KindOmniEmbed: {
+		// Self-hosted OpenAI-compatible UNIFIED MULTIMODAL embed
+		// (dir2mcp#334). Statically embed-capable: the standard
+		// /v1/embeddings contract is fixed and the served model embeds text
+		// and media into one shared vector space (SPEC 8.1.7), so — like
+		// kind:whisper for STT — it is marked Supported rather than
+		// EndpointDependent.
+		CapEmbed: Supported,
 	},
 }
 
