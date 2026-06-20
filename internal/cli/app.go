@@ -676,6 +676,12 @@ func (a *App) configureQueryMetrics(ret *retrieval.Service, cfg config.Config, e
 	}
 	ret.SetGenerationModel(a.resolveChatModel(cfg))
 	ret.SetMetricsEmitter(emit, usage.NewPriceTable(cfg.CostPriceOverrides))
+	// Opt-in energy/CO2e estimate (issue #328); off unless carbon.enabled.
+	ret.SetCarbonModel(usage.NewCarbonModel(
+		cfg.Carbon.Enabled,
+		cfg.Carbon.EnergyOverrides,
+		cfg.Carbon.GridGramsCO2ePerWh,
+	))
 }
 
 // configureReranker wires the optional Cohere rerank stage onto the

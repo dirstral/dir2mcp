@@ -222,6 +222,11 @@ type Config struct {
 	// YAML block. nil/empty ⇒ built-in defaults only. Observability-only:
 	// never affects retrieval or tool results.
 	CostPriceOverrides map[string]usage.ModelPrice
+	// Carbon configures the OPT-IN, approximate energy/CO2e estimate surfaced in
+	// the query_metrics event (issue #328). Parsed from the optional top-level
+	// `carbon:` YAML block. Disabled by default. Observability-only: never
+	// affects retrieval or tool results, and records only counts/estimates.
+	Carbon CarbonConfig
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -1274,6 +1279,13 @@ func applyFileOverrides(cfg *Config, path string) error {
 	if len(prices) > 0 {
 		cfg.CostPriceOverrides = prices
 	}
+
+	// Optional carbon: block for the opt-in energy/CO2e estimate (issue #328).
+	carbon, err := parseCarbonConfig(raw)
+	if err != nil {
+		return fmt.Errorf("config file %s: %w", path, err)
+	}
+	cfg.Carbon = carbon
 
 	return nil
 }

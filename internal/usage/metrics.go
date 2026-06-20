@@ -8,8 +8,8 @@ import (
 )
 
 // stageMetric is the per-stage breakdown surfaced in the query_metrics event.
-// Cost is a pointer so an unknown-model (no price) stage OMITS cost rather than
-// reporting a misleading 0.0.
+// Cost/EnergyWh/CO2eG are pointers so an unknown-model (no price / no energy
+// factor) stage OMITS them rather than reporting a misleading 0.0.
 type stageMetric struct {
 	LatencyMS        int64    `json:"latency_ms"`
 	Model            string   `json:"model,omitempty"`
@@ -18,6 +18,11 @@ type stageMetric struct {
 	TotalTokens      int64    `json:"total_tokens,omitempty"`
 	TokensReported   bool     `json:"tokens_reported"`
 	CostUSD          *float64 `json:"cost_usd,omitempty"`
+	// EnergyWh / CO2eG are OPT-IN approximate estimates (issue #328), present
+	// only when carbon estimation is enabled and the stage's model has a known
+	// energy factor. CO2eG additionally requires a positive grid factor.
+	EnergyWh *float64 `json:"energy_wh,omitempty"`
+	CO2eG    *float64 `json:"co2e_g,omitempty"`
 }
 
 // QueryMetrics accumulates per-query latency and (where available) token usage
@@ -27,6 +32,7 @@ type stageMetric struct {
 type QueryMetrics struct {
 	op     string // "ask" or "search"
 	prices *PriceTable
+	carbon *CarbonModel
 	stages map[Stage]*stageMetric
 	order  []Stage
 	total  time.Duration
@@ -34,11 +40,20 @@ type QueryMetrics struct {
 
 // NewQueryMetrics starts metrics collection for an operation ("ask"/"search")
 // using prices for cost mapping. A nil prices table still records tokens and
-// latency; cost is simply always omitted.
+// latency; cost is simply always omitted. Carbon estimation is off; use
+// NewQueryMetricsWithCarbon to enable the opt-in energy/CO2e estimate (#328).
 func NewQueryMetrics(op string, prices *PriceTable) *QueryMetrics {
+	return NewQueryMetricsWithCarbon(op, prices, nil)
+}
+
+// NewQueryMetricsWithCarbon is NewQueryMetrics plus an optional CarbonModel for
+// the opt-in energy/CO2e estimate (issue #328). A nil or disabled carbon model
+// omits all energy/CO2e fields, leaving cost/latency unchanged.
+func NewQueryMetricsWithCarbon(op string, prices *PriceTable, carbon *CarbonModel) *QueryMetrics {
 	return &QueryMetrics{
 		op:     op,
 		prices: prices,
+		carbon: carbon,
 		stages: make(map[Stage]*stageMetric),
 	}
 }
@@ -80,29 +95,66 @@ func (m *QueryMetrics) SetTotalLatency(d time.Duration) {
 	}
 }
 
-// finalize computes each stage's cost (when its model is priced) and returns
-// the aggregate totals: known cost, whether any stage had a known cost, and
-// total tokens across stages.
-func (m *QueryMetrics) finalize() (totalCost float64, costKnown bool, totalTokens int64) {
+// finalized holds the aggregate totals computed once per render so Event and
+// LogLine stay consistent without recomputing.
+type finalized struct {
+	totalCost   float64
+	costKnown   bool
+	totalTokens int64
+	totalWh     float64
+	energyKnown bool
+	totalCO2eG  float64
+	co2eKnown   bool
+	carbonOn    bool
+}
+
+// finalize computes each stage's cost (when its model is priced) and, when
+// carbon estimation is enabled, its energy/CO2e estimate (when its model has a
+// known factor), populating the per-stage pointers and returning the aggregate
+// totals. Unknown models omit the respective field rather than fabricating 0.
+func (m *QueryMetrics) finalize() finalized {
+	f := finalized{carbonOn: m.carbon.Enabled()}
 	for _, stage := range m.order {
 		sm := m.stages[stage]
 		if sm.TokensReported {
-			totalTokens += sm.TotalTokens
+			f.totalTokens += sm.TotalTokens
 		}
 		if sm.TokensReported && sm.Model != "" {
-			cost, ok := m.prices.Cost(sm.Model, Usage{
+			if cost, ok := m.prices.Cost(sm.Model, Usage{
 				PromptTokens:     sm.PromptTokens,
 				CompletionTokens: sm.CompletionTokens,
-			})
-			if ok {
+			}); ok {
 				rounded := roundUSD(cost)
 				sm.CostUSD = &rounded
-				totalCost += cost
-				costKnown = true
+				f.totalCost += cost
+				f.costKnown = true
+			}
+			if f.carbonOn {
+				m.finalizeStageCarbon(sm, &f)
 			}
 		}
 	}
-	return totalCost, costKnown, totalTokens
+	return f
+}
+
+// finalizeStageCarbon estimates and records a single stage's energy/CO2e,
+// updating the running totals. Caller guarantees carbon is enabled and the
+// stage reported tokens for a named model.
+func (m *QueryMetrics) finalizeStageCarbon(sm *stageMetric, f *finalized) {
+	wh, ok := m.carbon.EstimateWh(sm.Model, sm.TotalTokens)
+	if !ok {
+		return
+	}
+	roundedWh := roundEnergy(wh)
+	sm.EnergyWh = &roundedWh
+	f.totalWh += wh
+	f.energyKnown = true
+	if co2e, ok := m.carbon.EstimateCO2eGrams(wh); ok {
+		roundedCO2e := roundEnergy(co2e)
+		sm.CO2eG = &roundedCO2e
+		f.totalCO2eG += co2e
+		f.co2eKnown = true
+	}
 }
 
 // Event renders the structured payload for the query_metrics NDJSON event.
@@ -110,7 +162,7 @@ func (m *QueryMetrics) finalize() (totalCost float64, costKnown bool, totalToken
 // keys. cost_usd (per-stage and total) is omitted entirely when no priced
 // model contributed, so unknown models never fabricate a cost.
 func (m *QueryMetrics) Event() map[string]interface{} {
-	totalCost, costKnown, totalTokens := m.finalize()
+	f := m.finalize()
 
 	stages := make(map[string]interface{}, len(m.order))
 	for _, stage := range m.order {
@@ -120,11 +172,22 @@ func (m *QueryMetrics) Event() map[string]interface{} {
 	payload := map[string]interface{}{
 		"op":           m.op,
 		"latency_ms":   m.total.Milliseconds(),
-		"total_tokens": totalTokens,
+		"total_tokens": f.totalTokens,
 		"stages":       stages,
 	}
-	if costKnown {
-		payload["cost_usd"] = roundUSD(totalCost)
+	if f.costKnown {
+		payload["cost_usd"] = roundUSD(f.totalCost)
+	}
+	// Energy/CO2e are OPT-IN, approximate estimates (issue #328). They are
+	// surfaced only when enabled and at least one stage had a known factor, and
+	// are explicitly flagged with energy_estimate=true so consumers never mistake
+	// them for measurements.
+	if f.energyKnown {
+		payload["energy_wh"] = roundEnergy(f.totalWh)
+		payload["energy_estimate"] = true
+	}
+	if f.co2eKnown {
+		payload["co2e_g"] = roundEnergy(f.totalCO2eG)
 	}
 	return payload
 }
@@ -132,13 +195,23 @@ func (m *QueryMetrics) Event() map[string]interface{} {
 // LogLine renders a concise, human-readable one-liner for stderr logs. It
 // mirrors Event but never includes raw payloads.
 func (m *QueryMetrics) LogLine() string {
-	totalCost, costKnown, totalTokens := m.finalize()
+	f := m.finalize()
 	var b strings.Builder
-	fmt.Fprintf(&b, "query_metrics op=%s latency_ms=%d tokens=%d", m.op, m.total.Milliseconds(), totalTokens)
-	if costKnown {
-		fmt.Fprintf(&b, " cost_usd=%.6f", roundUSD(totalCost))
+	fmt.Fprintf(&b, "query_metrics op=%s latency_ms=%d tokens=%d", m.op, m.total.Milliseconds(), f.totalTokens)
+	if f.costKnown {
+		fmt.Fprintf(&b, " cost_usd=%.6f", roundUSD(f.totalCost))
 	} else {
 		b.WriteString(" cost_usd=unknown")
+	}
+	if f.carbonOn {
+		if f.energyKnown {
+			fmt.Fprintf(&b, " energy_wh~%.4f", roundEnergy(f.totalWh))
+		} else {
+			b.WriteString(" energy_wh=unknown")
+		}
+		if f.co2eKnown {
+			fmt.Fprintf(&b, " co2e_g~%.4f", roundEnergy(f.totalCO2eG))
+		}
 	}
 	for _, stage := range m.order {
 		sm := m.stages[stage]
@@ -155,4 +228,11 @@ func (m *QueryMetrics) LogLine() string {
 // output without floating-point noise.
 func roundUSD(v float64) float64 {
 	return math.Round(v*1e6) / 1e6
+}
+
+// roundEnergy rounds Wh / gCO2e estimates to 4 decimals for stable, readable
+// output. The estimate's inherent uncertainty far exceeds this precision; the
+// rounding only removes floating-point noise.
+func roundEnergy(v float64) float64 {
+	return math.Round(v*1e4) / 1e4
 }

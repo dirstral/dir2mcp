@@ -138,6 +138,9 @@ type Service struct {
 	// priceTable maps model names to approximate USD prices for the
 	// query_metrics event (issue #327). nil ⇒ cost is always omitted.
 	priceTable *usage.PriceTable
+	// carbon supplies the OPT-IN, approximate energy/CO2e estimate for the
+	// query_metrics event (issue #328). nil/disabled ⇒ no energy/CO2e fields.
+	carbon *usage.CarbonModel
 	// metricsEmit, when set, receives one structured query_metrics event per
 	// Ask/Search (issue #327). nil ⇒ metrics collection is skipped entirely
 	// (zero overhead). It never alters tool results.
@@ -240,6 +243,15 @@ func (s *Service) SetMetricsEmitter(emit func(level, event string, data interfac
 	s.priceTable = prices
 }
 
+// SetCarbonModel wires the OPT-IN energy/CO2e estimate (issue #328) onto the
+// query_metrics event. A nil or disabled model omits all energy/CO2e fields,
+// leaving cost/latency unchanged. Observability only; never affects results.
+func (s *Service) SetCarbonModel(carbon *usage.CarbonModel) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.carbon = carbon
+}
+
 // metricsEnabled reports whether a metrics emitter is wired.
 func (s *Service) metricsEnabled() bool {
 	s.metaMu.RLock()
@@ -260,6 +272,7 @@ func (s *Service) emitQueryMetrics(op string, sink *usage.Sink, total time.Durat
 	s.metaMu.RLock()
 	emit := s.metricsEmit
 	prices := s.priceTable
+	carbon := s.carbon
 	textModel := s.textModel
 	codeModel := s.codeModel
 	rerankModel := s.rerankModel
@@ -269,7 +282,7 @@ func (s *Service) emitQueryMetrics(op string, sink *usage.Sink, total time.Durat
 		return
 	}
 
-	qm := usage.NewQueryMetrics(op, prices)
+	qm := usage.NewQueryMetricsWithCarbon(op, prices, carbon)
 
 	// Embed: prefer the text model label; fall back to code model. Embedding is
 	// symmetric across the two for pricing purposes here.

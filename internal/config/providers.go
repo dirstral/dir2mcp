@@ -198,6 +198,71 @@ func parseCostPriceOverrides(raw []byte) (map[string]usage.ModelPrice, error) {
 	return out, nil
 }
 
+// carbonDoc is the yaml shape of the optional top-level `carbon:` block for the
+// opt-in energy/CO2e estimate (issue #328):
+//
+//	carbon:
+//	  enabled: true
+//	  grid_g_co2e_per_wh: 0.35   # optional; omit/<=0 to skip the CO2e estimate
+//	  energy:                     # optional per-model Wh/1K-token overrides
+//	    my-model:
+//	      wh_per_1k: 0.5
+//
+// gridSet distinguishes "operator set 0/negative" from "unset" so the loader
+// can apply the built-in default grid factor only when the key is absent.
+type carbonDoc struct {
+	Carbon struct {
+		Enabled        bool     `yaml:"enabled"`
+		GridGCO2ePerWh *float64 `yaml:"grid_g_co2e_per_wh"`
+		Energy         map[string]struct {
+			WhPer1K float64 `yaml:"wh_per_1k"`
+		} `yaml:"energy"`
+	} `yaml:"carbon"`
+}
+
+// CarbonConfig is the resolved, opt-in energy/carbon estimate configuration
+// (issue #328). Disabled by default; all factors operator-overridable.
+type CarbonConfig struct {
+	// Enabled gates the entire estimate. Off by default.
+	Enabled bool
+	// EnergyOverrides maps a model name to a Wh-per-1K-token factor, overriding
+	// the built-in defaults. nil/empty ⇒ built-in defaults only.
+	EnergyOverrides map[string]usage.EnergyFactor
+	// GridGramsCO2ePerWh is the grid carbon-intensity factor in gCO2e/Wh. When
+	// the key is absent it defaults to usage.DefaultGridIntensityGramsPerWh; a
+	// value <= 0 disables the CO2e estimate (Wh is still surfaced).
+	GridGramsCO2ePerWh float64
+}
+
+// parseCarbonConfig decodes the optional top-level `carbon:` block (issue #328).
+// Absent block ⇒ zero value (disabled), no error. When present, an unset grid
+// factor falls back to the built-in default so an enabled-but-minimal config
+// still produces a CO2e estimate.
+func parseCarbonConfig(raw []byte) (CarbonConfig, error) {
+	var cfg CarbonConfig
+	sub := extractTopLevelSubtree(raw, "carbon")
+	if len(sub) == 0 {
+		return cfg, nil
+	}
+	var doc carbonDoc
+	if err := yaml.Unmarshal(sub, &doc); err != nil {
+		return cfg, fmt.Errorf("parse carbon config: %w", err)
+	}
+	cfg.Enabled = doc.Carbon.Enabled
+	if doc.Carbon.GridGCO2ePerWh != nil {
+		cfg.GridGramsCO2ePerWh = *doc.Carbon.GridGCO2ePerWh
+	} else {
+		cfg.GridGramsCO2ePerWh = usage.DefaultGridIntensityGramsPerWh
+	}
+	if len(doc.Carbon.Energy) > 0 {
+		cfg.EnergyOverrides = make(map[string]usage.EnergyFactor, len(doc.Carbon.Energy))
+		for name, f := range doc.Carbon.Energy {
+			cfg.EnergyOverrides[name] = usage.EnergyFactor{WhPer1K: f.WhPer1K}
+		}
+	}
+	return cfg, nil
+}
+
 func parseProvidersDoc(raw []byte) (providersDoc, error) {
 	var doc providersDoc
 	sub := extractProvidersSubtree(raw)
