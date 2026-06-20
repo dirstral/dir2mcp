@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/secrets"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const DefaultProtocolVersion = "2025-11-25"
@@ -215,6 +216,12 @@ type Config struct {
 	// disabled (no floor): behavior is unchanged unless configured, preserving the
 	// local-first, no-surprises default. Negative values are CONFIG_INVALID.
 	RetrievalMinScore float64
+	// CostPriceOverrides maps a model name to per-1K-token USD prices,
+	// overriding the built-in defaults used by the per-query query_metrics
+	// event (issue #327). Parsed from the optional top-level `cost.prices:`
+	// YAML block. nil/empty ⇒ built-in defaults only. Observability-only:
+	// never affects retrieval or tool results.
+	CostPriceOverrides map[string]usage.ModelPrice
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -1258,6 +1265,15 @@ func applyFileOverrides(cfg *Config, path string) error {
 		return fmt.Errorf("config file %s: %w", path, err)
 	}
 	cfg.providersDoc = doc
+
+	// Optional cost.prices overrides for per-query metrics (issue #327).
+	prices, err := parseCostPriceOverrides(raw)
+	if err != nil {
+		return fmt.Errorf("config file %s: %w", path, err)
+	}
+	if len(prices) > 0 {
+		cfg.CostPriceOverrides = prices
+	}
 
 	return nil
 }

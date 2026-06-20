@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const (
@@ -176,7 +177,8 @@ type embedDataItem struct {
 }
 
 type embedResponse struct {
-	Data []embedDataItem `json:"data"`
+	Data  []embedDataItem   `json:"data"`
+	Usage usage.OpenAIUsage `json:"usage"`
 }
 
 type ocrRequest struct {
@@ -225,6 +227,16 @@ type generateResponse struct {
 			Content interface{} `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage usage.OpenAIUsage `json:"usage"`
+}
+
+// reportUsage forwards a provider-reported usage object to the per-query sink
+// when present (issue #327). A missing usage object leaves the stage unknown
+// (not zero). Inert when no sink is attached to ctx.
+func reportUsage(ctx context.Context, stage usage.Stage, u usage.OpenAIUsage) {
+	if !u.Empty() {
+		usage.Report(ctx, stage, u.ToUsage())
+	}
 }
 
 func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
@@ -316,6 +328,8 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 			Cause:      err,
 		}
 	}
+
+	reportUsage(ctx, usage.StageEmbed, parsed.Usage)
 
 	if len(parsed.Data) != len(inputs) {
 		return nil, &model.ProviderError{
@@ -929,6 +943,7 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 			Cause:     err,
 		}
 	}
+	reportUsage(ctx, usage.StageGenerate, parsed.Usage)
 	if len(parsed.Choices) == 0 {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",

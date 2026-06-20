@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/usage"
 	"gopkg.in/yaml.v3"
 )
 
@@ -130,6 +131,71 @@ func extractProvidersSubtree(raw []byte) []byte {
 		return nil
 	}
 	return []byte(strings.Join(out, "\n"))
+}
+
+// extractTopLevelSubtree returns only the named top-level block (its key line
+// plus the indented/blank/comment continuation), mirroring
+// extractProvidersSubtree so a single block can be yaml.v3-parsed in isolation
+// without the bespoke flat parser. Returns nil when the key is absent.
+func extractTopLevelSubtree(raw []byte, want string) []byte {
+	var out []string
+	capturing := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmedLeft := strings.TrimLeft(line, " \t")
+		indented := line != trimmedLeft
+		blank := strings.TrimSpace(line) == ""
+		comment := strings.HasPrefix(trimmedLeft, "#")
+		topKey := !indented && !blank && !comment && strings.Contains(trimmedLeft, ":")
+
+		if topKey {
+			key := strings.TrimSpace(strings.SplitN(trimmedLeft, ":", 2)[0])
+			capturing = key == want
+		}
+		if capturing {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
+// costDoc is the yaml shape of the optional top-level `cost:` block:
+//
+//	cost:
+//	  prices:
+//	    my-model:
+//	      input_per_1k: 0.0005
+//	      output_per_1k: 0.0015
+type costDoc struct {
+	Cost struct {
+		Prices map[string]struct {
+			InputPer1K  float64 `yaml:"input_per_1k"`
+			OutputPer1K float64 `yaml:"output_per_1k"`
+		} `yaml:"prices"`
+	} `yaml:"cost"`
+}
+
+// parseCostPriceOverrides decodes the optional cost.prices block into a price
+// override map for per-query metrics (issue #327). Absent block ⇒ nil, no error.
+func parseCostPriceOverrides(raw []byte) (map[string]usage.ModelPrice, error) {
+	sub := extractTopLevelSubtree(raw, "cost")
+	if len(sub) == 0 {
+		return nil, nil
+	}
+	var doc costDoc
+	if err := yaml.Unmarshal(sub, &doc); err != nil {
+		return nil, fmt.Errorf("parse cost.prices config: %w", err)
+	}
+	if len(doc.Cost.Prices) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]usage.ModelPrice, len(doc.Cost.Prices))
+	for name, p := range doc.Cost.Prices {
+		out[name] = usage.ModelPrice{InputPer1K: p.InputPer1K, OutputPer1K: p.OutputPer1K}
+	}
+	return out, nil
 }
 
 func parseProvidersDoc(raw []byte) (providersDoc, error) {

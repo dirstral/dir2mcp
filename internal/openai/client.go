@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const (
@@ -120,6 +121,7 @@ type embedResponse struct {
 		Index     int       `json:"index"`
 		Embedding []float64 `json:"embedding"`
 	} `json:"data"`
+	Usage usage.OpenAIUsage `json:"usage"`
 }
 
 // Embed implements model.Embedder. OpenAI embeddings are symmetric, so
@@ -204,6 +206,9 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to decode embedding response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
+	if !parsed.Usage.Empty() {
+		usage.Report(ctx, usage.StageEmbed, parsed.Usage.ToUsage())
+	}
 	if len(parsed.Data) != len(inputs) {
 		return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: fmt.Sprintf("embedding response size mismatch: got %d vectors for %d inputs", len(parsed.Data), len(inputs)), Retryable: false, StatusCode: resp.StatusCode}
 	}
@@ -248,6 +253,7 @@ type generateResponse struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage usage.OpenAIUsage `json:"usage"`
 }
 
 // Generate implements model.Generator via {base}/chat/completions.
@@ -309,6 +315,9 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 	var parsed generateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to decode generation response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if !parsed.Usage.Empty() {
+		usage.Report(ctx, usage.StageGenerate, parsed.Usage.ToUsage())
 	}
 	if len(parsed.Choices) == 0 {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "generation response had no choices", Retryable: false, StatusCode: resp.StatusCode}
