@@ -158,6 +158,11 @@ type Service struct {
 	// nowFn returns the reference instant for recency decay; overridable in
 	// tests for determinism. Defaults to time.Now.
 	nowFn func() time.Time
+	// compressor applies evidence-guided context compression (issue #335) to the
+	// per-hit text assembled into the RAG prompt — NEVER to the returned hits or
+	// citations. Default disabled ⇒ raw snippets are sent unchanged. Wired from
+	// config.ContextCompression* via SetContextCompression at construction.
+	compressor contextCompressor
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -378,6 +383,21 @@ func (s *Service) now() time.Time {
 		return time.Now()
 	}
 	return fn()
+}
+
+// SetContextCompression wires evidence-guided context compression (issue #335).
+// When enabled, the Ask path compresses the per-hit text sent to the generator —
+// keeping query-relevant, non-redundant sentences up to targetRatio of each
+// hit's original length — to cut prompt tokens and fit more evidence. It affects
+// ONLY the model-facing prompt: returned hits, snippets, and citations are never
+// altered, preserving citation fidelity. A targetRatio outside (0,1] selects the
+// built-in default. Disabled ⇒ raw snippets are sent unchanged (pass-through).
+// The engine wires this from config.ContextCompression* at construction time,
+// mirroring SetMinScore.
+func (s *Service) SetContextCompression(enabled bool, targetRatio float64) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.compressor = newContextCompressor(enabled, targetRatio)
 }
 
 // SetDocumentHashes installs the rel_path → content_hash map used to group
@@ -885,8 +905,12 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		s.metaMu.RLock()
 		systemPrompt := s.ragSystemPrompt
 		maxContextChars := s.ragMaxContextChars
+		compressor := s.compressor
 		s.metaMu.RUnlock()
-		prompt := buildRAGPrompt(question, hits, systemPrompt, maxContextChars)
+		// buildRAGPrompt compresses only the model-facing snippet text; the
+		// `hits` and `citations` built above are never mutated, so cited spans
+		// remain byte-for-byte identical to what was retrieved.
+		prompt := buildRAGPrompt(question, hits, systemPrompt, maxContextChars, compressor)
 		var generated string
 		genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
 			var gErr error
@@ -2104,7 +2128,7 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string, maxContextChars int) string {
+func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string, maxContextChars int, compressor contextCompressor) string {
 	systemPrompt = strings.TrimSpace(systemPrompt)
 	if systemPrompt == "" {
 		systemPrompt = defaultRAGSystemPrompt
@@ -2140,7 +2164,11 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 			line += " (" + title + ")"
 		}
 		line += " "
-		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
+		// Evidence-guided compression (issue #335) reshapes ONLY this local
+		// copy of the snippet that flows into the prompt; h.Snippet and the
+		// caller's citations are untouched. Disabled compressor ⇒ identity.
+		modelText := compressor.compressSnippet(question, strings.TrimSpace(h.Snippet))
+		snippet := truncateSnippet(modelText, 300)
 		switch {
 		case snippet != "":
 			// Available text (incl. an augment media hit's OCR/transcript)
