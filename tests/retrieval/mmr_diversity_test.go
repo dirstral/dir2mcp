@@ -98,6 +98,29 @@ func TestSearch_MMR_LambdaZeroPrefersDiversity(t *testing.T) {
 	assertOrder(t, got, []uint64{1, 3, 2})
 }
 
+// TestSearch_MMR_LambdaZeroSeedsByRelevanceNotChunkID locks in that the FIRST
+// MMR pick is relevance-seeded even when lambda=0. The most relevant hit here is
+// chunk 5 (cosine 1.00) while the lowest ChunkID is chunk 1 (cosine 0.80, a
+// diverse snippet). If the first selection applied the full objective it would
+// tie all candidates at 0 (maxSim=0, lambda=0) and the ChunkID tiebreak would
+// wrongly seed with chunk 1. The relevance-seeded pick selects chunk 5 first;
+// then chunk 1 (sim 0 to chunk 5) beats the near-duplicate chunk 2 (sim 1).
+func TestSearch_MMR_LambdaZeroSeedsByRelevanceNotChunkID(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{0.80, 0.60}) // cosine 0.80, lowest ChunkID
+	addVec(t, idx, 2, []float32{0.92, 0.39}) // cosine ~0.92, near-duplicate of 5
+	addVec(t, idx, 5, []float32{1, 0})       // cosine 1.00, most relevant
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "a.md", Snippet: "zebra ocean mountain"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "b.md", Snippet: "alpha apple fruit"})
+	svc.SetChunkMetadata(5, model.SearchHit{RelPath: "c.md", Snippet: "alpha apple fruit"})
+	svc.SetMMR(true, 0)
+	got := mmrSearchChunkIDs(t, svc, 10)
+	assertOrder(t, got, []uint64{5, 1, 2})
+}
+
 // TestSearch_MMR_ComposesWithRerank pins that MMR runs as the LAST reordering
 // step, after the rerank stage and before the final truncation: the reranker
 // scores the pool in pure-relevance order (best-first 1,2,3) and MMR then

@@ -1950,11 +1950,19 @@ func applyMMR(hits []model.SearchHit, lambda float64) []model.SearchHit {
 	for range hits {
 		best := -1
 		var bestScore float64
+		// The first selection has no diversity penalty (maxSim is 0 for every
+		// candidate), so seed it by pure relevance. Applying the full objective
+		// here would make every candidate tie at 0 when lambda=0 and fall back to
+		// the ChunkID tiebreak instead of picking the most relevant hit.
+		firstPick := len(selected) == 0
 		for i := 0; i < n; i++ {
 			if chosen[i] {
 				continue
 			}
-			score := lambda*rel[i] - (1-lambda)*maxSim[i]
+			score := rel[i]
+			if !firstPick {
+				score = lambda*rel[i] - (1-lambda)*maxSim[i]
+			}
 			if best == -1 || score > bestScore ||
 				(score == bestScore && hits[i].ChunkID < hits[best].ChunkID) {
 				best = i
