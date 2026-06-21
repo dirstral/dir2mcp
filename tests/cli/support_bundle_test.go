@@ -59,10 +59,15 @@ func TestSupportBundle_AssemblesDiagnosticsArchive(t *testing.T) {
 	for _, name := range []string{
 		"version.txt", "os.txt", "config.snapshot.yaml",
 		"server.log", "status.json", "list-files.json", "routing.json",
+		"daemon.json",
 	} {
 		if _, ok := entries[name]; !ok {
 			t.Errorf("bundle missing entry %q", name)
 		}
+	}
+	// daemon.json records liveness even with no daemon running (clean state dir).
+	if body, ok := entries["daemon.json"]; ok && !bytes.Contains(body, []byte("connection_present")) {
+		t.Errorf("daemon.json missing connection_present field: %s", body)
 	}
 	for name, body := range entries {
 		if bytes.Contains(body, []byte(sentinelKey)) {
