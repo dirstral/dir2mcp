@@ -175,6 +175,16 @@ type Service struct {
 	// false.
 	adaptiveKMin int
 	adaptiveKMax int
+	// mmrEnabled toggles Maximal Marginal Relevance diversity re-ordering
+	// (config retrieval.mmr.enabled, issue #340). When true, the final candidate
+	// pool is re-ordered before truncation to k to trade some relevance for
+	// coverage/diversity. Default false ⇒ pass-through (order unchanged). Wired
+	// from config.RetrievalMMREnabled at construction.
+	mmrEnabled bool
+	// mmrLambda is the MMR relevance-vs-diversity trade-off in [0,1] (config
+	// retrieval.mmr.lambda): 1 = pure relevance, 0 = pure diversity. Only
+	// consulted when mmrEnabled. Wired from config.RetrievalMMRLambda.
+	mmrLambda float64
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -445,6 +455,27 @@ func (s *Service) SetAdaptiveRetrieval(enabled bool, kMin, kMax int) {
 	s.adaptiveEnabled = enabled
 	s.adaptiveKMin = kMin
 	s.adaptiveKMax = kMax
+}
+
+// SetMMR wires the optional Maximal Marginal Relevance diversity re-ordering
+// (config retrieval.mmr.enabled / retrieval.mmr.lambda, issue #340). When
+// enabled, the final candidate pool is re-ordered before truncation to k to
+// trade some relevance for coverage/diversity. lambda is the relevance-vs-
+// diversity trade-off in [0,1]; values outside the range are clamped (the
+// config layer already rejects them, this is a defensive guard). Disabled ⇒
+// candidate order is unchanged (pass-through). The engine wires this from
+// config at construction time, mirroring SetMinScore.
+func (s *Service) SetMMR(enabled bool, lambda float64) {
+	if lambda < 0 {
+		lambda = 0
+	}
+	if lambda > 1 {
+		lambda = 1
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.mmrEnabled = enabled
+	s.mmrLambda = lambda
 }
 
 // SetDocumentHashes installs the rel_path → content_hash map used to group
@@ -1818,7 +1849,7 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	s.metaMu.RUnlock()
 
 	if !enabled || rr == nil || len(hits) <= 1 {
-		return truncateSearchHits(hits, k)
+		return s.diversifyAndTruncate(hits, k)
 	}
 	if pool <= 0 {
 		pool = defaultRerankCandidatePool
@@ -1847,13 +1878,13 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		if err != nil {
 			s.logf("rerank: provider error, falling back to fused order: %v", err)
 		}
-		return truncateSearchHits(fused, k)
+		return s.diversifyAndTruncate(fused, k)
 	}
 	out := make([]model.SearchHit, 0, len(fused))
 	for _, r := range results {
 		if r.Index < 0 || r.Index >= len(cand) {
 			s.logf("rerank: out-of-range index %d, falling back to fused order", r.Index)
-			return truncateSearchHits(fused, k)
+			return s.diversifyAndTruncate(fused, k)
 		}
 		h := cand[r.Index]
 		h.Score = r.RelevanceScore
@@ -1870,7 +1901,165 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if len(fused) > len(cand) {
 		out = append(out, fused[len(cand):]...)
 	}
-	return truncateSearchHits(out, k)
+	return s.diversifyAndTruncate(out, k)
+}
+
+// diversifyAndTruncate applies the optional MMR diversity re-ordering (issue
+// #340) to the final candidate pool and then truncates to k. When MMR is
+// disabled it is exactly truncateSearchHits(hits, k) — the candidate order is
+// unchanged and no allocation beyond the truncation slice occurs. It runs as
+// the last reordering step (after scoring/fusion/rerank and dedup), so the
+// relevance signal it consumes is each hit's final authoritative Score.
+func (s *Service) diversifyAndTruncate(hits []model.SearchHit, k int) []model.SearchHit {
+	s.metaMu.RLock()
+	enabled := s.mmrEnabled
+	lambda := s.mmrLambda
+	s.metaMu.RUnlock()
+	if !enabled || len(hits) <= 1 {
+		return truncateSearchHits(hits, k)
+	}
+	return truncateSearchHits(applyMMR(hits, lambda), k)
+}
+
+// applyMMR re-orders hits by Maximal Marginal Relevance: starting from the
+// most-relevant candidate, it iteratively selects the candidate maximizing
+//
+//	lambda*relevance(c) - (1-lambda)*maxSim(c, alreadySelected)
+//
+// where relevance is the pool-normalized final Score in [0,1] and sim is a
+// deterministic term-overlap (Jaccard) similarity over hit snippets — SearchHit
+// carries no embedding vector, so snippet overlap is the available diversity
+// signal. lambda=1 reduces to pure relevance ordering; lambda=0 to pure
+// diversity. Ties (equal MMR objective) break on lower ChunkID so the result is
+// deterministic. The input slice is not mutated; a re-ordered copy is returned.
+func applyMMR(hits []model.SearchHit, lambda float64) []model.SearchHit {
+	n := len(hits)
+	rel := normalizedRelevance(hits)
+	tokens := make([]map[string]struct{}, n)
+	for i := range hits {
+		tokens[i] = tokenizeSnippet(hits[i].Snippet)
+	}
+
+	selected := make([]model.SearchHit, 0, n)
+	chosen := make([]bool, n)
+	// maxSim[i] tracks the highest similarity of candidate i to any
+	// already-selected hit, updated incrementally as selections are made so the
+	// loop is O(n^2) overall rather than O(n^3).
+	maxSim := make([]float64, n)
+
+	for range hits {
+		best := -1
+		var bestScore float64
+		// The first selection has no diversity penalty (maxSim is 0 for every
+		// candidate), so seed it by pure relevance. Applying the full objective
+		// here would make every candidate tie at 0 when lambda=0 and fall back to
+		// the ChunkID tiebreak instead of picking the most relevant hit.
+		firstPick := len(selected) == 0
+		for i := 0; i < n; i++ {
+			if chosen[i] {
+				continue
+			}
+			score := rel[i]
+			if !firstPick {
+				score = lambda*rel[i] - (1-lambda)*maxSim[i]
+			}
+			if best == -1 || score > bestScore ||
+				(score == bestScore && hits[i].ChunkID < hits[best].ChunkID) {
+				best = i
+				bestScore = score
+			}
+		}
+		chosen[best] = true
+		selected = append(selected, hits[best])
+		// Update each remaining candidate's running max similarity against the
+		// newly selected hit.
+		for i := 0; i < n; i++ {
+			if chosen[i] {
+				continue
+			}
+			if sim := jaccardSimilarity(tokens[i], tokens[best]); sim > maxSim[i] {
+				maxSim[i] = sim
+			}
+		}
+	}
+	return selected
+}
+
+// normalizedRelevance maps each hit's Score onto [0,1] via min-max scaling over
+// the pool so the MMR relevance term is commensurate with the [0,1] similarity
+// penalty regardless of the underlying score magnitude (cosine, RRF, or rerank
+// score). A degenerate pool (all-equal scores) maps to all-1, so MMR then
+// orders purely by the diversity penalty.
+func normalizedRelevance(hits []model.SearchHit) []float64 {
+	rel := make([]float64, len(hits))
+	if len(hits) == 0 {
+		return rel
+	}
+	minScore := math.Inf(1)
+	maxScore := math.Inf(-1)
+	for _, h := range hits {
+		if h.Score < minScore {
+			minScore = h.Score
+		}
+		if h.Score > maxScore {
+			maxScore = h.Score
+		}
+	}
+	denom := maxScore - minScore
+	if denom <= 0 {
+		for i := range rel {
+			rel[i] = 1
+		}
+		return rel
+	}
+	for i, h := range hits {
+		rel[i] = (h.Score - minScore) / denom
+	}
+	return rel
+}
+
+// mmrTokenRe splits a snippet into lowercase alphanumeric word tokens for the
+// term-overlap diversity signal. Compiled once at package load.
+var mmrTokenRe = regexp.MustCompile(`[\p{L}\p{N}]+`)
+
+// tokenizeSnippet lowercases and splits a snippet into a set of word tokens used
+// for the term-overlap diversity signal. Returns an empty (non-nil) set for an
+// empty snippet.
+func tokenizeSnippet(snippet string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, tok := range mmrTokenRe.FindAllString(strings.ToLower(snippet), -1) {
+		set[tok] = struct{}{}
+	}
+	return set
+}
+
+// jaccardSimilarity returns |a∩b| / |a∪b| for two token sets, in [0,1]. Two
+// empty sets are defined as maximally similar (1.0): snippet-less hits (e.g.
+// media-only) are treated as near-duplicates of each other so MMR spreads them
+// out rather than clustering them.
+func jaccardSimilarity(a, b map[string]struct{}) float64 {
+	if len(a) == 0 && len(b) == 0 {
+		return 1
+	}
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	// Intersect over the smaller set to keep the scan tight.
+	small, large := a, b
+	if len(large) < len(small) {
+		small, large = large, small
+	}
+	inter := 0
+	for tok := range small {
+		if _, ok := large[tok]; ok {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
 }
 
 func truncateSearchHits(hits []model.SearchHit, k int) []model.SearchHit {

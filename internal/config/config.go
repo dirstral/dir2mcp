@@ -272,6 +272,21 @@ type Config struct {
 	// defaultConfig). Ignored entirely when RetrievalAdaptiveEnabled is false.
 	RetrievalAdaptiveKMin int
 	RetrievalAdaptiveKMax int
+	// RetrievalMMREnabled toggles Maximal Marginal Relevance (MMR) diversity
+	// re-ordering (config `retrieval.mmr.enabled`). When true, the final
+	// candidate pool is re-ordered before truncation to trade some relevance for
+	// coverage/diversity, iteratively picking the candidate that maximizes
+	// `lambda*relevance - (1-lambda)*maxSimToAlreadyPicked`. It composes with
+	// dedup (SPEC 9.2) and rerank (SPEC 9.1.1) and is config-only (NOT an MCP
+	// tool parameter). Default false ⇒ pass-through (candidate order unchanged),
+	// preserving the local-first, no-surprises default.
+	RetrievalMMREnabled bool
+	// RetrievalMMRLambda is the MMR relevance-vs-diversity trade-off
+	// (config `retrieval.mmr.lambda`) in [0,1]: 1.0 = pure relevance (no
+	// diversity penalty), 0.0 = pure diversity. Default 0.5 balances the two. It
+	// is only consulted when RetrievalMMREnabled is true. Values outside [0,1]
+	// (or NaN/Inf) are CONFIG_INVALID.
+	RetrievalMMRLambda float64
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -583,6 +598,8 @@ type fileConfig struct {
 	RetrievalAdaptiveEnabled           *bool
 	RetrievalAdaptiveKMin              *int
 	RetrievalAdaptiveKMax              *int
+	RetrievalMMREnabled                *bool
+	RetrievalMMRLambda                 *float64
 	RerankEnabled                      *bool
 	RerankProvider                     *string
 	CohereAPIKey                       *string
@@ -706,6 +723,8 @@ type persistedConfig struct {
 	RetrievalAdaptiveEnabled           bool          `yaml:"retrieval_adaptive_enabled"`
 	RetrievalAdaptiveKMin              int           `yaml:"retrieval_adaptive_k_min"`
 	RetrievalAdaptiveKMax              int           `yaml:"retrieval_adaptive_k_max"`
+	RetrievalMMREnabled                bool          `yaml:"retrieval_mmr_enabled"`
+	RetrievalMMRLambda                 float64       `yaml:"retrieval_mmr_lambda"`
 	RerankEnabled                      bool          `yaml:"rerank_enabled"`
 	RerankProvider                     string        `yaml:"rerank_provider"`
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
@@ -882,6 +901,11 @@ func Default() Config {
 		// queries and widen hard ones around the typical rag.k_default (10).
 		RetrievalAdaptiveKMin: 4,
 		RetrievalAdaptiveKMax: 30,
+		// MMR diversity re-ordering defaults to OFF (issue #340): candidate order
+		// is unchanged unless explicitly enabled. Lambda carries its balanced 0.5
+		// default so an enabled-but-unspecified config behaves predictably.
+		RetrievalMMREnabled: false,
+		RetrievalMMRLambda:  0.5,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -1003,6 +1027,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalAdaptiveEnabled:           cfg.RetrievalAdaptiveEnabled,
 		RetrievalAdaptiveKMin:              cfg.RetrievalAdaptiveKMin,
 		RetrievalAdaptiveKMax:              cfg.RetrievalAdaptiveKMax,
+		RetrievalMMREnabled:                cfg.RetrievalMMREnabled,
+		RetrievalMMRLambda:                 cfg.RetrievalMMRLambda,
 		RerankEnabled:                      rerankEnabledEffective(cfg),
 		RerankProvider:                     cfg.RerankProvider,
 		CohereBaseURL:                      cfg.CohereBaseURL,
@@ -1618,9 +1644,10 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 }
 
 // applyRetrievalTuningFileParsed overlays the opt-in retrieval-tuning file
-// fields (recency time-decay #323, context compression #335, and the adaptive
-// gate #338) onto cfg. Split out of applyModelRAGFileParsed to keep that
-// function within the gocyclo budget as tuning knobs are added.
+// fields (recency time-decay #323, context compression #335, the adaptive
+// gate #338, and MMR diversity #340) onto cfg. Split out of
+// applyModelRAGFileParsed to keep that function within the gocyclo budget as
+// tuning knobs are added.
 func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalRecencyHalfLife != nil {
 		cfg.RetrievalRecencyHalfLife = *fc.RetrievalRecencyHalfLife
@@ -1639,6 +1666,12 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.RetrievalAdaptiveKMax != nil {
 		cfg.RetrievalAdaptiveKMax = *fc.RetrievalAdaptiveKMax
+	}
+	if fc.RetrievalMMREnabled != nil {
+		cfg.RetrievalMMREnabled = *fc.RetrievalMMREnabled
+	}
+	if fc.RetrievalMMRLambda != nil {
+		cfg.RetrievalMMRLambda = *fc.RetrievalMMRLambda
 	}
 }
 
@@ -2055,6 +2088,10 @@ var configKeyAliases = map[string]string{
 	"adaptive_k_min":                          "retrieval.adaptive.k_min",
 	"retrieval_adaptive_k_max":                "retrieval.adaptive.k_max",
 	"adaptive_k_max":                          "retrieval.adaptive.k_max",
+	"retrieval_mmr_enabled":                   "retrieval.mmr.enabled",
+	"mmr_enabled":                             "retrieval.mmr.enabled",
+	"retrieval_mmr_lambda":                    "retrieval.mmr.lambda",
+	"mmr_lambda":                              "retrieval.mmr.lambda",
 	"rerank_enabled":                          "rerank.enabled",
 	"rerank.cohere.api_key":                   "cohere_api_key",
 	"rerank.cohere.base_url":                  "cohere_base_url",
@@ -2164,7 +2201,7 @@ func canonicalizeConfigKey(key string) string {
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -2240,6 +2277,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"x402_tools_call_enabled":    func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
 	"retrieval.hybrid.enabled":   func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
 	"retrieval.adaptive.enabled": func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
+	"retrieval.mmr.enabled":      func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
 	"dedup.retrieval":            func(c *fileConfig) **bool { return &c.DedupRetrieval },
 	"retrieval.context_compression.enabled": func(c *fileConfig) **bool {
 		return &c.ContextCompressionEnabled
@@ -2336,6 +2374,8 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.RetrievalMinScore
 	case "retrieval.context_compression.target_ratio":
 		target = &cfg.ContextCompressionTargetRatio
+	case "retrieval.mmr.lambda":
+		target = &cfg.RetrievalMMRLambda
 	default:
 		return nil
 	}
@@ -2658,6 +2698,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("retrieval_adaptive_enabled", cfg.RetrievalAdaptiveEnabled)
 	writeInt("retrieval_adaptive_k_min", cfg.RetrievalAdaptiveKMin)
 	writeInt("retrieval_adaptive_k_max", cfg.RetrievalAdaptiveKMax)
+	writeBool("retrieval_mmr_enabled", cfg.RetrievalMMREnabled)
+	writeScalar("retrieval_mmr_lambda", strconv.FormatFloat(cfg.RetrievalMMRLambda, 'f', -1, 64))
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -3425,10 +3467,11 @@ func (c *Config) validateNumericBounds() error {
 
 // validateRetrievalNumericBounds validates the retrieval-tuning numeric knobs —
 // the min_score relevance floor (#305), the recency time-decay half-life (#323),
-// and the context-compression keep-ratio (#335) — extracted from
-// validateNumericBounds to keep it within the gocyclo budget. NaN/Inf are also
-// rejected at parse time, but are re-guarded here so a programmatically-injected
-// value still fails validation rather than silently corrupting behavior.
+// the context-compression keep-ratio (#335), and the MMR lambda (#340) —
+// extracted from validateNumericBounds to keep it within the gocyclo budget.
+// NaN/Inf are also rejected at parse time, but are re-guarded here so a
+// programmatically-injected value still fails validation rather than silently
+// corrupting behavior.
 func (c *Config) validateRetrievalNumericBounds() error {
 	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor
 	// would never drop anything, so reject it explicitly.
@@ -3445,6 +3488,16 @@ func (c *Config) validateRetrievalNumericBounds() error {
 	if math.IsNaN(c.ContextCompressionTargetRatio) || math.IsInf(c.ContextCompressionTargetRatio, 0) ||
 		c.ContextCompressionTargetRatio < 0 || c.ContextCompressionTargetRatio > 1 {
 		return fmt.Errorf("retrieval.context_compression.target_ratio must be in [0,1] (0 = default): %v", c.ContextCompressionTargetRatio)
+	}
+	// retrieval.mmr.lambda is the MMR relevance-vs-diversity trade-off and MUST
+	// lie in [0,1]. Validate unconditionally (even when MMR is disabled) so a
+	// malformed value is rejected deterministically at config time rather than
+	// lying dormant until the knob is flipped on. NaN/Inf are already rejected at
+	// parse time in setFloatFileScalar, but guard here too for values injected
+	// programmatically (not via the file parser).
+	if c.RetrievalMMRLambda < 0 || c.RetrievalMMRLambda > 1 ||
+		math.IsNaN(c.RetrievalMMRLambda) || math.IsInf(c.RetrievalMMRLambda, 0) {
+		return fmt.Errorf("retrieval.mmr.lambda must be within [0,1]: %v", c.RetrievalMMRLambda)
 	}
 	if err := c.validateAdaptiveBounds(); err != nil {
 		return err
