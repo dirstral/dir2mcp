@@ -911,6 +911,11 @@ func (a *App) loadCrossFileDedupHashes(ctx context.Context, cfg config.Config, s
 	ret.SetDocumentHashes(hashes)
 }
 
+// corpusLanguagesLookupTimeout bounds the query-time store lookup that resolves
+// the "auto" cross-lingual target set, so a slow/blocked backend degrades to no
+// auto targets rather than hanging retrieval.
+const corpusLanguagesLookupTimeout = 2 * time.Second
+
 // configureCrossLingual wires server-side cross-lingual query expansion (#325)
 // onto the retrieval service. It reuses the chat generator as the translate
 // primitive (SPEC §8.6.2 uses the chat capability for translation) and, for the
@@ -927,9 +932,16 @@ func (a *App) configureCrossLingual(ret *retrieval.Service, cfg config.Config, s
 	ret.SetCrossLingual(cfg.CrossLingualEnabled, cfg.CrossLingualTargetLangs, translator)
 	if lister, ok := st.(model.CorpusLanguageLister); ok && lister != nil {
 		ret.SetCorpusLanguagesProvider(func() []string {
-			langs, err := lister.ListCorpusLanguages(context.Background())
+			// Bound the store lookup: this runs on the query-time retrieval path,
+			// so a slow/blocked backend must not hang retrieval indefinitely.
+			ctx, cancel := context.WithTimeout(context.Background(), corpusLanguagesLookupTimeout)
+			defer cancel()
+			langs, err := lister.ListCorpusLanguages(ctx)
 			if err != nil {
-				writef(a.stderr, "warning: list corpus languages for cross-lingual expansion: %v\n", err)
+				// Avoid logging the raw backend error: it can carry sensitive
+				// connection details. The expansion degrades gracefully (no auto
+				// targets) on failure.
+				writef(a.stderr, "warning: list corpus languages for cross-lingual expansion failed\n")
 				return nil
 			}
 			return langs

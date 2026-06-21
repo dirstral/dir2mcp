@@ -96,6 +96,10 @@ func (s *Service) crossLingualQueryVariants(ctx context.Context, queryStr string
 	}
 
 	variants := make([]string, 0, len(targets))
+	// Dedup translated variants: distinct target languages can yield the same
+	// translation (or one equal to the query), and retrieving/fusing a duplicate
+	// would double-count its evidence and skew the RRF ranking.
+	seenVariants := make(map[string]struct{}, len(targets))
 	for _, lang := range targets {
 		translated, terr := translator.Generate(ctx, buildCrossLingualPrompt(q, lang))
 		if terr != nil {
@@ -108,6 +112,11 @@ func (s *Service) crossLingualQueryVariants(ctx context.Context, queryStr string
 		if t == "" || strings.EqualFold(t, q) {
 			continue
 		}
+		key := strings.ToLower(t)
+		if _, dup := seenVariants[key]; dup {
+			continue
+		}
+		seenVariants[key] = struct{}{}
 		variants = append(variants, t)
 	}
 	return variants
@@ -215,8 +224,6 @@ func detectQueryLanguage(query string) string {
 		switch {
 		case unicode.Is(unicode.Cyrillic, r):
 			counts["ru"]++
-		case unicode.Is(unicode.Han, r):
-			counts["zh"]++
 		case unicode.Is(unicode.Hiragana, r), unicode.Is(unicode.Katakana, r):
 			counts["ja"]++
 		case unicode.Is(unicode.Hangul, r):
@@ -228,8 +235,12 @@ func detectQueryLanguage(query string) string {
 		case unicode.Is(unicode.Hebrew, r):
 			counts["he"]++
 		default:
-			// Latin and other shared scripts are ambiguous: do not attribute a
-			// language, so no target is skipped on their account.
+			// Latin, Han, and other shared scripts are ambiguous: do not attribute
+			// a language, so no target is skipped on their account. Han in
+			// particular is shared by Chinese and Japanese (and historically
+			// Korean), so mapping it to a single language would wrongly suppress a
+			// target variant; a genuine self-translation is still caught later by
+			// the query-equality check.
 		}
 	}
 	best := ""

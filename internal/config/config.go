@@ -3449,6 +3449,16 @@ func (c *Config) validateCrossLingual() error {
 						"(use \"auto\" or BCP-47 letters/digits/hyphen, e.g. \"en\" or \"pt-br\")", lang)
 				}
 			}
+			// Reject structurally malformed tags (e.g. "-", "en-", "en--us"): a
+			// leading/trailing/empty subtag is character-class-safe but has no
+			// primary subtag, so it would be silently dropped at target resolution.
+			// Failing here keeps misconfiguration explicit rather than silent.
+			for _, sub := range strings.Split(l, "-") {
+				if sub == "" {
+					return fmt.Errorf("retrieval.cross_lingual.target_langs contains a malformed language tag %q "+
+						"(empty subtag; use \"auto\" or BCP-47 tags like \"en\" or \"pt-br\")", lang)
+				}
+			}
 		}
 		if _, dup := seen[l]; dup {
 			continue
