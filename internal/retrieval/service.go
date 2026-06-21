@@ -945,7 +945,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	s.metaMu.RUnlock()
 	if adaptiveEnabled {
 		decision := adaptiveGate(query.Query, query.K, adaptiveKMin, adaptiveKMax)
-		s.logf("adaptive gate: class=%s retrieve=%t k=%d (q=%q)", decision.Class, decision.Retrieve, decision.K, truncateQuestion(query.Query))
+		s.logf("adaptive gate: class=%s retrieve=%t k=%d", decision.Class, decision.Retrieve, decision.K)
 		if decision.Retrieve {
 			query.K = decision.K
 		} else {
