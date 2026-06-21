@@ -9,9 +9,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -131,6 +135,18 @@ func collectSupportArtifacts(ctx context.Context, a *App, cfg config.Config) ([]
 
 	routingBytes, routingErr := marshalRoutingJSON(cfg)
 	add("routing.json", routingBytes, routingErr)
+
+	// Daemon liveness: whether the server the client talks to is even up, and
+	// where (token redacted). An empty server.log next to an unreachable daemon
+	// points at the transport/bridge layer rather than dir2mcp itself.
+	daemonBytes, daemonErr := marshalDaemonLivenessJSON(cfg)
+	add("daemon.json", daemonBytes, daemonErr)
+
+	// Host MCP-client (Claude Desktop) logs, best-effort. The client launches a
+	// `bunx mcp-remote` stdio→HTTP bridge, and transport-level "Failed to call
+	// tool" errors surface there — not in dir2mcp's own server.log. Absent logs
+	// are silently skipped (this is a diagnostic nicety, not a required artifact).
+	files = append(files, collectClientMCPLogs()...)
 
 	return files, warnings
 }
@@ -319,6 +335,135 @@ func supportEntryNames(files []supportFile) []string {
 		names = append(names, f.Name)
 	}
 	return names
+}
+
+// bundleSecretRedactors mask credential material that can appear in client
+// bridge logs and connection URLs (bearer tokens, Authorization headers, and
+// token-style query parameters) before they are written into the shared bundle.
+var bundleSecretRedactors = []*regexp.Regexp{
+	// Authorization header: header name + (optional "Bearer ") + value.
+	regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*)(?:bearer\s+)?[^\s"',}]+`),
+	// Standalone "Bearer <token>".
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`),
+	// token-style query parameters (?token=..., &access_token=..., &api_key=...).
+	regexp.MustCompile(`(?i)([?&](?:token|access_token|api_key|apikey|key)=)[^&\s"']+`),
+}
+
+// redactBundleSecrets masks credential material in text destined for the support
+// bundle. It is intentionally conservative (pattern-based) — the bundle is meant
+// to be shareable with a maintainer, so leaking a bearer token would defeat the
+// purpose.
+func redactBundleSecrets(s string) string {
+	out := s
+	out = bundleSecretRedactors[0].ReplaceAllString(out, "${1}[REDACTED]")
+	out = bundleSecretRedactors[1].ReplaceAllString(out, "Bearer [REDACTED]")
+	out = bundleSecretRedactors[2].ReplaceAllString(out, "${1}[REDACTED]")
+	return out
+}
+
+// claudeMCPLogDirs returns the OS-specific directories where Claude Desktop
+// writes its MCP server/bridge logs. Returns nil when the location cannot be
+// resolved (the caller then collects nothing — best-effort).
+func claudeMCPLogDirs() []string {
+	switch runtime.GOOS {
+	case "windows":
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			return []string{filepath.Join(appData, "Claude", "logs")}
+		}
+	case "darwin":
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			return []string{filepath.Join(home, "Library", "Logs", "Claude")}
+		}
+	default: // linux and other unixes
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			return []string{filepath.Join(home, ".config", "Claude", "logs")}
+		}
+	}
+	return nil
+}
+
+// collectClientMCPLogs gathers Claude Desktop's MCP logs (mcp*.log) best-effort,
+// tail-capped and secret-redacted, under client-logs/ in the bundle. Missing or
+// unreadable logs are silently skipped — this is a diagnostic aid, not a
+// required artifact, so it never produces warnings or errors.
+func collectClientMCPLogs() []supportFile {
+	var out []supportFile
+	for _, dir := range claudeMCPLogDirs() {
+		matches, err := filepath.Glob(filepath.Join(dir, "mcp*.log"))
+		if err != nil {
+			continue
+		}
+		sort.Strings(matches)
+		for _, match := range matches {
+			data, readErr := readLogTail(match, supportLogTailBytes)
+			if readErr != nil || len(data) == 0 {
+				continue
+			}
+			out = append(out, supportFile{
+				Name:  "client-logs/" + filepath.Base(match),
+				Bytes: []byte(redactBundleSecrets(string(data))),
+			})
+		}
+	}
+	return out
+}
+
+// marshalDaemonLivenessJSON records whether the dir2mcp daemon the client
+// connects to is configured and reachable. This disambiguates "the daemon is
+// down / the bridge can't reach it" (empty server.log, unreachable) from "the
+// daemon is up but a handler failed" (populated server.log). The connection URL
+// is redacted and only header *names* are recorded — never their values.
+func marshalDaemonLivenessJSON(cfg config.Config) ([]byte, error) {
+	info := map[string]interface{}{
+		"connection_present": false,
+		"reachable":          false,
+	}
+
+	raw, err := readFileBest(connectionFilePath(cfg.StateDir))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return json.MarshalIndent(info, "", "  ")
+	}
+	info["connection_present"] = true
+
+	var conn connectionPayload
+	if jerr := json.Unmarshal(raw, &conn); jerr != nil {
+		info["parse_error"] = "connection.json present but could not be parsed"
+		return json.MarshalIndent(info, "", "  ")
+	}
+	info["transport"] = conn.Transport
+	info["public"] = conn.Public
+	info["token_source"] = conn.TokenSource
+	info["url"] = redactBundleSecrets(conn.URL)
+	if len(conn.Headers) > 0 {
+		keys := make([]string, 0, len(conn.Headers))
+		for k := range conn.Headers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		info["header_keys"] = keys
+	}
+
+	if u, perr := url.Parse(strings.TrimSpace(conn.URL)); perr == nil && u.Hostname() != "" {
+		host := u.Host
+		if u.Port() == "" {
+			port := "80"
+			if u.Scheme == "https" {
+				port = "443"
+			}
+			host = net.JoinHostPort(u.Hostname(), port)
+		}
+		if c, derr := net.DialTimeout("tcp", host, 1500*time.Millisecond); derr == nil {
+			_ = c.Close()
+			info["reachable"] = true
+		} else {
+			info["reachable_error"] = derr.Error()
+		}
+	}
+
+	return json.MarshalIndent(info, "", "  ")
 }
 
 func warningStrings(errs []error) []string {
