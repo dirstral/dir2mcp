@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -246,12 +248,35 @@ func (s *Server) processToolsCall(ctx context.Context, rawParams json.RawMessage
 		}), http.StatusOK, nil
 	}
 
-	result, toolErr := tool.handler(ctx, params.Arguments)
+	result, toolErr := s.invokeToolHandler(ctx, tool, params.Name, params.Arguments)
 	if toolErr != nil {
 		return newToolErrorResult(*toolErr), http.StatusOK, nil
 	}
 
 	return result, http.StatusOK, nil
+}
+
+// invokeToolHandler runs a tool handler with panic recovery. A bug in any
+// handler is converted into a clean INTERNAL_ERROR tool result (and the stack is
+// logged) rather than propagating out through net/http, which would recover the
+// panic at the server level by abruptly closing the connection — surfacing on
+// the client as an opaque "Failed to call tool" with the stack written only to
+// stderr. Returning a normal tool-error result instead lets the model read and
+// report the failure, and the logged stack makes the underlying bug
+// diagnosable. See issue #356.
+func (s *Server) invokeToolHandler(ctx context.Context, tool toolDefinition, name string, args map[string]interface{}) (result toolCallResult, toolErr *toolExecutionError) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("mcp: tool %q handler panicked: %v\n%s", name, r, debug.Stack())
+			result = toolCallResult{}
+			toolErr = &toolExecutionError{
+				Code:      "INTERNAL_ERROR",
+				Message:   "internal error while executing tool",
+				Retryable: false,
+			}
+		}
+	}()
+	return tool.handler(ctx, args)
 }
 
 func parseToolsCallParams(raw json.RawMessage) (toolsCallParams, error) {
