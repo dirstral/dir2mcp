@@ -861,6 +861,42 @@ func (s *SQLiteStore) ListDocumentHashes(ctx context.Context) ([]model.DocumentH
 	return hashes, nil
 }
 
+// ListCorpusLanguages returns the distinct non-empty effective languages
+// recorded across non-deleted chunks (SPEC §5.2/§8.8), as BCP-47 tags sorted
+// for determinism. It backs the "auto" cross-lingual query-expansion target
+// resolution (#325): the retrieval service expands a query into the corpus's
+// detected languages (#267). Chunks with no recorded language (unknown) are
+// excluded. Implements model.CorpusLanguageLister.
+func (s *SQLiteStore) ListCorpusLanguages(ctx context.Context) ([]string, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT DISTINCT language FROM chunks WHERE deleted = 0 AND TRIM(language) != '' ORDER BY language`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	langs := make([]string, 0)
+	for rows.Next() {
+		var lang string
+		if err := rows.Scan(&lang); err != nil {
+			return nil, err
+		}
+		if lang = strings.TrimSpace(lang); lang != "" {
+			langs = append(langs, lang)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return langs, nil
+}
+
 // WithTx begins a new database transaction and passes a transaction-bound
 // representation store to the supplied callback. If the callback returns an
 // error the transaction is rolled back; otherwise it is committed.  The

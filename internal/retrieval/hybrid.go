@@ -28,6 +28,20 @@ const hybridCandidatePoolSize = 50
 // expose slightly different snippets for the same chunk; we prefer the
 // vector path as the canonical source.
 func fuseRRF(primary, secondary []model.SearchHit, k int) []model.SearchHit {
+	return fuseRRFMulti([][]model.SearchHit{primary, secondary}, k)
+}
+
+// fuseRRFMulti combines any number of ranked SearchHit lists into a single
+// ranked list using reciprocal-rank fusion — the n-ary generalization of
+// fuseRRF. A chunk appearing in a list at rank r contributes 1/(rrfK+r); a
+// chunk appearing in several lists sums its per-list contributions, so a chunk
+// surfaced by multiple lists (e.g. retrieved for multiple language variants in
+// cross-lingual expansion, #325) is boosted. The metadata of the FIRST list a
+// chunk appears in is preserved (lists are processed in argument order), output
+// is sorted best-first with a deterministic chunk_id tiebreak, and truncated to
+// k. Empty lists are skipped. This is the shared fusion primitive for both
+// hybrid BM25+vector fusion and cross-lingual per-variant fusion.
+func fuseRRFMulti(lists [][]model.SearchHit, k int) []model.SearchHit {
 	if k <= 0 {
 		k = 10
 	}
@@ -35,7 +49,11 @@ func fuseRRF(primary, secondary []model.SearchHit, k int) []model.SearchHit {
 		hit   model.SearchHit
 		score float64
 	}
-	bag := make(map[uint64]*fused, len(primary)+len(secondary))
+	total := 0
+	for _, l := range lists {
+		total += len(l)
+	}
+	bag := make(map[uint64]*fused, total)
 
 	contribute := func(hit model.SearchHit, rank int) {
 		entry, ok := bag[hit.ChunkID]
@@ -46,11 +64,10 @@ func fuseRRF(primary, secondary []model.SearchHit, k int) []model.SearchHit {
 		entry.score += 1.0 / float64(rrfK+rank)
 	}
 
-	for i, h := range primary {
-		contribute(h, i+1)
-	}
-	for i, h := range secondary {
-		contribute(h, i+1)
+	for _, list := range lists {
+		for i, h := range list {
+			contribute(h, i+1)
+		}
 	}
 
 	out := make([]model.SearchHit, 0, len(bag))
