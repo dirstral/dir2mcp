@@ -185,6 +185,17 @@ type Service struct {
 	// retrieval.mmr.lambda): 1 = pure relevance, 0 = pure diversity. Only
 	// consulted when mmrEnabled. Wired from config.RetrievalMMRLambda.
 	mmrLambda float64
+	// hydeEnabled toggles the opt-in HyDE (Hypothetical Document Embeddings)
+	// query transform (config retrieval.hyde.enabled). When true and a
+	// generator is configured, Search generates a short hypothetical answer to
+	// the query, embeds it, and retrieves with that text. Config-only (never an
+	// MCP tool parameter). Default false ⇒ unchanged behavior. Wired from
+	// config.RetrievalHyDEEnabled at construction.
+	hydeEnabled bool
+	// hydeMode selects how the HyDE-variant hits combine with the raw-query hits
+	// ("fuse" = RRF-fuse the two; "replace" = use the hypothetical-document hits
+	// alone). Default "fuse". Wired from config.RetrievalHyDEMode.
+	hydeMode string
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -228,6 +239,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		secretPatterns:      compiledPatterns,
 		hybridEnabled:       true,
 		rerankCandidatePool: defaultRerankCandidatePool,
+		hydeMode:            hydeModeFuse,
 	}
 }
 
@@ -476,6 +488,25 @@ func (s *Service) SetMMR(enabled bool, lambda float64) {
 	defer s.metaMu.Unlock()
 	s.mmrEnabled = enabled
 	s.mmrLambda = lambda
+}
+
+// SetHyDE wires the opt-in HyDE (Hypothetical Document Embeddings) query
+// transform (config retrieval.hyde.enabled / retrieval.hyde.mode). When enabled
+// and a generator is configured, Search generates a short hypothetical answer to
+// the query, embeds it, and retrieves with that text — fused with the raw-query
+// results (mode "fuse", the default) or used alone (mode "replace"). An empty or
+// unrecognized mode normalizes to "fuse". A generation failure degrades
+// gracefully to the raw query (never fatal). Config-only; the engine wires this
+// from config at construction time, mirroring SetMinScore.
+func (s *Service) SetHyDE(enabled bool, mode string) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != hydeModeReplace {
+		mode = hydeModeFuse
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.hydeEnabled = enabled
+	s.hydeMode = mode
 }
 
 // SetDocumentHashes installs the rel_path → content_hash map used to group
@@ -795,42 +826,12 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 }
 
 func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, error) {
-	s.metaMu.RLock()
-	textModel := s.textModel
-	codeModel := s.codeModel
-	textIndex := s.textIndex
-	codeIndex := s.codeIndex
-	s.metaMu.RUnlock()
-
 	k := query.K
 	if k <= 0 {
 		k = 15
 	}
 
-	mode := strings.ToLower(strings.TrimSpace(query.Index))
-	if mode == "" {
-		mode = "auto"
-	}
-	var (
-		hits []model.SearchHit
-		err  error
-	)
-	switch mode {
-	case "text":
-		hits, err = s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
-	case "code":
-		hits, err = s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
-	case "both":
-		hits, err = s.searchBothIndices(ctx, query.Query, k, textModel, codeModel, textIndex, codeIndex, query)
-	case "auto":
-		if looksLikeCodeQuery(query.Query) {
-			hits, err = s.searchSingleIndex(ctx, query.Query, k, codeModel, codeIndex, "code", query, true)
-		} else {
-			hits, err = s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
-		}
-	default:
-		hits, err = s.searchSingleIndex(ctx, query.Query, k, textModel, textIndex, "text", query, true)
-	}
+	hits, err := s.searchWithHyDE(ctx, query, k)
 	if err != nil {
 		return nil, err
 	}
@@ -839,11 +840,112 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// decayed score and newer content survives a tie. Config-only; default 0 ⇒
 	// pass-through (no allocation, no lookups).
 	hits = s.applyRecencyDecay(ctx, hits)
-	// Apply the server-side relevance floor LAST: after scoring/fusion/rerank
-	// (the per-mode searches above), after their dedup/truncation, and after the
-	// recency decay, using each hit's final authoritative Score. Config-only;
-	// default 0 ⇒ pass-through.
+	// Apply the server-side relevance floor LAST: after scoring/fusion/rerank,
+	// the optional HyDE fusion, their dedup/truncation, and the recency decay,
+	// using each hit's final authoritative Score. Config-only; default 0 ⇒
+	// pass-through.
 	return s.applyMinScoreFloor(hits), nil
+}
+
+// searchByMode runs the index-mode dispatch (text/code/both/auto) for one query
+// text, returning up to k ranked hits. It is the shared retrieval primitive used
+// by both the raw query and — when the HyDE transform is enabled — the
+// hypothetical-document variant, so the two go through identical
+// fusion/rerank/dedup logic. allowRerank is forwarded to the single-index path
+// (the "both" path reranks internally on its merged pool regardless).
+func (s *Service) searchByMode(ctx context.Context, queryText string, k int, query model.SearchQuery, allowRerank bool) ([]model.SearchHit, error) {
+	s.metaMu.RLock()
+	textModel := s.textModel
+	codeModel := s.codeModel
+	textIndex := s.textIndex
+	codeIndex := s.codeIndex
+	s.metaMu.RUnlock()
+
+	mode := strings.ToLower(strings.TrimSpace(query.Index))
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "text":
+		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
+	case "code":
+		return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
+	case "both":
+		return s.searchBothIndices(ctx, queryText, k, textModel, codeModel, textIndex, codeIndex, query)
+	case "auto":
+		if looksLikeCodeQuery(queryText) {
+			return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
+		}
+		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
+	default:
+		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
+	}
+}
+
+// searchWithHyDE runs retrieval for the query, applying the opt-in HyDE
+// (Hypothetical Document Embeddings) transform when enabled. With HyDE off it is
+// exactly searchByMode for the raw query (unchanged behavior). With HyDE on it
+// generates a short hypothetical answer, retrieves with that text, and either
+// RRF-fuses those hits with the raw-query hits (mode "fuse") or returns them
+// alone (mode "replace"). Generation failures, an empty hypothesis, or a missing
+// generator degrade gracefully to the raw-query results — HyDE is an
+// optimization, never a hard dependency.
+func (s *Service) searchWithHyDE(ctx context.Context, query model.SearchQuery, k int) ([]model.SearchHit, error) {
+	s.metaMu.RLock()
+	enabled := s.hydeEnabled
+	mode := s.hydeMode
+	gen := s.gen
+	s.metaMu.RUnlock()
+
+	if !enabled || gen == nil {
+		return s.searchByMode(ctx, query.Query, k, query, true)
+	}
+
+	hypothesis := s.generateHyDEDocument(ctx, gen, query.Query)
+	if hypothesis == "" {
+		// Graceful fallback: generation failed or produced nothing usable.
+		return s.searchByMode(ctx, query.Query, k, query, true)
+	}
+
+	if mode == hydeModeReplace {
+		// Use the hypothetical-document hits alone.
+		return s.searchByMode(ctx, hypothesis, k, query, true)
+	}
+
+	// Mode "fuse": retrieve both variants with rerank deferred so RRF fuses the
+	// raw candidate orderings, then rerank/truncate the fused pool once.
+	rawHits, err := s.searchByMode(ctx, query.Query, hybridCandidatePoolSize, query, false)
+	if err != nil {
+		return nil, err
+	}
+	hydeHits, err := s.searchByMode(ctx, hypothesis, hybridCandidatePoolSize, query, false)
+	if err != nil {
+		// A HyDE-variant retrieval error must not fail the whole request: fall
+		// back to the raw-query hits we already have.
+		s.logf("hyde: variant retrieval failed, falling back to raw query: %v", err)
+		return s.rerankPool(ctx, query.Query, rawHits, k), nil
+	}
+	fused := fuseRRF(rawHits, hydeHits, hybridCandidatePoolSize)
+	return s.rerankPool(ctx, query.Query, fused, k), nil
+}
+
+// generateHyDEDocument asks the generator for a concise hypothetical answer to
+// the query, used as the retrieval text for the HyDE transform. It returns the
+// trimmed generated text, or "" when generation fails or yields nothing — the
+// caller then falls back to the raw query. The question is not logged verbatim
+// (it may carry sensitive data); only a truncated form is logged on error.
+func (s *Service) generateHyDEDocument(ctx context.Context, gen model.Generator, queryText string) string {
+	queryText = strings.TrimSpace(queryText)
+	if queryText == "" {
+		return ""
+	}
+	prompt := buildHyDEPrompt(queryText)
+	generated, err := gen.Generate(ctx, prompt)
+	if err != nil {
+		s.logf("hyde: generation failed, falling back to raw query: %v", err)
+		return ""
+	}
+	return truncateHyDEAnswer(generated)
 }
 
 // applyRecencyDecay multiplies each hit's final authoritative Score by an

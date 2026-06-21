@@ -20,6 +20,15 @@ import (
 
 const DefaultProtocolVersion = "2025-11-25"
 
+// HyDE (Hypothetical Document Embeddings) query-transform modes
+// (config `retrieval.hyde.mode`). HyDEModeFuse RRF-fuses the
+// hypothetical-document hits with the raw-query hits; HyDEModeReplace uses the
+// hypothetical-document embedding alone. HyDEModeFuse is the default.
+const (
+	HyDEModeFuse    = "fuse"
+	HyDEModeReplace = "replace"
+)
+
 const EffectiveConfigSnapshotFile = ".dir2mcp.yaml.snapshot"
 
 // DefaultMediaClipMaxDurationMS / DefaultMediaClipMaxBytes are the built-in
@@ -287,6 +296,21 @@ type Config struct {
 	// is only consulted when RetrievalMMREnabled is true. Values outside [0,1]
 	// (or NaN/Inf) are CONFIG_INVALID.
 	RetrievalMMRLambda float64
+	// RetrievalHyDEEnabled toggles the opt-in HyDE (Hypothetical Document
+	// Embeddings) query transform (config `retrieval.hyde.enabled`). When true,
+	// Search generates a short hypothetical answer to the query via the
+	// configured generator, embeds that text, and retrieves with it. It is
+	// config-only (NOT an MCP tool parameter) so no tool input/output schema
+	// changes. Default false ⇒ unchanged behavior (raw query only). A generation
+	// failure degrades gracefully back to the raw query (never fatal). See
+	// Gao et al., "Precise Zero-Shot Dense Retrieval without Relevance Labels".
+	RetrievalHyDEEnabled bool
+	// RetrievalHyDEMode selects how the HyDE-variant results combine with the
+	// raw-query results (config `retrieval.hyde.mode`): "fuse" (default) RRF-fuses
+	// the hypothetical-document hits with the raw-query hits; "replace" uses the
+	// hypothetical-document embedding alone. Ignored when RetrievalHyDEEnabled is
+	// false. An empty value normalizes to "fuse".
+	RetrievalHyDEMode string
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -600,6 +624,8 @@ type fileConfig struct {
 	RetrievalAdaptiveKMax              *int
 	RetrievalMMREnabled                *bool
 	RetrievalMMRLambda                 *float64
+	RetrievalHyDEEnabled               *bool
+	RetrievalHyDEMode                  *string
 	RerankEnabled                      *bool
 	RerankProvider                     *string
 	CohereAPIKey                       *string
@@ -725,6 +751,8 @@ type persistedConfig struct {
 	RetrievalAdaptiveKMax              int           `yaml:"retrieval_adaptive_k_max"`
 	RetrievalMMREnabled                bool          `yaml:"retrieval_mmr_enabled"`
 	RetrievalMMRLambda                 float64       `yaml:"retrieval_mmr_lambda"`
+	RetrievalHyDEEnabled               bool          `yaml:"retrieval_hyde_enabled"`
+	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
 	RerankEnabled                      bool          `yaml:"rerank_enabled"`
 	RerankProvider                     string        `yaml:"rerank_provider"`
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
@@ -906,6 +934,12 @@ func Default() Config {
 		// default so an enabled-but-unspecified config behaves predictably.
 		RetrievalMMREnabled: false,
 		RetrievalMMRLambda:  0.5,
+		// RetrievalHyDEEnabled defaults to false: the HyDE query transform is
+		// off unless explicitly enabled, so default behavior is unchanged.
+		RetrievalHyDEEnabled: false,
+		// RetrievalHyDEMode defaults to "fuse": when HyDE is enabled the
+		// hypothetical-document hits are RRF-fused with the raw-query hits.
+		RetrievalHyDEMode: HyDEModeFuse,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -1029,6 +1063,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalAdaptiveKMax:              cfg.RetrievalAdaptiveKMax,
 		RetrievalMMREnabled:                cfg.RetrievalMMREnabled,
 		RetrievalMMRLambda:                 cfg.RetrievalMMRLambda,
+		RetrievalHyDEEnabled:               cfg.RetrievalHyDEEnabled,
+		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
 		RerankEnabled:                      rerankEnabledEffective(cfg),
 		RerankProvider:                     cfg.RerankProvider,
 		CohereBaseURL:                      cfg.CohereBaseURL,
@@ -1645,9 +1681,9 @@ func applyModelRAGFileParsed(cfg *Config, fc fileConfig) {
 
 // applyRetrievalTuningFileParsed overlays the opt-in retrieval-tuning file
 // fields (recency time-decay #323, context compression #335, the adaptive
-// gate #338, and MMR diversity #340) onto cfg. Split out of
-// applyModelRAGFileParsed to keep that function within the gocyclo budget as
-// tuning knobs are added.
+// gate #338, MMR diversity #340, and the HyDE query transform #333) onto cfg.
+// Split out of applyModelRAGFileParsed to keep that function within the gocyclo
+// budget as tuning knobs are added.
 func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalRecencyHalfLife != nil {
 		cfg.RetrievalRecencyHalfLife = *fc.RetrievalRecencyHalfLife
@@ -1672,6 +1708,12 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.RetrievalMMRLambda != nil {
 		cfg.RetrievalMMRLambda = *fc.RetrievalMMRLambda
+	}
+	if fc.RetrievalHyDEEnabled != nil {
+		cfg.RetrievalHyDEEnabled = *fc.RetrievalHyDEEnabled
+	}
+	if fc.RetrievalHyDEMode != nil {
+		cfg.RetrievalHyDEMode = *fc.RetrievalHyDEMode
 	}
 }
 
@@ -2092,6 +2134,10 @@ var configKeyAliases = map[string]string{
 	"mmr_enabled":                             "retrieval.mmr.enabled",
 	"retrieval_mmr_lambda":                    "retrieval.mmr.lambda",
 	"mmr_lambda":                              "retrieval.mmr.lambda",
+	"retrieval_hyde_enabled":                  "retrieval.hyde.enabled",
+	"hyde_enabled":                            "retrieval.hyde.enabled",
+	"retrieval_hyde_mode":                     "retrieval.hyde.mode",
+	"hyde_mode":                               "retrieval.hyde.mode",
 	"rerank_enabled":                          "rerank.enabled",
 	"rerank.cohere.api_key":                   "cohere_api_key",
 	"rerank.cohere.base_url":                  "cohere_base_url",
@@ -2201,7 +2247,7 @@ func canonicalizeConfigKey(key string) string {
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -2278,6 +2324,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"retrieval.hybrid.enabled":   func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
 	"retrieval.adaptive.enabled": func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
 	"retrieval.mmr.enabled":      func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
+	"retrieval.hyde.enabled":     func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
 	"dedup.retrieval":            func(c *fileConfig) **bool { return &c.DedupRetrieval },
 	"retrieval.context_compression.enabled": func(c *fileConfig) **bool {
 		return &c.ContextCompressionEnabled
@@ -2529,6 +2576,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "chunking.strategy":
 		cfg.ChunkingStrategy = strPtr(value)
+	case "retrieval.hyde.mode":
+		cfg.RetrievalHyDEMode = strPtr(value)
 	}
 }
 
@@ -2700,6 +2749,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("retrieval_adaptive_k_max", cfg.RetrievalAdaptiveKMax)
 	writeBool("retrieval_mmr_enabled", cfg.RetrievalMMREnabled)
 	writeScalar("retrieval_mmr_lambda", strconv.FormatFloat(cfg.RetrievalMMRLambda, 'f', -1, 64))
+	writeBool("retrieval_hyde_enabled", cfg.RetrievalHyDEEnabled)
+	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -3499,8 +3550,30 @@ func (c *Config) validateRetrievalNumericBounds() error {
 		math.IsNaN(c.RetrievalMMRLambda) || math.IsInf(c.RetrievalMMRLambda, 0) {
 		return fmt.Errorf("retrieval.mmr.lambda must be within [0,1]: %v", c.RetrievalMMRLambda)
 	}
+	if err := c.normalizeHyDEMode(); err != nil {
+		return err
+	}
 	if err := c.validateAdaptiveBounds(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// normalizeHyDEMode normalizes retrieval.hyde.mode in place: empty becomes
+// "fuse" (the default) and a recognized value is lowercased; any other value is
+// CONFIG_INVALID so a typo fails at config time (explicit, deterministic) rather
+// than silently behaving like "fuse" at query time. It runs regardless of
+// RetrievalHyDEEnabled so a stale/misspelled mode is caught even when HyDE is
+// currently off. Extracted to keep validateRetrievalNumericBounds under the
+// cyclomatic budget.
+func (c *Config) normalizeHyDEMode() error {
+	switch mode := strings.ToLower(strings.TrimSpace(c.RetrievalHyDEMode)); mode {
+	case "":
+		c.RetrievalHyDEMode = HyDEModeFuse
+	case HyDEModeFuse, HyDEModeReplace:
+		c.RetrievalHyDEMode = mode
+	default:
+		return fmt.Errorf("retrieval.hyde.mode must be one of %q, %q: %q", HyDEModeFuse, HyDEModeReplace, c.RetrievalHyDEMode)
 	}
 	return nil
 }
