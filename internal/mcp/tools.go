@@ -267,7 +267,10 @@ func (s *Server) processToolsCall(ctx context.Context, rawParams json.RawMessage
 func (s *Server) invokeToolHandler(ctx context.Context, tool toolDefinition, name string, args map[string]interface{}) (result toolCallResult, toolErr *toolExecutionError) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("mcp: tool %q handler panicked: %v\n%s", name, r, debug.Stack())
+			// Log the panic TYPE (not %v of the value) plus the stack: a recovered
+			// panic value can carry arbitrary request/tool content, and the stack
+			// already pinpoints the failure site. Avoids leaking sensitive payloads.
+			log.Printf("mcp: tool %q handler panicked: %T\n%s", name, r, debug.Stack())
 			result = toolCallResult{}
 			toolErr = &toolExecutionError{
 				Code:      "INTERNAL_ERROR",

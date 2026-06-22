@@ -548,7 +548,11 @@ func writeResponse(w http.ResponseWriter, statusCode int, response rpcResponse) 
 	// surfacing on the client as "Failed to call tool" (issue #362).
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("mcp: panic encoding/writing response: %v\n%s", r, debug.Stack())
+			// Log the panic TYPE (not %v of the value) plus the stack: a recovered
+			// panic value can carry arbitrary request/tool content, and the stack
+			// already pinpoints the failure site. Avoids leaking sensitive payloads
+			// into logs.
+			log.Printf("mcp: panic encoding/writing response: %T\n%s", r, debug.Stack())
 		}
 	}()
 	w.Header().Set("Content-Type", "application/json")
