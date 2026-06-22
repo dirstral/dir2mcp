@@ -97,10 +97,11 @@ func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot
 		s.stat("skipped", snapshot.Indexing.Skipped),
 		s.stat("deleted", snapshot.Indexing.Deleted),
 	)
-	writef(a.stdout, "    %s  %s  %s  %s",
+	writef(a.stdout, "    %s  %s  %s  %s  %s",
 		s.stat("reps", snapshot.Indexing.Representations),
 		s.stat("chunks", snapshot.Indexing.ChunksTotal),
 		s.stat("embedded", snapshot.Indexing.EmbeddedOK),
+		s.stat("pending", snapshot.Indexing.EmbeddedPending),
 		s.stat("unknown", snapshot.Indexing.Unknown),
 	)
 	if snapshot.Indexing.Errors > 0 {

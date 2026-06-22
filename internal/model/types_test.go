@@ -58,6 +58,7 @@ func TestStatsJSONFlattening(t *testing.T) {
 		"representations",
 		"chunks_total",
 		"embedded_ok",
+		"embedded_pending",
 		"errors",
 		"unknown",
 	}

@@ -463,8 +463,15 @@ type CorpusStats struct {
 	Representations int64            `json:"representations"`
 	ChunksTotal     int64            `json:"chunks_total"`
 	EmbeddedOK      int64            `json:"embedded_ok"`
-	Errors          int64            `json:"errors"`
-	Unknown         int64            `json:"unknown"`
+	// EmbeddedPending is the count of non-deleted chunks still awaiting
+	// embedding (embedding_status='pending'). Surfaced alongside EmbeddedOK so
+	// "chunks_total>0 but embedded_ok=0" is unambiguous: a large pending count
+	// with errors=0 means the embed worker hasn't drained the queue (semantic
+	// search is degraded to keyword-only until it does), vs. a real embed
+	// failure which shows under Errors/FailureSummary.
+	EmbeddedPending int64 `json:"embedded_pending"`
+	Errors          int64 `json:"errors"`
+	Unknown         int64 `json:"unknown"`
 	// FailureSummary groups chunk-level embedding failures by
 	// store.ErrorCategory ("rate_limit", "payload_too_large", etc.)
 	// plus a small sample of representative {rel_path, message}

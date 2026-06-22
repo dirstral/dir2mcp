@@ -285,6 +285,7 @@ type corpusIndexing struct {
 	Representations int64                 `json:"representations"`
 	ChunksTotal     int64                 `json:"chunks_total"`
 	EmbeddedOK      int64                 `json:"embedded_ok"`
+	EmbeddedPending int64                 `json:"embedded_pending"`
 	Errors          int64                 `json:"errors"`
 	Unknown         int64                 `json:"unknown"`
 	FailureSummary  *model.FailureSummary `json:"failure_summary,omitempty"`
@@ -1857,6 +1858,11 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			Representations: idx.Representations,
 			ChunksTotal:     idx.ChunksTotal,
 			EmbeddedOK:      idx.EmbeddedOK,
+			// embedded_pending is always a store-derived count (no live
+			// appstate counter tracks it), so source it straight from
+			// corpusStats rather than idx — correct in both the live-snapshot
+			// and computed-fallback branches above (#364).
+			EmbeddedPending: corpusStats.EmbeddedPending,
 			Errors:          idx.Errors,
 			Unknown:         idx.Unknown,
 			// FailureSummary travels straight through from the
