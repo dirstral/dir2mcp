@@ -906,6 +906,12 @@ func Default() Config {
 			"**/*.pem",
 			"**/*.key",
 			"**/id_rsa",
+			// dir2mcp's own support bundles: `support-bundle` writes
+			// dir2mcp-support-<ts>.tar.gz into the working dir, and deep archive
+			// ingestion would otherwise unpack and index its logs/config —
+			// poisoning the knowledge corpus with dir2mcp's own diagnostics
+			// (issue #366). Excluding the archive also skips its extraction.
+			"**/dir2mcp-support-*.tar.gz",
 		},
 		SecretPatterns: []string{
 			`AKIA[0-9A-Z]{16}`,

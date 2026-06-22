@@ -331,6 +331,7 @@ func TestMatchesAnyPathExclude(t *testing.T) {
 		"**/node_modules/**",
 		"**/*.pem",
 		"**/.env",
+		"**/dir2mcp-support-*.tar.gz",
 	}
 
 	tests := []struct {
@@ -366,6 +367,25 @@ func TestMatchesAnyPathExclude(t *testing.T) {
 		{
 			name:     "normal file",
 			relPath:  "src/main.go",
+			expected: false,
+		},
+		{
+			// dir2mcp's own support bundle must never be ingested (#366):
+			// `support-bundle` drops it in the corpus root and deep archive
+			// ingestion would otherwise unpack and index its logs/config.
+			name:     "support bundle at corpus root",
+			relPath:  "dir2mcp-support-20260622-165429.tar.gz",
+			expected: true,
+		},
+		{
+			name:     "support bundle in a subdirectory",
+			relPath:  "reports/dir2mcp-support-20260101-000000.tar.gz",
+			expected: true,
+		},
+		{
+			// A user's own archive must NOT be swept up by the pattern.
+			name:     "unrelated archive is not excluded",
+			relPath:  "data/corpus-archive.tar.gz",
 			expected: false,
 		},
 	}
