@@ -1735,6 +1735,7 @@ func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
 	base.Representations = corpus.Representations
 	base.ChunksTotal = corpus.ChunksTotal
 	base.EmbeddedOK = corpus.EmbeddedOK
+	base.EmbeddedPending = corpus.EmbeddedPending
 	base.Errors = corpus.Errors
 	base.TotalDocs = corpus.TotalDocs
 	if len(corpus.DocCounts) == 0 {
