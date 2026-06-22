@@ -1794,6 +1794,9 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE deleted = 0 AND embedding_status = 'ok'`).Scan(&stats.EmbeddedOK); err != nil {
 		return model.CorpusStats{}, err
 	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE deleted = 0 AND embedding_status = 'pending'`).Scan(&stats.EmbeddedPending); err != nil {
+		return model.CorpusStats{}, err
+	}
 
 	summary, err := loadFailureSummary(ctx, db, failureSummaryMaxSamples)
 	if err != nil {

@@ -771,6 +771,11 @@ func (w *EmbeddingWorker) Run(ctx context.Context, interval time.Duration, index
 	backoff := interval
 	const maxBackoff = 30 * time.Second
 
+	// One startup line so the support bundle / server.log shows the worker is
+	// actually running for this axis. Its ABSENCE on a corpus with pending
+	// chunks (embedded_pending>0) is itself the diagnosis. See issue #364.
+	w.logf("embed worker started [kind=%s, interval=%s]", indexKind, interval)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -781,7 +786,14 @@ func (w *EmbeddingWorker) Run(ctx context.Context, interval time.Duration, index
 			if w.RunOnceFunc != nil {
 				runOnce = w.RunOnceFunc
 			}
-			_, err := runOnce(ctx, indexKind)
+			n, err := runOnce(ctx, indexKind)
+			if n > 0 {
+				// Progress is otherwise invisible: a corpus that never logs
+				// "embedded N" while embedded_pending stays high tells us the
+				// worker found nothing to do (filter/visibility) vs. embedded
+				// fine (which would show here).
+				w.logf("embedded %d chunk(s) [kind=%s]", n, indexKind)
+			}
 			if err != nil {
 				if isRetryable(err) {
 					w.logf("run once failed (retryable): %v; backing off %v", err, backoff)

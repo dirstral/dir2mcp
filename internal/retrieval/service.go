@@ -1315,12 +1315,15 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return "", false, err
 	}
 
-	// For binary documents (PDF, audio) with no explicit span, return the
-	// cached OCR/transcript markdown rather than the raw bytes. Without this,
-	// callers that don't pass page=N or start_ms/end_ms get an unusable text
-	// payload made of PDF stream bytes (see issue #177). Text-native types
-	// (md, txt, code, html) keep the existing default of returning file bytes.
-	if kind == "" && isBinaryDocType(normalizedRel) {
+	// For binary documents (PDF, audio) with no explicit span — OR with a
+	// line-range span, which is meaningless for OCR/transcript text — return the
+	// cached OCR/transcript markdown rather than the raw bytes. page=N / time
+	// spans were already served from metadata above. Without this, a caller that
+	// passes start_line/end_line on a PDF (a very natural thing for a model to
+	// try) gets bounced with DOC_TYPE_UNSUPPORTED instead of the text it wanted
+	// (issue #364; see also #177). Text-native types (md, txt, code, html) keep
+	// the existing default of returning file bytes with line slicing.
+	if isBinaryDocType(normalizedRel) && (kind == "" || kind == "lines") {
 		content, truncated, err := s.openFileFromOCRCache(stateDir, resolvedAbs, normalizedRel, secretPatterns, maxChars)
 		if err != nil {
 			return "", false, err
