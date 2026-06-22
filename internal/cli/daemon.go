@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -126,6 +128,39 @@ func pidFilePath(stateDir string) string {
 // serverLogPath returns the canonical daemon log file location.
 func serverLogPath(stateDir string) string {
 	return filepath.Join(stateDir, serverLogName)
+}
+
+// teeServerLog mirrors the process-global logger to <state_dir>/server.log so
+// recovered-panic stacks and log.Printf output reach the support bundle in
+// EVERY launch mode — not just the double-fork daemon, whose stdout/stderr the
+// parent already redirects to that file (issue #360). It is a no-op in the
+// daemon child (its stderr is already the file, so teeing would double-write)
+// and returns a restore func (or nil) so the global-logger mutation is bounded
+// to the server's lifetime — important so it never leaks across tests. The tee
+// is additive: existing destinations (terminal in the foreground, the service
+// manager under launchd/systemd) keep receiving logs.
+func (a *App) teeServerLog(stateDir string) func() {
+	if isRunningAsDaemonChild() {
+		return nil
+	}
+	logPath := serverLogPath(stateDir)
+	if err := rotateLogIfLarge(logPath); err != nil {
+		// Non-fatal: a failed rotation just means we keep appending.
+		writef(a.stderr, "warning: rotate %s: %v\n", logPath, err)
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		// Best-effort: if we can't open the log file, leave logging as-is
+		// rather than failing server startup.
+		writef(a.stderr, "warning: open server log %s: %v\n", logPath, err)
+		return nil
+	}
+	prev := log.Writer()
+	log.SetOutput(io.MultiWriter(prev, f))
+	return func() {
+		log.SetOutput(prev)
+		_ = f.Close()
+	}
 }
 
 // connectionFilePath returns the canonical connection.json location.

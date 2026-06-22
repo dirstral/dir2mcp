@@ -55,6 +55,15 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return code
 	}
 
+	// Mirror the process logger to <state_dir>/server.log for foreground/service
+	// launches too (the daemon child already redirects stderr there). This keeps
+	// recovered-panic stacks and log output reachable in the support bundle
+	// regardless of how the server was started (issue #360). Bounded to this
+	// call so it never leaks into other code paths/tests.
+	if restoreLog := a.teeServerLog(cfg.StateDir); restoreLog != nil {
+		defer restoreLog()
+	}
+
 	st, textBuilt, codeBuilt, code := a.initStoreAndIndices(ctx, &cfg, opts.jsonOutput)
 	if code != exitSuccess {
 		return code
