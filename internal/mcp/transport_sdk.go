@@ -41,6 +41,23 @@ func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile st
 	}
 }
 
+// newMCPHTTPServer builds the http.Server for the MCP endpoint with timeouts
+// suited to long-running, LLM/OCR-backed tool calls. Crucially WriteTimeout is
+// 0 (disabled): the net/http write deadline spans the whole handler+write, so a
+// fixed value would kill legitimately slow tool calls mid-flight and surface as
+// "Failed to call tool" on the client (issue #362). ReadHeaderTimeout bounds the
+// real slowloris vector and IdleTimeout reaps idle keep-alive connections;
+// per-request cancellation is handled via context.
+func newMCPHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       2 * time.Minute,
+	}
+}
+
 // Serve implements Transport.
 func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	if err := t.validateServeInputs(handler); err != nil {
@@ -78,13 +95,7 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 		t.serveHTTPRequest(w, req, sdkHandler)
 	})
 
-	server := &http.Server{
-		Handler:           wrapped,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
+	server := newMCPHTTPServer(wrapped)
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -540,6 +541,20 @@ func writeError(w http.ResponseWriter, statusCode int, id interface{}, code int,
 }
 
 func writeResponse(w http.ResponseWriter, statusCode int, response rpcResponse) {
+	// Defense-in-depth: encoding/writing the response runs outside the tool
+	// handler's panic recovery (#357). A panic here would otherwise propagate to
+	// net/http, which drops the connection and logs only to stderr. Recover and
+	// log the stack so it reaches server.log (#360) instead of silently
+	// surfacing on the client as "Failed to call tool" (issue #362).
+	defer func() {
+		if r := recover(); r != nil {
+			// Log the panic TYPE (not %v of the value) plus the stack: a recovered
+			// panic value can carry arbitrary request/tool content, and the stack
+			// already pinpoints the failure site. Avoids leaking sensitive payloads
+			// into logs.
+			log.Printf("mcp: panic encoding/writing response: %T\n%s", r, debug.Stack())
+		}
+	}()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(response)
