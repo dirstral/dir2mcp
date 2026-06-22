@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -166,6 +168,45 @@ func (a *App) teeServerLog(stateDir string) func() {
 // connectionFilePath returns the canonical connection.json location.
 func connectionFilePath(stateDir string) string {
 	return filepath.Join(stateDir, connectionFileName)
+}
+
+// readPreviousListenPort returns the TCP port recorded in a prior run's
+// connection.json, or "" when none is recorded or it is unreadable. Used to make
+// the ephemeral listen port sticky across restarts (#368).
+func readPreviousListenPort(stateDir string) string {
+	raw, err := os.ReadFile(connectionFilePath(stateDir))
+	if err != nil {
+		return ""
+	}
+	var conn connectionPayload
+	if err := json.Unmarshal(raw, &conn); err != nil {
+		return ""
+	}
+	u, err := url.Parse(strings.TrimSpace(conn.URL))
+	if err != nil {
+		return ""
+	}
+	return u.Port()
+}
+
+// preferredListenAddr returns listenAddr unchanged unless it is the ephemeral
+// default (host:0), in which case it substitutes the port a previous run
+// recorded in connection.json so a restart/upgrade re-binds the SAME port and
+// the URL baked into the Claude client config keeps working (#368). Returns the
+// original ephemeral address when no prior port is recorded; callers should
+// retry with the original address if binding the sticky port fails (the port may
+// now be taken).
+func preferredListenAddr(listenAddr, stateDir string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil || port != "0" {
+		// Explicit port (operator pinned it) or unparseable: respect as-is.
+		return listenAddr
+	}
+	prev := readPreviousListenPort(stateDir)
+	if prev == "" || prev == "0" {
+		return listenAddr
+	}
+	return net.JoinHostPort(host, prev)
 }
 
 // rotateLogIfLarge renames an oversized log file to "<path>.1" so the

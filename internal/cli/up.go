@@ -137,10 +137,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		"state_dir": cfg.StateDir,
 	})
 
-	ln, err := net.Listen("tcp", cfg.ListenAddr)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitServerBindFailure, fmt.Sprintf("bind server: %v", err))
-		return exitServerBindFailure
+	ln, code := a.bindServerListener(cfg, opts.jsonOutput)
+	if code != exitSuccess {
+		return code
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1050,6 +1049,27 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnl
 	}
 	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, cfg.IngestLateChunking)
 	return nil
+}
+
+// bindServerListener binds the MCP server's TCP listener. It prefers the port a
+// previous run recorded (via preferredListenAddr, #368) so a restart/upgrade
+// re-binds the same ephemeral port and the URL baked into the Claude client
+// config keeps working; if that port is now taken it falls back to a fresh
+// ephemeral port so startup still succeeds. Returns the listener and exitSuccess,
+// or (nil, exit code) after writing a CLI error. Extracted from runUp to keep it
+// under the gocyclo budget.
+func (a *App) bindServerListener(cfg config.Config, jsonOutput bool) (net.Listener, int) {
+	listenAddr := preferredListenAddr(cfg.ListenAddr, cfg.StateDir)
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil && listenAddr != cfg.ListenAddr {
+		writef(a.stderr, "note: previous port (%s) unavailable, binding a new one (re-run `dir2mcp install claude` if Claude can't connect): %v\n", listenAddr, err)
+		ln, err = net.Listen("tcp", cfg.ListenAddr)
+	}
+	if err != nil {
+		writeCLIError(a.stderr, jsonOutput, exitServerBindFailure, fmt.Sprintf("bind server: %v", err))
+		return nil, exitServerBindFailure
+	}
+	return ln, exitSuccess
 }
 
 // printHumanConnectionIfVerbose prints the human-readable connection block
