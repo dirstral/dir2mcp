@@ -29,6 +29,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/setupwizard"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
@@ -818,6 +819,13 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 	}
 	return total, nil
 }
+
+// Compile-time guard: the concrete store handed to startEmbeddingIfNotReadOnly
+// MUST satisfy index.ChunkSource, otherwise the runtime `st.(index.ChunkSource)`
+// assertion there fails silently and the embed worker never starts (issue #364).
+// A signature drift on any ChunkSource method (e.g. MarkFailedWithCategory) now
+// breaks the build instead of disabling embedding corpus-wide at runtime.
+var _ index.ChunkSource = (*store.SQLiteStore)(nil)
 
 func startEmbeddingWorkers(
 	ctx context.Context,

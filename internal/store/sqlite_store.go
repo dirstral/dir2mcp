@@ -2141,8 +2141,14 @@ func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason st
 // stored alongside the existing free-text reason so the original
 // message stays available for debugging while aggregations operate on
 // the enum.
-func (s *SQLiteStore) MarkFailedWithCategory(ctx context.Context, labels []uint64, category ErrorCategory, reason string) error {
-	return s.markEmbeddingStatus(ctx, labels, "error", reason, string(category))
+// category is the string form of an ErrorCategory: the index.ChunkSource
+// interface deliberately declares it as a plain string so the embed worker
+// (package index) need not depend on this package's ErrorCategory type. The
+// parameter MUST stay `string` — typing it as ErrorCategory silently breaks the
+// `store.(index.ChunkSource)` assertion in startEmbeddingIfNotReadOnly, which
+// disables the embed worker corpus-wide with no error (issue #364).
+func (s *SQLiteStore) MarkFailedWithCategory(ctx context.Context, labels []uint64, category, reason string) error {
+	return s.markEmbeddingStatus(ctx, labels, "error", reason, category)
 }
 
 func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time, authScope string) error {
