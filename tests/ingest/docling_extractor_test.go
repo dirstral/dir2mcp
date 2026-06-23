@@ -27,6 +27,40 @@ func TestDoclingExtractor_Extract_UsesConfiguredCommand(t *testing.T) {
 	}
 }
 
+// TestDoclingExtractor_Extract_FileOutputPath covers the {output} path (issue
+// #376): docling does not stream to stdout — it writes a file into the directory
+// given to --output. A template containing {output} must therefore run the
+// command, then read the produced file back, rather than reading stdout. `cp
+// {input} {output}` simulates docling: cp into a directory keeps the input
+// basename, so the extractor reads that file's contents.
+func TestDoclingExtractor_Extract_FileOutputPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping POSIX-only command test on Windows")
+	}
+	extractor := ingest.NewDoclingExtractor("cp {input} {output}")
+	out, err := extractor.Extract(context.Background(), "sample.md", []byte("hello from file output"))
+	if err != nil {
+		t.Fatalf("extract failed: %v", err)
+	}
+	if strings.TrimSpace(out) != "hello from file output" {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+// TestDoclingExtractor_Extract_FileOutputEmpty verifies that a {output} command
+// which writes nothing surfaces the empty-output error (issue #376) instead of
+// silently succeeding — `true` runs successfully but leaves the output dir empty.
+func TestDoclingExtractor_Extract_FileOutputEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping POSIX-only command test on Windows")
+	}
+	extractor := ingest.NewDoclingExtractor("true {input} {output}")
+	_, err := extractor.Extract(context.Background(), "sample.md", []byte("data"))
+	if err == nil || !strings.Contains(err.Error(), "empty output") {
+		t.Fatalf("expected empty-output error, got: %v", err)
+	}
+}
+
 func TestDocumentExtractorFromConfig_PrefersDoclingCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping POSIX-only command test on Windows")
