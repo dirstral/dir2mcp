@@ -18,7 +18,18 @@ import (
 // page/bbox provenance (spec 0.9.0 §7.4.B). When a custom docling_command
 // emits flat Markdown instead, Extract transparently falls back to treating
 // the output as Markdown.
-const defaultDoclingCommand = "docling --to json --output - {input}"
+//
+// `{output}` is substituted with a fresh per-call temp directory and the
+// produced file is read back from it. docling does NOT stream to stdout —
+// `--output -` writes a file named `-` in the working directory and leaves
+// stdout empty (issue #376), which silently failed every extraction. A template
+// that omits `{output}` keeps the legacy stdout-reading path (e.g. a custom
+// `cat {input}` or a wrapper that genuinely prints to stdout).
+const defaultDoclingCommand = "docling --to json --output {output} {input}"
+
+// doclingOutputPlaceholder marks where a per-call temp output directory is
+// substituted into the command template.
+const doclingOutputPlaceholder = "{output}"
 
 const (
 	maxDoclingStdoutBytes = 100 * 1024 * 1024
@@ -101,7 +112,9 @@ type structuredExtractor interface {
 }
 
 // run executes the configured docling command against data and returns the
-// trimmed stdout.
+// trimmed extraction output. When the template contains {output} (the default),
+// docling writes into a per-call temp directory and run reads the produced file
+// back; otherwise the legacy stdout-reading path is used.
 func (d *doclingExtractor) run(ctx context.Context, relPath string, data []byte) (string, error) {
 	ext := filepath.Ext(relPath)
 	if ext == "" {
@@ -123,7 +136,56 @@ func (d *doclingExtractor) run(ctx context.Context, relPath string, data []byte)
 		return "", fmt.Errorf("close temp doc file: %w", err)
 	}
 
-	args, err := buildDoclingCommandArgs(d.commandTemplate, tmpPath)
+	if strings.Contains(d.commandTemplate, doclingOutputPlaceholder) {
+		return d.runFileOutput(ctx, tmpPath)
+	}
+	return d.runStdout(ctx, tmpPath)
+}
+
+// runFileOutput runs docling with {output} pointed at a fresh temp directory and
+// returns the contents of the single file docling writes there (issue #376).
+// The output dir is isolated from the corpus so docling's artifacts can never be
+// re-ingested, and is removed when the call returns.
+func (d *doclingExtractor) runFileOutput(ctx context.Context, inputPath string) (string, error) {
+	outDir, err := os.MkdirTemp("", "dir2mcp-docling-out-*")
+	if err != nil {
+		return "", fmt.Errorf("create docling output dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(outDir) }()
+
+	args, err := buildDoclingCommandArgs(d.commandTemplate, inputPath, outDir)
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = SanitizeDoclingEnv(os.Environ())
+	// docling logs progress to stdout/stderr; the real output is the file in
+	// outDir, so stdout is discarded and only stderr is captured for diagnostics.
+	var stderr bytes.Buffer
+	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("docling command failed: %s", msg)
+	}
+
+	out, err := readDoclingOutputDir(outDir, inputPath, maxDoclingStdoutBytes)
+	if err != nil {
+		return "", err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return "", fmt.Errorf("docling command produced empty output")
+	}
+	return out, nil
+}
+
+// runStdout is the legacy path for command templates without {output}: it reads
+// the extraction from the command's stdout (e.g. a custom `cat {input}` wrapper).
+func (d *doclingExtractor) runStdout(ctx context.Context, inputPath string) (string, error) {
+	args, err := buildDoclingCommandArgs(d.commandTemplate, inputPath, "")
 	if err != nil {
 		return "", err
 	}
@@ -152,6 +214,47 @@ func (d *doclingExtractor) run(ctx context.Context, relPath string, data []byte)
 		return "", fmt.Errorf("docling command produced empty output")
 	}
 	return out, nil
+}
+
+// readDoclingOutputDir returns the contents of the file docling wrote into
+// outDir. docling names the output after the input stem (`<stem>.json`/`.md`),
+// so when several files are present the one matching the input stem is preferred;
+// a single file is used directly. A file larger than limit is rejected rather
+// than partially read.
+func readDoclingOutputDir(outDir, inputPath string, limit int) (string, error) {
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return "", fmt.Errorf("read docling output dir: %w", err)
+	}
+	files := make([]os.DirEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Type().IsRegular() {
+			files = append(files, e)
+		}
+	}
+	if len(files) == 0 {
+		return "", nil
+	}
+
+	chosen := files[0]
+	if len(files) > 1 {
+		stem := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+		for _, f := range files {
+			if strings.TrimSuffix(f.Name(), filepath.Ext(f.Name())) == stem {
+				chosen = f
+				break
+			}
+		}
+	}
+
+	if info, ierr := chosen.Info(); ierr == nil && limit > 0 && info.Size() > int64(limit) {
+		return "", fmt.Errorf("docling command output exceeded limit")
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, chosen.Name()))
+	if err != nil {
+		return "", fmt.Errorf("read docling output file: %w", err)
+	}
+	return string(data), nil
 }
 
 // Extract returns Markdown suitable for chunking/indexing. When the command
@@ -205,7 +308,7 @@ func (d *doclingExtractor) ExtractStructured(ctx context.Context, relPath string
 	}, nil
 }
 
-func buildDoclingCommandArgs(template, inputPath string) ([]string, error) {
+func buildDoclingCommandArgs(template, inputPath, outputDir string) ([]string, error) {
 	parts := strings.Fields(strings.TrimSpace(template))
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("docling command is empty")
@@ -215,6 +318,9 @@ func buildDoclingCommandArgs(template, inputPath string) ([]string, error) {
 		if strings.Contains(parts[i], "{input}") {
 			parts[i] = strings.ReplaceAll(parts[i], "{input}", inputPath)
 			replaced = true
+		}
+		if strings.Contains(parts[i], doclingOutputPlaceholder) {
+			parts[i] = strings.ReplaceAll(parts[i], doclingOutputPlaceholder, outputDir)
 		}
 	}
 	if !replaced {
