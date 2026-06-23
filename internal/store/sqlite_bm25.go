@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -17,6 +19,15 @@ import (
 // better" semantics (matching the vector path) can sort consistently. Raw
 // FTS5 bm25() returns lower-is-better scores; we flip the sign at the
 // boundary. Rank order is preserved either way.
+//
+// Defensive NULL handling: on some external-content FTS5 indexes (observed in
+// the field with modernc.org/sqlite, see #373), bm25() can return NULL for
+// matched rows when the index lacks usable per-document term statistics.
+// Scanning a NULL into a plain float64 fails with "converting NULL to float64
+// is unsupported", which previously killed the entire lexical path and forced
+// a vector-only fallback (returning zero results when the vector index was
+// empty). We now scan into sql.NullFloat64 and order NULL-scored rows LAST so a
+// missing score degrades a single hit's rank rather than failing the query.
 func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, indexKind string) ([]model.SearchHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -48,7 +59,11 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 		stmt += ` AND c.index_kind = ?`
 		args = append(args, kind)
 	}
-	stmt += ` ORDER BY score, c.chunk_id ASC LIMIT ?`
+	// `score IS NULL` sorts FALSE(0) before TRUE(1), so non-NULL (real) scores
+	// come first and any NULL-scored rows sink to the bottom of the lexical
+	// ranking. Without this guard SQLite's ASC ordering would float NULLs to the
+	// very top (best position), which is exactly backwards for a missing score.
+	stmt += ` ORDER BY score IS NULL, score, c.chunk_id ASC LIMIT ?`
 	args = append(args, k)
 
 	rows, err := db.QueryContext(ctx, stmt, args...)
@@ -67,7 +82,7 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 			text     string
 			language string
 			title    string
-			score    float64
+			score    sql.NullFloat64
 		)
 		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &language, &title, &score); err != nil {
 			return nil, err
@@ -75,13 +90,20 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 		if chunkID <= 0 {
 			continue
 		}
+		// Negate so higher-is-better matches the vector path. A NULL bm25 score
+		// (no usable term statistics for this row) maps to the worst possible
+		// final score so it ranks last, consistent with the ORDER BY above.
+		hitScore := math.Inf(-1)
+		if score.Valid {
+			hitScore = -score.Float64
+		}
 		hits = append(hits, model.SearchHit{
 			ChunkID:  uint64(chunkID),
 			RelPath:  relPath,
 			Title:    title,
 			DocType:  docType,
 			RepType:  repType,
-			Score:    -score,
+			Score:    hitScore,
 			Snippet:  snippet(text, 240),
 			Span:     model.Span{Kind: "lines"},
 			Language: language,
