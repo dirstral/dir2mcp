@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -9,7 +10,29 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
+
+// notChunkSourceStore is a minimal model.Store that deliberately does NOT
+// implement index.ChunkSource, used to exercise the assertion-failure path in
+// startEmbeddingIfNotReadOnly (issue #374). The shipped *store.SQLiteStore
+// always satisfies ChunkSource (guarded at compile time), so a fake is the only
+// way to drive the "embedding disabled" warning branch.
+type notChunkSourceStore struct{}
+
+func (notChunkSourceStore) Init(context.Context) error { return nil }
+func (notChunkSourceStore) UpsertDocument(context.Context, model.Document) error {
+	return nil
+}
+func (notChunkSourceStore) GetDocumentByPath(context.Context, string) (model.Document, error) {
+	return model.Document{}, nil
+}
+func (notChunkSourceStore) ListFiles(context.Context, string, string, int, int) ([]model.Document, int64, error) {
+	return nil, 0, nil
+}
+func (notChunkSourceStore) Close() error { return nil }
 
 // TestPreferredListenAddr verifies the sticky-port logic (#368): the ephemeral
 // default (host:0) is replaced with a prior run's recorded port so a restart
@@ -91,5 +114,89 @@ func TestTeeServerLog_NoopInDaemonChild(t *testing.T) {
 	if restore := app.teeServerLog(t.TempDir()); restore != nil {
 		restore()
 		t.Fatal("teeServerLog must be a no-op in the daemon child (stderr already → server.log)")
+	}
+}
+
+// TestPickEmbedLogger_JSONModeReachesServerLog verifies that in JSON/daemon mode
+// the embed-worker logger is NOT discarded (issue #374): it writes to the
+// process-global log destination, which teeServerLog has wired to server.log. A
+// discarded logger would make the issue-#364 "embed worker started" diagnostic —
+// whose absence is the diagnosis — impossible to ever observe in a real daemon.
+func TestPickEmbedLogger_JSONModeReachesServerLog(t *testing.T) {
+	t.Setenv(daemonChildEnv, "") // foreground tee path (daemon child wires stderr→file at the OS level)
+	stateDir := t.TempDir()
+	app := NewAppWithIO(io.Discard, &bytes.Buffer{})
+
+	restore := app.teeServerLog(stateDir)
+	if restore == nil {
+		t.Fatal("expected tee to be active so log.Writer() reaches server.log")
+	}
+	defer restore()
+
+	// stderr is intentionally a buffer we ignore: in JSON mode the embed logger
+	// must route to log.Writer() (→ server.log), not to stderr.
+	embedLogger := pickEmbedLogger(io.Discard, true /* jsonOutput */)
+	const marker = "embed worker started [kind=text]"
+	embedLogger.Printf("%s", marker)
+
+	data, err := os.ReadFile(serverLogPath(stateDir))
+	if err != nil {
+		t.Fatalf("read server.log: %v", err)
+	}
+	if !strings.Contains(string(data), marker) {
+		t.Fatalf("JSON-mode embed logger output missing from server.log (was it discarded?); got %q", data)
+	}
+}
+
+// TestStartEmbeddingIfNotReadOnly_NoChunkSourceLogsWarning verifies that when the
+// store does not satisfy index.ChunkSource, embedding is not silently disabled
+// (issue #374): a warning is written to server.log (via the embed logger →
+// log.Writer() tee) AND emitted as a structured NDJSON event.
+func TestStartEmbeddingIfNotReadOnly_NoChunkSourceLogsWarning(t *testing.T) {
+	t.Setenv(daemonChildEnv, "")
+	stateDir := t.TempDir()
+	var stdout bytes.Buffer
+	app := NewAppWithIO(&stdout, io.Discard)
+
+	restore := app.teeServerLog(stateDir)
+	if restore == nil {
+		t.Fatal("expected tee to be active so the embed logger reaches server.log")
+	}
+	defer restore()
+
+	emitter := newNDJSONEmitter(&stdout, true /* enabled */)
+
+	err := startEmbeddingIfNotReadOnly(
+		context.Background(),
+		config.Config{},
+		false, // readOnly: must be false to reach the ChunkSource assertion
+		notChunkSourceStore{},
+		nil, nil, // textIx, codeIx
+		nil,                 // embedder
+		nil,                 // ret
+		nil,                 // indexingState
+		make(chan error, 1), // embedErrCh
+		io.Discard,          // stderr
+		true,                // jsonOutput
+		"", "", "",          // embedModelText, embedModelCode, rootDir
+		nil, // corpusFS
+		emitter,
+	)
+	if err != nil {
+		t.Fatalf("startEmbeddingIfNotReadOnly returned error: %v", err)
+	}
+
+	// server.log got the human warning line.
+	logData, readErr := os.ReadFile(serverLogPath(stateDir))
+	if readErr != nil {
+		t.Fatalf("read server.log: %v", readErr)
+	}
+	if !strings.Contains(string(logData), "does not satisfy index.ChunkSource") {
+		t.Fatalf("server.log missing ChunkSource-disabled warning; got %q", logData)
+	}
+
+	// stdout got the structured NDJSON warning event.
+	if !strings.Contains(stdout.String(), "embedding_disabled_no_chunk_source") {
+		t.Fatalf("NDJSON warning event missing from stdout; got %q", stdout.String())
 	}
 }

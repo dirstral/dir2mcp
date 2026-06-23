@@ -164,7 +164,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer a.stopPersistenceWithLog(persistence)
 
 	embedErrCh := make(chan error, 4)
-	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS); err != nil {
+	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS, emitter); err != nil {
 		// A distributed-embedding setup failure is fatal: refuse to run a server
 		// that would silently never drain its pending queue.
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("start embedding: %v", err))
@@ -636,11 +636,27 @@ func buildMCPServerOptions(cfg *config.Config, st model.Store, indexingState *ap
 	return opts
 }
 
-// pickEmbedLogger returns a logger appropriate for the embed workers based on
-// whether JSON output mode is active (discard) or not (stderr).
+// pickEmbedLogger returns a logger for the embed workers.
+//
+// In human mode it writes to stderr (the operator's terminal). In JSON mode it
+// MUST NOT discard: the daemonized server child runs in JSON mode, and silently
+// dropping the worker's "embed worker started [kind=...]" startup line (issue
+// #364 added it precisely so its ABSENCE in server.log is the diagnosis) and the
+// per-batch "embedded N chunk(s)" progress would make those diagnostics
+// unreachable in a real daemon. Instead it writes to the process-global log
+// destination (log.Writer()), which is already wired to reach
+// <state_dir>/server.log in EVERY launch mode:
+//
+//   - daemon child: the parent redirects the child's stderr to server.log, and
+//     log.Writer() defaults to stderr (issue #360);
+//   - foreground/service: teeServerLog() has already swapped log.Writer() for a
+//     MultiWriter that includes the server.log file handle.
+//
+// Routing through that single destination (rather than opening server.log a
+// second time here) is what avoids double-writing the worker lines.
 func pickEmbedLogger(stderr io.Writer, jsonOutput bool) *log.Logger {
 	if jsonOutput {
-		return log.New(io.Discard, "", 0)
+		return log.New(log.Writer(), "", log.LstdFlags)
 	}
 	return log.New(stderr, "", log.LstdFlags)
 }
@@ -1043,15 +1059,27 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 // It returns an error only for a distributed-mode SETUP failure (broker cannot be
 // built, store lacks ChunkTaskByID, no embed identity), which the caller treats as
 // fatal — the historical in-process path never errors here.
-func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS) error {
+func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS, emitter *ndjsonEmitter) error {
 	if readOnly {
 		return nil
 	}
+	embedLogger := pickEmbedLogger(stderr, jsonOutput)
 	chunkSource, ok := st.(index.ChunkSource)
 	if !ok {
+		// The compile-time guard (var _ index.ChunkSource = (*store.SQLiteStore)(nil))
+		// keeps the shipped store satisfying ChunkSource, but a future/alternate
+		// backend that does not would otherwise disable embedding corpus-wide with
+		// no trace. Log loudly (to server.log via embedLogger) and emit a structured
+		// NDJSON warning so the silent-failure of issue #364 can never recur.
+		embedLogger.Printf("embedding disabled: store %T does not satisfy index.ChunkSource; pending chunks will never be embedded", st)
+		if emitter != nil {
+			emitter.Emit("warning", "embedding_disabled_no_chunk_source", map[string]interface{}{
+				"store_type": fmt.Sprintf("%T", st),
+				"message":    "store does not satisfy index.ChunkSource; embedding is disabled and pending chunks will never be embedded",
+			})
+		}
 		return nil
 	}
-	embedLogger := pickEmbedLogger(stderr, jsonOutput)
 	if cfg.DistributedEmbed.Enabled {
 		return startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
 	}
