@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -280,6 +281,17 @@ func (i *HNSWIndex) Save(ctx context.Context, path string) error {
 	}
 	if path == "" {
 		return errors.New("path is required")
+	}
+
+	// Ensure the destination directory exists before writing. The temp file is
+	// created in the *same* directory as path (path+".tmp") so the subsequent
+	// rename is atomic on a single filesystem; if the state directory is missing
+	// both os.Create and os.Rename would otherwise fail with "no such file or
+	// directory" (issue #375). MkdirAll on an existing directory is a no-op.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
 	}
 
 	tmpPath := path + ".tmp"

@@ -164,3 +164,120 @@ func TestHNSWIndex_LoadNonExistentFile(t *testing.T) {
 		t.Fatalf("expected nil for nonexistent file, got %v", err)
 	}
 }
+
+// TestHNSWIndex_BackendRoundTrip is the regression test for issue #375: the
+// memory backend is constructed exactly as production does (via NewBackend),
+// vectors are saved, and a *fresh* index loaded from the SAME wired path must
+// recover them. This pins three invariants that the bug violated:
+//
+//  1. NewBackend persists to the versioned vectors_<kind>.v2.hnsw snapshot, so
+//     the save target, the temp file (<path>.tmp), and the loader's path all
+//     agree — a divergent non-v2 tmp/target name (the reported failure) would
+//     either leave the v2 file empty or fail the rename.
+//  2. The save→reload cycle through that path preserves the vectors, proving
+//     they actually persist across restarts (no forced re-embed).
+//  3. The temp sidecar is renamed away, leaving only the durable snapshot.
+func TestHNSWIndex_BackendRoundTrip(t *testing.T) {
+	cases := []struct {
+		kind     string
+		wantName string
+	}{
+		{index.KindText, index.TextIndexFileName},
+		{index.KindCode, index.CodeIndexFileName},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			stateDir := t.TempDir()
+
+			ix, path := index.NewBackend(index.BackendMemory, stateDir, tc.kind)
+
+			// The wired path must be the versioned snapshot the loader reads.
+			if got := filepath.Base(path); got != tc.wantName {
+				t.Fatalf("NewBackend path basename = %q, want %q", got, tc.wantName)
+			}
+			if filepath.Dir(path) != stateDir {
+				t.Fatalf("NewBackend path dir = %q, want %q", filepath.Dir(path), stateDir)
+			}
+
+			hnsw, ok := ix.(*index.HNSWIndex)
+			if !ok {
+				t.Fatalf("memory backend should be *HNSWIndex, got %T", ix)
+			}
+			upsertVec(t, hnsw, 42, []float32{0.4, 0.5, 0.6})
+			upsertVec(t, hnsw, 43, []float32{0.7, 0.8, 0.9})
+
+			// Save via the model.Persistable contract using the wired path,
+			// exactly as PersistenceManager.SaveAll does.
+			p, ok := ix.(model.Persistable)
+			if !ok {
+				t.Fatalf("memory backend should be model.Persistable, got %T", ix)
+			}
+			if err := p.Save(context.Background(), path); err != nil {
+				t.Fatalf("Save failed: %v", err)
+			}
+
+			// The durable snapshot must exist at the v2 path and the temp
+			// sidecar must have been renamed away (no leftover .tmp).
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("expected snapshot at wired path %q: %v", path, err)
+			}
+			if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+				t.Fatalf("expected temp sidecar %q to be gone after rename, stat err=%v", path+".tmp", err)
+			}
+
+			// A fresh backend reading the SAME stateDir/kind must recover the
+			// vectors — this is the cross-restart persistence the bug broke.
+			reopened, reopenedPath := index.NewBackend(index.BackendMemory, stateDir, tc.kind)
+			if reopenedPath != path {
+				t.Fatalf("reopened path %q != original %q", reopenedPath, path)
+			}
+			rp := reopened.(model.Persistable)
+			if err := rp.Load(context.Background(), reopenedPath); err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			hits, err := reopened.Search(context.Background(), []float32{0.4, 0.5, 0.6}, 2, model.Filter{})
+			if err != nil {
+				t.Fatalf("Search failed: %v", err)
+			}
+			if len(hits) != 2 {
+				t.Fatalf("expected 2 vectors to survive round-trip, got %d", len(hits))
+			}
+			if hits[0].ChunkID != 42 {
+				t.Fatalf("expected nearest chunk 42, got %d", hits[0].ChunkID)
+			}
+		})
+	}
+}
+
+// TestHNSWIndex_SaveCreatesMissingStateDir guards the precise #375 symptom: a
+// save whose destination directory does not yet exist must create it rather
+// than fail with "no such file or directory" on create/rename, then leave a
+// loadable snapshot at the versioned path.
+func TestHNSWIndex_SaveCreatesMissingStateDir(t *testing.T) {
+	root := t.TempDir()
+	// Nested, not-yet-created state dir, mirroring <root>/.dir2mcp.
+	stateDir := filepath.Join(root, ".dir2mcp")
+	path := filepath.Join(stateDir, index.TextIndexFileName)
+
+	idx := index.NewHNSWIndex(path)
+	upsertVec(t, idx, 5, []float32{1, 0, 0})
+
+	if err := idx.Save(context.Background(), ""); err != nil {
+		t.Fatalf("Save into missing state dir failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected snapshot created at %q: %v", path, err)
+	}
+
+	loaded := index.NewHNSWIndex(path)
+	if err := loaded.Load(context.Background(), ""); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	hits, err := loaded.Search(context.Background(), []float32{1, 0, 0}, 1, model.Filter{})
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ChunkID != 5 {
+		t.Fatalf("unexpected round-trip result after creating state dir: %#v", hits)
+	}
+}
