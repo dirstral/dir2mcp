@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -199,4 +201,36 @@ func unreachableDoclingServeURL(t *testing.T) string {
 	url := srv.URL
 	srv.Close()
 	return url
+}
+
+// TestDoclingExtractor_Extract_BareBinaryExpandsToFileOutput covers issue #381:
+// the dir2mcp-full wrapper sets DIR2MCP_DOCLING_COMMAND to a BARE docling binary
+// path (a single token, no flags). Run as-is that becomes `docling <input>`,
+// which writes Markdown to the CWD and nothing to stdout — every extraction then
+// fails "empty output" and litters the corpus. NewDoclingExtractor must expand a
+// single-token command to the default `--to json --output {output} {input}`
+// template and read the produced file. A fake single-token "docling" that writes
+// to the directory it is given via --output proves the expansion took effect.
+func TestDoclingExtractor_Extract_BareBinaryExpandsToFileOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping POSIX-only command test on Windows")
+	}
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "docling")
+	// Expanded argv: <fake> --to json --output <outdir> <input>
+	// => $4 is the output dir, $5 is the input file. Write a file into $4 so the
+	// file-output path (not the stdout path) is what returns the content.
+	script := "#!/bin/sh\nprintf 'expanded-and-file-output' > \"$4/result.txt\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake docling: %v", err)
+	}
+
+	extractor := ingest.NewDoclingExtractor(fake) // single bare token
+	out, err := extractor.Extract(context.Background(), "sample.pdf", []byte("%PDF-1.4 fake"))
+	if err != nil {
+		t.Fatalf("extract failed (bare binary not expanded to file-output template?): %v", err)
+	}
+	if strings.TrimSpace(out) != "expanded-and-file-output" {
+		t.Fatalf("unexpected output: %q", out)
+	}
 }

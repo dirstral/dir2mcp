@@ -58,8 +58,8 @@ const serverLogName = "server.log"
 
 // daemonReadinessHeadroom is the slack added on top of the document-extractor
 // probe ceiling to cover index load and the listener bind that follow the
-// probe before the child writes connection.json. 25s on top of the 20s probe
-// gives a 45s total readiness window.
+// probe before the child writes connection.json. 25s on top of the 90s probe
+// gives a 115s total readiness window.
 const daemonReadinessHeadroom = 25 * time.Second
 
 // daemonReadinessTimeout caps how long the parent will wait for the child
@@ -68,16 +68,16 @@ const daemonReadinessHeadroom = 25 * time.Second
 // The server itself binds within ~1s, but the child resolves the document
 // extractor during startup BEFORE it binds. On dir2mcp-full with the default
 // IngestExtractor="auto" and docling on PATH, that runs the docling
-// functional probe (`docling --version`, which imports torch) bounded by
-// ingest.doclingProbeTimeout (20s) on a cold first run. The readiness window
-// MUST therefore stay comfortably above that probe ceiling, otherwise a
+// functional probe (`docling --version`, which imports torch/transformers/cv2)
+// bounded by ingest.doclingProbeTimeout (90s) on a cold first run. The readiness
+// window MUST therefore stay comfortably above that probe ceiling, otherwise a
 // healthy-but-slow first run trips a false "not ready" while the child is
 // still warming up.
 //
 // We derive it from the probe ceiling (+ headroom) rather than hard-coding a
 // figure so the ordering invariant — readiness window > probe ceiling — can't
-// silently regress if the probe timeout is ever raised. Evaluates to 45s with
-// today's 20s probe. Do NOT lower the probe timeout to "fix" a slow start.
+// silently regress if the probe timeout is ever raised. Evaluates to 115s with
+// today's 90s probe. Do NOT lower the probe timeout to "fix" a slow start.
 var daemonReadinessTimeout = ingest.DoclingProbeTimeout() + daemonReadinessHeadroom
 
 // DaemonReadinessTimeout exposes the readiness window so external tests can

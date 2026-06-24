@@ -32,7 +32,15 @@ const defaultDoclingCommand = "docling --to json --output {output} {input}"
 const doclingOutputPlaceholder = "{output}"
 
 const (
-	maxDoclingStdoutBytes = 100 * 1024 * 1024
+	// maxDoclingOutputBytes caps the docling extraction output we read back (the
+	// structured JSON file, the legacy stdout buffer, and the docling-serve
+	// response). docling's `--to json` DoclingDocument is verbose — a 920KB,
+	// few-hundred-page legal PDF produces ~100MB of JSON — so the old 100MB cap
+	// rejected large acts (e.g. the BVI Business Companies Act) with "output
+	// exceeded limit" and left them unindexed (issue #381). 1 GiB comfortably
+	// covers the largest legal PDFs while still bounding a pathological output.
+	// The read is one-time during indexing; query-time paths are unaffected.
+	maxDoclingOutputBytes = 1024 * 1024 * 1024
 	maxDoclingStderrBytes = 1 * 1024 * 1024
 )
 
@@ -84,11 +92,22 @@ func (w *limitedBuffer) Write(p []byte) (int, error) {
 
 // NewDoclingExtractor returns a document extractor backed by a local docling
 // CLI invocation. If commandTemplate is blank, a default `docling` command is
-// used. The template may include `{input}`; when omitted, input is appended.
+// used. The template may include `{input}` and `{output}`; when `{input}` is
+// omitted, input is appended.
+//
+// A bare binary path (a single token, e.g. the dir2mcp-full wrapper's
+// DIR2MCP_DOCLING_COMMAND, which is just `…/docling-venv/bin/docling`) is
+// underspecified: run as-is it becomes `docling <input>`, which writes Markdown
+// into the working directory and nothing to stdout — every extraction then fails
+// "empty output" and litters the corpus (issue #381). Expand it to the default
+// flags so docling writes structured JSON into the {output} temp dir we read back.
 func NewDoclingExtractor(commandTemplate string) *doclingExtractor {
 	tpl := strings.TrimSpace(commandTemplate)
-	if tpl == "" {
+	switch {
+	case tpl == "":
 		tpl = defaultDoclingCommand
+	case len(strings.Fields(tpl)) == 1:
+		tpl = tpl + " --to json --output " + doclingOutputPlaceholder + " {input}"
 	}
 	return &doclingExtractor{commandTemplate: tpl}
 }
@@ -171,7 +190,7 @@ func (d *doclingExtractor) runFileOutput(ctx context.Context, inputPath string) 
 		return "", fmt.Errorf("docling command failed: %s", msg)
 	}
 
-	out, err := readDoclingOutputDir(outDir, inputPath, maxDoclingStdoutBytes)
+	out, err := readDoclingOutputDir(outDir, inputPath, maxDoclingOutputBytes)
 	if err != nil {
 		return "", err
 	}
@@ -196,7 +215,7 @@ func (d *doclingExtractor) runStdout(ctx context.Context, inputPath string) (str
 	// sys.path and shadow the venv's pinned packages with a different version.
 	cmd.Env = SanitizeDoclingEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: maxDoclingStdoutBytes}
+	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: maxDoclingOutputBytes}
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
 	if err := cmd.Run(); err != nil {
 		if errors.Is(err, errDoclingOutputTooLarge) {

@@ -106,12 +106,12 @@ func (d *doclingServeExtractor) convert(ctx context.Context, relPath string, dat
 
 	// Read one byte past the limit so an over-size response surfaces as a clear
 	// "too large" error rather than a confusing truncated-JSON decode failure.
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxDoclingStdoutBytes+1))
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxDoclingOutputBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read docling-serve response: %w", err)
 	}
-	if len(payload) > maxDoclingStdoutBytes {
-		return nil, fmt.Errorf("docling-serve response exceeded %d bytes", maxDoclingStdoutBytes)
+	if len(payload) > maxDoclingOutputBytes {
+		return nil, fmt.Errorf("docling-serve response exceeded %d bytes", maxDoclingOutputBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Deliberately do NOT echo the response body: this error is persisted as
