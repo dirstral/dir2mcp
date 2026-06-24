@@ -14,7 +14,16 @@ import (
 
 // doclingProbeTimeout bounds the docling functional check so a hung binary
 // cannot stall startup or `dir2mcp doctor`.
-const doclingProbeTimeout = 20 * time.Second
+//
+// It must clear docling's COLD `--version` time, which imports the whole
+// torch/transformers/cv2 stack: ~26s on a warm M-series Mac and slower on older
+// hardware / the first run after install. The old 20s ceiling timed out that
+// cold probe, so `ingest.extractor=auto` silently fell back to Mistral OCR even
+// though docling worked (issue #381). 90s is generous headroom for slow machines
+// while still bounding a genuinely hung binary. The probe result is memoized per
+// process, so only the first probe pays it; the daemon readiness window scales
+// off this value, so the readiness > probe ordering invariant still holds.
+const doclingProbeTimeout = 90 * time.Second
 
 // DoclingProbeTimeout exposes the docling functional-probe ceiling so other
 // packages (and tests) can keep dependent timeouts — notably the daemon
