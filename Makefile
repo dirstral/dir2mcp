@@ -92,6 +92,16 @@ SMOKE_CORPUS ?= tests/testdata/smoke-corpus
 inspector-smoke: build
 	bash scripts/inspector-smoke.sh ./dir2mcp "$(SMOKE_CORPUS)"
 
+# Pre-release end-to-end gate: speaks MCP to a RUNNING dir2mcp daemon and
+# exercises ask/search/open_file (the retrieval surface that broke across
+# v0.9.x). Point it at a freshly (re)indexed corpus on the candidate binary
+# BEFORE tagging a release; all checks must pass. Needs a live daemon + the
+# corpus's provider credentials, so it is a manual gate, not part of `make ci`.
+#   make release-smoke STATE_DIR=~/Downloads/stas-legal/.dir2mcp
+STATE_DIR ?= .dir2mcp
+release-smoke:
+	python3 scripts/release_smoke.py --state-dir "$(STATE_DIR)"
+
 clean:
 	rm -f dir2mcp coverage.out
 	# only purge the test cache so we don't evict the global build cache
