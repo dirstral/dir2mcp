@@ -98,9 +98,13 @@ inspector-smoke: build
 # BEFORE tagging a release; all checks must pass. Needs a live daemon + the
 # corpus's provider credentials, so it is a manual gate, not part of `make ci`.
 #   make release-smoke STATE_DIR=~/Downloads/stas-legal/.dir2mcp
+# TRANSPORT=http (default) hits the daemon directly; TRANSPORT=stdio drives the
+# real `bunx mcp-remote` bridge Claude Desktop uses (catches client-layer bugs).
+# Run both before a release.
 STATE_DIR ?= .dir2mcp
+TRANSPORT ?= http
 release-smoke:
-	python3 scripts/release_smoke.py --state-dir "$(STATE_DIR)"
+	python3 scripts/release_smoke.py --state-dir "$(STATE_DIR)" --transport "$(TRANSPORT)"
 
 clean:
 	rm -f dir2mcp coverage.out

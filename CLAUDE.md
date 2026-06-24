@@ -75,14 +75,19 @@ run the gate against the running daemon:
 ```bash
 make build
 # point a daemon at a freshly-reindexed corpus on THIS binary, wait for pending=0, then:
-make release-smoke STATE_DIR=/path/to/corpus/.dir2mcp
+make release-smoke STATE_DIR=/path/to/corpus/.dir2mcp                  # server contract (HTTP)
+make release-smoke STATE_DIR=/path/to/corpus/.dir2mcp TRANSPORT=stdio  # full mcp-remote bridge
 ```
 
 It speaks MCP to the daemon and asserts: indexing stopped + `errors=0` +
 `embedded_ok>0`; each question returns a grounded answer **with citations**;
 `search` returns hits; `open_file page=1` returns text. Any failure exits
-non-zero — do not tag until it is all-pass. (Manual gate: needs a live daemon +
-the corpus's provider credentials, so it is not part of `make ci`.)
+non-zero — do not tag until it is all-pass. Run **both** transports:
+`TRANSPORT=http` (default) hits the daemon directly; `TRANSPORT=stdio` drives the
+same `bunx mcp-remote` bridge Claude Desktop uses, so it also catches
+client/bridge-layer regressions (the "Failed to call tool" class). (Manual gate:
+needs a live daemon + the corpus's provider credentials, so it is not part of
+`make ci`.)
 
 The release workflow will build binaries for `darwin/linux × amd64/arm64`, publish a GitHub release with checksums, and push updated formulas to `Dirstral/homebrew-tap` automatically.
 
