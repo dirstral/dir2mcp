@@ -69,7 +69,14 @@ func normalizeLabel(raw string) string {
 }
 
 // Title returns the document title from the first title-labeled text element,
-// falling back to the document name. Empty when neither is present.
+// or "" when the document has no title element.
+//
+// It deliberately does NOT fall back to the document name: docling derives that
+// name from the input filename, and dir2mcp feeds docling a temp file, so the
+// fallback surfaced the temp filename (e.g. "dir2mcp-docling-1234") as the
+// document title (issue #383). Returning "" instead lets the ingest service run
+// its content-based title heuristic (ExtractTitle) — the same path Mistral OCR
+// uses — yielding a real title like the document's heading.
 func (d *Document) Title() string {
 	for _, t := range d.Texts {
 		if t != nil && normalizeLabel(t.Label) == LabelTitle {
@@ -78,7 +85,7 @@ func (d *Document) Title() string {
 			}
 		}
 	}
-	return strings.TrimSpace(d.Name)
+	return ""
 }
 
 // headingFrame tracks one open section in the breadcrumb stack.
