@@ -1906,6 +1906,19 @@ func mediaPageKey(relPath string, page int) string {
 	return relPath + "\x00" + strconv.Itoa(page)
 }
 
+// regionCoversPage reports whether a structured-extraction region span spans the
+// given 1-based page. EndPage falls back to StartPage for single-page regions.
+func regionCoversPage(region *model.RegionSpan, page int) bool {
+	if region == nil || region.StartPage <= 0 || page <= 0 {
+		return false
+	}
+	end := region.EndPage
+	if end < region.StartPage {
+		end = region.StartPage
+	}
+	return page >= region.StartPage && page <= end
+}
+
 // dedupMediaCandidates implements the SPEC 8.1.7 page-image dedup: drop a media
 // page-image candidate for (rel_path, page) only when a text/region candidate
 // for that same page survives, so a page is not double-counted. It runs BEFORE
@@ -2973,6 +2986,12 @@ func (s *Service) sliceFromMetadata(relPath string, requested model.Span) (strin
 		case "page":
 			if strings.EqualFold(span.Kind, "page") && span.Page == requested.Page {
 				matches = append(matches, candidate{page: span.Page, text: hit.Snippet})
+			} else if strings.EqualFold(span.Kind, "region") && regionCoversPage(span.Region, requested.Page) {
+				// Structured (docling) chunks carry a region span with a page
+				// range, not a plain page span. Without this, open_file page=N on
+				// a docling-extracted PDF found no metadata match and fell through
+				// to reading raw PDF bytes -> DOC_TYPE_UNSUPPORTED (issue #383).
+				matches = append(matches, candidate{page: span.Region.StartPage, text: hit.Snippet})
 			}
 		case "time":
 			if !strings.EqualFold(span.Kind, "time") {

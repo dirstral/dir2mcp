@@ -660,3 +660,29 @@ func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
 		t.Fatalf("expected only one [docs/a.md] tag, got %q", got.Answer)
 	}
 }
+
+// TestRegionCoversPage pins issue #383: open_file page=N on a docling-extracted
+// PDF must match the chunk's region span (page range), not just plain page spans.
+func TestRegionCoversPage(t *testing.T) {
+	cases := []struct {
+		name   string
+		region *model.RegionSpan
+		page   int
+		want   bool
+	}{
+		{"nil region", nil, 1, false},
+		{"start of range", &model.RegionSpan{StartPage: 4, EndPage: 5}, 4, true},
+		{"end of range", &model.RegionSpan{StartPage: 4, EndPage: 5}, 5, true},
+		{"above range", &model.RegionSpan{StartPage: 4, EndPage: 5}, 6, false},
+		{"below range", &model.RegionSpan{StartPage: 4, EndPage: 5}, 3, false},
+		{"single page (EndPage 0)", &model.RegionSpan{StartPage: 7}, 7, true},
+		{"single page miss", &model.RegionSpan{StartPage: 7}, 8, false},
+		{"unset start", &model.RegionSpan{StartPage: 0}, 1, false},
+		{"zero page request", &model.RegionSpan{StartPage: 4, EndPage: 5}, 0, false},
+	}
+	for _, c := range cases {
+		if got := regionCoversPage(c.region, c.page); got != c.want {
+			t.Errorf("%s: regionCoversPage(%+v, %d) = %v, want %v", c.name, c.region, c.page, got, c.want)
+		}
+	}
+}

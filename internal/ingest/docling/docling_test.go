@@ -145,6 +145,23 @@ func TestTitle(t *testing.T) {
 	}
 }
 
+// TestTitle_NoTitleElementReturnsEmpty pins issue #383: with no title-labeled
+// element, Title() must return "" and NOT fall back to the document name (which
+// is the temp input filename dir2mcp feeds docling), so the ingest service's
+// content-based title heuristic supplies the title instead.
+func TestTitle_NoTitleElementReturnsEmpty(t *testing.T) {
+	doc := &Document{
+		Name: "dir2mcp-docling-12345",
+		Texts: []*textItem{
+			{Label: LabelSectionHeader, Text: "Some Heading"},
+			{Label: "text", Text: "body text"},
+		},
+	}
+	if got := doc.Title(); got != "" {
+		t.Errorf("Title() = %q, want \"\" (no title element must not fall back to Name)", got)
+	}
+}
+
 func TestTableRendersAtomicallyWithCaption(t *testing.T) {
 	doc, _ := Parse([]byte(sampleDoc))
 	blocks := doc.Linearize()
