@@ -2709,6 +2709,14 @@ func hitDefinitionSchema() map[string]interface{} {
 			"score":    map[string]interface{}{"type": "number"},
 			"snippet":  map[string]interface{}{"type": "string"},
 			"span":     map[string]interface{}{"$ref": "#/definitions/Span"},
+			// modality and media_ref are emitted by serializeHit for media /
+			// multimodal chunks (SPEC 8.1.7). They MUST be declared here: the hit
+			// object is additionalProperties:false, so an undeclared field makes a
+			// strict MCP client (Claude Desktop validates structuredContent against
+			// outputSchema) reject the whole result with "Failed to call tool" —
+			// the search/ask failures on docling corpora (issue #387).
+			"modality":  map[string]interface{}{"type": "string"},
+			"media_ref": map[string]interface{}{"type": "string"},
 		},
 		"required": []string{"chunk_id", "rel_path", "score", "snippet", "span"},
 	}

@@ -3,7 +3,36 @@ package mcp
 import (
 	"strings"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/model"
 )
+
+// TestSerializeHitKeysDeclaredInSchema guards against serializer/outputSchema
+// drift on search/ask hits (issue #387). The hit object is
+// additionalProperties:false, so any key serializeHit emits that the schema does
+// not declare makes a strict MCP client (Claude Desktop validates
+// structuredContent against outputSchema) reject the whole result with "Failed
+// to call tool". A media/multimodal hit exercises the conditional fields
+// (modality, media_ref) that were previously missing from the schema.
+func TestSerializeHitKeysDeclaredInSchema(t *testing.T) {
+	hit := model.SearchHit{
+		ChunkID: 1, RelPath: "a.pdf", Title: "A", DocType: "pdf", RepType: "extracted_markdown",
+		Score: 0.5, Snippet: "x",
+		Span:     model.Span{Kind: "region", Region: &model.RegionSpan{StartPage: 1, EndPage: 1}},
+		Modality: "text", MediaRef: "a.pdf",
+	}
+	out := serializeHit(hit)
+	props, ok := hitDefinitionSchema()["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("hitDefinitionSchema has no properties map")
+	}
+	for k := range out {
+		if _, declared := props[k]; !declared {
+			t.Errorf("serializeHit emits %q but hitDefinitionSchema does not declare it "+
+				"(additionalProperties:false → strict MCP clients reject the result)", k)
+		}
+	}
+}
 
 // TestLooksLikeBinaryContent exercises the heuristic upgrade landed for
 // PR #180: NUL-byte detection alone misses binary formats (mp3 frames, some
