@@ -25,14 +25,48 @@ import argparse, json, os, select, subprocess, sys, urllib.request
 PROTO = "2025-11-25"
 
 
+def _result_or_error(msg):
+    """Map a JSON-RPC response message to a tool result, surfacing protocol
+    errors as an isError result instead of silently collapsing them to {} (so a
+    handshake/auth failure produces a clear failure, not misleading downstream
+    FAILs)."""
+    if msg is None:
+        return {"isError": True, "content": [{"type": "text", "text": "no response (Failed to call tool)"}]}
+    if msg.get("error"):
+        e = msg["error"]
+        return {"isError": True, "content": [{"type": "text", "text": f"JSON-RPC error {e.get('code')}: {e.get('message')}"}]}
+    return msg.get("result", {})
+
+
+def _check_init(msg, transport):
+    """Fail fast with the real protocol/auth error from an initialize response."""
+    if msg is None:
+        raise RuntimeError(f"{transport}: no response to initialize (server/bridge unreachable?)")
+    if msg.get("error"):
+        e = msg["error"]
+        raise RuntimeError(f"{transport}: initialize failed — JSON-RPC error {e.get('code')}: {e.get('message')}")
+
+
+def is_texty(s):
+    """Heuristic: real extracted text (not raw bytes / empty). Legal prose is
+    mostly letters; binary payloads are not."""
+    s = (s or "").strip()
+    if len(s) < 20:
+        return False
+    letters = sum(c.isalpha() or c.isspace() for c in s)
+    return letters >= 0.6 * len(s)
+
+
 class HTTPClient:
     """MCP over streamable-HTTP, directly to the daemon."""
 
     def __init__(self, url, token):
         self.url, self.token, self.sid = url, token, None
-        self.sid = self._post({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        msg, sid = self._post({"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": PROTO, "capabilities": {},
-                       "clientInfo": {"name": "release-smoke", "version": "1"}}})[1]
+                       "clientInfo": {"name": "release-smoke", "version": "1"}}})
+        _check_init(msg, "http")
+        self.sid = sid
 
     def _post(self, body):
         req = urllib.request.Request(self.url, data=json.dumps(body).encode(), method="POST")
@@ -58,7 +92,7 @@ class HTTPClient:
     def call(self, name, args):
         d, _ = self._post({"jsonrpc": "2.0", "id": 99, "method": "tools/call",
                            "params": {"name": name, "arguments": args}})
-        return (d or {}).get("result", {})
+        return _result_or_error(d)
 
     def close(self):
         pass
@@ -80,8 +114,7 @@ class StdioClient:
                        "clientInfo": {"name": "release-smoke", "version": "1"}}})
         # bunx may cold-download mcp-remote, and the bridge handshakes with the
         # server before forwarding — allow a generous window for the first reply.
-        if self._read_until(1, timeout=90) is None:
-            raise RuntimeError("mcp-remote bridge did not complete initialize within 90s")
+        _check_init(self._read_until(1, timeout=90), "stdio")
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def _send(self, obj):
@@ -114,11 +147,9 @@ class StdioClient:
         rid = self._id
         self._send({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                     "params": {"name": name, "arguments": args}})
-        msg = self._read_until(rid, timeout=120)
-        if msg is None:
-            # the exact "Failed to call tool" class: bridge never returned a result
-            return {"isError": True, "content": [{"type": "text", "text": "bridge: no response (Failed to call tool)"}]}
-        return msg.get("result", {})
+        # A None here is the exact "Failed to call tool" class — the bridge never
+        # returned a result; _result_or_error surfaces it as a tool error.
+        return _result_or_error(self._read_until(rid, timeout=120))
 
     def close(self):
         try:
@@ -154,17 +185,29 @@ def run_checks(client, questions):
     hits = r.get("structuredContent", {}).get("hits", []) if not r.get("isError") else []
     check("search: >=1 hit", len(hits) >= 1, f"hits={len(hits)}")
 
-    lf = client.call("dir2mcp_list_files", {"glob": "*.pdf", "limit": 1})
-    files = lf.get("structuredContent", {}).get("files", [])
-    if files:
-        rp = files[0]["rel_path"]
-        of = client.call("dir2mcp_open_file", {"rel_path": rp, "page": 1})
-        txt = (of.get("content") or [{}])[0].get("text", "") if not of.get("isError") else ""
-        check(f"open_file page=1 ({rp[:30]}…)",
-              not of.get("isError") and len(txt.strip()) > 0,
-              "tool error" if of.get("isError") else f"{len(txt)}c")
-    else:
+    lf = client.call("dir2mcp_list_files", {"glob": "*.pdf", "limit": 12})
+    files = [f["rel_path"] for f in lf.get("structuredContent", {}).get("files", [])]
+    if not files:
         check("open_file: a pdf exists to test", False)
+        return fails
+    # Probe several PDFs rather than whichever sorts first: a single image-only
+    # cover page must not fail the gate, and the result must be real text (not raw
+    # bytes). Pass on the first page that yields printable text; fail only if none
+    # of the sampled PDFs do (which would mean open_file page reads are broken).
+    opened, last = None, ""
+    for rp in files:
+        of = client.call("dir2mcp_open_file", {"rel_path": rp, "page": 1})
+        if of.get("isError"):
+            last = "tool error"
+            continue
+        txt = (of.get("content") or [{}])[0].get("text", "")
+        if is_texty(txt):
+            opened = (rp, len(txt.strip()))
+            break
+        last = f"{len(txt.strip())}c not text-like"
+    check("open_file page=1 returns text",
+          opened is not None,
+          f"{opened[0][:30]}… {opened[1]}c" if opened else f"none of {len(files)} pdfs ({last})")
     return fails
 
 
