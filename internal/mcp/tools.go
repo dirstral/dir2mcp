@@ -818,7 +818,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 		"hits": serializeSearchHits(hits), "indexing_complete": indexingComplete,
 	}
 	return toolCallResult{
-		Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("found %d result(s)", len(hits))}},
+		Content:           []toolContentItem{{Type: "text", Text: renderSearchHitsText(hits, "result")}},
 		StructuredContent: structured,
 	}, nil
 }
@@ -1770,7 +1770,7 @@ func (s *Server) runSearchOnlyMode(ctx context.Context, question string, sq mode
 		"indexing_complete": indexingComplete,
 	}
 	return toolCallResult{
-		Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("found %d supporting result(s)", len(hits))}},
+		Content:           []toolContentItem{{Type: "text", Text: renderSearchHitsText(hits, "supporting result")}},
 		StructuredContent: structured,
 	}, nil
 }
@@ -2578,6 +2578,34 @@ func serializeHit(h model.SearchHit) map[string]interface{} {
 		out["media_ref"] = mediaRef
 	}
 	return out
+}
+
+// renderSearchHitsText renders hits into a readable text block for a tool's
+// content payload. structuredContent carries the full machine-readable hits, but
+// a model that reads the content text (as Claude Desktop does) previously saw
+// only a bare count ("found N result(s)") with none of the matched text — so it
+// could not read or cite search results without a follow-up open_file, and
+// search-only mode looked like it "returned only counts". Each entry carries the
+// document (title + rel_path), score, and the snippet so the block is
+// self-sufficient. structuredContent is unchanged.
+func renderSearchHitsText(hits []model.SearchHit, noun string) string {
+	if len(hits) == 0 {
+		return fmt.Sprintf("found 0 %s(s)", noun)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "found %d %s(s):", len(hits), noun)
+	for i, h := range hits {
+		loc := h.RelPath
+		if t := strings.TrimSpace(h.Title); t != "" {
+			loc = fmt.Sprintf("%s (%s)", t, h.RelPath)
+		}
+		snippet := strings.Join(strings.Fields(h.Snippet), " ")
+		if len(snippet) > 600 {
+			snippet = snippet[:600] + "…"
+		}
+		fmt.Fprintf(&b, "\n\n%d. %s — score %.3f\n%s", i+1, loc, h.Score, snippet)
+	}
+	return b.String()
 }
 
 func serializeSearchHits(hits []model.SearchHit) []map[string]interface{} {

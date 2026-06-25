@@ -7,6 +7,25 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
+// TestRenderSearchHitsTextIncludesSnippets guards that the search / search-only
+// content text carries each hit's document and snippet, not just a count. A bare
+// "found N result(s)" (the old behavior) left a model that reads the content
+// block unable to see or cite the matches — it looked like search "returned only
+// counts" even though structuredContent had the data.
+func TestRenderSearchHitsTextIncludesSnippets(t *testing.T) {
+	out := renderSearchHitsText([]model.SearchHit{
+		{RelPath: "a.pdf", Title: "Act A", Score: 0.5, Snippet: "the operative clause text"},
+	}, "result")
+	for _, want := range []string{"found 1 result(s)", "Act A", "a.pdf", "the operative clause text"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered search text missing %q:\n%s", want, out)
+		}
+	}
+	if got := renderSearchHitsText(nil, "result"); got != "found 0 result(s)" {
+		t.Errorf("empty hits: got %q, want %q", got, "found 0 result(s)")
+	}
+}
+
 // TestSerializeHitKeysDeclaredInSchema guards against serializer/outputSchema
 // drift on search/ask hits (issue #387). The hit object is
 // additionalProperties:false, so any key serializeHit emits that the schema does
