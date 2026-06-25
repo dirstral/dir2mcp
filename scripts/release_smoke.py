@@ -57,6 +57,79 @@ def is_texty(s):
     return letters >= 0.6 * len(s)
 
 
+def _resolve_ref(ref, root):
+    # Fail closed: a typo'd ref ('#/definitions/Hti') must surface as an error,
+    # not silently resolve to {} (which would validate as success and skip the
+    # nested checks). Returns None when the ref is malformed or unresolvable.
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return None
+    node = root
+    for part in ref.lstrip("#/").split("/"):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def schema_errors(schema, inst, root, path="$"):
+    """Minimal JSON-Schema check for the subset the dir2mcp outputSchemas use
+    ($ref/oneOf/const/enum/object+additionalProperties+required/array/scalars).
+    Mirrors what a strict MCP client (Claude Desktop) does to structuredContent —
+    the check that would have caught #387 (a serialized field not declared in an
+    additionalProperties:false object). NOT a full validator; deliberately small
+    and dependency-free."""
+    if not isinstance(schema, dict):
+        return []
+    if "$ref" in schema:
+        target = _resolve_ref(schema["$ref"], root)
+        if target is None:
+            return [f"{path}: unresolved $ref {schema['$ref']!r}"]
+        return schema_errors(target, inst, root, path)
+    if "oneOf" in schema:
+        matches = [s for s in schema["oneOf"] if not schema_errors(s, inst, root, path)]
+        return [] if len(matches) == 1 else [f"{path}: matched {len(matches)} oneOf branches (want 1)"]
+    if "const" in schema:
+        return [] if inst == schema["const"] else [f"{path}: {inst!r} != const {schema['const']!r}"]
+    if "enum" in schema:
+        return [] if inst in schema["enum"] else [f"{path}: {inst!r} not in enum"]
+    t = schema.get("type")
+    if t == "object" or (t is None and "properties" in schema):
+        if not isinstance(inst, dict):
+            return [f"{path}: expected object"]
+        errs, props = [], schema.get("properties", {})
+        for req in schema.get("required", []):
+            if req not in inst:
+                errs.append(f"{path}.{req}: required property missing")
+        addl = schema.get("additionalProperties", True)
+        for k, v in inst.items():
+            if k in props:
+                errs += schema_errors(props[k], v, root, f"{path}.{k}")
+            elif addl is False:
+                errs.append(f"{path}.{k}: additional property not allowed by schema")
+            elif isinstance(addl, dict):
+                errs += schema_errors(addl, v, root, f"{path}.{k}")
+        return errs
+    if t == "array":
+        if not isinstance(inst, list):
+            return [f"{path}: expected array"]
+        items, errs = schema.get("items"), []
+        if items:
+            for i, v in enumerate(inst):
+                errs += schema_errors(items, v, root, f"{path}[{i}]")
+        return errs
+    # bool is a subclass of int in Python, so guard integer/number explicitly —
+    # else True/False would pass where strict JSON Schema rejects them.
+    if t == "string" and not isinstance(inst, str):
+        return [f"{path}: expected string"]
+    if t == "integer" and (not isinstance(inst, int) or isinstance(inst, bool)):
+        return [f"{path}: expected integer"]
+    if t == "number" and (not isinstance(inst, (int, float)) or isinstance(inst, bool)):
+        return [f"{path}: expected number"]
+    if t == "boolean" and not isinstance(inst, bool):
+        return [f"{path}: expected boolean"]
+    return []
+
+
 class HTTPClient:
     """MCP over streamable-HTTP, directly to the daemon."""
 
@@ -93,6 +166,11 @@ class HTTPClient:
         d, _ = self._post({"jsonrpc": "2.0", "id": 99, "method": "tools/call",
                            "params": {"name": name, "arguments": args}})
         return _result_or_error(d)
+
+    def list_tools(self):
+        d, _ = self._post({"jsonrpc": "2.0", "id": 50, "method": "tools/list", "params": {}})
+        res = _result_or_error(d)
+        return {t["name"]: t.get("outputSchema") for t in (res.get("tools") or [])}
 
     def close(self):
         pass
@@ -151,6 +229,13 @@ class StdioClient:
         # returned a result; _result_or_error surfaces it as a tool error.
         return _result_or_error(self._read_until(rid, timeout=120))
 
+    def list_tools(self):
+        self._id += 1
+        rid = self._id
+        self._send({"jsonrpc": "2.0", "id": rid, "method": "tools/list", "params": {}})
+        res = _result_or_error(self._read_until(rid, timeout=60))
+        return {t["name"]: t.get("outputSchema") for t in (res.get("tools") or [])}
+
     def close(self):
         try:
             self.proc.terminate()
@@ -165,7 +250,37 @@ def run_checks(client, questions):
         if not ok:
             fails.append(name)
 
+    # Fetch each tool's declared outputSchema once. Strict MCP clients (Claude
+    # Desktop) validate structuredContent against it and reject the whole call on
+    # any mismatch — see #387, where a serialized hit field (modality) absent from
+    # an additionalProperties:false schema made search/ask fail with "Failed to
+    # call tool" while curl and this gate (which formerly didn't validate) passed.
+    try:
+        schemas = client.list_tools()
+    except Exception as e:
+        schemas = {}
+        check("tools/list (for schema validation)", False, str(e)[:80])
+
+    # Returns True when the response is safe to read downstream — either the tool
+    # declares no outputSchema (so strict clients don't validate it either; stats
+    # is one) or its structuredContent conforms. Returns False (and records a
+    # FAIL) when a declared schema is present but the content is missing or
+    # non-conforming, so callers can skip interpreting an already-rejected result.
+    def validate(tool, r):
+        sch = schemas.get(tool)
+        if not sch:
+            return True
+        sc = r.get("structuredContent")
+        if sc is None:
+            check(f"{tool}: structuredContent present (schema declared)", False, "missing structuredContent")
+            return False
+        errs = schema_errors(sch, sc, sch)
+        check(f"{tool}: structuredContent conforms to outputSchema",
+              not errs, "ok" if not errs else f"{len(errs)} err — {errs[0][:90]}")
+        return not errs
+
     r = client.call("dir2mcp_stats", {})
+    validate("dir2mcp_stats", r)
     ix = r.get("structuredContent", {}).get("indexing", {})
     check("stats: indexing stopped", ix.get("running") is False, f"running={ix.get('running')}")
     check("stats: errors==0", ix.get("errors", -1) == 0, f"errors={ix.get('errors')}")
@@ -176,16 +291,21 @@ def run_checks(client, questions):
         if r.get("isError"):
             check(f"ask: {q[:42]}…", False, "tool error")
             continue
+        if not validate("dir2mcp_ask", r):
+            continue  # schema already failed; don't read fields off a rejected result
         sc = r.get("structuredContent", {})
         ans = (sc.get("answer") or "").strip()
         cites = sc.get("citations") or []
         check(f"ask: {q[:42]}…", bool(ans) and len(cites) >= 1, f"answer={len(ans)}c citations={len(cites)}")
 
     r = client.call("dir2mcp_search", {"query": "financial investigation agency powers", "k": 5})
+    validate("dir2mcp_search", r)
     hits = r.get("structuredContent", {}).get("hits", []) if not r.get("isError") else []
     check("search: >=1 hit", len(hits) >= 1, f"hits={len(hits)}")
 
     lf = client.call("dir2mcp_list_files", {"glob": "*.pdf", "limit": 12})
+    if not validate("dir2mcp_list_files", lf):
+        return fails  # schema failed; the files list can't be trusted to drive open_file
     files = [f["rel_path"] for f in lf.get("structuredContent", {}).get("files", [])]
     if not files:
         check("open_file: a pdf exists to test", False)
@@ -200,6 +320,9 @@ def run_checks(client, questions):
         if of.get("isError"):
             last = "tool error"
             continue
+        if not validate("dir2mcp_open_file", of):
+            last = "schema-nonconforming"
+            continue  # a rejected result is not a valid text page
         txt = (of.get("content") or [{}])[0].get("text", "")
         if is_texty(txt):
             opened = (rp, len(txt.strip()))
