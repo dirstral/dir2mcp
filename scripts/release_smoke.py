@@ -58,11 +58,16 @@ def is_texty(s):
 
 
 def _resolve_ref(ref, root):
+    # Fail closed: a typo'd ref ('#/definitions/Hti') must surface as an error,
+    # not silently resolve to {} (which would validate as success and skip the
+    # nested checks). Returns None when the ref is malformed or unresolvable.
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return None
     node = root
     for part in ref.lstrip("#/").split("/"):
-        if not isinstance(node, dict):
-            return {}
-        node = node.get(part, {})
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
     return node
 
 
@@ -76,7 +81,10 @@ def schema_errors(schema, inst, root, path="$"):
     if not isinstance(schema, dict):
         return []
     if "$ref" in schema:
-        return schema_errors(_resolve_ref(schema["$ref"], root), inst, root, path)
+        target = _resolve_ref(schema["$ref"], root)
+        if target is None:
+            return [f"{path}: unresolved $ref {schema['$ref']!r}"]
+        return schema_errors(target, inst, root, path)
     if "oneOf" in schema:
         matches = [s for s in schema["oneOf"] if not schema_errors(s, inst, root, path)]
         return [] if len(matches) == 1 else [f"{path}: matched {len(matches)} oneOf branches (want 1)"]
@@ -109,9 +117,16 @@ def schema_errors(schema, inst, root, path="$"):
             for i, v in enumerate(inst):
                 errs += schema_errors(items, v, root, f"{path}[{i}]")
         return errs
-    scal = {"string": str, "integer": int, "number": (int, float), "boolean": bool}
-    if t in scal and not isinstance(inst, scal[t]):
-        return [f"{path}: expected {t}"]
+    # bool is a subclass of int in Python, so guard integer/number explicitly —
+    # else True/False would pass where strict JSON Schema rejects them.
+    if t == "string" and not isinstance(inst, str):
+        return [f"{path}: expected string"]
+    if t == "integer" and (not isinstance(inst, int) or isinstance(inst, bool)):
+        return [f"{path}: expected integer"]
+    if t == "number" and (not isinstance(inst, (int, float)) or isinstance(inst, bool)):
+        return [f"{path}: expected number"]
+    if t == "boolean" and not isinstance(inst, bool):
+        return [f"{path}: expected boolean"]
     return []
 
 
@@ -246,13 +261,23 @@ def run_checks(client, questions):
         schemas = {}
         check("tools/list (for schema validation)", False, str(e)[:80])
 
+    # Returns True when the response is safe to read downstream — either the tool
+    # declares no outputSchema (so strict clients don't validate it either; stats
+    # is one) or its structuredContent conforms. Returns False (and records a
+    # FAIL) when a declared schema is present but the content is missing or
+    # non-conforming, so callers can skip interpreting an already-rejected result.
     def validate(tool, r):
-        sch, sc = schemas.get(tool), r.get("structuredContent")
-        if not sch or sc is None:
-            return
+        sch = schemas.get(tool)
+        if not sch:
+            return True
+        sc = r.get("structuredContent")
+        if sc is None:
+            check(f"{tool}: structuredContent present (schema declared)", False, "missing structuredContent")
+            return False
         errs = schema_errors(sch, sc, sch)
         check(f"{tool}: structuredContent conforms to outputSchema",
               not errs, "ok" if not errs else f"{len(errs)} err — {errs[0][:90]}")
+        return not errs
 
     r = client.call("dir2mcp_stats", {})
     validate("dir2mcp_stats", r)
@@ -266,7 +291,8 @@ def run_checks(client, questions):
         if r.get("isError"):
             check(f"ask: {q[:42]}…", False, "tool error")
             continue
-        validate("dir2mcp_ask", r)
+        if not validate("dir2mcp_ask", r):
+            continue  # schema already failed; don't read fields off a rejected result
         sc = r.get("structuredContent", {})
         ans = (sc.get("answer") or "").strip()
         cites = sc.get("citations") or []
@@ -278,7 +304,8 @@ def run_checks(client, questions):
     check("search: >=1 hit", len(hits) >= 1, f"hits={len(hits)}")
 
     lf = client.call("dir2mcp_list_files", {"glob": "*.pdf", "limit": 12})
-    validate("dir2mcp_list_files", lf)
+    if not validate("dir2mcp_list_files", lf):
+        return fails  # schema failed; the files list can't be trusted to drive open_file
     files = [f["rel_path"] for f in lf.get("structuredContent", {}).get("files", [])]
     if not files:
         check("open_file: a pdf exists to test", False)
@@ -293,7 +320,9 @@ def run_checks(client, questions):
         if of.get("isError"):
             last = "tool error"
             continue
-        validate("dir2mcp_open_file", of)
+        if not validate("dir2mcp_open_file", of):
+            last = "schema-nonconforming"
+            continue  # a rejected result is not a valid text page
         txt = (of.get("content") or [{}])[0].get("text", "")
         if is_texty(txt):
             opened = (rp, len(txt.strip()))
