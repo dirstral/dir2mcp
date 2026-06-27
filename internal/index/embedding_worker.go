@@ -610,6 +610,15 @@ func (w *EmbeddingWorker) indexChunks(ctx context.Context, validTasks []model.Ch
 					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])
 				}
 			}
+			// A transient index/upsert error (the vector store is momentarily
+			// unreachable — connection refused/reset, 503/529, EOF) must NOT
+			// permanently fail the chunk: leave it PENDING so the next cycle
+			// retries it, mirroring the embed-path behavior (issue #412).
+			// Without this guard a brief Qdrant/pgvector blip silently buried
+			// chunks in the error state corpus-wide.
+			if isTransientEmbedError(addErr) {
+				return idx, addErr
+			}
 			category := string(store.ClassifyError(addErr))
 			reason := store.SanitizeReason(addErr.Error())
 			if mfErr := w.Source.MarkFailedWithCategory(ctx, labels[idx:idx+1], category, reason); mfErr != nil {
@@ -891,6 +900,14 @@ func isTransientEmbedError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
+	// A bare EOF / unexpected-EOF (connection dropped mid-response) is a
+	// transient transport failure that a later cycle recovers from. Match it
+	// structurally (errors.Is) in addition to the keyword set below, since
+	// io.EOF survives wrapping (e.g. *model.ProviderError.Cause) where the
+	// string form may not.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
 	// net.Error can indicate timeouts or temporary network failures.
 	var ne net.Error
 	if errors.As(err, &ne) {
@@ -906,30 +923,36 @@ func isTransientEmbedError(err error) bool {
 			return true
 		}
 	}
-	// some embedder implementations return textual hints for rate limits or
-	// timeouts; look for those substrings so the behaviour is still correct
-	// even if they don't implement the net.Error interface.
-	lower := strings.ToLower(err.Error())
-	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "timeout") {
+	// Rate-limit responses are retryable after backoff. store.IsTransientError
+	// (below) classifies rate limits under their own category, not transient_net,
+	// so keep this check explicit here.
+	if strings.Contains(strings.ToLower(err.Error()), "rate limit") {
 		return true
 	}
-	return false
+	// Defer to the shared store classification so the worker's retry gate and
+	// the transient_net diagnostics label agree on exactly the same set of
+	// errors (issue #412): timeouts, connection refused/reset, DNS failures,
+	// 503/529, service unavailable, overloaded, EOF. A failure left PENDING
+	// here is the same class dir2mcp status/doctor report as transient_net.
+	return store.IsTransientError(err)
 }
 
+// modelForKind returns the configured embed model for the index axis, or ""
+// when none was resolved. An empty result is intentional: it tells the
+// provider ADAPTER to apply its own correct default (text-embedding-3-small
+// for OpenAI, embed-v4.0 for Cohere, gemini-embedding-001 for Gemini, etc.).
+// Previously this fell back to the Mistral model names ("mistral-embed" /
+// "codestral-embed"), which silently sent a Mistral model id to whatever
+// provider was actually active — so swapping the embed provider to OpenAI or
+// Cohere failed the whole corpus with an unknown-model error (issue #396). The
+// concrete model is supplied upstream from the resolved embed profile
+// (ModelForText/ModelForCode); only when that profile leaves it blank do we
+// defer to the adapter default.
 func (w *EmbeddingWorker) modelForKind(indexKind string) string {
-	kind := strings.ToLower(strings.TrimSpace(indexKind))
-	switch kind {
-	case "code":
-		if strings.TrimSpace(w.ModelForCode) != "" {
-			return w.ModelForCode
-		}
-		return "codestral-embed"
-	default:
-		if strings.TrimSpace(w.ModelForText) != "" {
-			return w.ModelForText
-		}
-		return "mistral-embed"
+	if strings.ToLower(strings.TrimSpace(indexKind)) == "code" {
+		return strings.TrimSpace(w.ModelForCode)
 	}
+	return strings.TrimSpace(w.ModelForText)
 }
 
 // LateChunkDecision resolves the late-chunking capability gate (issue #332) for

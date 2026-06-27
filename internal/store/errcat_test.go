@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -26,6 +27,9 @@ func TestClassifyError_KnownPatterns(t *testing.T) {
 		{"net-deadline", context.DeadlineExceeded, ErrorCategoryTransientNet},
 		{"net-text", errors.New("connection refused"), ErrorCategoryTransientNet},
 		{"net-timeout", &fakeTimeoutErr{}, ErrorCategoryTransientNet},
+		{"net-503", errors.New("embed failed: 503 service unavailable"), ErrorCategoryTransientNet},
+		{"net-529-overloaded", errors.New("upstream returned: overloaded"), ErrorCategoryTransientNet},
+		{"net-eof", errors.New("post /embeddings: unexpected EOF"), ErrorCategoryTransientNet},
 		{"parse", errors.New("ocr extract failed: corrupt PDF"), ErrorCategoryParseError},
 		{"embed", errors.New("vector dimension mismatch: got 1024 want 1536"), ErrorCategoryEmbeddingFailure},
 		{"unknown", errors.New("something else"), ErrorCategoryUnknown},
@@ -49,6 +53,37 @@ func (e *fakeTimeoutErr) Temporary() bool { return true }
 // the isNetTransient branch of the classifier is exercised.
 var _ net.Error = (*fakeTimeoutErr)(nil)
 var _ = time.Now // keep imports stable for follow-on tests
+
+// TestIsTransientError pins the shared retry gate (issue #412): the broadened
+// transient set — connection refused, 503, overloaded, EOF, net timeouts — must
+// be reported transient, while permanent failures (auth, dimension) must not.
+func TestIsTransientError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"connection-refused", errors.New("dial tcp: connect: connection refused"), true},
+		{"connection-reset", errors.New("read: connection reset by peer"), true},
+		{"no-such-host", errors.New("lookup api.example.com: no such host"), true},
+		{"http-503", errors.New("embed failed: 503 service unavailable"), true},
+		{"overloaded-529", errors.New("upstream returned: overloaded"), true},
+		{"eof", errors.New("post /embeddings: unexpected EOF"), true},
+		{"wrapped-io-eof", io.EOF, true},
+		{"net-timeout", &fakeTimeoutErr{}, true},
+		{"deadline", context.DeadlineExceeded, true},
+		{"auth-permanent", errors.New("401 unauthorized"), false},
+		{"dimension-permanent", errors.New("vector dimension mismatch"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsTransientError(tc.err); got != tc.want {
+				t.Errorf("IsTransientError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestSanitizeReason(t *testing.T) {
 	cases := []struct {
