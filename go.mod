@@ -83,12 +83,12 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/image v0.39.0 // indirect
+	golang.org/x/image v0.43.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260427160629-7cedc36a6bc4 // indirect
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
@@ -101,12 +101,7 @@ require (
 	modernc.org/token v1.1.0 // indirect
 )
 
-// audit: govulncheck scan (2026-02-28) found no tracked CVEs in the full
-// dependency graph.  nancy sleuth was not installed in the build image but
-// results would be equivalent.  We keep the indirect modules here to match
-// the modernc.org/sqlite dependency surface.
-//
-// bigfft is pinned explicitly below as a proactive freeze – not because the
-// current govulncheck report flagged it, but to ensure reproducible builds and
-// to reduce risk from any future or unreviewed transitive changes.  This
-// precautionary measure makes clear the note applies to the bigfft dependency.
+// audit: govulncheck scan (2026-06-27) reports no vulnerabilities affecting
+// our code. golang.org/x/image was bumped to v0.43.0 to fix GO-2026-5061
+// (a webp decoder panic reachable via internal/pdfutil). We keep the indirect
+// modules here to match the modernc.org/sqlite dependency surface.
