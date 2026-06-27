@@ -150,6 +150,82 @@ func TestBinaryContentMessageForDocType(t *testing.T) {
 	}
 }
 
+// spanMatchesOneOf reports how many of the Span schema's oneOf branches the
+// given rendered span satisfies. A schema-valid span must match exactly one.
+// Each branch is a const-kind object with additionalProperties:false, so the
+// check is: kind const matches, every required key is present, and the span
+// emits no key the branch does not declare.
+func spanMatchesOneOf(t *testing.T, span map[string]interface{}) int {
+	t.Helper()
+	branches, ok := spanDefinitionSchema()["oneOf"].([]interface{})
+	if !ok {
+		t.Fatal("spanDefinitionSchema has no oneOf list")
+	}
+	matched := 0
+	for _, b := range branches {
+		branch, ok := b.(map[string]interface{})
+		if !ok {
+			t.Fatalf("oneOf branch is not an object: %T", b)
+		}
+		props, _ := branch["properties"].(map[string]interface{})
+		kindSchema, _ := props["kind"].(map[string]interface{})
+		if span["kind"] != kindSchema["const"] {
+			continue
+		}
+		ok = true
+		if reqs, hasReq := branch["required"].([]string); hasReq {
+			for _, r := range reqs {
+				if _, present := span[r]; !present {
+					ok = false
+					break
+				}
+			}
+		}
+		if ok {
+			for k := range span {
+				if _, declared := props[k]; !declared {
+					ok = false
+					break
+				}
+			}
+		}
+		if ok {
+			matched++
+		}
+	}
+	return matched
+}
+
+// TestBuildOpenFileSpan_EmptyAndUnknownKindFallback pins the fix for issue #397:
+// a span with an empty or unknown Kind (e.g. a BM25 hit on a cache miss whose
+// Span.Kind is "") must degrade to the schema-valid "document" variant rather
+// than echoing {"kind":""} (or {"kind":"<unknown>"}), which matches none of the
+// Span oneOf branches and makes a strict MCP client (Claude Desktop validates
+// structuredContent against outputSchema) reject the whole result with "Failed
+// to call tool".
+func TestBuildOpenFileSpan_EmptyAndUnknownKindFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		kind string
+	}{
+		{name: "empty kind", kind: ""},
+		{name: "whitespace kind", kind: "   "},
+		{name: "unknown kind", kind: "bogus"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildOpenFileSpan(model.Span{Kind: tc.kind})
+			if got["kind"] != "document" || len(got) != 1 {
+				t.Fatalf("buildOpenFileSpan(kind=%q) = %+v, want {\"kind\":\"document\"}", tc.kind, got)
+			}
+			if n := spanMatchesOneOf(t, got); n != 1 {
+				t.Fatalf("rendered span %+v matched %d Span oneOf branches, want exactly 1", got, n)
+			}
+		})
+	}
+}
+
 func preview(s string) string {
 	if len(s) <= 40 {
 		return s
