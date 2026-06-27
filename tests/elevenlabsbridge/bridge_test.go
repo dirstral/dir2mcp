@@ -2,7 +2,9 @@ package elevenlabsbridge_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -330,6 +332,179 @@ func assertAskRequestSequence(t *testing.T, requests []recordedMCPRequest) {
 	}
 	if requests[1].K != 7 {
 		t.Fatalf("k=%d", requests[1].K)
+	}
+}
+
+func TestInboundSecretRejectsUnauthenticated(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests []recordedMCPRequest
+	)
+	handlerErrCh := make(chan error, 8)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleMCPBackend(w, r, &mu, &requests, handlerErrCh)
+	}))
+	defer backend.Close()
+
+	cfg := elevenlabsbridge.DefaultConfig()
+	cfg.MCPURL = backend.URL
+	cfg.MCPToken = "bridge-token"
+	cfg.StateDir = t.TempDir()
+	cfg.InboundSecret = "top-secret"
+
+	bridge, err := elevenlabsbridge.New(cfg)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	if !bridge.InboundAuthEnabled() {
+		t.Fatalf("expected inbound auth to be enabled")
+	}
+
+	srv := httptest.NewServer(bridge.Handler())
+	defer srv.Close()
+
+	askBody := `{"question":"what is alpha?","k":7}`
+
+	// No credential -> 401, and the backend must never be reached.
+	if got := postAsk(t, srv.URL, askBody, ""); got != http.StatusUnauthorized {
+		t.Fatalf("missing secret: status=%d want=%d", got, http.StatusUnauthorized)
+	}
+	// Wrong credential -> 401.
+	if got := postAskWithHeader(t, srv.URL, askBody, "X-Bridge-Secret", "wrong"); got != http.StatusUnauthorized {
+		t.Fatalf("wrong secret: status=%d want=%d", got, http.StatusUnauthorized)
+	}
+
+	mu.Lock()
+	if len(requests) != 0 {
+		mu.Unlock()
+		t.Fatalf("backend was reached by unauthenticated callers: %#v", requests)
+	}
+	mu.Unlock()
+
+	// Correct credential via X-Bridge-Secret -> 200.
+	if got := postAskWithHeader(t, srv.URL, askBody, "X-Bridge-Secret", "top-secret"); got != http.StatusOK {
+		t.Fatalf("valid X-Bridge-Secret: status=%d want=%d", got, http.StatusOK)
+	}
+	// Correct credential via Authorization: Bearer -> 200.
+	if got := postAsk(t, srv.URL, askBody, "Bearer top-secret"); got != http.StatusOK {
+		t.Fatalf("valid bearer: status=%d want=%d", got, http.StatusOK)
+	}
+
+	// /health stays unauthenticated.
+	healthResp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	_ = healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK {
+		t.Fatalf("health status=%d want=%d", healthResp.StatusCode, http.StatusOK)
+	}
+
+	close(handlerErrCh)
+	for err := range handlerErrCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func postAsk(t *testing.T, baseURL, body, authorization string) int {
+	t.Helper()
+	return postAskWithHeader(t, baseURL, body, "Authorization", authorization)
+}
+
+func postAskWithHeader(t *testing.T, baseURL, body, headerName, headerValue string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/ask", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if headerValue != "" {
+		req.Header.Set(headerName, headerValue)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func TestValidateListenSecurity(t *testing.T) {
+	cases := []struct {
+		name          string
+		listen        string
+		hasSecret     bool
+		forceInsecure bool
+		wantErr       bool
+	}{
+		{name: "loopback no secret allowed", listen: "127.0.0.1:8088"},
+		{name: "loopback ipv6 allowed", listen: "[::1]:8088"},
+		{name: "localhost allowed", listen: "localhost:8088"},
+		{name: "wildcard no secret refused", listen: "0.0.0.0:8088", wantErr: true},
+		{name: "empty host refused", listen: ":8088", wantErr: true},
+		{name: "ipv6 wildcard refused", listen: "[::]:8088", wantErr: true},
+		{name: "public ip no secret refused", listen: "192.168.1.10:8088", wantErr: true},
+		{name: "public ip with secret allowed", listen: "0.0.0.0:8088", hasSecret: true},
+		{name: "public ip force insecure allowed", listen: "0.0.0.0:8088", forceInsecure: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := elevenlabsbridge.ValidateListenSecurity(tc.listen, tc.hasSecret, tc.forceInsecure)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %q (secret=%v force=%v)", tc.listen, tc.hasSecret, tc.forceInsecure)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.listen, err)
+			}
+		})
+	}
+}
+
+func TestRunWithBridgeRefusesNonLoopbackWithoutSecret(t *testing.T) {
+	cfg := elevenlabsbridge.DefaultConfig()
+	cfg.MCPURL = "http://127.0.0.1:1/mcp"
+	cfg.MCPToken = "token"
+	cfg.StateDir = t.TempDir()
+
+	bridge, err := elevenlabsbridge.New(cfg)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+
+	// Non-loopback without a secret must be refused before the server binds.
+	if err := elevenlabsbridge.RunWithBridge(context.Background(), bridge, "0.0.0.0:0"); err == nil {
+		t.Fatalf("expected RunWithBridge to refuse non-loopback bind without secret")
+	} else if !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunWithBridgeAllowsLoopbackWithoutSecret(t *testing.T) {
+	cfg := elevenlabsbridge.DefaultConfig()
+	cfg.MCPURL = "http://127.0.0.1:1/mcp"
+	cfg.MCPToken = "token"
+	cfg.StateDir = t.TempDir()
+
+	bridge, err := elevenlabsbridge.New(cfg)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- elevenlabsbridge.RunWithBridge(ctx, bridge, "127.0.0.1:0")
+	}()
+
+	// The guard must not refuse a loopback bind: cancel and expect a clean
+	// context-cancellation rather than a security error.
+	cancel()
+	if err := <-errCh; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
 	}
 }
 

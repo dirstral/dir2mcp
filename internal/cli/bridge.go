@@ -36,10 +36,20 @@ func (a *App) runBridgeElevenLabs(ctx context.Context, global globalOptions, arg
 		return parseCode
 	}
 
+	if err := elevenlabsbridge.ValidateListenSecurity(listen, cfg.InboundSecretConfigured(), cfg.ForceInsecure); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, err.Error())
+		return exitConfigInvalid
+	}
+
 	bridge, err := elevenlabsbridge.New(cfg)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, err.Error())
 		return exitGeneric
+	}
+
+	inboundAuth := "none"
+	if bridge.InboundAuthEnabled() {
+		inboundAuth = "secret"
 	}
 
 	if global.jsonOutput {
@@ -49,6 +59,7 @@ func (a *App) runBridgeElevenLabs(ctx context.Context, global globalOptions, arg
 			"mcp_url":      cfg.MCPURL,
 			"state_dir":    cfg.StateDir,
 			"token_source": bridge.TokenSource(),
+			"inbound_auth": inboundAuth,
 		}); err != nil {
 			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode bridge json: %v", err))
 			return exitGeneric
@@ -58,6 +69,7 @@ func (a *App) runBridgeElevenLabs(ctx context.Context, global globalOptions, arg
 		_, _ = fmt.Fprintf(a.stdout, "MCP_URL=%s\n", cfg.MCPURL)
 		_, _ = fmt.Fprintf(a.stdout, "STATE_DIR=%s\n", cfg.StateDir)
 		_, _ = fmt.Fprintf(a.stdout, "MCP token source=%s\n", bridge.TokenSource())
+		_, _ = fmt.Fprintf(a.stdout, "inbound auth=%s\n", inboundAuth)
 	}
 
 	if err := elevenlabsbridge.RunWithBridge(ctx, bridge, listen); err != nil && ctx.Err() == nil {
@@ -69,10 +81,11 @@ func (a *App) runBridgeElevenLabs(ctx context.Context, global globalOptions, arg
 
 func loadBridgeDefaultConfig(global globalOptions) (elevenlabsbridge.Config, error) {
 	env := map[string]string{
-		"MCP_URL":   os.Getenv("MCP_URL"),
-		"MCP_TOKEN": os.Getenv("MCP_TOKEN"),
-		"STATE_DIR": os.Getenv("STATE_DIR"),
-		"PORT":      os.Getenv("PORT"),
+		"MCP_URL":               os.Getenv("MCP_URL"),
+		"MCP_TOKEN":             os.Getenv("MCP_TOKEN"),
+		"STATE_DIR":             os.Getenv("STATE_DIR"),
+		"PORT":                  os.Getenv("PORT"),
+		"BRIDGE_INBOUND_SECRET": os.Getenv("BRIDGE_INBOUND_SECRET"),
 	}
 	if v := strings.TrimSpace(global.stateDir); v != "" {
 		env["STATE_DIR"] = v
@@ -88,6 +101,8 @@ func (a *App) parseBridgeElevenLabsFlags(global globalOptions, defaultCfg eleven
 	stateDir := fs.String("state-dir", defaultCfg.StateDir, "dir2mcp state directory")
 	port := fs.Int("port", defaultCfg.Port, "bridge listen port")
 	listenAddr := fs.String("listen", "", "override listen address (host:port)")
+	inboundSecret := fs.String("inbound-secret", defaultCfg.InboundSecret, "shared secret required from inbound callers (Authorization: Bearer <secret> or X-Bridge-Secret)")
+	forceInsecure := fs.Bool("force-insecure", false, "allow binding a non-loopback address without an inbound secret (unsafe)")
 	if err := fs.Parse(args); err != nil {
 		return elevenlabsbridge.Config{}, "", exitConfigInvalid
 	}
@@ -100,6 +115,8 @@ func (a *App) parseBridgeElevenLabsFlags(global globalOptions, defaultCfg eleven
 	cfg.MCPURL = strings.TrimSpace(*mcpURL)
 	cfg.MCPToken = strings.TrimSpace(*mcpToken)
 	cfg.StateDir = strings.TrimSpace(*stateDir)
+	cfg.InboundSecret = strings.TrimSpace(*inboundSecret)
+	cfg.ForceInsecure = *forceInsecure
 	portProvided := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
