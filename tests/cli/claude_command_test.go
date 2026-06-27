@@ -444,9 +444,13 @@ func TestClaudeUninstallIsIdempotentWhenEntryAbsent(t *testing.T) {
 	}
 }
 
-func TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers(t *testing.T) {
-	tmp := t.TempDir()
-	stateDir := filepath.Join(tmp, "state")
+// setupAtomicInstallFixture writes the state dir (token + connection.json) and a
+// pre-existing Claude config carrying an UNRELATED MCP server, returning the
+// state dir, the config path, and its parent dir. Extracted to keep the test
+// itself under the gocyclo budget.
+func setupAtomicInstallFixture(t *testing.T, tmp string) (stateDir, configDir, configPath string) {
+	t.Helper()
+	stateDir = filepath.Join(tmp, "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
@@ -466,14 +470,11 @@ func TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers(t *test
 	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), raw, 0o644); err != nil {
 		t.Fatalf("write connection: %v", err)
 	}
-
-	// A pre-existing config carrying an UNRELATED MCP server from another tool;
-	// the install must not clobber it.
-	configDir := filepath.Join(tmp, "cfg")
+	configDir = filepath.Join(tmp, "cfg")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("mkdir cfg: %v", err)
 	}
-	configPath := filepath.Join(configDir, "claude_desktop_config.json")
+	configPath = filepath.Join(configDir, "claude_desktop_config.json")
 	initial := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"some-other-tool": map[string]interface{}{
@@ -486,6 +487,12 @@ func TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers(t *test
 	if err := os.WriteFile(configPath, initialRaw, 0o644); err != nil {
 		t.Fatalf("write initial config: %v", err)
 	}
+	return stateDir, configDir, configPath
+}
+
+func TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, configDir, configPath := setupAtomicInstallFixture(t, tmp)
 
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
