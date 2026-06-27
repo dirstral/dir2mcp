@@ -58,15 +58,44 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		source = "computed"
 	}
 
-	return a.renderStatusOutput(global, cfg.StateDir, snapshot, source)
+	// Reconcile a daemon-written "running" snapshot against process liveness.
+	// corpus.json is written by the daemon, so a daemon that recorded
+	// running=true and then crashed would otherwise leave status reporting
+	// indexing as "running" forever. If no live daemon owns this state dir, the
+	// snapshot is stale: report indexing as stopped instead (#418).
+	staleRunning := false
+	if snapshot.Indexing.Running && !daemonIsLive(cfg.StateDir) {
+		snapshot.Indexing.Running = false
+		staleRunning = true
+	}
+
+	return a.renderStatusOutput(global, cfg.StateDir, snapshot, source, staleRunning)
 }
 
-func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot corpusSnapshot, source string) int {
+// daemonIsLive reports whether a live daemon process currently owns the given
+// state dir. It consults the pid file written by `dir2mcp up` and checks the
+// recorded pid for liveness. Returns false when the pid file is absent,
+// malformed, or names a process that is no longer running.
+func daemonIsLive(stateDir string) bool {
+	pid, err := readPIDFile(pidFilePath(stateDir))
+	if err != nil {
+		return false
+	}
+	return processIsAlive(pid)
+}
+
+func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot corpusSnapshot, source string, staleRunning bool) int {
 	if global.jsonOutput {
 		payload := map[string]interface{}{
 			"source":    source,
 			"state_dir": stateDir,
 			"snapshot":  snapshot,
+		}
+		if staleRunning {
+			// Additive, optional field: signals that the snapshot recorded
+			// indexing as running but no live daemon was found, so running was
+			// reconciled to false. Absent in the common case (#418).
+			payload["stale_running"] = true
 		}
 		if err := emitJSON(a.stdout, payload); err != nil {
 			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode status json: %v", err))
@@ -86,8 +115,11 @@ func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot
 	writeln(a.stdout)
 
 	runningLabel := s.dim("stopped")
-	if snapshot.Indexing.Running {
+	switch {
+	case snapshot.Indexing.Running:
 		runningLabel = s.Green.Render("running")
+	case staleRunning:
+		runningLabel = s.dim("stopped") + "  " + s.dim("(stale snapshot; daemon not running)")
 	}
 
 	writef(a.stdout, "  %s  %s  %s\n", s.sectionHeader("Indexing"), s.dim("mode="+snapshot.Indexing.Mode), runningLabel)
