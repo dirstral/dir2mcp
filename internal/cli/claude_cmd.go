@@ -403,13 +403,18 @@ func loadJSONFileOrEmpty(path string) (map[string]interface{}, error) {
 	return out, nil
 }
 
+// writeJSONFile serializes payload and writes it atomically with owner-only
+// (0600) permissions. Atomicity matters because this rewrites the user's whole
+// Claude Desktop config (containing *all* of their MCP servers): a truncate-in-
+// place write interrupted mid-stream would corrupt every entry, not just ours.
+// The 0600 mode keeps the embedded bearer token out of world-readable files.
 func writeJSONFile(path string, payload map[string]interface{}) error {
 	raw, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
 	raw = append(raw, '\n')
-	return os.WriteFile(path, raw, 0o644)
+	return writeFileAtomic(path, raw)
 }
 
 func jsonMarshalMap(v interface{}) (map[string]interface{}, error) {

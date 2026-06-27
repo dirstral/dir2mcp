@@ -245,7 +245,8 @@ func transcriptRepLanguage(metaJSON string) string {
 }
 
 // writeFileAtomic writes data to path via a sibling temp file + rename so a
-// reader never observes a partially written subtitle document. The temp file is
+// reader never observes a partially written file and an interrupted write can
+// never truncate/corrupt an existing one. The temp file is created 0600 and
 // removed on any failure before the rename completes.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
@@ -262,6 +263,13 @@ func writeFileAtomic(path string, data []byte) error {
 	cleanup := func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
+	}
+	// Pin owner-only perms explicitly rather than relying on the implicit
+	// CreateTemp mode: some callers (e.g. the Claude config) embed a bearer
+	// token and must never land world-readable.
+	if err := tmp.Chmod(0o600); err != nil {
+		cleanup()
+		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
 		cleanup()
