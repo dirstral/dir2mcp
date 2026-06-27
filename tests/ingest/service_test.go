@@ -598,8 +598,16 @@ func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
 	if !ok {
 		t.Fatal("expected audio document to be upserted")
 	}
-	if doc.Status != "ok" {
-		t.Fatalf("expected audio document status to remain ok, got %q", doc.Status)
+	// #413: a genuine provider failure that produced zero representations must be
+	// persisted as status="error" with a descriptive message — not silently left
+	// status="ok", which hid the unsearchable audio from CorpusStats.Errors /
+	// RecentFailures and reported errors=0 after a restart. The run itself still
+	// must not fail (asserted above).
+	if doc.Status != "error" {
+		t.Fatalf("expected audio document status to be persisted as error, got %q", doc.Status)
+	}
+	if doc.ErrorMessage == "" {
+		t.Fatal("expected a descriptive error_message on the failed audio document")
 	}
 }
 
