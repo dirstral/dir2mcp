@@ -115,12 +115,19 @@ func (b *MemBroker) Lease(_ context.Context, visibility time.Duration) (Lease, e
 
 // reclaimExpiredLocked moves in-flight jobs whose lease deadline has passed back
 // to pending so a crashed/abandoned worker cannot strand a chunk (SPEC §8.7.3
-// lease expiry). Caller holds b.mu.
+// lease expiry). A job whose lease expires after it has already exhausted
+// maxAttempts is dead-lettered instead of redelivered, mirroring Nack's gate, so
+// a chunk that reliably kills/hangs the worker before it can Ack/Nack cannot be
+// re-leased forever. Caller holds b.mu.
 func (b *MemBroker) reclaimExpiredLocked(now time.Time) {
 	for token, mj := range b.inflight {
 		if now.After(mj.deadline) {
 			delete(b.inflight, token)
 			mj.token = ""
+			if mj.attempts >= b.maxAttempts {
+				b.deadLetter = append(b.deadLetter, mj)
+				continue
+			}
 			b.pending = append(b.pending, mj)
 		}
 	}

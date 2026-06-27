@@ -169,6 +169,53 @@ func TestBroker_NackRedeliversThenDeadLetters(t *testing.T) {
 	}
 }
 
+// TestBroker_ReclaimDeadLettersAfterMaxAttempts pins F1 (issue #433): the
+// lease-reclaim path must respect maxAttempts. A chunk whose embedding reliably
+// kills/hangs the worker dies before it can Ack/Nack, so each lease simply
+// expires and is reclaimed. Reclaim redelivers only up to maxAttempts; once
+// attempts are exhausted the next reclaim dead-letters the job instead of
+// re-leasing it forever. Runs against both default broker impls.
+func TestBroker_ReclaimDeadLettersAfterMaxAttempts(t *testing.T) {
+	for _, bf := range brokerFactories() {
+		t.Run(bf.name, func(t *testing.T) {
+			ctx := context.Background()
+			b := bf.make(t) // maxAttempts = 3
+			now := time.Unix(2_000, 0)
+			bf.setClock(b, func() time.Time { return now })
+
+			if err := b.Enqueue(ctx, sampleJob(5)); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+
+			// Lease the job maxAttempts times, letting each lease expire without an
+			// Ack/Nack so the next Lease reclaims and redelivers it (the crash-loop).
+			for i := 0; i < 3; i++ {
+				lease, err := b.Lease(ctx, 10*time.Second)
+				if err != nil {
+					t.Fatalf("Lease attempt %d: %v", i+1, err)
+				}
+				if lease.Job.ChunkID != 5 {
+					t.Fatalf("attempt %d leased chunk %d, want 5", i+1, lease.Job.ChunkID)
+				}
+				now = now.Add(11 * time.Second) // let the lease expire
+			}
+
+			// attempts == maxAttempts and the lease has expired: reclaim must
+			// dead-letter the job, not redeliver it.
+			if _, err := b.Lease(ctx, 10*time.Second); err != embedqueue.ErrNoJob {
+				t.Fatalf("post-exhaustion Lease err = %v, want ErrNoJob (job must be dead-lettered)", err)
+			}
+			st, err := b.Stats(ctx)
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			if st.DeadLettered != 1 || st.Pending != 0 || st.InFlight != 0 {
+				t.Fatalf("after reclaim stats = %+v, want DeadLettered=1 only", st)
+			}
+		})
+	}
+}
+
 // TestSQLiteBroker_Durable confirms the SQLite broker persists enqueued jobs
 // across a reopen (a coordinator restart does not lose the backlog).
 func TestSQLiteBroker_Durable(t *testing.T) {

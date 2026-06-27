@@ -37,6 +37,20 @@ func NewSQLiteBroker(ctx context.Context, path string, maxAttempts int) (*SQLite
 	if err != nil {
 		return nil, fmt.Errorf("embedqueue: open sqlite broker: %w", err)
 	}
+	// Order matters: busy_timeout MUST come before journal_mode (mirrors
+	// internal/store/sqlite_store.go). Under the multi-worker pool the
+	// reclaim-write-first Lease otherwise hits "database is locked" immediately
+	// instead of waiting; WAL further reduces read/write blocking across
+	// connections and processes.
+	for _, pragma := range []string{
+		`PRAGMA busy_timeout=5000;`,
+		`PRAGMA journal_mode=WAL;`,
+	} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("embedqueue: configure sqlite broker: %w", err)
+		}
+	}
 	b, err := newSQLiteBroker(ctx, db, true, maxAttempts)
 	if err != nil {
 		_ = db.Close()
@@ -143,6 +157,34 @@ WHERE NOT EXISTS (
 	return nil
 }
 
+// execer is the subset of *sql.DB / *sql.Tx that reclaimExpired needs, so the
+// same reclaim runs both inside Lease's transaction and on Stats's bare handle.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// reclaimExpired moves in-flight jobs whose lease deadline has passed back to
+// pending so a crashed/abandoned worker cannot strand a chunk (SPEC §8.7.3 lease
+// expiry). A job whose lease expires after it has already exhausted maxAttempts
+// is dead-lettered instead of redelivered, mirroring Nack's gate, so a chunk that
+// reliably kills/hangs the worker before it can Ack/Nack cannot be re-leased
+// forever. The dead-letter UPDATE runs first so attempts-exhausted rows are not
+// caught by the requeue UPDATE.
+func (b *SQLiteBroker) reclaimExpired(ctx context.Context, q execer, nowNS int64) error {
+	if _, err := q.ExecContext(ctx,
+		`UPDATE embed_jobs SET state='dead', token=NULL, deadline_ns=0
+		   WHERE state='inflight' AND deadline_ns < ? AND attempts >= ?`,
+		nowNS, b.maxAttempts); err != nil {
+		return fmt.Errorf("embedqueue: reclaim dead-letter: %w", err)
+	}
+	if _, err := q.ExecContext(ctx,
+		`UPDATE embed_jobs SET state='pending', token=NULL, deadline_ns=0
+		   WHERE state='inflight' AND deadline_ns < ?`, nowNS); err != nil {
+		return fmt.Errorf("embedqueue: reclaim: %w", err)
+	}
+	return nil
+}
+
 // Lease reclaims expired leases, then atomically claims the oldest claimable
 // pending job.
 func (b *SQLiteBroker) Lease(ctx context.Context, visibility time.Duration) (Lease, error) {
@@ -158,10 +200,8 @@ func (b *SQLiteBroker) Lease(ctx context.Context, visibility time.Duration) (Lea
 	defer func() { _ = tx.Rollback() }()
 
 	// Reclaim expired in-flight leases (SPEC §8.7.3 lease expiry).
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE embed_jobs SET state='pending', token=NULL, deadline_ns=0
-		   WHERE state='inflight' AND deadline_ns < ?`, nowNS); err != nil {
-		return Lease{}, fmt.Errorf("embedqueue: lease reclaim: %w", err)
+	if err := b.reclaimExpired(ctx, tx, nowNS); err != nil {
+		return Lease{}, err
 	}
 
 	var (
@@ -253,10 +293,8 @@ func (b *SQLiteBroker) Nack(ctx context.Context, token string, retryAfter time.D
 // are accurate.
 func (b *SQLiteBroker) Stats(ctx context.Context) (Stats, error) {
 	nowNS := b.now().UnixNano()
-	if _, err := b.db.ExecContext(ctx,
-		`UPDATE embed_jobs SET state='pending', token=NULL, deadline_ns=0
-		   WHERE state='inflight' AND deadline_ns < ?`, nowNS); err != nil {
-		return Stats{}, fmt.Errorf("embedqueue: stats reclaim: %w", err)
+	if err := b.reclaimExpired(ctx, b.db, nowNS); err != nil {
+		return Stats{}, err
 	}
 	var s Stats
 	row := b.db.QueryRowContext(ctx, `
