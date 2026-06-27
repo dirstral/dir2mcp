@@ -1776,7 +1776,7 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 		SELECT
 			COUNT(*) AS scanned,
 			COALESCE(SUM(CASE WHEN deleted = 0 AND status = 'ok' THEN 1 ELSE 0 END), 0) AS indexed,
-			COALESCE(SUM(CASE WHEN deleted = 0 AND status = 'skipped' THEN 1 ELSE 0 END), 0) AS skipped,
+			COALESCE(SUM(CASE WHEN deleted = 0 AND status IN ('skipped', 'secret_excluded') THEN 1 ELSE 0 END), 0) AS skipped,
 			COALESCE(SUM(CASE WHEN deleted = 1 THEN 1 ELSE 0 END), 0) AS deleted,
 			COALESCE(SUM(CASE WHEN deleted = 0 AND status = 'error' THEN 1 ELSE 0 END), 0) AS errors
 		FROM documents`,
@@ -1818,10 +1818,19 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	}
 
 	args := []any{"pending"}
+	// Skip chunks whose parent document is errored or tombstoned: a doc whose
+	// status is 'error' (e.g. a later representation failed after an earlier
+	// rep's chunks committed) or is deleted must not keep live embeddable
+	// chunks that the embed worker re-embeds every cycle. Documents are keyed
+	// by rel_path, which chunks denormalize, so a LEFT JOIN on it predicates
+	// the parent's lifecycle at candidate selection. The NULL guard preserves a
+	// chunk with no document row (e.g. UpsertChunkTask seeds a bare chunk).
 	query := `WITH filtered_chunks AS (
 	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language
 	            FROM chunks c
+	            LEFT JOIN documents d ON d.rel_path = c.rel_path
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
+	              AND (d.rel_path IS NULL OR (d.deleted = 0 AND d.status != 'error'))
 	          ),
 	          ranked_spans AS (
 	            SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
@@ -2503,6 +2512,13 @@ func normalizeStatus(status string) string {
 		return "skipped"
 	case "error":
 		return "error"
+	case "secret_excluded":
+		// A document withheld because it contains secrets is not "ok": it has
+		// zero searchable chunks and must persist faithfully so it stays
+		// visible as an audit signal (and is counted as skipped, not indexed).
+		return "secret_excluded"
+	case "pending":
+		return "pending"
 	default:
 		return "ok"
 	}
