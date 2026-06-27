@@ -103,15 +103,31 @@ func CreateTableSQL(schema, table string, dim int) string {
 )`, tbl, dim)
 }
 
+// HNSWMaxDim is pgvector's hard upper bound on the number of dimensions an
+// hnsw (or ivfflat) index can cover. Above this, "CREATE INDEX ... USING hnsw"
+// fails outright (e.g. gemini-embedding-001's native 3072 dims), so dir2mcp
+// skips ANN index creation and falls back to exact (sequential-scan) search
+// rather than leaving the backend permanently broken (issue #437 F2).
+const HNSWMaxDim = 2000
+
 // CreateHNSWIndexSQL returns the DDL to create the HNSW index on the embedding
-// column using cosine distance. The index name is derived from the table name
-// so repeated calls are idempotent.
-func CreateHNSWIndexSQL(schema, table string) string {
+// column using cosine distance, and ok=true. The index name is derived from the
+// table name so repeated calls are idempotent.
+//
+// When dim exceeds HNSWMaxDim, pgvector cannot build the index, so it returns
+// ok=false and an empty statement: the caller must SKIP index creation. The
+// table remains fully queryable without the index (pgvector falls back to an
+// exact sequential scan — slower, but correct), so a high-dimensional model
+// must never fail the whole backend.
+func CreateHNSWIndexSQL(schema, table string, dim int) (string, bool) {
+	if dim > HNSWMaxDim {
+		return "", false
+	}
 	idxName := quoteIdent(table + "_embedding_hnsw")
 	return fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS %s ON %s USING hnsw (embedding vector_cosine_ops)`,
 		idxName, qualifiedTable(schema, table),
-	)
+	), true
 }
 
 // CreateIdentityTableSQL returns the DDL for the single-row identity table.
@@ -200,10 +216,22 @@ func BuildFilterPredicates(f model.Filter, startArg int) ([]string, []any) {
 		clauses = append(clauses, "btrim(rel_path) <> ''")
 	}
 	if f.PathPrefix != "" {
-		// rel_path LIKE prefix || '%' — escape LIKE metacharacters in the
-		// prefix so a literal % or _ in a path is matched verbatim.
-		ph := next(escapeLikePrefix(f.PathPrefix) + "%")
-		clauses = append(clauses, fmt.Sprintf("rel_path LIKE %s ESCAPE '\\'", ph))
+		// Normalize the prefix with the SAME NormalizePathPrefix that
+		// model.Filter.Match (via MatchesPathPrefix) applies, so the SQL
+		// pushdown and the authoritative Go-side recheck agree (issue #437 F1 /
+		// #286). Without this, a raw "./Docs"-style or trailing-slash prefix
+		// pushed verbatim diverges from the matcher and silently drops valid
+		// rows. A prefix that normalizes away (e.g. "." or "./") imposes no
+		// constraint and is skipped (matches everything), mirroring the matcher.
+		//
+		// Matching is case-INSENSITIVE — lower(rel_path) LIKE lower(prefix||'%')
+		// — to mirror MatchesPathPrefix's ASCII case-fold and the store's
+		// list_files LIKE. LIKE metacharacters in the literal prefix are escaped
+		// so a literal % or _ in a path is matched verbatim.
+		if normalized := model.NormalizePathPrefix(f.PathPrefix); normalized != "" {
+			ph := next(escapeLikePrefix(normalized) + "%")
+			clauses = append(clauses, fmt.Sprintf("lower(rel_path) LIKE lower(%s) ESCAPE '\\'", ph))
+		}
 	}
 	if len(f.DocTypes) > 0 {
 		// Case-insensitive set membership: lower(doc_type) = ANY(lowered set).

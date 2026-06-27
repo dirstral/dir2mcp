@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/jackc/pgx/v5"
@@ -97,7 +98,7 @@ type Index struct {
 
 	mu         sync.Mutex
 	dim        int  // 0 until known (config or first vector)
-	tableReady bool // vectors table + HNSW index created
+	tableReady bool // vectors table created (+ HNSW index when dim <= HNSWMaxDim)
 }
 
 // Open connects to Postgres, verifies pgvector is available, and ensures the
@@ -165,9 +166,10 @@ func (i *Index) ensureBaseSchema(ctx context.Context) error {
 	return nil
 }
 
-// ensureVectorsTable creates the dimensioned vectors table and its HNSW index
-// if not already created in this process. dim must be positive. It is
-// idempotent and safe under concurrent callers.
+// ensureVectorsTable creates the dimensioned vectors table and, when the
+// dimension is within pgvector's index limit (HNSWMaxDim), its HNSW index, if
+// not already created in this process. dim must be positive. It is idempotent
+// and safe under concurrent callers.
 func (i *Index) ensureVectorsTable(ctx context.Context, dim int) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -177,9 +179,17 @@ func (i *Index) ensureVectorsTable(ctx context.Context, dim int) error {
 	if dim <= 0 {
 		return fmt.Errorf("pgvector: embedding dimension must be positive, got %d", dim)
 	}
-	stmts := []string{
-		CreateTableSQL(i.schema, i.table, dim),
-		CreateHNSWIndexSQL(i.schema, i.table),
+	stmts := []string{CreateTableSQL(i.schema, i.table, dim)}
+	// pgvector's hnsw/ivfflat indexes are capped at HNSWMaxDim dimensions; above
+	// that, CREATE INDEX fails and would leave tableReady false and every Upsert
+	// re-failing corpus-wide (issue #437 F2). For high-dimensional models we skip
+	// the ANN index — the table still answers queries via exact search — and warn
+	// the operator rather than failing the backend.
+	if idxSQL, ok := CreateHNSWIndexSQL(i.schema, i.table, dim); ok {
+		stmts = append(stmts, idxSQL)
+	} else {
+		log.Printf("pgvector: ANN (HNSW) indexing disabled for table %q: embedding dimension %d exceeds pgvector's %d-dim index limit; falling back to exact (sequential-scan) search. For faster ANN search, use a smaller Matryoshka embedding dimension (<= %d).",
+			i.table, dim, HNSWMaxDim, HNSWMaxDim)
 	}
 	for _, s := range stmts {
 		if _, err := i.db.Exec(ctx, s); err != nil {
