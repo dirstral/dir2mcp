@@ -105,14 +105,14 @@ func TestSDKTransport_RecoversPanic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
-	defer serverSession.Close()
+	defer func() { _ = serverSession.Close() }()
 
 	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "v0"}, nil)
 	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatalf("client connect: %v", err)
 	}
-	defer clientSession.Close()
+	defer func() { _ = clientSession.Close() }()
 
 	// The call must return a normal (in-band) error result, not a transport
 	// error or a crashed daemon.
