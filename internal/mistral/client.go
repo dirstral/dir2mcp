@@ -44,6 +44,12 @@ const (
 	// DefaultTranscribeModel is the default model used for audio
 	// transcription requests.
 	DefaultTranscribeModel = "voxtral-mini-latest"
+
+	// maxResponseBytes caps a JSON success response body (embeddings, OCR,
+	// transcription, chat) so a malicious or buggy upstream (e.g. a gzip bomb
+	// behind a custom base_url) cannot drive unbounded memory use when we
+	// buffer or decode it (issue #416).
+	maxResponseBytes = 64 << 20 // 64 MiB
 )
 
 // Client provides Mistral API integrations.
@@ -318,8 +324,12 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		return nil, mistralHTTPError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var parsed embedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &model.ProviderError{
 			Code:       "MISTRAL_FAILED",
 			Message:    "failed to decode embedding response",
@@ -331,33 +341,31 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 
 	reportUsage(ctx, usage.StageEmbed, parsed.Usage)
 
-	if len(parsed.Data) != len(inputs) {
-		return nil, &model.ProviderError{
-			Code:       "MISTRAL_FAILED",
-			Message:    fmt.Sprintf("embedding response size mismatch: got %d vectors for %d inputs", len(parsed.Data), len(inputs)),
-			Retryable:  false,
-			StatusCode: resp.StatusCode,
-		}
+	vectors, err := collectEmbedVectors(parsed, len(inputs), resp.StatusCode)
+	if err != nil {
+		return nil, err
 	}
 
-	vectors := make([][]float32, len(inputs))
-	seen := make([]bool, len(inputs))
+	return vectors, nil
+}
+
+// collectEmbedVectors validates the response covers every input exactly once
+// and reorders vectors by the server-reported index to match input order.
+func collectEmbedVectors(parsed embedResponse, n, statusCode int) ([][]float32, error) {
+	fail := func(msg string) error {
+		return &model.ProviderError{Code: "MISTRAL_FAILED", Message: msg, Retryable: false, StatusCode: statusCode}
+	}
+	if len(parsed.Data) != n {
+		return nil, fail(fmt.Sprintf("embedding response size mismatch: got %d vectors for %d inputs", len(parsed.Data), n))
+	}
+	vectors := make([][]float32, n)
+	seen := make([]bool, n)
 	for _, item := range parsed.Data {
-		if item.Index < 0 || item.Index >= len(inputs) {
-			return nil, &model.ProviderError{
-				Code:       "MISTRAL_FAILED",
-				Message:    "embedding response contains invalid index",
-				Retryable:  false,
-				StatusCode: resp.StatusCode,
-			}
+		if item.Index < 0 || item.Index >= n {
+			return nil, fail("embedding response contains invalid index")
 		}
 		if seen[item.Index] {
-			return nil, &model.ProviderError{
-				Code:       "MISTRAL_FAILED",
-				Message:    fmt.Sprintf("embedding response contains duplicate index: %d", item.Index),
-				Retryable:  false,
-				StatusCode: resp.StatusCode,
-			}
+			return nil, fail(fmt.Sprintf("embedding response contains duplicate index: %d", item.Index))
 		}
 		vector := make([]float32, len(item.Embedding))
 		for i, val := range item.Embedding {
@@ -366,19 +374,27 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		vectors[item.Index] = vector
 		seen[item.Index] = true
 	}
-
 	for i := range seen {
 		if !seen[i] {
-			return nil, &model.ProviderError{
-				Code:       "MISTRAL_FAILED",
-				Message:    fmt.Sprintf("embedding response missing index: %d", i),
-				Retryable:  false,
-				StatusCode: resp.StatusCode,
-			}
+			return nil, fail(fmt.Sprintf("embedding response missing index: %d", i))
 		}
 	}
-
 	return vectors, nil
+}
+
+// readLimitedBody buffers a success response body under limit bytes, returning
+// a clear error rather than reading unbounded if the upstream sends more
+// (issue #416). It reads one byte past the cap to detect an over-limit body
+// without buffering the whole thing.
+func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if int64(len(data)) > limit {
+		return nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
+	}
+	return data, nil
 }
 
 // mistralHTTPError reads the response body and returns a *model.ProviderError
@@ -627,8 +643,12 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 		return "", mistralHTTPError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return "", err
+	}
 	var parsed ocrResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
 			Message:   "failed to decode ocr response",
@@ -796,8 +816,12 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		return "", mistralHTTPError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return "", err
+	}
 	var parsed transcribeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
 			Message:   "failed to decode transcription response",
@@ -934,8 +958,12 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 		return "", mistralHTTPError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return "", err
+	}
 	var parsed generateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
 			Message:   "failed to decode generation response",

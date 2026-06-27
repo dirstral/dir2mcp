@@ -50,6 +50,16 @@ const (
 	DefaultSTTModel   = "whisper-1"
 	DefaultTTSModel   = "tts-1"
 	DefaultTTSVoice   = "alloy"
+
+	// maxResponseBytes caps a JSON success response body (embeddings, chat,
+	// transcription) so a malicious or buggy upstream (e.g. a gzip bomb behind
+	// a custom base_url) cannot drive unbounded memory use when we buffer or
+	// decode it (issue #416).
+	maxResponseBytes = 64 << 20 // 64 MiB
+	// maxAudioResponseBytes caps a TTS audio body. Audio is legitimately
+	// larger than JSON, so it gets a higher ceiling while still bounding the
+	// read.
+	maxAudioResponseBytes = 256 << 20 // 256 MiB
 )
 
 // Client is an OpenAI-compatible API adapter.
@@ -202,8 +212,12 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		return nil, httpError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var parsed embedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to decode embedding response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	if !parsed.Usage.Empty() {
@@ -312,8 +326,12 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 		return "", httpError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return "", err
+	}
 	var parsed generateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to decode generation response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	if !parsed.Usage.Empty() {
@@ -418,8 +436,12 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if resp.StatusCode != http.StatusOK {
 		return "", httpError(resp)
 	}
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return "", err
+	}
 	var parsed transcriptionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to decode transcription response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	return strings.TrimSpace(parsed.Text), nil
@@ -466,9 +488,9 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, httpError(resp)
 		}
-		audio, rerr := io.ReadAll(resp.Body)
+		audio, rerr := readLimitedBody(resp, maxAudioResponseBytes)
 		if rerr != nil {
-			return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to read tts audio", Retryable: true, Cause: rerr}
+			return nil, rerr
 		}
 		if len(audio) == 0 {
 			return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: "tts returned no audio", Retryable: false, StatusCode: resp.StatusCode}
@@ -535,6 +557,21 @@ func clientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
 	cp := *base
 	cp.Timeout = timeout
 	return &cp
+}
+
+// readLimitedBody buffers a success response body under limit bytes, returning
+// a clear error rather than reading unbounded if the upstream sends more
+// (issue #416). It reads one byte past the cap to detect an over-limit body
+// without buffering the whole thing.
+func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if int64(len(data)) > limit {
+		return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
+	}
+	return data, nil
 }
 
 func httpError(resp *http.Response) error {
