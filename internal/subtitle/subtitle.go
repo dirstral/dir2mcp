@@ -7,11 +7,53 @@ package subtitle
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 )
+
+// blankLineRE matches an interior run of blank lines (a newline, optional
+// whitespace, and one or more further newlines). Such a run terminates a cue
+// block early in both WebVTT and SRT, so renderers collapse it to a single
+// newline to keep cue boundaries intact.
+var blankLineRE = regexp.MustCompile(`\n[ \t]*\n+`)
+
+// collapseBlankLines replaces any interior run of blank lines with a single
+// newline so ordinary transcript text (which may contain paragraph breaks)
+// cannot prematurely terminate a cue block.
+func collapseBlankLines(text string) string {
+	return blankLineRE.ReplaceAllString(text, "\n")
+}
+
+// vttCueTextReplacer escapes the characters that are special in WebVTT cue
+// payloads. Escaping '>' also neutralises the "-->" timing arrow (it becomes
+// "--&gt;"), so a cue line can never be misread as a timing line.
+var vttCueTextReplacer = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+)
+
+// escapeVTTText makes arbitrary transcript text safe as a WebVTT cue payload:
+// it collapses interior blank lines, escapes '&'/'<'/'>', and (via the '>'
+// escape) neutralises any "-->" so the text cannot break the cue structure.
+func escapeVTTText(text string) string {
+	return vttCueTextReplacer.Replace(collapseBlankLines(text))
+}
+
+// srtCueTextReplacer neutralises the "-->" timing arrow in SRT cue text. SRT
+// has no markup escaping, so a literal "-->" on its own line could be parsed as
+// a timing line; replacing it with "-→" keeps the text readable and unambiguous.
+var srtCueTextReplacer = strings.NewReplacer("-->", "-→")
+
+// neutralizeSRTText makes arbitrary transcript text safe as an SRT cue payload:
+// it collapses interior blank lines (which would end the cue block early) and
+// neutralises any "-->" timing arrow.
+func neutralizeSRTText(text string) string {
+	return srtCueTextReplacer.Replace(collapseBlankLines(text))
+}
 
 // Cue is a single subtitle entry: a [StartMS, EndMS] time window and the text
 // shown during it. Index is the 1-based sequence number used by SRT (WebVTT
@@ -122,22 +164,32 @@ func RenderVTT(cues []Cue) string {
 			b.WriteString(speaker)
 			b.WriteByte('>')
 		}
-		b.WriteString(text)
+		b.WriteString(escapeVTTText(text))
 		b.WriteString("\n\n")
 	}
 	return b.String()
 }
 
-// sanitizeVoiceName makes a speaker name safe to embed in a WebVTT <v Name> tag:
-// it trims whitespace and strips '<' and '>' so the name cannot terminate the
-// tag or inject markup. Returns "" for an empty/blank name so the caller omits
-// the voice tag entirely.
+// voiceNameReplacer makes a speaker name safe to embed in a WebVTT <v Name>
+// tag: it strips '<'/'>' (which would terminate the tag or inject markup),
+// escapes '&' (a bare ampersand is an invalid entity in the tag), and replaces
+// CR/LF with a space (a newline would leave the <v ...> tag unterminated).
+var voiceNameReplacer = strings.NewReplacer(
+	"<", "",
+	">", "",
+	"&", "&amp;",
+	"\r", " ",
+	"\n", " ",
+)
+
+// sanitizeVoiceName makes a speaker name safe to embed in a WebVTT <v Name> tag.
+// Returns "" for an empty/blank name so the caller omits the voice tag entirely.
 func sanitizeVoiceName(name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return ""
 	}
-	return strings.TrimSpace(strings.NewReplacer("<", "", ">", "").Replace(name))
+	return strings.TrimSpace(voiceNameReplacer.Replace(name))
 }
 
 // RenderSRT serializes cues as a SubRip (SRT) document: a 1-based index line,
@@ -159,7 +211,7 @@ func RenderSRT(cues []Cue) string {
 		b.WriteString(" --> ")
 		b.WriteString(formatTimestampSRT(cue.EndMS))
 		b.WriteByte('\n')
-		b.WriteString(text)
+		b.WriteString(neutralizeSRTText(text))
 		b.WriteString("\n\n")
 	}
 	return b.String()
