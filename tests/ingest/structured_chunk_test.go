@@ -3,6 +3,7 @@ package tests
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
@@ -95,6 +96,80 @@ func TestChunkStructuredBlocks_PageSpanFallback(t *testing.T) {
 	}
 	if segs[0].Span.Kind != "page" || segs[0].Span.Page != 4 {
 		t.Errorf("span = %+v, want page span on page 4", segs[0].Span)
+	}
+}
+
+// TestChunkStructuredBlocks_MultibyteFlushUsesRunesNotBytes pins the F6 fix:
+// the structured chunker's flush trigger is a RUNE budget (maxChars=2500), not a
+// byte length. A run of same-section Cyrillic blocks totalling well under 2500
+// runes — but well over 2500 *bytes* (2 bytes/rune) — must group into a single
+// chunk, not fragment because strings.Builder.Len() (bytes) tripped the flush.
+func TestChunkStructuredBlocks_MultibyteFlushUsesRunesNotBytes(t *testing.T) {
+	// 10 blocks × 200 Cyrillic runes = 2000 runes (~4000 bytes) plus joiners,
+	// still < 2500 runes but > 2500 bytes.
+	const blockCount = 10
+	const runesPerBlock = 200
+	blocks := make([]docling.Block, 0, blockCount)
+	for i := 0; i < blockCount; i++ {
+		blocks = append(blocks, docling.Block{
+			Label:   "paragraph",
+			Text:    strings.Repeat("я", runesPerBlock),
+			Page:    1,
+			BBox:    bbox(1),
+			Section: []string{"Раздел"},
+		})
+	}
+
+	segs := ingest.ChunkStructuredBlocks(blocks)
+	if len(segs) != 1 {
+		t.Fatalf("expected the multibyte same-section run to group into 1 chunk, got %d", len(segs))
+	}
+	// The single chunk should carry roughly the full rune budget's worth of text,
+	// proving the flush did NOT fire early on byte length.
+	if n := utf8.RuneCountInString(segs[0].Text); n < 2000 {
+		t.Fatalf("grouped chunk has only %d runes, want ~2000+ (early byte-based flush?)", n)
+	}
+	if n := utf8.RuneCountInString(segs[0].Text); n > 2500 {
+		t.Fatalf("grouped chunk has %d runes, exceeds the 2500 rune budget", n)
+	}
+}
+
+// TestChunkStructuredBlocks_MultibyteFlushesAtRuneBudget pins that once a
+// same-section multibyte run exceeds the 2500-rune budget it does split — but at
+// the rune budget, yielding chunks near 2500 runes rather than ~1250 (the byte
+// bug would split a 2-byte/rune script at half the intended size).
+func TestChunkStructuredBlocks_MultibyteFlushesAtRuneBudget(t *testing.T) {
+	const blockCount = 30
+	const runesPerBlock = 200 // 30×200 = 6000 runes total
+	blocks := make([]docling.Block, 0, blockCount)
+	for i := 0; i < blockCount; i++ {
+		blocks = append(blocks, docling.Block{
+			Label:   "paragraph",
+			Text:    strings.Repeat("я", runesPerBlock),
+			Page:    1,
+			BBox:    bbox(1),
+			Section: []string{"Раздел"},
+		})
+	}
+
+	segs := ingest.ChunkStructuredBlocks(blocks)
+	if len(segs) < 2 {
+		t.Fatalf("expected a 6000-rune run to split, got %d chunks", len(segs))
+	}
+	var largest int
+	for _, s := range segs {
+		n := utf8.RuneCountInString(s.Text)
+		if n > 2500 {
+			t.Fatalf("chunk has %d runes, exceeds the 2500 rune budget", n)
+		}
+		if n > largest {
+			largest = n
+		}
+	}
+	// With correct rune accounting at least one chunk approaches the budget; the
+	// byte bug would cap every chunk near ~1250 runes.
+	if largest < 1500 {
+		t.Fatalf("largest chunk only %d runes; flush appears byte-based, not rune-based", largest)
 	}
 }
 

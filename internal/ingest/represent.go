@@ -379,6 +379,15 @@ const (
 	structuredChunkMinChars     = 200
 )
 
+// Code chunking is primarily line-based, but a single window (or a single very
+// long line, e.g. a minified JS/CSS bundle) must still be bounded by characters
+// so it stays within the embedder's input limit. codeChunkMaxChars is a rune
+// budget, kept consistent with the structured/text chunkers.
+const (
+	codeChunkMaxChars     = structuredChunkMaxChars
+	codeChunkOverlapChars = structuredChunkOverlapChars
+)
+
 // chunkStructuredBlocks implements section/element-aware chunking over the
 // ordered blocks of a structured document (spec §7.5): consecutive blocks
 // sharing the same section breadcrumb are grouped, then split by size; tables
@@ -416,6 +425,7 @@ type structuredChunker struct {
 	out          []chunkSegment
 	buf          []docling.Block
 	bufText      strings.Builder
+	bufRunes     int
 	bufSection   []string
 }
 
@@ -442,10 +452,15 @@ func (c *structuredChunker) add(b docling.Block) {
 	}
 	if c.bufText.Len() > 0 {
 		c.bufText.WriteString("\n\n")
+		c.bufRunes += 2
 	}
 	c.bufText.WriteString(b.Text)
+	c.bufRunes += utf8.RuneCountInString(b.Text)
 	c.buf = append(c.buf, b)
-	if c.bufText.Len() >= c.maxChars {
+	// maxChars is a rune budget; compare against the accumulated rune count, not
+	// strings.Builder.Len() (bytes) — otherwise multibyte text (Cyrillic, CJK)
+	// flushes at a fraction of the intended size and over-fragments chunks.
+	if c.bufRunes >= c.maxChars {
 		c.flush()
 	}
 }
@@ -465,6 +480,7 @@ func (c *structuredChunker) flush() {
 	buffered := c.buf
 	c.buf = nil
 	c.bufText.Reset()
+	c.bufRunes = 0
 	c.bufSection = nil
 	if text == "" || len(buffered) == 0 {
 		return
@@ -1002,7 +1018,21 @@ func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment
 		if text == "" {
 			continue
 		}
-		out = append(out, chunkSegment{
+		out = appendCodeWindow(out, text, start, end)
+		if end == len(lines) {
+			break
+		}
+	}
+	return out
+}
+
+// appendCodeWindow emits a line-window's text as one chunk, or—when the window
+// exceeds the rune cap (e.g. a minified single-line bundle)—splits it further by
+// characters so no chunk overruns the embedder input limit. Sub-segment line
+// numbers are mapped back into the window's absolute [start+1, end] range.
+func appendCodeWindow(out []chunkSegment, text string, start, end int) []chunkSegment {
+	if utf8.RuneCountInString(text) <= codeChunkMaxChars {
+		return append(out, chunkSegment{
 			Text: text,
 			Span: model.Span{
 				Kind:      "lines",
@@ -1010,9 +1040,16 @@ func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment
 				EndLine:   end,
 			},
 		})
-		if end == len(lines) {
-			break
-		}
+	}
+	for _, sub := range chunkTextByChars(text, codeChunkMaxChars, codeChunkOverlapChars, 1) {
+		out = append(out, chunkSegment{
+			Text: sub.Text,
+			Span: model.Span{
+				Kind:      "lines",
+				StartLine: start + sub.Span.StartLine,
+				EndLine:   start + sub.Span.EndLine,
+			},
+		})
 	}
 	return out
 }
