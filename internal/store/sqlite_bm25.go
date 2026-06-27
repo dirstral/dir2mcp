@@ -28,6 +28,11 @@ import (
 // a vector-only fallback (returning zero results when the vector index was
 // empty). We now scan into sql.NullFloat64 and order NULL-scored rows LAST so a
 // missing score degrades a single hit's rank rather than failing the query.
+//
+// Quarantine filter (#439, F1): chunks the quality gate quarantined carry
+// embedding_status='error'. They must not surface via the lexical/hybrid path,
+// so the WHERE clause excludes them (embedding_status != 'error'). 'pending'
+// chunks remain searchable lexically (they need no embedding to match BM25).
 func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, indexKind string) ([]model.SearchHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -54,7 +59,8 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 	         FROM chunks_fts
 	         JOIN chunks c ON c.chunk_id = chunks_fts.rowid
 	         LEFT JOIN documents d ON d.rel_path = c.rel_path
-	         WHERE chunks_fts MATCH ? AND c.deleted = 0`
+	         WHERE chunks_fts MATCH ? AND c.deleted = 0
+	               AND c.embedding_status != 'error'`
 	if kind := strings.TrimSpace(indexKind); kind != "" {
 		stmt += ` AND c.index_kind = ?`
 		args = append(args, kind)
