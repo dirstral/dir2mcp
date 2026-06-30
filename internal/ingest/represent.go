@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
+	"github.com/dirstral/dir2mcp/internal/langdetect"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
@@ -59,6 +61,52 @@ func TranscriptRepType(language string) string {
 // RepresentationGenerator handles creation of representations from documents
 type RepresentationGenerator struct {
 	store model.RepresentationStore
+	// langDetectEnabled turns on best-effort language auto-detection for
+	// raw_text representations (SPEC §8.8). Default false; the Service enables it
+	// from config. A raw_text rep has no operator pin or source declaration, so
+	// detection is the only language signal (recorded as language_source=detected).
+	langDetectEnabled bool
+}
+
+// SetLanguageDetection enables or disables best-effort raw_text language
+// auto-detection (SPEC §8.8). Off by default so callers that do not opt in keep
+// the prior behavior (no recorded language).
+func (rg *RepresentationGenerator) SetLanguageDetection(enabled bool) {
+	rg.langDetectEnabled = enabled
+}
+
+// detectedLanguageMeta is the meta_json recorded on a raw_text representation
+// whose language was auto-detected (SPEC §5.2/§8.8). It is marshaled only on the
+// detection-succeeded path; when detection is disabled or yields unknown,
+// rawTextLanguageMeta returns "" directly and this struct is never built.
+type detectedLanguageMeta struct {
+	Language           string  `json:"language,omitempty"`
+	LanguageSource     string  `json:"language_source,omitempty"`
+	LanguageConfidence float64 `json:"language_confidence,omitempty"`
+}
+
+// rawTextLanguageMeta returns the meta_json for a raw_text representation when
+// language detection is enabled and succeeds, else "" (unknown — a first-class,
+// non-error state). Detection never fails ingestion. The detected tag is NOT
+// part of any derivation identity (raw_text has none; its rep_hash is content
+// only), so a detector change can refresh the language without re-embedding.
+func (rg *RepresentationGenerator) rawTextLanguageMeta(text string) string {
+	if !rg.langDetectEnabled {
+		return ""
+	}
+	tag, confidence, ok := langdetect.Detect(text, langdetect.DefaultMinConfidence)
+	if !ok {
+		return ""
+	}
+	encoded, err := json.Marshal(detectedLanguageMeta{
+		Language:           tag,
+		LanguageSource:     langSourceDetected,
+		LanguageConfidence: confidence,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 // RepresentationGenerator handles creation of representations from documents.
@@ -138,6 +186,7 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 		DocID:       doc.DocID,
 		RepType:     RepTypeRawText,
 		RepHash:     repHash,
+		MetaJSON:    rg.rawTextLanguageMeta(string(normalizedContent)),
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,
 	}

@@ -400,6 +400,17 @@ type Config struct {
 	// once it has been quiet for this long.
 	IngestWatchDebounce time.Duration
 
+	// LanguageDetectionEnabled turns on best-effort representation language
+	// auto-detection (SPEC §8.8, config `language_detection_enabled`). On by
+	// default: for a plain-text (raw_text) representation with no operator pin
+	// (configured) and no source-asserted language (declared), the language is
+	// detected from its text and recorded with language_source="detected".
+	// Detection is best-effort and never fails ingestion; below-floor/unknown
+	// results simply leave the language unset (a first-class state). Set false to
+	// record no detected language. (The confidence floor is a fixed default,
+	// langdetect.DefaultMinConfidence; making it configurable is a follow-up.)
+	LanguageDetectionEnabled bool
+
 	STTProvider               string
 	STTMistralModel           string
 	STTElevenLabsModel        string
@@ -672,6 +683,7 @@ type fileConfig struct {
 	STTElevenLabsModel                 *string
 	STTElevenLabsLanguageCode          *string
 	QualityGatesEnabled                *bool
+	LanguageDetectionEnabled           *bool
 	MediaSidecarsDisabled              *bool
 	MediaVariantsGroup                 *bool
 	MediaVariantsSelect                *string
@@ -800,6 +812,7 @@ type persistedConfig struct {
 	STTElevenLabsModel                 string        `yaml:"stt_elevenlabs_model"`
 	STTElevenLabsLanguageCode          string        `yaml:"stt_elevenlabs_language_code"`
 	QualityGatesEnabled                bool          `yaml:"quality_gates_enabled"`
+	LanguageDetectionEnabled           bool          `yaml:"language_detection_enabled"`
 	MediaSidecarsDisabled              bool          `yaml:"media_sidecars_disabled"`
 	MediaVariantsGroup                 bool          `yaml:"media_variants_group"`
 	MediaVariantsSelect                string        `yaml:"media_variants_select"`
@@ -1000,6 +1013,7 @@ func Default() Config {
 		STTElevenLabsModel:        "scribe_v1",
 		STTElevenLabsLanguageCode: "",
 		QualityGatesEnabled:       true,
+		LanguageDetectionEnabled:  true,
 		MediaClipMaxDurationMS:    DefaultMediaClipMaxDurationMS,
 		MediaClipMaxBytes:         DefaultMediaClipMaxBytes,
 		MediaVariantsGroup:        false,
@@ -1125,6 +1139,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		STTElevenLabsModel:                 cfg.STTElevenLabsModel,
 		STTElevenLabsLanguageCode:          cfg.STTElevenLabsLanguageCode,
 		QualityGatesEnabled:                cfg.QualityGatesEnabled,
+		LanguageDetectionEnabled:           cfg.LanguageDetectionEnabled,
 		MediaSidecarsDisabled:              cfg.MediaSidecarsDisabled,
 		MediaVariantsGroup:                 cfg.MediaVariantsGroup,
 		MediaVariantsSelect:                cfg.MediaVariantsSelect,
@@ -1842,6 +1857,9 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.QualityGatesEnabled != nil {
 		cfg.QualityGatesEnabled = *fc.QualityGatesEnabled
 	}
+	if fc.LanguageDetectionEnabled != nil {
+		cfg.LanguageDetectionEnabled = *fc.LanguageDetectionEnabled
+	}
 	applyMediaFileParsed(cfg, fc)
 }
 
@@ -2340,17 +2358,18 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 // from a table (rather than a switch) keeps its cyclomatic complexity flat as
 // more boolean keys are added.
 var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
-	"public":                  func(c *fileConfig) **bool { return &c.Public },
-	"rag.generate_answer":     func(c *fileConfig) **bool { return &c.RAGGenerateAnswer },
-	"ingest.gitignore":        func(c *fileConfig) **bool { return &c.IngestGitignore },
-	"ingest.follow_symlinks":  func(c *fileConfig) **bool { return &c.IngestFollowSymlinks },
-	"ingest.scan_cache":       func(c *fileConfig) **bool { return &c.IngestScanCache },
-	"ingest.late_chunking":    func(c *fileConfig) **bool { return &c.IngestLateChunking },
-	"ingest.watch":            func(c *fileConfig) **bool { return &c.IngestWatch },
-	"quality_gates_enabled":   func(c *fileConfig) **bool { return &c.QualityGatesEnabled },
-	"media_sidecars_disabled": func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
-	"media.variants.group":    func(c *fileConfig) **bool { return &c.MediaVariantsGroup },
-	"media.translate.enabled": func(c *fileConfig) **bool { return &c.MediaTranslateEnabled },
+	"public":                     func(c *fileConfig) **bool { return &c.Public },
+	"rag.generate_answer":        func(c *fileConfig) **bool { return &c.RAGGenerateAnswer },
+	"ingest.gitignore":           func(c *fileConfig) **bool { return &c.IngestGitignore },
+	"ingest.follow_symlinks":     func(c *fileConfig) **bool { return &c.IngestFollowSymlinks },
+	"ingest.scan_cache":          func(c *fileConfig) **bool { return &c.IngestScanCache },
+	"ingest.late_chunking":       func(c *fileConfig) **bool { return &c.IngestLateChunking },
+	"ingest.watch":               func(c *fileConfig) **bool { return &c.IngestWatch },
+	"quality_gates_enabled":      func(c *fileConfig) **bool { return &c.QualityGatesEnabled },
+	"language_detection_enabled": func(c *fileConfig) **bool { return &c.LanguageDetectionEnabled },
+	"media_sidecars_disabled":    func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
+	"media.variants.group":       func(c *fileConfig) **bool { return &c.MediaVariantsGroup },
+	"media.translate.enabled":    func(c *fileConfig) **bool { return &c.MediaTranslateEnabled },
 	"media.subtitles.ttml.enabled": func(c *fileConfig) **bool {
 		return &c.MediaSubtitlesTTMLEnabled
 	},
@@ -2826,6 +2845,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
 	writeBool("quality_gates_enabled", cfg.QualityGatesEnabled)
+	writeBool("language_detection_enabled", cfg.LanguageDetectionEnabled)
 	writeBool("media_sidecars_disabled", cfg.MediaSidecarsDisabled)
 	writeBool("media_variants_group", cfg.MediaVariantsGroup)
 	writeScalar("media_variants_select", cfg.MediaVariantsSelect)
