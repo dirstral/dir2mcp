@@ -76,8 +76,9 @@ func (rg *RepresentationGenerator) SetLanguageDetection(enabled bool) {
 }
 
 // detectedLanguageMeta is the meta_json recorded on a raw_text representation
-// whose language was auto-detected (SPEC §5.2/§8.8). All fields omitempty so a
-// no-detection rep serializes to "{}" / is left empty by the caller.
+// whose language was auto-detected (SPEC §5.2/§8.8). It is marshaled only on the
+// detection-succeeded path; when detection is disabled or yields unknown,
+// rawTextLanguageMeta returns "" directly and this struct is never built.
 type detectedLanguageMeta struct {
 	Language           string  `json:"language,omitempty"`
 	LanguageSource     string  `json:"language_source,omitempty"`
