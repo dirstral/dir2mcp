@@ -6,8 +6,21 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/langdetect"
 	"github.com/dirstral/dir2mcp/internal/provider"
 )
+
+// detectLanguage runs best-effort representation language auto-detection on text
+// when enabled (SPEC §8.8), returning the BCP-47 primary subtag and confidence,
+// or ("", 0, false) when detection is disabled or the result is unknown/below
+// the confidence floor. Detection never fails the caller; unknown is a
+// first-class, non-error state.
+func (s *Service) detectLanguage(text string) (tag string, confidence float64, ok bool) {
+	if s == nil || !s.cfg.LanguageDetectionEnabled {
+		return "", 0, false
+	}
+	return langdetect.Detect(text, langdetect.DefaultMinConfidence)
+}
 
 // Representation provenance and identity-driven re-derivation (spec §8.6.7).
 //
@@ -72,7 +85,7 @@ func (s *Service) activeDiarizeIdentity() string {
 // omitted (omitempty) when unset, so a setup with no resolved STT identity still
 // produces valid meta_json (and an empty recorded identity that the gate treats
 // as "always passes").
-func (s *Service) sttTranscriptMetaJSON(speakers []Speaker) (string, error) {
+func (s *Service) sttTranscriptMetaJSON(speakers []Speaker, text string) (string, error) {
 	meta := transcriptMeta{
 		Source:     sttSource,
 		Language:   strings.TrimSpace(s.transcriptLanguage),
@@ -80,14 +93,18 @@ func (s *Service) sttTranscriptMetaJSON(speakers []Speaker) (string, error) {
 		Provider:   strings.TrimSpace(s.sttProvider),
 		Model:      strings.TrimSpace(s.sttModel),
 	}
-	// transcriptLanguage is an operator pin (media.language / per-provider
-	// stt_language, SPEC §16.2), so when present it is the effective language with
-	// provenance "configured" — the top of the §8.8 precedence. When unset the STT
-	// path records no language (unknown): dir2mcp's transcribers do not currently
-	// report a detected language, and §8.8 forbids assuming a default, so the
-	// representation stays unknown until a detector that reports one is wired.
+	// §8.8 precedence: an operator pin (media.language / per-provider
+	// stt_language, §16.2) is the "configured" language and always wins. With no
+	// pin, fall back to best-effort auto-detection on the transcript text
+	// ("detected"). A detected language is recorded as the effective language but
+	// is deliberately excluded from the derivation identity (see
+	// transcriptIdentityFromMeta): a pure detector change must not re-transcribe.
 	if meta.Language != "" {
 		meta.LanguageSource = langSourceConfigured
+	} else if tag, conf, ok := s.detectLanguage(text); ok {
+		meta.Language = tag
+		meta.LanguageSource = langSourceDetected
+		meta.LanguageConfidence = &conf
 	}
 	if s.diarizeActive {
 		// Record the diarize backend identity whenever diarization is active so a
@@ -371,8 +388,17 @@ func transcriptIdentityFromMeta(metaJSON string) (string, bool) {
 	if strings.TrimSpace(meta.Provider) == "" && strings.TrimSpace(meta.Model) == "" {
 		return "", false
 	}
+	// A detected language (§8.8) is best-effort metadata, NOT part of the
+	// derivation identity: a detector change must not force re-transcription. The
+	// active identity (activeTranscriptIdentity) is built from the configured pin
+	// only, so exclude a detected language here to keep the two comparable. A
+	// configured/declared language remains part of the identity.
+	identityLang := meta.Language
+	if strings.TrimSpace(meta.LanguageSource) == langSourceDetected {
+		identityLang = ""
+	}
 	sttIdentity := derivationIdentity(string(provider.CapSTT),
-		meta.Provider, meta.Model, meta.ModelVersion, meta.Language)
+		meta.Provider, meta.Model, meta.ModelVersion, identityLang)
 	// Fold the recorded diarize identity (§8.6.8) into the transcript identity so
 	// a diarize provider/model change is detected as stale. Only model-derived
 	// diarization records a provider/model; a sidecar-supplied <v> attribution

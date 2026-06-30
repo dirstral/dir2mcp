@@ -2117,7 +2117,7 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 		DocID:       doc.DocID,
 		RepType:     RepTypeExtractedMarkdown,
 		RepHash:     computeRepHash([]byte(ocrText)),
-		MetaJSON:    s.extractionMetaJSON(),
+		MetaJSON:    s.extractionMetaJSON(ocrText),
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,
 	}
@@ -2161,7 +2161,7 @@ func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model
 		DocID:       doc.DocID,
 		RepType:     RepTypeExtractedMarkdown,
 		RepHash:     computeRepHash([]byte(md)),
-		MetaJSON:    s.extractionMetaJSON(),
+		MetaJSON:    s.extractionMetaJSON(md),
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,
 	}
@@ -2223,7 +2223,7 @@ func (s *Service) persistTitle(ctx context.Context, doc model.Document, title st
 	}
 }
 
-func (s *Service) extractionMetaJSON() string {
+func (s *Service) extractionMetaJSON(text string) string {
 	if s == nil || s.extractor == nil {
 		return ""
 	}
@@ -2243,6 +2243,17 @@ func (s *Service) extractionMetaJSON() string {
 		// provider/model already set from extractorProviderModel.
 	default:
 		meta["type"] = fmt.Sprintf("%T", s.extractor)
+	}
+	// §8.8: with no operator pin or provider-declared language, record a
+	// best-effort detected language for the extracted text. Stored as strings
+	// only (no confidence) so the map[string]string round-trips through
+	// ocrIdentityFromMeta, which ignores language entirely — detection never
+	// affects the OCR derivation identity.
+	if _, has := meta["language"]; !has {
+		if tag, _, ok := s.detectLanguage(text); ok {
+			meta["language"] = tag
+			meta["language_source"] = langSourceDetected
+		}
 	}
 	encoded, err := json.Marshal(meta)
 	if err != nil {
@@ -2368,7 +2379,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// attribution that is actually present on the segments.
 	s.applyDiarization(ctx, doc, content, segments)
 
-	metaJSON, err := s.sttTranscriptMetaJSON(distinctSpeakers(segments))
+	metaJSON, err := s.sttTranscriptMetaJSON(distinctSpeakers(segments), transcriptText)
 	if err != nil {
 		return fmt.Errorf("marshal transcript meta: %w", err)
 	}
