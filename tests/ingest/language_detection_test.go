@@ -15,7 +15,7 @@ import (
 
 // sttServiceWithDetection mirrors sttService (derivation_identity_test.go) but
 // turns on §8.8 best-effort language auto-detection.
-func sttServiceWithDetection(t *testing.T, root, stateDir string, st model.Store, sttModel, language string, tr *fakeTranscriber) *ingest.Service {
+func sttServiceWithDetection(t *testing.T, root, stateDir string, st model.Store, provider, sttModel, language string, tr *fakeTranscriber) *ingest.Service {
 	t.Helper()
 	svc := mustNewIngestService(t, config.Config{
 		RootDir:                  root,
@@ -24,7 +24,7 @@ func sttServiceWithDetection(t *testing.T, root, stateDir string, st model.Store
 		LanguageDetectionEnabled: true,
 	}, st)
 	svc.SetTranscriber(tr)
-	svc.SetSTTIdentity("whisper", sttModel)
+	svc.SetSTTIdentity(provider, sttModel)
 	svc.SetTranscriptLanguage(language)
 	return svc
 }
@@ -33,6 +33,49 @@ func sttServiceWithDetection(t *testing.T, root, stateDir string, st model.Store
 // carries) long enough for trigram detection.
 const englishTranscript = "[00:00] The committee reviewed the annual report in detail, and several members raised concerns about the regional budget allocations before the proposal was finally approved by a clear majority."
 
+// fakeExtractor is a stub model.DocumentExtractor returning canned markdown.
+type fakeExtractor struct{ text string }
+
+func (f *fakeExtractor) Extract(_ context.Context, _ string, _ []byte) (string, error) {
+	return f.text, nil
+}
+
+const englishExtracted = "The committee reviewed the annual report in detail and several members raised concerns about the regional budget allocations before approving the proposal."
+
+// TestOCRLanguageDetected_WhenNoPin: an extracted_markdown (OCR) representation
+// records a best-effort detected language (§8.8 `detected`) with no pin.
+func TestOCRLanguageDetected_WhenNoPin(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "doc.pdf"), "fake-pdf-bytes")
+	st := newRealStore(t)
+	svc := mustNewIngestService(t, config.Config{
+		RootDir:                  root,
+		StateDir:                 t.TempDir(),
+		LanguageDetectionEnabled: true,
+	}, st)
+	svc.SetDocumentExtractor(&fakeExtractor{text: englishExtracted})
+
+	f := ingest.DiscoveredFile{RelPath: "doc.pdf", SizeBytes: 14, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	meta, err := st.RepresentationMetaByType(context.Background(), "doc.pdf", ingest.RepTypeExtractedMarkdown)
+	if err != nil {
+		t.Fatalf("RepresentationMetaByType: %v", err)
+	}
+	var p map[string]any
+	if err := json.Unmarshal([]byte(meta), &p); err != nil {
+		t.Fatalf("meta not json (%q): %v", meta, err)
+	}
+	if p["language"] != "en" {
+		t.Errorf("language = %v, want en (meta=%q)", p["language"], meta)
+	}
+	if p["language_source"] != "detected" {
+		t.Errorf("language_source = %v, want detected", p["language_source"])
+	}
+}
+
 // TestTranscriptLanguageDetected_WhenNoPin: with no operator pin, the STT
 // transcript records a best-effort detected language (§8.8 `detected`).
 func TestTranscriptLanguageDetected_WhenNoPin(t *testing.T) {
@@ -40,7 +83,7 @@ func TestTranscriptLanguageDetected_WhenNoPin(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	svc := sttServiceWithDetection(t, root, t.TempDir(), st, "whisper-large-v3", "", &fakeTranscriber{text: englishTranscript})
+	svc := sttServiceWithDetection(t, root, t.TempDir(), st, "whisper", "whisper-large-v3", "", &fakeTranscriber{text: englishTranscript})
 
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
@@ -66,7 +109,7 @@ func TestTranscriptPin_NotOverriddenByDetection(t *testing.T) {
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 	// English audio, but the operator pinned French — the pin must win.
-	svc := sttServiceWithDetection(t, root, t.TempDir(), st, "whisper-large-v3", "fr", &fakeTranscriber{text: englishTranscript})
+	svc := sttServiceWithDetection(t, root, t.TempDir(), st, "whisper", "whisper-large-v3", "fr", &fakeTranscriber{text: englishTranscript})
 
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
@@ -98,7 +141,7 @@ func TestTranscriptDetectedLanguage_DoesNotForceReDerivation(t *testing.T) {
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	tr1 := &fakeTranscriber{text: englishTranscript}
-	svc1 := sttServiceWithDetection(t, root, stateDir, st, "whisper-large-v3", "", tr1)
+	svc1 := sttServiceWithDetection(t, root, stateDir, st, "whisper", "whisper-large-v3", "", tr1)
 	if err := svc1.ProcessDocument(context.Background(), f, nil, false); err != nil {
 		t.Fatalf("scan1: %v", err)
 	}
@@ -111,7 +154,7 @@ func TestTranscriptDetectedLanguage_DoesNotForceReDerivation(t *testing.T) {
 
 	// Same model + same content: identity must match → no re-transcription.
 	tr2 := &fakeTranscriber{text: englishTranscript}
-	svc2 := sttServiceWithDetection(t, root, stateDir, st, "whisper-large-v3", "", tr2)
+	svc2 := sttServiceWithDetection(t, root, stateDir, st, "whisper", "whisper-large-v3", "", tr2)
 	if err := svc2.ProcessDocument(context.Background(), f, nil, false); err != nil {
 		t.Fatalf("scan2: %v", err)
 	}

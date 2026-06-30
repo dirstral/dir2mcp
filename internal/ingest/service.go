@@ -2244,11 +2244,13 @@ func (s *Service) extractionMetaJSON(text string) string {
 	default:
 		meta["type"] = fmt.Sprintf("%T", s.extractor)
 	}
-	// §8.8: with no operator pin or provider-declared language, record a
-	// best-effort detected language for the extracted text. Stored as strings
-	// only (no confidence) so the map[string]string round-trips through
-	// ocrIdentityFromMeta, which ignores language entirely — detection never
-	// affects the OCR derivation identity.
+	// §8.8: record a best-effort detected language for the extracted text. No
+	// extractor reports a language today, so the meta["language"] guard is
+	// forward-compatible: if a future extractor records a provider-declared
+	// language ("declared", which outranks "detected"), the guard preserves it.
+	// Stored as strings only (no confidence) so the map[string]string round-trips
+	// through ocrIdentityFromMeta, which ignores language entirely — detection
+	// never affects the OCR derivation identity.
 	if _, has := meta["language"]; !has {
 		if tag, _, ok := s.detectLanguage(text); ok {
 			meta["language"] = tag
