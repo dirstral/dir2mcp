@@ -326,6 +326,8 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc.transcriber = transcriber
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
+		// Best-effort raw_text language auto-detection (SPEC §8.8), on by default.
+		svc.repGen.SetLanguageDetection(cfg.LanguageDetectionEnabled)
 	}
 	// Construct the output quality gate from config (spec 0.16.0). When the
 	// master switch is on we use the package defaults (per-threshold config is

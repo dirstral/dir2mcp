@@ -40,12 +40,13 @@ const translationSource = "translation"
 // They record which signal won the §8.8 precedence (configured > declared >
 // detected) for a representation's effective language.
 //
-// The third precedence rank, "detected" (a best-effort auto-detector's result),
-// is part of the §8.8 contract but is intentionally NOT emitted yet: dir2mcp's
-// transcribers do not currently report a detected language and §8.8 forbids
-// assuming a default, so a representation with no pin and no declaration stays
-// unknown. The "detected" value will be wired here when a detector that reports
-// a language becomes available; recording it now would be dead code.
+// The third precedence rank, "detected" (a best-effort auto-detector's result,
+// langSourceDetected), is emitted for plain-text (raw_text) representations via
+// the langdetect detector (SPEC §8.8). It is recorded only when neither a pin
+// (configured) nor a source declaration (declared) is present. Transcript and
+// OCR detection is a follow-up: their meta language doubles as part of the
+// derivation identity (§8.6.7), so recording a detected language there without
+// decoupling it from that identity would force spurious re-derivation.
 const (
 	// langSourceConfigured: the language was pinned by an operator (e.g.
 	// media.language / a per-provider stt_language). It always wins (§8.8).
@@ -53,6 +54,9 @@ const (
 	// langSourceDeclared: the language was asserted by the source itself (a
 	// sidecar's language suffix §8.6.4, a track/document language tag).
 	langSourceDeclared = "declared"
+	// langSourceDetected: a best-effort auto-detector determined the language
+	// (§8.8). Lowest precedence — recorded only when no pin/declaration exists.
+	langSourceDetected = "detected"
 )
 
 // sidecarFile is a discovered subtitle sidecar for a media document: its corpus

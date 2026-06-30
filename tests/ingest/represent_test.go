@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -209,6 +210,53 @@ func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
 	}
 	if st.reps[0].RepHash != hash {
 		t.Fatalf("representation hash %q does not match provided content hash %q", st.reps[0].RepHash, hash)
+	}
+}
+
+func TestGenerateRawText_DetectsLanguageWhenEnabled(t *testing.T) {
+	st := &fakeRepStore{failAfter: -1}
+	rg := ingest.NewRepresentationGenerator(st)
+	rg.SetLanguageDetection(true)
+	doc := model.Document{DocID: 1, RelPath: "notes.txt", DocType: "text"}
+	content := []byte("The annual report describes how the committee carefully reviewed every application and then approved the budget for the coming financial year across all of the regional offices.")
+	if err := rg.GenerateRawTextFromContent(context.Background(), doc, content); err != nil {
+		t.Fatalf("GenerateRawTextFromContent failed: %v", err)
+	}
+	if len(st.reps) == 0 {
+		t.Fatal("no representation recorded")
+	}
+	var meta struct {
+		Language       string  `json:"language"`
+		LanguageSource string  `json:"language_source"`
+		Confidence     float64 `json:"language_confidence"`
+	}
+	if err := json.Unmarshal([]byte(st.reps[0].MetaJSON), &meta); err != nil {
+		t.Fatalf("meta_json %q is not valid JSON: %v", st.reps[0].MetaJSON, err)
+	}
+	if meta.Language != "en" {
+		t.Errorf("detected language = %q, want en (meta=%q)", meta.Language, st.reps[0].MetaJSON)
+	}
+	if meta.LanguageSource != "detected" {
+		t.Errorf("language_source = %q, want detected", meta.LanguageSource)
+	}
+	if meta.Confidence <= 0 {
+		t.Errorf("language_confidence = %v, want > 0", meta.Confidence)
+	}
+}
+
+func TestGenerateRawText_NoLanguageWhenDetectionDisabled(t *testing.T) {
+	st := &fakeRepStore{failAfter: -1}
+	rg := ingest.NewRepresentationGenerator(st) // detection off by default
+	doc := model.Document{DocID: 1, RelPath: "notes.txt", DocType: "text"}
+	content := []byte("The annual report describes how the committee reviewed every application and approved the budget for the coming financial year.")
+	if err := rg.GenerateRawTextFromContent(context.Background(), doc, content); err != nil {
+		t.Fatalf("GenerateRawTextFromContent failed: %v", err)
+	}
+	if len(st.reps) == 0 {
+		t.Fatal("no representation recorded")
+	}
+	if strings.TrimSpace(st.reps[0].MetaJSON) != "" {
+		t.Errorf("detection disabled should record no meta_json, got %q", st.reps[0].MetaJSON)
 	}
 }
 
