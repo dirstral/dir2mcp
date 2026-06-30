@@ -757,7 +757,7 @@ Normative docs are maintained in the [`dirstral-spec`](https://github.com/dirstr
 - [dirstral-spec/docs/SPEC.md](dirstral-spec/docs/SPEC.md) — normative behavior, schemas, and runtime contracts
 - [dirstral-spec/docs/ECOSYSTEM.md](dirstral-spec/docs/ECOSYSTEM.md) — ecosystem/market/discovery/payment context
 - [dirstral-spec/docs/x402-payment-adapter-spec.md](dirstral-spec/docs/x402-payment-adapter-spec.md) — facilitator adapter contract
-- dir2mcp implements spec version `0.16.x` ([versioning](dirstral-spec/spec/versioning.md))
+- [dirstral-spec/spec/versioning.md](dirstral-spec/spec/versioning.md) — spec versioning policy and the implementation **compatibility matrix** (the canonical record of which spec version dir2mcp targets; the vendored submodule carries the current spec version in its header)
 
 Operator guides (in-repo):
 
