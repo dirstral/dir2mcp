@@ -93,6 +93,42 @@ func TestIndex_Upsert_StubQuerier(t *testing.T) {
 	}
 }
 
+// TestIndex_Upsert_HighDimSkipsHNSW verifies that a high-dimensional embedding
+// (> pgvector's 2000-dim index limit) still succeeds: the table is created and
+// the INSERT runs, but the CREATE INDEX ... USING hnsw DDL is SKIPPED so the
+// backend is not permanently broken (issue #437 F2).
+func TestIndex_Upsert_HighDimSkipsHNSW(t *testing.T) {
+	stub := &stubQuerier{}
+	ix := pgvectorindex.NewWithQuerier(stub, pgvectorindex.Config{}, false)
+
+	vec := make([]float32, 3072) // gemini-embedding-001 native dim
+	vec[0] = 0.5
+	if err := ix.Upsert(context.Background(), vec, model.IndexPayload{ChunkID: 1, RelPath: "a.md"}); err != nil {
+		t.Fatalf("Upsert at dim 3072 must not fail: %v", err)
+	}
+
+	var sawCreateTable, sawHNSW, sawInsert bool
+	for _, e := range stub.execs {
+		switch {
+		case strings.Contains(e.sql, "CREATE TABLE IF NOT EXISTS"):
+			sawCreateTable = true
+		case strings.Contains(e.sql, "USING hnsw"):
+			sawHNSW = true
+		case strings.Contains(e.sql, "ON CONFLICT (chunk_id) DO UPDATE"):
+			sawInsert = true
+		}
+	}
+	if !sawCreateTable {
+		t.Errorf("expected CREATE TABLE for high-dim upsert, execs: %+v", stub.execs)
+	}
+	if sawHNSW {
+		t.Errorf("HNSW index DDL must be SKIPPED above the 2000-dim limit, execs: %+v", stub.execs)
+	}
+	if !sawInsert {
+		t.Errorf("expected the INSERT to still run, execs: %+v", stub.execs)
+	}
+}
+
 // TestIndex_Upsert_RejectsBadInput mirrors the HNSW contract: empty vector and
 // zero chunk_id are errors.
 func TestIndex_Upsert_RejectsBadInput(t *testing.T) {
