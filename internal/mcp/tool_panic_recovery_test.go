@@ -2,7 +2,12 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/protocol"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // TestInvokeToolHandler_RecoversPanic verifies that a panicking tool handler is
@@ -65,5 +70,71 @@ func TestInvokeToolHandler_PassThrough(t *testing.T) {
 	}
 	if len(result.Content) != 1 || result.Content[0].Text != "ok" {
 		t.Fatalf("result not passed through unchanged: %+v", result)
+	}
+}
+
+// TestSDKTransport_RecoversPanic drives the *production* SDK transport closure
+// (buildSDKServer's AddTool handler) end-to-end: the go-sdk runs tool handlers in
+// a background goroutine with no recover of its own, so a panic that escapes the
+// closure crashes the whole daemon. Before the fix the closure called
+// td.handler directly, bypassing invokeToolHandler's recover guard on the default
+// (x402-off) path. This asserts a panicking handler now returns a clean isError
+// tool result instead of taking down the process. Regression for issue #401.
+func TestSDKTransport_RecoversPanic(t *testing.T) {
+	ctx := context.Background()
+
+	s := &Server{
+		cfg: config.Config{ServerName: "test"},
+		tools: map[string]toolDefinition{
+			protocol.ToolNameSearch: {
+				Name:         protocol.ToolNameSearch,
+				Description:  "panicking tool for test",
+				InputSchema:  map[string]interface{}{"type": "object"},
+				OutputSchema: map[string]interface{}{"type": "object"},
+				handler: func(context.Context, map[string]interface{}) (toolCallResult, *toolExecutionError) {
+					panic("synthetic handler panic via SDK transport")
+				},
+			},
+		},
+	}
+
+	sdkServer := s.buildSDKServer()
+
+	clientTransport, serverTransport := sdkmcp.NewInMemoryTransports()
+	serverSession, err := sdkServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer func() { _ = serverSession.Close() }()
+
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "v0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	// The call must return a normal (in-band) error result, not a transport
+	// error or a crashed daemon.
+	res, err := clientSession.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      protocol.ToolNameSearch,
+		Arguments: map[string]interface{}{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool returned a transport error (handler panic not recovered): %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected an isError tool result after a handler panic, got %+v", res)
+	}
+
+	var text string
+	for _, c := range res.Content {
+		if tc, ok := c.(*sdkmcp.TextContent); ok {
+			text = tc.Text
+			break
+		}
+	}
+	if want := "INTERNAL_ERROR"; !strings.Contains(text, want) {
+		t.Fatalf("expected error result to mention %q, got %q", want, text)
 	}
 }

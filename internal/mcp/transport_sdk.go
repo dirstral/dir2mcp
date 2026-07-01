@@ -397,7 +397,7 @@ func (s *Server) buildSDKServer() *sdkmcp.Server {
 					return nil, fmt.Errorf("invalid tool arguments: %w", err)
 				}
 			}
-			res, toolErr := td.handler(ctx, args)
+			res, toolErr := s.invokeToolHandler(ctx, td, td.Name, args)
 			if toolErr != nil {
 				res = newToolErrorResult(*toolErr)
 			}
