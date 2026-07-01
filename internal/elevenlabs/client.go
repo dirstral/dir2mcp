@@ -21,6 +21,15 @@ const (
 	defaultBaseURL  = "https://api.elevenlabs.io"
 	defaultTimeout  = 30 * time.Second
 	defaultSTTModel = "scribe_v1"
+
+	// maxResponseBytes caps a JSON success response body (STT) so a malicious
+	// or buggy upstream (e.g. a gzip bomb behind a custom base_url) cannot
+	// drive unbounded memory use when we buffer it (issue #416).
+	maxResponseBytes = 64 << 20 // 64 MiB
+	// maxAudioResponseBytes caps a TTS audio body. Audio is legitimately
+	// larger than JSON, so it gets a higher ceiling while still bounding the
+	// read.
+	maxAudioResponseBytes = 256 << 20 // 256 MiB
 )
 
 type Client struct {
@@ -184,9 +193,9 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 		_ = resp.Body.Close()
 	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := readLimitedBody(resp, maxResponseBytes)
 	if err != nil {
-		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to read STT response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
+		return "", err
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
@@ -285,15 +294,9 @@ func (c *Client) SynthesizeWithVoice(ctx context.Context, text, voiceID string) 
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp, maxAudioResponseBytes)
 	if err != nil {
-		return nil, &model.ProviderError{
-			Code:       "ELEVENLABS_FAILED",
-			Message:    "failed to read TTS response",
-			Retryable:  true,
-			StatusCode: resp.StatusCode,
-			Cause:      err,
-		}
+		return nil, err
 	}
 
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
@@ -305,6 +308,21 @@ func (c *Client) SynthesizeWithVoice(ctx context.Context, text, voiceID string) 
 		message = fmt.Sprintf("elevenlabs tts returned status %d", resp.StatusCode)
 	}
 	return nil, mapProviderError(resp.StatusCode, message)
+}
+
+// readLimitedBody buffers a response body under limit bytes, returning a clear
+// error rather than reading unbounded if the upstream sends more (issue #416).
+// It reads one byte past the cap to detect an over-limit body without
+// buffering the whole thing.
+func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if int64(len(data)) > limit {
+		return nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
+	}
+	return data, nil
 }
 
 func mapProviderError(statusCode int, message string) error {

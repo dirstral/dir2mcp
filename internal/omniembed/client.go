@@ -49,6 +49,12 @@ const (
 	// frequently ignore the field or accept the served model alias, but
 	// operators SHOULD set an explicit model via the provider profile.
 	DefaultModel = "omniembed"
+
+	// maxResponseBytes caps a success response body so a malicious or buggy
+	// self-hosted endpoint (the omniembed base_url is operator-supplied and
+	// often unauthenticated) cannot drive unbounded memory use via a
+	// giant/gzip-bombed 200 response (issue #416).
+	maxResponseBytes = 64 << 20 // 64 MiB
 )
 
 // Client speaks the OpenAI-compatible /v1/embeddings contract against a
@@ -241,8 +247,12 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		return nil, httpError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var parsed embedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &model.ProviderError{Code: "OMNIEMBED_FAILED", Message: "failed to decode embedding response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	return collectVectors(parsed, len(inputs), resp.StatusCode)
@@ -302,6 +312,21 @@ func (c *Client) doJSON(ctx context.Context, path string, body []byte) (*http.Re
 		return nil, &model.ProviderError{Code: "OMNIEMBED_FAILED", Message: "request failed", Retryable: true, Cause: err}
 	}
 	return resp, nil
+}
+
+// readLimitedBody buffers a success response body under maxResponseBytes,
+// returning a clear error rather than reading unbounded if the upstream sends
+// more (issue #416). It reads one byte past the cap to detect an over-limit
+// body without buffering the whole thing.
+func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, &model.ProviderError{Code: "OMNIEMBED_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if int64(len(data)) > limit {
+		return nil, &model.ProviderError{Code: "OMNIEMBED_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
+	}
+	return data, nil
 }
 
 func httpError(resp *http.Response) error {

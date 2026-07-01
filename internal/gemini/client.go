@@ -70,6 +70,13 @@ const (
 	// (signed 16-bit little-endian, mono); used to build the WAV header
 	// when the response mimeType omits an explicit rate.
 	geminiTTSSampleRate = 24000
+
+	// maxResponseBytes caps a success response body so a malicious or buggy
+	// upstream (e.g. a gzip bomb behind a compromised/custom base_url) cannot
+	// drive unbounded memory use when we buffer/decode the body (issue #416).
+	// Gemini returns even TTS audio inline (base64) inside the JSON response,
+	// so this single generous cap covers embeddings, chat, STT and TTS.
+	maxResponseBytes = 64 << 20 // 64 MiB
 )
 
 // Client is a Gemini adapter that speaks the OpenAI-compatible wire
@@ -316,8 +323,12 @@ func (c *Client) embedReqsNative(ctx context.Context, modelName string, dim int,
 		return nil, httpError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var parsed geminiBatchEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode embedding response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	if len(parsed.Embeddings) != len(reqs) {
@@ -466,8 +477,12 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 		return "", httpError(resp)
 	}
 
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return "", err
+	}
 	var parsed generateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode generation response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	if !parsed.Usage.Empty() {
@@ -605,8 +620,12 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if resp.StatusCode != http.StatusOK {
 		return "", httpError(resp)
 	}
+	raw, err := readLimitedBody(resp, maxResponseBytes)
+	if err != nil {
+		return "", err
+	}
 	var parsed geminiGenerateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode transcription response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	text := strings.TrimSpace(firstCandidateText(parsed))
@@ -672,8 +691,12 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, httpError(resp)
 		}
+		raw, err := readLimitedBody(resp, maxResponseBytes)
+		if err != nil {
+			return nil, err
+		}
 		var parsed geminiGenerateResponse
-		if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		if err := json.Unmarshal(raw, &parsed); err != nil {
 			return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode tts response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 		}
 		pcm, rate, perr := firstAudioPart(parsed)
@@ -837,11 +860,39 @@ func (c *Client) doJSON(ctx context.Context, path string, body []byte, timeout t
 // a shallow copy so connection pooling is preserved.
 func clientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
 	if base == nil {
-		return &http.Client{Timeout: timeout}
+		return &http.Client{Timeout: timeout, CheckRedirect: refuseRedirect}
 	}
 	cp := *base
 	cp.Timeout = timeout
+	cp.CheckRedirect = refuseRedirect
 	return &cp
+}
+
+// refuseRedirect stops the HTTP client from following any redirect. A direct
+// provider API call never legitimately needs one, and Go copies custom request
+// headers (here the x-goog-api-key key, which it does NOT strip cross-host the
+// way it strips Authorization/Cookie) onto the redirect target — so following a
+// 3xx from a compromised/misconfigured base_url would leak the Gemini key to an
+// attacker-controlled host (issue #416). Returning http.ErrUseLastResponse
+// halts at the 3xx response (surfaced as a non-2xx provider error) without ever
+// sending the key onward.
+func refuseRedirect(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
+// readLimitedBody buffers a success response body under limit bytes, returning
+// a clear error rather than reading unbounded if the upstream sends more
+// (issue #416). It reads one byte past the cap to detect an over-limit body
+// without buffering the whole thing.
+func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if int64(len(data)) > limit {
+		return nil, &model.ProviderError{Code: "GEMINI_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
+	}
+	return data, nil
 }
 
 func httpError(resp *http.Response) error {

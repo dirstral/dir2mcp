@@ -713,6 +713,41 @@ func TestAudioMissingKeyAndEmptyInput(t *testing.T) {
 	}
 }
 
+// TestRedirectIsRefusedAndKeyNotLeaked pins issue #416: the Gemini client must
+// NOT follow HTTP redirects. The key rides a custom header (x-goog-api-key),
+// and Go copies custom headers onto a redirect target (it only strips
+// Authorization/Cookie cross-host) — so a 3xx from a compromised or
+// misconfigured base_url would forward the API key to an attacker-controlled
+// host. The redirect target must never be contacted and the call must fail.
+func TestRedirectIsRefusedAndKeyNotLeaked(t *testing.T) {
+	var attackerHits int32
+	var leaked int32
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attackerHits, 1)
+		if r.Header.Get("x-goog-api-key") != "" {
+			atomic.StoreInt32(&leaked, 1)
+		}
+		_ = json.NewEncoder(w).Encode(embedRespFor(decodeNativeEmbed(t, r)))
+	}))
+	defer attacker.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	c := newClient(redirector.URL)
+	if _, err := c.Embed(context.Background(), "gemini-embedding-001", model.EmbedDocument, []string{"x"}); err == nil {
+		t.Fatal("embed across a redirect must fail (redirect refused), got nil error")
+	}
+	if n := atomic.LoadInt32(&attackerHits); n != 0 {
+		t.Fatalf("redirect target was contacted %d time(s); the redirect must be refused", n)
+	}
+	if atomic.LoadInt32(&leaked) != 0 {
+		t.Fatal("x-goog-api-key was leaked to the redirect target")
+	}
+}
+
 // asProviderErr unwraps via errors.As (repo convention) so wrapped
 // provider errors are still recognized.
 func asProviderErr(err error, target **model.ProviderError) bool {
