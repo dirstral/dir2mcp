@@ -111,6 +111,13 @@ func (s *Service) runHybridSearch(
 	}
 	ls, ok := store.(model.LexicalSearcher)
 	if !ok {
+		// Hybrid is enabled but the store cannot serve BM25 — this silently
+		// degrades retrieval to vector-only (the BM25-regression class, issue
+		// #399). Warn once so it is diagnosable instead of invisible, without
+		// flooding the log on every query.
+		s.hybridNoLexicalWarnOnce.Do(func() {
+			s.logf("hybrid: enabled but store %T does not implement LexicalSearcher; degrading to vector-only search", store)
+		})
 		return nil, false
 	}
 	bm25Hits, err := ls.SearchBM25(ctx, query, hybridCandidatePoolSize, indexKind)

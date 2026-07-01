@@ -108,6 +108,11 @@ type Service struct {
 	// true; the engine can disable it via SetHybridEnabled when the operator
 	// sets retrieval.hybrid.enabled=false.
 	hybridEnabled bool
+	// hybridNoLexicalWarnOnce guards a single warning when hybrid is enabled
+	// but the store does not satisfy model.LexicalSearcher, so a BM25-regression
+	// that silently drops hybrid to vector-only is visible in the logs exactly
+	// once rather than never (issue #399) — and not on every query.
+	hybridNoLexicalWarnOnce sync.Once
 	// reranker, when set and rerankEnabled, re-scores the fused candidate
 	// pool before truncation to k (see SPEC 9.1.1). Fail-open: any error
 	// falls back to the pre-rerank order.
