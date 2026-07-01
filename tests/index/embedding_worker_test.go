@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -222,6 +223,9 @@ func (s *fakeChunkSource) MarkFailedWithCategory(_ context.Context, labels []uin
 type fakeEmbedder struct {
 	vectors [][]float32
 	err     error
+	// gotModel records the model name passed to the most recent Embed call so
+	// tests can assert on modelForKind's resolution (issue #396).
+	gotModel string
 }
 
 // testWorker provides a fake RunOnce sequence; it also implements the
@@ -245,12 +249,31 @@ func (w *testWorker) RunOnce(ctx context.Context, indexKind string) (int, error)
 	return 1, nil
 }
 
-func (e *fakeEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, _ []string) ([][]float32, error) {
+func (e *fakeEmbedder) Embed(_ context.Context, modelName string, _ model.EmbedRole, _ []string) ([][]float32, error) {
+	e.gotModel = modelName
 	if e.err != nil {
 		return nil, e.err
 	}
 	return e.vectors, nil
 }
+
+// fakeUpsertIndex is a minimal model.Index whose Upsert returns a configurable
+// error, so tests can exercise the index-error path (issue #412) without a real
+// vector backend. All other methods are no-ops.
+type fakeUpsertIndex struct {
+	upsertErr error
+}
+
+func (f *fakeUpsertIndex) Upsert(_ context.Context, _ []float32, _ model.IndexPayload) error {
+	return f.upsertErr
+}
+func (f *fakeUpsertIndex) Delete(_ context.Context, _ []uint64) error { return nil }
+func (f *fakeUpsertIndex) Search(_ context.Context, _ []float32, _ int, _ model.Filter) ([]model.IndexHit, error) {
+	return nil, nil
+}
+func (f *fakeUpsertIndex) Identity(_ context.Context) (string, error) { return "", nil }
+func (f *fakeUpsertIndex) Reset(_ context.Context, _ string) error    { return nil }
+func (f *fakeUpsertIndex) Close() error                               { return nil }
 
 func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 	source := &fakeChunkSource{
@@ -552,6 +575,139 @@ func TestEmbeddingWorker_RunOnce_MarkFailedLogging(t *testing.T) {
 	if !strings.Contains(logged, "mark failed update error") || !strings.Contains(logged, "db down") {
 		t.Fatalf("expected log message about mark failed error, got %q", logged)
 	}
+}
+
+// TestEmbeddingWorker_RunOnce_TransientEmbedErrorsLeavePending pins issue #412:
+// the broadened transient classifier (connection refused / 503 / overloaded /
+// EOF) must keep the chunk PENDING for retry rather than permanently failing it.
+func TestEmbeddingWorker_RunOnce_TransientEmbedErrorsLeavePending(t *testing.T) {
+	cases := []struct{ name, msg string }{
+		{"connection-refused", "dial tcp 10.0.0.1:443: connect: connection refused"},
+		{"http-503", "embedding request failed: 503 service unavailable"},
+		{"overloaded", "upstream returned error: overloaded"},
+		{"unexpected-eof", "post /v1/embeddings: unexpected EOF"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := &fakeChunkSource{
+				tasks: []model.ChunkTask{model.NewChunkTask(70, "x", "", model.ChunkMetadata{ChunkID: 70})},
+			}
+			embErr := errors.New(tc.msg)
+			worker := &index.EmbeddingWorker{
+				Source: source, Index: index.NewHNSWIndex(""),
+				Embedder: &fakeEmbedder{err: embErr}, BatchSize: 1,
+			}
+			n, err := worker.RunOnce(context.Background(), "text")
+			if !errors.Is(err, embErr) {
+				t.Fatalf("err = %v, want %v", err, embErr)
+			}
+			if n != 0 {
+				t.Fatalf("indexed = %d, want 0", n)
+			}
+			if len(source.failedLabels) != 0 {
+				t.Fatalf("transient %q must not mark failed, got %v", tc.msg, source.failedLabels)
+			}
+		})
+	}
+
+	// A wrapped io.EOF (structural match, where the string form may be lost)
+	// is also transient.
+	t.Run("wrapped-io-eof", func(t *testing.T) {
+		source := &fakeChunkSource{
+			tasks: []model.ChunkTask{model.NewChunkTask(71, "y", "", model.ChunkMetadata{ChunkID: 71})},
+		}
+		embErr := fmt.Errorf("embed batch failed: %w", io.EOF)
+		worker := &index.EmbeddingWorker{
+			Source: source, Index: index.NewHNSWIndex(""),
+			Embedder: &fakeEmbedder{err: embErr}, BatchSize: 1,
+		}
+		if _, err := worker.RunOnce(context.Background(), "text"); !errors.Is(err, embErr) {
+			t.Fatalf("err = %v, want %v", err, embErr)
+		}
+		if len(source.failedLabels) != 0 {
+			t.Fatalf("wrapped EOF must not mark failed, got %v", source.failedLabels)
+		}
+	})
+}
+
+// TestEmbeddingWorker_RunOnce_TransientIndexErrorLeavesPending pins issue #412
+// part 2: a transient vector-index Upsert error must NOT mark the chunk failed —
+// it stays pending so the next cycle retries once the store recovers.
+func TestEmbeddingWorker_RunOnce_TransientIndexErrorLeavesPending(t *testing.T) {
+	source := &fakeChunkSource{
+		tasks: []model.ChunkTask{model.NewChunkTask(80, "z", "", model.ChunkMetadata{ChunkID: 80})},
+	}
+	upErr := errors.New("upsert vector: 503 service unavailable")
+	worker := &index.EmbeddingWorker{
+		Source: source, Index: &fakeUpsertIndex{upsertErr: upErr},
+		Embedder: &fakeEmbedder{vectors: [][]float32{{1, 0}}}, BatchSize: 1,
+	}
+	n, err := worker.RunOnce(context.Background(), "text")
+	if !errors.Is(err, upErr) {
+		t.Fatalf("err = %v, want %v", err, upErr)
+	}
+	if n != 0 {
+		t.Fatalf("indexed = %d, want 0", n)
+	}
+	if len(source.failedLabels) != 0 {
+		t.Fatalf("transient index error must leave chunk pending, got failed %v", source.failedLabels)
+	}
+	if len(source.embedded) != 0 {
+		t.Fatalf("nothing should be marked embedded on a failed-only batch, got %v", source.embedded)
+	}
+}
+
+// TestEmbeddingWorker_RunOnce_PermanentIndexErrorMarksFailed is the regression
+// guard for the other side of the #412 guard: a NON-transient index error still
+// marks the chunk failed (so genuinely broken chunks are not retried forever).
+func TestEmbeddingWorker_RunOnce_PermanentIndexErrorMarksFailed(t *testing.T) {
+	source := &fakeChunkSource{
+		tasks: []model.ChunkTask{model.NewChunkTask(81, "z", "", model.ChunkMetadata{ChunkID: 81})},
+	}
+	upErr := errors.New("vector dimension mismatch")
+	worker := &index.EmbeddingWorker{
+		Source: source, Index: &fakeUpsertIndex{upsertErr: upErr},
+		Embedder: &fakeEmbedder{vectors: [][]float32{{1, 0}}}, BatchSize: 1,
+	}
+	if _, err := worker.RunOnce(context.Background(), "text"); !errors.Is(err, upErr) {
+		t.Fatalf("err = %v, want %v", err, upErr)
+	}
+	if len(source.failedLabels) != 1 || source.failedLabels[0] != 81 {
+		t.Fatalf("permanent index error must mark chunk failed, got %v", source.failedLabels)
+	}
+}
+
+// TestEmbeddingWorker_ModelForKind_EmptyDefersToAdapter pins issue #396: with no
+// configured embed model, the worker passes "" to the embedder so the provider
+// ADAPTER applies its own default — it must NOT fall back to a Mistral model id
+// (which would fail an OpenAI/Cohere/Gemini corpus).
+func TestEmbeddingWorker_ModelForKind_EmptyDefersToAdapter(t *testing.T) {
+	t.Run("text", func(t *testing.T) {
+		source := &fakeChunkSource{
+			tasks: []model.ChunkTask{model.NewChunkTask(90, "hi", "", model.ChunkMetadata{ChunkID: 90, DocType: "text"})},
+		}
+		emb := &fakeEmbedder{vectors: [][]float32{{1, 0}}} // ModelForText intentionally unset
+		worker := &index.EmbeddingWorker{Source: source, Index: index.NewHNSWIndex(""), Embedder: emb, BatchSize: 1}
+		if _, err := worker.RunOnce(context.Background(), "text"); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		if emb.gotModel != "" {
+			t.Fatalf("text embed model = %q, want empty (adapter default), not a mistral literal", emb.gotModel)
+		}
+	})
+	t.Run("code", func(t *testing.T) {
+		source := &fakeChunkSource{
+			tasks: []model.ChunkTask{model.NewChunkTask(91, "hi", "", model.ChunkMetadata{ChunkID: 91, DocType: "code"})},
+		}
+		emb := &fakeEmbedder{vectors: [][]float32{{1, 0}}} // ModelForCode intentionally unset
+		worker := &index.EmbeddingWorker{Source: source, Index: index.NewHNSWIndex(""), Embedder: emb, BatchSize: 1}
+		if _, err := worker.RunOnce(context.Background(), "code"); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		if emb.gotModel != "" {
+			t.Fatalf("code embed model = %q, want empty (adapter default), not a codestral literal", emb.gotModel)
+		}
+	})
 }
 
 func TestEmbeddingWorker_Run_FatalErrorStops(t *testing.T) {

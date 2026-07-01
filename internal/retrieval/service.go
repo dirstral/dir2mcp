@@ -637,21 +637,33 @@ func truncateQuestion(q string) string {
 	return string(r[:max]) + "…"
 }
 
+// SetQueryEmbeddingModel records the text-axis model used to embed the QUERY.
+// It MUST resolve to the same model the corpus was embedded with — sending a
+// query through a different embedder/model than the index yields a vector in a
+// foreign space and garbage hits.
+//
+// An empty modelName is recorded as empty (clearing the historical
+// "mistral-embed" default), so the active provider adapter applies its OWN
+// default — the very same default the embed worker used for the corpus when its
+// profile left the model blank (modelForKind, issue #396). Previously this was
+// a no-op on empty, so switching the embed provider to OpenAI/Cohere left the
+// query pinned to "mistral-embed" and every search hit a wrong-provider model
+// error while indexing had succeeded. The resolved embed profile always
+// supplies a concrete model for providers that define one (e.g. Mistral), so
+// this only clears the default for providers that intentionally defer to their
+// adapter.
 func (s *Service) SetQueryEmbeddingModel(modelName string) {
-	if strings.TrimSpace(modelName) == "" {
-		return
-	}
 	s.metaMu.Lock()
-	s.textModel = modelName
+	s.textModel = strings.TrimSpace(modelName)
 	s.metaMu.Unlock()
 }
 
+// SetCodeEmbeddingModel records the code-axis query embed model. Empty clears
+// the historical "codestral-embed" default so the active provider adapter
+// applies its own default (issue #396); see SetQueryEmbeddingModel.
 func (s *Service) SetCodeEmbeddingModel(modelName string) {
-	if strings.TrimSpace(modelName) == "" {
-		return
-	}
 	s.metaMu.Lock()
-	s.codeModel = modelName
+	s.codeModel = strings.TrimSpace(modelName)
 	s.metaMu.Unlock()
 }
 

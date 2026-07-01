@@ -61,6 +61,22 @@ type classifierRule struct {
 	keywords []string
 }
 
+// transientNetKeywords is the canonical keyword set for a transient,
+// retryable network/upstream failure. It is the single source of truth
+// shared by ClassifyError (which labels these transient_net) and
+// IsTransientError (which the embedding worker uses to decide whether to
+// leave a chunk PENDING for retry rather than permanently failing it,
+// issue #412), so the retry decision and the diagnostics label never
+// disagree. Beyond the classic socket/DNS failures it also covers the
+// transient upstream statuses providers return under load — 503 Service
+// Unavailable, 529 Overloaded (Anthropic), and a bare EOF / "connection
+// reset" mid-response — all of which a later cycle routinely recovers from.
+var transientNetKeywords = []string{
+	"timeout", "connection refused", "connection reset", "no such host",
+	"context deadline exceeded", "i/o timeout", "503", "529",
+	"service unavailable", "overloaded", "eof",
+}
+
 // classifierRules is the keyword-driven classification table consumed
 // by ClassifyError. Split out as a package var so the function below
 // stays under the cyclomatic-complexity budget and so new keywords
@@ -69,9 +85,26 @@ var classifierRules = []classifierRule{
 	{ErrorCategoryRateLimit, []string{"429", "rate limit", "rate-limit", "quota exceeded", "too many requests"}},
 	{ErrorCategoryPayloadTooLarge, []string{"413", "payload too large", "request entity too large", "file too large", "exceeds maximum size"}},
 	{ErrorCategoryAuth, []string{"401", "403", "unauthorized", "forbidden", "invalid api key", "authentication"}},
-	{ErrorCategoryTransientNet, []string{"timeout", "connection refused", "connection reset", "no such host", "context deadline exceeded", "i/o timeout"}},
+	{ErrorCategoryTransientNet, transientNetKeywords},
 	{ErrorCategoryParseError, []string{"parse", "decode", "ocr", "extract", "corrupt", "unsupported"}},
 	{ErrorCategoryEmbeddingFailure, []string{"embedding", "embed", "vector", "dimension"}},
+}
+
+// IsTransientError reports whether err is a transient, retryable failure:
+// a net.Error timeout, or a message matching the shared transient_net
+// keyword set (connection refused/reset, DNS, 503/529, service
+// unavailable, overloaded, EOF). It exists so the embedding worker's
+// retry gate (issue #412) and ClassifyError's transient_net label use the
+// exact same definition — a failure the worker leaves PENDING is the same
+// class the diagnostics surface reports as transient_net. nil ⇒ false.
+func IsTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isNetTransient(err) {
+		return true
+	}
+	return containsAny(strings.ToLower(err.Error()), transientNetKeywords)
 }
 
 // ClassifyError returns the ErrorCategory that best describes err.
