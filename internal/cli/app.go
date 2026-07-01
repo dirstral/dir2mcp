@@ -844,6 +844,16 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 		}
 	}
 
+	// Route open_file / OCR reads through the corpus filesystem for object-store
+	// backends so the ask CLI can read S3-backed documents too (#432). A build
+	// failure is non-fatal here: local/NFS corpora do not need it and search/ask
+	// citations never touch the corpus FS, so ask still functions.
+	if sourceIsRemote(cfg) {
+		if corpusFS, fsErr := buildCorpusFS(ctx, cfg); fsErr == nil {
+			ret.SetCorpusFS(corpusFS)
+		}
+	}
+
 	cleanup := func() {
 		_ = textIx.Close()
 		_ = codeIx.Close()

@@ -133,6 +133,13 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if setter, ok := ing.(corpusFSSetter); ok {
 		setter.SetCorpusFS(corpusFS)
 	}
+	// Route retrieval-time reads (open_file raw text / OCR / transcript) through
+	// the corpus filesystem for object-store backends so open_file works on an S3
+	// corpus (#432). Local/NFS corpora keep the historical local read path (their
+	// resolved-path + symlink-containment behavior) untouched.
+	if sourceIsRemote(cfg) {
+		ret.SetCorpusFS(corpusFS)
+	}
 
 	emitter.Emit("info", "index_loaded", map[string]interface{}{
 		"state_dir": cfg.StateDir,
@@ -1009,6 +1016,15 @@ func initIndexingState(ctx context.Context, st model.Store, ret *retrieval.Servi
 // configured backend (local/nfs/s3) drives discovery and reads.
 type corpusFSSetter interface {
 	SetCorpusFS(fsys corpusfs.CorpusFS)
+}
+
+// sourceIsRemote reports whether the configured corpus source is an object-store
+// backend (currently S3) rather than a local/NFS filesystem. Retrieval-time
+// reads are routed through the corpus filesystem only for remote backends; local
+// and NFS corpora keep the historical local-filesystem read path. Kind matching
+// mirrors corpusfs.New (case-insensitive; empty normalizes to local).
+func sourceIsRemote(cfg config.Config) bool {
+	return strings.EqualFold(strings.TrimSpace(cfg.Source.Kind), "s3")
 }
 
 // buildCorpusFS constructs the corpus filesystem selected by cfg.Source
