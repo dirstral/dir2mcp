@@ -3,12 +3,12 @@ package ingest
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 )
@@ -44,7 +44,22 @@ const (
 	maxDoclingStderrBytes = 1 * 1024 * 1024
 )
 
-var errDoclingOutputTooLarge = errors.New("docling output exceeded configured limit")
+// doclingExtractTimeout bounds a single document's docling subprocess so one
+// pathological file can never wedge the whole indexer (issue #406). docling
+// streams tqdm/loguru progress for the lifetime of a slow extraction, so the
+// limit must sit comfortably above the slowest real document: large multi-
+// hundred-page legal PDFs (the corpus this protects) can take several minutes
+// on CPU-only hosts, so 15 minutes leaves generous headroom while still
+// guaranteeing forward progress. On expiry the document is marked failed
+// (retryable) instead of hanging indexing. It is a var (not a const) only so
+// tests can shorten it; production never reassigns it.
+var doclingExtractTimeout = 15 * time.Minute
+
+// doclingWaitDelay is a backstop after the context is cancelled (timeout or
+// shutdown): os/exec sends the kill signal, and if the child has not exited
+// within this grace period the I/O pipes are force-closed so cmd.Run() cannot
+// block indefinitely on a wedged subprocess that ignores cancellation.
+const doclingWaitDelay = 10 * time.Second
 
 // SanitizeDoclingEnv returns env (in os.Environ "KEY=VALUE" form) with the
 // Python path-injection variables removed and user site-packages disabled, so
@@ -78,17 +93,42 @@ type doclingExtractor struct {
 	commandTemplate string
 }
 
+// limitedBuffer caps how much it retains while still accepting every write.
+// Crucially it NEVER returns an error: when wired as cmd.Stdout/cmd.Stderr, a
+// Write that returns an error makes os/exec stop draining that pipe, so the
+// child blocks on a full pipe and cmd.Run() never returns — docling streams
+// verbose tqdm/loguru progress to stderr, so a large PDF can exceed the cap and
+// deadlock indexing (issue #406). Instead, once over the cap it discards the
+// overflow (no longer appending to buf) but reports the full length as written
+// so the pipe keeps draining. Callers detect over-cap output via Truncated()
+// after Run() returns.
 type limitedBuffer struct {
-	buf   *bytes.Buffer
-	limit int
+	buf       *bytes.Buffer
+	limit     int
+	truncated bool
 }
 
 func (w *limitedBuffer) Write(p []byte) (int, error) {
-	if w.limit > 0 && w.buf.Len()+len(p) > w.limit {
-		return 0, errDoclingOutputTooLarge
+	if w.limit <= 0 {
+		return w.buf.Write(p)
 	}
-	return w.buf.Write(p)
+	if remaining := w.limit - w.buf.Len(); remaining > 0 {
+		if len(p) <= remaining {
+			return w.buf.Write(p)
+		}
+		// Keep what fits, discard the rest, but acknowledge the whole write so
+		// os/exec keeps draining the pipe.
+		_, _ = w.buf.Write(p[:remaining])
+		w.truncated = true
+		return len(p), nil
+	}
+	// Already at/over the cap: discard but acknowledge to keep the pipe draining.
+	w.truncated = true
+	return len(p), nil
 }
+
+// Truncated reports whether any bytes were discarded because the cap was hit.
+func (w *limitedBuffer) Truncated() bool { return w.truncated }
 
 // NewDoclingExtractor returns a document extractor backed by a local docling
 // CLI invocation. If commandTemplate is blank, a default `docling` command is
@@ -176,13 +216,19 @@ func (d *doclingExtractor) runFileOutput(ctx context.Context, inputPath string) 
 	if err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, doclingExtractTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.WaitDelay = doclingWaitDelay
 	cmd.Env = SanitizeDoclingEnv(os.Environ())
 	// docling logs progress to stdout/stderr; the real output is the file in
 	// outDir, so stdout is discarded and only stderr is captured for diagnostics.
 	var stderr bytes.Buffer
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("docling command timed out after %s", doclingExtractTimeout)
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
@@ -208,18 +254,22 @@ func (d *doclingExtractor) runStdout(ctx context.Context, inputPath string) (str
 	if err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, doclingExtractTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.WaitDelay = doclingWaitDelay
 	// Run docling with a sanitized environment so it uses only its bundled
 	// venv. A stray PYTHONPATH/PYTHONHOME in the caller's shell (e.g. from a
 	// conda install) would otherwise be added to the venv interpreter's
 	// sys.path and shadow the venv's pinned packages with a different version.
 	cmd.Env = SanitizeDoclingEnv(os.Environ())
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: maxDoclingOutputBytes}
+	stdoutBuf := &limitedBuffer{buf: &bytes.Buffer{}, limit: maxDoclingOutputBytes}
+	var stderr bytes.Buffer
+	cmd.Stdout = stdoutBuf
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
 	if err := cmd.Run(); err != nil {
-		if errors.Is(err, errDoclingOutputTooLarge) {
-			return "", fmt.Errorf("docling command output exceeded limit")
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("docling command timed out after %s", doclingExtractTimeout)
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -228,7 +278,12 @@ func (d *doclingExtractor) runStdout(ctx context.Context, inputPath string) (str
 		return "", fmt.Errorf("docling command failed: %s", msg)
 	}
 
-	out := strings.TrimSpace(stdout.String())
+	// The buffer keeps draining past the cap (so the child never deadlocks on a
+	// full pipe); reject over-cap stdout here, after the command has exited.
+	if stdoutBuf.Truncated() {
+		return "", fmt.Errorf("docling command output exceeded limit")
+	}
+	out := strings.TrimSpace(stdoutBuf.buf.String())
 	if out == "" {
 		return "", fmt.Errorf("docling command produced empty output")
 	}
