@@ -62,6 +62,72 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 	assertServiceRunDocStatuses(t, st)
 }
 
+// TestServiceRun_CountersResetPerScan guards issue #426: the run-progress
+// counters must reflect the current scan/corpus, not a monotonic sum of every
+// scan the daemon has performed. Two successive scans over an unchanged corpus
+// must therefore report the same steady-state totals instead of doubling.
+func TestServiceRun_CountersResetPerScan(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
+	mustWriteFile(t, filepath.Join(root, "code", "main.go"), []byte("package main\n"))
+	mustWriteFile(t, filepath.Join(root, "archive.zip"), []byte("PK\x03\x04"))
+	mustWriteFile(t, filepath.Join(root, "secret.txt"), []byte("Authorization: Bearer abcdefgh.ijklmnop.qrstuvwx\n"))
+
+	st := newMemoryStore()
+	st.docs["gone.txt"] = model.Document{
+		RelPath:   "gone.txt",
+		DocType:   "text",
+		SizeBytes: 4,
+		MTimeUnix: 1,
+		Status:    "ok",
+	}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetIndexingState(indexState)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("first Run failed: %v", err)
+	}
+	first := indexState.Snapshot()
+	// keep.txt + code/main.go index; archive.zip + secret.txt skip; gone.txt (in
+	// the store, absent on disk) is tombstoned.
+	if first.Scanned != 4 || first.Indexed != 2 || first.Skipped != 2 || first.Deleted != 1 || first.Errors != 0 {
+		t.Fatalf("first run counts unexpected: scanned=%d indexed=%d skipped=%d deleted=%d errors=%d",
+			first.Scanned, first.Indexed, first.Skipped, first.Deleted, first.Errors)
+	}
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("second Run failed: %v", err)
+	}
+	second := indexState.Snapshot()
+	// Without the per-run reset these would be 8/4/4 (accumulated). gone.txt was
+	// already tombstoned, so the second scan sees no new deletions.
+	if second.Scanned != 4 {
+		t.Fatalf("second run Scanned=%d want=4 (counters accumulated across scans)", second.Scanned)
+	}
+	if second.Indexed != 2 {
+		t.Fatalf("second run Indexed=%d want=2 (counters accumulated across scans)", second.Indexed)
+	}
+	if second.Skipped != 2 {
+		t.Fatalf("second run Skipped=%d want=2 (counters accumulated across scans)", second.Skipped)
+	}
+	if second.Deleted != 0 {
+		t.Fatalf("second run Deleted=%d want=0", second.Deleted)
+	}
+	if second.Errors != 0 {
+		t.Fatalf("second run Errors=%d want=0", second.Errors)
+	}
+	// The indexed+skipped+errors <= scanned invariant must hold every run.
+	if second.Indexed+second.Skipped+second.Errors > second.Scanned {
+		t.Fatalf("invariant violated: indexed(%d)+skipped(%d)+errors(%d) > scanned(%d)",
+			second.Indexed, second.Skipped, second.Errors, second.Scanned)
+	}
+}
+
 func assertServiceRunSnapshotCounts(t *testing.T, snapshot appstate.IndexingSnapshot) {
 	t.Helper()
 	if snapshot.Scanned != 5 {
@@ -425,6 +491,41 @@ func TestServiceRun_RepGenerationFailureMarksDocAsError(t *testing.T) {
 	}
 	if len(st.reps) != 0 {
 		t.Fatalf("expected no representations after rollback, got %d", len(st.reps))
+	}
+}
+
+// TestServiceRun_RepGenerationFailureCountsErrorNotIndexed guards the
+// double-count half of issue #426: a document whose representation generation
+// fails must count solely as an error, never as both indexed and error, so the
+// indexed+skipped+errors <= scanned invariant holds.
+func TestServiceRun_RepGenerationFailureCountsErrorNotIndexed(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "fail.txt"), []byte("some valid text content\n"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	inner := newMemoryStore()
+	st := &failingChunkMemoryStore{memoryStore: inner}
+
+	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetIndexingState(indexState)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned unexpected error: %v", err)
+	}
+
+	snap := indexState.Snapshot()
+	if snap.Errors != 1 {
+		t.Fatalf("Errors=%d want=1", snap.Errors)
+	}
+	if snap.Indexed != 0 {
+		t.Fatalf("Indexed=%d want=0 (failed rep-gen must not also count as indexed)", snap.Indexed)
+	}
+	if snap.Indexed+snap.Skipped+snap.Errors > snap.Scanned {
+		t.Fatalf("invariant violated: indexed(%d)+skipped(%d)+errors(%d) > scanned(%d)",
+			snap.Indexed, snap.Skipped, snap.Errors, snap.Scanned)
 	}
 }
 

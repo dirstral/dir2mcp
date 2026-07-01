@@ -74,6 +74,26 @@ func (s *IndexingState) SetRunning(running bool) {
 	s.running.Store(running)
 }
 
+// ResetProgress zeroes the per-run progress counters that runScan owns so a new
+// scan reports the current corpus rather than an ever-growing sum of every scan
+// the daemon has performed (issue #426). It deliberately leaves embeddedOK
+// untouched: that counter is owned by the (separately running, resumable) embed
+// worker and preloaded from the store, so it reflects durable embed progress
+// rather than a single scan and must survive across rescans. jobID/mode/running
+// are lifecycle fields, not counters, and are left as-is.
+func (s *IndexingState) ResetProgress() {
+	if s == nil {
+		return
+	}
+	s.scanned.Store(0)
+	s.indexed.Store(0)
+	s.skipped.Store(0)
+	s.deleted.Store(0)
+	s.representations.Store(0)
+	s.chunksTotal.Store(0)
+	s.errors.Store(0)
+}
+
 func (s *IndexingState) AddScanned(delta int64) {
 	if s == nil {
 		return
