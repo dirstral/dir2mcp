@@ -2,6 +2,7 @@ package elevenlabsbridge
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/protocol"
 )
+
+const inboundSecretHeader = "X-Bridge-Secret"
 
 const defaultAskK = 3
 const maxBridgeRequestBodyBytes int64 = 1 << 20
@@ -74,12 +77,79 @@ func (b *bridge) MCPURL() string {
 	return b.cfg.MCPURL
 }
 
+// InboundAuthEnabled reports whether protected routes require a shared secret.
+func (b *bridge) InboundAuthEnabled() bool {
+	if b == nil {
+		return false
+	}
+	return b.cfg.InboundSecretConfigured()
+}
+
 func (b *bridge) routes() {
+	// /health is intentionally unauthenticated: it returns no corpus data.
 	b.mux.HandleFunc("/health", b.handleHealth)
-	b.mux.HandleFunc("/ask", b.methodGuard(http.MethodPost, b.handleAsk))
-	b.mux.HandleFunc("/search", b.methodGuard(http.MethodPost, b.handleSearch))
-	b.mux.HandleFunc("/list_files", b.methodGuard(http.MethodGet, b.handleListFiles, http.MethodPost))
-	b.mux.HandleFunc("/stats", b.methodGuard(http.MethodGet, b.handleStats, http.MethodPost))
+	b.mux.HandleFunc("/ask", b.protected(http.MethodPost, b.handleAsk))
+	b.mux.HandleFunc("/search", b.protected(http.MethodPost, b.handleSearch))
+	b.mux.HandleFunc("/list_files", b.protected(http.MethodGet, b.handleListFiles, http.MethodPost))
+	b.mux.HandleFunc("/stats", b.protected(http.MethodGet, b.handleStats, http.MethodPost))
+}
+
+// protected wraps a handler with the inbound-auth check followed by the HTTP
+// method guard, so unauthenticated callers are rejected before any work runs.
+func (b *bridge) protected(allowed string, fn http.HandlerFunc, extra ...string) http.HandlerFunc {
+	return b.requireInboundAuth(b.methodGuard(allowed, fn, extra...))
+}
+
+// requireInboundAuth rejects requests that do not present the configured shared
+// secret. When no secret is configured the handler passes through; in that case
+// the non-loopback guard (ValidateListenSecurity) prevents the bridge from
+// starting on a publicly reachable address.
+func (b *bridge) requireInboundAuth(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !b.cfg.InboundSecretConfigured() {
+			fn(w, r)
+			return
+		}
+		if !b.inboundSecretMatches(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="elevenlabs-bridge"`)
+			writeJSONError(w, http.StatusUnauthorized, "missing or invalid inbound credentials")
+			return
+		}
+		fn(w, r)
+	}
+}
+
+// inboundSecretMatches performs a constant-time comparison of the presented
+// credential against the configured secret. It accepts either an
+// "Authorization: Bearer <secret>" header or an "X-Bridge-Secret: <secret>"
+// header.
+func (b *bridge) inboundSecretMatches(r *http.Request) bool {
+	secret := strings.TrimSpace(b.cfg.InboundSecret)
+	if secret == "" {
+		return false
+	}
+	presented := strings.TrimSpace(r.Header.Get(inboundSecretHeader))
+	if presented == "" {
+		if auth := strings.TrimSpace(r.Header.Get("Authorization")); auth != "" {
+			if rest, ok := cutBearerPrefix(auth); ok {
+				presented = strings.TrimSpace(rest)
+			}
+		}
+	}
+	if presented == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(secret)) == 1
+}
+
+// cutBearerPrefix strips a case-insensitive "Bearer " prefix from an
+// Authorization header value.
+func cutBearerPrefix(value string) (string, bool) {
+	const prefix = "bearer "
+	if len(value) < len(prefix) || !strings.EqualFold(value[:len(prefix)], prefix) {
+		return "", false
+	}
+	return value[len(prefix):], true
 }
 
 func (b *bridge) methodGuard(allowed string, fn http.HandlerFunc, extra ...string) http.HandlerFunc {
@@ -266,6 +336,9 @@ func Run(ctx context.Context, cfg Config, listenAddr string) error {
 // RunWithBridge starts the bridge HTTP server with a pre-constructed bridge and
 // blocks until the context is canceled or the server fails to start.
 func RunWithBridge(ctx context.Context, b *bridge, listenAddr string) error {
+	if err := ValidateListenSecurity(listenAddr, b.cfg.InboundSecretConfigured(), b.cfg.ForceInsecure); err != nil {
+		return err
+	}
 	server := &http.Server{
 		Addr:              strings.TrimSpace(listenAddr),
 		Handler:           b.Handler(),

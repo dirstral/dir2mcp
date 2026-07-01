@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +30,22 @@ type Config struct {
 	MCPToken string
 	StateDir string
 	Port     int
+	// InboundSecret is the shared secret that inbound callers must present
+	// (via "Authorization: Bearer <secret>" or "X-Bridge-Secret: <secret>")
+	// on every protected route. When empty, inbound auth is disabled and the
+	// bridge refuses to bind to a non-loopback address unless ForceInsecure is
+	// set.
+	InboundSecret string
+	// ForceInsecure permits binding to a non-loopback address without an
+	// inbound secret. It mirrors the main server's --force-insecure escape
+	// hatch and is unsafe: anyone who can reach the socket can drive
+	// authenticated MCP calls against the private corpus.
+	ForceInsecure bool
+}
+
+// InboundSecretConfigured reports whether an inbound shared secret is set.
+func (cfg Config) InboundSecretConfigured() bool {
+	return strings.TrimSpace(cfg.InboundSecret) != ""
 }
 
 // DefaultConfig returns the bridge defaults used when env vars and flags are
@@ -53,6 +70,9 @@ func LoadConfigFromEnv(env map[string]string) (Config, error) {
 	}
 	if v := strings.TrimSpace(env["STATE_DIR"]); v != "" {
 		cfg.StateDir = v
+	}
+	if v := strings.TrimSpace(env["BRIDGE_INBOUND_SECRET"]); v != "" {
+		cfg.InboundSecret = v
 	}
 	if v := strings.TrimSpace(env["PORT"]); v != "" {
 		port, err := strconv.Atoi(v)
@@ -93,10 +113,11 @@ func LoadConfigFromEnv(env map[string]string) (Config, error) {
 // LoadConfigFromOSEnv resolves the bridge config from the current process env.
 func LoadConfigFromOSEnv() (Config, error) {
 	return LoadConfigFromEnv(map[string]string{
-		"MCP_URL":   os.Getenv("MCP_URL"),
-		"MCP_TOKEN": os.Getenv("MCP_TOKEN"),
-		"STATE_DIR": os.Getenv("STATE_DIR"),
-		"PORT":      os.Getenv("PORT"),
+		"MCP_URL":               os.Getenv("MCP_URL"),
+		"MCP_TOKEN":             os.Getenv("MCP_TOKEN"),
+		"STATE_DIR":             os.Getenv("STATE_DIR"),
+		"PORT":                  os.Getenv("PORT"),
+		"BRIDGE_INBOUND_SECRET": os.Getenv("BRIDGE_INBOUND_SECRET"),
 	})
 }
 
@@ -152,6 +173,57 @@ func readTokenFromFile(tokenPath string) (token, source, absPath string, err err
 // port. The bridge intentionally binds to loopback by default.
 func (cfg Config) EffectiveListenAddr() string {
 	return fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+}
+
+// isLoopbackListenAddr reports whether listenAddr binds only to a loopback
+// interface. An empty host (e.g. ":8088") or a wildcard host (0.0.0.0, ::) is
+// treated as non-loopback because it is reachable from other hosts. Unparseable
+// addresses are treated as non-loopback (fail closed).
+func isLoopbackListenAddr(listenAddr string) bool {
+	addr := strings.TrimSpace(listenAddr)
+	if addr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port present; treat the whole value as the host.
+		host = addr
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		// Empty host binds all interfaces.
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	if parsed == nil {
+		return false
+	}
+	if parsed.IsUnspecified() {
+		return false
+	}
+	return parsed.IsLoopback()
+}
+
+// ValidateListenSecurity enforces the non-loopback guard: binding to a
+// non-loopback address without an inbound secret is refused unless
+// forceInsecure is set. Loopback binds (local development) are always allowed.
+// It mirrors the main server's --public/--force-insecure contract.
+func ValidateListenSecurity(listenAddr string, hasInboundSecret, forceInsecure bool) error {
+	if hasInboundSecret || forceInsecure {
+		return nil
+	}
+	if isLoopbackListenAddr(listenAddr) {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to bind elevenlabs bridge to non-loopback address %q without inbound auth: "+
+			"set BRIDGE_INBOUND_SECRET (or --inbound-secret) to require a shared secret, "+
+			"or pass --force-insecure to override (unsafe: exposes the private corpus to anonymous callers)",
+		strings.TrimSpace(listenAddr),
+	)
 }
 
 func readConnectionPayload(stateDir string) (connectionPayload, error) {
