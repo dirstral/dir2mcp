@@ -27,15 +27,21 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitConfigInvalid
 	}
 
+	cfg, code := a.loadReindexConfig(global)
+	if code != exitSuccess {
+		return code
+	}
+	// Refuse before prompting/destroying anything: a reindex under a live
+	// daemon corrupts the shared index/state (issue #418).
+	if code := a.refuseReindexIfDaemonRunning(global, cfg); code != exitSuccess {
+		return code
+	}
+
 	if !a.confirmDestructive(global, "Re-index all documents?", "Discards the current index and rebuilds it from scratch (may re-run OCR/embeddings).") {
 		writeln(a.stderr, "reindex aborted")
 		return exitSuccess
 	}
 
-	cfg, code := a.loadReindexConfig(global)
-	if code != exitSuccess {
-		return code
-	}
 	st, code := a.prepareReindexStore(ctx, global, cfg)
 	if code != exitSuccess {
 		return code
@@ -73,6 +79,40 @@ func (a *App) loadReindexConfig(global globalOptions) (config.Config, int) {
 	}
 	cfg.StateDir = baseDir
 	return cfg, exitSuccess
+}
+
+// refuseReindexIfDaemonRunning blocks a reindex when a live `dir2mcp up`
+// daemon owns the same state dir. A reindex clears content hashes and
+// unlinks the on-disk vector index (see prepareReindexStore); doing that
+// under a running daemon means two concurrent sqlite writers and index
+// files removed out from under a process that still holds them open —
+// index/state corruption, with the daemon continuing to serve a freed,
+// stale index (issue #418). We reuse the exact pid-file + liveness check
+// `up` uses to detect an already-running instance (readPIDFile +
+// processIsAlive) rather than reimplementing pid logic, and refuse with
+// an actionable error instead of racing the daemon.
+//
+// Returns exitSuccess (reindex may proceed) when there is no pid file,
+// the pid file is unreadable/malformed, or it names a dead process — none
+// of which we can positively identify as a live daemon.
+func (a *App) refuseReindexIfDaemonRunning(global globalOptions, cfg config.Config) int {
+	pid, err := readPIDFile(pidFilePath(cfg.StateDir))
+	if err != nil {
+		// No pid file (the common case) or a malformed one: nothing we can
+		// confirm is a live daemon, so let the reindex proceed. `down`
+		// handles cleanup of a malformed pid file.
+		return exitSuccess
+	}
+	if !processIsAlive(pid) {
+		// Stale pid file from a daemon that crashed/exited without cleanup —
+		// safe to reindex.
+		return exitSuccess
+	}
+	writeCLIError(a.stderr, global.jsonOutput, exitGeneric,
+		fmt.Sprintf("dir2mcp is running for %s (pid %d); refusing to reindex under a live daemon", cfg.StateDir, pid),
+		"Stop it with `dir2mcp down` first, then re-run `dir2mcp reindex`.",
+	)
+	return exitGeneric
 }
 
 // prepareReindexStore creates the state directory, opens the store,
