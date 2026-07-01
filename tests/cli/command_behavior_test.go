@@ -135,6 +135,138 @@ func TestStatusReadsCorpusSnapshotHuman(t *testing.T) {
 	}
 }
 
+// runningCorpusJSON returns a corpus.json payload that records indexing as
+// currently running, used to exercise the stale-running reconciliation (#418).
+func runningCorpusJSON() string {
+	return `{
+  "ts": "2026-03-01T00:00:00Z",
+  "indexing": {"mode":"incremental","running":true,"scanned":1,"indexed":1,"skipped":0,"deleted":0,"representations":1,"chunks_total":1,"embedded_ok":1,"errors":0},
+  "doc_counts": {"code": 1},
+  "total_docs": 1,
+  "code_ratio": 1.0
+}`
+}
+
+// TestStatusStaleRunningReportsStopped covers the core #418 fix: corpus.json
+// recorded indexing as running, but no live daemon owns the state dir (no pid
+// file), so status must reconcile the snapshot to "stopped" instead of
+// reporting a stale, perpetual "running".
+func TestStatusStaleRunningReportsStopped(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "corpus.json"), []byte(runningCorpusJSON()), 0o644); err != nil {
+		t.Fatalf("write corpus.json: %v", err)
+	}
+	// Deliberately no server.pid: the daemon crashed/exited.
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"status"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	out := stdout.String()
+	if !strings.Contains(out, "stopped") {
+		t.Fatalf("expected indexing reported stopped, got: %s", out)
+	}
+	if !strings.Contains(out, "stale snapshot") {
+		t.Fatalf("expected stale-snapshot note, got: %s", out)
+	}
+}
+
+// TestStatusStaleRunningJSONReconcilesRunningFalse asserts the JSON envelope
+// reports running=false and flags stale_running when the snapshot is stale.
+func TestStatusStaleRunningJSONReconcilesRunningFalse(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "corpus.json"), []byte(runningCorpusJSON()), 0o644); err != nil {
+		t.Fatalf("write corpus.json: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		StaleRunning bool `json:"stale_running"`
+		Snapshot     struct {
+			Indexing struct {
+				Running bool `json:"running"`
+			} `json:"indexing"`
+		} `json:"snapshot"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal status payload: %v\nraw=%s", err, stdout.String())
+	}
+	if payload.Snapshot.Indexing.Running {
+		t.Fatalf("expected indexing.running reconciled to false, got true: %s", stdout.String())
+	}
+	if !payload.StaleRunning {
+		t.Fatalf("expected stale_running=true in payload, got: %s", stdout.String())
+	}
+}
+
+// TestStatusLiveDaemonReportsRunning guards the normal case: when a live daemon
+// owns the state dir (pid file names a running process), a running snapshot is
+// reported as running, not reconciled away.
+func TestStatusLiveDaemonReportsRunning(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "corpus.json"), []byte(runningCorpusJSON()), 0o644); err != nil {
+		t.Fatalf("write corpus.json: %v", err)
+	}
+	// The test process itself is a guaranteed-live pid, standing in for a
+	// live daemon registered in server.pid.
+	pid := fmt.Sprintf("%d\n", os.Getpid())
+	if err := os.WriteFile(filepath.Join(stateDir, "server.pid"), []byte(pid), 0o644); err != nil {
+		t.Fatalf("write server.pid: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "status"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	var payload struct {
+		StaleRunning bool `json:"stale_running"`
+		Snapshot     struct {
+			Indexing struct {
+				Running bool `json:"running"`
+			} `json:"indexing"`
+		} `json:"snapshot"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal status payload: %v\nraw=%s", err, stdout.String())
+	}
+	if !payload.Snapshot.Indexing.Running {
+		t.Fatalf("expected live daemon to report running=true, got: %s", stdout.String())
+	}
+	if payload.StaleRunning {
+		t.Fatalf("did not expect stale_running for a live daemon: %s", stdout.String())
+	}
+}
+
 func TestStatusJSONMode(t *testing.T) {
 	tmp := t.TempDir()
 	stateDir := filepath.Join(tmp, ".dir2mcp")
