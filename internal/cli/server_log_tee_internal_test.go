@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -46,10 +48,14 @@ func TestPreferredListenAddr(t *testing.T) {
 		}
 	})
 
-	t.Run("ephemeral with no prior connection stays ephemeral", func(t *testing.T) {
-		got := preferredListenAddr("127.0.0.1:0", t.TempDir())
-		if got != "127.0.0.1:0" {
-			t.Fatalf("want ephemeral 127.0.0.1:0 with no prior port, got %q", got)
+	t.Run("ephemeral with no prior connection uses a deterministic per-corpus port", func(t *testing.T) {
+		// No connection.json (fresh corpus, or after down/rm) must NOT drift to a
+		// fresh random port — it should bind a stable port derived from the state
+		// dir so the baked client URL keeps working across reinstalls (#386).
+		stateDir := t.TempDir()
+		want := net.JoinHostPort("127.0.0.1", deterministicPort(stateDir))
+		if got := preferredListenAddr("127.0.0.1:0", stateDir); got != want {
+			t.Fatalf("want deterministic %q, got %q", want, got)
 		}
 	})
 
@@ -67,6 +73,24 @@ func TestPreferredListenAddr(t *testing.T) {
 			t.Fatalf("want sticky 127.0.0.1:58210 from prior connection.json, got %q", got)
 		}
 	})
+}
+
+// TestDeterministicPort covers the per-corpus port derivation (#386): stable for
+// a given state dir, inside the IANA dynamic range, and corpus-specific so two
+// corpora almost never collide.
+func TestDeterministicPort(t *testing.T) {
+	a := t.TempDir()
+	p := deterministicPort(a)
+	if p == "" || p != deterministicPort(a) {
+		t.Fatalf("deterministicPort not stable for %q: %q", a, p)
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n < 49152 || n > 65535 {
+		t.Fatalf("port %q outside dynamic range 49152-65535", p)
+	}
+	if other := deterministicPort(t.TempDir()); other == p {
+		t.Errorf("distinct corpora collided on port %q", p)
+	}
 }
 
 // TestTeeServerLog_WritesToServerLogInForeground verifies that a foreground /

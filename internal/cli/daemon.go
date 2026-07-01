@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -202,11 +204,35 @@ func preferredListenAddr(listenAddr, stateDir string) string {
 		// Explicit port (operator pinned it) or unparseable: respect as-is.
 		return listenAddr
 	}
-	prev := readPreviousListenPort(stateDir)
-	if prev == "" || prev == "0" {
-		return listenAddr
+	// Prefer the port a previous run recorded in connection.json (#368).
+	if prev := readPreviousListenPort(stateDir); prev != "" && prev != "0" {
+		return net.JoinHostPort(host, prev)
 	}
-	return net.JoinHostPort(host, prev)
+	// No recorded port — e.g. a fresh corpus, or after `down`/`rm -rf .dir2mcp`
+	// (which the setup guide runs) removed connection.json. Derive a port that is
+	// deterministic for this corpus instead of letting :0 pick a fresh random one
+	// every time, so the URL baked into the client config stays valid across
+	// reinstalls and the bridge does not silently strand (#386).
+	if dp := deterministicPort(stateDir); dp != "" {
+		return net.JoinHostPort(host, dp)
+	}
+	return listenAddr
+}
+
+// deterministicPort maps a corpus's state directory to a stable port in the IANA
+// dynamic/private range (49152–65535) via a hash of its absolute path. The same
+// corpus binds the same port across restarts even with no prior connection.json;
+// distinct corpora almost always differ. bindServerListener still falls back to
+// an ephemeral port if this one is taken, so startup never fails. Returns "" when
+// the path can't be resolved (caller then keeps the ephemeral :0).
+func deterministicPort(stateDir string) string {
+	abs, err := filepath.Abs(strings.TrimSpace(stateDir))
+	if err != nil || abs == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(abs))
+	const base, span = 49152, 16384 // 49152..65535 inclusive
+	return strconv.Itoa(base + int(binary.BigEndian.Uint16(sum[:2]))%span)
 }
 
 // rotateLogIfLarge renames an oversized log file to "<path>.1" so the
