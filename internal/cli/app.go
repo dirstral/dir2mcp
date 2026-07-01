@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -245,7 +246,12 @@ type ndjsonEvent struct {
 
 type ndjsonEmitter struct {
 	enabled bool
-	out     io.Writer
+	// mu serializes writes to out. A single emitter is the shared sink for
+	// concurrent ask/search query_metrics events and the corpus writer;
+	// without synchronization their lines (which can exceed PIPE_BUF) may
+	// interleave and corrupt server.log.
+	mu  sync.Mutex
+	out io.Writer
 }
 
 type cliErrorPayload struct {
@@ -1709,7 +1715,55 @@ func writeConnectionFile(path string, payload connectionPayload) error {
 	// readable by other accounts) those are credential-adjacent. The
 	// state directory is 0o700 already, but defending in depth keeps a
 	// permissive parent directory from leaking the file's contents.
-	return os.WriteFile(path, content, 0o600)
+	//
+	// Write atomically (temp file + fsync + rename) so a concurrent reader
+	// — readiness poll, support bundle, or claude_cmd — never observes a
+	// truncated/partial file the way an in-place os.WriteFile(O_TRUNC) can.
+	return atomicWriteFile(path, content, 0o600)
+}
+
+// atomicWriteFile writes data to path atomically: it writes to a sibling
+// temp file in the same directory, fsyncs it, chmods it to mode, then
+// renames it over path (with a Windows remove-and-retry fallback). The
+// rename guarantees a concurrent reader sees either the old or the new file,
+// never a partial one. A per-write temp name keeps concurrent writers from
+// stomping each other's temp file.
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmp := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		// os.Rename fails on Windows when the destination already exists.
+		// Remove the existing file and retry once to support Windows.
+		_ = os.Remove(path)
+		if err2 := os.Rename(tmp, path); err2 != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("rename temp file: %w", err2)
+		}
+	}
+	return nil
 }
 
 // newNDJSONEmitter constructs an ndjsonEmitter that writes events to out
@@ -1772,44 +1826,15 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 		return err
 	}
 
-	path := filepath.Join(stateDir, "corpus.json")
-	// Use a per-write temporary file so concurrent snapshot writers don't
-	// stomp each other's tmp file and trigger spurious ENOENT on rename.
-	tmpFile, err := os.CreateTemp(stateDir, "corpus.json.tmp.")
-	if err != nil {
-		return fmt.Errorf("create temp corpus snapshot: %w", err)
-	}
-	tmp := tmpFile.Name()
-
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmp)
 		return fmt.Errorf("marshal corpus snapshot: %w", err)
 	}
 
-	if _, err := tmpFile.Write(raw); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write temp corpus snapshot: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close temp corpus snapshot: %w", err)
-	}
 	// Match previous file mode (0o644) used with os.WriteFile.
-	if err := os.Chmod(tmp, 0o644); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("chmod temp corpus snapshot: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		// os.Rename fails on Windows when the destination already exists.
-		// Remove the existing file and retry once to support Windows.
-		_ = os.Remove(path)
-		if err2 := os.Rename(tmp, path); err2 != nil {
-			_ = os.Remove(tmp)
-			return fmt.Errorf("rename corpus snapshot: %w", err2)
-		}
+	path := filepath.Join(stateDir, "corpus.json")
+	if err := atomicWriteFile(path, raw, 0o644); err != nil {
+		return fmt.Errorf("write corpus snapshot: %w", err)
 	}
 	return nil
 }
@@ -2078,6 +2103,8 @@ func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 	if err != nil {
 		return
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	_, _ = fmt.Fprintln(e.out, string(encoded))
 }
 
