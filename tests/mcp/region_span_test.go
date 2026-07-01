@@ -63,6 +63,20 @@ func TestBuildOpenFileSpan_RegionDegrades(t *testing.T) {
 	}
 }
 
+// TestBuildOpenFileSpan_EmptyKindDegradesToDocument pins the fix for issue #397:
+// a span with an empty (or unknown) Kind — as produced by a BM25 hit on a cache
+// miss — must render as the schema-valid {"kind":"document"} variant, not as
+// {"kind":""}, which matches no Span oneOf branch and makes a strict MCP client
+// reject the whole tool result ("Failed to call tool").
+func TestBuildOpenFileSpan_EmptyKindDegradesToDocument(t *testing.T) {
+	for _, kind := range []string{"", "   ", "totally-unknown"} {
+		got := mcp.BuildOpenFileSpan(model.Span{Kind: kind})
+		if got["kind"] != "document" || len(got) != 1 {
+			t.Errorf("BuildOpenFileSpan(kind=%q) = %+v, want {kind:document}", kind, got)
+		}
+	}
+}
+
 // TestBuildOpenFileSpan_ScalarKindsUnchanged guards that adding region did not
 // disturb the existing kinds.
 func TestBuildOpenFileSpan_ScalarKindsUnchanged(t *testing.T) {

@@ -2366,8 +2366,13 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 	case "region":
 		return buildRegionSpan(span)
 	default:
+		// An empty or unknown kind (e.g. a BM25 hit on a cache miss whose
+		// Span.Kind is "") matches none of the Span oneOf branches in the
+		// outputSchema, so echoing it (or "") makes strict MCP clients reject
+		// the whole tool result ("Failed to call tool", issue #397). Degrade to
+		// the schema-valid "document" variant, which requires only kind.
 		return map[string]interface{}{
-			"kind": kind,
+			"kind": "document",
 		}
 	}
 }
