@@ -1281,7 +1281,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return nil
 	}
 
-	if err := s.generateRepresentations(ctx, doc, content, forceReindex); err != nil {
+	if err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex); err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -1528,7 +1528,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	if !needsProcessing || doc.Status != "ok" {
 		return nil
 	}
-	if err := s.generateRepresentations(ctx, doc, content, forceReindex); err != nil {
+	if err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex); err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -1936,7 +1936,7 @@ func isEmbeddableAudio(relPath string) bool {
 	}
 }
 
-func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, forceReindex bool) error {
+func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) error {
 	if s.repGen == nil {
 		return nil
 	}
@@ -1970,7 +1970,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return nil
 	}
 
-	return s.generateTranscriptOrSidecar(ctx, doc, content, forceReindex)
+	return s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
 }
 
 // generateTranscriptOrSidecar resolves a media document's transcript. Subtitle
@@ -1979,7 +1979,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 // transcript is authoritative. `--force`/reindex overrides the gate, retiring
 // any stale sidecar transcripts and re-running STT. Sidecar ingestion bypasses
 // the quality gate (authored, not model-derived; §8.6.6/§8.6.7).
-func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, forceReindex bool) error {
+func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) error {
 	if !forceReindex {
 		ingested, err := s.ingestSidecarTranscripts(ctx, doc)
 		if err != nil {
@@ -2001,6 +2001,20 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		if errors.Is(err, ErrTranscriptProviderFailure) {
 			s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
 			s.addErrors(1)
+			// #413: a genuine provider failure that left the document with no
+			// representation of its own (no media chunks under multimodal
+			// `augment`) must not stay status="ok" — that hid the unsearchable
+			// audio from CorpusStats.Errors / RecentFailures / FailureSummary and
+			// reported errors=0 after a restart. Persist it as status="error" so
+			// the failure is durably visible and is retried on the next
+			// incremental run, while STILL returning nil so the batch continues. A
+			// document that DID produce media chunks stays "ok": it remains
+			// searchable, so it is not a zero-representation failure. Legitimately
+			// empty media never reaches here — an empty transcript returns nil
+			// without ErrTranscriptProviderFailure.
+			if !mediaProduced {
+				s.persistNonFatalDocError(ctx, doc, err, secretPatterns)
+			}
 			return nil
 		}
 		return err
@@ -2035,6 +2049,23 @@ func (s *Service) retireStaleSidecarTranscripts(ctx context.Context, doc model.D
 		s.getLogger().Printf("retired %d stale sidecar transcript(s) for %s before STT reindex", n, doc.RelPath)
 	}
 	return nil
+}
+
+// persistNonFatalDocError records a per-document failure that must NOT abort the
+// batch run (the caller still returns nil) by re-upserting the document as
+// status="error" with a redacted message. Without it, a document that produced
+// zero representations because of a genuine provider failure would stay
+// status="ok" and be invisible to CorpusStats.Errors / RecentFailures /
+// FailureSummary — silently unsearchable, with errors=0 reported after a restart
+// (#413). The upsert error is logged and swallowed because the original failure
+// is the more actionable signal, mirroring the generateRepresentations error
+// path. The live error counter is incremented separately by the caller.
+func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Document, cause error, secretPatterns []*regexp.Regexp) {
+	doc.Status = "error"
+	doc.ErrorMessage = RedactSecretsInMessage(cause.Error(), secretPatterns)
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		s.getLogger().Printf("persist error status for %s: %v", doc.RelPath, err)
+	}
 }
 
 // persistTitleIfFound runs the title heuristic on the supplied text body and,
