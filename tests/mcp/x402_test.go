@@ -160,6 +160,82 @@ func TestX402ToolsCall_VerifyInvalidReturns402WithChallenge(t *testing.T) {
 	}
 }
 
+// TestX402ToolsCall_VerifyVerdictFalseAt200Returns402 covers the security
+// regression in issue #400: a facilitator that returns HTTP 200 with
+// {"isValid":false} (no Go error) must NOT execute the gated tool. The server
+// must reject the call with a 402 PAYMENT_INVALID challenge and never settle.
+func TestX402ToolsCall_VerifyVerdictFalseAt200Returns402(t *testing.T) {
+	t.Parallel()
+	fac := newFacilitatorStub(t)
+	fac.verifyStatus = http.StatusOK // 200 OK, but verdict says invalid
+	fac.verifyBody = `{"isValid":false,"invalidReason":"insufficient_funds"}`
+	facServer := httptest.NewServer(fac)
+	defer facServer.Close()
+
+	cfg := x402EnabledTestConfig("https://resource.example.com")
+	cfg.AuthMode = "none"
+	cfg.X402.FacilitatorURL = facServer.URL
+
+	retriever := &countingSearchRetriever{}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":401,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"foo"}}}`, map[string]string{
+		"PAYMENT-SIGNATURE": "forged-payment-signature",
+	})
+	defer func() { _ = resp.Body.Close() }()
+
+	assertRPCErrorCodeAndRetryable(t, resp, http.StatusPaymentRequired, "PAYMENT_INVALID", false)
+	if strings.TrimSpace(resp.Header.Get("PAYMENT-REQUIRED")) == "" {
+		t.Fatal("expected PAYMENT-REQUIRED header on rejected (isValid=false) verify")
+	}
+	if retriever.searchCalls.Load() != 0 {
+		t.Fatalf("gated tool executed for an invalid payment: search calls=%d want=0", retriever.searchCalls.Load())
+	}
+	if fac.settleCalls.Load() != 0 {
+		t.Fatalf("settle calls=%d want=0 (must not settle an invalid payment)", fac.settleCalls.Load())
+	}
+}
+
+// TestX402ToolsCall_SettleVerdictFalseAt200Returns402 covers the settle half of
+// issue #400: a facilitator that returns HTTP 200 with {"success":false} (no Go
+// error) must not be reported as a successful settlement. The tool runs (settle
+// happens after execution) but the response must be a 402 with no
+// PAYMENT-RESPONSE header.
+func TestX402ToolsCall_SettleVerdictFalseAt200Returns402(t *testing.T) {
+	t.Parallel()
+	fac := newFacilitatorStub(t)
+	fac.verifyStatus = http.StatusOK
+	fac.verifyBody = `{"ok":true,"isValid":true,"payer":"payer-1"}`
+	fac.settleStatus = http.StatusOK // 200 OK, but verdict says failure
+	fac.settleBody = `{"success":false,"errorReason":"settlement_rejected"}`
+	facServer := httptest.NewServer(fac)
+	defer facServer.Close()
+
+	cfg := x402EnabledTestConfig("https://resource.example.com")
+	cfg.AuthMode = "none"
+	cfg.X402.FacilitatorURL = facServer.URL
+
+	retriever := &countingSearchRetriever{}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":402,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"foo"}}}`, map[string]string{
+		"PAYMENT-SIGNATURE": "unsettleable-payment-signature",
+	})
+	defer func() { _ = resp.Body.Close() }()
+
+	assertRPCErrorCodeAndRetryable(t, resp, http.StatusPaymentRequired, "PAYMENT_SETTLEMENT_FAILED", false)
+	if strings.TrimSpace(resp.Header.Get("PAYMENT-RESPONSE")) != "" {
+		t.Fatal("expected no PAYMENT-RESPONSE header when settlement verdict is success=false")
+	}
+	if fac.settleCalls.Load() != 1 {
+		t.Fatalf("settle calls=%d want=1", fac.settleCalls.Load())
+	}
+}
+
 func TestX402ToolsCall_ToolErrorDoesNotSettle(t *testing.T) {
 	t.Parallel()
 	fac := newFacilitatorStub(t)

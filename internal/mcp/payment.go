@@ -111,6 +111,13 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		s.handlePaymentFailure(w, id, "verify", err, executionKey)
 		return
 	}
+	// The facilitator returns HTTP 200 with {"isValid":false} for a rejected
+	// payment, which surfaces here as a nil Go error. Inspect the verdict and
+	// fail closed so an invalid payment never reaches the gated tool.
+	if !paymentVerdictTrue(verifyResponse, "isValid") {
+		s.rejectInvalidPayment(w, id, verifyResponse, executionKey)
+		return
+	}
 	s.emitPaymentEvent("info", "payment_verified", safePaymentResponseFields(verifyResponse))
 	s.appendPaymentLog("payment_verified", safePaymentResponseFields(verifyResponse))
 
@@ -145,6 +152,13 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		s.handlePaymentFailure(w, id, "settle", err, executionKey)
 		return
 	}
+	// As with verify, the facilitator returns HTTP 200 with {"success":false}
+	// for a failed settlement (nil Go error). Do not mark the outcome settled
+	// or emit a PAYMENT-RESPONSE for an unsettled payment.
+	if !paymentVerdictTrue(settleResponse, "success") {
+		s.rejectFailedSettlement(w, id, settleResponse, executionKey)
+		return
+	}
 
 	// update the cached outcome; if the entry was pruned we need to
 	// reconstruct and persist the successful state before replaying it.
@@ -162,6 +176,87 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 
 	s.emitPaymentEvent("info", "payment_settled", safePaymentResponseFields(settleResponse))
 	s.appendPaymentLog("payment_settled", safePaymentResponseFields(settleResponse))
+}
+
+// paymentVerdictTrue reports whether the facilitator response body carries the
+// named boolean verdict field set to true ("isValid" for verify, "success" for
+// settle). A missing, malformed, or non-true field is treated as false so the
+// payment gate fails closed: the facilitator returns HTTP 200 with
+// isValid=false / success=false for a rejected payment, which surfaces as a nil
+// Go error and must not be mistaken for a successful payment.
+func paymentVerdictTrue(raw json.RawMessage, field string) bool {
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return false
+	}
+	v, ok := parsed[field]
+	if !ok {
+		return false
+	}
+	var b bool
+	if err := json.Unmarshal(v, &b); err != nil {
+		return false
+	}
+	return b
+}
+
+// paymentStringField extracts a string field from a facilitator response body,
+// returning "" when the field is absent or not a string.
+func paymentStringField(raw json.RawMessage, field string) string {
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return ""
+	}
+	v, ok := parsed[field]
+	if !ok {
+		return ""
+	}
+	var str string
+	if err := json.Unmarshal(v, &str); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(str)
+}
+
+// rejectInvalidPayment handles a facilitator verify that returned a non-true
+// verdict (isValid=false) without a transport error. It records the verdict and
+// responds with a PAYMENT_INVALID challenge instead of executing the tool.
+func (s *Server) rejectInvalidPayment(w http.ResponseWriter, id interface{}, verifyResponse json.RawMessage, executionKey string) {
+	fields := safePaymentResponseFields(verifyResponse)
+	s.emitPaymentEvent("info", "payment_invalid", fields)
+	s.appendPaymentLog("payment_invalid", fields)
+	message := "payment verification rejected"
+	if reason := paymentStringField(verifyResponse, "invalidReason"); reason != "" {
+		message += ": " + reason
+	}
+	s.handlePaymentFailure(w, id, "verify", &x402.FacilitatorError{
+		Operation:  "verify",
+		StatusCode: http.StatusPaymentRequired,
+		Code:       x402.CodePaymentInvalid,
+		Message:    message,
+		Retryable:  false,
+	}, executionKey)
+}
+
+// rejectFailedSettlement handles a facilitator settle that returned a non-true
+// verdict (success=false) without a transport error. The gated tool has already
+// executed, but the payment did not settle, so the outcome is not marked
+// settled and no successful PAYMENT-RESPONSE is emitted.
+func (s *Server) rejectFailedSettlement(w http.ResponseWriter, id interface{}, settleResponse json.RawMessage, executionKey string) {
+	fields := safePaymentResponseFields(settleResponse)
+	s.emitPaymentEvent("error", "payment_settlement_failed", fields)
+	s.appendPaymentLog("payment_settlement_failed", fields)
+	message := "payment settlement failed"
+	if reason := paymentStringField(settleResponse, "errorReason"); reason != "" {
+		message += ": " + reason
+	}
+	s.handlePaymentFailure(w, id, "settle", &x402.FacilitatorError{
+		Operation:  "settle",
+		StatusCode: http.StatusPaymentRequired,
+		Code:       x402.CodePaymentSettlementFailed,
+		Message:    message,
+		Retryable:  false,
+	}, executionKey)
 }
 
 func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, operation string, err error, executionKey string) {
@@ -247,6 +342,10 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 	settleResponse, settleErr := s.x402Client.Settle(ctx, paymentSignature, s.x402Requirement)
 	if settleErr != nil {
 		s.handlePaymentFailure(w, id, "settle", settleErr, executionKey)
+		return true
+	}
+	if !paymentVerdictTrue(settleResponse, "success") {
+		s.rejectFailedSettlement(w, id, settleResponse, executionKey)
 		return true
 	}
 	// original outcome loaded above; keep a copy in case the cache entry
@@ -651,7 +750,7 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 // response, including only explicitly allowed fields to avoid recording
 // unexpected or sensitive fields that the facilitator may add in future.
 func safePaymentResponseFields(raw json.RawMessage) map[string]interface{} {
-	allowed := []string{"ok", "txHash", "status", "network", "amount"}
+	allowed := []string{"ok", "txHash", "status", "network", "amount", "isValid", "success", "invalidReason"}
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return map[string]interface{}{}
