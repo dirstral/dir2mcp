@@ -932,6 +932,16 @@ func Default() Config {
 			`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
+			// OpenAI/Mistral-style hyphenated secret keys, e.g. "sk-proj-..."
+			// and "sk-...". Case-sensitive lowercase "sk-" prefix; the {20,}
+			// run of key chars keeps this from matching ordinary hyphenated
+			// prose (issue #443).
+			`sk-[A-Za-z0-9-]{20,}`,
+			// Generic provider-key assignment, e.g. "MISTRAL_API_KEY=<32 alnum>",
+			// "COHERE_API_KEY: ...", "GEMINI_API_KEY=...". Requires an
+			// uppercase provider prefix plus a 16+ char non-whitespace value so
+			// it gates real credentials without flagging plain text (issue #443).
+			`[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}`,
 		},
 		ElevenLabsAPIKey:     "",
 		ElevenLabsBaseURL:    "",
