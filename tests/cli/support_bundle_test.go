@@ -83,7 +83,10 @@ func TestSupportBundle_AssemblesDiagnosticsArchive(t *testing.T) {
 // failed (status="error") but never *why* — the upstream extraction
 // error was logged to server.log only. Now the bundle carries
 // documents.error_message so maintainers can triage a failed corpus
-// from the bundle alone.
+// from the bundle alone. Because rel_path/error_message can echo corpus
+// content, they are only emitted when the operator opts in with
+// --include-content (see TestSupportBundle_ListFilesRedactsContentByDefault
+// for the privacy-preserving default).
 func TestSupportBundle_ListFilesIncludesErrorMessage(t *testing.T) {
 	tmp := t.TempDir()
 	stateDir := filepath.Join(tmp, ".dir2mcp")
@@ -113,9 +116,12 @@ func TestSupportBundle_ListFilesIncludesErrorMessage(t *testing.T) {
 	testutil.WithWorkingDir(t, tmp, func() {
 		var stdout, stderr bytes.Buffer
 		app := cli.NewAppWithIO(&stdout, &stderr)
-		code := app.Run([]string{"support-bundle", "--output", bundlePath})
+		code := app.Run([]string{"support-bundle", "--include-content", "--output", bundlePath})
 		if code != 0 {
 			t.Fatalf("support-bundle exit=%d stderr=%q", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "review the bundle before sharing") {
+			t.Errorf("--include-content should warn about corpus content, stderr=%q", stderr.String())
 		}
 	})
 
@@ -175,6 +181,145 @@ func TestSupportBundle_JSONFlagParseError(t *testing.T) {
 			t.Errorf("stdout contained raw flag-package text: %q", stdout.String())
 		}
 	})
+}
+
+// TestSupportBundle_ListFilesRedactsContentByDefault pins the #436 S1 fix:
+// without --include-content the bundle must NOT disclose the corpus inventory
+// (rel_path/title) or free-text extraction errors (which can echo file
+// content), while still keeping the diagnostic skeleton (doc_type, status, and
+// a has_error flag) so a maintainer can triage failures.
+func TestSupportBundle_ListFilesRedactsContentByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("PATH", t.TempDir())
+
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	const secretPath = "clients/acme-merger-2026/board-minutes.pdf"
+	const secretTitle = "Project Bluebird acquisition terms"
+	const secretError = "extraction failed near text 'confidential: layoff list'"
+	if err := st.UpsertDocument(ctx, model.Document{
+		RelPath:      secretPath,
+		DocType:      "pdf",
+		Title:        secretTitle,
+		SizeBytes:    4096,
+		Status:       "error",
+		ErrorMessage: secretError,
+	}); err != nil {
+		t.Fatalf("upsert doc: %v", err)
+	}
+	_ = st.Close()
+
+	bundlePath := filepath.Join(tmp, "bundle.tar.gz")
+	testutil.WithWorkingDir(t, tmp, func() {
+		var stdout, stderr bytes.Buffer
+		app := cli.NewAppWithIO(&stdout, &stderr)
+		code := app.Run([]string{"support-bundle", "--output", bundlePath})
+		if code != 0 {
+			t.Fatalf("support-bundle exit=%d stderr=%q", code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "review the bundle before sharing") {
+			t.Errorf("default bundle should not emit the include-content warning, stderr=%q", stderr.String())
+		}
+	})
+
+	entries := extractTarGz(t, bundlePath)
+	// No corpus content anywhere in the bundle by default.
+	assertNoLeak(t, entries, []string{
+		secretPath, secretTitle, secretError, "board-minutes", "Bluebird", "layoff",
+	})
+
+	listBody := entries["list-files.json"]
+	var listed struct {
+		ContentIncluded bool `json:"content_included"`
+		Files           []struct {
+			RelPath      string `json:"rel_path"`
+			DocType      string `json:"doc_type"`
+			Title        string `json:"title"`
+			Status       string `json:"status"`
+			ErrorMessage string `json:"error_message"`
+			HasError     bool   `json:"has_error"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(listBody, &listed); err != nil {
+		t.Fatalf("decode list-files.json: %v body=%s", err, listBody)
+	}
+	if listed.ContentIncluded {
+		t.Errorf("content_included = true, want false by default")
+	}
+	if len(listed.Files) != 1 {
+		t.Fatalf("want 1 file row, got %d: %s", len(listed.Files), listBody)
+	}
+	row := listed.Files[0]
+	// Skeleton preserved for diagnostics...
+	if row.DocType != "pdf" || row.Status != "error" || !row.HasError {
+		t.Errorf("diagnostic skeleton lost: %+v", row)
+	}
+	// ...but extension-only placeholder path, no title, no error text.
+	if row.RelPath != "[redacted].pdf" {
+		t.Errorf("rel_path = %q, want extension-only placeholder", row.RelPath)
+	}
+	if row.Title != "" || row.ErrorMessage != "" {
+		t.Errorf("title/error_message should be empty by default: %+v", row)
+	}
+}
+
+// TestSupportBundle_ServerLogRedacted pins that server.log — redirected daemon
+// stdout/stderr that can carry bearer tokens and query text — is run through the
+// secret redactor before it enters the shareable bundle (previously it was
+// bundled raw while client logs and daemon.json were already redacted).
+func TestSupportBundle_ServerLogRedacted(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("PATH", t.TempDir())
+
+	const token = "sk-supersecret-abc123XYZ"
+	logLine := "2026-07-01 handling request Authorization: Bearer " + token + "\n"
+	if err := os.WriteFile(filepath.Join(stateDir, "server.log"), []byte(logLine), 0o600); err != nil {
+		t.Fatalf("write server.log: %v", err)
+	}
+
+	bundlePath := filepath.Join(tmp, "bundle.tar.gz")
+	testutil.WithWorkingDir(t, tmp, func() {
+		var stdout, stderr bytes.Buffer
+		app := cli.NewAppWithIO(&stdout, &stderr)
+		code := app.Run([]string{"support-bundle", "--output", bundlePath})
+		if code != 0 {
+			t.Fatalf("support-bundle exit=%d stderr=%q", code, stderr.String())
+		}
+	})
+
+	entries := extractTarGz(t, bundlePath)
+	serverLog, ok := entries["server.log"]
+	if !ok {
+		t.Fatalf("bundle missing server.log")
+	}
+	if bytes.Contains(serverLog, []byte(token)) {
+		t.Fatalf("server.log leaked bearer token: %s", serverLog)
+	}
+	if !bytes.Contains(serverLog, []byte("[REDACTED]")) {
+		t.Errorf("server.log should carry redaction marker, got: %s", serverLog)
+	}
+}
+
+// assertNoLeak fails if any bundle entry contains any of the sensitive strings.
+func assertNoLeak(t *testing.T, entries map[string][]byte, secrets []string) {
+	t.Helper()
+	for name, body := range entries {
+		for _, secret := range secrets {
+			if bytes.Contains(body, []byte(secret)) {
+				t.Fatalf("entry %q leaked corpus content %q", name, secret)
+			}
+		}
+	}
 }
 
 func assertOCRDiagnostic(t *testing.T, raw []byte) {
