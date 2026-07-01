@@ -443,3 +443,105 @@ func TestClaudeUninstallIsIdempotentWhenEntryAbsent(t *testing.T) {
 		t.Errorf("expected informational stdout about nothing to remove, got: %q", got)
 	}
 }
+
+// setupAtomicInstallFixture writes the state dir (token + connection.json) and a
+// pre-existing Claude config carrying an UNRELATED MCP server, returning the
+// state dir, the config path, and its parent dir. Extracted to keep the test
+// itself under the gocyclo budget.
+func setupAtomicInstallFixture(t *testing.T, tmp string) (stateDir, configDir, configPath string) {
+	t.Helper()
+	stateDir = filepath.Join(tmp, "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	tokenPath := filepath.Join(stateDir, "secret.token")
+	if err := os.WriteFile(tokenPath, []byte("supersecret\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	connection := map[string]interface{}{
+		"transport":    "mcp_streamable_http",
+		"url":          "http://127.0.0.1:9882/mcp",
+		"headers":      map[string]string{"MCP-Protocol-Version": "2025-11-25"},
+		"public":       false,
+		"token_source": "secret.token",
+		"token_file":   tokenPath,
+	}
+	raw, _ := json.Marshal(connection)
+	if err := os.WriteFile(filepath.Join(stateDir, "connection.json"), raw, 0o644); err != nil {
+		t.Fatalf("write connection: %v", err)
+	}
+	configDir = filepath.Join(tmp, "cfg")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir cfg: %v", err)
+	}
+	configPath = filepath.Join(configDir, "claude_desktop_config.json")
+	initial := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"some-other-tool": map[string]interface{}{
+				"command": "other",
+				"args":    []string{"--serve"},
+			},
+		},
+	}
+	initialRaw, _ := json.MarshalIndent(initial, "", "  ")
+	if err := os.WriteFile(configPath, initialRaw, 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+	return stateDir, configDir, configPath
+}
+
+func TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, configDir, configPath := setupAtomicInstallFixture(t, tmp)
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	code := app.RunWithContext(context.Background(), []string{
+		"--state-dir", stateDir,
+		"install", "claude",
+		"--name", "stas-legal-dir2mcp",
+		"--config-path", configPath,
+	})
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	// The token-bearing config must be owner-only.
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("config perms = %o, want 0600 (it embeds a bearer token)", perm)
+	}
+
+	// Atomic writer must not leave a sibling temp file behind on success.
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		t.Fatalf("readdir cfg: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(configPath) {
+			t.Errorf("unexpected leftover file in config dir: %q", e.Name())
+		}
+	}
+
+	updatedRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	var updated map[string]interface{}
+	if err := json.Unmarshal(updatedRaw, &updated); err != nil {
+		t.Fatalf("unmarshal updated config: %v raw=%s", err, string(updatedRaw))
+	}
+	mcpServers, ok := updated["mcpServers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcpServers missing after install: %+v", updated)
+	}
+	if _, ok := mcpServers["stas-legal-dir2mcp"]; !ok {
+		t.Errorf("named server not written: %+v", mcpServers)
+	}
+	if _, ok := mcpServers["some-other-tool"]; !ok {
+		t.Errorf("unrelated MCP server entry should be preserved: %+v", mcpServers)
+	}
+}
