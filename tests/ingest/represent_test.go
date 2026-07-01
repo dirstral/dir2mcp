@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -327,6 +328,47 @@ func TestChunkCodeByLines(t *testing.T) {
 	}
 	if chunks[1].Span.StartLine != 171 {
 		t.Fatalf("expected overlap start line 171, got %d", chunks[1].Span.StartLine)
+	}
+}
+
+// TestChunkCodeByLines_MinifiedSingleLineSplitByChars pins that a minified
+// single-long-line bundle (no newlines) is bounded by characters rather than
+// emitted as one giant chunk that would exceed the embedder input limit.
+func TestChunkCodeByLines_MinifiedSingleLineSplitByChars(t *testing.T) {
+	const maxCodeChars = 2500
+	// One physical line, ~6000 runes, well over the per-chunk char cap.
+	content := strings.Repeat("a", 6000)
+	chunks := ingest.ChunkCodeByLines(content, 200, 30)
+	if len(chunks) < 2 {
+		t.Fatalf("expected the oversize single line to split into multiple chunks, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if c.Span.Kind != "lines" {
+			t.Errorf("chunk %d span kind = %q, want lines", i, c.Span.Kind)
+		}
+		if c.Span.StartLine != 1 || c.Span.EndLine != 1 {
+			t.Errorf("chunk %d span = %+v, want single-line [1,1]", i, c.Span)
+		}
+		if n := utf8.RuneCountInString(c.Text); n > maxCodeChars {
+			t.Errorf("chunk %d has %d runes, exceeds cap %d", i, n, maxCodeChars)
+		}
+	}
+}
+
+// TestChunkCodeByLines_LongLineWithinWindowSplit pins that an oversize line
+// inside a multi-line window is still split by characters, with every chunk
+// staying under the cap.
+func TestChunkCodeByLines_LongLineWithinWindowSplit(t *testing.T) {
+	const maxCodeChars = 2500
+	content := "short header\n" + strings.Repeat("b", 8000) + "\nshort footer"
+	chunks := ingest.ChunkCodeByLines(content, 200, 30)
+	if len(chunks) < 2 {
+		t.Fatalf("expected oversize window to split, got %d chunks", len(chunks))
+	}
+	for i, c := range chunks {
+		if n := utf8.RuneCountInString(c.Text); n > maxCodeChars {
+			t.Errorf("chunk %d has %d runes, exceeds cap %d", i, n, maxCodeChars)
+		}
 	}
 }
 
