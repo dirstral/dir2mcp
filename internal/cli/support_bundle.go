@@ -37,8 +37,9 @@ const supportLogTailBytes int64 = 2 * 1024 * 1024 // 2 MB
 // — the effective config snapshot only carries `secret_sources:`
 // metadata (where each credential came from), not the credentials
 // themselves; server.log and the client bridge logs are run through the
-// secret redactor; and list-files.json redacts corpus paths/titles/error
-// messages unless the operator opts in with --include-content.
+// secret redactor; and list-files.json (plus status.json's failure samples)
+// redact corpus paths/titles/error messages unless the operator opts in with
+// --include-content.
 func (a *App) runSupportBundle(ctx context.Context, global globalOptions, args []string) int {
 	fs := flag.NewFlagSet("support-bundle", flag.ContinueOnError)
 	// Route flag-parse output through writeCLIError so JSON callers get
@@ -90,9 +91,12 @@ func (a *App) runSupportBundle(ctx context.Context, global globalOptions, args [
 
 	if !global.quiet {
 		_, _ = fmt.Fprintf(a.stdout, "Wrote support bundle to %s\n", destPath)
-		for _, w := range warnings {
-			_, _ = fmt.Fprintf(a.stderr, "warning: %v\n", w)
-		}
+	}
+	// Warnings — including the --include-content privacy-consent notice — are
+	// diagnostics on stderr. --quiet suppresses non-error output, but a consent
+	// warning must never be silently dropped, so it survives quiet mode.
+	for _, w := range warnings {
+		_, _ = fmt.Fprintf(a.stderr, "warning: %v\n", w)
 	}
 	return exitSuccess
 }
@@ -137,14 +141,14 @@ func collectSupportArtifacts(ctx context.Context, a *App, cfg config.Config, inc
 	}
 	add("server.log", logBytes, logErr)
 
-	statusBytes, statusErr := marshalStatusJSON(ctx, a, cfg)
+	statusBytes, statusErr := marshalStatusJSON(ctx, a, cfg, includeContent)
 	add("status.json", statusBytes, statusErr)
 
 	listBytes, listErr := marshalListFilesJSON(ctx, a, cfg, includeContent)
 	add("list-files.json", listBytes, listErr)
 	if listErr == nil && includeContent {
 		warnings = append(warnings, errors.New(
-			"list-files.json: --include-content embedded corpus paths/titles/error messages; review the bundle before sharing it"))
+			"list-files.json/status.json: --include-content may include corpus paths/titles/error messages; review the bundle before sharing it"))
 	}
 
 	routingBytes, routingErr := marshalRoutingJSON(cfg)
@@ -208,8 +212,11 @@ func readLogTail(path string, maxBytes int64) ([]byte, error) {
 
 // marshalStatusJSON computes the same payload `dir2mcp status --json`
 // would emit. Falls back to a placeholder when no state is present so
-// the bundle still records "we tried and found nothing".
-func marshalStatusJSON(ctx context.Context, a *App, cfg config.Config) ([]byte, error) {
+// the bundle still records "we tried and found nothing". The snapshot's
+// FailureSummary.Samples carry raw {rel_path, message} pairs that can echo
+// corpus content, so they are redacted the same way list-files.json is
+// unless the operator opts in with --include-content.
+func marshalStatusJSON(ctx context.Context, a *App, cfg config.Config, includeContent bool) ([]byte, error) {
 	snapshotPath := filepath.Join(cfg.StateDir, "corpus.json")
 	snapshot, err := readCorpusSnapshot(snapshotPath)
 	source := "corpus_json"
@@ -233,11 +240,37 @@ func marshalStatusJSON(ctx context.Context, a *App, cfg config.Config) ([]byte, 
 		}
 		source = "computed"
 	}
+	snapshot.Indexing.FailureSummary = redactFailureSamples(snapshot.Indexing.FailureSummary, includeContent)
 	return json.MarshalIndent(map[string]interface{}{
 		"source":    source,
 		"state_dir": cfg.StateDir,
 		"snapshot":  snapshot,
 	}, "", "  ")
+}
+
+// redactFailureSamples returns a copy of the failure summary whose sample
+// fields are handled exactly like list-files.json: rel_path becomes an
+// extension-only placeholder and the free-text message is dropped by default,
+// while --include-content restores the raw values run through the secret
+// redactor. The Categories aggregate is a fixed error-category enum with no
+// corpus content, so it is preserved either way. A copy is returned so the
+// underlying snapshot (which may be shared with the store) is never mutated.
+func redactFailureSamples(fs *model.FailureSummary, includeContent bool) *model.FailureSummary {
+	if fs == nil {
+		return nil
+	}
+	out := &model.FailureSummary{Categories: fs.Categories}
+	if len(fs.Samples) > 0 {
+		out.Samples = make([]model.FailureSample, len(fs.Samples))
+		for i, s := range fs.Samples {
+			out.Samples[i] = model.FailureSample{
+				RelPath:  listFileRelPath(s.RelPath, includeContent),
+				Category: s.Category,
+				Message:  redactContentField(s.Message, includeContent),
+			}
+		}
+	}
+	return out
 }
 
 // supportBundleFileRow is the per-document shape emitted in the bundle's
@@ -318,10 +351,29 @@ func listFileRelPath(relPath string, includeContent bool) string {
 	if includeContent {
 		return redactBundleSecrets(relPath)
 	}
-	if ext := filepath.Ext(relPath); ext != "" {
+	if ext := redactedExtension(relPath); ext != "" {
 		return "[redacted]" + ext
 	}
 	return "[redacted]"
+}
+
+// compoundExtensions are multi-part suffixes whose full form (not just the last
+// segment filepath.Ext returns) can drive extractor/OCR routing. Preserving the
+// whole suffix keeps the routing signal — e.g. .tar.gz instead of a misleading
+// .gz — while still disclosing only the extension, never the basename.
+var compoundExtensions = []string{".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"}
+
+// redactedExtension returns the routing-relevant extension of relPath: a known
+// compound suffix when present (case-insensitive match, original casing kept),
+// otherwise the single trailing extension from filepath.Ext.
+func redactedExtension(relPath string) string {
+	lower := strings.ToLower(relPath)
+	for _, ce := range compoundExtensions {
+		if strings.HasSuffix(lower, ce) {
+			return relPath[len(relPath)-len(ce):]
+		}
+	}
+	return filepath.Ext(relPath)
 }
 
 // redactContentField returns a corpus-content string (title, error message) for

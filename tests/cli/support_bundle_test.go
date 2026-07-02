@@ -310,6 +310,195 @@ func TestSupportBundle_ServerLogRedacted(t *testing.T) {
 	}
 }
 
+// TestSupportBundle_RedactedPathKeepsCompoundExtension pins that the
+// extension-only placeholder retains multi-part suffixes like .tar.gz (the
+// routing signal a maintainer needs) instead of the misleading .gz that
+// filepath.Ext alone would yield — while still disclosing no basename.
+func TestSupportBundle_RedactedPathKeepsCompoundExtension(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("PATH", t.TempDir())
+
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if err := st.UpsertDocument(ctx, model.Document{
+		RelPath:   "backups/nightly.tar.gz",
+		DocType:   "archive",
+		SizeBytes: 1024,
+		Status:    "indexed",
+	}); err != nil {
+		t.Fatalf("upsert doc: %v", err)
+	}
+	_ = st.Close()
+
+	bundlePath := filepath.Join(tmp, "bundle.tar.gz")
+	testutil.WithWorkingDir(t, tmp, func() {
+		var stdout, stderr bytes.Buffer
+		app := cli.NewAppWithIO(&stdout, &stderr)
+		code := app.Run([]string{"support-bundle", "--output", bundlePath})
+		if code != 0 {
+			t.Fatalf("support-bundle exit=%d stderr=%q", code, stderr.String())
+		}
+	})
+
+	entries := extractTarGz(t, bundlePath)
+	// Basename must not leak even though the compound suffix is retained.
+	assertNoLeak(t, entries, []string{"nightly", "backups"})
+
+	var listed struct {
+		Files []struct {
+			RelPath string `json:"rel_path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(entries["list-files.json"], &listed); err != nil {
+		t.Fatalf("decode list-files.json: %v", err)
+	}
+	if len(listed.Files) != 1 {
+		t.Fatalf("want 1 file row, got %d: %s", len(listed.Files), entries["list-files.json"])
+	}
+	if listed.Files[0].RelPath != "[redacted].tar.gz" {
+		t.Errorf("rel_path = %q, want [redacted].tar.gz", listed.Files[0].RelPath)
+	}
+}
+
+// TestSupportBundle_StatusFailureSamplesRedactedByDefault pins that status.json
+// — which embeds the corpus snapshot including FailureSummary.Samples — never
+// discloses the raw {rel_path, message} pairs of failed chunks without
+// --include-content. The category aggregate (a fixed enum) is still kept so a
+// maintainer can triage embedding failures.
+func TestSupportBundle_StatusFailureSamplesRedactedByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("PATH", t.TempDir())
+
+	const secretPath = "clients/acme-merger-2026/board-minutes.pdf"
+	const secretMessage = "embed failed near 'confidential: layoff list'"
+	// Seed corpus.json directly with a failure sample so the snapshot read path
+	// (source=corpus_json) carries the sensitive fields into status.json.
+	corpusJSON := `{
+  "ts": "2026-07-01T00:00:00Z",
+  "indexing": {
+    "mode": "idle",
+    "errors": 1,
+    "failure_summary": {
+      "categories": {"payload_too_large": 1},
+      "samples": [
+        {"rel_path": "` + secretPath + `", "category": "payload_too_large", "message": "` + secretMessage + `"}
+      ]
+    }
+  },
+  "doc_counts": {},
+  "total_docs": 1
+}`
+	if err := os.WriteFile(filepath.Join(stateDir, "corpus.json"), []byte(corpusJSON), 0o600); err != nil {
+		t.Fatalf("write corpus.json: %v", err)
+	}
+
+	bundlePath := filepath.Join(tmp, "bundle.tar.gz")
+	testutil.WithWorkingDir(t, tmp, func() {
+		var stdout, stderr bytes.Buffer
+		app := cli.NewAppWithIO(&stdout, &stderr)
+		code := app.Run([]string{"support-bundle", "--output", bundlePath})
+		if code != 0 {
+			t.Fatalf("support-bundle exit=%d stderr=%q", code, stderr.String())
+		}
+	})
+
+	entries := extractTarGz(t, bundlePath)
+	// No raw failure-sample content anywhere in the bundle by default.
+	assertNoLeak(t, entries, []string{
+		secretPath, secretMessage, "board-minutes", "layoff",
+	})
+
+	var status struct {
+		Snapshot struct {
+			Indexing struct {
+				FailureSummary struct {
+					Categories map[string]int64 `json:"categories"`
+					Samples    []struct {
+						RelPath  string `json:"rel_path"`
+						Category string `json:"category"`
+						Message  string `json:"message"`
+					} `json:"samples"`
+				} `json:"failure_summary"`
+			} `json:"indexing"`
+		} `json:"snapshot"`
+	}
+	if err := json.Unmarshal(entries["status.json"], &status); err != nil {
+		t.Fatalf("decode status.json: %v body=%s", err, entries["status.json"])
+	}
+	samples := status.Snapshot.Indexing.FailureSummary.Samples
+	if len(samples) != 1 {
+		t.Fatalf("want 1 failure sample, got %d: %s", len(samples), entries["status.json"])
+	}
+	s := samples[0]
+	// Category (a fixed enum) is preserved for triage...
+	if s.Category != "payload_too_large" {
+		t.Errorf("category = %q, want payload_too_large", s.Category)
+	}
+	if status.Snapshot.Indexing.FailureSummary.Categories["payload_too_large"] != 1 {
+		t.Errorf("categories aggregate lost: %+v", status.Snapshot.Indexing.FailureSummary.Categories)
+	}
+	// ...but rel_path is an extension-only placeholder and message is dropped.
+	if s.RelPath != "[redacted].pdf" {
+		t.Errorf("rel_path = %q, want extension-only placeholder", s.RelPath)
+	}
+	if s.Message != "" {
+		t.Errorf("message = %q, want empty by default", s.Message)
+	}
+}
+
+// TestSupportBundle_QuietPreservesIncludeContentWarning pins that --quiet does
+// not silently swallow the --include-content privacy-consent warning: quiet
+// suppresses the "Wrote support bundle" progress line on stdout but the consent
+// notice must still reach stderr.
+func TestSupportBundle_QuietPreservesIncludeContentWarning(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("PATH", t.TempDir())
+
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if err := st.UpsertDocument(ctx, model.Document{
+		RelPath:      "doomed.pdf",
+		DocType:      "pdf",
+		SizeBytes:    1234,
+		Status:       "error",
+		ErrorMessage: "docling extraction failed",
+	}); err != nil {
+		t.Fatalf("upsert error doc: %v", err)
+	}
+	_ = st.Close()
+
+	bundlePath := filepath.Join(tmp, "bundle.tar.gz")
+	testutil.WithWorkingDir(t, tmp, func() {
+		var stdout, stderr bytes.Buffer
+		app := cli.NewAppWithIO(&stdout, &stderr)
+		code := app.Run([]string{"--quiet", "support-bundle", "--include-content", "--output", bundlePath})
+		if code != 0 {
+			t.Fatalf("support-bundle exit=%d stderr=%q", code, stderr.String())
+		}
+		if strings.Contains(stdout.String(), "Wrote support bundle to") {
+			t.Errorf("--quiet should suppress the progress line, stdout=%q", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "review the bundle before sharing") {
+			t.Errorf("--quiet must not drop the include-content consent warning, stderr=%q", stderr.String())
+		}
+	})
+}
+
 // assertNoLeak fails if any bundle entry contains any of the sensitive strings.
 func assertNoLeak(t *testing.T, entries map[string][]byte, secrets []string) {
 	t.Helper()
