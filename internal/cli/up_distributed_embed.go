@@ -17,6 +17,12 @@ import (
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
+// distributedEmbedBatchSize is the number of chunks the distributed worker leases
+// and embeds per iteration, and the per-axis EmbeddingWorker batch size (issue
+// #435). Kept as one constant so the lease batch and the provider embed batch
+// stay in lockstep; mirrors the in-process EmbeddingWorker default of 32.
+const distributedEmbedBatchSize = 32
+
 // distributedTaskFetcher is the read-by-id capability the distributed worker
 // needs from the shared store (SPEC §8.7.4). The metadata store satisfies it.
 type distributedTaskFetcher interface {
@@ -88,7 +94,12 @@ func startDistributedEmbedding(
 		Fetcher:       fetcher,
 		Embedders:     embedders,
 		EmbedIdentity: identityStr,
-		Logger:        logger,
+		// Lease/embed up to distributedEmbedBatchSize chunks per iteration so the
+		// distributed path batches through the provider like the in-process loop
+		// (one embed call per batch, not per chunk — issue #435). Kept in lockstep
+		// with the per-axis EmbeddingWorker.BatchSize set in newEmbedStep.
+		BatchSize: distributedEmbedBatchSize,
+		Logger:    logger,
 	}
 
 	// Close the broker when the run context ends so its handle (e.g. a SQLite DB)
@@ -169,7 +180,7 @@ func newEmbedStep(
 		ModelForCode: codeModel,
 		RootDir:      rootDir,
 		Corpus:       corpusFS,
-		BatchSize:    32,
+		BatchSize:    distributedEmbedBatchSize,
 		Logger:       logger,
 		OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
 			if ret != nil {

@@ -2,6 +2,8 @@ package embedqueue_test
 
 import (
 	"context"
+	"errors"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -54,6 +56,65 @@ func (e *fakeEmbedStep) EmbedAndIndex(_ context.Context, _ string, tasks []model
 }
 
 func (e *fakeEmbedStep) writes() []uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]uint64, len(e.written))
+	copy(out, e.written)
+	return out
+}
+
+// batchSizes records the length of the task slice passed to each EmbedAndIndex
+// call, so a test can assert the worker batched (a single N-chunk call) rather
+// than making N one-chunk calls (issue #435).
+type batchRecordingEmbedStep struct {
+	mu      sync.Mutex
+	written []uint64
+	batches []int
+}
+
+func (e *batchRecordingEmbedStep) EmbedAndIndex(_ context.Context, _ string, tasks []model.ChunkTask) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.batches = append(e.batches, len(tasks))
+	for _, t := range tasks {
+		e.written = append(e.written, t.Metadata.ChunkID)
+	}
+	return len(tasks), nil
+}
+
+func (e *batchRecordingEmbedStep) snapshot() (writes []uint64, batches []int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	writes = append(writes, e.written...)
+	batches = append(batches, e.batches...)
+	return writes, batches
+}
+
+// poisonEmbedStep fails any batch that contains poisonID (as a real provider
+// rejects a whole request when one input is bad) but succeeds otherwise, so a
+// test can assert per-chunk isolation: the poison chunk is redelivered/dead-
+// lettered while its innocent batch-mates still land (issue #435).
+type poisonEmbedStep struct {
+	mu       sync.Mutex
+	poisonID uint64
+	written  []uint64
+}
+
+func (e *poisonEmbedStep) EmbedAndIndex(_ context.Context, _ string, tasks []model.ChunkTask) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, t := range tasks {
+		if t.Metadata.ChunkID == e.poisonID {
+			return 0, errors.New("poison chunk: permanent embed failure")
+		}
+	}
+	for _, t := range tasks {
+		e.written = append(e.written, t.Metadata.ChunkID)
+	}
+	return len(tasks), nil
+}
+
+func (e *poisonEmbedStep) writes() []uint64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := make([]uint64, len(e.written))
@@ -220,6 +281,118 @@ func TestWorker_EmbedIdentityMismatchRejected(t *testing.T) {
 
 	if got := step.writes(); len(got) != 0 {
 		t.Fatalf("worker embedded a mismatched-identity job: writes=%v", got)
+	}
+}
+
+// TestWorker_BatchesUpToBatchSize pins the #435 fix: with several jobs queued the
+// worker leases and embeds them in a SINGLE EmbedAndIndex call (up to BatchSize)
+// instead of one provider call per chunk. Every enqueued chunk is embedded exactly
+// once and the recorded batch sizes show batching (a call carrying >1 chunk).
+func TestWorker_BatchesUpToBatchSize(t *testing.T) {
+	ctx := context.Background()
+	broker := embedqueue.NewMemBroker(3)
+	tasks := map[uint64]model.ChunkTask{}
+	const n = 5
+	for id := uint64(1); id <= n; id++ {
+		tasks[id] = textTask(id, "chunk")
+	}
+	fetch := &fakeFetcher{tasks: tasks}
+	step := &batchRecordingEmbedStep{}
+
+	for id := uint64(1); id <= n; id++ {
+		if err := broker.Enqueue(ctx, embedqueue.Job{
+			ChunkID: id, IndexKind: "text", EmbedIdentity: testIdentity,
+		}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+
+	cfg := embedqueue.Config{
+		Broker:        broker,
+		Fetcher:       fetch,
+		Embedders:     map[string]embedqueue.Embedder{"text": step},
+		EmbedIdentity: testIdentity,
+		BatchSize:     n, // drain the whole queue in one lease batch
+		PollInterval:  2 * time.Millisecond,
+	}
+	runWorkerUntil(t, cfg, func() bool {
+		w, _ := step.snapshot()
+		st, _ := broker.Stats(ctx)
+		return st.Pending == 0 && st.InFlight == 0 && len(w) >= n
+	})
+
+	writes, batches := step.snapshot()
+	got := append([]uint64(nil), writes...)
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	want := []uint64{1, 2, 3, 4, 5}
+	if len(got) != len(want) {
+		t.Fatalf("writes = %v, want each of %v exactly once", writes, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("writes = %v, want each of %v exactly once", writes, want)
+		}
+	}
+	// The whole point of #435: at least one EmbedAndIndex call carried more than
+	// one chunk. The old one-chunk-per-lease worker would show all 1s.
+	maxBatch := 0
+	for _, b := range batches {
+		if b > maxBatch {
+			maxBatch = b
+		}
+	}
+	if maxBatch < 2 {
+		t.Fatalf("no batching: EmbedAndIndex batch sizes = %v, want at least one call with >1 chunk", batches)
+	}
+}
+
+// TestWorker_BatchPoisonChunkIsolated pins that a batch failure preserves
+// per-chunk isolation (issue #435): a single poison chunk that fails the whole
+// batch is redelivered (and eventually dead-lettered) WITHOUT dragging its
+// innocent batch-mates down — those still land exactly once.
+func TestWorker_BatchPoisonChunkIsolated(t *testing.T) {
+	ctx := context.Background()
+	broker := embedqueue.NewMemBroker(2) // dead-letter the poison chunk after 2 tries
+	tasks := map[uint64]model.ChunkTask{
+		1: textTask(1, "good-a"),
+		2: textTask(2, "poison"),
+		3: textTask(3, "good-b"),
+	}
+	fetch := &fakeFetcher{tasks: tasks}
+	step := &poisonEmbedStep{poisonID: 2}
+
+	for id := uint64(1); id <= 3; id++ {
+		if err := broker.Enqueue(ctx, embedqueue.Job{
+			ChunkID: id, IndexKind: "text", EmbedIdentity: testIdentity,
+		}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+
+	cfg := embedqueue.Config{
+		Broker:        broker,
+		Fetcher:       fetch,
+		Embedders:     map[string]embedqueue.Embedder{"text": step},
+		EmbedIdentity: testIdentity,
+		BatchSize:     3,
+		PollInterval:  1 * time.Millisecond,
+		RetryAfter:    1 * time.Millisecond,
+	}
+	runWorkerUntil(t, cfg, func() bool {
+		st, _ := broker.Stats(ctx)
+		return st.DeadLettered == 1 && st.Pending == 0 && st.InFlight == 0
+	})
+
+	writes := step.writes()
+	seen := map[uint64]int{}
+	for _, id := range writes {
+		seen[id]++
+	}
+	if seen[2] != 0 {
+		t.Fatalf("poison chunk 2 was embedded (%d times); it must never land: writes=%v", seen[2], writes)
+	}
+	if seen[1] != 1 || seen[3] != 1 {
+		t.Fatalf("innocent batch-mates must land exactly once after isolation: writes=%v", writes)
 	}
 }
 
