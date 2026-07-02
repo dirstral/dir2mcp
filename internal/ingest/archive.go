@@ -41,6 +41,20 @@ func isSafeArchivePath(p string) bool {
 	return strings.HasPrefix(cleaned, "/") && !strings.HasPrefix(cleaned, "/..")
 }
 
+// isSafeArchiveMemberName reports whether name is safe to use as the final path
+// segment of a single-compressed member's rel_path. It rejects empty names, the
+// "."/".." traversal segments, embedded path separators, and any ".." sequence
+// (mirroring isSafeArchivePath's traversal rejection).
+func isSafeArchiveMemberName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	return !strings.Contains(name, "..")
+}
+
 // archiveFormat returns a canonical format string for the archive at relPath,
 // or "" if the format is unsupported by the stdlib extractor.
 func archiveFormat(relPath string) string {
@@ -108,6 +122,10 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]ar
 		rd = gr
 	case "bz2":
 		rd = bzip2.NewReader(f)
+	default:
+		// Guard against a nil reader: the caller only dispatches "gz"/"bz2" here,
+		// but an unexpected value must fail loudly instead of dereferencing nil.
+		return nil, fmt.Errorf("unsupported single-compressed format %q", format)
 	}
 
 	content, err := io.ReadAll(io.LimitReader(rd, archiveMemberMaxBytes+1))
@@ -122,6 +140,14 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]ar
 	memberName := strings.TrimSuffix(base, filepath.Ext(base))
 	if memberName == "" || memberName == base {
 		memberName = base + ".out"
+	}
+	// Guard against edge-case archive names whose stripped member name is a
+	// traversal segment (e.g. "..gz" -> "." or "..bz2" -> "."): such a name would
+	// yield a "<archive>/.." style rel_path that escapes the archive namespace.
+	// Mirror isSafeArchivePath's traversal rejection and fall back to a benign
+	// synthetic name.
+	if !isSafeArchiveMemberName(memberName) {
+		memberName = "member"
 	}
 	return []archiveMember{{
 		RelPath: archiveRelPath + "/" + memberName,

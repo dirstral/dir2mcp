@@ -1460,6 +1460,14 @@ func (s *Service) readDocumentContent(ctx context.Context, relPath string) ([]by
 func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool) error {
 	if needsProcessing {
 		if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
+			if !errors.Is(err, errUnsupportedArchiveFormat) {
+				// Context cancellation (shutdown mid-archive) and any other
+				// non-sentinel error must propagate WITHOUT persisting a durable
+				// "error" status or mutating counters: processArchiveMembers returns
+				// ctx.Err() on cancellation, and recording that as a hard per-document
+				// failure would corrupt CorpusStats and wrongly flag the container.
+				return err
+			}
 			// #398: an unsupported/unextractable archive (.xz/.7z/.rar) must not be
 			// silently ingested as an empty skipped document. Persist the container
 			// itself as status="error" so it is durably visible via status queries and

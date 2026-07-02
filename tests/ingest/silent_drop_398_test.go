@@ -101,6 +101,24 @@ func TestArchiveIngest_BareGzipMemberIndexed(t *testing.T) {
 	}
 }
 
+// TestArchiveIngest_EdgeCaseNameNoTraversal is the regression guard for the PR
+// #483 path-traversal finding: a bare single-compressed archive whose name
+// reduces to a traversal segment once the compression suffix is stripped (e.g.
+// "..gz" -> ".") must NOT yield a member rel_path containing a "."/".." traversal
+// segment. End-to-end, no such path may ever be persisted; the precise synthetic
+// member name is asserted at the extraction layer in the internal package test
+// TestExtractSingleCompressedMember_EdgeCaseNameSanitised.
+func TestArchiveIngest_EdgeCaseNameNoTraversal(t *testing.T) {
+	data := buildGzip(t, "edge case payload")
+	st := runArchiveIngest(t, "..gz", data)
+
+	for p := range docPaths(t, st) {
+		if strings.HasPrefix(p, "..gz/") && (strings.HasSuffix(p, "/..") || strings.HasSuffix(p, "/.") || strings.Contains(p[len("..gz/"):], "..")) {
+			t.Errorf("member rel_path %q contains a traversal segment; edge-case name was not sanitised", p)
+		}
+	}
+}
+
 // TestArchiveIngest_UnsupportedFormatMarkedError is the regression guard for
 // #398 item 2: a classified-but-unextractable archive (.7z/.xz/.rar) was silently
 // ingested as an empty skipped document with zero diagnostics. It must now be
