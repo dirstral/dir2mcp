@@ -1,19 +1,21 @@
-package cli
+package tests
 
 import (
 	"bytes"
 	"sync"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/cli"
 )
 
 // TestSyncWriterSerializesConcurrentWrites is the focused regression guard for
 // issue #419: many goroutines writing to one shared sink (here a bytes.Buffer,
 // as in the CLI tests) must not race or lose bytes. Run under `go test -race`
-// this fails if syncWriter drops its mutex; even without -race the byte count
+// this fails if SyncWriter drops its mutex; even without -race the byte count
 // assertion catches a torn Buffer.grow.
 func TestSyncWriterSerializesConcurrentWrites(t *testing.T) {
 	var buf bytes.Buffer
-	w := newSyncWriter(&buf)
+	w := cli.NewSyncWriter(&buf)
 
 	const goroutines, perGoroutine = 8, 250
 	line := []byte("embed worker started [kind=text]\n")
@@ -42,8 +44,8 @@ func TestSyncWriterSerializesConcurrentWrites(t *testing.T) {
 // an already-synchronized sink is wrapped again (e.g. both the embed logger and
 // the event loop route through the shared sink).
 func TestNewSyncWriterDoesNotDoubleWrap(t *testing.T) {
-	inner := newSyncWriter(&bytes.Buffer{})
-	if got := newSyncWriter(inner); got != inner {
-		t.Fatalf("newSyncWriter double-wrapped an existing *syncWriter: got %p, want %p", got, inner)
+	inner := cli.NewSyncWriter(&bytes.Buffer{})
+	if got := cli.NewSyncWriter(inner); got != inner {
+		t.Fatalf("NewSyncWriter double-wrapped an existing *SyncWriter: got %p, want %p", got, inner)
 	}
 }

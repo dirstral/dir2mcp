@@ -158,7 +158,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// persistence autosave callback, and the event loop). Without it, direct
 	// writef(stderr, ...) writes race the embed worker's *log.Logger writes on the
 	// same underlying sink (a bytes.Buffer under `go test -race`) — issue #419.
-	logSink := newSyncWriter(a.stderr)
+	logSink := NewSyncWriter(a.stderr)
 
 	persistence := index.NewPersistenceManager(
 		[]index.IndexedFile{
@@ -171,18 +171,20 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	persistence.Start(runCtx)
 	defer a.stopPersistenceWithLog(persistence)
 
-	// Drain the embed workers before runUp returns. They are the goroutines whose
+	// Drain every long-lived background goroutine before runUp returns: the embed
+	// workers (or, in distributed mode, the coordinator/worker/broker-closer), the
+	// corpus writer, and the watch worker. These are the goroutines whose
 	// unconditional startup/progress logging outlives the call otherwise, racing a
 	// caller that reads the sink after return (issue #419); waiting also stops them
 	// from touching the store/indices the deferred Close calls below tear down.
-	var embedWG sync.WaitGroup
+	var bgWG sync.WaitGroup
 	defer func() {
 		cancel()
-		embedWG.Wait()
+		bgWG.Wait()
 	}()
 
 	embedErrCh := make(chan error, 4)
-	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, logSink, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS, emitter, &embedWG); err != nil {
+	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, logSink, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS, emitter, &bgWG); err != nil {
 		// A distributed-embedding setup failure is fatal: refuse to run a server
 		// that would silently never drain its pending queue.
 		writeCLIError(logSink, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("start embedding: %v", err))
@@ -216,9 +218,16 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	stdinQuitCh := a.installInteractionForUp(cancel, cfg, connection, auth, opts, nonInteractiveMode)
 
 	ingestErrCh := make(chan error, 1)
-	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
+	// Track the corpus writer on bgWG so the deferred drain waits for it to stop
+	// before st.Close() runs; otherwise writeCorpusSnapshot can query a closed
+	// store, and its logging can race a caller reading the sink after return (#419).
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
+	}()
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh)
-	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, ing, logSink)
+	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, ing, logSink, &bgWG)
 
 	return a.runEventLoop(runCtx, cancel, &cfg, st, indexingState, emitter, serverErrCh, ingestErrCh, embedErrCh, stdinQuitCh, logSink)
 }
@@ -737,7 +746,7 @@ type watchable interface {
 // the server.
 func startWatchWorker(runCtx context.Context, readOnly, enabled bool, ing interface {
 	Run(context.Context) error
-}, stderr io.Writer) {
+}, stderr io.Writer, wg *sync.WaitGroup) {
 	if !enabled {
 		return
 	}
@@ -751,7 +760,16 @@ func startWatchWorker(runCtx context.Context, readOnly, enabled bool, ing interf
 	if !ok {
 		return
 	}
+	// Register on the drain group so the deferred cancel()+Wait() in runUp waits
+	// for this goroutine to exit before returning; its Watch error logging would
+	// otherwise race a caller reading the shared sink after return (issue #419).
+	if wg != nil {
+		wg.Add(1)
+	}
 	go func() {
+		if wg != nil {
+			defer wg.Done()
+		}
 		if err := w.Watch(runCtx); err != nil && runCtx.Err() == nil {
 			_, _ = fmt.Fprintf(stderr, "watch: %v\n", err)
 		}
@@ -1107,7 +1125,7 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnl
 		return nil
 	}
 	if cfg.DistributedEmbed.Enabled {
-		return startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
+		return startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, wg)
 	}
 	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, cfg.IngestLateChunking, wg)
 	return nil
