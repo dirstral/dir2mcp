@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
@@ -44,6 +45,49 @@ func TestResetProgress_ZeroesRunCountersPreservesEmbedded(t *testing.T) {
 	if !got.Running {
 		t.Fatal("ResetProgress must preserve Running=true")
 	}
+}
+
+// TestResetProgress_SnapshotInvariantDuringConcurrentReset guards the counter
+// ordering in ResetProgress: because Snapshot() reads each field independently
+// without a lock, a status scrape can interleave with a reset. Zeroing the
+// component counters before scanned keeps the indexed+skipped+errors <= scanned
+// invariant true for every observer, so a snapshot taken mid-reset never sees
+// scanned=0 while indexed/skipped/errors still carry the previous run's totals.
+// Run with -race to also surface any unsynchronised access.
+func TestResetProgress_SnapshotInvariantDuringConcurrentReset(t *testing.T) {
+	s := appstate.NewIndexingState(appstate.ModeFull)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				got := s.Snapshot()
+				if got.Indexed+got.Skipped+got.Errors > got.Scanned {
+					t.Errorf("invariant violated mid-reset: indexed(%d)+skipped(%d)+errors(%d) > scanned(%d)",
+						got.Indexed, got.Skipped, got.Errors, got.Scanned)
+					return
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < 2000; i++ {
+		s.AddScanned(10)
+		s.AddIndexed(4)
+		s.AddSkipped(3)
+		s.AddErrors(2)
+		s.ResetProgress()
+	}
+
+	close(stop)
+	wg.Wait()
 }
 
 // TestResetProgress_NilReceiverIsSafe mirrors the nil-guard pattern used by the
