@@ -82,7 +82,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
 		if code != 0 {
@@ -168,7 +168,7 @@ func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
 		if code != 0 {
@@ -221,7 +221,7 @@ func TestUpSupportsGlobalDirAndStateDirFlags(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{
@@ -305,7 +305,7 @@ func TestUpTLSConnectionURLUsesHTTPS(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{
@@ -344,7 +344,7 @@ func TestUpWarnsAboutFacilitatorTokenConflict(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{
@@ -510,7 +510,7 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	})
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"reindex"})
 		if code != 0 {
@@ -564,7 +564,7 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	})
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"reindex"})
 		if code != 0 {
@@ -609,7 +609,7 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{
@@ -681,7 +681,7 @@ func TestUpJSONPreloadErrorEmitsWarningEvent(t *testing.T) {
 	})
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{"up", "--json", "--listen", "127.0.0.1:0"})
@@ -798,7 +798,7 @@ func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up"})
 		if code != 0 {
@@ -826,7 +826,7 @@ func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public"})
 		if code != 0 {
@@ -898,7 +898,7 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public", "--auth", "none", "--force-insecure", "--json"})
 		if code != 0 {
@@ -949,7 +949,7 @@ func TestUpX402OnAllowsMissingFields(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{
@@ -997,7 +997,7 @@ func TestUpPublicRespectsExplicitListen(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public", "--listen", "127.0.0.1:0"})
 		if code != 0 {
@@ -1025,7 +1025,7 @@ func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public", "--json", "--read-only"})
 		if code != 0 {

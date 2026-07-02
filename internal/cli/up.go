@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/huh"
@@ -152,22 +153,39 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	defer cleanupPIDFile()
 
+	// One mutex-guarded sink shared by every goroutine that logs to stderr during
+	// the concurrent phase (embed workers, corpus writer, watch worker, the
+	// persistence autosave callback, and the event loop). Without it, direct
+	// writef(stderr, ...) writes race the embed worker's *log.Logger writes on the
+	// same underlying sink (a bytes.Buffer under `go test -race`) — issue #419.
+	logSink := newSyncWriter(a.stderr)
+
 	persistence := index.NewPersistenceManager(
 		[]index.IndexedFile{
 			{Path: textIndexPath, Index: textIx},
 			{Path: codeIndexPath, Index: codeIx},
 		},
 		15*time.Second,
-		func(saveErr error) { writef(a.stderr, "index autosave warning: %v\n", saveErr) },
+		func(saveErr error) { writef(logSink, "index autosave warning: %v\n", saveErr) },
 	)
 	persistence.Start(runCtx)
 	defer a.stopPersistenceWithLog(persistence)
 
+	// Drain the embed workers before runUp returns. They are the goroutines whose
+	// unconditional startup/progress logging outlives the call otherwise, racing a
+	// caller that reads the sink after return (issue #419); waiting also stops them
+	// from touching the store/indices the deferred Close calls below tear down.
+	var embedWG sync.WaitGroup
+	defer func() {
+		cancel()
+		embedWG.Wait()
+	}()
+
 	embedErrCh := make(chan error, 4)
-	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, a.stderr, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS, emitter); err != nil {
+	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, logSink, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS, emitter, &embedWG); err != nil {
 		// A distributed-embedding setup failure is fatal: refuse to run a server
 		// that would silently never drain its pending queue.
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("start embedding: %v", err))
+		writeCLIError(logSink, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("start embedding: %v", err))
 		return exitConfigInvalid
 	}
 
@@ -198,11 +216,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	stdinQuitCh := a.installInteractionForUp(cancel, cfg, connection, auth, opts, nonInteractiveMode)
 
 	ingestErrCh := make(chan error, 1)
-	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
+	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh)
-	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, ing, a.stderr)
+	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, ing, logSink)
 
-	return a.runEventLoop(runCtx, cancel, &cfg, st, indexingState, emitter, serverErrCh, ingestErrCh, embedErrCh, stdinQuitCh)
+	return a.runEventLoop(runCtx, cancel, &cfg, st, indexingState, emitter, serverErrCh, ingestErrCh, embedErrCh, stdinQuitCh, logSink)
 }
 
 // applyTLSConfig resolves TLS cert/key from opts and cfg, validates them, and
@@ -753,6 +771,7 @@ func (a *App) runEventLoop(
 	ingestErrCh chan error,
 	embedErrCh <-chan error,
 	stdinQuitCh <-chan struct{},
+	logSink io.Writer,
 ) int {
 	for {
 		select {
@@ -763,7 +782,7 @@ func (a *App) runEventLoop(
 			return exitSuccess
 		case serverErr := <-serverErrCh:
 			if serverErr != nil {
-				writeCLIError(a.stderr, emitter.enabled, exitGeneric, fmt.Sprintf("server failed: %v", serverErr))
+				writeCLIError(logSink, emitter.enabled, exitGeneric, fmt.Sprintf("server failed: %v", serverErr))
 				emitter.Emit("error", "fatal", map[string]interface{}{
 					"code":    "SERVER_FAILURE",
 					"message": serverErr.Error(),
@@ -774,14 +793,14 @@ func (a *App) runEventLoop(
 		case ingestErr, ok := <-ingestErrCh:
 			if !ok {
 				ingestErrCh = nil
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
 				continue
 			}
 			if ingestErr == nil {
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
 				continue
 			}
-			writeCLIError(a.stderr, emitter.enabled, exitIngestionFatal, fmt.Sprintf("ingestion failed: %v", ingestErr))
+			writeCLIError(logSink, emitter.enabled, exitIngestionFatal, fmt.Sprintf("ingestion failed: %v", ingestErr))
 			emitter.Emit("error", "file_error", map[string]interface{}{
 				"message": ingestErr.Error(),
 			})
@@ -794,7 +813,7 @@ func (a *App) runEventLoop(
 			if embedErr == nil {
 				continue
 			}
-			writeCLIError(a.stderr, emitter.enabled, exitGeneric, fmt.Sprintf("embedding worker warning: %v", embedErr))
+			writeCLIError(logSink, emitter.enabled, exitGeneric, fmt.Sprintf("embedding worker warning: %v", embedErr))
 			emitter.Emit("error", "embed_error", map[string]interface{}{
 				"message": embedErr.Error(),
 			})
@@ -856,6 +875,7 @@ func startEmbeddingWorkers(
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
 	lateChunking bool,
+	wg *sync.WaitGroup,
 ) {
 	if st == nil || embedder == nil {
 		return
@@ -887,7 +907,13 @@ func startEmbeddingWorkers(
 			},
 		}
 
+		if wg != nil {
+			wg.Add(1)
+		}
 		go func() {
+			if wg != nil {
+				defer wg.Done()
+			}
 			err := worker.Run(ctx, 750*time.Millisecond, workerKind)
 			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
@@ -1059,7 +1085,7 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 // It returns an error only for a distributed-mode SETUP failure (broker cannot be
 // built, store lacks ChunkTaskByID, no embed identity), which the caller treats as
 // fatal — the historical in-process path never errors here.
-func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS, emitter *ndjsonEmitter) error {
+func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnly bool, st model.Store, textIx, codeIx model.Index, embedder model.Embedder, ret *retrieval.Service, indexingState *appstate.IndexingState, embedErrCh chan error, stderr io.Writer, jsonOutput bool, embedModelText, embedModelCode, rootDir string, corpusFS corpusfs.CorpusFS, emitter *ndjsonEmitter, wg *sync.WaitGroup) error {
 	if readOnly {
 		return nil
 	}
@@ -1083,7 +1109,7 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnl
 	if cfg.DistributedEmbed.Enabled {
 		return startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS)
 	}
-	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, cfg.IngestLateChunking)
+	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, cfg.IngestLateChunking, wg)
 	return nil
 }
 

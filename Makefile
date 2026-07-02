@@ -26,7 +26,7 @@ build-elevenlabs-bridge:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt vet lint cyclo ineffassign misspell test check ci benchmark inspector-smoke conformance
+.PHONY: all clean clean-all help fmt vet lint cyclo ineffassign misspell test test-race check ci benchmark inspector-smoke conformance
 
 all: check
 
@@ -42,6 +42,7 @@ help:
 	@echo "  ineffassign - run ineffassign over the whole tree"
 	@echo "  misspell    - run misspell over the whole tree"
 	@echo "  test   - run go test"
+	@echo "  test-race - run go test -race on the concurrency-sensitive packages (needs CGO)"
 	@echo "  check  - fmt + vet + lint + cyclo + ineffassign + misspell + test + build"
 	@echo "  ci     - vet + cyclo + ineffassign + misspell + test (CI-safe default)"
 	@echo "  build-elevenlabs-bridge - build the ElevenLabs webhook bridge binary"
@@ -73,6 +74,13 @@ misspell:
 
 test:
 	go test ./...
+
+# test-race exercises the goroutine-heavy embed/index/watch/store paths under the
+# race detector so concurrency regressions (issue #419) are caught. It needs the
+# C toolchain (CGO_ENABLED=1); it is a separate target rather than folded into
+# `check` because `check`/`ci` run with CGO_ENABLED=0.
+test-race:
+	CGO_ENABLED=1 go test -race ./internal/cli/... ./internal/index/... ./tests/cli ./tests/index ./tests/store
 
 test-release-tools:
 	cd scripts && python3 -m unittest discover -p 'test_*.py'
