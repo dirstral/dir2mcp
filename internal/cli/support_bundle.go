@@ -146,7 +146,7 @@ func collectSupportArtifacts(ctx context.Context, a *App, cfg config.Config, inc
 
 	listBytes, listErr := marshalListFilesJSON(ctx, a, cfg, includeContent)
 	add("list-files.json", listBytes, listErr)
-	if listErr == nil && includeContent {
+	if includeContent {
 		warnings = append(warnings, errors.New(
 			"list-files.json/status.json: --include-content may include corpus paths/titles/error messages; review the bundle before sharing it"))
 	}
@@ -259,7 +259,13 @@ func redactFailureSamples(fs *model.FailureSummary, includeContent bool) *model.
 	if fs == nil {
 		return nil
 	}
-	out := &model.FailureSummary{Categories: fs.Categories}
+	out := &model.FailureSummary{}
+	if fs.Categories != nil {
+		out.Categories = make(map[string]int64, len(fs.Categories))
+		for k, v := range fs.Categories {
+			out.Categories[k] = v
+		}
+	}
 	if len(fs.Samples) > 0 {
 		out.Samples = make([]model.FailureSample, len(fs.Samples))
 		for i, s := range fs.Samples {
