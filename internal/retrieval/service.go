@@ -81,8 +81,12 @@ const (
 	// ragDocMarkerRedaction replaces any occurrence of the fence markers found
 	// inside corpus-derived text (snippet, rel_path, title) so a poisoned
 	// document cannot spoof or prematurely close the untrusted fence and smuggle
-	// content past the injection guard (issue #445).
-	ragDocMarkerRedaction = "[UNTRUSTED-DOCUMENT-MARKER-REDACTED]"
+	// content past the injection guard (issue #445). Deliberately contains no
+	// square brackets (which would nest inside the [rel_path] citation tag and
+	// confuse ensureAnswerAttributions' matching) and no fence characters
+	// ('<'/'>', which could re-introduce a fence spoof); guillemets keep it a
+	// clearly-legible redaction marker.
+	ragDocMarkerRedaction = "«UNTRUSTED-DOCUMENT-MARKER-REDACTED»"
 )
 
 // Service implements retrieval operations over embedded data.
@@ -2641,11 +2645,13 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 	}
 	for i := 0; i < limit && remaining > 0; i++ {
 		h := hits[i]
-		// Keep the bracketed [rel_path] tag stable for the answering model
-		// (ensureAnswerAttributions relies on it for canonical citation
-		// matching). When a human-readable Title is available, surface it
-		// alongside the path as a parenthetical hint so the model has the
-		// document name in addition to its path.
+		// Preserve the bracketed [rel_path] citation tag structurally so the
+		// answering model (and ensureAnswerAttributions) can match it, but note
+		// the tag's contents may be sanitized by neutralizeHeaderField for
+		// fence-safety on adversarial inputs (marker/terminator literals in a
+		// crafted RelPath/Title are redacted). When a human-readable Title is
+		// available, surface it alongside the path as a parenthetical hint so the
+		// model has the document name in addition to its path.
 		//
 		// Wrap the snippet in explicit BEGIN/END UNTRUSTED DOCUMENT markers
 		// (issue #445) so the model can distinguish untrusted corpus DATA from
