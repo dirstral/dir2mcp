@@ -708,35 +708,76 @@ func (w *EmbeddingWorker) EmbedAndIndex(ctx context.Context, indexKind string, t
 	if err != nil {
 		return 0, err
 	}
+	return w.embedIndexBatch(ctx, indexKind, modelName, validTasks, labels)
+}
 
+// embedIndexBatch embeds validTasks (aligned 1:1 with labels), upserts the
+// resulting vectors into the index, and marks the chunks embedded. It is the
+// recursive core of EmbedAndIndex.
+//
+// On a non-transient, non-fatal batch embed error it bisects the batch
+// (bisectEmbedBatch) so a single provider-rejected "poison" input — an
+// oversized / bad-encoding / over-token-limit chunk that 400s the whole HTTP
+// request, since openai/gemini/omniembed all embed by batch — is isolated and
+// marked failed while its healthy siblings still embed (issue #399). Previously
+// one bad chunk marked up to batch-size-1 healthy siblings embedding_failure.
+//
+// The classification contract from issue #412 is preserved: transient errors
+// (network hiccup, rate limit, cancellation) leave the chunks PENDING for a
+// later cycle and are never marked failed; ErrFatal is a local media/config
+// failure (not a provider input rejection) and keeps the existing whole-batch
+// behavior so genuine misconfiguration stays loud rather than degrading into a
+// silent per-chunk failure storm.
+func (w *EmbeddingWorker) embedIndexBatch(ctx context.Context, indexKind, modelName string, validTasks []model.ChunkTask, labels []uint64) (int, error) {
 	// Text chunks embed via Embed; media chunks (SPEC 8.1.7) embed via
 	// EmbedMedia. embedTasks returns vectors aligned 1:1 with validTasks.
 	vectors, err := w.embedTasks(ctx, modelName, validTasks)
 	if err != nil {
-		// distinguish between transient errors (which we want to retry later)
-		// and permanent failures for which the chunks should be marked as
-		// irrecoverable.  A transient error could be a network timeout,
-		// rate‑limit response, or context cancellation.  We intentionally keep
-		// the interface simple; by returning the error without marking the
-		// chunks as failed they will remain in the pending state and be
-		// re‑fetched on the next cycle.  Permanent errors fall through to the
-		// existing MarkFailed behaviour.
+		// A transient error could be a network timeout, rate-limit response, or
+		// context cancellation. Returning it without marking the chunks failed
+		// leaves them PENDING so they are re-fetched on the next cycle (#412).
 		if isTransientEmbedError(err) {
 			return 0, err
 		}
+		// Non-transient, multi-item, not a local/config fatal, and not a
+		// corpus-wide auth rejection: this is the poison-chunk case. Bisect the
+		// batch so only the offending input(s) fail instead of the whole HTTP
+		// batch (#399). Auth failures (401/403) are excluded because they reject
+		// every input identically — bisecting them isolates nothing and instead
+		// explodes one batch into O(n) embed calls (1+2+4+…), hammering the
+		// provider and risking a rate-limit/lockout, so they keep the existing
+		// whole-batch failure behavior below.
+		if len(validTasks) > 1 && !errors.Is(err, ErrFatal) &&
+			store.ClassifyError(err) != store.ErrorCategoryAuth {
+			return w.bisectEmbedBatch(ctx, indexKind, modelName, validTasks, labels, err)
+		}
+		// Single item, a fatal batch error, or an auth batch: mark failed
+		// (existing behavior).
 		category := string(store.ClassifyError(err))
 		reason := store.SanitizeReason(err.Error())
 		if mfErr := w.Source.MarkFailedWithCategory(ctx, labels, category, reason); mfErr != nil {
 			w.logf("mark failed update error: %v (source error: %v) labels=%v", mfErr, err, labels)
 		}
-		return 0, err
+		// ErrFatal is a local media/config failure that must stay loud and stop
+		// the worker (issue #412), so propagate it unwrapped — a parent
+		// bisectEmbedBatch must NOT absorb it. Every other non-transient failure
+		// here has been terminally marked failed, so wrap it in the
+		// errChunkMarkedFailed sentinel: a parent bisection absorbs that (its
+		// healthy siblings still succeed) while the run loop can still tell it
+		// apart from a post-embed write failure that must propagate.
+		if errors.Is(err, ErrFatal) {
+			return 0, err
+		}
+		return 0, fmt.Errorf("%w: %w", errChunkMarkedFailed, err)
 	}
 	if len(vectors) != len(validTasks) {
 		reason := "embedding vector count mismatch"
 		if mfErr := w.Source.MarkFailedWithCategory(ctx, labels, string(store.ErrorCategoryEmbeddingFailure), reason); mfErr != nil {
 			w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, labels)
 		}
-		return 0, errors.New(reason)
+		// Terminally marked failed, so absorbable by a parent bisection (same
+		// contract as the embed-rejection case above).
+		return 0, fmt.Errorf("%w: %s", errChunkMarkedFailed, reason)
 	}
 
 	n, err := w.indexChunks(ctx, validTasks, labels, vectors)
@@ -753,6 +794,53 @@ func (w *EmbeddingWorker) EmbedAndIndex(ctx context.Context, indexKind string, t
 	}
 
 	return len(labels), nil
+}
+
+// bisectEmbedBatch isolates the provider-rejected input(s) in a batch that
+// failed a non-transient, non-fatal embed by splitting it in half and
+// re-embedding each half through embedIndexBatch. Recursion narrows to the
+// individual poison chunk, which is marked failed (embedding_status=error)
+// while every healthy sibling still embeds and indexes (issue #399).
+//
+// Error precedence in the return value (see mergeBisectErrors): only the
+// errChunkMarkedFailed sentinel is absorbed — an isolated poison chunk this
+// recursion already marked failed is terminal, so once it is contained the batch
+// reports success for the healthy remainder. Every other error propagates:
+// transient errors (those chunks stayed PENDING, so the run loop must back off
+// and re-fetch them), ErrFatal (a local media/config failure that must stop the
+// worker, issue #412 — and it wins over a sibling's transient error), and
+// post-embed write failures from indexChunks/markEmbeddedWithRetry (the run loop
+// must see them or the affected chunks re-embed in a tight loop).
+// Returns the total number of chunks successfully indexed across both halves.
+func (w *EmbeddingWorker) bisectEmbedBatch(ctx context.Context, indexKind, modelName string, validTasks []model.ChunkTask, labels []uint64, batchErr error) (int, error) {
+	w.logf("embed batch of %d failed non-transiently (%s); bisecting to isolate poison chunk(s) so healthy siblings still embed [kind=%s]",
+		len(validTasks), store.SanitizeReason(batchErr.Error()), indexKind)
+	mid := len(validTasks) / 2
+	nLeft, errLeft := w.embedIndexBatch(ctx, indexKind, modelName, validTasks[:mid], labels[:mid])
+	nRight, errRight := w.embedIndexBatch(ctx, indexKind, modelName, validTasks[mid:], labels[mid:])
+	return nLeft + nRight, mergeBisectErrors(errLeft, errRight)
+}
+
+// mergeBisectErrors selects the error a bisection should surface to its caller.
+// The errChunkMarkedFailed sentinel (a poison chunk a recursion already marked
+// terminally failed) is absorbed so healthy siblings still report success. Of
+// the remaining errors ErrFatal takes precedence — a local media/config failure
+// must stop the worker (issue #412) even when a sibling half only saw a
+// transient error — otherwise the first non-absorbable error is returned.
+func mergeBisectErrors(errs ...error) error {
+	var first error
+	for _, e := range errs {
+		if e == nil || errors.Is(e, errChunkMarkedFailed) {
+			continue
+		}
+		if errors.Is(e, ErrFatal) {
+			return e
+		}
+		if first == nil {
+			first = e
+		}
+	}
+	return first
 }
 
 // Run starts a background loop that periodically calls RunOnce. A small
@@ -859,6 +947,16 @@ var ErrFatal = errors.New("fatal")
 // fixes it. Recognized by isTransientEmbedError so it routes to the retry (keep
 // pending) path rather than MarkFailed.
 var errRetryableMediaRead = errors.New("retryable media read")
+
+// errChunkMarkedFailed marks a batch whose chunk(s) embedIndexBatch has already
+// moved to a terminal failed state (embedding_status=error) — the isolated
+// poison chunk from bisection (#399) or a vector-count-mismatch. It exists so
+// bisectEmbedBatch can absorb exactly this case (its healthy siblings still
+// succeed) while still propagating everything the run loop must act on: transient
+// errors, ErrFatal, and post-embed write failures from indexChunks /
+// markEmbeddedWithRetry. It is never returned for a transient error or for
+// ErrFatal (both propagate unwrapped), so absorbing it cannot swallow those.
+var errChunkMarkedFailed = errors.New("chunk marked failed")
 
 // isRetryable determines whether RunOnce should be retried when it returns
 // the provided error. The predicate is intentionally conservative; context
