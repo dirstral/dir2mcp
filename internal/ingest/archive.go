@@ -71,13 +71,13 @@ func archiveFormat(relPath string) string {
 // the error. An unrecognised format returns errUnsupportedArchiveFormat so the
 // caller can surface a diagnostic instead of silently dropping the document.
 func extractArchiveMembers(absPath, archiveRelPath string) ([]archiveMember, error) {
-	switch archiveFormat(archiveRelPath) {
+	switch format := archiveFormat(archiveRelPath); format {
 	case "zip":
 		return extractZipMembers(absPath, archiveRelPath)
 	case "tar", "tar.gz", "tar.bz2":
 		return extractTarMembers(absPath, archiveRelPath)
 	case "gz", "bz2":
-		return extractSingleCompressedMember(absPath, archiveRelPath)
+		return extractSingleCompressedMember(absPath, archiveRelPath, format)
 	default:
 		return nil, errUnsupportedArchiveFormat
 	}
@@ -87,8 +87,10 @@ func extractArchiveMembers(absPath, archiveRelPath string) ([]archiveMember, err
 // bzip2) that wrap exactly one payload with no internal file tree. The decoded
 // member's virtual path is "<archiveRelPath>/<base name minus the compression
 // suffix>". A payload larger than archiveMemberMaxBytes is skipped (returns no
-// members) rather than truncated.
-func extractSingleCompressedMember(absPath, archiveRelPath string) ([]archiveMember, error) {
+// members) rather than truncated. format is the canonical archiveFormat value
+// already resolved by the caller ("gz" or "bz2"), passed through to avoid a
+// duplicate path walk and keep the dispatch decision in one place.
+func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]archiveMember, error) {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("open compressed file: %w", err)
@@ -96,7 +98,7 @@ func extractSingleCompressedMember(absPath, archiveRelPath string) ([]archiveMem
 	defer func() { _ = f.Close() }()
 
 	var rd io.Reader
-	switch archiveFormat(archiveRelPath) {
+	switch format {
 	case "gz":
 		gr, err := gzip.NewReader(f)
 		if err != nil {
@@ -106,8 +108,6 @@ func extractSingleCompressedMember(absPath, archiveRelPath string) ([]archiveMem
 		rd = gr
 	case "bz2":
 		rd = bzip2.NewReader(f)
-	default:
-		return nil, errUnsupportedArchiveFormat
 	}
 
 	content, err := io.ReadAll(io.LimitReader(rd, archiveMemberMaxBytes+1))

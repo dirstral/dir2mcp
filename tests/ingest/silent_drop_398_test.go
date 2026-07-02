@@ -6,12 +6,15 @@ import (
 	"context"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // noRepStore implements model.Store but deliberately NOT
@@ -35,10 +38,17 @@ func (noRepStore) Close() error { return nil }
 // stays nil and representation generation is silently disabled corpus-wide (the
 // #364 failure mode one layer up). NewService must now warn loudly on that
 // negative branch instead of degrading without a trace.
+//
+// NewService emits the seam warning through the process-wide default logger
+// (log.Default()), so this test redirects that logger's output to a buffer to
+// observe it. It therefore mutates global state and MUST NOT be parallelised
+// (no t.Parallel()); the original writer is captured and restored via
+// t.Cleanup so the logger is never left pointing at an unexpected destination.
 func TestNewService_RepresentationStoreSeam_WarnsLoudly(t *testing.T) {
 	var buf bytes.Buffer
+	prevOut := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	cfg := config.Default()
 	cfg.RootDir = t.TempDir()
@@ -110,6 +120,46 @@ func TestArchiveIngest_UnsupportedFormatMarkedError(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(doc.ErrorMessage), "unsupported archive format") {
 		t.Errorf("error_message = %q, want it to mention the unsupported archive format", doc.ErrorMessage)
+	}
+}
+
+// runArchiveIngestSnapshot mirrors runArchiveIngest but attaches an
+// IndexingState so the in-memory run counters can be asserted, and returns the
+// snapshot taken after the run.
+func runArchiveIngestSnapshot(t *testing.T, archiveName string, archiveData []byte) appstate.IndexingSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, archiveName), archiveData, 0o600); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	cfg := config.Default()
+	cfg.RootDir = root
+	svc := mustNewIngestService(t, cfg, st)
+	state := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc.SetIndexingState(state)
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return state.Snapshot()
+}
+
+// TestUnsupportedArchive_CountedOnceAsError guards the #398 review fix: an
+// unsupported archive builds as status="skipped" (archive containers hold no
+// direct text) and is then flipped to status="error" when extraction fails. The
+// run counters must record it as exactly one error and zero skips — not
+// double-counted as both, which previously inflated CorpusStats totals.
+func TestUnsupportedArchive_CountedOnceAsError(t *testing.T) {
+	snap := runArchiveIngestSnapshot(t, "bundle.7z", []byte("not a real 7z archive"))
+	if snap.Errors != 1 {
+		t.Errorf("snapshot.Errors = %d, want 1", snap.Errors)
+	}
+	if snap.Skipped != 0 {
+		t.Errorf("snapshot.Skipped = %d, want 0 (an errored archive must not be counted as skipped too)", snap.Skipped)
 	}
 }
 

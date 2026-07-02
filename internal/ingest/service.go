@@ -290,11 +290,6 @@ func (s *Service) markActiveSkipped() {
 // provider call itself (as opposed to persistence/cache write failures).
 var ErrTranscriptProviderFailure = errors.New("transcript provider failure")
 
-// errNoVideoRepresentation marks a video document that produced zero
-// representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it,
-// video STT is not applied (transcription is audio-only), and multimodal
-// keyframe embedding is off. Such a video is known but unsearchable, so it is
-// surfaced as a durable non-fatal diagnostic instead of a silent no-op (#398).
 // errBinaryOnRawTextPath marks a document that classified into a text-oriented
 // doc type (SPEC §7.4) but whose bytes are binary — most notably a .parquet file,
 // which classifies as "data". Indexing it as raw text would normalize the binary
@@ -303,6 +298,11 @@ var ErrTranscriptProviderFailure = errors.New("transcript provider failure")
 var errBinaryOnRawTextPath = errors.New(
 	"binary content on the raw-text path; not indexed as text (e.g. Parquet or another binary file with a text-classified extension)")
 
+// errNoVideoRepresentation marks a video document that produced zero
+// representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it,
+// video STT is not applied (transcription is audio-only), and multimodal
+// keyframe embedding is off. Such a video is known but unsearchable, so it is
+// surfaced as a durable non-fatal diagnostic instead of a silent no-op (#398).
 var errNoVideoRepresentation = errors.New(
 	"video produced no representation: no subtitle sidecar found, video is not transcribed (STT is audio-only), " +
 		"and multimodal keyframe embedding is off — enable embed_multimodal or provide a .vtt/.srt sidecar to make it searchable")
@@ -1464,11 +1464,21 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 			// silently ingested as an empty skipped document. Persist the container
 			// itself as status="error" so it is durably visible via status queries and
 			// retried on the next incremental run, mirroring the representation-failure
-			// path in processDocument. The upsert error is silenced because the
-			// original archive error is the more actionable signal.
+			// path in processDocument.
 			doc.Status = "error"
 			doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
-			_ = s.store.UpsertDocument(ctx, doc)
+			if upErr := s.store.UpsertDocument(ctx, doc); upErr != nil {
+				// Log and continue, mirroring persistNonFatalDocError: the original
+				// archive error is the more actionable signal, but a persistence
+				// failure here would otherwise be invisible and could leave the
+				// archive looking like a silent skip again.
+				s.getLogger().Printf("persist error status for %s: %v", f.RelPath, upErr)
+			}
+			// processDocument already counted this archive as skipped (archive
+			// containers build as status="skipped"); scanPass will count the error
+			// returned below separately. Drop the skipped tally so the same file is
+			// not double-counted as both skipped and error in CorpusStats (#398).
+			s.addSkipped(-1)
 			return fmt.Errorf("process archive members %s: %w", f.RelPath, err)
 		}
 	} else if seen != nil {
