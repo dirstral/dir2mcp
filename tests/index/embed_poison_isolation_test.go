@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -148,5 +149,113 @@ func TestEmbedAndIndex_TransientBatchLeavesAllPending(t *testing.T) {
 	}
 	if len(src.embedded) != 0 {
 		t.Fatalf("embedded = %v, want none", src.embedded)
+	}
+}
+
+// fatalText marks an input that embeds fatally when isolated (a local
+// media/config failure, index.ErrFatal) — as opposed to poisonText, which is a
+// provider input rejection. A multi-item batch containing it fails
+// non-transiently but non-fatally so the worker bisects; only the isolated
+// single input surfaces ErrFatal.
+const fatalText = "FATAL-local-config"
+
+type fatalOnIsolateEmbedder struct{ calls int }
+
+func (e *fatalOnIsolateEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, inputs []string) ([][]float32, error) {
+	e.calls++
+	hasFatal := false
+	for _, in := range inputs {
+		if strings.Contains(in, fatalText) {
+			hasFatal = true
+		}
+	}
+	if hasFatal {
+		if len(inputs) == 1 {
+			// Isolated fatal input: local media/config failure must stay loud.
+			return nil, fmt.Errorf("%w: local media/config failure", index.ErrFatal)
+		}
+		// Multi-item batch containing it: non-transient, non-fatal → bisect.
+		return nil, errors.New("400 bad request")
+	}
+	out := make([][]float32, len(inputs))
+	for i := range inputs {
+		out[i] = []float32{1, 0}
+	}
+	return out, nil
+}
+
+// TestBisect_FatalErrorPropagates pins the #412 contract through the #399
+// bisection path: an ErrFatal surfacing in a bisected sub-batch must propagate
+// (so the run loop stops) rather than be swallowed as batch success.
+func TestBisect_FatalErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	src := &fakeChunkSource{}
+	idx := index.NewHNSWIndex("")
+	emb := &fatalOnIsolateEmbedder{}
+	worker := &index.EmbeddingWorker{Source: src, Index: idx, Embedder: emb, BatchSize: 8}
+
+	tasks := []model.ChunkTask{
+		textTask(1, "healthy one"),
+		textTask(2, fatalText),
+	}
+	_, err := worker.EmbedAndIndex(ctx, "text", tasks)
+	if !errors.Is(err, index.ErrFatal) {
+		t.Fatalf("err = %v, want ErrFatal to propagate out of bisection", err)
+	}
+}
+
+// authEmbedder always rejects with a 401 (a corpus-wide auth failure) and counts
+// its calls so a test can assert bisection did NOT fan out into O(n) calls.
+type authEmbedder struct{ calls int }
+
+func (e *authEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, _ []string) ([][]float32, error) {
+	e.calls++
+	return nil, errors.New("401 unauthorized: invalid api key")
+}
+
+// TestAuthError_NotBisected pins that a corpus-wide auth rejection is not
+// bisected (that would explode one batch into O(n) embed calls without isolating
+// anything). It marks the whole batch failed in a single embed call.
+func TestAuthError_NotBisected(t *testing.T) {
+	ctx := context.Background()
+	src := &fakeChunkSource{}
+	idx := index.NewHNSWIndex("")
+	emb := &authEmbedder{}
+	worker := &index.EmbeddingWorker{Source: src, Index: idx, Embedder: emb, BatchSize: 8}
+
+	tasks := []model.ChunkTask{
+		textTask(1, "a"), textTask(2, "b"), textTask(3, "c"), textTask(4, "d"),
+	}
+	if _, err := worker.EmbedAndIndex(ctx, "text", tasks); err == nil {
+		t.Fatal("auth failure should surface an error, got nil")
+	}
+	if emb.calls != 1 {
+		t.Fatalf("embed calls = %d, want 1 (auth must not bisect into O(n) calls)", emb.calls)
+	}
+	if len(src.failedLabels) != 4 {
+		t.Fatalf("failed labels = %v, want all 4 marked failed (whole-batch behavior)", src.failedLabels)
+	}
+}
+
+// TestBisect_PostEmbedWriteErrorPropagates pins the greptile P1 finding: a
+// non-transient index/upsert (post-embed write) failure in a bisected sub-batch
+// must propagate so the run loop backs off — otherwise the chunks stay PENDING
+// while the batch reports success, causing a tight re-embed loop.
+func TestBisect_PostEmbedWriteErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	src := &fakeChunkSource{}
+	writeErr := errors.New("vector dimension mismatch")
+	emb := &poisonEmbedder{}
+	worker := &index.EmbeddingWorker{
+		Source: src, Index: &fakeUpsertIndex{upsertErr: writeErr}, Embedder: emb, BatchSize: 8,
+	}
+
+	tasks := []model.ChunkTask{
+		textTask(1, "healthy one"), // will embed then fail the index write
+		textTask(2, poisonText),    // isolated + marked failed by bisection
+	}
+	_, err := worker.EmbedAndIndex(ctx, "text", tasks)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("err = %v, want the post-embed write error to propagate out of bisection", err)
 	}
 }

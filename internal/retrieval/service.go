@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -108,11 +109,14 @@ type Service struct {
 	// true; the engine can disable it via SetHybridEnabled when the operator
 	// sets retrieval.hybrid.enabled=false.
 	hybridEnabled bool
-	// hybridNoLexicalWarnOnce guards a single warning when hybrid is enabled
-	// but the store does not satisfy model.LexicalSearcher, so a BM25-regression
-	// that silently drops hybrid to vector-only is visible in the logs exactly
-	// once rather than never (issue #399) — and not on every query.
-	hybridNoLexicalWarnOnce sync.Once
+	// hybridNoLexicalWarned guards a single warning when hybrid is enabled but
+	// the store does not satisfy model.LexicalSearcher, so a BM25-regression that
+	// silently drops hybrid to vector-only is visible in the logs exactly once
+	// rather than never (issue #399) — and not on every query. It is an
+	// atomic.Bool rather than a sync.Once so SetHybridEnabled(true) can reset it:
+	// a hot-reload that toggles hybrid off and back on re-arms the warning
+	// instead of staying silent for the lifetime of the Service.
+	hybridNoLexicalWarned atomic.Bool
 	// reranker, when set and rerankEnabled, re-scores the fused candidate
 	// pool before truncation to k (see SPEC 9.1.1). Fail-open: any error
 	// falls back to the pre-rerank order.
@@ -275,6 +279,12 @@ func (s *Service) SetHybridEnabled(enabled bool) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 	s.hybridEnabled = enabled
+	// Re-arm the "no LexicalSearcher" warning on each (re-)enable so that a
+	// hot-reload toggling hybrid off and back on surfaces the degradation again
+	// instead of staying silent because the warning already fired once.
+	if enabled {
+		s.hybridNoLexicalWarned.Store(false)
+	}
 }
 
 // SetReranker wires an optional rerank provider. modelName is the
