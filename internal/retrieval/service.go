@@ -2651,9 +2651,9 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 		// (issue #445) so the model can distinguish untrusted corpus DATA from
 		// trusted instructions; the default system prompt tells it to never
 		// follow directions embedded inside these markers.
-		header := ragDocOpenMarker + " [" + neutralizeRAGMarkers(h.RelPath) + "]"
+		header := ragDocOpenMarker + " [" + neutralizeHeaderField(h.RelPath) + "]"
 		if title := strings.TrimSpace(h.Title); title != "" {
-			header += " (" + neutralizeRAGMarkers(title) + ")"
+			header += " (" + neutralizeHeaderField(title) + ")"
 		}
 		header += ragDocOpenMarkerEnd + "\n"
 		// Evidence-guided compression (issue #335) reshapes ONLY this local
@@ -2687,7 +2687,11 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 		}
 
 		fitLen := remaining - len([]rune(closing))
-		if fitLen > 0 {
+		// Only truncate when the full opening marker still fits; otherwise
+		// truncateRunes would cut inside the BEGIN marker and emit an
+		// unbalanced fence (a partial open marker followed by a valid END
+		// marker). In that case skip the doc entirely (issue #445).
+		if fitLen >= len([]rune(header)) {
 			truncated := truncateRunes(header+snippet, fitLen)
 			if strings.TrimSpace(truncated) != "" {
 				b.WriteString(truncated + closing)
@@ -2705,6 +2709,17 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 func neutralizeRAGMarkers(s string) string {
 	s = strings.ReplaceAll(s, ragDocCloseMarker, ragDocMarkerRedaction)
 	s = strings.ReplaceAll(s, ragDocOpenMarker, ragDocMarkerRedaction)
+	return s
+}
+
+// neutralizeHeaderField sanitizes values interpolated into the open-fence
+// header (rel_path, title). In addition to the redaction performed by
+// neutralizeRAGMarkers, it strips the open-marker terminator (ragDocOpenMarkerEnd,
+// i.e. ">>>") so a crafted RelPath/Title cannot prematurely close the opening
+// fence and smuggle content past the injection guard (issue #445).
+func neutralizeHeaderField(s string) string {
+	s = neutralizeRAGMarkers(s)
+	s = strings.ReplaceAll(s, ragDocOpenMarkerEnd, ragDocMarkerRedaction)
 	return s
 }
 
