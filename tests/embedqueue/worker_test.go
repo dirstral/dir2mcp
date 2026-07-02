@@ -391,8 +391,8 @@ func TestWorker_BatchPoisonChunkIsolated(t *testing.T) {
 	if seen[2] != 0 {
 		t.Fatalf("poison chunk 2 was embedded (%d times); it must never land: writes=%v", seen[2], writes)
 	}
-	if seen[1] == 0 || seen[3] == 0 {
-		t.Fatalf("innocent batch-mates did not land after isolation: writes=%v", writes)
+	if seen[1] != 1 || seen[3] != 1 {
+		t.Fatalf("innocent batch-mates must land exactly once after isolation: writes=%v", writes)
 	}
 }
 

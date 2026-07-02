@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -211,8 +212,17 @@ func (cfg Config) processBatch(ctx context.Context, leases []Lease) {
 		}
 		groups[pj.indexKind] = append(groups[pj.indexKind], pj)
 	}
-	for kind, group := range groups {
-		cfg.embedGroup(ctx, kind, group)
+	// Embed groups in a deterministic index_kind order (Go map iteration is
+	// randomized). A stable order keeps the earliest-leased kinds from being
+	// pushed to the back of an arbitrary shuffle, which would needlessly shrink
+	// their remaining lease window and inflate redelivery/attempt counts.
+	kinds := make([]string, 0, len(groups))
+	for kind := range groups {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	for _, kind := range kinds {
+		cfg.embedGroup(ctx, kind, groups[kind])
 	}
 }
 
@@ -280,6 +290,19 @@ func (cfg Config) embedGroup(ctx context.Context, indexKind string, group []prep
 	if len(group) == 0 {
 		return
 	}
+	// Drop any job whose lease already expired before we reached the provider.
+	// Draining a full batch and fetching each authoritative task serially costs
+	// time, so an early-leased job's window can be exhausted before EmbedAndIndex
+	// is called (a real risk at BatchSize=32 with a slow shared store). Embedding
+	// under a dead lease is wasted work: the follow-up Ack no-ops against a token
+	// the broker has already invalidated, so the job is redelivered anyway. The
+	// broker will re-lease it and embedding stays idempotent (keyed by chunk_id),
+	// so skipping here is safe and avoids attempt inflation (SPEC §8.7.3;
+	// Lease.Deadline).
+	group = cfg.liveLeases(group)
+	if len(group) == 0 {
+		return
+	}
 	tasks := make([]model.ChunkTask, len(group))
 	for i, pj := range group {
 		tasks[i] = pj.task
@@ -306,6 +329,23 @@ func (cfg Config) embedGroup(ctx context.Context, indexKind string, group []prep
 			cfg.logf("embedqueue: ack chunk %d: %v", pj.lease.Job.ChunkID, err)
 		}
 	}
+}
+
+// liveLeases returns the prepared jobs whose lease has not yet expired. An
+// expired lease is left in place (not Acked/Nacked) so the broker redelivers it;
+// embedding under it would only waste a provider call and a no-op Ack.
+func (cfg Config) liveLeases(group []preparedJob) []preparedJob {
+	now := time.Now()
+	live := group[:0]
+	for _, pj := range group {
+		if !pj.lease.Deadline.IsZero() && !now.Before(pj.lease.Deadline) {
+			cfg.logf("embedqueue: lease for chunk %d expired before embed; leaving for redelivery",
+				pj.lease.Job.ChunkID)
+			continue
+		}
+		live = append(live, pj)
+	}
+	return live
 }
 
 // embedOne embeds a single prepared job and Acks on success or Nacks on failure.
