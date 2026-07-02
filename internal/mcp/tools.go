@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"math"
@@ -27,6 +28,12 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 )
+
+// maxOpenFilePage caps the open_file page argument so a caller cannot request
+// an absurd page index (issue #407 part 3). Real documents stay well under
+// this; the ceiling only bounds pathological input for symmetry with the other
+// numeric limits (k/max_chars/clip-duration).
+const maxOpenFilePage = 1_000_000
 
 const (
 	defaultEmbedTextModel = "mistral-embed"
@@ -1076,6 +1083,11 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, toolErr
 	}
 
+	// sourceTextForAnnotation applies the secret_patterns gate for every
+	// document kind (issue #407): the audio branch gates inside the transcript
+	// path, and the OCR/raw branches gate before returning. Gating once at the
+	// source avoids re-scanning (and, previously, recompiling regexes for) audio
+	// transcripts that were already checked.
 	sourceText, sourceRep, toolErr := s.sourceTextForAnnotation(ctx, doc)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
@@ -1797,6 +1809,9 @@ func parsePageArg(args map[string]interface{}) (page int, hasPage bool, toolErr 
 	if p <= 0 {
 		return 0, false, &toolExecutionError{Code: "INVALID_FIELD", Message: "page must be > 0", Retryable: false}
 	}
+	if p > maxOpenFilePage {
+		return 0, false, &toolExecutionError{Code: "INVALID_FIELD", Message: fmt.Sprintf("page must be <= %d", maxOpenFilePage), Retryable: false}
+	}
 	return p, true, nil
 }
 
@@ -1964,9 +1979,21 @@ func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel st
 	if statErr != nil {
 		return model.Document{}, mapFileAccessError(statErr)
 	}
-	content, readErr := os.ReadFile(absPath)
+	// Bound the read to the ingest file-size cap. open_file streams via
+	// readFileBounded; this on-demand branch previously used an unbounded
+	// os.ReadFile, so a large within-root audio file could OOM the daemon
+	// (issue #407). Files over the cap are never indexed by discovery either,
+	// so refusing here keeps the two paths consistent.
+	maxBytes := s.ingestMaxFileBytes()
+	if info.Size() > maxBytes {
+		return model.Document{}, &toolExecutionError{Code: "FILE_TOO_LARGE", Message: fmt.Sprintf("audio file is %d bytes, exceeds ingest limit %d bytes", info.Size(), maxBytes), Retryable: false}
+	}
+	content, tooLarge, readErr := readBoundedFile(absPath, maxBytes)
 	if readErr != nil {
 		return model.Document{}, mapFileAccessError(readErr)
+	}
+	if tooLarge {
+		return model.Document{}, &toolExecutionError{Code: "FILE_TOO_LARGE", Message: fmt.Sprintf("audio file exceeds ingest limit %d bytes", maxBytes), Retryable: false}
 	}
 	upsertDoc := model.Document{
 		RelPath: normalizedRel, DocType: "audio", SourceType: "filesystem",
@@ -1988,6 +2015,8 @@ func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel st
 
 func mapPathError(err error) *toolExecutionError {
 	switch {
+	case errors.Is(err, model.ErrForbidden):
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, os.ErrNotExist):
@@ -2008,6 +2037,8 @@ func mapReadDocumentError(err error) *toolExecutionError {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
+	case errors.Is(err, model.ErrForbidden):
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	default:
@@ -2062,6 +2093,18 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
 	}
 
+	// Gate the transcript against secret_patterns before indexing or returning
+	// it (issue #407). open_file refuses a document whose text matches a secret
+	// pattern; without this, the same content could be exfiltrated via the
+	// transcript segments / transcribe_and_ask. ReadOrComputeTranscript already
+	// persisted the text to the transcript cache, so purge that entry on a match
+	// (using the same STT key) — otherwise the refused secret would linger on
+	// disk even though the API response is blocked.
+	if gate := s.refuseIfSecretContent(transcript); gate != nil {
+		ing.PurgeTranscriptCache(content, language)
+		return "", false, false, gate
+	}
+
 	indexed := false
 	if strings.TrimSpace(transcript) != "" {
 		// only attempt to persist a representation when we actually have text
@@ -2071,6 +2114,23 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		indexed = true
 	}
 	return transcript, !cacheValid, indexed, nil
+}
+
+// annotationReadError maps a readDocumentContent failure to the tool error
+// sourceTextForAnnotation returns. Extracted so the OCR and raw-text branches
+// share one mapping (and to keep sourceTextForAnnotation under the cyclomatic
+// limit).
+func annotationReadError(err error) *toolExecutionError {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
+	case errors.Is(err, model.ErrForbidden):
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+	case errors.Is(err, model.ErrPathOutsideRoot):
+		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+	default:
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
+	}
 }
 
 func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document) (string, string, *toolExecutionError) {
@@ -2084,14 +2144,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 	case "pdf", "image", "document":
 		content, err := s.readDocumentContent(doc.RelPath)
 		if err != nil {
-			switch {
-			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
-			case errors.Is(err, model.ErrPathOutsideRoot):
-				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
-			default:
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
-			}
+			return "", "", annotationReadError(err)
 		}
 		extractor := ingest.DocumentExtractorFromConfigContext(ctx, s.cfg)
 		if extractor == nil {
@@ -2110,21 +2163,73 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if ocrErr != nil {
 			return "", "", s.mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
 		}
+		// Gate the OCR text (issue #407). ReadOrComputeOCR already wrote it to the
+		// OCR cache, so purge that entry on a match (same extractor key) rather
+		// than leaving the refused secret persisted on disk.
+		if gate := s.refuseIfSecretContent(text); gate != nil {
+			ing.PurgeOCRCache(content)
+			return "", "", gate
+		}
 		return text, ingest.RepTypeOCRMarkdown, nil
 	default:
 		content, err := s.readDocumentContent(doc.RelPath)
 		if err != nil {
-			switch {
-			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
-			case errors.Is(err, model.ErrPathOutsideRoot):
-				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
-			default:
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
-			}
+			return "", "", annotationReadError(err)
 		}
-		return string(ingest.NormalizeUTF8(content)), ingest.RepTypeRawText, nil
+		text := string(ingest.NormalizeUTF8(content))
+		// Gate raw text too (issue #407); there is no derived cache to purge on
+		// this path.
+		if gate := s.refuseIfSecretContent(text); gate != nil {
+			return "", "", gate
+		}
+		return text, ingest.RepTypeRawText, nil
 	}
+}
+
+// ingestMaxFileBytes returns the per-file size cap used by ingestion, so the
+// on-demand tool read paths honour the same bound (issue #407).
+func (s *Server) ingestMaxFileBytes() int64 {
+	if s.cfg.IngestMaxFileMB > 0 {
+		return int64(s.cfg.IngestMaxFileMB) * 1024 * 1024
+	}
+	return ingest.DefaultMaxFileSizeBytes()
+}
+
+// readBoundedFile reads at most maxBytes from path. It reports tooLarge=true
+// (with nil content) when the file exceeds the cap, guarding against a file
+// that grows between stat and read.
+func readBoundedFile(path string, maxBytes int64) (content []byte, tooLarge bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, true, nil
+	}
+	return data, false, nil
+}
+
+// refuseIfSecretContent applies the same secret-pattern gate open_file enforces
+// before returning text to the caller (issue #407). annotate/transcribe emit
+// derived text (transcript segments, OCR/annotation previews) that open_file
+// would refuse for a document matching secret_patterns, so mirror the gate here
+// to close the exfiltration path. The offending text is never logged.
+func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
+	s.secretPatternOnce.Do(func() {
+		s.secretPatterns, s.secretPatternErr = ingest.CompileSecretPatterns(s.cfg.SecretPatterns)
+	})
+	if s.secretPatternErr != nil {
+		return &toolExecutionError{Code: "CONFIG_INVALID", Message: fmt.Sprintf("compile secret patterns: %v", s.secretPatternErr), Retryable: false}
+	}
+	if ingest.HasSecretMatch([]byte(text), s.secretPatterns) {
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+	}
+	return nil
 }
 
 func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
@@ -2148,6 +2253,15 @@ func (s *Server) resolveDocumentPath(relPath string) (string, error) {
 	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
 		return "", model.ErrPathOutsideRoot
 	}
+	// Apply the corpus path-exclusion policy that normal ingestion enforces
+	// (issue #407). Excluded files are never indexed, so the on-demand
+	// transcribe/annotate branches would otherwise be the *only* way to reach
+	// them — letting a caller extract a file the operator deliberately excluded
+	// (e.g. private/*.mp3, **/.env). Reuse the same helper ingestion uses so the
+	// policy cannot drift.
+	if ingest.MatchesAnyPathExclude(normalized, s.cfg.PathExcludes) {
+		return "", model.ErrForbidden
+	}
 	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
 	targetReal, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
@@ -2156,6 +2270,11 @@ func (s *Server) resolveDocumentPath(relPath string) (string, error) {
 	rel, err := filepath.Rel(rootReal, targetReal)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", model.ErrPathOutsideRoot
+	}
+	// Re-check the symlink-resolved path so a symlink whose real target is
+	// excluded (or matches a secret-file glob) is refused too.
+	if ingest.MatchesAnyPathExclude(filepath.ToSlash(rel), s.cfg.PathExcludes) {
+		return "", model.ErrForbidden
 	}
 	return targetReal, nil
 }
