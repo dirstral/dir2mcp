@@ -889,6 +889,16 @@ func (s *Service) runScan(ctx context.Context) error {
 		return errors.New("ingest store is not configured")
 	}
 
+	// Reset the per-run progress counters so each scan reports the current corpus
+	// rather than accumulating across every scan the daemon performs (issue #426).
+	// Without this the 10-min safety rescan re-adds the whole corpus each time,
+	// `errors` never clears after a transient failure is repaired, and stale
+	// event-path increments carry forward. embeddedOK is intentionally preserved
+	// (owned by the embed worker, not this scan).
+	if s.indexingState != nil {
+		s.indexingState.ResetProgress()
+	}
+
 	discoverOpts := DiscoverOptionsFromConfig(s.cfg)
 	// Attach the optional directory-discovery scan cache (issue #267 item 5) for
 	// the local-filesystem backend only. It is opened for the duration of this
@@ -1252,9 +1262,16 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return err
 	}
 
+	// Count "indexed" only once the document is durably processed. A doc that is
+	// ok now but whose representation generation fails below must count solely as
+	// an error (runScan adds it), not as both indexed and error — otherwise the
+	// same doc is double-counted and indexed+skipped+errors exceeds scanned
+	// (issue #426). indexedPending tracks the ok case so it is credited at each
+	// point where no further rep work can fail this run.
+	indexedPending := false
 	switch doc.Status {
 	case "ok":
-		s.addIndexed(1)
+		indexedPending = true
 	case "skipped", "secret_excluded":
 		s.addSkipped(1)
 		s.markActiveSkipped()
@@ -1271,12 +1288,15 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// Archive containers: extract and ingest each member as its own document.
 	// The archive document itself remains "skipped" (no direct text content).
 	if doc.DocType == "archive" {
+		s.creditIndexed(indexedPending)
 		return s.handleArchiveDocument(ctx, f, secretPatterns, forceReindex, seen, needsProcessing)
 	}
 
 	if !needsProcessing || doc.Status != "ok" {
 		// No representation work performed this run (cache hit / unchanged content
 		// / non-ok status): record it as skipped for the batch manifest (§8.6.11).
+		// An ok cache hit is still a durably-indexed document, so credit it.
+		s.creditIndexed(indexedPending)
 		s.markActiveSkipped()
 		return nil
 	}
@@ -1290,7 +1310,19 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
+	s.creditIndexed(indexedPending)
 	return nil
+}
+
+// creditIndexed bumps the run-progress "indexed" counter when the document was
+// durably processed (status ok). Kept as a helper so processDocument credits the
+// counter only at the exit points past which no representation work can still
+// fail — a doc that later errors during rep-gen must count solely as an error,
+// not as both indexed and error (issue #426).
+func (s *Service) creditIndexed(indexed bool) {
+	if indexed {
+		s.addIndexed(1)
+	}
 }
 
 // deriveDocument runs the derivation pass for a single asset under the two-phase
