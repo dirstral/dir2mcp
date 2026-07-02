@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"compress/bzip2"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,13 @@ import (
 )
 
 const archiveMemberMaxBytes = 10 * 1024 * 1024 // 10 MiB
+
+// errUnsupportedArchiveFormat is returned by extractArchiveMembers when a path
+// classified as an "archive" (classify.go) maps to a container the stdlib
+// extractor cannot open (e.g. .xz/.7z/.rar). The caller surfaces it as a durable
+// per-document diagnostic instead of silently ingesting an empty skipped
+// document (#398).
+var errUnsupportedArchiveFormat = errors.New("unsupported archive format")
 
 // archiveMember holds extracted content from a single archive entry.
 // RelPath is the virtual path "<archiveRelPath>/<memberPath>" used as the
@@ -46,6 +54,12 @@ func archiveFormat(relPath string) string {
 		return "tar"
 	case strings.HasSuffix(name, ".zip"):
 		return "zip"
+	// Bare single-file compressors (checked AFTER the .tar.* variants above so a
+	// tarball is never misclassified as a single member).
+	case strings.HasSuffix(name, ".gz"):
+		return "gz"
+	case strings.HasSuffix(name, ".bz2"):
+		return "bz2"
 	default:
 		return ""
 	}
@@ -54,16 +68,65 @@ func archiveFormat(relPath string) string {
 // extractArchiveMembers dispatches to the correct extractor based on archiveFormat.
 // Members that fail path safety checks or exceed archiveMemberMaxBytes are
 // silently skipped; corrupted archives return whatever members were read before
-// the error.
+// the error. An unrecognised format returns errUnsupportedArchiveFormat so the
+// caller can surface a diagnostic instead of silently dropping the document.
 func extractArchiveMembers(absPath, archiveRelPath string) ([]archiveMember, error) {
 	switch archiveFormat(archiveRelPath) {
 	case "zip":
 		return extractZipMembers(absPath, archiveRelPath)
 	case "tar", "tar.gz", "tar.bz2":
 		return extractTarMembers(absPath, archiveRelPath)
+	case "gz", "bz2":
+		return extractSingleCompressedMember(absPath, archiveRelPath)
 	default:
-		return nil, nil // unsupported format; caller treats as empty
+		return nil, errUnsupportedArchiveFormat
 	}
+}
+
+// extractSingleCompressedMember handles bare single-file compressors (gzip,
+// bzip2) that wrap exactly one payload with no internal file tree. The decoded
+// member's virtual path is "<archiveRelPath>/<base name minus the compression
+// suffix>". A payload larger than archiveMemberMaxBytes is skipped (returns no
+// members) rather than truncated.
+func extractSingleCompressedMember(absPath, archiveRelPath string) ([]archiveMember, error) {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("open compressed file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var rd io.Reader
+	switch archiveFormat(archiveRelPath) {
+	case "gz":
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		defer func() { _ = gr.Close() }()
+		rd = gr
+	case "bz2":
+		rd = bzip2.NewReader(f)
+	default:
+		return nil, errUnsupportedArchiveFormat
+	}
+
+	content, err := io.ReadAll(io.LimitReader(rd, archiveMemberMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("decompress %s: %w", archiveRelPath, err)
+	}
+	if int64(len(content)) > archiveMemberMaxBytes {
+		return nil, nil // payload exceeds per-member cap; skip
+	}
+
+	base := filepath.Base(archiveRelPath)
+	memberName := strings.TrimSuffix(base, filepath.Ext(base))
+	if memberName == "" || memberName == base {
+		memberName = base + ".out"
+	}
+	return []archiveMember{{
+		RelPath: archiveRelPath + "/" + memberName,
+		Content: content,
+	}}, nil
 }
 
 func extractZipMembers(absPath, archiveRelPath string) ([]archiveMember, error) {
