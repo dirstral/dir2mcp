@@ -221,6 +221,55 @@ func TestBinaryParquet_NotIndexedAsText(t *testing.T) {
 	}
 }
 
+// TestBinaryContent_CountedOnceAsError_NotIndexed is the regression guard for the
+// PR #483 double-count finding (thread PRRT_kwDORa91686N7L64, service.go:2049): a
+// binary payload on the raw-text path (a .parquet here) persists status="error"
+// and increments the error counter, but the diagnostic returned nil, so
+// processDocument ALSO credited the document as indexed. That double-counted it as
+// both indexed and error, so indexed+skipped+errors exceeded scanned — violating
+// the issue #426 invariant. The soft-error must now suppress the indexed credit so
+// the document counts solely as an error.
+func TestBinaryContent_CountedOnceAsError_NotIndexed(t *testing.T) {
+	// Parquet magic + a NUL byte: the same shape looksLikeBinaryContent detects.
+	parquet := append([]byte("PAR1"), 0x00, 0x01, 0x02, 0x00, 0xff, 0xfe)
+	snap := runArchiveIngestSnapshot(t, "data.parquet", parquet)
+
+	if snap.Errors != 1 {
+		t.Errorf("snapshot.Errors = %d, want 1 (a binary-on-raw-text doc is exactly one error)", snap.Errors)
+	}
+	if snap.Indexed != 0 {
+		t.Errorf("snapshot.Indexed = %d, want 0 (a soft-errored doc must not also be credited as indexed)", snap.Indexed)
+	}
+	if snap.Skipped != 0 {
+		t.Errorf("snapshot.Skipped = %d, want 0", snap.Skipped)
+	}
+	if snap.Indexed+snap.Skipped+snap.Errors > snap.Scanned {
+		t.Errorf("indexed(%d)+skipped(%d)+errors(%d) = %d exceeds scanned(%d); the doc was double-counted (issue #426)",
+			snap.Indexed, snap.Skipped, snap.Errors, snap.Indexed+snap.Skipped+snap.Errors, snap.Scanned)
+	}
+}
+
+// TestVideoWithoutSidecar_CountedOnceAsError_NotIndexed is the sibling guard for
+// the second PR #483 soft-error path: a sidecar-less, multimodal-off video
+// produces zero representations and is persisted status="error" with addErrors(1),
+// but the diagnostic returned nil so processDocument also credited it as indexed.
+// It must count solely as an error. The same suppression mechanism covers both
+// this and the binary-content path.
+func TestVideoWithoutSidecar_CountedOnceAsError_NotIndexed(t *testing.T) {
+	snap := runArchiveIngestSnapshot(t, "clip.mp4", []byte("fake-video-bytes"))
+
+	if snap.Errors != 1 {
+		t.Errorf("snapshot.Errors = %d, want 1 (a zero-representation video is exactly one error)", snap.Errors)
+	}
+	if snap.Indexed != 0 {
+		t.Errorf("snapshot.Indexed = %d, want 0 (a soft-errored video must not also be credited as indexed)", snap.Indexed)
+	}
+	if snap.Indexed+snap.Skipped+snap.Errors > snap.Scanned {
+		t.Errorf("indexed(%d)+skipped(%d)+errors(%d) = %d exceeds scanned(%d); the video was double-counted (issue #426)",
+			snap.Indexed, snap.Skipped, snap.Errors, snap.Indexed+snap.Skipped+snap.Errors, snap.Scanned)
+	}
+}
+
 // TestTextData_StillIndexedOnRawTextPath guards against a false positive from the
 // #398 item 4 binary heuristic: sibling "data" extensions that are genuine text
 // (.json here) must still be indexed as raw text, not misflagged as binary.
