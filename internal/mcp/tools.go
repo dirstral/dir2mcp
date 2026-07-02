@@ -1083,15 +1083,14 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, toolErr
 	}
 
+	// sourceTextForAnnotation applies the secret_patterns gate for every
+	// document kind (issue #407): the audio branch gates inside the transcript
+	// path, and the OCR/raw branches gate before returning. Gating once at the
+	// source avoids re-scanning (and, previously, recompiling regexes for) audio
+	// transcripts that were already checked.
 	sourceText, sourceRep, toolErr := s.sourceTextForAnnotation(ctx, doc)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
-	}
-	// Gate the source text against secret_patterns, matching open_file (issue
-	// #407). The audio branch is already gated inside the transcript path; this
-	// covers OCR/raw-text documents whose content open_file would refuse.
-	if gate := s.refuseIfSecretContent(sourceText); gate != nil {
-		return toolCallResult{}, gate
 	}
 	if strings.TrimSpace(sourceText) == "" {
 		return toolCallResult{}, &toolExecutionError{Code: "ANNOTATE_FAILED", Message: "no source text available for annotation", Retryable: false}
@@ -2097,8 +2096,12 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	// Gate the transcript against secret_patterns before indexing or returning
 	// it (issue #407). open_file refuses a document whose text matches a secret
 	// pattern; without this, the same content could be exfiltrated via the
-	// transcript segments / transcribe_and_ask.
+	// transcript segments / transcribe_and_ask. ReadOrComputeTranscript already
+	// persisted the text to the transcript cache, so purge that entry on a match
+	// (using the same STT key) — otherwise the refused secret would linger on
+	// disk even though the API response is blocked.
 	if gate := s.refuseIfSecretContent(transcript); gate != nil {
+		ing.PurgeTranscriptCache(content, language)
 		return "", false, false, gate
 	}
 
@@ -2113,6 +2116,23 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	return transcript, !cacheValid, indexed, nil
 }
 
+// annotationReadError maps a readDocumentContent failure to the tool error
+// sourceTextForAnnotation returns. Extracted so the OCR and raw-text branches
+// share one mapping (and to keep sourceTextForAnnotation under the cyclomatic
+// limit).
+func annotationReadError(err error) *toolExecutionError {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
+	case errors.Is(err, model.ErrForbidden):
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+	case errors.Is(err, model.ErrPathOutsideRoot):
+		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+	default:
+		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
+	}
+}
+
 func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document) (string, string, *toolExecutionError) {
 	switch doc.DocType {
 	case "audio":
@@ -2124,16 +2144,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 	case "pdf", "image", "document":
 		content, err := s.readDocumentContent(doc.RelPath)
 		if err != nil {
-			switch {
-			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
-			case errors.Is(err, model.ErrForbidden):
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
-			case errors.Is(err, model.ErrPathOutsideRoot):
-				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
-			default:
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
-			}
+			return "", "", annotationReadError(err)
 		}
 		extractor := ingest.DocumentExtractorFromConfigContext(ctx, s.cfg)
 		if extractor == nil {
@@ -2152,22 +2163,26 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if ocrErr != nil {
 			return "", "", s.mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
 		}
+		// Gate the OCR text (issue #407). ReadOrComputeOCR already wrote it to the
+		// OCR cache, so purge that entry on a match (same extractor key) rather
+		// than leaving the refused secret persisted on disk.
+		if gate := s.refuseIfSecretContent(text); gate != nil {
+			ing.PurgeOCRCache(content)
+			return "", "", gate
+		}
 		return text, ingest.RepTypeOCRMarkdown, nil
 	default:
 		content, err := s.readDocumentContent(doc.RelPath)
 		if err != nil {
-			switch {
-			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
-			case errors.Is(err, model.ErrForbidden):
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
-			case errors.Is(err, model.ErrPathOutsideRoot):
-				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
-			default:
-				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
-			}
+			return "", "", annotationReadError(err)
 		}
-		return string(ingest.NormalizeUTF8(content)), ingest.RepTypeRawText, nil
+		text := string(ingest.NormalizeUTF8(content))
+		// Gate raw text too (issue #407); there is no derived cache to purge on
+		// this path.
+		if gate := s.refuseIfSecretContent(text); gate != nil {
+			return "", "", gate
+		}
+		return text, ingest.RepTypeRawText, nil
 	}
 }
 
@@ -2205,11 +2220,13 @@ func readBoundedFile(path string, maxBytes int64) (content []byte, tooLarge bool
 // would refuse for a document matching secret_patterns, so mirror the gate here
 // to close the exfiltration path. The offending text is never logged.
 func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
-	patterns, err := ingest.CompileSecretPatterns(s.cfg.SecretPatterns)
-	if err != nil {
-		return &toolExecutionError{Code: "CONFIG_INVALID", Message: fmt.Sprintf("compile secret patterns: %v", err), Retryable: false}
+	s.secretPatternOnce.Do(func() {
+		s.secretPatterns, s.secretPatternErr = ingest.CompileSecretPatterns(s.cfg.SecretPatterns)
+	})
+	if s.secretPatternErr != nil {
+		return &toolExecutionError{Code: "CONFIG_INVALID", Message: fmt.Sprintf("compile secret patterns: %v", s.secretPatternErr), Retryable: false}
 	}
-	if ingest.HasSecretMatch([]byte(text), patterns) {
+	if ingest.HasSecretMatch([]byte(text), s.secretPatterns) {
 		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
 	}
 	return nil

@@ -147,3 +147,64 @@ func TestMCPTranscribe_RefusesSecretTranscript(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	assertToolCallErrorCodeAndMessage(t, resp, protocol.ErrorCodePermissionDenied, nil, []string{exampleAWSKey})
 }
+
+// TestMCPTranscribe_PurgesSecretTranscriptCache verifies the disk-persistence gap
+// is closed (issue #407): ReadOrComputeTranscript writes the computed transcript
+// to {StateDir}/cache/transcribe before the secret gate runs, so a refused
+// transcript must be purged from that cache rather than left on disk in
+// plaintext.
+func TestMCPTranscribe_PurgesSecretTranscriptCache(t *testing.T) {
+	cfg, st, rootDir := newExcludeTestServer(t)
+	if err := os.WriteFile(filepath.Join(rootDir, "voice.wav"), []byte("RIFF0000WAVEfmt data"), 0o644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/audio/transcriptions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"segments":[{"start":1,"end":2,"text":"my key is ` + exampleAWSKey + `"}]}`))
+	}))
+	defer upstream.Close()
+	cfg = withMistralUpstream(t, cfg, "mistral-ocr", upstream.URL)
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":706,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{"rel_path":"voice.wav"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+	assertToolCallErrorCode(t, resp, protocol.ErrorCodePermissionDenied)
+
+	assertNoSecretOnDisk(t, filepath.Join(cfg.StateDir, "cache", "transcribe"), exampleAWSKey)
+}
+
+// assertNoSecretOnDisk walks dir and fails if any file's contents contain secret,
+// proving a refused derivation was not left persisted in the cache.
+func assertNoSecretOnDisk(t *testing.T, dir, secret string) {
+	t.Helper()
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("secret leaked to cache file %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk cache dir: %v", err)
+	}
+}

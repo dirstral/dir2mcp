@@ -2905,6 +2905,18 @@ func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, cont
 	return s.readOrComputeOCR(ctx, doc, content)
 }
 
+// PurgeOCRCache removes the OCR cache entry for the given content, using the
+// same active-extractor key readOrComputeOCR writes under. Callers that gate the
+// returned OCR text (e.g. the MCP secret-pattern gate) use this so a refused
+// result is never left persisted in {StateDir}/cache/ocr. Missing files are
+// ignored.
+func (s *Service) PurgeOCRCache(content []byte) {
+	cachePath := filepath.Join(s.cfg.StateDir, "cache", "ocr", s.ocrCacheKey(content)+".md")
+	if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.getLogger().Printf("purge ocr cache: %v", err)
+	}
+}
+
 // TranscriptLangSuffix returns a safe filename suffix for the given language,
 // used to key the transcript cache by content+language. Empty language returns
 // an empty suffix so language-unaware callers share the same cache file.
@@ -3043,6 +3055,22 @@ func (s *Service) writeCachedWords(path string, words []model.TimedWord) {
 // ReadOrComputeTranscript exposes transcript cache lookup/computation for tests.
 func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
 	return s.readOrComputeTranscript(ctx, doc, content, language)
+}
+
+// PurgeTranscriptCache removes the transcript cache entry (and its word-timing
+// sidecar) for the given content+language, using the same active-STT key
+// readOrComputeTranscriptWithWords writes under. Callers that gate the returned
+// transcript (e.g. the MCP secret-pattern gate) use this so refused text is
+// never left persisted in {StateDir}/cache/transcribe. Missing files are
+// ignored.
+func (s *Service) PurgeTranscriptCache(content []byte, language string) {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
+	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
+	for _, p := range []string{base + ".txt", base + ".words.json"} {
+		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.getLogger().Printf("purge transcript cache: %v", err)
+		}
+	}
 }
 
 // flattenJSONForIndexing walks an arbitrary JSON-like structure and

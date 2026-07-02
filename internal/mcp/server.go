@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -122,6 +123,14 @@ type Server struct {
 	execKeyMu map[string]*keyMutex
 
 	eventEmitter func(level, event string, data interface{})
+
+	// secretPatterns is the compiled secret_patterns slice used by
+	// refuseIfSecretContent. Compilation is deferred to first use and performed
+	// at most once via secretPatternOnce so annotate/transcribe requests reuse
+	// the same []*regexp.Regexp instead of recompiling every call.
+	secretPatternOnce sync.Once
+	secretPatterns    []*regexp.Regexp
+	secretPatternErr  error
 
 	// extractSegment cuts [startMS, endMS) from a local media file and returns
 	// the container bytes for dir2mcp_open_media_clip (SPEC §15.11). It defaults
