@@ -754,7 +754,7 @@ func TestSQLiteStore_CorpusStats_Empty(t *testing.T) {
 }
 
 func TestSQLiteStoreConcurrentReadWriteWithWAL(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), raceScaled(5*time.Second))
 	defer cancel()
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))

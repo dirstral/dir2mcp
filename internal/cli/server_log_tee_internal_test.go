@@ -205,6 +205,7 @@ func TestStartEmbeddingIfNotReadOnly_NoChunkSourceLogsWarning(t *testing.T) {
 		"", "", "",          // embedModelText, embedModelCode, rootDir
 		nil, // corpusFS
 		emitter,
+		nil, // wg: no workers start on this path (store lacks ChunkSource)
 	)
 	if err != nil {
 		t.Fatalf("startEmbeddingIfNotReadOnly returned error: %v", err)

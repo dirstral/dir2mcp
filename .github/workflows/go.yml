@@ -47,6 +47,23 @@ jobs:
       - name: Check
         run: make check
 
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The race detector requires cgo; the rest of CI runs CGO_ENABLED=0.
+      - name: Run tests under the race detector
+        run: make test-race
+
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 5

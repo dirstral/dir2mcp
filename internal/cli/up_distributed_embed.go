@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
@@ -53,6 +54,7 @@ func startDistributedEmbedding(
 	logger *log.Logger,
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
+	wg *sync.WaitGroup,
 ) error {
 	// Setup failures are returned (not sent to errCh) so the caller can FAIL FAST:
 	// a server that cannot start its embedding topology would otherwise run
@@ -102,27 +104,44 @@ func startDistributedEmbedding(
 		Logger:    logger,
 	}
 
+	// Register every goroutine below on the caller's drain group so runUp's
+	// deferred cancel()+Wait() blocks until they exit before it closes the
+	// store/indices and returns — otherwise their logging (via logger → the shared
+	// sink) can race a caller reading that sink after return, and the worker can
+	// touch the store after Close (issue #419).
+	spawn := func(fn func()) {
+		if wg != nil {
+			wg.Add(1)
+		}
+		go func() {
+			if wg != nil {
+				defer wg.Done()
+			}
+			fn()
+		}()
+	}
+
 	// Close the broker when the run context ends so its handle (e.g. a SQLite DB)
 	// is released on shutdown.
-	go func() {
+	spawn(func() {
 		<-ctx.Done()
 		_ = broker.Close()
-	}()
+	})
 
 	// Coordinator: periodically enqueue chunks that are still pending. Each pass
 	// enqueues the current pending head; the ticker drives the full drain as the
 	// head clears and picks up chunks added later (incremental ingest), with no
 	// global ordering requirement (SPEC §8.7.3).
-	go runCoordinatorLoop(ctx, coord, errCh, logger)
+	spawn(func() { runCoordinatorLoop(ctx, coord, errCh, logger) })
 
 	// Worker: drain the queue. Errors are surfaced on errCh (cancellation is not
 	// an error), mirroring startEmbeddingWorkers.
-	go func() {
+	spawn(func() {
 		if rerr := embedqueue.Run(ctx, workerCfg); rerr != nil &&
 			!errors.Is(rerr, context.Canceled) && !errors.Is(rerr, context.DeadlineExceeded) {
 			errCh <- fmt.Errorf("distributed embed worker: %w", rerr)
 		}
-	}()
+	})
 	return nil
 }
 
