@@ -48,7 +48,7 @@ func (a *App) runSupportBundle(ctx context.Context, global globalOptions, args [
 	fs.SetOutput(io.Discard)
 	output := fs.String("output", "", "destination tar.gz path (default: ./dir2mcp-support-<timestamp>.tar.gz)")
 	includeContent := fs.Bool("include-content", false,
-		"include corpus paths/titles/extraction error messages in list-files.json (may disclose corpus content — review the bundle before sharing)")
+		"include corpus paths/titles/extraction error messages in list-files.json and status.json failure samples (may disclose corpus content — review the bundle before sharing)")
 	if err := fs.Parse(args); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("support-bundle: %v", err))
 		return exitConfigInvalid
@@ -250,8 +250,9 @@ func marshalStatusJSON(ctx context.Context, a *App, cfg config.Config, includeCo
 
 // redactFailureSamples returns a copy of the failure summary whose sample
 // fields are handled exactly like list-files.json: rel_path becomes an
-// extension-only placeholder and the free-text message is dropped by default,
-// while --include-content restores the raw values run through the secret
+// extension-only placeholder and the free-text message is blanked (set to the
+// empty string, not omitted) by default, while --include-content restores the
+// raw values run through the secret
 // redactor. The Categories aggregate is a fixed error-category enum with no
 // corpus content, so it is preserved either way. A copy is returned so the
 // underlying snapshot (which may be shared with the store) is never mutated.
