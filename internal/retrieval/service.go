@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
@@ -100,8 +101,14 @@ type Service struct {
 	chunkByIndex        map[string]map[uint64]model.SearchHit
 	rootDir             string
 	stateDir            string
-	protocolVersion     string
-	pathExcludes        []string
+	// corpusFS, when non-nil, routes open_file raw-text reads and OCR/transcript
+	// source-byte hashing through the corpus filesystem abstraction instead of the
+	// local filesystem. It is injected only for object-store backends (S3) so a
+	// remote corpus returns content instead of failing on a missing local path
+	// (#432); nil preserves the historical local-filesystem read path exactly.
+	corpusFS        corpusfs.CorpusFS
+	protocolVersion string
+	pathExcludes    []string
 	// cached compiled regexps for exclude patterns; keys are normalized patterns
 	excludeRegexps map[string]*regexp.Regexp
 	secretPatterns []*regexp.Regexp
@@ -698,6 +705,20 @@ func (s *Service) SetRootDir(root string) {
 	}
 	s.metaMu.Lock()
 	s.rootDir = root
+	s.metaMu.Unlock()
+}
+
+// SetCorpusFS injects the corpus filesystem backend used for retrieval-time
+// reads (open_file raw text and OCR/transcript source-byte hashing). When nil
+// (the default) reads resolve against the local filesystem exactly as before,
+// so local/NFS corpora are unaffected. Object-store backends (S3) inject a
+// CorpusFS so open_file reads route through its Open seam and return content
+// instead of failing on a missing local path (#432). The cache the OCR/
+// transcript text lives in is always local under the state dir and is read
+// directly regardless of backend.
+func (s *Service) SetCorpusFS(fsys corpusfs.CorpusFS) {
+	s.metaMu.Lock()
+	s.corpusFS = fsys
 	s.metaMu.Unlock()
 }
 
@@ -1311,6 +1332,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	s.metaMu.RLock()
 	rootDir := s.rootDir
 	stateDir := s.stateDir
+	corpusFS := s.corpusFS
 	pathExcludes := append([]string(nil), s.pathExcludes...)
 	secretPatterns := append([]*regexp.Regexp(nil), s.secretPatterns...)
 	s.metaMu.RUnlock()
@@ -1337,9 +1359,18 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return content, truncated, err
 	}
 
-	resolvedAbs, err := resolveSymlinkInRoot(targetAbs, realRoot, pathExcludes, s)
-	if err != nil {
-		return "", false, err
+	// Symlink resolution and in-root containment are local-filesystem concerns.
+	// For an object-store backend (corpusFS set) there is no local path to
+	// EvalSymlinks — containment is enforced by the CorpusFS itself against the
+	// rel path — so skip it and let the read helpers route through the backend
+	// (#432). resolveFilePath above already rejected traversal/absolute/excluded
+	// rel paths for both backends.
+	resolvedAbs := targetAbs
+	if corpusFS == nil {
+		resolvedAbs, err = resolveSymlinkInRoot(targetAbs, realRoot, pathExcludes, s)
+		if err != nil {
+			return "", false, err
+		}
 	}
 
 	// For binary documents (PDF, audio) with no explicit span — OR with a
@@ -1351,14 +1382,14 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	// (issue #364; see also #177). Text-native types (md, txt, code, html) keep
 	// the existing default of returning file bytes with line slicing.
 	if isBinaryDocType(normalizedRel) && (kind == "" || kind == "lines") {
-		content, truncated, err := s.openFileFromOCRCache(stateDir, resolvedAbs, normalizedRel, secretPatterns, maxChars)
+		content, truncated, err := s.openFileFromOCRCache(ctx, corpusFS, stateDir, resolvedAbs, normalizedRel, secretPatterns, maxChars)
 		if err != nil {
 			return "", false, err
 		}
 		return content, truncated, nil
 	}
 
-	return s.openFileFromResolvedPath(resolvedAbs, secretPatterns, kind, span, maxChars)
+	return s.openFileFromResolvedPath(ctx, corpusFS, resolvedAbs, normalizedRel, secretPatterns, kind, span, maxChars)
 }
 
 // chunkModalityChecker is the optional store capability used to classify a
@@ -1440,6 +1471,81 @@ func isBinaryDocType(relPath string) bool {
 	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext)
 }
 
+// readSourceBytes returns the full byte content of the corpus document at
+// relPath. When a CorpusFS backend is injected (object stores such as S3) the
+// read routes through its Open seam — the same seam the media/embedding paths
+// use — so remote corpora return content instead of failing on a missing local
+// path (#432). With no backend it preserves the historical local read exactly:
+// a directory target maps to the actionable DOC_TYPE_UNSUPPORTED rather than an
+// opaque OS error, then readFileBounded returns the bytes. The bool mirrors
+// readFileBounded's truncation flag (always false here since the read is
+// unbounded; open_file applies its own maxChars downstream).
+func (s *Service) readSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) ([]byte, bool, error) {
+	if corpusFS != nil {
+		rc, err := corpusFS.Open(ctx, relPath)
+		if err != nil {
+			return nil, false, err
+		}
+		defer func() { _ = rc.Close() }()
+		data, readErr := io.ReadAll(rc)
+		if readErr != nil {
+			return nil, false, readErr
+		}
+		return data, false, nil
+	}
+
+	info, err := os.Stat(resolvedAbs)
+	if err != nil {
+		return nil, false, err
+	}
+	if info.IsDir() {
+		return nil, false, model.ErrDocTypeUnsupported
+	}
+	return readFileBounded(resolvedAbs, 0)
+}
+
+// hashSourceBytes computes the sha256 hex digest of the corpus document at
+// relPath — the key under which ingest stored the document's OCR/transcript
+// cache entry. It streams the source bytes through the CorpusFS Open seam when a
+// backend is injected (so an S3 object is hashed without a local copy) and
+// otherwise reads the local resolved path, rejecting a directory target with the
+// same DOC_TYPE_UNSUPPORTED mapping the raw-text path uses.
+func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) (string, error) {
+	var reader io.Reader
+	if corpusFS != nil {
+		rc, err := corpusFS.Open(ctx, relPath)
+		if err != nil {
+			return "", err
+		}
+		defer func() { _ = rc.Close() }()
+		reader = rc
+	} else {
+		// Reject directories explicitly, mirroring readSourceBytes. Without this
+		// guard os.Open succeeds on a directory and io.Copy on a directory file
+		// descriptor surfaces as an opaque OS error that the MCP layer would map to
+		// INTERNAL_ERROR; DOC_TYPE_UNSUPPORTED is the correct, actionable mapping.
+		info, err := os.Stat(resolvedAbs)
+		if err != nil {
+			return "", err
+		}
+		if info.IsDir() {
+			return "", model.ErrDocTypeUnsupported
+		}
+		sourceFile, err := os.Open(resolvedAbs)
+		if err != nil {
+			return "", err
+		}
+		defer func() { _ = sourceFile.Close() }()
+		reader = sourceFile
+	}
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
 // openFileFromOCRCache reads the precomputed OCR (or transcript) representation
 // for a binary document. The cache layout mirrors what
 // internal/ingest.Service.readOrComputeOCR / readOrComputeTranscript write:
@@ -1448,35 +1554,16 @@ func isBinaryDocType(relPath string) bool {
 // When no cache file exists (e.g. ingest is still running), the function
 // returns model.ErrOCRNotReady so callers can surface an actionable error
 // rather than fall back to raw bytes.
-func (s *Service) openFileFromOCRCache(stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, maxChars int) (string, bool, error) {
+func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, maxChars int) (string, bool, error) {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
 		stateDir = filepath.Join(".", ".dir2mcp")
 	}
 
-	// Reject directories explicitly, mirroring openFileFromResolvedPath. Without
-	// this guard os.Open succeeds on a directory and io.Copy on a directory file
-	// descriptor surfaces as an opaque OS error that the MCP layer would map to
-	// INTERNAL_ERROR; DOC_TYPE_UNSUPPORTED is the correct, actionable mapping.
-	info, err := os.Stat(resolvedAbs)
+	hashHex, err := s.hashSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
 		return "", false, err
 	}
-	if info.IsDir() {
-		return "", false, model.ErrDocTypeUnsupported
-	}
-
-	sourceFile, err := os.Open(resolvedAbs)
-	if err != nil {
-		return "", false, err
-	}
-	defer func() { _ = sourceFile.Close() }()
-
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, sourceFile); err != nil {
-		return "", false, err
-	}
-	hashHex := hex.EncodeToString(hasher.Sum(nil))
 
 	candidates := openFileOCRCacheCandidates(stateDir, hashHex, relPath)
 	for _, candidate := range candidates {
@@ -1539,16 +1626,8 @@ func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, ma
 	return out, truncated, true, nil
 }
 
-func (s *Service) openFileFromResolvedPath(resolvedAbs string, secretPatterns []*regexp.Regexp, kind string, span model.Span, maxChars int) (string, bool, error) {
-	info, err := os.Stat(resolvedAbs)
-	if err != nil {
-		return "", false, err
-	}
-	if info.IsDir() {
-		return "", false, model.ErrDocTypeUnsupported
-	}
-
-	raw, readTruncated, err := readFileBounded(resolvedAbs, 0)
+func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, span model.Span, maxChars int) (string, bool, error) {
+	raw, readTruncated, err := s.readSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
 		return "", false, err
 	}
