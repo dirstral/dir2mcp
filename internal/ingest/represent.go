@@ -17,6 +17,9 @@ import (
 	"github.com/dirstral/dir2mcp/internal/langdetect"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 // transcriptTimestampBracketedRe matches leading timestamps in [mm:ss] or
@@ -331,7 +334,13 @@ func normalizeUTF8(content []byte) []byte {
 
 // NormalizeUTF8 ensures content is valid UTF-8 and uses LF line endings.
 func NormalizeUTF8(content []byte) []byte {
-	// Salvage any invalid UTF-8 by replacing with U+FFFD.
+	// Transcode from a detected source encoding (BOM / UTF-16 / legacy
+	// single-byte) to UTF-8 and strip a leading UTF-8 BOM before validation
+	// (#417). Without this, a UTF-16 file reads as NUL-interleaved garbage and a
+	// Latin-1/Windows-1252 file loses every accented byte to U+FFFD.
+	content = decodeToUTF8(content)
+
+	// Salvage any residual invalid UTF-8 by replacing with U+FFFD.
 	if !utf8.Valid(content) {
 		out := strings.ToValidUTF8(string(content), "\uFFFD")
 		content = []byte(out)
@@ -342,6 +351,114 @@ func NormalizeUTF8(content []byte) []byte {
 	content = bytes.ReplaceAll(content, []byte("\r"), []byte("\n"))
 
 	return content
+}
+
+// Byte-order marks for the Unicode encodings decodeToUTF8 recognizes.
+var (
+	bomUTF8    = []byte{0xEF, 0xBB, 0xBF}
+	bomUTF16BE = []byte{0xFE, 0xFF}
+	bomUTF16LE = []byte{0xFF, 0xFE}
+)
+
+// decodeToUTF8 transcodes content to UTF-8 from a detected source encoding
+// before normalization (SPEC \u00A77.4 "normalize to UTF-8"). Detection is
+// deterministic and script-agnostic \u2014 it improves CJK, Cyrillic and Latin text
+// uniformly and hardcodes no locale:
+//   - a Unicode BOM (UTF-8, UTF-16 LE/BE) is authoritative: the BOM is consumed
+//     and, for UTF-16, the payload is transcoded;
+//   - a BOM-less UTF-16 stream is recognized from its NUL-interleaving pattern.
+//     UTF-16-encoded ASCII/Latin text is "valid UTF-8" only because its padding
+//     NUL bytes are themselves valid UTF-8, so this MUST run before utf8.Valid;
+//   - otherwise valid UTF-8 is kept as-is;
+//   - remaining invalid-UTF-8 bytes are treated as a legacy single-byte encoding
+//     (Windows-1252, the superset of ISO-8859-1) rather than destroyed into
+//     U+FFFD, so accented Latin bytes (\u00E9=0xE9, \u00FC=0xFC) survive.
+//
+// It never fails: a transcode error falls back to the original bytes so the
+// caller's U+FFFD salvage still applies.
+func decodeToUTF8(content []byte) []byte {
+	if len(content) == 0 {
+		return content
+	}
+	switch {
+	case bytes.HasPrefix(content, bomUTF8):
+		return content[len(bomUTF8):]
+	case bytes.HasPrefix(content, bomUTF16LE):
+		return transcodeUTF16(content[len(bomUTF16LE):], unicode.LittleEndian)
+	case bytes.HasPrefix(content, bomUTF16BE):
+		return transcodeUTF16(content[len(bomUTF16BE):], unicode.BigEndian)
+	}
+	if endian, ok := sniffUTF16(content); ok {
+		return transcodeUTF16(content, endian)
+	}
+	if utf8.Valid(content) {
+		return content
+	}
+	// Invalid UTF-8 with no NUL padding: a legacy single-byte encoding. Decode
+	// as Windows-1252 (a superset of ISO-8859-1 over 0xA0-0xFF) so accented text
+	// is recovered instead of replaced with U+FFFD.
+	if out, _, err := transform.Bytes(charmap.Windows1252.NewDecoder(), content); err == nil {
+		return out
+	}
+	return content
+}
+
+// transcodeUTF16 decodes UTF-16 bytes of the given endianness to UTF-8. The BOM,
+// if any, has already been consumed by the caller, so IgnoreBOM is used. On a
+// transform error (e.g. an odd trailing byte) it returns the original bytes and
+// lets the caller's U+FFFD salvage handle them.
+func transcodeUTF16(content []byte, endian unicode.Endianness) []byte {
+	dec := unicode.UTF16(endian, unicode.IgnoreBOM).NewDecoder()
+	out, _, err := transform.Bytes(dec, content)
+	if err != nil {
+		return content
+	}
+	return out
+}
+
+// sniffUTF16MinBytes is the smallest input sniffUTF16 will classify; below it the
+// NUL-distribution signal is too weak to trust.
+const sniffUTF16MinBytes = 4
+
+// sniffUTF16NULPercent is the minimum share (percent) of bytes at a single parity
+// that must be NUL for a BOM-less UTF-16 classification.
+const sniffUTF16NULPercent = 30
+
+// sniffUTF16 detects a BOM-less UTF-16 stream from its NUL-byte distribution:
+// UTF-16-encoded ASCII/Latin text pads every code unit with a 0x00 byte at a
+// fixed parity (odd offsets for little-endian, even for big-endian). A large,
+// parity-aligned share of NULs is a strong signal; plain UTF-8 text never
+// contains NUL, so this does not misfire on legitimate UTF-8. It is deliberately
+// conservative (script-agnostic, no locale assumptions).
+func sniffUTF16(content []byte) (unicode.Endianness, bool) {
+	n := len(content)
+	if n < sniffUTF16MinBytes || n%2 != 0 {
+		return unicode.LittleEndian, false
+	}
+	if n > binarySniffLen {
+		n = binarySniffLen &^ 1 // keep the window even so parity is meaningful
+	}
+	var evenNUL, oddNUL int
+	for i := 0; i < n; i++ {
+		if content[i] != 0x00 {
+			continue
+		}
+		if i%2 == 0 {
+			evenNUL++
+		} else {
+			oddNUL++
+		}
+	}
+	units := n / 2 // one NUL padding byte per UTF-16 code unit at most
+	threshold := units * sniffUTF16NULPercent / 100
+	switch {
+	case oddNUL > evenNUL && oddNUL >= threshold:
+		return unicode.LittleEndian, true
+	case evenNUL > oddNUL && evenNUL >= threshold:
+		return unicode.BigEndian, true
+	default:
+		return unicode.LittleEndian, false
+	}
 }
 
 // ShouldGenerateRawText determines if a document should have raw_text representation.
