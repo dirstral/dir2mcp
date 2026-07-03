@@ -169,6 +169,48 @@ func TestGenerate_HappyPathAndStructuredContent(t *testing.T) {
 	}
 }
 
+// TestGenerate_SendsBoundedMaxTokens locks issue #500: the chat request
+// must always carry a finite max_tokens so a misbehaving/self-hosted model
+// cannot run away past the generation timeout and fail the whole file.
+// NewClient's default (1024) applies when the caller sets nothing; an
+// explicit GenerationMaxTokens overrides it.
+func TestGenerate_SendsBoundedMaxTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override int
+		want     float64
+	}{
+		{name: "default", override: 0, want: 1024},
+		{name: "override", override: 42, want: 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+				})
+			}))
+			defer srv.Close()
+
+			c := newClient(srv.URL)
+			if tc.override != 0 {
+				c.GenerationMaxTokens = tc.override
+			}
+			if _, err := c.Generate(context.Background(), "hi"); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			mt, ok := gotBody["max_tokens"]
+			if !ok {
+				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
+			}
+			if got, _ := mt.(float64); got != tc.want {
+				t.Fatalf("max_tokens = %v, want %v", mt, tc.want)
+			}
+		})
+	}
+}
+
 // TestGenerate_UsesGenerationTimeoutNotDefault locks the fix for the
 // PR #191 review: NewClient always sets HTTPClient (30s), so the
 // per-call GenerationTimeout must still be applied. With a 50ms
