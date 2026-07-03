@@ -95,3 +95,94 @@ func (r *s3RangeReader) Close() error {
 	}
 	return nil
 }
+
+// s3StreamReader is an io.ReadSeekCloser over an S3 object whose total size is
+// unknown (a HEAD that omitted Content-Length). It streams a single whole-object
+// GET rather than issuing ranged reads, so sequential consumers (io.ReadAll of a
+// whole file) get the complete bytes instead of the silent-empty result a
+// size-0 range reader would produce. Seeks are limited to what a forward-only
+// stream can honor: querying the current position, a no-op seek to it, and
+// forward skips (by discarding bytes); backward seeks and SeekEnd fail because
+// the object cannot be rewound and its length is unknown.
+type s3StreamReader struct {
+	ctx    context.Context
+	client s3API
+	bucket string
+	key    string
+
+	offset int64
+	body   io.ReadCloser
+}
+
+// Read fulfills io.Reader, opening the whole-object GET body on demand.
+func (r *s3StreamReader) Read(p []byte) (int, error) {
+	if r.body == nil {
+		if err := r.open(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := r.body.Read(p)
+	r.offset += int64(n)
+	return n, err
+}
+
+// open starts the whole-object (unranged) GET.
+func (r *s3StreamReader) open() error {
+	out, err := r.client.GetObject(r.ctx, &s3.GetObjectInput{
+		Bucket: aws.String(r.bucket),
+		Key:    aws.String(r.key),
+	})
+	if err != nil {
+		return fmt.Errorf("corpusfs: stream get s3://%s/%s: %w", r.bucket, r.key, err)
+	}
+	r.body = out.Body
+	return nil
+}
+
+// Seek fulfills io.Seeker within the limits of a forward-only stream: it resolves
+// the target absolute offset, treats a seek to the current position as a no-op
+// (so callers can query the position with Seek(0, io.SeekCurrent)), and services
+// a forward seek by discarding the intervening bytes. Backward seeks and seeks
+// relative to the (unknown) end are rejected.
+func (r *s3StreamReader) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = r.offset + offset
+	case io.SeekEnd:
+		return 0, errors.New("corpusfs: cannot seek relative to end of unknown-length s3 object")
+	default:
+		return 0, errors.New("corpusfs: invalid seek whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("corpusfs: negative seek position")
+	}
+	if abs == r.offset {
+		return abs, nil
+	}
+	if abs < r.offset {
+		return 0, errors.New("corpusfs: cannot seek backward in a streaming s3 object")
+	}
+	if r.body == nil {
+		if err := r.open(); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := io.CopyN(io.Discard, r.body, abs-r.offset); err != nil {
+		return 0, fmt.Errorf("corpusfs: forward seek s3://%s/%s: %w", r.bucket, r.key, err)
+	}
+	r.offset = abs
+	return abs, nil
+}
+
+// Close releases the open GET body, if any.
+func (r *s3StreamReader) Close() error {
+	if r.body != nil {
+		err := r.body.Close()
+		r.body = nil
+		return err
+	}
+	return nil
+}

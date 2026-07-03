@@ -138,18 +138,41 @@ func (s *S3FS) relForKey(key string) (string, bool) {
 
 // Walk lists objects under the prefix and converts them to DiscoveredFile,
 // honoring MaxSizeBytes and the default excluded directories (matched against
-// the relative key segments). The root argument is ignored: the configured
-// prefix is the corpus root. Results are sorted by RelPath.
+// the relative key segments). When opts.UseGitIgnore is set, the rules in any
+// discovered .gitignore objects are fetched and applied to the listed keys so
+// gitignore is honored on S3 exactly as it is on the local filesystem (issue
+// #487). The root argument is ignored: the configured prefix is the corpus root.
+// Results are sorted by RelPath.
 func (s *S3FS) Walk(ctx context.Context, _ string, opts Options) ([]DiscoveredFile, error) {
 	if opts.MaxSizeBytes <= 0 {
 		opts.MaxSizeBytes = defaultMaxFileSizeBytes
 	}
 
+	files, gitignoreRels, err := s.listObjects(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.UseGitIgnore && len(gitignoreRels) > 0 {
+		if files, err = s.filterGitIgnored(ctx, files, gitignoreRels); err != nil {
+			return nil, err
+		}
+	}
+
+	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
+	return files, nil
+}
+
+// listObjects paginates the bucket listing, converting in-scope objects to
+// DiscoveredFile and (when gitignore is enabled) collecting the corpus-relative
+// paths of any .gitignore objects so their rules can be loaded afterward.
+func (s *S3FS) listObjects(ctx context.Context, opts Options) ([]DiscoveredFile, []string, error) {
 	files := make([]DiscoveredFile, 0, 256)
+	var gitignoreRels []string
 	var token *string
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
@@ -157,14 +180,17 @@ func (s *S3FS) Walk(ctx context.Context, _ string, opts Options) ([]DiscoveredFi
 			ContinuationToken: token,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("corpusfs: list s3://%s/%s: %w", s.bucket, s.prefix, err)
+			return nil, nil, fmt.Errorf("corpusfs: list s3://%s/%s: %w", s.bucket, s.prefix, err)
 		}
 		for _, obj := range out.Contents {
-			f, ok := s.discoveredFromObject(obj, opts)
-			if !ok {
-				continue
+			if opts.UseGitIgnore {
+				if rel, ok := s.relForKey(aws.ToString(obj.Key)); ok && path.Base(rel) == ".gitignore" {
+					gitignoreRels = append(gitignoreRels, rel)
+				}
 			}
-			files = append(files, f)
+			if f, ok := s.discoveredFromObject(obj, opts); ok {
+				files = append(files, f)
+			}
 		}
 		if out.IsTruncated == nil || !*out.IsTruncated {
 			break
@@ -174,9 +200,76 @@ func (s *S3FS) Walk(ctx context.Context, _ string, opts Options) ([]DiscoveredFi
 			break
 		}
 	}
+	return files, gitignoreRels, nil
+}
 
-	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
-	return files, nil
+// filterGitIgnored loads the rules from the discovered .gitignore objects and
+// drops the discovered files they exclude, in place.
+func (s *S3FS) filterGitIgnored(ctx context.Context, files []DiscoveredFile, gitignoreRels []string) ([]DiscoveredFile, error) {
+	rules, err := s.loadGitIgnoreRules(ctx, gitignoreRels)
+	if err != nil {
+		return nil, err
+	}
+	kept := files[:0]
+	for _, f := range files {
+		if keyIgnoredByGitignore(f.RelPath, rules) {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept, nil
+}
+
+// maxGitIgnoreObjectBytes bounds how many bytes are read from a .gitignore
+// object so a pathologically large key cannot exhaust memory during discovery.
+const maxGitIgnoreObjectBytes = 1 << 20 // 1 MiB
+
+// loadGitIgnoreRules fetches and parses the given .gitignore objects into a
+// single ordered rule set. The rels are sorted root-first (by directory depth,
+// then lexically) so shallower rules precede deeper ones — matching the local
+// walker's parent-first accumulation and gitignore's last-match-wins precedence.
+func (s *S3FS) loadGitIgnoreRules(ctx context.Context, rels []string) ([]gitIgnoreRule, error) {
+	ordered := append([]string(nil), rels...)
+	sort.Slice(ordered, func(i, j int) bool {
+		di, dj := strings.Count(ordered[i], "/"), strings.Count(ordered[j], "/")
+		if di != dj {
+			return di < dj
+		}
+		return ordered[i] < ordered[j]
+	})
+
+	var rules []gitIgnoreRule
+	for _, rel := range ordered {
+		content, err := s.getGitIgnoreObject(ctx, rel)
+		if err != nil {
+			return nil, err
+		}
+		relDir := path.Dir(rel)
+		if relDir == "." {
+			relDir = ""
+		}
+		rules = append(rules, parseGitIgnoreContent(content, relDir)...)
+	}
+	return rules, nil
+}
+
+// getGitIgnoreObject reads a single .gitignore object's bytes (bounded by
+// maxGitIgnoreObjectBytes) so its rules can be parsed.
+func (s *S3FS) getGitIgnoreObject(ctx context.Context, rel string) ([]byte, error) {
+	key := s.keyForRel(rel)
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("corpusfs: get gitignore s3://%s/%s: %w", s.bucket, key, err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	content, err := io.ReadAll(io.LimitReader(out.Body, maxGitIgnoreObjectBytes))
+	if err != nil {
+		return nil, fmt.Errorf("corpusfs: read gitignore s3://%s/%s: %w", s.bucket, key, err)
+	}
+	return content, nil
 }
 
 // discoveredFromObject converts a listed object into a DiscoveredFile, applying
@@ -244,6 +337,19 @@ func (s *S3FS) Open(ctx context.Context, relPath string) (io.ReadSeekCloser, err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("corpusfs: head s3://%s/%s: %w", s.bucket, key, err)
+	}
+	// A HEAD that omits Content-Length (seen on some MinIO/R2/gateway setups)
+	// leaves the total size unknown. The range reader treats an unknown size as 0
+	// and returns io.EOF on the first Read, so io.ReadAll would yield empty
+	// content with no error — a silently truncated document. Fall back to a
+	// whole-object streaming GET so the bytes are actually read (issue #487).
+	if head.ContentLength == nil {
+		return &s3StreamReader{
+			ctx:    ctx,
+			client: s.client,
+			bucket: s.bucket,
+			key:    key,
+		}, nil
 	}
 	return &s3RangeReader{
 		ctx:    ctx,
