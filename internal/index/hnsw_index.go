@@ -157,11 +157,19 @@ func (i *HNSWIndex) Delete(ctx context.Context, chunkIDs []uint64) error {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	changed := false
 	for _, id := range chunkIDs {
+		if _, ok := i.vectors[id]; ok {
+			changed = true
+		}
 		delete(i.vectors, id)
 		delete(i.payloads, id)
 	}
-	i.version++
+	// Only a real removal makes the index dirty; deleting unknown IDs must not
+	// bump version or the next autosave rewrites an identical snapshot for nothing.
+	if changed {
+		i.version++
+	}
 	return nil
 }
 
@@ -530,9 +538,9 @@ func (i *HNSWIndex) Load(ctx context.Context, path string) error {
 	i.vectors = snapshot.Vectors
 	i.payloads = snapshot.Payloads
 	i.identity = snapshot.Identity
-	// The freshly loaded state is exactly what is on disk, so mark it clean: a
+	// The freshly loaded state is exactly what is on disk, so mark it clean
+	// (version is a mutation counter — Load is not a mutation, so leave it): a
 	// Save with no intervening mutation must not rewrite an identical snapshot.
-	i.version++
 	i.savedVersion = i.version
 	i.mu.Unlock()
 	return nil

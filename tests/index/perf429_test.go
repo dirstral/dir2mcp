@@ -268,7 +268,10 @@ func TestHNSWIndex_ConcurrentSearchUpsertSave(t *testing.T) {
 				return
 			default:
 			}
-			_ = idx.Upsert(context.Background(), []float32{float32(id), 2}, model.IndexPayload{ChunkID: id, RelPath: "c.txt", DocType: "md"})
+			if err := idx.Upsert(context.Background(), []float32{float32(id), 2}, model.IndexPayload{ChunkID: id, RelPath: "c.txt", DocType: "md"}); err != nil {
+				t.Errorf("concurrent Upsert: %v", err)
+				return
+			}
 		}
 	}()
 
@@ -281,7 +284,10 @@ func TestHNSWIndex_ConcurrentSearchUpsertSave(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				_ = idx.Save(context.Background(), "")
+				if err := idx.Save(context.Background(), ""); err != nil {
+					t.Errorf("concurrent Save: %v", err)
+					return
+				}
 			}
 		}
 	}()
