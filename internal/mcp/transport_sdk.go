@@ -139,7 +139,26 @@ func (t *SDKTransport) validateServeInputs(handler Handler) error {
 }
 
 func (t *SDKTransport) serveHTTPRequest(w http.ResponseWriter, req *http.Request, sdkHandler http.Handler) {
-	if !t.checkPreRequest(w, req) {
+	if !t.checkRateLimit(w, req) {
+		return
+	}
+	switch req.Method {
+	case http.MethodPost:
+		t.servePost(w, req, sdkHandler)
+	case http.MethodDelete:
+		// DELETE is the spec's explicit session-termination verb. GET
+		// (server->client SSE) is intentionally unsupported: this is a
+		// request/response RAG server that pushes no unsolicited
+		// notifications, so it 405s below with an accurate Allow header.
+		t.serveSessionTermination(w, req, sdkHandler)
+	default:
+		w.Header().Set("Allow", "POST, DELETE")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (t *SDKTransport) servePost(w http.ResponseWriter, req *http.Request, sdkHandler http.Handler) {
+	if !t.checkPostPreRequest(w, req) {
 		return
 	}
 	body, ok := readSDKBody(w, req)
@@ -157,7 +176,7 @@ func (t *SDKTransport) serveHTTPRequest(w http.ResponseWriter, req *http.Request
 	t.dispatchSDKRequest(w, req, parsedReq, id, hasID, sdkHandler)
 }
 
-func (t *SDKTransport) checkPreRequest(w http.ResponseWriter, req *http.Request) bool {
+func (t *SDKTransport) checkRateLimit(w http.ResponseWriter, req *http.Request) bool {
 	if t.server.rateLimiter != nil {
 		if !t.server.rateLimiter.allow(realIP(req, t.server.rateLimiter)) {
 			w.Header().Set("Retry-After", "1")
@@ -165,11 +184,10 @@ func (t *SDKTransport) checkPreRequest(w http.ResponseWriter, req *http.Request)
 			return false
 		}
 	}
-	if req.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return false
-	}
+	return true
+}
+
+func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Request) bool {
 	ct := req.Header.Get("Content-Type")
 	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
 		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
@@ -181,10 +199,85 @@ func (t *SDKTransport) checkPreRequest(w http.ResponseWriter, req *http.Request)
 	if !t.server.allowOrigin(w, req) {
 		return false
 	}
-	if strings.TrimSpace(req.Header.Get("Accept")) == "" {
-		req.Header.Set("Accept", "application/json, text/event-stream")
-	}
+	negotiateAccept(req)
 	return true
+}
+
+// negotiateAccept guarantees the POST Accept header advertises BOTH
+// application/json and text/event-stream, which the streamable-HTTP SDK
+// requires (it 400s a POST that lists only one). A spec-conformant client that
+// sends exactly "Accept: application/json" — reasonable, since the server runs
+// JSONResponse — would otherwise be rejected, so a partial header is augmented
+// rather than only injected when absent (issue #404). Detection mirrors the
+// SDK's exact whole-token matching (not substring), so an unmatched token like
+// "application/json;q=0.9" is treated as missing and the canonical token is
+// appended, which the SDK then matches.
+func negotiateAccept(req *http.Request) {
+	const jsonType = "application/json"
+	const sseType = "text/event-stream"
+
+	values := req.Header.Values("Accept")
+	jsonOK, streamOK := acceptSatisfies(values)
+	if jsonOK && streamOK {
+		return
+	}
+	parts := make([]string, 0, 3)
+	if existing := strings.TrimSpace(strings.Join(values, ", ")); existing != "" {
+		parts = append(parts, existing)
+	}
+	if !jsonOK {
+		parts = append(parts, jsonType)
+	}
+	if !streamOK {
+		parts = append(parts, sseType)
+	}
+	req.Header.Set("Accept", strings.Join(parts, ", "))
+}
+
+// acceptSatisfies reports whether the Accept header values already advertise
+// application/json and text/event-stream using the same whole-token matching
+// the SDK applies, so negotiateAccept only appends what is genuinely missing.
+func acceptSatisfies(values []string) (jsonOK, streamOK bool) {
+	for _, tok := range strings.Split(strings.Join(values, ","), ",") {
+		switch strings.TrimSpace(tok) {
+		case "application/json", "application/*":
+			jsonOK = true
+		case "text/event-stream", "text/*":
+			streamOK = true
+		case "*/*":
+			jsonOK = true
+			streamOK = true
+		}
+	}
+	return jsonOK, streamOK
+}
+
+// serveSessionTermination handles the spec's DELETE session-termination verb.
+// It validates the session against our own store first (so an unknown/expired
+// session gets our canonical SESSION_NOT_FOUND contract), forwards to the SDK
+// to tear down its per-session state, then forgets our copy so the id cannot be
+// replayed. Both stores key off the same id minted during initialize.
+func (t *SDKTransport) serveSessionTermination(w http.ResponseWriter, req *http.Request, sdkHandler http.Handler) {
+	if ok, _ := t.server.authorize(w, req); !ok {
+		return
+	}
+	if !t.server.allowOrigin(w, req) {
+		return
+	}
+	sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
+	if sessionID == "" {
+		writeError(w, http.StatusNotFound, nil, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+		return
+	}
+	if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
+		if reason != "" {
+			w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+		}
+		writeError(w, http.StatusNotFound, nil, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+		return
+	}
+	sdkHandler.ServeHTTP(w, req)
+	t.server.forgetSession(sessionID)
 }
 
 func readSDKBody(w http.ResponseWriter, req *http.Request) ([]byte, bool) {
@@ -227,6 +320,8 @@ func (t *SDKTransport) dispatchSDKRequest(w http.ResponseWriter, req *http.Reque
 		t.handleSDKInitialize(w, req, id, hasID, sdkHandler)
 	case protocol.RPCMethodNotificationsInitialized:
 		t.handleSDKNotificationsInitialized(w, id, hasID)
+	case protocol.RPCMethodNotificationsCancelled:
+		t.handleSDKNotificationsCancelled(w, req, id, hasID, sdkHandler)
 	case protocol.RPCMethodToolsList:
 		t.handleSDKToolsList(w, req, hasID, sdkHandler)
 	case protocol.RPCMethodToolsCall:
@@ -279,6 +374,26 @@ func (t *SDKTransport) handleSDKNotificationsInitialized(w http.ResponseWriter, 
 		return
 	}
 	writeResult(w, http.StatusOK, id, map[string]interface{}{})
+}
+
+// handleSDKNotificationsCancelled forwards a cancellation notification to the
+// SDK so it can cancel the context of the request it targets (matched by
+// requestId within the session). Previously this fell through to
+// handleSDKUnknownMethod and was 202'd without ever reaching the SDK, so a
+// client cancelling a long ask/transcribe could not stop the server from
+// continuing to spend provider quota (issue #404). Cancellation only reaches an
+// in-flight tool call on the SDK-dispatched path (the default, non-x402 path);
+// the x402 path routes tools/call outside the SDK, so a cancel there is a
+// well-formed 202 no-op rather than an interrupt.
+func (t *SDKTransport) handleSDKNotificationsCancelled(w http.ResponseWriter, req *http.Request, id interface{}, hasID bool, sdkHandler http.Handler) {
+	if hasID {
+		// notifications/cancelled is a notification; an id makes it malformed.
+		// Preserve the JSON-RPC error contract rather than forwarding a
+		// would-be request the SDK would treat differently.
+		writeError(w, http.StatusOK, id, -32600, "notifications/cancelled must not carry an id", "INVALID_FIELD", false)
+		return
+	}
+	sdkHandler.ServeHTTP(w, req)
 }
 
 func (t *SDKTransport) handleSDKToolsList(w http.ResponseWriter, req *http.Request, hasID bool, sdkHandler http.Handler) {

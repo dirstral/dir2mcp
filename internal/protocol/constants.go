@@ -46,6 +46,7 @@ const (
 const (
 	RPCMethodInitialize               = "initialize"
 	RPCMethodNotificationsInitialized = "notifications/initialized"
+	RPCMethodNotificationsCancelled   = "notifications/cancelled"
 	RPCMethodToolsList                = "tools/list"
 	RPCMethodToolsCall                = "tools/call"
 )
