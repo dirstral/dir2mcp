@@ -188,7 +188,9 @@ func (a *App) runEmbedWorkerLoop(ctx context.Context, cfg config.Config, global 
 	defer func() { _ = broker.Close() }()
 
 	logger := pickEmbedLogger(a.stderr, global.jsonOutput)
-	embedders := buildAxisEmbedders(chunkSource, textIx, codeIx, embedder, nil, (*appstate.IndexingState)(nil), textModel, codeModel, cfg.RootDir, corpusFS, logger)
+	// The standalone embed-worker (#249) has no local IndexingState, so it needs no
+	// embedded_ok guard (the count hook is inert without a state to increment).
+	embedders := buildAxisEmbedders(chunkSource, textIx, codeIx, embedder, nil, (*appstate.IndexingState)(nil), (*embedqueue.EmbeddedGuard)(nil), textModel, codeModel, cfg.RootDir, corpusFS, logger)
 	if len(embedders) == 0 {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: no index axis configured for embed-worker")
 		return exitConfigInvalid
