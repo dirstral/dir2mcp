@@ -49,7 +49,7 @@ func TestSelfHosted_EmbedBaseURLResolves(t *testing.T) {
 	}
 	// The embed identity must encode the self-hosted profile + model so a
 	// change is corpus-lifetime / reindex-bound (SPEC §8.1.4 / §8.5).
-	if id := r.EmbedIdentity(); id != "gpu-embed|bge-m3||0|0|off" {
+	if id := r.EmbedIdentity(); id != "gpu-embed|bge-m3||0|0|off|off" {
 		t.Fatalf("embed identity = %q", id)
 	}
 }

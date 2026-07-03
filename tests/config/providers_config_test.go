@@ -166,9 +166,10 @@ func TestProviders_UserOverrideAndCustomProfile(t *testing.T) {
 func TestProviders_EmbedIdentityStable(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "mk")
 	id := loadCfg(t, "version: 1\n").Providers().EmbedIdentity()
-	// provider|text_model|code_model|text_dim|code_dim|multimodal
-	// (SPEC 8.1.4/8.1.6/8.1.7); default Mistral: native dims, mode off.
-	if id != "mistral|mistral-embed|codestral-embed|0|0|off" {
+	// provider|text_model|code_model|text_dim|code_dim|multimodal|late_chunking
+	// (SPEC 8.1.4/8.1.6/8.1.7, issue #332/#446); default Mistral: native dims,
+	// multimodal + late_chunking off.
+	if id != "mistral|mistral-embed|codestral-embed|0|0|off|off" {
 		t.Fatalf("embed identity = %q", id)
 	}
 }
@@ -196,8 +197,8 @@ func TestProviders_EmbedDimensionKnob(t *testing.T) {
 		t.Fatalf("dims = text:%d code:%d, want 1536/768", p.EmbedTextDim, p.EmbedCodeDim)
 	}
 	id := r.EmbedIdentity()
-	if !strings.HasSuffix(id, "|1536|768|off") {
-		t.Fatalf("embed identity %q must encode requested dims (and off mode)", id)
+	if !strings.HasSuffix(id, "|1536|768|off|off") {
+		t.Fatalf("embed identity %q must encode requested dims (and off modes)", id)
 	}
 }
 
@@ -220,7 +221,7 @@ func TestProviders_EmbedMultimodalKnob(t *testing.T) {
 	if p.EmbedMultimodal != "augment" {
 		t.Fatalf("multimodal = %q, want augment", p.EmbedMultimodal)
 	}
-	if !strings.HasSuffix(r.EmbedIdentity(), "|augment") {
+	if !strings.HasSuffix(r.EmbedIdentity(), "|augment|off") {
 		t.Fatalf("embed identity %q must encode the multimodal mode", r.EmbedIdentity())
 	}
 }
@@ -266,7 +267,7 @@ func TestProviders_OmniEmbedSelfHosted(t *testing.T) {
 	if p.EmbedMultimodal != "replace" {
 		t.Fatalf("multimodal = %q, want replace", p.EmbedMultimodal)
 	}
-	if !strings.HasSuffix(r.EmbedIdentity(), "|replace") {
+	if !strings.HasSuffix(r.EmbedIdentity(), "|replace|off") {
 		t.Fatalf("embed identity %q must encode the multimodal mode", r.EmbedIdentity())
 	}
 }
