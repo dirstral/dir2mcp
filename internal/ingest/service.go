@@ -145,6 +145,20 @@ type Service struct {
 	// (0, err) is treated as "do not trim".
 	DetectLeadingSilenceFunc func(ctx context.Context, path string) (time.Duration, error)
 
+	// ArchiveMaxMembers and ArchiveMaxTotalBytes bound archive fan-out to contain
+	// decompression bombs (#408): the number of members ingested per archive and
+	// the aggregate uncompressed bytes buffered. A value <= 0 uses the package
+	// defaults (archiveMaxMembers / archiveMaxTotalBytes). Exposed so tests can
+	// exercise the caps without building multi-hundred-MiB fixtures.
+	ArchiveMaxMembers    int
+	ArchiveMaxTotalBytes int64
+
+	// MaxMediaChunksPerDoc bounds the number of direct-embedding media chunks
+	// (PDF pages or A/V time windows) generated for one document (#408). A value
+	// <= 0 uses the package default (maxMediaChunksPerDoc). Exposed so tests can
+	// exercise the cap without huge media inputs.
+	MaxMediaChunksPerDoc int
+
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
 	// Access must go through the logger() helper or SetLogger; the field
@@ -1618,6 +1632,24 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 	return nil
 }
 
+// archiveMaxMembersEff resolves the effective per-archive member-count cap:
+// the Service override when positive, else the package default (#408).
+func (s *Service) archiveMaxMembersEff() int {
+	if s.ArchiveMaxMembers > 0 {
+		return s.ArchiveMaxMembers
+	}
+	return archiveMaxMembers
+}
+
+// archiveMaxTotalBytesEff resolves the effective per-archive aggregate-bytes cap:
+// the Service override when positive, else the package default (#408).
+func (s *Service) archiveMaxTotalBytesEff() int64 {
+	if s.ArchiveMaxTotalBytes > 0 {
+		return s.ArchiveMaxTotalBytes
+	}
+	return archiveMaxTotalBytes
+}
+
 // processArchiveMembers extracts members from an archive and ingests each one
 // as an independent document. One bad member is logged and skipped without
 // aborting the rest.
@@ -1631,7 +1663,7 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 		return nil // localize failure is non-fatal; archive stays "skipped"
 	}
 	defer cleanup()
-	members, err := extractArchiveMembers(localPath, f.RelPath)
+	members, truncated, err := extractArchiveMembers(localPath, f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff())
 	if err != nil {
 		if errors.Is(err, errUnsupportedArchiveFormat) {
 			// #398: .xz/.7z/.rar (and any other classified-but-unextractable
@@ -1643,6 +1675,16 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 		}
 		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
 		return nil // corrupt/other extraction failure is non-fatal; archive stays "skipped"
+	}
+	if truncated {
+		// #408 decompression-bomb guard: extraction stopped once the archive hit
+		// the member-count or aggregate-uncompressed-size cap. The members read
+		// before the cap are still ingested below; surface a clear warning so the
+		// truncation is visible rather than a silent partial ingest.
+		s.getLogger().Printf(
+			"archive %s: member fan-out exceeded caps (max_members=%d, max_total_bytes=%d); ingesting the first %d member(s), remaining entries skipped (#408)",
+			f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff(), len(members),
+		)
 	}
 	for _, m := range members {
 		if err := ctx.Err(); err != nil {
@@ -1997,6 +2039,38 @@ const (
 	videoWindowCapMS = 120 * 1000
 )
 
+// maxMediaChunksPerDoc bounds the number of direct-embedding media chunks (PDF
+// pages or A/V time windows) generated for a single document. Without a ceiling
+// a 10k-page PDF or a multi-hour recording fans out into thousands of multimodal
+// embed inputs and ffmpeg segment extractions — an accidental or hostile
+// amplification/DoS vector (#408). Chunks past the cap are dropped with a durable
+// "truncated at N of M" warning rather than silently processed or dropped.
+const maxMediaChunksPerDoc = 512
+
+// maxMediaChunksEff resolves the effective per-document media-chunk cap: the
+// Service override when positive, else the package default (#408).
+func (s *Service) maxMediaChunksEff() int {
+	if s.MaxMediaChunksPerDoc > 0 {
+		return s.MaxMediaChunksPerDoc
+	}
+	return maxMediaChunksPerDoc
+}
+
+// capMediaSpans truncates spans to the per-document media-chunk cap, emitting a
+// diagnostic when it does so (#408). Media chunks past the cap are not embedded
+// directly; the document's text path (OCR/transcript) is unaffected.
+func (s *Service) capMediaSpans(doc model.Document, spans []model.Span) []model.Span {
+	limit := s.maxMediaChunksEff()
+	if len(spans) <= limit {
+		return spans
+	}
+	s.getLogger().Printf(
+		"multimodal: %s produced %d media chunk(s), exceeding the per-document cap (%d); truncated at %d — %d chunk(s) will not be embedded directly (#408)",
+		doc.RelPath, len(spans), limit, limit, len(spans)-limit,
+	)
+	return spans[:limit]
+}
+
 // resolveMediaWindowMS returns the window length (ms) to use for windowing
 // media of the given doc type. A positive configured value (cfgSec seconds)
 // overrides the default; values exceeding the per-modality cap are clamped
@@ -2031,16 +2105,16 @@ func (s *Service) mediaSpansFor(ctx context.Context, doc model.Document, content
 	case "image":
 		return []model.Span{{Kind: "page", Page: 1}}
 	case "pdf":
-		return s.pdfPageSpans(doc, content)
+		return s.capMediaSpans(doc, s.pdfPageSpans(doc, content))
 	case "audio":
 		if !isEmbeddableAudio(doc.RelPath) {
 			return nil
 		}
 		windowMS := s.resolveMediaWindowMS(s.cfg.MediaAudioWindowSec, audioWindowMS, audioWindowCapMS, "audio")
-		return s.mediaTimeSpans(ctx, doc, windowMS)
+		return s.capMediaSpans(doc, s.mediaTimeSpans(ctx, doc, windowMS))
 	case "video":
 		windowMS := s.resolveMediaWindowMS(s.cfg.MediaVideoWindowSec, videoWindowMS, videoWindowCapMS, "video")
-		return s.mediaTimeSpans(ctx, doc, windowMS)
+		return s.capMediaSpans(doc, s.mediaTimeSpans(ctx, doc, windowMS))
 	default:
 		return nil
 	}
