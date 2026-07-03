@@ -265,6 +265,65 @@ func TestProcessDocument_ArchiveExtractionFailureLeavesContentHashUnstamped(t *t
 	}
 }
 
+// TestProcessDocument_ArchiveMemberFailureLeavesContentHashUnstamped pins the
+// member-granularity half of the #502 fix: when a single archive member fails to
+// ingest (a stand-in for a crash mid-member), that member is logged and skipped
+// per #398 best-effort, but the CONTAINER's content_hash is NOT stamped — so the
+// next incremental scan re-extracts and retries the failed member instead of
+// permanently skipping it on a premature done marker. An all-success archive (see
+// TestProcessDocument_ArchiveWithholdsContentHashUntilMembersExtracted) DOES stamp
+// the marker; this asserts the failing-member counterpart withholds it.
+func TestProcessDocument_ArchiveMemberFailureLeavesContentHashUnstamped(t *testing.T) {
+	root := t.TempDir()
+	archiveData := buildZip(t, map[string]string{"notes.txt": "hello from a zip member whose commit will fail"})
+	if err := os.WriteFile(filepath.Join(root, "docs.zip"), archiveData, 0o600); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	wantHash := ingest.ComputeContentHash(archiveData)
+
+	// insertChunkErr makes the member's representation commit fail (a stand-in for a
+	// per-member crash/outage). The member is logged+skipped (#398 best-effort), so
+	// processDocument still succeeds, but the container must NOT be finalized.
+	st := &fakeIncrementalStore{reflectByPath: true, insertChunkErr: errors.New("simulated member commit crash")}
+	svc := mustNewIngestService(t, config.Config{RootDir: root}, st)
+	df := ingest.DiscoveredFile{RelPath: "docs.zip", SizeBytes: int64(len(archiveData))}
+
+	// Best-effort: a member failure is swallowed, so the run itself succeeds.
+	if err := svc.ProcessDocument(context.Background(), df, nil, false); err != nil {
+		t.Fatalf("processDocument failed: %v", err)
+	}
+
+	// Sanity: the failing member WAS attempted (so this is really the member-failure
+	// path, not an archive that produced no members).
+	if st.insertChunkCalls == 0 {
+		t.Fatalf("expected the member's representation commit to be attempted")
+	}
+
+	var last model.Document
+	found := false
+	for i, d := range st.upsertedDocs {
+		if d.RelPath != "docs.zip" {
+			continue
+		}
+		if d.ContentHash == wantHash {
+			t.Fatalf("upsert #%d stamped the container content_hash despite a failed member: %q", i, d.ContentHash)
+		}
+		last = d
+		found = true
+	}
+	if !found {
+		t.Fatalf("expected the archive container to be upserted")
+	}
+	// Terminal container row: blank hash so the next scan re-extracts and retries
+	// the failed member; status stays "skipped" (archive containers carry no text).
+	if last.ContentHash != "" {
+		t.Fatalf("terminal container content_hash = %q, want empty so the failed member is retried next scan", last.ContentHash)
+	}
+	if last.Status != "skipped" {
+		t.Fatalf("terminal container status = %q, want skipped", last.Status)
+	}
+}
+
 // TestNeedsReprocessing_EmptyHashResumesAfterInterruption is the restart half of
 // the #402 A1 story: a document left with an empty content_hash by an interrupted
 // run (the withheld-marker state) is always reprocessed on the next scan.
