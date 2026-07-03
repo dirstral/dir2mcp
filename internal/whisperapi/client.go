@@ -241,6 +241,25 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 		return fail("failed to write transcription input", err)
 	}
 
+	if err := c.writeTranscriptionFields(writer); err != nil {
+		return nil, nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return fail("failed to finalize transcription request body", err)
+	}
+	return buf.Bytes(), writer, nil
+}
+
+// writeTranscriptionFields writes the non-file multipart form fields
+// (model/response_format/task/language/vad_filter) and returns the first write
+// error as a *model.ProviderError. Split out of buildBody to keep that function
+// under the cyclomatic-complexity budget; the wire output is unchanged (task is
+// only emitted when translating, language only when non-empty, vad_filter only
+// when set).
+func (c *Client) writeTranscriptionFields(writer *multipart.Writer) error {
+	fail := func(msg string, cause error) error {
+		return &model.ProviderError{Code: "WHISPER_FAILED", Message: msg, Retryable: false, Cause: cause}
+	}
 	modelName := strings.TrimSpace(c.DefaultModel)
 	if modelName == "" {
 		modelName = DefaultModel
@@ -269,10 +288,7 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 			return fail("failed to write transcription vad_filter", err)
 		}
 	}
-	if err := writer.Close(); err != nil {
-		return fail("failed to finalize transcription request body", err)
-	}
-	return buf.Bytes(), writer, nil
+	return nil
 }
 
 // responseFormat returns the configured response format, defaulting to

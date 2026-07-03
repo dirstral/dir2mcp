@@ -1914,6 +1914,14 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
 	applyMediaSubtitlesFileParsed(cfg, fc)
+	applyMediaProcessingFileParsed(cfg, fc)
+	applyMediaBatchFileParsed(cfg, fc)
+}
+
+// applyMediaProcessingFileParsed copies the set media processing/clip file
+// fields onto cfg. Split from applyMediaFileParsed to keep that function under
+// the cyclomatic-complexity budget.
+func applyMediaProcessingFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTrimLeadingSilence != nil {
 		cfg.MediaTrimLeadingSilence = *fc.MediaTrimLeadingSilence
 	}
@@ -1940,7 +1948,6 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaClipMaxBytes != nil {
 		cfg.MediaClipMaxBytes = *fc.MediaClipMaxBytes
 	}
-	applyMediaBatchFileParsed(cfg, fc)
 }
 
 // applyMediaBatchFileParsed copies the set media.batch file fields (SPEC §8.6.11)
@@ -3445,9 +3452,32 @@ func (c *Config) validateMediaTranslate() error {
 	if !c.MediaTranslateEnabled {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(c.MediaTranslateTargetLangs))
-	out := make([]string, 0, len(c.MediaTranslateTargetLangs))
-	for _, lang := range c.MediaTranslateTargetLangs {
+	out, err := normalizeMediaTranslateTargets(c.MediaTranslateTargetLangs)
+	if err != nil {
+		return err
+	}
+	if len(out) == 0 {
+		return errors.New("media.translate.enabled=true requires a non-empty " +
+			"media.translate.target_langs (no default target language)")
+	}
+	c.MediaTranslateTargetLangs = out
+
+	engine, err := c.validateMediaTranslateEngine(out)
+	if err != nil {
+		return err
+	}
+	c.MediaTranslateEngine = engine
+	return nil
+}
+
+// normalizeMediaTranslateTargets trims, lower-cases and de-duplicates the
+// media.translate.target_langs list, rejecting any tag outside the cache-safe
+// BCP-47 alphabet. Split out of validateMediaTranslate to keep that function
+// under the cyclomatic-complexity budget; behaviour is unchanged.
+func normalizeMediaTranslateTargets(langs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(langs))
+	out := make([]string, 0, len(langs))
+	for _, lang := range langs {
 		l := strings.ToLower(strings.TrimSpace(lang))
 		if l == "" {
 			continue
@@ -3459,7 +3489,7 @@ func (c *Config) validateMediaTranslate() error {
 		for _, r := range l {
 			safe := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
 			if !safe {
-				return fmt.Errorf("media.translate.target_langs contains an invalid language tag %q "+
+				return nil, fmt.Errorf("media.translate.target_langs contains an invalid language tag %q "+
 					"(use BCP-47 letters/digits/hyphen, e.g. \"en\" or \"pt-br\")", lang)
 			}
 		}
@@ -3469,16 +3499,19 @@ func (c *Config) validateMediaTranslate() error {
 		seen[l] = struct{}{}
 		out = append(out, l)
 	}
-	if len(out) == 0 {
-		return errors.New("media.translate.enabled=true requires a non-empty " +
-			"media.translate.target_langs (no default target language)")
-	}
-	c.MediaTranslateTargetLangs = out
+	return out, nil
+}
 
-	// Translation engine: "chat" (default, line-by-line via the chat generator)
-	// or "whisper" (native audio->English translate task). Whisper only produces
-	// English and needs a whisper STT provider, so validate those preconditions
-	// here where the normalized target list and resolved providers are available.
+// validateMediaTranslateEngine resolves and validates the translation engine
+// against the normalized target list. Split out of validateMediaTranslate to
+// keep that function under the cyclomatic-complexity budget; behaviour is
+// unchanged.
+//
+// Translation engine: "chat" (default, line-by-line via the chat generator)
+// or "whisper" (native audio->English translate task). Whisper only produces
+// English and needs a whisper STT provider, so validate those preconditions
+// here where the normalized target list and resolved providers are available.
+func (c *Config) validateMediaTranslateEngine(out []string) (string, error) {
 	engine := strings.ToLower(strings.TrimSpace(c.MediaTranslateEngine))
 	if engine == "" {
 		engine = Default().MediaTranslateEngine
@@ -3488,20 +3521,19 @@ func (c *Config) validateMediaTranslate() error {
 	case "whisper":
 		prof, ok := resolveSTTProfileForCapability(*c)
 		if !ok || prof.Kind != provider.KindWhisper {
-			return errors.New("CONFIG_INVALID: media.translate.engine=whisper requires the STT provider " +
+			return "", errors.New("CONFIG_INVALID: media.translate.engine=whisper requires the STT provider " +
 				"to be kind:whisper (set stt.provider: whisper), or use media.translate.engine=chat")
 		}
 		for _, lang := range out {
 			if strings.SplitN(lang, "-", 2)[0] != "en" {
-				return fmt.Errorf("CONFIG_INVALID: media.translate.engine=whisper only produces English; set "+
+				return "", fmt.Errorf("CONFIG_INVALID: media.translate.engine=whisper only produces English; set "+
 					"media.translate.target_langs: [en] (got %q) or use media.translate.engine=chat", lang)
 			}
 		}
 	default:
-		return fmt.Errorf("media.translate.engine must be one of chat, whisper: %q", c.MediaTranslateEngine)
+		return "", fmt.Errorf("media.translate.engine must be one of chat, whisper: %q", c.MediaTranslateEngine)
 	}
-	c.MediaTranslateEngine = engine
-	return nil
+	return engine, nil
 }
 
 // crossLingualAutoSentinel is the target-langs value meaning "expand into the

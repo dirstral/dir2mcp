@@ -400,6 +400,22 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	if svc.translateEngine == "" {
 		svc.translateEngine = "chat"
 	}
+	svc.resolveTranslateBinding(cfg)
+	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
+	// unresolvable embed profile leaves it off (text-only).
+	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+		svc.embedMultimodal = provider.NormalizeEmbedMultimodal(ep.EmbedMultimodal)
+	}
+	return svc, nil
+}
+
+// resolveTranslateBinding resolves the optional transcript-translation binding
+// (SPEC §8.6.2). Split out of NewService to keep that constructor under the
+// cyclomatic-complexity budget; behaviour is unchanged. When translation is
+// enabled we resolve the chat capability and build a generator; when off
+// (default), or no chat provider resolves, the field stays nil and the
+// translate step self-skips so behaviour is unchanged.
+func (svc *Service) resolveTranslateBinding(cfg config.Config) {
 	if cfg.MediaTranslateEnabled && len(svc.translateTargetLangs) > 0 {
 		if svc.translateEngine == "whisper" {
 			// Whisper's native translate task (audio->English) instead of the chat
@@ -420,12 +436,6 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 			svc.getLogger().Printf("transcript translation disabled: %v", terr)
 		}
 	}
-	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
-	// unresolvable embed profile leaves it off (text-only).
-	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
-		svc.embedMultimodal = provider.NormalizeEmbedMultimodal(ep.EmbedMultimodal)
-	}
-	return svc, nil
 }
 
 // SetOnDocumentDeleted registers a compatibility wrapper for callers that still
