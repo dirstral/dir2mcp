@@ -1429,14 +1429,29 @@ func (a *App) setupServerSingleInstance(stateDir string, opts upOptions, cancel 
 	}
 	release, err := acquireSingleInstanceLock(stateDir)
 	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
-			err.Error(),
-			"Another dir2mcp server is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
-		)
+		// Only the genuine already-running/locked case gets the "another
+		// server is running" hint. Environmental failures (e.g. no
+		// permission to create or write the pid file) surface their real
+		// error unadorned so the hint does not mislead (#434).
+		if errors.Is(err, errAlreadyRunning) {
+			writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
+				err.Error(),
+				"Another dir2mcp server is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
+			)
+		} else {
+			writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, err.Error())
+		}
 		return cleanup, exitGeneric
 	}
 	return release, exitSuccess
 }
+
+// errAlreadyRunning marks the single-instance lock failure caused by a
+// live server already owning the state dir (or winning the O_EXCL race),
+// as distinct from environmental failures (permission creating/writing
+// the pid file). The caller checks it with errors.Is so only the genuine
+// already-running case gets the "another server is running" hint.
+var errAlreadyRunning = errors.New("dir2mcp is already running")
 
 // acquireSingleInstanceLock claims the per-state-dir pid file so at most
 // one server process ever writes a given corpus's sqlite + index. It
@@ -1452,8 +1467,18 @@ func acquireSingleInstanceLock(stateDir string) (release func(), err error) {
 	// we must refuse.
 	if existing, rerr := readPIDFile(pidPath); rerr == nil {
 		if processIsAlive(existing) {
-			return nil, fmt.Errorf("dir2mcp is already running for %s (pid %d)", stateDir, existing)
+			return nil, fmt.Errorf("%w for %s (pid %d)", errAlreadyRunning, stateDir, existing)
 		}
+		_ = removePIDFile(pidPath)
+	} else if !errors.Is(rerr, os.ErrNotExist) {
+		// The pid file exists but is empty/corrupt/unparseable
+		// (readPIDFile errored with something other than "not exist").
+		// Its content names no live process, so treat it as a dead owner
+		// and clear it — otherwise a single malformed pid file would
+		// permanently brick startup: the O_EXCL claim below would fail
+		// and every run would report a bogus "already running" (#434). A
+		// live owner is never removed here because a live owner yields a
+		// parseable pid (the rerr == nil branch above), not an error.
 		_ = removePIDFile(pidPath)
 	}
 	if cerr := claimPIDFile(pidPath, os.Getpid()); cerr != nil {
@@ -1461,9 +1486,9 @@ func acquireSingleInstanceLock(stateDir string) (release func(), err error) {
 			// Lost the race between the stale check and the claim: another
 			// starter won. Surface its pid when we can still read it.
 			if existing, rerr := readPIDFile(pidPath); rerr == nil {
-				return nil, fmt.Errorf("dir2mcp is already running for %s (pid %d)", stateDir, existing)
+				return nil, fmt.Errorf("%w for %s (pid %d)", errAlreadyRunning, stateDir, existing)
 			}
-			return nil, fmt.Errorf("dir2mcp is already running for %s (pid file %s already claimed)", stateDir, pidPath)
+			return nil, fmt.Errorf("%w for %s (pid file %s already claimed)", errAlreadyRunning, stateDir, pidPath)
 		}
 		return nil, fmt.Errorf("claim pid file %s: %w", pidPath, cerr)
 	}

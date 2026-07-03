@@ -77,11 +77,8 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 // recorded pid for liveness. Returns false when the pid file is absent,
 // malformed, or names a process that is no longer running.
 func daemonIsLive(stateDir string) bool {
-	pid, err := readPIDFile(pidFilePath(stateDir))
-	if err != nil {
-		return false
-	}
-	return processIsAlive(pid)
+	_, alive := daemonProcess(stateDir)
+	return alive
 }
 
 func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot corpusSnapshot, source string, staleRunning bool) int {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,6 +88,42 @@ func TestForegroundCleansStalePidAndStarts(t *testing.T) {
 	})
 	if strings.Contains(stderr.String(), "already running") {
 		t.Fatalf("stale pid file was treated as a live instance: %s", stderr.String())
+	}
+}
+
+// TestForegroundClearsMalformedPidAndStarts verifies the guard recovers
+// from a corrupt/unparseable pid file rather than letting it permanently
+// brick startup. A malformed pid file names no live process, so the guard
+// must treat it as a dead owner, remove it, claim the lock, and run — not
+// report a bogus "already running" (#434). Without the fix the O_EXCL
+// claim over the still-present malformed file fails and every start bails.
+func TestForegroundClearsMalformedPidAndStarts(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
+
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	// Garbage that readPIDFile cannot parse into a pid. The guard must not
+	// mistake an unparseable file for a live owner.
+	if err := os.WriteFile(filepath.Join(stateDir, "server.pid"), []byte("not-a-pid\n"), 0o600); err != nil {
+		t.Fatalf("write malformed pid file: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up", "--foreground", "--listen", "127.0.0.1:0"})
+		if code != 0 {
+			t.Fatalf("foreground up refused to start over a malformed pid file: code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	if strings.Contains(stderr.String(), "already running") {
+		t.Fatalf("malformed pid file was treated as a live instance: %s", stderr.String())
 	}
 }
 
@@ -194,9 +231,9 @@ func TestDoctorDeepProbeFailsOnBadCreds(t *testing.T) {
 // stays construct-only: the same bad-credential endpoint must NOT be probed,
 // so provider.embed resolves ok and no network call is made.
 func TestDoctorWithoutDeepDoesNotProbe(t *testing.T) {
-	probed := false
+	var probed atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		probed = true
+		probed.Store(true)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
@@ -218,7 +255,7 @@ func TestDoctorWithoutDeepDoesNotProbe(t *testing.T) {
 	withWorkingDir(t, tmp, func() {
 		_ = app.RunWithContext(context.Background(), []string{"--json", "doctor"})
 	})
-	if probed {
+	if probed.Load() {
 		t.Fatalf("default doctor probed the provider endpoint; probing must be gated behind --deep. stderr=%s", stderr.String())
 	}
 }
