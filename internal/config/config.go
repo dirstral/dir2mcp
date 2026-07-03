@@ -3644,6 +3644,13 @@ func (c *Config) validateNumericBounds() error {
 	if c.ChunkingOverlapTokens < 0 {
 		return fmt.Errorf("chunking.overlap_tokens must be non-negative: %d", c.ChunkingOverlapTokens)
 	}
+	// Relational guard (#405): an overlap >= the window size produces chunks
+	// that never advance (or run backwards), so reject it. Only enforced when
+	// a window is explicitly set (max_tokens > 0); 0 means "unset, use the
+	// chunker default", where a nonzero overlap is not yet meaningful.
+	if c.ChunkingMaxTokens > 0 && c.ChunkingOverlapTokens >= c.ChunkingMaxTokens {
+		return fmt.Errorf("chunking.overlap_tokens (%d) must be less than chunking.max_tokens (%d)", c.ChunkingOverlapTokens, c.ChunkingMaxTokens)
+	}
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
 	}
