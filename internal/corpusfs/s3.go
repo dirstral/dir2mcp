@@ -265,9 +265,17 @@ func (s *S3FS) getGitIgnoreObject(ctx context.Context, rel string) ([]byte, erro
 		return nil, fmt.Errorf("corpusfs: get gitignore s3://%s/%s: %w", s.bucket, key, err)
 	}
 	defer func() { _ = out.Body.Close() }()
-	content, err := io.ReadAll(io.LimitReader(out.Body, maxGitIgnoreObjectBytes))
+	// Read one byte past the cap so a .gitignore larger than
+	// maxGitIgnoreObjectBytes can be detected. Applying a silently truncated
+	// rule set would drop trailing ignore rules and wrongly include files, so
+	// fail loudly rather than filter with partial rules.
+	content, err := io.ReadAll(io.LimitReader(out.Body, maxGitIgnoreObjectBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("corpusfs: read gitignore s3://%s/%s: %w", s.bucket, key, err)
+	}
+	if int64(len(content)) > maxGitIgnoreObjectBytes {
+		return nil, fmt.Errorf("corpusfs: gitignore s3://%s/%s exceeds %d-byte limit; "+
+			"refusing to apply truncated ignore rules", s.bucket, key, maxGitIgnoreObjectBytes)
 	}
 	return content, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -112,10 +113,14 @@ type s3StreamReader struct {
 
 	offset int64
 	body   io.ReadCloser
+	closed bool
 }
 
 // Read fulfills io.Reader, opening the whole-object GET body on demand.
 func (r *s3StreamReader) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, fs.ErrClosed
+	}
 	if r.body == nil {
 		if err := r.open(); err != nil {
 			return 0, err
@@ -145,6 +150,9 @@ func (r *s3StreamReader) open() error {
 // a forward seek by discarding the intervening bytes. Backward seeks and seeks
 // relative to the (unknown) end are rejected.
 func (r *s3StreamReader) Seek(offset int64, whence int) (int64, error) {
+	if r.closed {
+		return 0, fs.ErrClosed
+	}
 	var abs int64
 	switch whence {
 	case io.SeekStart:
@@ -177,8 +185,14 @@ func (r *s3StreamReader) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
-// Close releases the open GET body, if any.
+// Close releases the open GET body, if any, and marks the reader closed so a
+// later Read/Seek cannot silently reopen the stream from offset 0 while r.offset
+// is non-zero (which would return corrupted data). Double-Close is a no-op.
 func (r *s3StreamReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 	if r.body != nil {
 		err := r.body.Close()
 		r.body = nil

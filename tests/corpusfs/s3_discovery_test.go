@@ -2,7 +2,9 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -58,6 +60,81 @@ func TestS3FSWalk_HonorsGitIgnore(t *testing.T) {
 	}
 	if len(all) != len(objs) {
 		t.Fatalf("without gitignore expected all %d objects, got %d", len(objs), len(all))
+	}
+}
+
+// TestS3FSWalk_OversizedGitIgnoreErrors verifies that a .gitignore larger than
+// the read cap is rejected loudly rather than silently truncated: applying a
+// partial rule set would drop trailing ignore rules and wrongly include files.
+func TestS3FSWalk_OversizedGitIgnoreErrors(t *testing.T) {
+	// > 1 MiB of valid ignore rules so the reader's cap is exceeded.
+	big := strings.Repeat("*.log\n", 200000) // 1.2 MB
+	objs := map[string][]byte{
+		".gitignore": []byte(big),
+		"keep.txt":   []byte("keep"),
+		"app.log":    []byte("would be ignored if rules loaded"),
+	}
+	fsys, _ := newFakeS3FS(t, "", objs, "")
+
+	_, err := fsys.Walk(context.Background(), "", corpusfs.Options{UseGitIgnore: true})
+	if err == nil {
+		t.Fatalf("Walk with oversized .gitignore = nil error, want a truncation error")
+	}
+	if !strings.Contains(err.Error(), "truncated") && !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Walk error = %v, want it to flag the oversized/truncated .gitignore", err)
+	}
+
+	// A within-cap .gitignore still loads and filters normally (control).
+	objs[".gitignore"] = []byte("*.log\n")
+	okFS, _ := newFakeS3FS(t, "", objs, "")
+	got, err := okFS.Walk(context.Background(), "", corpusfs.Options{UseGitIgnore: true})
+	if err != nil {
+		t.Fatalf("Walk with small .gitignore: %v", err)
+	}
+	for _, f := range got {
+		if f.RelPath == "app.log" {
+			t.Fatalf("app.log should be excluded by the small .gitignore, got %v", got)
+		}
+	}
+}
+
+// TestS3FSOpen_UseAfterCloseRejected verifies that a streaming reader rejects
+// Read/Seek after Close instead of silently reopening from offset 0 while its
+// logical offset is non-zero (which would return corrupted data). It also
+// confirms double-Close is safe.
+func TestS3FSOpen_UseAfterCloseRejected(t *testing.T) {
+	body := []byte("the quick brown fox jumps over the lazy dog")
+	objs := map[string][]byte{"corpus/doc.txt": body}
+	stub := &fakeS3{objects: objs}
+	fsys, err := corpusfs.NewS3FS(&nilLenS3{fakeS3: stub}, corpusfs.S3Config{Bucket: "bkt", Prefix: "corpus"})
+	if err != nil {
+		t.Fatalf("NewS3FS: %v", err)
+	}
+
+	rc, err := fsys.Open(context.Background(), "doc.txt")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Consume some bytes so the logical offset is non-zero before Close.
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(rc, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Double-Close must be safe.
+	if err := rc.Close(); err != nil {
+		t.Fatalf("second Close = %v, want nil", err)
+	}
+
+	if _, err := rc.Read(make([]byte, 4)); !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("Read after Close = %v, want fs.ErrClosed", err)
+	}
+	if _, err := rc.Seek(0, io.SeekCurrent); !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("Seek after Close = %v, want fs.ErrClosed", err)
 	}
 }
 
@@ -154,6 +231,33 @@ func TestNew_S3RegionEndpointValidation(t *testing.T) {
 				t.Fatalf("New(%+v) err = %v, want substring %q", tc.cfg, err, tc.wantSub)
 			}
 		})
+	}
+}
+
+// TestNew_S3EndpointErrorRedactsUserinfo pins the security fix: a rejected
+// endpoint that embeds credentials (http://user:pass@host) must not leak the
+// userinfo into the returned error, which lands in logs/startup output.
+func TestNew_S3EndpointErrorRedactsUserinfo(t *testing.T) {
+	restore := corpusfs.SetS3ClientBuilderForTest(func(_ context.Context, _ corpusfs.Config) (corpusfs.S3API, error) {
+		t.Fatal("client builder must not be called when config is invalid")
+		return nil, nil
+	})
+	defer restore()
+
+	// Non-http scheme so validation rejects it, with secret userinfo embedded.
+	cfg := corpusfs.Config{Kind: "s3", S3Bucket: "b", S3Endpoint: "ftp://alice:hunter2@minio:9000"}
+	_, err := corpusfs.New(context.Background(), cfg)
+	if err == nil {
+		t.Fatalf("New(%+v) = nil error, want validation failure", cfg)
+	}
+	for _, secret := range []string{"hunter2", "alice:hunter2", "alice"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("endpoint error leaked userinfo %q: %v", secret, err)
+		}
+	}
+	// It should still be actionable: name the offending scheme.
+	if !strings.Contains(err.Error(), "http or https") {
+		t.Fatalf("endpoint error = %v, want it to flag the scheme requirement", err)
 	}
 }
 

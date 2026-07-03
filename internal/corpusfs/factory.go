@@ -178,15 +178,28 @@ func validateS3SourceConfig(cfg Config) error {
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return fmt.Errorf("corpusfs: source.s3.endpoint is not a valid URL: %w", err)
+		// Never echo the raw endpoint: it may embed userinfo
+		// (http://user:pass@host), and a parse-failure error would leak those
+		// credentials into logs/startup output.
+		return errors.New("corpusfs: source.s3.endpoint is not a valid URL")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("corpusfs: source.s3.endpoint must use http or https, got %q", endpoint)
+		return fmt.Errorf("corpusfs: source.s3.endpoint must use http or https, got %q", redactedEndpoint(u))
 	}
 	if u.Host == "" {
-		return fmt.Errorf("corpusfs: source.s3.endpoint must include a host, got %q", endpoint)
+		return errors.New("corpusfs: source.s3.endpoint must include a host")
 	}
 	return nil
+}
+
+// redactedEndpoint renders a parsed endpoint URL as scheme://host, dropping any
+// userinfo, path, or query so credentials embedded in the endpoint
+// (http://user:pass@host) never reach logs or error messages.
+func redactedEndpoint(u *url.URL) string {
+	if u.Host == "" {
+		return u.Scheme
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // presignerForClient returns a presignFunc backed by the SDK's PresignClient when
