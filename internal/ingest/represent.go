@@ -404,14 +404,21 @@ func decodeToUTF8(content []byte) []byte {
 }
 
 // transcodeUTF16 decodes UTF-16 bytes of the given endianness to UTF-8. The BOM,
-// if any, has already been consumed by the caller, so IgnoreBOM is used. On a
-// transform error (e.g. an odd trailing byte) it returns the original bytes and
-// lets the caller's U+FFFD salvage handle them.
+// if any, has already been consumed by the caller, so IgnoreBOM is used.
+//
+// A BOM or the NUL-interleaving heuristic has already classified this stream as
+// UTF-16, so the output must be proper UTF-8 text or U+FFFD replacement chars —
+// never the raw interleaved-NUL bytes. Returning the raw bytes on error would be
+// unsafe: NUL padding is itself valid UTF-8, so those bytes pass utf8.Valid and
+// the caller's U+FFFD salvage never fires, leaving NUL-interleaved garbage. On a
+// transform error (e.g. an odd trailing byte that leaves an incomplete final
+// code unit) we therefore emit the successfully decoded prefix followed by a
+// single U+FFFD for the stray unit.
 func transcodeUTF16(content []byte, endian unicode.Endianness) []byte {
 	dec := unicode.UTF16(endian, unicode.IgnoreBOM).NewDecoder()
 	out, _, err := transform.Bytes(dec, content)
 	if err != nil {
-		return content
+		return append(out, "�"...)
 	}
 	return out
 }
@@ -431,8 +438,12 @@ const sniffUTF16NULPercent = 30
 // contains NUL, so this does not misfire on legitimate UTF-8. It is deliberately
 // conservative (script-agnostic, no locale assumptions).
 func sniffUTF16(content []byte) (unicode.Endianness, bool) {
-	n := len(content)
-	if n < sniffUTF16MinBytes || n%2 != 0 {
+	// Truncate the parity window to an even length so a stray trailing byte
+	// (corruption, padding, or an incomplete final code unit) does not defeat
+	// detection of an otherwise UTF-16 stream. The dropped odd byte is decoded
+	// best-effort (as U+FFFD) by transcodeUTF16.
+	n := len(content) &^ 1
+	if n < sniffUTF16MinBytes {
 		return unicode.LittleEndian, false
 	}
 	if n > binarySniffLen {

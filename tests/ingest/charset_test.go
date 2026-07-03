@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -56,6 +57,41 @@ func TestNormalizeUTF8_DecodesUTF16(t *testing.T) {
 				t.Fatalf("NormalizeUTF8 = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestNormalizeUTF8_UTF16BOMOddTailYieldsReplacement pins that once a UTF-16 BOM
+// has classified the stream, a stray trailing byte (odd payload length) is
+// salvaged as U+FFFD rather than surviving as a raw interleaved NUL. NUL padding
+// is itself valid UTF-8, so returning the raw bytes would let them masquerade as
+// valid text; the BOM's authority means the output must be UTF-8 text or a
+// replacement char (Copilot finding on transcodeUTF16).
+func TestNormalizeUTF8_UTF16BOMOddTailYieldsReplacement(t *testing.T) {
+	// UTF-16LE BOM (FF FE) followed by a lone 0x00: an incomplete final code
+	// unit. Must not yield the raw 0x00 byte.
+	in := []byte{0xFF, 0xFE, 0x00}
+	got := ingest.NormalizeUTF8(in)
+	if bytes.IndexByte(got, 0x00) != -1 {
+		t.Fatalf("NormalizeUTF8 = %q, must not contain a raw NUL byte", got)
+	}
+	if want := []byte("�"); !bytes.Equal(got, want) {
+		t.Fatalf("NormalizeUTF8 = %q, want %q (U+FFFD replacement)", got, want)
+	}
+}
+
+// TestNormalizeUTF8_DecodesBOMlessUTF16OddTail pins that a BOM-less UTF-16 body
+// with a trailing odd byte is still detected and decoded, rather than being
+// rejected outright by an even-length gate (optibot finding on sniffUTF16). The
+// stray byte is salvaged as U+FFFD; the real text must survive.
+func TestNormalizeUTF8_DecodesBOMlessUTF16OddTail(t *testing.T) {
+	body := encodeUTF16(t, unicode.LittleEndian, unicode.IgnoreBOM, "plain ascii sentence long enough")
+	in := append(append([]byte{}, body...), 0x41) // stray trailing odd byte
+	got := string(ingest.NormalizeUTF8(in))
+	if !strings.Contains(got, "plain ascii sentence long enough") {
+		t.Fatalf("NormalizeUTF8 = %q, want decoded UTF-16 text (odd-tail body not detected)", got)
+	}
+	if strings.ContainsRune(got, 0x00) {
+		t.Fatalf("NormalizeUTF8 = %q, must not contain a raw NUL byte", got)
 	}
 }
 
