@@ -82,9 +82,10 @@ func ReconcileEmbeddedVectors(ctx context.Context, source EmbeddedVectorSource, 
 		repended     int
 		afterChunkID int64
 	)
-	// flush re-pends the buffered missing IDs and resets the buffer. Every ID in
-	// missing has chunk_id <= afterChunkID (drawn only from completed pages), so
-	// the write cannot perturb the keyset walk of the remaining "ok" set.
+	// flush re-pends the buffered missing IDs and resets the buffer. afterChunkID
+	// is advanced to a page's last chunk_id before that page's IDs can be flushed,
+	// so every buffered ID has chunk_id <= afterChunkID and the write cannot perturb
+	// the keyset walk of the remaining "ok" set.
 	flush := func() error {
 		if len(missing) == 0 {
 			return nil
@@ -110,13 +111,15 @@ func ReconcileEmbeddedVectors(ctx context.Context, source EmbeddedVectorSource, 
 			return repended, err
 		}
 		missing = append(missing, pageMiss...)
+		// Advance the cursor to the largest chunk_id read on THIS page BEFORE any
+		// flush (rows are ordered by chunk_id ascending, so the final Label is the
+		// greatest key seen so far). Advancing on every page — including the final
+		// short one — keeps every buffered ID at chunk_id <= afterChunkID, so the
+		// end-of-scan flush's invariant holds literally for the last page too.
+		afterChunkID = int64(chunks[len(chunks)-1].Label)
 		if len(chunks) < reconcilePageSize {
 			break
 		}
-		// Seek past the last chunk_id in this page (rows are ordered by chunk_id
-		// ascending, so the final Label is the greatest key seen so far). Flush
-		// only after advancing the cursor keeps every buffered ID <= afterChunkID.
-		afterChunkID = int64(chunks[len(chunks)-1].Label)
 		if len(missing) >= reconcileRependBatch {
 			if err := flush(); err != nil {
 				return repended, err

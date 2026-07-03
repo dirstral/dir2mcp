@@ -20,11 +20,15 @@ type fakeEmbeddedSource struct {
 	// can assert re-pending is flushed in bounded batches (issue #503) rather than
 	// one terminal call.
 	rependBatches []int
-	listErr       error
-	repErr        error
+	// seeks records the afterChunkID cursor passed to each ListEmbeddedChunkMetadata
+	// call so tests can assert the keyset walk advances monotonically.
+	seeks   []int64
+	listErr error
+	repErr  error
 }
 
 func (f *fakeEmbeddedSource) ListEmbeddedChunkMetadata(_ context.Context, kind string, limit int, afterChunkID int64) ([]model.ChunkTask, error) {
+	f.seeks = append(f.seeks, afterChunkID)
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -176,6 +180,14 @@ func TestReconcileEmbeddedVectors_RependsInBoundedBatches(t *testing.T) {
 	}
 	if sum != total {
 		t.Fatalf("batch sizes sum to %d, want %d: %v", sum, total, src.rependBatches)
+	}
+	// The keyset cursor is monotonic non-decreasing across pages — each fetch seeks
+	// strictly past the previous page's largest chunk_id, so no row is scanned twice
+	// and the flush invariant (buffered ID chunk_id <= afterChunkID) can hold.
+	for i := 1; i < len(src.seeks); i++ {
+		if src.seeks[i] <= src.seeks[i-1] {
+			t.Fatalf("seek cursor not monotonic at page %d: %v", i, src.seeks)
+		}
 	}
 	// Correctness preserved: the union of all batches is exactly the missing set.
 	got := append([]uint64(nil), src.repended...)
