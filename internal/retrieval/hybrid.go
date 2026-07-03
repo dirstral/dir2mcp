@@ -105,7 +105,6 @@ func (s *Service) runHybridSearch(
 	s.metaMu.RLock()
 	enabled := s.hybridEnabled
 	store := s.store
-	rerankPool := s.rerankCandidatePool
 	s.metaMu.RUnlock()
 	if !enabled {
 		return nil, false
@@ -146,29 +145,5 @@ func (s *Service) runHybridSearch(
 			bm25Hits[i].DocType = cached.DocType
 		}
 	}
-	// Fuse into a candidate pool sized for the downstream rerank stage, not just
-	// the final k. Truncating fusion to k here would defeat the over-fetch pool
-	// (#417): the reranker (rerankPool) could then only reorder the top-k and
-	// never rescue a relevant chunk fused at rank k+1..pool. The caller truncates
-	// to k when rerank is disabled, so the wider pool is harmless there. This
-	// mirrors the HyDE path, which already fuses to hybridCandidatePoolSize.
-	return fuseRRF(vectorHits, bm25Hits, rerankFusionPoolSize(k, rerankPool)), true
-}
-
-// rerankFusionPoolSize returns how many fused candidates to keep before the
-// rerank stage: at least hybridCandidatePoolSize and the configured rerank
-// candidate pool (falling back to the default when unset), but never fewer than
-// the caller's k so a larger requested k is still honored.
-func rerankFusionPoolSize(k, rerankPool int) int {
-	pool := rerankPool
-	if pool <= 0 {
-		pool = defaultRerankCandidatePool
-	}
-	if pool < hybridCandidatePoolSize {
-		pool = hybridCandidatePoolSize
-	}
-	if k > pool {
-		return k
-	}
-	return pool
+	return fuseRRF(vectorHits, bm25Hits, k), true
 }
