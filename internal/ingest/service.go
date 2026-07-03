@@ -1297,6 +1297,10 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
+	// #502: also withhold the marker for an archive container this run will
+	// (re)extract; finalContentHash still carries the original hash for the deferred
+	// finalize (withholdContentHash captured it before this blank).
+	withholdArchiveContentHash(&doc, needsProcessing)
 
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
@@ -1318,7 +1322,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// The archive document itself remains "skipped" (no direct text content).
 	if doc.DocType == "archive" {
 		s.creditIndexed(indexedPending)
-		return s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing)
+		return s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing, finalContentHash)
 	}
 
 	if !needsProcessing || doc.Status != "ok" {
@@ -1379,6 +1383,21 @@ func withholdContentHash(doc *model.Document, needsProcessing bool) (finalConten
 	return finalContentHash, willGenerateReps
 }
 
+// withholdArchiveContentHash withholds the content_hash done marker for an archive
+// container this run will (re)extract (#502). withholdContentHash does not cover
+// archives — they persist as status="skipped", not "ok" — but they still use
+// content_hash as the incremental gate for whether member extraction re-runs.
+// Blanking it here (and stamping it only after processArchiveMembers completes)
+// closes the same crash window #402/#485 closed for the representation-commit path,
+// on the archive-extraction path. It is a no-op for non-archives and for archives
+// this run will not re-extract. Kept separate from processDocument to hold that
+// method within the cyclomatic-complexity budget.
+func withholdArchiveContentHash(doc *model.Document, needsProcessing bool) {
+	if needsProcessing && doc.DocType == "archive" {
+		doc.ContentHash = ""
+	}
+}
+
 // finalizeIfGenerated stamps the withheld #402 done marker via finalizeContentHash
 // when this run generated representations for doc, and is a no-op otherwise. Split
 // out so processDocument/processDocumentFromContent stay within the cyclomatic
@@ -1410,6 +1429,16 @@ func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, 
 // columns) after the #413 guard; not-found → recreate the row from doc (there is
 // no current row whose columns must be preserved); store error → propagate.
 func (s *Service) finalizeContentHash(ctx context.Context, doc *model.Document, contentHash string) error {
+	return s.finalizeContentHashForStatus(ctx, doc, contentHash, "ok")
+}
+
+// finalizeContentHashForStatus is finalizeContentHash generalized over the
+// document's healthy "done" status. The representation-commit path finalizes an
+// "ok" document; the archive-extraction path (#502) finalizes a container that
+// persists as status="skipped". healthyStatus is the status the freshly re-read
+// row must still be in for the withheld marker to be stamped — the #413 guard
+// that never resurrects an out-of-band status="error" into a done state.
+func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.Document, contentHash, healthyStatus string) error {
 	current, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
 	if err != nil {
 		if !isNotFoundError(err) {
@@ -1424,9 +1453,10 @@ func (s *Service) finalizeContentHash(ctx context.Context, doc *model.Document, 
 		}
 		return nil
 	}
-	// #413 guard: a non-fatal per-representation failure may have persisted
-	// status="error" out-of-band; never resurrect it into a done state.
-	if current.Status != "ok" {
+	// #413 guard: a non-fatal per-representation failure (or archive-subtype
+	// failure) may have persisted a status other than the expected healthy one
+	// out-of-band; never resurrect it into a done state.
+	if current.Status != healthyStatus {
 		return nil
 	}
 	// Stamp the withheld done marker onto the re-read row so out-of-band writes
@@ -1581,7 +1611,7 @@ func (s *Service) readDocumentContent(ctx context.Context, relPath string) ([]by
 // content changed (or a full reindex was requested) it extracts and processes
 // the members; otherwise it retains the existing member paths in seen so that
 // markMissingAsDeleted does not tombstone them.
-func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool) error {
+func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool, finalContentHash string) error {
 	if needsProcessing {
 		if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
 			if !errors.Is(err, errUnsupportedArchiveFormat) {
@@ -1624,6 +1654,14 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 			// not double-counted as both skipped and error in CorpusStats (#398).
 			s.addSkipped(-1)
 			return fmt.Errorf("process archive members %s: %w", f.RelPath, err)
+		}
+		// #502: member extraction completed — stamp the withheld content_hash done
+		// marker now. The initial upsert blanked it, so a crash anywhere between that
+		// upsert and this point leaves the container with an empty hash and the next
+		// scan re-extracts instead of skipping on a premature marker. The container
+		// persists as status="skipped", so finalize preserves that healthy status.
+		if err := s.finalizeContentHashForStatus(ctx, &doc, finalContentHash, "skipped"); err != nil {
+			return err
 		}
 	} else if seen != nil {
 		// Archive content unchanged: retain existing members in seen.
