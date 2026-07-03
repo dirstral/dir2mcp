@@ -25,8 +25,10 @@ type CoordinatorLoopOptions struct {
 	StallThreshold int
 
 	// OnError, if set, is called on every enqueue failure (each tick). It is the
-	// per-failure, best-effort notification hook: the loop NEVER blocks on it, so a
-	// transient failure cannot stall the loop. Cancellation errors are not reported.
+	// per-failure, best-effort notification hook. The loop invokes it SYNCHRONOUSLY
+	// on its own goroutine, so the callback MUST be fast/non-blocking (or at most
+	// context-bounded) — a callback that blocks indefinitely stalls the loop and
+	// prevents further re-enqueues. Cancellation errors are not reported.
 	OnError func(err error)
 
 	// OnStall, if set, is called ONCE when the consecutive-failure count first
@@ -35,7 +37,10 @@ type CoordinatorLoopOptions struct {
 	// stall — unlike OnError it is expected to guarantee delivery (e.g. a blocking,
 	// context-aware channel send or a structured event), because otherwise
 	// embedding makes no progress while the daemon still looks healthy (issue #435
-	// C4). It receives the consecutive-failure count and the latest error.
+	// C4). Like OnError it is invoked SYNCHRONOUSLY on the loop's goroutine, so it
+	// too must be fast/non-blocking or at most context-bounded (a context-aware
+	// blocking send is fine — it cannot outlive ctx). It receives the
+	// consecutive-failure count and the latest error.
 	OnStall func(consecutive int, err error)
 }
 

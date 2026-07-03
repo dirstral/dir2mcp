@@ -26,7 +26,9 @@ func AcquireCoordinatorLock(lockPath string) (*CoordinatorLock, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		if err == syscall.EWOULDBLOCK {
+		// flock reports "already held" as EAGAIN or EWOULDBLOCK; POSIX allows these
+		// to be distinct errnos on some Unix platforms, so treat both as locked.
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
 			return nil, ErrCoordinatorLocked
 		}
 		return nil, fmt.Errorf("embedqueue: lock coordinator lock: %w", err)

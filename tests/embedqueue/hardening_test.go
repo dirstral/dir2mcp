@@ -3,7 +3,6 @@ package embedqueue_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -128,56 +127,9 @@ func TestEmbeddedGuard_ConcurrentFirstOnce(t *testing.T) {
 	}
 }
 
-// --- C3: single-coordinator lock (issue #435) ---
-
-// TestCoordinatorLock_DetectAndRefuse pins the detect-and-refuse guard: a second
-// acquisition of the same lock path is refused with ErrCoordinatorLocked, and the
-// path becomes acquirable again after the first holder releases.
-func TestCoordinatorLock_DetectAndRefuse(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "embed-coordinator.lock")
-
-	first, err := embedqueue.AcquireCoordinatorLock(path)
-	if err != nil {
-		t.Fatalf("first acquire: %v", err)
-	}
-
-	if _, err := embedqueue.AcquireCoordinatorLock(path); !errors.Is(err, embedqueue.ErrCoordinatorLocked) {
-		t.Fatalf("second acquire while held: err = %v, want ErrCoordinatorLocked", err)
-	}
-
-	if err := first.Release(); err != nil {
-		t.Fatalf("release: %v", err)
-	}
-
-	// After release the lock is free again.
-	second, err := embedqueue.AcquireCoordinatorLock(path)
-	if err != nil {
-		t.Fatalf("acquire after release: %v", err)
-	}
-	if err := second.Release(); err != nil {
-		t.Fatalf("release second: %v", err)
-	}
-}
-
-// TestCoordinatorLock_ReleaseIdempotent pins that Release is safe to call twice and
-// on a nil lock (defensive shutdown paths).
-func TestCoordinatorLock_ReleaseIdempotent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "embed-coordinator.lock")
-	l, err := embedqueue.AcquireCoordinatorLock(path)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	if err := l.Release(); err != nil {
-		t.Fatalf("first release: %v", err)
-	}
-	if err := l.Release(); err != nil {
-		t.Fatalf("second release should be a no-op: %v", err)
-	}
-	var nilLock *embedqueue.CoordinatorLock
-	if err := nilLock.Release(); err != nil {
-		t.Fatalf("nil release should be a no-op: %v", err)
-	}
-}
+// The C3 single-coordinator-lock tests (TestCoordinatorLock_*) live in
+// coordinator_lock_unix_test.go: AcquireCoordinatorLock only enforces mutual
+// exclusion under //go:build unix, so those assertions are gated to that tag.
 
 // --- C4: enqueue-stall signal (issue #435) ---
 
