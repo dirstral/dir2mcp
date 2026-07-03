@@ -154,7 +154,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer cancel()
 	defer func() { _ = ln.Close() }()
 
-	cleanupPIDFile, code := a.setupDaemonChildIfApplicable(cfg.StateDir, opts, cancel)
+	cleanupPIDFile, code := a.setupServerSingleInstance(cfg.StateDir, opts, cancel)
 	if code != exitSuccess {
 		return code
 	}
@@ -1403,36 +1403,71 @@ func (a *App) publishConnection(cfg config.Config, mcpURL string, auth authMater
 	return connection, exitSuccess
 }
 
-// setupDaemonChildIfApplicable performs the two daemon-child-only
-// preconditions that have to happen BEFORE writing connection.json: the
-// SIGTERM handler install and the O_EXCL pid-file claim. The handler is
-// installed first so a SIGTERM that arrives during the window between
-// here and the event loop is converted into a graceful cancel rather
-// than killing the child abruptly. The pid-file claim must come before
-// connection.json so a second daemon racing for the same state dir
-// loses deterministically and exits before touching anything else.
+// setupServerSingleInstance performs the preconditions that must happen
+// BEFORE writing connection.json: the daemon-child SIGTERM handler and,
+// in EVERY run mode, the single-instance pid-file lock. The handler is
+// installed first (daemon child only) so a SIGTERM in the window between
+// here and the event loop becomes a graceful cancel. The pid lock must
+// come before connection.json so a second server racing for the same
+// state dir loses deterministically and exits before touching anything.
 //
-// Returns the deferred cleanup closure (a no-op when not running as
-// daemon child) and an exit code; runUp returns immediately when the
-// code is non-zero (the helper has already written the error).
+// Crucially the lock is taken for foreground/service (`up --foreground`,
+// the launchd/systemd target) too, not just the double-fork daemon child
+// — two processes holding the same meta.sqlite + HNSW index files with
+// divergent in-memory state corrupt the index (#434). The daemon child
+// relies on its parent having reconciled a stale pid file first; the
+// foreground/service path has no parent, so acquireSingleInstanceLock
+// reconciles a dead owner itself before its O_EXCL claim.
 //
-// Extracted from runUp to keep that function under the
-// cyclomatic-complexity budget after PR #174's daemon-child setup grew.
-func (a *App) setupDaemonChildIfApplicable(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
+// Returns the deferred cleanup closure (removes the pid file on exit)
+// and an exit code; runUp returns immediately when the code is non-zero
+// (the helper has already written the error).
+func (a *App) setupServerSingleInstance(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
 	cleanup = func() {}
-	if !isRunningAsDaemonChild() {
-		return cleanup, exitSuccess
+	if isRunningAsDaemonChild() {
+		installDaemonChildSignalHandler(cancel)
 	}
-	installDaemonChildSignalHandler(cancel)
-	pidPath := pidFilePath(stateDir)
-	if err := claimPIDFile(pidPath, os.Getpid()); err != nil {
+	release, err := acquireSingleInstanceLock(stateDir)
+	if err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
-			fmt.Sprintf("claim pid file %s: %v", pidPath, err),
-			"another dir2mcp daemon is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
+			err.Error(),
+			"Another dir2mcp server is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
 		)
 		return cleanup, exitGeneric
 	}
-	return func() { _ = removePIDFile(pidPath) }, exitSuccess
+	return release, exitSuccess
+}
+
+// acquireSingleInstanceLock claims the per-state-dir pid file so at most
+// one server process ever writes a given corpus's sqlite + index. It
+// reconciles a stale pid file (owner process dead) so a clean restart is
+// not blocked by a crash, then claims with O_EXCL so two live starters
+// racing the same directory cannot both win. A live owner — or losing
+// the O_EXCL race — returns an "already running" error the caller
+// surfaces; the returned release removes the pid file on shutdown.
+func acquireSingleInstanceLock(stateDir string) (release func(), err error) {
+	pidPath := pidFilePath(stateDir)
+	// Reconcile a stale pid file whose owner is gone so the O_EXCL claim
+	// below has a clear field; a LIVE owner means a second writer, which
+	// we must refuse.
+	if existing, rerr := readPIDFile(pidPath); rerr == nil {
+		if processIsAlive(existing) {
+			return nil, fmt.Errorf("dir2mcp is already running for %s (pid %d)", stateDir, existing)
+		}
+		_ = removePIDFile(pidPath)
+	}
+	if cerr := claimPIDFile(pidPath, os.Getpid()); cerr != nil {
+		if errors.Is(cerr, os.ErrExist) {
+			// Lost the race between the stale check and the claim: another
+			// starter won. Surface its pid when we can still read it.
+			if existing, rerr := readPIDFile(pidPath); rerr == nil {
+				return nil, fmt.Errorf("dir2mcp is already running for %s (pid %d)", stateDir, existing)
+			}
+			return nil, fmt.Errorf("dir2mcp is already running for %s (pid file %s already claimed)", stateDir, pidPath)
+		}
+		return nil, fmt.Errorf("claim pid file %s: %w", pidPath, cerr)
+	}
+	return func() { _ = removePIDFile(pidPath) }, nil
 }
 
 // installInteractionForUp picks the right termination interaction for
