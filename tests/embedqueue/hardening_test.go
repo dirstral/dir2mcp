@@ -241,3 +241,15 @@ func TestRunCoordinator_StallResetsAfterSuccess(t *testing.T) {
 		t.Fatalf("OnStall fired %d times for a sub-threshold failure burst, want 0", got)
 	}
 }
+
+// TestRunCoordinator_NilCoordinator pins that the exported loop helper fails
+// fast (reports via OnError and returns) instead of panicking on a nil coord.
+func TestRunCoordinator_NilCoordinator(t *testing.T) {
+	var got error
+	embedqueue.RunCoordinator(context.Background(), nil, embedqueue.CoordinatorLoopOptions{
+		OnError: func(err error) { got = err },
+	})
+	if got == nil {
+		t.Fatal("nil coordinator: want OnError to receive an error, got nil")
+	}
+}

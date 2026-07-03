@@ -69,6 +69,15 @@ func (o CoordinatorLoopOptions) stallThreshold() int {
 // signal instead of a silently-idle daemon. A single success resets both the
 // counter and the armed OnStall.
 func RunCoordinator(ctx context.Context, coord *Coordinator, opts CoordinatorLoopOptions) {
+	// Fail fast rather than panicking on coord.EnqueuePending: RunCoordinator is
+	// an exported reusable helper, so a nil coordinator is a caller bug that should
+	// surface as a clear signal, not a dereference panic.
+	if coord == nil {
+		if opts.OnError != nil {
+			opts.OnError(errors.New("RunCoordinator: nil coordinator"))
+		}
+		return
+	}
 	ticker := time.NewTicker(opts.interval())
 	defer ticker.Stop()
 
