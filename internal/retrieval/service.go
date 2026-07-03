@@ -783,6 +783,13 @@ func (s *Service) SetStateDir(stateDir string) {
 // (not a store-recorded one, which can carry a differing model_version) is what
 // keeps this lookup byte-identical to ingest's writer.
 func (s *Service) SetDerivationCacheIdentities(ocrIdentity, transcriptIdentity string) {
+	// Trim to stay byte-identical to ingest's canonical identity, whose fields are
+	// each TrimSpace'd by derivationIdentity (internal/ingest/derivation.go); any
+	// stray leading/trailing whitespace here would silently force a cache miss.
+	// Trimming ingest's already-trimmed output is a no-op, matching sibling setters
+	// (SetStateDir/SetProtocolVersion).
+	ocrIdentity = strings.TrimSpace(ocrIdentity)
+	transcriptIdentity = strings.TrimSpace(transcriptIdentity)
 	s.metaMu.Lock()
 	s.ocrCacheIdentity = ocrIdentity
 	s.transcriptCacheIdentity = transcriptIdentity
@@ -1716,11 +1723,35 @@ func (s *Service) sourceContentHash(ctx context.Context, corpusFS corpusfs.Corpu
 	if provider, ok := store.(ocrSourceHashProvider); ok {
 		if hash, ok, err := provider.OCRSourceContentHash(ctx, relPath); err != nil {
 			s.logf("open_file: source-hash lookup for %q failed, hashing bytes: %v", relPath, err)
-		} else if ok && hash != "" {
+		} else if ok && isSHA256Hex(hash) {
 			return hash, nil
+		} else if ok && hash != "" {
+			// The store reported a value that is not a canonical sha256 hex digest
+			// (wrong length / non-hex / uppercase). Trusting it would fold a bogus
+			// base hash into the cache key, deterministically missing the entry
+			// ingest wrote and regressing open_file to OCR_NOT_READY. Fall back to
+			// hashing the bytes so the key stays byte-identical to ingest's.
+			s.logf("open_file: store source-hash for %q is not sha256-hex, hashing bytes", relPath)
 		}
 	}
 	return s.hashSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
+}
+
+// isSHA256Hex reports whether s is exactly 64 lowercase hexadecimal characters —
+// the canonical form of a sha256 digest ingest folds into the derivation cache
+// key. A store-provided base hash MUST pass this before it is trusted; anything
+// else falls back to hashing the source bytes so the key stays byte-identical.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // cacheIdentityForExt selects which active derivation identity governs relPath's

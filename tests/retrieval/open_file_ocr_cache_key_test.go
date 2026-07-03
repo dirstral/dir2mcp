@@ -25,10 +25,12 @@ import (
 // files below are written at ingest's REAL key (ing.OCRCacheKey /
 // ing.ReadOrComputeTranscript), so a hit proves the two keys agree.
 
-// fakeKeyStore is a minimal model.Store. When baseHash is non-empty it also
-// implements the optional ocrSourceHashProvider capability (OCRSourceContentHash),
-// letting open_file derive the identity-aware key WITHOUT a full object GET (the
-// #488 perf path).
+// fakeKeyStore is a minimal model.Store that always implements the optional
+// ocrSourceHashProvider capability (OCRSourceContentHash is defined below). It
+// returns ok=true — supplying baseHash — only when baseHash is non-empty, letting
+// open_file derive the identity-aware key WITHOUT a full object GET (the #488 perf
+// path); with an empty baseHash it reports ok=false so open_file falls back to
+// hashing the bytes.
 type fakeKeyStore struct {
 	baseHash string
 }
@@ -43,7 +45,10 @@ func (f *fakeKeyStore) ListFiles(context.Context, string, string, int, int) ([]m
 }
 func (f *fakeKeyStore) Close() error { return nil }
 
-// OCRSourceContentHash is present only when baseHash is set (the perf capability).
+// OCRSourceContentHash is ALWAYS defined, so *fakeKeyStore always satisfies the
+// optional ocrSourceHashProvider capability. It signals whether a base hash is
+// actually available via its ok return (false when baseHash is unset), not by the
+// method's presence.
 func (f *fakeKeyStore) OCRSourceContentHash(_ context.Context, _ string) (string, bool, error) {
 	if f.baseHash == "" {
 		return "", false, nil
@@ -263,6 +268,87 @@ func TestOpenFile_OCRCacheKey_SkipsObjectGETWhenStoreHasHash(t *testing.T) {
 	}
 	if fs.opens != 0 {
 		t.Fatalf("expected zero object GETs when the store supplies the base hash, got %d", fs.opens)
+	}
+}
+
+// TestOpenFile_OCRCacheKey_WhitespacePaddedIdentityHits locks the FIX-1 trim:
+// SetDerivationCacheIdentities must TrimSpace its args so a caller that passes a
+// whitespace-padded identity still reconstructs ingest's byte-identical key and
+// HITS the cache, instead of silently missing on the stray whitespace.
+func TestOpenFile_OCRCacheKey_WhitespacePaddedIdentityHits(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".dir2mcp")
+
+	pdfBytes := []byte("%PDF-1.4 whitespace body")
+	fs := &fakeCorpusFS{objects: map[string][]byte{"docs/w.pdf": pdfBytes}}
+
+	ocrText := "# Padded identity OCR text"
+	cacheDir := filepath.Join(stateDir, "cache", "ocr")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir ocr cache: %v", err)
+	}
+	key := ingestOCRCacheKey(t, stateDir, pdfBytes)
+	if err := os.WriteFile(filepath.Join(cacheDir, key+".md"), []byte(ocrText), 0o644); err != nil {
+		t.Fatalf("write ocr cache: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetStateDir(stateDir)
+	svc.SetCorpusFS(fs)
+	// Same active OCR identity as the hit case, but padded with leading/trailing
+	// whitespace — the setter must trim it to stay byte-identical to ingest's key.
+	svc.SetDerivationCacheIdentities("  ocr|docling|||\n", "\t")
+
+	out, err := svc.OpenFile(context.Background(), "docs/w.pdf", model.Span{}, 20000)
+	if err != nil {
+		t.Fatalf("OpenFile with whitespace-padded identity returned err: %v", err)
+	}
+	if out != ocrText {
+		t.Fatalf("expected cached OCR text with padded identity, got %q", out)
+	}
+}
+
+// TestOpenFile_OCRCacheKey_MalformedStoreHashFallsBack locks the FIX-2 validation:
+// a store that reports a non-sha256 base hash (wrong shape) must NOT be trusted —
+// open_file falls back to hashing the source bytes (a real object GET) and still
+// reconstructs ingest's key and HITS, instead of folding the bogus hash and
+// regressing to OCR_NOT_READY.
+func TestOpenFile_OCRCacheKey_MalformedStoreHashFallsBack(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".dir2mcp")
+
+	pdfBytes := []byte("%PDF-1.4 malformed-hash body")
+	fs := &countingCorpusFS{objects: map[string][]byte{"docs/m.pdf": pdfBytes}}
+
+	ocrText := "# Fallback OCR text"
+	cacheDir := filepath.Join(stateDir, "cache", "ocr")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir ocr cache: %v", err)
+	}
+	key := ingestOCRCacheKey(t, stateDir, pdfBytes)
+	if err := os.WriteFile(filepath.Join(cacheDir, key+".md"), []byte(ocrText), 0o644); err != nil {
+		t.Fatalf("write ocr cache: %v", err)
+	}
+
+	// The store reports a bogus, non-sha256 base hash: open_file must reject its
+	// shape and hash the bytes instead.
+	store := &fakeKeyStore{baseHash: "not-a-valid-sha256-hash"}
+	svc := retrieval.NewService(store, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetStateDir(stateDir)
+	svc.SetCorpusFS(fs)
+	svc.SetDerivationCacheIdentities("ocr|docling|||", "")
+
+	out, err := svc.OpenFile(context.Background(), "docs/m.pdf", model.Span{}, 20000)
+	if err != nil {
+		t.Fatalf("OpenFile (malformed store-hash fallback) returned err: %v", err)
+	}
+	if out != ocrText {
+		t.Fatalf("expected cached OCR text via byte-hash fallback, got %q", out)
+	}
+	if fs.opens == 0 {
+		t.Fatalf("expected a byte-hashing object GET when the store hash is malformed, got %d", fs.opens)
 	}
 }
 
