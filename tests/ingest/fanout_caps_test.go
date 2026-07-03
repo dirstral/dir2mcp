@@ -147,6 +147,7 @@ func runArchiveIngestCapped(t *testing.T, archiveName string, archiveData []byte
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	cfg := config.Default()
 	cfg.RootDir = root
 	svc := mustNewIngestService(t, cfg, st)
@@ -217,6 +218,40 @@ func TestArchiveCap_AggregateBytesStops(t *testing.T) {
 	}
 	if !strings.Contains(logs, "member fan-out exceeded caps") {
 		t.Errorf("expected an aggregate-size cap warning; got logs:\n%s", logs)
+	}
+}
+
+// TestArchiveCap_SingleCompressedAggregateBytesStops pins #408: the aggregate
+// -size cap must be honored on the bare single-compressed (gz/bz2) path too, not
+// just zip/tar. A .gz whose decompressed payload exceeds maxTotalBytes is refused
+// and flagged truncated, consistent with the container paths.
+func TestArchiveCap_SingleCompressedAggregateBytesStops(t *testing.T) {
+	const bodySize = 1000
+	data := buildGzip(t, strings.Repeat("a", bodySize))
+	// Cap well below the decompressed payload: the single member cannot fit, so
+	// nothing is ingested and the truncation warning fires.
+	st, logs := runArchiveIngestCapped(t, "big.txt.gz", data, 0, 500)
+
+	if got := countArchiveMembers(t, st, "big.txt.gz"); got != 0 {
+		t.Fatalf("ingested archive members = %d, want 0 (payload exceeds aggregate-size cap)", got)
+	}
+	if !strings.Contains(logs, "member fan-out exceeded caps") || !strings.Contains(logs, "#408") {
+		t.Errorf("expected an aggregate-size cap warning for single-compressed archive; got logs:\n%s", logs)
+	}
+}
+
+// TestArchiveCap_SingleCompressedUnderCapIngested confirms the size cap on the
+// single-compressed path is non-intrusive: a .gz whose payload fits under
+// maxTotalBytes ingests its one member with no truncation warning.
+func TestArchiveCap_SingleCompressedUnderCapIngested(t *testing.T) {
+	data := buildGzip(t, "small payload")
+	st, logs := runArchiveIngestCapped(t, "ok.txt.gz", data, 0, 1<<20)
+
+	if got := countArchiveMembers(t, st, "ok.txt.gz"); got != 1 {
+		t.Fatalf("ingested archive members = %d, want 1", got)
+	}
+	if strings.Contains(logs, "member fan-out exceeded caps") {
+		t.Errorf("did not expect a truncation warning under the cap; got logs:\n%s", logs)
 	}
 }
 

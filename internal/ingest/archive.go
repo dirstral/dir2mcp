@@ -151,8 +151,7 @@ func extractArchiveMembers(absPath, archiveRelPath string, maxMembers int, maxTo
 	case "tar", "tar.gz", "tar.bz2":
 		return extractTarMembers(absPath, archiveRelPath, maxMembers, maxTotalBytes)
 	case "gz", "bz2":
-		m, err := extractSingleCompressedMember(absPath, archiveRelPath, format)
-		return m, false, err
+		return extractSingleCompressedMember(absPath, archiveRelPath, format, maxMembers, maxTotalBytes)
 	default:
 		return nil, false, errUnsupportedArchiveFormat
 	}
@@ -165,10 +164,17 @@ func extractArchiveMembers(absPath, archiveRelPath string, maxMembers int, maxTo
 // members) rather than truncated. format is the canonical archiveFormat value
 // already resolved by the caller ("gz" or "bz2"), passed through to avoid a
 // duplicate path walk and keep the dispatch decision in one place.
-func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]archiveMember, error) {
+//
+// maxMembers/maxTotalBytes are the same fan-out caps applied on the zip/tar
+// paths (#408); they run through the shared memberAccumulator so the aggregate
+// -size cap is honored consistently. The member-count cap is effectively 1 here
+// (a single payload), but the size cap must still be respected: a decoded member
+// larger than maxTotalBytes is refused and truncated=true is returned, matching
+// how the zip/tar paths signal truncation.
+func extractSingleCompressedMember(absPath, archiveRelPath, format string, maxMembers int, maxTotalBytes int64) ([]archiveMember, bool, error) {
 	f, err := os.Open(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("open compressed file: %w", err)
+		return nil, false, fmt.Errorf("open compressed file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -177,7 +183,7 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]ar
 	case "gz":
 		gr, err := gzip.NewReader(f)
 		if err != nil {
-			return nil, fmt.Errorf("gzip reader: %w", err)
+			return nil, false, fmt.Errorf("gzip reader: %w", err)
 		}
 		defer func() { _ = gr.Close() }()
 		rd = gr
@@ -186,15 +192,15 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]ar
 	default:
 		// Guard against a nil reader: the caller only dispatches "gz"/"bz2" here,
 		// but an unexpected value must fail loudly instead of dereferencing nil.
-		return nil, fmt.Errorf("unsupported single-compressed format %q", format)
+		return nil, false, fmt.Errorf("unsupported single-compressed format %q", format)
 	}
 
 	content, err := io.ReadAll(io.LimitReader(rd, archiveMemberMaxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("decompress %s: %w", archiveRelPath, err)
+		return nil, false, fmt.Errorf("decompress %s: %w", archiveRelPath, err)
 	}
 	if int64(len(content)) > archiveMemberMaxBytes {
-		return nil, nil // payload exceeds per-member cap; skip
+		return nil, false, nil // payload exceeds per-member cap; skip
 	}
 
 	base := filepath.Base(archiveRelPath)
@@ -210,10 +216,12 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]ar
 	if !isSafeArchiveMemberName(memberName) {
 		memberName = "member"
 	}
-	return []archiveMember{{
-		RelPath: archiveRelPath + "/" + memberName,
-		Content: content,
-	}}, nil
+	// Route through the shared accumulator so the aggregate-size cap is enforced
+	// consistently with the zip/tar paths: if the single decoded member exceeds
+	// maxTotalBytes, it is refused and truncated=true is surfaced (#408).
+	acc := newMemberAccumulator(maxMembers, maxTotalBytes)
+	acc.add(archiveRelPath+"/"+memberName, content)
+	return acc.members, acc.truncated, nil
 }
 
 func extractZipMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) ([]archiveMember, bool, error) {
