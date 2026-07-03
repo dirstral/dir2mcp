@@ -1004,25 +1004,49 @@ func (s *Service) searchByMode(ctx context.Context, queryText string, k int, que
 	codeIndex := s.codeIndex
 	s.metaMu.RUnlock()
 
-	mode := strings.ToLower(strings.TrimSpace(query.Index))
-	if mode == "" {
-		mode = "auto"
-	}
-	switch mode {
-	case "text":
-		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
+	// resolveSearchAxis is the single source of truth for which physical index a
+	// query resolves to, so the dispatch here and the index_used reported to the
+	// tool layer (SPEC §15.2) can never disagree — including the "auto" mode that
+	// routes a code-shaped query to the code index.
+	switch resolveSearchAxis(query.Index, queryText) {
 	case "code":
 		return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
 	case "both":
 		return s.searchBothIndices(ctx, queryText, k, textModel, codeModel, textIndex, codeIndex, query)
-	case "auto":
-		if looksLikeCodeQuery(queryText) {
-			return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
-		}
-		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
-	default:
+	default: // "text"
 		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
 	}
+}
+
+// resolveSearchAxis reports which physical index (text|code|both) searchByMode
+// will use for the given requested index mode and query text. It is the shared
+// resolver behind both the dispatch and the tool layer's index_used field, so a
+// default-mode ("auto") query that routes to the code index is reported as
+// "code" rather than the requested-name-derived "text" (SPEC §15.2).
+func resolveSearchAxis(mode, queryText string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "code":
+		return "code"
+	case "both":
+		return "both"
+	case "text":
+		return "text"
+	case "auto", "":
+		if looksLikeCodeQuery(queryText) {
+			return "code"
+		}
+		return "text"
+	default:
+		return "text"
+	}
+}
+
+// ResolveIndex reports the physical index (text|code|both) that Search will
+// actually query for the given SearchQuery, letting the MCP tool layer emit a
+// truthful index_used (SPEC §15.2) without re-deriving the routing heuristic.
+func (s *Service) ResolveIndex(query model.SearchQuery) string {
+	return resolveSearchAxis(query.Index, query.Query)
 }
 
 // searchWithHyDE runs retrieval for the query, applying the opt-in HyDE

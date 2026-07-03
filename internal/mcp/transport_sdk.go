@@ -495,6 +495,15 @@ func (s *Server) buildSDKServer() *sdkmcp.Server {
 			if !ok || initResult == nil || initResult.Capabilities == nil {
 				return result, nil
 			}
+			// Pin the negotiated protocolVersion to the version this server
+			// supports (SPEC §11.2) instead of echoing the client's requested
+			// value. This also makes the configured protocol_version knob
+			// (§5.5) take wire effect; it defaults to the spec version.
+			pinned := strings.TrimSpace(s.cfg.ProtocolVersion)
+			if pinned == "" {
+				pinned = protocol.ProtocolDefaultVersion
+			}
+			initResult.ProtocolVersion = pinned
 			initResult.Capabilities.Logging = nil
 			if initResult.Capabilities.Tools == nil {
 				initResult.Capabilities.Tools = &sdkmcp.ToolCapabilities{}

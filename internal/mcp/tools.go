@@ -809,12 +809,19 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if searchErr != nil {
 		return toolCallResult{}, mapSearchError(searchErr)
 	}
+	// index_used MUST be the index the query was actually routed to (SPEC
+	// §15.2), not the requested name. For "auto" the retriever resolves to
+	// text or code from the query text, so prefer its resolved axis and fall
+	// back to the name-derived value only when the retriever can't report it.
 	indexUsed := "text"
 	switch indexName {
 	case "code":
 		indexUsed = "code"
 	case "both":
 		indexUsed = "both"
+	}
+	if resolver, ok := s.retriever.(model.IndexAxisResolver); ok {
+		indexUsed = resolver.ResolveIndex(model.SearchQuery{Query: query, Index: indexName})
 	}
 	indexingComplete := true
 	if ic, err := s.retriever.IndexingComplete(ctx); err == nil {
@@ -1744,7 +1751,7 @@ func mapSearchError(err error) *toolExecutionError {
 func mapOpenFileError(err error) *toolExecutionError {
 	switch {
 	case errors.Is(err, model.ErrForbidden):
-		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, model.ErrDocTypeUnsupported):
@@ -2016,7 +2023,7 @@ func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel st
 func mapPathError(err error) *toolExecutionError {
 	switch {
 	case errors.Is(err, model.ErrForbidden):
-		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, os.ErrNotExist):
@@ -2038,7 +2045,7 @@ func mapReadDocumentError(err error) *toolExecutionError {
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	case errors.Is(err, model.ErrForbidden):
-		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	default:
@@ -2125,7 +2132,7 @@ func annotationReadError(err error) *toolExecutionError {
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	case errors.Is(err, model.ErrForbidden):
-		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 	default:
@@ -2227,7 +2234,7 @@ func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
 		return &toolExecutionError{Code: "CONFIG_INVALID", Message: fmt.Sprintf("compile secret patterns: %v", s.secretPatternErr), Retryable: false}
 	}
 	if ingest.HasSecretMatch([]byte(text), s.secretPatterns) {
-		return &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
+		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	}
 	return nil
 }

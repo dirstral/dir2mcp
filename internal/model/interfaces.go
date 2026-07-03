@@ -117,6 +117,16 @@ type Retriever interface {
 	IndexingComplete(ctx context.Context) (bool, error)
 }
 
+// IndexAxisResolver is an optional Retriever capability that reports which
+// physical index (text|code|both) a query will actually be routed to. The MCP
+// search tool uses it to populate a truthful index_used (SPEC §15.2) — in
+// particular so an "auto" query that routes to the code index is reported as
+// "code" rather than the requested-name default of "text". Retrievers that do
+// not implement it fall back to a name-derived index_used.
+type IndexAxisResolver interface {
+	ResolveIndex(query SearchQuery) string
+}
+
 type Ingestor interface {
 	Run(ctx context.Context) error
 	Reindex(ctx context.Context) error
