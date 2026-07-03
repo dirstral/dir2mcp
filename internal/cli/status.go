@@ -72,13 +72,16 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 	return a.renderStatusOutput(global, cfg.StateDir, snapshot, source, staleRunning)
 }
 
-// daemonIsLive reports whether a live daemon process currently owns the given
-// state dir. It consults the pid file written by `dir2mcp up` and checks the
-// recorded pid for liveness. Returns false when the pid file is absent,
-// malformed, or names a process that is no longer running.
+// daemonIsLive reports whether a live daemon that is actually OURS currently
+// owns the given state dir. It consults the pid file written by `dir2mcp up`
+// and verifies both liveness and identity (classifyPIDFile). Returns false
+// when the pid file is absent, malformed, names a dead process, or names a
+// recycled pid (alive, but an unrelated process the OS reassigned after a
+// crash) — so a crashed daemon's stale "running" snapshot is reported as
+// stopped rather than lingering green forever (issue #418).
 func daemonIsLive(stateDir string) bool {
-	_, alive := daemonProcess(stateDir)
-	return alive
+	_, ownership := classifyPIDFile(pidFilePath(stateDir))
+	return ownership == pidLive
 }
 
 func (a *App) renderStatusOutput(global globalOptions, stateDir string, snapshot corpusSnapshot, source string, staleRunning bool) int {
