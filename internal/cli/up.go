@@ -189,6 +189,14 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		cancel()
 		bgWG.Wait()
 	}()
+	// Startup reconciliation (#402 A2): re-pend chunks sqlite counts embedded but
+	// whose vectors were lost to an ungraceful crash before the in-memory index's
+	// periodic snapshot. Must run before the embed worker so the re-pended chunks
+	// are picked up this session. No-op for durable backends and in read-only mode.
+	// Writes go through the synchronized logSink, not raw a.stderr: persistence
+	// autosave (started above) and the embed workers already write logSink
+	// concurrently, so a raw-stderr write here would race that shared sink (#419).
+	reconcileEmbeddedVectorsAtStartup(runCtx, opts.readOnly, st, textIx, codeIx, emitter, logSink)
 
 	embedErrCh := make(chan error, 4)
 	if err := startEmbeddingIfNotReadOnly(runCtx, cfg, opts.readOnly, st, textIx, codeIx, embedder, ret, indexingState, embedErrCh, logSink, opts.jsonOutput, etm, ecm, cfg.RootDir, corpusFS, emitter, &bgWG); err != nil {
@@ -854,9 +862,9 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 	total := 0
 	kinds := []string{"text", "code"}
 	for _, kind := range kinds {
-		offset := 0
+		var afterChunkID int64
 		for {
-			tasks, err := source.ListEmbeddedChunkMetadata(ctx, kind, pageSize, offset)
+			tasks, err := source.ListEmbeddedChunkMetadata(ctx, kind, pageSize, afterChunkID)
 			if err != nil {
 				if errors.Is(err, model.ErrNotImplemented) {
 					break
@@ -874,7 +882,9 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 			if len(tasks) < pageSize {
 				break
 			}
-			offset += len(tasks)
+			// Keyset seek: pages are ordered by chunk_id ascending, so carry the
+			// last chunk_id forward instead of an OFFSET that rescans skipped rows.
+			afterChunkID = int64(tasks[len(tasks)-1].Metadata.ChunkID)
 		}
 	}
 	return total, nil
@@ -895,6 +905,12 @@ var _ index.ChunkSource = (*store.SQLiteStore)(nil)
 // #364 failure mode one layer up). A signature drift on any RepresentationStore
 // method now breaks the build instead of silently dropping every document.
 var _ model.RepresentationStore = (*store.SQLiteStore)(nil)
+
+// Compile-time guard: the store MUST also satisfy index.EmbeddedVectorSource so
+// the runtime `st.(index.EmbeddedVectorSource)` assertion in
+// reconcileEmbeddedVectorsAtStartup keeps working — a signature drift would
+// otherwise silently disable the #402 A2 crash-recovery reconciliation.
+var _ index.EmbeddedVectorSource = (*store.SQLiteStore)(nil)
 
 func startEmbeddingWorkers(
 	ctx context.Context,
@@ -1117,6 +1133,54 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
 	defer stopCancel()
 	if stopErr := persistence.StopAndSave(stopCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
 		writef(a.stderr, "final index save warning: %v\n", stopErr)
+	}
+}
+
+// reconcileEmbeddedVectorsAtStartup re-pends embedded chunks whose vectors are
+// missing from a crash-recovered vector index (issue #402 A2), for both the text
+// and code kinds. It is a no-op when the store does not expose the reconciliation
+// surface or the backend is durable (index.ReconcileEmbeddedVectors handles the
+// latter). Failures are logged, never fatal: a reconciliation error leaves the
+// corpus no worse off than before, so it must not block server startup.
+func reconcileEmbeddedVectorsAtStartup(ctx context.Context, readOnly bool, st model.Store, textIx, codeIx model.Index, emitter *ndjsonEmitter, stderr io.Writer) {
+	if readOnly {
+		return
+	}
+	source, ok := st.(index.EmbeddedVectorSource)
+	if !ok {
+		return
+	}
+	kinds := []struct {
+		name string
+		ix   model.Index
+	}{
+		{index.KindText, textIx},
+		{index.KindCode, codeIx},
+	}
+	total := 0
+	for _, k := range kinds {
+		n, err := index.ReconcileEmbeddedVectors(ctx, source, k.ix, k.name)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// Clean shutdown mid-reconciliation: expected, not worth a warning.
+				return
+			}
+			writef(stderr, "warning: embedded-vector reconciliation (%s) failed: %v\n", k.name, err)
+			if emitter != nil {
+				emitter.Emit("warning", "embedded_vector_reconcile_failed", map[string]interface{}{
+					"kind":    k.name,
+					"message": err.Error(),
+				})
+			}
+			continue
+		}
+		total += n
+	}
+	if total > 0 && emitter != nil {
+		emitter.Emit("info", "embedded_vectors_repended", map[string]interface{}{
+			"count":   total,
+			"message": "re-pending embedded chunks whose vectors were missing after an ungraceful shutdown",
+		})
 	}
 }
 

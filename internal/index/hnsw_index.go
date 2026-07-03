@@ -114,6 +114,26 @@ func (i *HNSWIndex) Upsert(ctx context.Context, vector []float32, payload model.
 	return nil
 }
 
+// HasVectors reports, for each requested chunk ID, whether a vector is currently
+// present in the index. It implements VectorPresence (issue #402 A2): the
+// in-memory HNSW's durability is the periodic snapshot (~15s autosave), so an
+// ungraceful crash between MarkEmbedded and the next SaveAll silently drops
+// vectors that sqlite still counts embedded. Startup reconciliation calls this
+// to re-pend those chunks. A nil/empty request returns an empty map.
+func (i *HNSWIndex) HasVectors(ctx context.Context, chunkIDs []uint64) (map[uint64]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	present := make(map[uint64]bool, len(chunkIDs))
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for _, id := range chunkIDs {
+		_, ok := i.vectors[id]
+		present[id] = ok
+	}
+	return present, nil
+}
+
 // Delete removes the vectors and payloads for the given chunk IDs. Unknown IDs
 // are ignored.
 func (i *HNSWIndex) Delete(ctx context.Context, chunkIDs []uint64) error {

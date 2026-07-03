@@ -28,6 +28,15 @@ type fakeIncrementalStore struct {
 	lastInsertedChunk model.Chunk
 	insertedChunks    []model.Chunk
 	insertedSpans     [][]model.Span
+
+	// insertChunkErr, when non-nil, is returned by InsertChunkWithSpans to
+	// simulate an ungraceful failure/crash mid-representation-commit (#402).
+	insertChunkErr error
+
+	// reflectUpserts makes GetDocumentByPath return the most recently upserted
+	// document (instead of existingDoc) so tests can exercise the read-back the
+	// #402 content_hash finalize performs.
+	reflectUpserts bool
 }
 
 func (f *fakeIncrementalStore) Init(context.Context) error { return nil }
@@ -46,6 +55,9 @@ func (f *fakeIncrementalStore) GetDocumentByPath(_ context.Context, _ string) (m
 	if f.existingErr != nil {
 		return model.Document{}, f.existingErr
 	}
+	if f.reflectUpserts && len(f.upsertedDocs) > 0 {
+		return f.upsertedDocs[len(f.upsertedDocs)-1], nil
+	}
 	return f.existingDoc, nil
 }
 func (f *fakeIncrementalStore) UpsertRepresentation(_ context.Context, rep model.Representation) (int64, error) {
@@ -57,6 +69,9 @@ func (f *fakeIncrementalStore) UpsertRepresentation(_ context.Context, rep model
 }
 func (f *fakeIncrementalStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
 	f.insertChunkCalls++
+	if f.insertChunkErr != nil {
+		return 0, f.insertChunkErr
+	}
 	// record
 	f.lastInsertedChunk = chunk
 	f.insertedChunks = append(f.insertedChunks, chunk)

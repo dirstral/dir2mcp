@@ -106,7 +106,7 @@ type contentHashResetter interface {
 }
 
 type embeddedChunkLister interface {
-	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
+	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit int, afterChunkID int64) ([]model.ChunkTask, error)
 }
 
 type activeDocCountStore interface {

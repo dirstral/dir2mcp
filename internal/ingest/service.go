@@ -1282,6 +1282,8 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	}
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
+	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
+
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
@@ -1324,6 +1326,13 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
+	// Representations committed: stamp the withheld #402 done marker now that the
+	// chunks are durably written. finalizeContentHash re-reads the row, so a
+	// document a soft-error path persisted as status="error" is left unmarked and
+	// retried next run rather than recorded as fully indexed.
+	if err := s.finalizeIfGenerated(ctx, &doc, willGenerateReps, finalContentHash); err != nil {
+		return err
+	}
 	if nonFatalErrored {
 		// A non-fatal soft-error path (binary-content, video-no-representation, or
 		// a zero-representation provider failure) already persisted this document
@@ -1334,6 +1343,84 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		indexedPending = false
 	}
 	s.creditIndexed(indexedPending)
+	return nil
+}
+
+// withholdContentHash implements the #402 done-marker withholding. A document's
+// content_hash is the incremental "done" marker — resolveNeedsProcessing treats a
+// stored hash equal to the freshly computed one as "already indexed, skip".
+// Committing that marker in the doc upsert *before* the representations/chunks
+// are durably written means an ungraceful death (SIGKILL/OOM/power loss) in that
+// gap leaves an ok document carrying the done marker but zero chunks —
+// permanently invisible to search/ask and never reprocessed. When this run will
+// (re)generate representations, blank the marker on the initial upsert so it is
+// stamped only after the reps commit (see finalizeContentHash); it returns the
+// original hash to finalize with and whether withholding applied.
+func withholdContentHash(doc *model.Document, needsProcessing bool) (finalContentHash string, willGenerateReps bool) {
+	willGenerateReps = needsProcessing && doc.Status == "ok" && doc.DocType != "archive"
+	finalContentHash = doc.ContentHash
+	if willGenerateReps {
+		doc.ContentHash = ""
+	}
+	return finalContentHash, willGenerateReps
+}
+
+// finalizeIfGenerated stamps the withheld #402 done marker via finalizeContentHash
+// when this run generated representations for doc, and is a no-op otherwise. Split
+// out so processDocument/processDocumentFromContent stay within the cyclomatic
+// complexity limit.
+func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, willGenerateReps bool, contentHash string) error {
+	if !willGenerateReps {
+		return nil
+	}
+	return s.finalizeContentHash(ctx, doc, contentHash)
+}
+
+// finalizeContentHash stamps the withheld content_hash "done" marker only after a
+// document's representations/chunks are durably committed (#402). It re-reads the
+// current row first for two reasons:
+//
+//   - #413: it never overwrites an out-of-band status="error" that a non-fatal
+//     per-representation failure may have persisted while generateRepresentations
+//     still returned nil (e.g. a transcript provider outage). Such a document keeps
+//     an empty content_hash and is retried on the next incremental run rather than
+//     being falsely recorded as fully indexed.
+//   - It upserts the re-read row rather than the by-value doc, so out-of-band
+//     column writes made during representation generation — notably the title
+//     (persistTitle/persistTitleIfFound writes documents.title on a separate
+//     upsert against the DB row, invisible to this function's by-value doc) —
+//     survive. Only the withheld content_hash comes from this finalize step; every
+//     other column is taken from the freshly re-read row.
+//
+// Paths are explicit: found → upsert the re-read row (preserving out-of-band
+// columns) after the #413 guard; not-found → recreate the row from doc (there is
+// no current row whose columns must be preserved); store error → propagate.
+func (s *Service) finalizeContentHash(ctx context.Context, doc *model.Document, contentHash string) error {
+	current, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
+	if err != nil {
+		if !isNotFoundError(err) {
+			return fmt.Errorf("fetch document before finalizing content hash: %w", err)
+		}
+		// Not found: the initial upsert's row is gone (deleted mid-run) or never
+		// landed. There are no out-of-band columns to preserve, so deliberately
+		// recreate the row from doc with the withheld hash stamped on.
+		doc.ContentHash = contentHash
+		if err := s.store.UpsertDocument(ctx, *doc); err != nil {
+			return fmt.Errorf("finalize document content hash: %w", err)
+		}
+		return nil
+	}
+	// #413 guard: a non-fatal per-representation failure may have persisted
+	// status="error" out-of-band; never resurrect it into a done state.
+	if current.Status != "ok" {
+		return nil
+	}
+	// Stamp the withheld done marker onto the re-read row so out-of-band writes
+	// (e.g. title) survive, then upsert that row rather than the by-value doc.
+	current.ContentHash = contentHash
+	if err := s.store.UpsertDocument(ctx, current); err != nil {
+		return fmt.Errorf("finalize document content hash: %w", err)
+	}
 	return nil
 }
 
@@ -1646,6 +1733,11 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	}
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 
+	// Withhold the content_hash done marker until representations commit so an
+	// ungraceful crash mid-ingest cannot leave an ok archive member with zero
+	// chunks that is never reprocessed (#402; see withholdContentHash).
+	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
+
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
@@ -1669,6 +1761,10 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
+	}
+	// Stamp the withheld #402 done marker now the archive member's reps commit.
+	if err := s.finalizeIfGenerated(ctx, &doc, willGenerateReps, finalContentHash); err != nil {
+		return err
 	}
 	return nil
 }
