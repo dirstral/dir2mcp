@@ -1936,12 +1936,7 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaVideoWindowSec != nil {
 		cfg.MediaVideoWindowSec = *fc.MediaVideoWindowSec
 	}
-	if fc.MediaSTTMaxPayloadMB != nil {
-		cfg.MediaSTTMaxPayloadMB = *fc.MediaSTTMaxPayloadMB
-	}
-	if fc.MediaSTTRequestTimeoutSec != nil {
-		cfg.MediaSTTRequestTimeoutSec = *fc.MediaSTTRequestTimeoutSec
-	}
+	applyMediaSTTFileParsed(cfg, fc)
 	if fc.MediaClipMaxDurationMS != nil {
 		cfg.MediaClipMaxDurationMS = *fc.MediaClipMaxDurationMS
 	}
@@ -1963,6 +1958,18 @@ func applyMediaBatchFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.MediaBatchManifest != nil {
 		cfg.MediaBatchManifest = strings.TrimSpace(*fc.MediaBatchManifest)
+	}
+}
+
+// applyMediaSTTFileParsed copies the set media.stt.* file fields (#510, #511)
+// onto cfg. Split out of applyMediaFileParsed so that function stays under the
+// cyclomatic-complexity budget.
+func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
+	if fc.MediaSTTMaxPayloadMB != nil {
+		cfg.MediaSTTMaxPayloadMB = *fc.MediaSTTMaxPayloadMB
+	}
+	if fc.MediaSTTRequestTimeoutSec != nil {
+		cfg.MediaSTTRequestTimeoutSec = *fc.MediaSTTRequestTimeoutSec
 	}
 }
 
