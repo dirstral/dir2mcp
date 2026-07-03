@@ -47,29 +47,6 @@ func startConformanceServer(t *testing.T) (baseURL string, stop func()) {
 	return "http://" + ln.Addr().String() + "/mcp", stop
 }
 
-// initSession performs an initialize handshake and returns the session id.
-func initSession(t *testing.T, client *http.Client, url string) string {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
-	if err != nil {
-		t.Fatalf("build initialize: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("POST initialize: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		t.Fatalf("initialize status: %d", resp.StatusCode)
-	}
-	sessionID := strings.TrimSpace(resp.Header.Get("MCP-Session-Id"))
-	if sessionID == "" {
-		t.Fatal("expected MCP-Session-Id from initialize")
-	}
-	return sessionID
-}
-
 // TestSDKTransport_PartialAcceptNegotiated verifies that a client sending only
 // "Accept: application/json" (non-empty but partial) is accepted rather than
 // 400'd by the SDK's dual-type requirement (#404, gap 2).
@@ -106,7 +83,7 @@ func TestSDKTransport_DeleteTerminatesSession(t *testing.T) {
 	defer stop()
 
 	client := &http.Client{Timeout: 3 * time.Second}
-	sessionID := initSession(t, client, url)
+	sessionID := initializeSession(t, url)
 
 	delReq, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err != nil {
@@ -194,7 +171,7 @@ func TestSDKTransport_CancelledNotificationForwarded(t *testing.T) {
 	defer stop()
 
 	client := &http.Client{Timeout: 3 * time.Second}
-	sessionID := initSession(t, client, url)
+	sessionID := initializeSession(t, url)
 
 	cancelReq, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"42","reason":"user aborted"}}`))
 	if err != nil {
@@ -220,7 +197,7 @@ func TestSDKTransport_CancelledWithIDRejected(t *testing.T) {
 	defer stop()
 
 	client := &http.Client{Timeout: 3 * time.Second}
-	sessionID := initSession(t, client, url)
+	sessionID := initializeSession(t, url)
 
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":9,"method":"notifications/cancelled","params":{"requestId":"42"}}`))
 	if err != nil {

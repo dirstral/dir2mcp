@@ -276,8 +276,18 @@ func (t *SDKTransport) serveSessionTermination(w http.ResponseWriter, req *http.
 		writeError(w, http.StatusNotFound, nil, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
 		return
 	}
-	sdkHandler.ServeHTTP(w, req)
-	t.server.forgetSession(sessionID)
+	// Buffer the SDK's DELETE response so we can inspect its status before
+	// deciding whether to forget our own record. Only a confirmed 204 (the
+	// spec's success status for session termination) means the SDK actually
+	// tore down its per-session state; on any non-success response
+	// (error/timeout/id mismatch) we leave our record intact so the client can
+	// retry, rather than bricking a still-live session and blocking retries.
+	rec := newBufferedResponseWriter()
+	sdkHandler.ServeHTTP(rec, req)
+	if rec.status == http.StatusNoContent {
+		t.server.forgetSession(sessionID)
+	}
+	copyBufferedResponse(w, rec)
 }
 
 func readSDKBody(w http.ResponseWriter, req *http.Request) ([]byte, bool) {
