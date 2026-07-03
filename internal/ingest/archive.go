@@ -15,6 +15,60 @@ import (
 
 const archiveMemberMaxBytes = 10 * 1024 * 1024 // 10 MiB
 
+const (
+	// archiveMaxMembers bounds the number of members ingested from a single
+	// archive. Without it a tar/zip with thousands of entries is fully buffered
+	// in memory before ingestion (#408). Members past the cap are skipped and a
+	// truncation flag is returned so the caller can surface a diagnostic instead
+	// of a silent drop.
+	archiveMaxMembers = 4096
+	// archiveMaxTotalBytes bounds the aggregate uncompressed bytes buffered from a
+	// single archive — a decompression-bomb guard (a small compressed input
+	// expanding into many ~10 MiB members). Extraction stops once adding the next
+	// member would exceed this ceiling, bounding peak memory to roughly this value
+	// plus one member (#408).
+	archiveMaxTotalBytes = 512 * 1024 * 1024 // 512 MiB
+)
+
+// memberAccumulator collects archive members while enforcing the member-count
+// and aggregate-uncompressed-size caps (#408). A non-positive cap falls back to
+// the package default so callers can pass 0 for "use default".
+type memberAccumulator struct {
+	members      []archiveMember
+	total        int64
+	maxMembers   int
+	maxTotalByte int64
+	truncated    bool
+}
+
+func newMemberAccumulator(maxMembers int, maxTotalBytes int64) *memberAccumulator {
+	if maxMembers <= 0 {
+		maxMembers = archiveMaxMembers
+	}
+	if maxTotalBytes <= 0 {
+		maxTotalBytes = archiveMaxTotalBytes
+	}
+	return &memberAccumulator{maxMembers: maxMembers, maxTotalByte: maxTotalBytes}
+}
+
+// add appends a member unless a cap would be exceeded. It returns stop=true when
+// a cap is hit: the member is NOT added and extraction should halt, and the
+// truncated flag is set so the caller surfaces a diagnostic instead of silently
+// dropping the remaining entries.
+func (a *memberAccumulator) add(relPath string, content []byte) (stop bool) {
+	if len(a.members) >= a.maxMembers {
+		a.truncated = true
+		return true
+	}
+	if a.total+int64(len(content)) > a.maxTotalByte {
+		a.truncated = true
+		return true
+	}
+	a.total += int64(len(content))
+	a.members = append(a.members, archiveMember{RelPath: relPath, Content: content})
+	return false
+}
+
 // errUnsupportedArchiveFormat is returned by extractArchiveMembers when a path
 // classified as an "archive" (classify.go) maps to a container the stdlib
 // extractor cannot open (e.g. .xz/.7z/.rar). The caller surfaces it as a durable
@@ -84,16 +138,23 @@ func archiveFormat(relPath string) string {
 // silently skipped; corrupted archives return whatever members were read before
 // the error. An unrecognised format returns errUnsupportedArchiveFormat so the
 // caller can surface a diagnostic instead of silently dropping the document.
-func extractArchiveMembers(absPath, archiveRelPath string) ([]archiveMember, error) {
+//
+// maxMembers and maxTotalBytes bound the member-count and aggregate-uncompressed
+// fan-out (#408); pass 0 for the package defaults. The returned truncated flag is
+// true when extraction stopped early because a cap was hit — the members returned
+// before the cap are still valid and should be ingested, and the caller is
+// expected to log a warning so the truncation is visible.
+func extractArchiveMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) (members []archiveMember, truncated bool, err error) {
 	switch format := archiveFormat(archiveRelPath); format {
 	case "zip":
-		return extractZipMembers(absPath, archiveRelPath)
+		return extractZipMembers(absPath, archiveRelPath, maxMembers, maxTotalBytes)
 	case "tar", "tar.gz", "tar.bz2":
-		return extractTarMembers(absPath, archiveRelPath)
+		return extractTarMembers(absPath, archiveRelPath, maxMembers, maxTotalBytes)
 	case "gz", "bz2":
-		return extractSingleCompressedMember(absPath, archiveRelPath, format)
+		m, err := extractSingleCompressedMember(absPath, archiveRelPath, format)
+		return m, false, err
 	default:
-		return nil, errUnsupportedArchiveFormat
+		return nil, false, errUnsupportedArchiveFormat
 	}
 }
 
@@ -155,14 +216,14 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string) ([]ar
 	}}, nil
 }
 
-func extractZipMembers(absPath, archiveRelPath string) ([]archiveMember, error) {
+func extractZipMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) ([]archiveMember, bool, error) {
 	r, err := zip.OpenReader(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("open zip: %w", err)
+		return nil, false, fmt.Errorf("open zip: %w", err)
 	}
 	defer func() { _ = r.Close() }()
 
-	var members []archiveMember
+	acc := newMemberAccumulator(maxMembers, maxTotalBytes)
 	for _, f := range r.File {
 		if f.FileInfo().IsDir() {
 			continue
@@ -182,18 +243,17 @@ func extractZipMembers(absPath, archiveRelPath string) ([]archiveMember, error) 
 		if readErr != nil || int64(len(content)) > archiveMemberMaxBytes {
 			continue
 		}
-		members = append(members, archiveMember{
-			RelPath: archiveRelPath + "/" + f.Name,
-			Content: content,
-		})
+		if acc.add(archiveRelPath+"/"+f.Name, content) {
+			break // member-count or aggregate-size cap hit (#408)
+		}
 	}
-	return members, nil
+	return acc.members, acc.truncated, nil
 }
 
-func extractTarMembers(absPath, archiveRelPath string) ([]archiveMember, error) {
+func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) ([]archiveMember, bool, error) {
 	f, err := os.Open(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("open tar: %w", err)
+		return nil, false, fmt.Errorf("open tar: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -202,7 +262,7 @@ func extractTarMembers(absPath, archiveRelPath string) ([]archiveMember, error) 
 	case "tar.gz":
 		gr, err := gzip.NewReader(f)
 		if err != nil {
-			return nil, fmt.Errorf("gzip reader: %w", err)
+			return nil, false, fmt.Errorf("gzip reader: %w", err)
 		}
 		defer func() { _ = gr.Close() }()
 		rd = gr
@@ -211,7 +271,7 @@ func extractTarMembers(absPath, archiveRelPath string) ([]archiveMember, error) 
 	}
 
 	tr := tar.NewReader(rd)
-	var members []archiveMember
+	acc := newMemberAccumulator(maxMembers, maxTotalBytes)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -233,10 +293,9 @@ func extractTarMembers(absPath, archiveRelPath string) ([]archiveMember, error) 
 		if readErr != nil || int64(len(content)) > archiveMemberMaxBytes {
 			continue
 		}
-		members = append(members, archiveMember{
-			RelPath: archiveRelPath + "/" + hdr.Name,
-			Content: content,
-		})
+		if acc.add(archiveRelPath+"/"+hdr.Name, content) {
+			break // member-count or aggregate-size cap hit (#408)
+		}
 	}
-	return members, nil
+	return acc.members, acc.truncated, nil
 }
