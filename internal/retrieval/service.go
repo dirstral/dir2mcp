@@ -130,6 +130,17 @@ type Service struct {
 	chunkByIndex        map[string]map[uint64]model.SearchHit
 	rootDir             string
 	stateDir            string
+	// ocrCacheIdentity / transcriptCacheIdentity are the ACTIVE OCR-extraction and
+	// STT(+diarize) derivation identities (SPEC §8.6.7) of the ingest pipeline,
+	// plumbed in via SetDerivationCacheIdentities so open_file's OCR/transcript
+	// cache LOOKUP keys the cache the SAME identity-aware way ingest's writer does
+	// (internal/ingest/derivation.go ocrCacheKey/transcriptCacheKey). Without them
+	// retrieval keyed on the source bytes alone and missed every entry ingest wrote
+	// on a docling/mistral/STT corpus (issue #488). An empty identity selects the
+	// historical bytes-only key — exactly what ingest writes when no
+	// extractor/transcriber is configured — so the no-OCR path is unchanged.
+	ocrCacheIdentity        string
+	transcriptCacheIdentity string
 	// corpusFS, when non-nil, routes open_file raw-text reads and OCR/transcript
 	// source-byte hashing through the corpus filesystem abstraction instead of the
 	// local filesystem. It is injected only for object-store backends (S3) so a
@@ -758,6 +769,23 @@ func (s *Service) SetStateDir(stateDir string) {
 	}
 	s.metaMu.Lock()
 	s.stateDir = stateDir
+	s.metaMu.Unlock()
+}
+
+// SetDerivationCacheIdentities plumbs the ingest pipeline's ACTIVE OCR and
+// transcript derivation identities (SPEC §8.6.7) into open_file's OCR/transcript
+// cache lookup so a docling/mistral/STT corpus's cached text is FOUND instead of
+// missed (issue #488). Pass ingest's active OCR identity (Service.activeOCRIdentity)
+// as ocrIdentity and its active transcript identity (activeTranscriptIdentity,
+// which already folds diarize) as transcriptIdentity. An empty string selects the
+// bytes-only key ingest writes when the respective extractor/transcriber is not
+// configured, preserving the pre-#488 no-OCR behavior. Passing the ACTIVE identity
+// (not a store-recorded one, which can carry a differing model_version) is what
+// keeps this lookup byte-identical to ingest's writer.
+func (s *Service) SetDerivationCacheIdentities(ocrIdentity, transcriptIdentity string) {
+	s.metaMu.Lock()
+	s.ocrCacheIdentity = ocrIdentity
+	s.transcriptCacheIdentity = transcriptIdentity
 	s.metaMu.Unlock()
 }
 
@@ -1534,11 +1562,13 @@ func (s *Service) readSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusF
 }
 
 // hashSourceBytes computes the sha256 hex digest of the corpus document at
-// relPath — the key under which ingest stored the document's OCR/transcript
-// cache entry. It streams the source bytes through the CorpusFS Open seam when a
-// backend is injected (so an S3 object is hashed without a local copy) and
-// otherwise reads the local resolved path, rejecting a directory target with the
-// same DOC_TYPE_UNSUPPORTED mapping the raw-text path uses.
+// relPath — the BASE content hash ingest folds (with the derivation identity)
+// into the OCR/transcript cache key. It streams the source bytes through the
+// CorpusFS Open seam when a backend is injected (so an S3 object is hashed
+// without a local copy) and otherwise reads the local resolved path, rejecting a
+// directory target with the same DOC_TYPE_UNSUPPORTED mapping the raw-text path
+// uses. It is the fallback for ocrCacheKeyForOpen: a store that can report the
+// already-known base hash (ocrSourceHashProvider) skips this full object GET.
 func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) (string, error) {
 	var reader io.Reader
 	if corpusFS != nil {
@@ -1578,23 +1608,25 @@ func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusF
 // openFileFromOCRCache reads the precomputed OCR (or transcript) representation
 // for a binary document. The cache layout mirrors what
 // internal/ingest.Service.readOrComputeOCR / readOrComputeTranscript write:
-// <stateDir>/cache/ocr/<sha256-of-source-bytes>.md for OCR, and
-// <stateDir>/cache/transcribe/<sha256-of-source-bytes>*.txt for transcripts.
-// When no cache file exists (e.g. ingest is still running), the function
-// returns model.ErrOCRNotReady so callers can surface an actionable error
-// rather than fall back to raw bytes.
+// <stateDir>/cache/ocr/<key>.md for OCR, and
+// <stateDir>/cache/transcribe/<key>*.txt for transcripts. The <key> is the
+// identity-aware key ingest wrote — sha256(sha256(bytes)+"\x00"+identity) with the
+// active OCR/transcript derivation identity folded in (SPEC §8.6.7) — NOT a
+// bytes-only hash; see ocrCacheKeyForOpen. When no cache file exists (e.g. ingest
+// is still running), the function returns model.ErrOCRNotReady so callers can
+// surface an actionable error rather than fall back to raw bytes.
 func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, maxChars int) (string, bool, error) {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
 		stateDir = filepath.Join(".", ".dir2mcp")
 	}
 
-	hashHex, err := s.hashSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
+	cacheKey, err := s.ocrCacheKeyForOpen(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
 		return "", false, err
 	}
 
-	candidates := openFileOCRCacheCandidates(stateDir, hashHex, relPath)
+	candidates := openFileOCRCacheCandidates(stateDir, cacheKey, relPath)
 	for _, candidate := range candidates {
 		data, readErr := os.ReadFile(candidate)
 		if readErr != nil {
@@ -1614,20 +1646,21 @@ func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.Co
 }
 
 // openFileOCRCacheCandidates returns the set of cache paths to consult, in
-// preference order, for a given source document. Audio transcripts are stored
+// preference order, for a given source document. cacheKey is the identity-aware
+// filename stem ingest wrote (ocrCacheKeyForOpen). Audio transcripts are stored
 // with an optional language suffix (or none), so we glob for any matching
 // file. PDFs use a single .md path.
-func openFileOCRCacheCandidates(stateDir, hashHex, relPath string) []string {
+func openFileOCRCacheCandidates(stateDir, cacheKey, relPath string) []string {
 	ext := strings.ToLower(filepath.Ext(relPath))
 	switch {
 	case ext == ".pdf" || isImageExt(ext):
 		// PDF and image extraction both write extracted markdown to cache/ocr.
-		return []string{filepath.Join(stateDir, "cache", "ocr", hashHex+".md")}
+		return []string{filepath.Join(stateDir, "cache", "ocr", cacheKey+".md")}
 	case isAudioExt(ext):
-		// transcripts are written as <hash>[<-lang>].txt; default-language
+		// transcripts are written as <key>[<-lang>].txt; default-language
 		// transcripts have no suffix, so the unsuffixed file is preferred.
-		out := []string{filepath.Join(stateDir, "cache", "transcribe", hashHex+".txt")}
-		matches, err := filepath.Glob(filepath.Join(stateDir, "cache", "transcribe", hashHex+"-*.txt"))
+		out := []string{filepath.Join(stateDir, "cache", "transcribe", cacheKey+".txt")}
+		matches, err := filepath.Glob(filepath.Join(stateDir, "cache", "transcribe", cacheKey+"-*.txt"))
 		if err == nil {
 			sort.Strings(matches)
 			out = append(out, matches...)
@@ -1636,6 +1669,91 @@ func openFileOCRCacheCandidates(stateDir, hashHex, relPath string) []string {
 	default:
 		return nil
 	}
+}
+
+// ocrSourceHashProvider is the OPTIONAL store capability that returns the EXACT
+// base content hash ingest folded into an OCR/transcript cache key — the
+// sha256-hex over the document's raw source bytes (ingest.ComputeContentHash),
+// NOT the sidecar-folded content_hash the store persists for the incremental gate
+// (§7.6). When a store can supply it, open_file derives the identity-aware cache
+// key WITHOUT a full object GET (issue #488 perf). A store that does not implement
+// it, or returns ok=false, transparently falls back to streaming+hashing the
+// source bytes, so correctness never depends on this optimization.
+type ocrSourceHashProvider interface {
+	OCRSourceContentHash(ctx context.Context, relPath string) (hash string, ok bool, err error)
+}
+
+// ocrCacheKeyForOpen derives the on-disk OCR/transcript cache filename stem for
+// relPath, reproducing the identity-aware key ingest wrote (SPEC §8.6.7). It
+// folds the ACTIVE OCR (pdf/image) or transcript (audio) derivation identity into
+// the base content hash exactly as internal/ingest.Service.ocrCacheKey /
+// transcriptCacheKey do, so open_file lands on ingest's cache entry instead of
+// missing every identity-scoped entry (issue #488). The base content hash is
+// taken from the store when it can report the already-known value (skipping a full
+// object GET); otherwise it is computed by streaming the source bytes.
+func (s *Service) ocrCacheKeyForOpen(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) (string, error) {
+	s.metaMu.RLock()
+	ocrIdentity := s.ocrCacheIdentity
+	transcriptIdentity := s.transcriptCacheIdentity
+	store := s.store
+	s.metaMu.RUnlock()
+
+	identity := cacheIdentityForExt(relPath, ocrIdentity, transcriptIdentity)
+
+	contentHash, err := s.sourceContentHash(ctx, corpusFS, store, resolvedAbs, relPath)
+	if err != nil {
+		return "", err
+	}
+	return foldDerivationCacheKey(contentHash, identity), nil
+}
+
+// sourceContentHash returns the base content hash for relPath, preferring the
+// store's already-known value (ocrSourceHashProvider) so the identity-aware key
+// can be derived WITHOUT a full object GET (#488 perf). A store that lacks the
+// capability, reports ok=false, or errors falls back to streaming+hashing the
+// bytes — the optimization is best-effort and never changes the resulting key.
+func (s *Service) sourceContentHash(ctx context.Context, corpusFS corpusfs.CorpusFS, store model.Store, resolvedAbs, relPath string) (string, error) {
+	if provider, ok := store.(ocrSourceHashProvider); ok {
+		if hash, ok, err := provider.OCRSourceContentHash(ctx, relPath); err != nil {
+			s.logf("open_file: source-hash lookup for %q failed, hashing bytes: %v", relPath, err)
+		} else if ok && hash != "" {
+			return hash, nil
+		}
+	}
+	return s.hashSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
+}
+
+// cacheIdentityForExt selects which active derivation identity governs relPath's
+// cache key: the OCR-extraction identity for PDF/image documents and the
+// transcript identity for audio, matching ingest's per-representation keying.
+// Any other extension (no OCR/transcript representation) folds in no identity.
+func cacheIdentityForExt(relPath, ocrIdentity, transcriptIdentity string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	switch {
+	case ext == ".pdf" || isImageExt(ext):
+		return ocrIdentity
+	case isAudioExt(ext):
+		return transcriptIdentity
+	default:
+		return ""
+	}
+}
+
+// foldDerivationCacheKey reproduces the identity-folding in
+// internal/ingest.Service.ocrCacheKey / transcriptCacheKey
+// (internal/ingest/derivation.go): with a non-empty active derivation identity it
+// returns sha256-hex(contentHash + "\x00" + identity), folding the OCR/STT
+// provider+model identity into the key so open_file lands on the same cache entry
+// ingest wrote (SPEC §8.6.7). An empty identity — no extractor/transcriber
+// configured, or an unwired retriever — preserves the historical bytes-only key,
+// which is exactly what ingest writes in that case.
+func foldDerivationCacheKey(contentHash, identity string) string {
+	if identity == "" {
+		return contentHash
+	}
+	combined := strings.Join([]string{contentHash, identity}, "\x00")
+	sum := sha256.Sum256([]byte(combined))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
