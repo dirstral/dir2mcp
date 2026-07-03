@@ -283,6 +283,27 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 	}
 }
 
+// TranslateTranscriber builds a Transcriber that runs Whisper's native
+// translate task (audio->English single pass) instead of transcription. It is
+// only meaningful for kind:whisper — the only STT provider with a translate
+// task — so any other kind is rejected. Used by the ingest translate path when
+// media.translate.engine=whisper (config validation guarantees the STT provider
+// is kind:whisper before this is reached). Language is intentionally NOT set:
+// task=translate always targets English, and pinning the source language would
+// only ever hurt auto-detection.
+func TranslateTranscriber(p provider.Profile) (model.Transcriber, error) {
+	if p.Kind != provider.KindWhisper {
+		return nil, unsupported(p, provider.CapSTT)
+	}
+	c := whisperapi.NewClient(p.BaseURL, p.APIKey)
+	if p.STTModel != "" {
+		c.DefaultModel = p.STTModel
+	}
+	c.VADFilter = p.STTVAD
+	c.Task = whisperapi.TaskTranslate
+	return c, nil
+}
+
 // newElevenLabs builds an ElevenLabs client carrying the profile's
 // voice / STT model / language / base URL (shared by Transcriber+TTS).
 func newElevenLabs(p provider.Profile) *elevenlabs.Client {

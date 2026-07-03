@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
@@ -452,6 +453,16 @@ type Config struct {
 	// consulted when MediaTranslateEnabled is true; enabling translation with an
 	// empty list is CONFIG_INVALID.
 	MediaTranslateTargetLangs []string
+
+	// MediaTranslateEngine selects HOW transcripts are translated (config
+	// `media.translate.engine`): "chat" (default) translates the transcript text
+	// line-by-line via the chat generator; "whisper" re-decodes the source audio
+	// with Whisper's native translate task (audio->English single pass), which
+	// keeps names/terms in the acoustic model's context and produces its own
+	// segment timings. "whisper" requires the STT provider to be kind:whisper and
+	// English-only target_langs (Whisper's only translation target). Only
+	// consulted when MediaTranslateEnabled is true.
+	MediaTranslateEngine string
 	// MediaFilterWords is an optional, general-purpose list of boilerplate /
 	// credits / watermark phrases stripped from transcript and subtitle text
 	// (config `media.filter_words`). Matching is case-insensitive substring
@@ -689,6 +700,7 @@ type fileConfig struct {
 	MediaVariantsSelect                *string
 	MediaTranslateEnabled              *bool
 	MediaTranslateTargetLangs          []string
+	MediaTranslateEngine               *string
 	MediaFilterWords                   []string
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
@@ -818,6 +830,7 @@ type persistedConfig struct {
 	MediaVariantsSelect                string        `yaml:"media_variants_select"`
 	MediaTranslateEnabled              bool          `yaml:"media_translate_enabled"`
 	MediaTranslateTargetLangs          []string      `yaml:"media_translate_target_langs"`
+	MediaTranslateEngine               string        `yaml:"media_translate_engine"`
 	MediaFilterWords                   []string      `yaml:"media_filter_words"`
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
@@ -1030,6 +1043,7 @@ func Default() Config {
 		MediaVariantsSelect:       "best",
 		MediaTranslateEnabled:     false,
 		MediaTranslateTargetLangs: nil,
+		MediaTranslateEngine:      "chat",
 		// Bilingual subtitle export (SPEC §8.6.10) is OFF by default; the align
 		// tolerance carries its spec default so an enabled-but-unspecified config
 		// behaves predictably.
@@ -1155,6 +1169,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaVariantsSelect:                cfg.MediaVariantsSelect,
 		MediaTranslateEnabled:              cfg.MediaTranslateEnabled,
 		MediaTranslateTargetLangs:          append([]string(nil), cfg.MediaTranslateTargetLangs...),
+		MediaTranslateEngine:               cfg.MediaTranslateEngine,
 		MediaFilterWords:                   append([]string(nil), cfg.MediaFilterWords...),
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
@@ -1892,6 +1907,9 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTranslateTargetLangs != nil {
 		cfg.MediaTranslateTargetLangs = normalizeStringSlice(fc.MediaTranslateTargetLangs)
 	}
+	if fc.MediaTranslateEngine != nil {
+		cfg.MediaTranslateEngine = *fc.MediaTranslateEngine
+	}
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
@@ -2248,6 +2266,7 @@ var configKeyAliases = map[string]string{
 	"media_variants_select":                   "media.variants.select",
 	"media_translate_enabled":                 "media.translate.enabled",
 	"media_translate_target_langs":            "media.translate.target_langs",
+	"media_translate_engine":                  "media.translate.engine",
 	"media_filter_words":                      "media.filter_words",
 	"filter_words":                            "media.filter_words",
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
@@ -2681,6 +2700,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
+	case "media.translate.engine":
+		cfg.MediaTranslateEngine = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -2861,6 +2882,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_variants_select", cfg.MediaVariantsSelect)
 	writeBool("media_translate_enabled", cfg.MediaTranslateEnabled)
 	writeList("media_translate_target_langs", cfg.MediaTranslateTargetLangs)
+	writeScalar("media_translate_engine", cfg.MediaTranslateEngine)
 	writeList("media_filter_words", cfg.MediaFilterWords)
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
@@ -3452,6 +3474,33 @@ func (c *Config) validateMediaTranslate() error {
 			"media.translate.target_langs (no default target language)")
 	}
 	c.MediaTranslateTargetLangs = out
+
+	// Translation engine: "chat" (default, line-by-line via the chat generator)
+	// or "whisper" (native audio->English translate task). Whisper only produces
+	// English and needs a whisper STT provider, so validate those preconditions
+	// here where the normalized target list and resolved providers are available.
+	engine := strings.ToLower(strings.TrimSpace(c.MediaTranslateEngine))
+	if engine == "" {
+		engine = Default().MediaTranslateEngine
+	}
+	switch engine {
+	case "chat":
+	case "whisper":
+		prof, ok := resolveSTTProfileForCapability(*c)
+		if !ok || prof.Kind != provider.KindWhisper {
+			return errors.New("CONFIG_INVALID: media.translate.engine=whisper requires the STT provider " +
+				"to be kind:whisper (set stt.provider: whisper), or use media.translate.engine=chat")
+		}
+		for _, lang := range out {
+			if strings.SplitN(lang, "-", 2)[0] != "en" {
+				return fmt.Errorf("CONFIG_INVALID: media.translate.engine=whisper only produces English; set "+
+					"media.translate.target_langs: [en] (got %q) or use media.translate.engine=chat", lang)
+			}
+		}
+	default:
+		return fmt.Errorf("media.translate.engine must be one of chat, whisper: %q", c.MediaTranslateEngine)
+	}
+	c.MediaTranslateEngine = engine
 	return nil
 }
 

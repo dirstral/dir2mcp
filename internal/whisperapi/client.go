@@ -53,6 +53,12 @@ const (
 	// ResponseFormatVerboseJSON additionally yields word-level timestamps
 	// (consumed by #252; this client already parses them into the struct).
 	ResponseFormatVerboseJSON = "verbose_json"
+
+	// TaskTranscribe keeps the source language (default Whisper behavior).
+	TaskTranscribe = "transcribe"
+	// TaskTranslate makes Whisper decode straight to English (its only
+	// supported translation target).
+	TaskTranslate = "translate"
 )
 
 // Client speaks the OpenAI-compatible /v1/audio/transcriptions contract
@@ -84,6 +90,14 @@ type Client struct {
 	// segments + word timestamps per spec §8.6.1) or "json" (segments only).
 	// Empty falls back to ResponseFormatVerboseJSON.
 	ResponseFormat string
+
+	// Task selects the Whisper task: "transcribe" (default, keep the source
+	// language) or "translate" (decode straight to English — the only target
+	// Whisper supports). Empty falls back to TaskTranscribe, so the transcribe
+	// contract is unchanged for existing callers. Sent as the multipart `task`
+	// field only when it differs from the default, so servers that don't accept
+	// the field keep working for plain transcription.
+	Task string
 
 	// VADFilter, when true, sends the OpenAI-compatible `vad_filter=true` form
 	// field so a server that supports voice-activity detection (e.g.
@@ -237,6 +251,14 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 	if err := writer.WriteField("response_format", c.responseFormat()); err != nil {
 		return fail("failed to write transcription response_format", err)
 	}
+	// Only emit `task` when translating, so plain-transcription requests are
+	// byte-for-byte unchanged and servers that don't recognize the field keep
+	// working for the default path.
+	if task := c.task(); task == TaskTranslate {
+		if err := writer.WriteField("task", task); err != nil {
+			return fail("failed to write transcription task", err)
+		}
+	}
 	if language := strings.TrimSpace(c.DefaultLanguage); language != "" {
 		if err := writer.WriteField("language", language); err != nil {
 			return fail("failed to write transcription language", err)
@@ -262,6 +284,17 @@ func (c *Client) responseFormat() string {
 		return f
 	}
 	return ResponseFormatVerboseJSON
+}
+
+// task returns the configured Whisper task, defaulting to TaskTranscribe so the
+// existing transcription contract is unchanged. Any non-empty value other than
+// the default is passed through, and only TaskTranslate is actually emitted on
+// the wire (see buildBody).
+func (c *Client) task() string {
+	if t := strings.TrimSpace(c.Task); t != "" {
+		return t
+	}
+	return TaskTranscribe
 }
 
 func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {

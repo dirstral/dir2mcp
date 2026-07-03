@@ -119,11 +119,21 @@ type Service struct {
 	// translation is enabled (enabling with an empty list is CONFIG_INVALID).
 	translateTargetLangs []string
 
-	// translateProvider/translateModel record the resolved chat provider/model
-	// used for translation so each translated transcript representation can carry
-	// its translation derivation identity in meta_json (SPEC §5.2/§8.6.7).
+	// translateProvider/translateModel record the resolved provider/model used
+	// for translation so each translated transcript representation can carry its
+	// translation derivation identity in meta_json (SPEC §5.2/§8.6.7). For the
+	// chat engine these are the chat provider/model; for the whisper engine they
+	// are the STT provider/model.
 	translateProvider string
 	translateModel    string
+
+	// translateEngine selects how transcripts are translated (config
+	// media.translate.engine): "chat" (default, line-by-line via s.translator) or
+	// "whisper" (native audio->English translate task via s.translateSTT).
+	translateEngine string
+	// translateSTT runs Whisper's translate task; set only when
+	// translateEngine == "whisper", nil for the chat engine.
+	translateSTT model.Transcriber
 
 	// embedMultimodal is the resolved multimodal embedding mode (SPEC
 	// 8.1.7): "off" (default), "augment", or "replace". When augment/
@@ -386,8 +396,23 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	// generator; when off (default), or no chat provider resolves, the field
 	// stays nil and the translate step self-skips so behaviour is unchanged.
 	svc.translateTargetLangs = append([]string(nil), cfg.MediaTranslateTargetLangs...)
+	svc.translateEngine = strings.ToLower(strings.TrimSpace(cfg.MediaTranslateEngine))
+	if svc.translateEngine == "" {
+		svc.translateEngine = "chat"
+	}
 	if cfg.MediaTranslateEnabled && len(svc.translateTargetLangs) > 0 {
-		if tr, prof, terr := translatorFromConfig(cfg); terr == nil && tr != nil {
+		if svc.translateEngine == "whisper" {
+			// Whisper's native translate task (audio->English) instead of the chat
+			// generator. Config validation guarantees the STT provider is
+			// kind:whisper and the targets are English-only before we get here.
+			if tr, prof, terr := translateTranscriberFromConfig(cfg); terr == nil && tr != nil {
+				svc.translateSTT = tr
+				svc.translateProvider = prof.Name
+				svc.translateModel = strings.TrimSpace(prof.STTModel)
+			} else if terr != nil {
+				svc.getLogger().Printf("whisper transcript translation disabled: %v", terr)
+			}
+		} else if tr, prof, terr := translatorFromConfig(cfg); terr == nil && tr != nil {
 			svc.translator = tr
 			svc.translateProvider = prof.Name
 			svc.translateModel = strings.TrimSpace(prof.ChatModel)
@@ -679,6 +704,33 @@ func translatorFromConfig(cfg config.Config) (model.Generator, provider.Profile,
 	return gen, prof, nil
 }
 
+// translateTranscriberFromConfig resolves the active STT profile and builds a
+// Whisper translate-task transcriber for media.translate.engine=whisper. It
+// reuses the same STT profile resolution as source transcription (resolveSTTProfile)
+// so translation re-decodes the audio on the exact provider that produced the
+// source transcript. Returns an error (leaving translation off) when no STT
+// profile resolves or the profile is not translate-capable (non-whisper).
+// translationConfigured reports whether transcript translation should run: at
+// least one target language plus a resolved engine binding (the chat generator
+// for engine=chat, or the Whisper translate transcriber for engine=whisper).
+// Both translate gates consult this so the two engines self-skip identically
+// when translation is off or unresolved.
+func (s *Service) translationConfigured() bool {
+	return len(s.translateTargetLangs) > 0 && (s.translator != nil || s.translateSTT != nil)
+}
+
+func translateTranscriberFromConfig(cfg config.Config) (model.Transcriber, provider.Profile, error) {
+	prof, ok := resolveSTTProfile(cfg)
+	if !ok {
+		return nil, provider.Profile{}, errors.New("resolve STT provider for whisper translation: no STT provider")
+	}
+	tr, err := providerfactory.TranslateTranscriber(prof)
+	if err != nil {
+		return nil, provider.Profile{}, fmt.Errorf("build whisper translate transcriber (%s): %w", prof.Name, err)
+	}
+	return tr, prof, nil
+}
+
 // healthCheckInterval returns the configured base poll interval for connector
 // health probes. It mirrors the behaviour described in VISION.md: when the
 // configuration value is zero (or the receiver is nil) the default from
@@ -739,6 +791,25 @@ func (s *Service) SetTranscriber(transcriber model.Transcriber) {
 // transcripts' meta_json. Target languages are normalized (trimmed/lower-cased).
 func (s *Service) SetTranslator(translator model.Generator, providerName, modelName string, targetLangs []string) {
 	s.translator = translator
+	s.translateProvider = strings.TrimSpace(providerName)
+	s.translateModel = strings.TrimSpace(modelName)
+	norm := make([]string, 0, len(targetLangs))
+	for _, l := range targetLangs {
+		if t := strings.ToLower(strings.TrimSpace(l)); t != "" {
+			norm = append(norm, t)
+		}
+	}
+	s.translateTargetLangs = norm
+}
+
+// SetTranslateTranscriber overrides the whisper translate-task binding and
+// selects the whisper translation engine, primarily for tests. Passing a nil
+// transcriber (or empty langs) disables translation. The recorded provider/model
+// are written into translated transcripts' meta_json. Target languages are
+// normalized (trimmed/lower-cased).
+func (s *Service) SetTranslateTranscriber(transcriber model.Transcriber, providerName, modelName string, targetLangs []string) {
+	s.translateSTT = transcriber
+	s.translateEngine = "whisper"
 	s.translateProvider = strings.TrimSpace(providerName)
 	s.translateModel = strings.TrimSpace(modelName)
 	norm := make([]string, 0, len(targetLangs))
@@ -1480,7 +1551,7 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	// No translation configured, or the multimodal "replace" mode that stands in
 	// for STT→text (so no transcript exists to translate): nothing to derive. This
 	// matches the single-pass gates so the corpus-wide output is identical.
-	if s.translator == nil || len(s.translateTargetLangs) == 0 {
+	if !s.translationConfigured() {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -2787,7 +2858,7 @@ func (s *Service) applyDiarization(ctx context.Context, doc model.Document, cont
 // sidecar per-language reps; routes through the output quality gate; and records
 // source_language + translate provider/model in meta_json.
 func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration, trimOffsetMS int) error {
-	if s.translator == nil || len(s.translateTargetLangs) == 0 {
+	if !s.translationConfigured() {
 		return nil
 	}
 	sourceLang := strings.TrimSpace(s.transcriptLanguage)
@@ -2841,7 +2912,20 @@ func sameLanguage(a, b string) bool {
 // so re-ingesting an unchanged document reuses the cached translation instead of
 // re-calling the chat provider.
 func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration, trimOffsetMS int) error {
-	translated, err := s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
+	// Source the English text either from the chat generator (line-by-line over
+	// the source transcript) or, for engine=whisper, from Whisper's native
+	// translate task (a second pass over the audio that re-segments with its own
+	// timings). Both yield [mm:ss]-marked lines, so everything below — quality
+	// gate, representation upsert, time-span chunking, export — is identical.
+	var (
+		translated string
+		err        error
+	)
+	if s.translateEngine == "whisper" {
+		translated, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
+	} else {
+		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
+	}
 	if err != nil {
 		return fmt.Errorf("translate transcript for %s into %q: %w", doc.RelPath, targetLang, err)
 	}
@@ -3269,6 +3353,44 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 		}
 	}
 	return string(transcriptBytes), words, nil
+}
+
+// readOrComputeWhisperTranslation produces the English transcript for
+// media.translate.engine=whisper by re-decoding the SOURCE audio with Whisper's
+// native translate task (task=translate). Unlike the chat path it deliberately
+// ignores the source transcript text: Whisper re-segments the audio and returns
+// its own [mm:ss] English lines with their own timings. The result is cached
+// under {StateDir}/cache/transcribe with a "-translate" discriminator so it
+// never collides with the source-language transcribe cache for the same bytes.
+func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	if s.translateSTT == nil {
+		return "", errors.New("whisper translate transcriber not configured")
+	}
+
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("create transcript cache dir: %w", err)
+	}
+
+	// Whisper translate always targets English; key on the media bytes + STT
+	// identity (transcriptCacheKey, matching the source transcript so a provider
+	// change re-derives) plus a "-translate" discriminator and the en suffix so
+	// the file is distinct from the source transcript's cache entry.
+	base := s.transcriptCacheKey(content) + "-translate" + TranscriptLangSuffix("en")
+	cachePath := filepath.Join(cacheDir, base+".txt")
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		return string(cached), nil
+	}
+
+	translated, err := s.translateSTT.Transcribe(ctx, doc.RelPath, content)
+	if err != nil {
+		return "", fmt.Errorf("%w: whisper-translate %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+	}
+	translatedBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n"))
+	if err := os.WriteFile(cachePath, translatedBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write whisper-translate cache: %w", err)
+	}
+	return string(translatedBytes), nil
 }
 
 // transcribe calls the configured transcriber, preferring the structured
