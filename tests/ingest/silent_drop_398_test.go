@@ -105,9 +105,9 @@ func TestArchiveIngest_BareGzipMemberIndexed(t *testing.T) {
 // #483 path-traversal finding: a bare single-compressed archive whose name
 // reduces to a traversal segment once the compression suffix is stripped (e.g.
 // "..gz" -> ".") must NOT yield a member rel_path containing a "."/".." traversal
-// segment. End-to-end, no such path may ever be persisted; the precise synthetic
-// member name is asserted at the extraction layer in the internal package test
-// TestExtractSingleCompressedMember_EdgeCaseNameSanitised.
+// segment. End-to-end, no such path may ever be persisted — the extractor rewrites
+// the stripped traversal name to a benign synthetic segment before any member
+// document is created.
 func TestArchiveIngest_EdgeCaseNameNoTraversal(t *testing.T) {
 	data := buildGzip(t, "edge case payload")
 	st := runArchiveIngest(t, "..gz", data)

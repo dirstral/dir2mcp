@@ -1290,26 +1290,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return err
 	}
 
-	// Count "indexed" only once the document is durably processed. A doc that is
-	// ok now but whose representation generation fails below must count solely as
-	// an error (runScan adds it), not as both indexed and error — otherwise the
-	// same doc is double-counted and indexed+skipped+errors exceeds scanned
-	// (issue #426). indexedPending tracks the ok case so it is credited at each
-	// point where no further rep work can fail this run.
-	indexedPending := false
-	switch doc.Status {
-	case "ok":
-		indexedPending = true
-	case "skipped", "secret_excluded":
-		s.addSkipped(1)
-		s.markActiveSkipped()
-	case "error":
-		// although buildDocumentWithContent will never return a document with
-		// Status="error" (the error case returns early above), we leave this
-		// branch in place as a defensive measure. future changes to document
-		// construction might introduce new terminal statuses and it's nicer
-		// to handle them explicitly here rather than silently falling through.
-		s.addErrors(1)
+	// Apply the #426 initial-status accounting. indexedPending tracks the ok case
+	// so it is credited only at each point below where no further rep work can
+	// fail this run; a terminal status is already fully counted and returns early.
+	indexedPending, terminal := s.creditInitialStatus(doc)
+	if terminal {
 		return nil
 	}
 
@@ -1350,6 +1335,34 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	}
 	s.creditIndexed(indexedPending)
 	return nil
+}
+
+// creditInitialStatus applies the #426 initial-status accounting for a freshly
+// built doc. A doc that is ok now but whose representation generation fails later
+// must count solely as an error (runScan adds it), not as both indexed and error
+// — otherwise the same doc is double-counted and indexed+skipped+errors exceeds
+// scanned (issue #426). It returns indexedPending (the ok case is credited later,
+// only past the exit points where no rep work can still fail) and terminal (a
+// terminal status already fully counted, so processDocument should return early).
+func (s *Service) creditInitialStatus(doc model.Document) (indexedPending, terminal bool) {
+	switch doc.Status {
+	case "ok":
+		return true, false
+	case "skipped", "secret_excluded":
+		s.addSkipped(1)
+		s.markActiveSkipped()
+		return false, false
+	case "error":
+		// although buildDocumentWithContent will never return a document with
+		// Status="error" (the error case returns early in processDocument), we
+		// leave this branch in place as a defensive measure. future changes to
+		// document construction might introduce new terminal statuses and it's
+		// nicer to handle them explicitly here rather than silently falling
+		// through.
+		s.addErrors(1)
+		return false, true
+	}
+	return false, false
 }
 
 // creditIndexed bumps the run-progress "indexed" counter when the document was
@@ -1476,6 +1489,18 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 				// "error" status or mutating counters: processArchiveMembers returns
 				// ctx.Err() on cancellation, and recording that as a hard per-document
 				// failure would corrupt CorpusStats and wrongly flag the container.
+				//
+				// This "persist only for the errUnsupportedArchiveFormat sentinel"
+				// guard is what keeps cancellation from writing a status="error"; it is
+				// verified by static reasoning rather than a test. Triggering the
+				// member-loop cancellation path deterministically needs a call-count
+				// context tuned to the exact ctx.Err() sequence (LocalFS.Localize
+				// checks ctx before the loop, so a pre-cancelled context is swallowed
+				// as a non-fatal skip and never reaches the loop). That white-box hook
+				// only works from inside this package against handleArchiveDocument
+				// directly; the black-box tests/ingest suite (which drives the public
+				// Service.Run) cannot reach it without flakiness, so it is intentionally
+				// not covered by an external test.
 				return err
 			}
 			// #398: an unsupported/unextractable archive (.xz/.7z/.rar) must not be
