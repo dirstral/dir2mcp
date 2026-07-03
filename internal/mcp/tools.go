@@ -803,26 +803,32 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
+	sq := model.SearchQuery{
 		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages,
-	})
+	}
+	// index_used MUST be the index the query was actually routed to (SPEC §15.2),
+	// not the requested name. Prefer AxisSearcher so the reported axis is read back
+	// from the SAME dispatch that produced these hits — it can never diverge from
+	// the axis searched (e.g. HyDE "replace" routes on the generated hypothesis,
+	// not the original query). Fall back to the name-derived axis only when the
+	// retriever can't report it.
+	var (
+		hits      []model.SearchHit
+		indexUsed string
+		searchErr error
+	)
+	if axisSearcher, ok := s.retriever.(model.AxisSearcher); ok {
+		hits, indexUsed, searchErr = axisSearcher.SearchWithAxis(ctx, sq)
+	} else {
+		hits, searchErr = s.retriever.Search(ctx, sq)
+		indexUsed = axisFromIndexName(indexName)
+	}
 	if searchErr != nil {
 		return toolCallResult{}, mapSearchError(searchErr)
 	}
-	// index_used MUST be the index the query was actually routed to (SPEC
-	// §15.2), not the requested name. For "auto" the retriever resolves to
-	// text or code from the query text, so prefer its resolved axis and fall
-	// back to the name-derived value only when the retriever can't report it.
-	indexUsed := "text"
-	switch indexName {
-	case "code":
-		indexUsed = "code"
-	case "both":
-		indexUsed = "both"
-	}
-	if resolver, ok := s.retriever.(model.IndexAxisResolver); ok {
-		indexUsed = resolver.ResolveIndex(model.SearchQuery{Query: query, Index: indexName})
-	}
+	// Defend the SPEC §15.2 enum: never emit a non-{text,code,both} axis, whatever
+	// the retriever reported.
+	indexUsed = normalizeIndexAxis(indexUsed)
 	indexingComplete := true
 	if ic, err := s.retriever.IndexingComplete(ctx); err == nil {
 		indexingComplete = ic
@@ -835,6 +841,32 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 		Content:           []toolContentItem{{Type: "text", Text: renderSearchHitsText(hits, "result")}},
 		StructuredContent: structured,
 	}, nil
+}
+
+// axisFromIndexName maps a requested index name to the default SPEC §15.2 axis
+// used when the retriever can't report the actually-dispatched axis. "auto" and
+// any unknown value conservatively map to "text".
+func axisFromIndexName(name string) string {
+	switch name {
+	case "code":
+		return "code"
+	case "both":
+		return "both"
+	default:
+		return "text"
+	}
+}
+
+// normalizeIndexAxis clamps an axis to the SPEC §15.2 index_used enum
+// {text,code,both}, defaulting anything else to "text" so a non-conforming
+// retriever can never make the tool emit an illegal value.
+func normalizeIndexAxis(axis string) string {
+	switch axis {
+	case "code", "both", "text":
+		return axis
+	default:
+		return "text"
+	}
 }
 
 func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
