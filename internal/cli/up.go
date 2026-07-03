@@ -887,6 +887,15 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 // breaks the build instead of disabling embedding corpus-wide at runtime.
 var _ index.ChunkSource = (*store.SQLiteStore)(nil)
 
+// Compile-time guard: the concrete store handed to ingest.NewService MUST
+// satisfy model.RepresentationStore, otherwise the runtime
+// `store.(model.RepresentationStore)` assertion there fails silently and the
+// representation generator (repGen) is never constructed — disabling ALL
+// representation/chunk/embedding generation corpus-wide with no trace (#398, the
+// #364 failure mode one layer up). A signature drift on any RepresentationStore
+// method now breaks the build instead of silently dropping every document.
+var _ model.RepresentationStore = (*store.SQLiteStore)(nil)
+
 func startEmbeddingWorkers(
 	ctx context.Context,
 	st index.ChunkSource,

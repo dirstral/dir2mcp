@@ -302,6 +302,24 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 	return nil
 }
 
+// binarySniffLen bounds how many leading bytes looksLikeBinaryContent inspects.
+const binarySniffLen = 8000
+
+// looksLikeBinaryContent reports whether content appears to be binary rather
+// than text, using the same NUL-byte heuristic git uses: a NUL byte within the
+// leading window is a strong, very-low-false-positive signal of binary data
+// (plain text — source code, CSV/TSV, JSON/JSONL, XML, YAML, TOML — never
+// contains one). It guards the raw-text path (SPEC §7.4 "data" docs) against
+// indexing binary blobs — e.g. Parquet, which classifies as "data" — as
+// U+FFFD replacement-character soup (#398).
+func looksLikeBinaryContent(content []byte) bool {
+	n := len(content)
+	if n > binarySniffLen {
+		n = binarySniffLen
+	}
+	return bytes.IndexByte(content[:n], 0x00) >= 0
+}
+
 // normalizeUTF8 ensures content is valid UTF-8 and normalizes line endings to \n
 // Invalid byte sequences are replaced with the Unicode replacement character
 // and the resulting slice is returned.  The previous signature returned an

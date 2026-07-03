@@ -290,6 +290,23 @@ func (s *Service) markActiveSkipped() {
 // provider call itself (as opposed to persistence/cache write failures).
 var ErrTranscriptProviderFailure = errors.New("transcript provider failure")
 
+// errBinaryOnRawTextPath marks a document that classified into a text-oriented
+// doc type (SPEC §7.4) but whose bytes are binary — most notably a .parquet file,
+// which classifies as "data". Indexing it as raw text would normalize the binary
+// bytes to U+FFFD replacement-character soup and chunk/embed the garbage, so it is
+// skipped and recorded as a durable diagnostic instead (#398).
+var errBinaryOnRawTextPath = errors.New(
+	"binary content on the raw-text path; not indexed as text (e.g. Parquet or another binary file with a text-classified extension)")
+
+// errNoVideoRepresentation marks a video document that produced zero
+// representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it,
+// video STT is not applied (transcription is audio-only), and multimodal
+// keyframe embedding is off. Such a video is known but unsearchable, so it is
+// surfaced as a durable non-fatal diagnostic instead of a silent no-op (#398).
+var errNoVideoRepresentation = errors.New(
+	"video produced no representation: no subtitle sidecar found, video is not transcribed (STT is audio-only), " +
+		"and multimodal keyframe embedding is off — enable embed_multimodal or provide a .vtt/.srt sidecar to make it searchable")
+
 type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
 }
@@ -328,6 +345,17 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.repGen = NewRepresentationGenerator(rs)
 		// Best-effort raw_text language auto-detection (SPEC §8.8), on by default.
 		svc.repGen.SetLanguageDetection(cfg.LanguageDetectionEnabled)
+	} else {
+		// #398/#364: the shipped store always satisfies model.RepresentationStore
+		// (enforced by a compile-time guard in the cli package). If a
+		// future/alternate backend does not, repGen stays nil and
+		// generateRepresentations returns nil for EVERY document — producing zero
+		// raw-text/OCR/media/transcript representations, zero chunks and zero
+		// embeddings corpus-wide, silently. That is the #364 failure mode one layer
+		// up from the ChunkSource seam it fixed, so warn just as loudly here rather
+		// than degrade without a trace.
+		svc.logger.Printf("WARNING: store %T does not satisfy model.RepresentationStore; "+
+			"representation generation is DISABLED — no chunks or embeddings will be produced for any document", store)
 	}
 	// Construct the output quality gate from config (spec 0.16.0). When the
 	// master switch is on we use the package defaults (per-threshold config is
@@ -1262,26 +1290,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return err
 	}
 
-	// Count "indexed" only once the document is durably processed. A doc that is
-	// ok now but whose representation generation fails below must count solely as
-	// an error (runScan adds it), not as both indexed and error — otherwise the
-	// same doc is double-counted and indexed+skipped+errors exceeds scanned
-	// (issue #426). indexedPending tracks the ok case so it is credited at each
-	// point where no further rep work can fail this run.
-	indexedPending := false
-	switch doc.Status {
-	case "ok":
-		indexedPending = true
-	case "skipped", "secret_excluded":
-		s.addSkipped(1)
-		s.markActiveSkipped()
-	case "error":
-		// although buildDocumentWithContent will never return a document with
-		// Status="error" (the error case returns early above), we leave this
-		// branch in place as a defensive measure. future changes to document
-		// construction might introduce new terminal statuses and it's nicer
-		// to handle them explicitly here rather than silently falling through.
-		s.addErrors(1)
+	// Apply the #426 initial-status accounting. indexedPending tracks the ok case
+	// so it is credited only at each point below where no further rep work can
+	// fail this run; a terminal status is already fully counted and returns early.
+	indexedPending, terminal := s.creditInitialStatus(doc)
+	if terminal {
 		return nil
 	}
 
@@ -1289,7 +1302,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// The archive document itself remains "skipped" (no direct text content).
 	if doc.DocType == "archive" {
 		s.creditIndexed(indexedPending)
-		return s.handleArchiveDocument(ctx, f, secretPatterns, forceReindex, seen, needsProcessing)
+		return s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing)
 	}
 
 	if !needsProcessing || doc.Status != "ok" {
@@ -1301,7 +1314,8 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return nil
 	}
 
-	if err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex); err != nil {
+	nonFatalErrored, err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex)
+	if err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -1310,8 +1324,45 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
+	if nonFatalErrored {
+		// A non-fatal soft-error path (binary-content, video-no-representation, or
+		// a zero-representation provider failure) already persisted this document
+		// as status="error" and bumped the error counter itself. It must count
+		// solely as an error, so suppress the indexed credit — otherwise the same
+		// doc is counted as both indexed and error and indexed+skipped+errors
+		// exceeds scanned (issue #426).
+		indexedPending = false
+	}
 	s.creditIndexed(indexedPending)
 	return nil
+}
+
+// creditInitialStatus applies the #426 initial-status accounting for a freshly
+// built doc. A doc that is ok now but whose representation generation fails later
+// must count solely as an error (runScan adds it), not as both indexed and error
+// — otherwise the same doc is double-counted and indexed+skipped+errors exceeds
+// scanned (issue #426). It returns indexedPending (the ok case is credited later,
+// only past the exit points where no rep work can still fail) and terminal (a
+// terminal status already fully counted, so processDocument should return early).
+func (s *Service) creditInitialStatus(doc model.Document) (indexedPending, terminal bool) {
+	switch doc.Status {
+	case "ok":
+		return true, false
+	case "skipped", "secret_excluded":
+		s.addSkipped(1)
+		s.markActiveSkipped()
+		return false, false
+	case "error":
+		// although buildDocumentWithContent will never return a document with
+		// Status="error" (the error case returns early in processDocument), we
+		// leave this branch in place as a defensive measure. future changes to
+		// document construction might introduce new terminal statuses and it's
+		// nicer to handle them explicitly here rather than silently falling
+		// through.
+		s.addErrors(1)
+		return false, true
+	}
+	return false, false
 }
 
 // creditIndexed bumps the run-progress "indexed" counter when the document was
@@ -1429,10 +1480,49 @@ func (s *Service) readDocumentContent(ctx context.Context, relPath string) ([]by
 // content changed (or a full reindex was requested) it extracts and processes
 // the members; otherwise it retains the existing member paths in seen so that
 // markMissingAsDeleted does not tombstone them.
-func (s *Service) handleArchiveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool) error {
+func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool) error {
 	if needsProcessing {
 		if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
-			return fmt.Errorf("process archive members: %w", err)
+			if !errors.Is(err, errUnsupportedArchiveFormat) {
+				// Context cancellation (shutdown mid-archive) and any other
+				// non-sentinel error must propagate WITHOUT persisting a durable
+				// "error" status or mutating counters: processArchiveMembers returns
+				// ctx.Err() on cancellation, and recording that as a hard per-document
+				// failure would corrupt CorpusStats and wrongly flag the container.
+				//
+				// This "persist only for the errUnsupportedArchiveFormat sentinel"
+				// guard is what keeps cancellation from writing a status="error"; it is
+				// verified by static reasoning rather than a test. Triggering the
+				// member-loop cancellation path deterministically needs a call-count
+				// context tuned to the exact ctx.Err() sequence (LocalFS.Localize
+				// checks ctx before the loop, so a pre-cancelled context is swallowed
+				// as a non-fatal skip and never reaches the loop). That white-box hook
+				// only works from inside this package against handleArchiveDocument
+				// directly; the black-box tests/ingest suite (which drives the public
+				// Service.Run) cannot reach it without flakiness, so it is intentionally
+				// not covered by an external test.
+				return err
+			}
+			// #398: an unsupported/unextractable archive (.xz/.7z/.rar) must not be
+			// silently ingested as an empty skipped document. Persist the container
+			// itself as status="error" so it is durably visible via status queries and
+			// retried on the next incremental run, mirroring the representation-failure
+			// path in processDocument.
+			doc.Status = "error"
+			doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
+			if upErr := s.store.UpsertDocument(ctx, doc); upErr != nil {
+				// Log and continue, mirroring persistNonFatalDocError: the original
+				// archive error is the more actionable signal, but a persistence
+				// failure here would otherwise be invisible and could leave the
+				// archive looking like a silent skip again.
+				s.getLogger().Printf("persist error status for %s: %v", f.RelPath, upErr)
+			}
+			// processDocument already counted this archive as skipped (archive
+			// containers build as status="skipped"); scanPass will count the error
+			// returned below separately. Drop the skipped tally so the same file is
+			// not double-counted as both skipped and error in CorpusStats (#398).
+			s.addSkipped(-1)
+			return fmt.Errorf("process archive members %s: %w", f.RelPath, err)
 		}
 	} else if seen != nil {
 		// Archive content unchanged: retain existing members in seen.
@@ -1456,8 +1546,16 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 	defer cleanup()
 	members, err := extractArchiveMembers(localPath, f.RelPath)
 	if err != nil {
+		if errors.Is(err, errUnsupportedArchiveFormat) {
+			// #398: .xz/.7z/.rar (and any other classified-but-unextractable
+			// container) were being silently ingested as empty skipped documents —
+			// known but unsearchable, with zero diagnostics. Return the error so the
+			// caller records the archive as status="error" and counts it, making the
+			// gap visible and retriable instead of vanishing.
+			return fmt.Errorf("unsupported archive format for %s: %w", f.RelPath, err)
+		}
 		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
-		return nil // extraction failure is non-fatal; archive stays "skipped"
+		return nil // corrupt/other extraction failure is non-fatal; archive stays "skipped"
 	}
 	for _, m := range members {
 		if err := ctx.Err(); err != nil {
@@ -1560,7 +1658,10 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	if !needsProcessing || doc.Status != "ok" {
 		return nil
 	}
-	if err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex); err != nil {
+	// Archive members are not credited to the run's indexed counter here (the
+	// container document accounts for the archive), so the non-fatal-error signal
+	// is irrelevant on this path: a persisted soft-error already counted itself.
+	if _, err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex); err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -1968,16 +2069,34 @@ func isEmbeddableAudio(relPath string) bool {
 	}
 }
 
-func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+// generateRepresentations produces a document's representations. It returns
+// (nonFatalErrored, err). A returned err is a hard failure the caller propagates
+// (aborting this document, counted as an error by runScan). nonFatalErrored is
+// true when a soft-failure path (binary-content, video-no-representation, or a
+// zero-representation provider failure) already persisted the document as
+// status="error" and incremented the error counter itself while returning no
+// hard error: the caller MUST NOT then also credit the document as indexed, or it
+// would be double-counted as both indexed and error (issue #426).
+func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) (bool, error) {
 	if s.repGen == nil {
-		return nil
+		return false, nil
 	}
 
 	if ShouldGenerateRawText(doc.DocType) {
+		// #398: a binary payload that classified into a text-oriented doc type
+		// (e.g. .parquet → "data") must not be run through the raw-text path, where
+		// normalizeUTF8 would turn it into U+FFFD soup and chunk/embed the garbage.
+		// Skip it and record a durable, non-fatal diagnostic; the run continues.
+		if looksLikeBinaryContent(content) {
+			s.getLogger().Printf("skipping binary content on raw-text path for %s (%s): %v", doc.RelPath, doc.DocType, errBinaryOnRawTextPath)
+			s.addErrors(1)
+			s.persistNonFatalDocError(ctx, doc, errBinaryOnRawTextPath, secretPatterns)
+			return true, nil
+		}
 		// we already loaded the file contents earlier in processDocument,
 		// avoid re-reading it by using the new helper method.
 		if err := s.repGen.GenerateRawTextFromContent(ctx, doc, content); err != nil {
-			return err
+			return false, err
 		}
 		s.addRepresentations(1)
 
@@ -1987,19 +2106,19 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 			titleContent = titleContent[:titleScanLimit]
 		}
 		s.persistTitleIfFound(ctx, doc, string(titleContent))
-		return nil
+		return false, nil
 	}
 
 	mediaProduced, err := s.generateExtractedAndMediaRepresentations(ctx, doc, content)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// In `replace`, direct media embedding stands in for STT→text, so skip the
 	// transcript when audio media chunks were produced (SPEC 8.1.7). `augment`
 	// and `off` keep the transcript path unchanged.
 	skipTranscript := s.embedMultimodal == "replace" && mediaProduced
 	if skipTranscript {
-		return nil
+		return false, nil
 	}
 
 	return s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
@@ -2011,21 +2130,38 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 // transcript is authoritative. `--force`/reindex overrides the gate, retiring
 // any stale sidecar transcripts and re-running STT. Sidecar ingestion bypasses
 // the quality gate (authored, not model-derived; §8.6.6/§8.6.7).
-func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) error {
+//
+// It returns (nonFatalErrored, err) with the same contract as
+// generateRepresentations: nonFatalErrored is true when a soft-failure path
+// persisted the document as status="error" and counted it as an error itself, so
+// the caller must not also credit it as indexed (issue #426).
+func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, error) {
 	if !forceReindex {
 		ingested, err := s.ingestSidecarTranscripts(ctx, doc)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if ingested {
-			return nil
+			return false, nil
 		}
 	} else if err := s.retireStaleSidecarTranscripts(ctx, doc); err != nil {
-		return err
+		return false, err
 	}
 
 	if doc.DocType != "audio" || s.transcriber == nil {
-		return nil
+		// #398: a video with no subtitle sidecar (handled above) and no multimodal
+		// keyframe chunks yields zero representations because transcription is
+		// audio-only. That was a silent no-op; record it as status="error" so the
+		// unsearchable video is durably visible (CorpusStats.Errors / RecentFailures)
+		// and retried once a sidecar is added or embed_multimodal is enabled. The run
+		// still continues (returns nil), mirroring the #413 provider-failure path.
+		if doc.DocType == "video" && !mediaProduced {
+			s.getLogger().Printf("no representation produced for video %s: %v", doc.RelPath, errNoVideoRepresentation)
+			s.addErrors(1)
+			s.persistNonFatalDocError(ctx, doc, errNoVideoRepresentation, secretPatterns)
+			return true, nil
+		}
+		return false, nil
 	}
 	if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
 		// Provider/transient failures should not fail the entire ingest run.
@@ -2046,13 +2182,18 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 			// without ErrTranscriptProviderFailure.
 			if !mediaProduced {
 				s.persistNonFatalDocError(ctx, doc, err, secretPatterns)
+				// The document is now durably status="error" and already counted
+				// above; signal the caller not to also credit it as indexed
+				// (issue #426). A doc that DID produce media chunks stays "ok"
+				// and searchable, so it is still credited (returns false).
+				return true, nil
 			}
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	s.addRepresentations(1)
-	return nil
+	return false, nil
 }
 
 // retireStaleSidecarTranscripts tombstones a media document's existing
