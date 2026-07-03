@@ -54,7 +54,7 @@ func (f *fakeErrorStore) Close() error { return nil }
 
 // implement embeddedChunkLister so preloadEmbeddedChunkMetadata will hit our
 // injected failure.
-func (f *fakeErrorStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error) {
+func (f *fakeErrorStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit int, afterChunkID int64) ([]model.ChunkTask, error) {
 	return nil, f.err
 }
 

@@ -1923,7 +1923,13 @@ func (s *SQLiteStore) ChunkModalityPresence(ctx context.Context, relPath string)
 	return m == 1, t == 1, nil
 }
 
-func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error) {
+// ListEmbeddedChunkMetadata pages through embedded ("ok") chunks using keyset
+// (seek) pagination: afterChunkID is an exclusive lower bound on chunk_id (pass 0
+// to start), and callers carry the last chunk_id of each page forward as the next
+// afterChunkID. Rows are ordered by chunk_id ascending, so this walks each row
+// exactly once — unlike OFFSET, which rescans and discards skipped rows every
+// page (quadratic on large embedded sets).
+func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit int, afterChunkID int64) ([]model.ChunkTask, error) {
 	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return nil, err
@@ -1932,15 +1938,15 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	if limit <= 0 {
 		limit = 500
 	}
-	if offset < 0 {
-		offset = 0
+	if afterChunkID < 0 {
+		afterChunkID = 0
 	}
 
-	args := []any{"ok"}
+	args := []any{"ok", afterChunkID}
 	query := `WITH filtered_chunks AS (
 	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language
 	            FROM chunks c
-	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
+	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > ?
 	          ),
 	          ranked_spans AS (
 	            SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
@@ -1958,8 +1964,8 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 		query += ` WHERE fc.index_kind = ?`
 		args = append(args, indexKind)
 	}
-	args = append(args, limit, offset)
-	query += ` ORDER BY fc.chunk_id LIMIT ? OFFSET ?`
+	args = append(args, limit)
+	query += ` ORDER BY fc.chunk_id LIMIT ?`
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -2134,6 +2140,15 @@ func SpanFromRow(kind string, start, end int, extraJSON string) model.Span {
 
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
 	return s.markEmbeddingStatus(ctx, labels, "ok", "", "")
+}
+
+// RependEmbeddedChunks resets the given chunks' embedding_status back to
+// "pending" (clearing any stale error/category) so the embed worker re-embeds
+// them via NextPending. It is used by startup reconciliation (issue #402 A2)
+// when an embedded chunk's vector is missing from a crash-recovered in-memory
+// index, restoring recall that would otherwise be silently lost.
+func (s *SQLiteStore) RependEmbeddedChunks(ctx context.Context, labels []uint64) error {
+	return s.markEmbeddingStatus(ctx, labels, "pending", "", "")
 }
 
 // MarkFailed retains its original signature for callers that have not
