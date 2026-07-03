@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -74,6 +75,47 @@ func TestSchemaVersionDowngradeGuard(t *testing.T) {
 	defer func() { _ = st2.Close() }()
 	if err := st2.Init(ctx); err == nil {
 		t.Fatal("expected Init to reject a database with a newer schema version")
+	}
+}
+
+// TestSchemaVersionRejectedBeforeWALCreated pins that the downgrade tripwire
+// runs BEFORE any persistent mutation: opening a newer-schema database must be
+// refused without so much as creating its -wal file. journal_mode=WAL, applied
+// by openDB, persistently creates/modifies the -wal file, so the user_version
+// check must precede it (#405).
+func TestSchemaVersionRejectedBeforeWALCreated(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+
+	// Build a minimal database stamped with a far-future schema version using a
+	// raw connection in the default (rollback) journal mode, so the fixture
+	// itself leaves no -wal file behind.
+	raw := openRaw(t, dbPath)
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _touch(x)`); err != nil {
+		t.Fatalf("touch db: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 99999`); err != nil {
+		t.Fatalf("forge user_version: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	walPath := dbPath + "-wal"
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Fatalf("precondition: -wal file should not exist yet (stat err=%v)", err)
+	}
+
+	// A fresh store must refuse the future database...
+	st := store.NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+	if err := st.Init(ctx); err == nil {
+		t.Fatal("expected Init to reject a database with a newer schema version")
+	}
+
+	// ...and must NOT have created a -wal file while doing so.
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Fatalf("Init must not create a -wal file when rejecting a newer-schema DB (stat err=%v)", err)
 	}
 }
 

@@ -339,9 +339,26 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	// Order matters: busy_timeout MUST come before journal_mode. Switching to
-	// WAL itself can fail with SQLITE_BUSY if another process holds the
-	// database lock; without busy_timeout already in effect, that PRAGMA
+	// busy_timeout is connection-local and non-persistent: setting it neither
+	// creates nor mutates any on-disk file. Set it first so the WAL switch below
+	// waits rather than returning SQLITE_BUSY immediately when another process
+	// holds the database lock.
+	if _, err := db.ExecContext(ctx, `PRAGMA busy_timeout=5000;`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Reject a database written by a NEWER binary BEFORE any persistent mutation
+	// (#405). PRAGMA journal_mode=WAL below persistently creates/modifies the
+	// -wal file, so the downgrade tripwire MUST run first: a future-schema DB we
+	// do not understand must be left byte-for-byte untouched. Reading
+	// user_version is a pure read and does not create a -wal file.
+	if err := checkSchemaVersion(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Order matters: busy_timeout (set above) MUST come before journal_mode.
+	// Switching to WAL itself can fail with SQLITE_BUSY if another process holds
+	// the database lock; without busy_timeout already in effect, that PRAGMA
 	// returns immediately rather than waiting.
 	//
 	// foreign_keys=ON makes the ON DELETE CASCADE constraints declared on
@@ -353,7 +370,6 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	// single-connection pool (SetMaxOpenConns(1)) makes this per-connection
 	// pragma stick for the life of the store handle.
 	for _, pragma := range []string{
-		`PRAGMA busy_timeout=5000;`,
 		`PRAGMA journal_mode=WAL;`,
 		`PRAGMA foreign_keys=ON;`,
 	} {
@@ -383,8 +399,9 @@ const schemaVersion = 1
 // database was written by a newer binary (dbVersion > schemaVersion). Older or
 // unstamped databases (user_version == 0, the SQLite default) are accepted and
 // upgraded in place by the additive migrations, then re-stamped by
-// stampSchemaVersion. This runs BEFORE any migration so a future DB is never
-// mutated by a binary that does not understand it.
+// stampSchemaVersion. openDB calls this BEFORE applying journal_mode=WAL (or any
+// other persistent pragma/migration) so a future-schema DB is never mutated —
+// not even its -wal file created — by a binary that does not understand it.
 func checkSchemaVersion(ctx context.Context, db *sql.DB) error {
 	var dbVersion int64
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&dbVersion); err != nil {
@@ -493,14 +510,10 @@ func (s *SQLiteStore) initLocked(ctx context.Context) error {
 		return fmt.Errorf("set database file permissions: %w", err)
 	}
 
+	// openDB refuses a database written by a newer binary before applying any
+	// persistent pragma (WAL), so a future-schema DB is rejected untouched (#405).
 	db, err := openDB(ctx, s.path)
 	if err != nil {
-		return err
-	}
-
-	// Refuse a database written by a newer binary before touching it (#405).
-	if err := checkSchemaVersion(ctx, db); err != nil {
-		_ = db.Close()
 		return err
 	}
 
@@ -669,11 +682,14 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 // (quarantine query-time filter): both of those leave the FTS row set intact.
 func repairFTSIfDrifted(ctx context.Context, db *sql.DB) error {
 	var chunkCount, indexedCount int64
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&chunkCount); err != nil {
-		return fmt.Errorf("count chunks: %w", err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts_docsize`).Scan(&indexedCount); err != nil {
-		return fmt.Errorf("count chunks_fts_docsize: %w", err)
+	// Read both counts in ONE statement so they observe a single, consistent
+	// database snapshot. Two separate COUNT(*) queries can straddle a concurrent
+	// writer's commit and see different snapshots, reporting a spurious mismatch
+	// that triggers a needless (costly) full FTS rebuild.
+	if err := db.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM chunks),
+		(SELECT COUNT(*) FROM chunks_fts_docsize)`).Scan(&chunkCount, &indexedCount); err != nil {
+		return fmt.Errorf("count chunks vs chunks_fts_docsize: %w", err)
 	}
 	if chunkCount == indexedCount {
 		return nil
