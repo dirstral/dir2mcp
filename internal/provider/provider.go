@@ -186,10 +186,17 @@ type Profile struct {
 	// provider this maps to the OpenAI-compatible `vad_filter` form field;
 	// providers without VAD support ignore it. It is not part of the STT
 	// identity, so toggling it is not reindex-bound.
-	STTVAD      bool
-	TTSModel    string
-	TTSVoice    string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
-	RerankModel string
+	STTVAD bool
+	// STTMaxPayloadMB / STTRequestTimeoutSec tune the self-hosted whisper client's
+	// request limits (config `media.stt.max_payload_mb` / `media.stt.request_timeout_sec`,
+	// dir2mcp#510/#511). 0 means "use the client's built-in default". Like STTVAD
+	// these are operational knobs, not part of the STT identity, so changing them
+	// is not reindex-bound.
+	STTMaxPayloadMB      int
+	STTRequestTimeoutSec int
+	TTSModel             string
+	TTSVoice             string // TTS voice id/name (e.g. ElevenLabs voice, OpenAI voice)
+	RerankModel          string
 }
 
 // Eligible reports whether the profile may be selected/preflighted

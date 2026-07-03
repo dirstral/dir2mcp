@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/anthropic"
 	"github.com/dirstral/dir2mcp/internal/cohere"
@@ -251,6 +252,7 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 			c.DefaultLanguage = lang
 		}
 		c.VADFilter = p.STTVAD
+		applyWhisperLimits(c, p)
 		return c, nil
 	case provider.KindMistral:
 		c := mistral.NewClient(p.BaseURL, p.APIKey)
@@ -280,6 +282,20 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 		return c, nil
 	default:
 		return nil, unsupported(p, provider.CapSTT)
+	}
+}
+
+// applyWhisperLimits overrides the whisper client's built-in request caps from
+// the resolved profile when set (>0). The defaults (50 MB payload, 120 s
+// timeout) are too small for long-form media, so an operator can raise them via
+// media.stt.max_payload_mb / media.stt.request_timeout_sec (dir2mcp#510/#511). A
+// zero value leaves the client's default in place.
+func applyWhisperLimits(c *whisperapi.Client, p provider.Profile) {
+	if p.STTMaxPayloadMB > 0 {
+		c.MaxPayloadBytes = p.STTMaxPayloadMB * 1024 * 1024
+	}
+	if p.STTRequestTimeoutSec > 0 && c.HTTPClient != nil {
+		c.HTTPClient.Timeout = time.Duration(p.STTRequestTimeoutSec) * time.Second
 	}
 }
 
