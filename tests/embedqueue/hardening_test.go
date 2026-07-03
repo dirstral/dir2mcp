@@ -40,7 +40,11 @@ func TestEmbeddedGuard_First(t *testing.T) {
 // so callers with no guard keep the pre-guard behavior instead of panicking.
 func TestEmbeddedGuard_NilReceiver(t *testing.T) {
 	var g *embedqueue.EmbeddedGuard
-	if !g.First("text", 1) || !g.First("text", 1) {
+	// A nil guard must never dedup: the SAME (kind, id) reported twice both
+	// return first=true (a real guard would return false on the second call).
+	first := g.First("text", 1)
+	again := g.First("text", 1)
+	if !first || !again {
 		t.Fatal("nil guard: every call should report first=true")
 	}
 }
