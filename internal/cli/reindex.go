@@ -50,7 +50,10 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	ing, err := a.newIngestor(cfg, st)
 	if err != nil {
 		// The rebuild will not run, so restore the previous index we moved
-		// aside rather than leaving the corpus without one (issue #418).
+		// aside AND the content-hash gate we cleared, rather than leaving the
+		// corpus without one / forcing a full reprocess (issue #418). Restore
+		// the hashes while the store (meta.sqlite) is still open.
+		staging.restoreContentHashes(ctx, a.stderr)
 		a.closeStoreWithLog(st)
 		staging.rollback(a.stderr)
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
@@ -72,6 +75,16 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	// rolled-back index.
 	if reindexErr == nil && !global.quiet && !global.jsonOutput {
 		printReindexFinalSummary(a.stderr, ctx, st)
+	}
+	// Resolve the content-hash snapshot while the store (meta.sqlite) is still
+	// open: discard it on a durable rebuild, restore it on any failure so the
+	// incremental gate survives an interrupted reindex (issue #418). The index
+	// files, by contrast, are committed/rolled back AFTER the store is closed so
+	// a persist-on-close cannot clobber a rolled-back index.
+	if reindexErr == nil {
+		staging.discardContentHashBackup(ctx, a.stderr)
+	} else {
+		staging.restoreContentHashes(ctx, a.stderr)
 	}
 	a.closeStoreWithLog(st)
 	if reindexErr == nil {
@@ -133,15 +146,54 @@ func (a *App) refuseReindexIfDaemonRunning(global globalOptions, cfg config.Conf
 // restored if the rebuild is interrupted or fails (issue #418).
 const reindexBackupSuffix = ".reindex-old"
 
-// reindexStaging tracks the on-disk vector index files a reindex moved aside
-// instead of deleting up front. commit discards those backups after a durable
-// rebuild; rollback restores them over any partial rebuild so an interrupted
-// reindex (Ctrl-C on a long OCR/embed run) leaves the corpus's previous index
-// in place rather than empty/half-indexed (issue #418). A nil-safe zero value
-// (no state dir, no backups) makes commit/rollback no-ops.
+// reindexStaging tracks the mutations a reindex makes before the rebuild is
+// durable so they can all be unwound together if it is interrupted or fails:
+//   - the on-disk vector index files moved aside (rename, not delete), and
+//   - the documents.content_hash snapshot taken before the incremental gate is
+//     cleared.
+//
+// commit discards both after a durable rebuild; rollback restores both over any
+// partial rebuild so an interrupted reindex (Ctrl-C on a long OCR/embed run)
+// leaves the corpus's previous index in place rather than empty/half-indexed,
+// AND keeps its content hashes so the next incremental sync does not reprocess
+// the whole corpus (issue #418). A nil-safe zero value (no state dir, no
+// backups, no hash backup) makes every operation a no-op.
 type reindexStaging struct {
 	stateDir string
 	backups  []string // basenames moved to name+reindexBackupSuffix
+
+	// hashBackup is the store capability holding the pre-clear content_hash
+	// snapshot; nil when the store does not support it or no snapshot was taken.
+	hashBackup contentHashBackuper
+}
+
+// restoreContentHashes rolls the content_hash snapshot back over the cleared
+// gate and drops it. It uses a cancellation-detached context so it still runs
+// after a Ctrl-C / ctx cancellation (the exact case this must recover). Called
+// while the store (meta.sqlite) is still open, best-effort: warnings are logged
+// but never fail teardown.
+func (s *reindexStaging) restoreContentHashes(ctx context.Context, stderr io.Writer) {
+	if s.hashBackup == nil {
+		return
+	}
+	b := s.hashBackup
+	s.hashBackup = nil
+	if err := b.RestoreContentHashes(context.WithoutCancel(ctx)); err != nil {
+		writef(stderr, "warning: reindex rollback: restore content hashes: %v\n", err)
+	}
+}
+
+// discardContentHashBackup drops the content_hash snapshot after a durable
+// rebuild. Called while the store is still open; best-effort.
+func (s *reindexStaging) discardContentHashBackup(ctx context.Context, stderr io.Writer) {
+	if s.hashBackup == nil {
+		return
+	}
+	b := s.hashBackup
+	s.hashBackup = nil
+	if err := b.DiscardContentHashBackup(context.WithoutCancel(ctx)); err != nil {
+		writef(stderr, "warning: reindex commit: discard content hash backup: %v\n", err)
+	}
 }
 
 // backup renames stateDir/name aside to name+reindexBackupSuffix. A missing
@@ -206,7 +258,20 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
 		return nil, nil, exitIndexLoadFailure
 	}
+	// Snapshot the content-hash gate BEFORE clearing it so an interrupted or
+	// failed rebuild can restore the incremental "already indexed" state instead
+	// of reprocessing the whole corpus on the next sync (issue #418). Behind an
+	// optional-capability interface so non-sqlite stores degrade gracefully.
+	if b, ok := interface{}(st).(contentHashBackuper); ok {
+		if err := b.BackupContentHashes(ctx); err != nil {
+			_ = st.Close()
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("snapshot content hashes: %v", err))
+			return nil, nil, exitGeneric
+		}
+		staging.hashBackup = b
+	}
 	if code := clearContentHashesIfSupported(ctx, st, a.stderr, global.jsonOutput); code != exitSuccess {
+		staging.discardContentHashBackup(ctx, a.stderr)
 		_ = st.Close()
 		return nil, nil, code
 	}
@@ -217,6 +282,9 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 	// (issue #418).
 	for _, name := range index.StaleIndexFiles(cfg.IndexBackend) {
 		if err := staging.backup(name); err != nil {
+			// Undo the cleared content-hash gate (store still open) before
+			// restoring the index files and closing (issue #418).
+			staging.restoreContentHashes(ctx, a.stderr)
 			staging.rollback(a.stderr)
 			_ = st.Close()
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("stage index file %s: %v", name, err))

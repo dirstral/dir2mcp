@@ -105,6 +105,17 @@ type contentHashResetter interface {
 	ClearDocumentContentHashes(ctx context.Context) error
 }
 
+// contentHashBackuper lets a reindex snapshot the content-hash gate before
+// clearing it and restore it if the rebuild is interrupted or fails, so an
+// aborted reindex does not force a full-corpus reprocess on the next sync
+// (issue #418). Optional capability: stores without it degrade gracefully (the
+// clear simply is not unwound).
+type contentHashBackuper interface {
+	BackupContentHashes(ctx context.Context) error
+	RestoreContentHashes(ctx context.Context) error
+	DiscardContentHashBackup(ctx context.Context) error
+}
+
 type embeddedChunkLister interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit int, afterChunkID int64) ([]model.ChunkTask, error)
 }
