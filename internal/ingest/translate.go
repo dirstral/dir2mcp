@@ -147,18 +147,28 @@ func splitTimestampMarker(line string) (marker, text string) {
 	return strings.TrimRight(trimmed[:idx], " \t"), body
 }
 
-// formatTimestampMarker renders a millisecond offset as a bracketed [mm:ss] or
-// [hh:mm:ss] marker, matching the transcript timestamp format.
+// formatTimestampMarker renders a millisecond offset as a bracketed [mm:ss] /
+// [hh:mm:ss] marker, or the [.mmm] sub-second form when the offset is not on a
+// whole second, matching the transcript timestamp format (issue #431). It is
+// only a fallback for the "body not locatable" branch of splitTimestampMarker;
+// the common path preserves the source marker verbatim.
 func formatTimestampMarker(ms int) string {
 	if ms < 0 {
 		ms = 0
 	}
 	totalSec := ms / 1000
+	frac := ms % 1000
 	h := totalSec / 3600
 	m := (totalSec % 3600) / 60
 	sec := totalSec % 60
+	var base string
 	if h > 0 {
-		return fmt.Sprintf("[%02d:%02d:%02d]", h, m, sec)
+		base = fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
+	} else {
+		base = fmt.Sprintf("%02d:%02d", m, sec)
 	}
-	return fmt.Sprintf("[%02d:%02d]", m, sec)
+	if frac != 0 {
+		return fmt.Sprintf("[%s.%03d]", base, frac)
+	}
+	return "[" + base + "]"
 }
