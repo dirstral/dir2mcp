@@ -125,6 +125,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return exitConfigInvalid
 	}
 	wireIngestorHooks(ing, indexingState, ret.EvictDocuments)
+	wireDerivationCacheIdentities(ret, ing)
 
 	corpusFS, err := buildCorpusFS(ctx, cfg)
 	if err != nil {
@@ -1085,6 +1086,34 @@ func initIndexingState(ctx context.Context, st model.Store, ret *retrieval.Servi
 // configured backend (local/nfs/s3) drives discovery and reads.
 type corpusFSSetter interface {
 	SetCorpusFS(fsys corpusfs.CorpusFS)
+}
+
+// derivationCacheIdentityProvider is the subset of the ingest pipeline that
+// exposes its ACTIVE OCR/transcript derivation identities (SPEC §8.6.7). The
+// concrete *ingest.Service implements it. It is asserted on the live ingestor so
+// the retriever's open_file cache lookup can be keyed the SAME identity-aware way
+// ingest's writer keys the cache it wrote (issue #488) — using the ACTUAL active
+// extractor/STT binding the ingestor runs with, not just a config re-derivation.
+// A test ingestor that does not implement it simply leaves the retriever on the
+// historical bytes-only key.
+type derivationCacheIdentityProvider interface {
+	ActiveOCRIdentity() string
+	ActiveTranscriptIdentity() string
+}
+
+// wireDerivationCacheIdentities plumbs the live ingestor's ACTIVE OCR/transcript
+// derivation identities (SPEC §8.6.7) into open_file's cache lookup so it keys the
+// OCR/transcript cache the SAME identity-aware way ingest's writer does (issue
+// #488). Sourced from the live ingestor (not a config re-derivation) so it
+// reflects the exact extractor/STT binding this daemon writes cache entries with.
+// An ingestor that does not expose the identities (a test fake) leaves the
+// retriever on the historical bytes-only key.
+func wireDerivationCacheIdentities(ret *retrieval.Service, ing model.Ingestor) {
+	ids, ok := ing.(derivationCacheIdentityProvider)
+	if !ok {
+		return
+	}
+	ret.SetDerivationCacheIdentities(ids.ActiveOCRIdentity(), ids.ActiveTranscriptIdentity())
 }
 
 // sourceIsRemote reports whether the configured corpus source is an object-store
