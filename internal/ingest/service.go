@@ -234,6 +234,16 @@ type Service struct {
 	// batch run is active, making recordOutput a no-op on the hot path.
 	activeOutcome *assetOutcome
 
+	// quarantinedThisDoc records that the output quality gate (§8.6.6) marked the
+	// document currently being processed as a non-fatal per-document error, so the
+	// scan loop must count it as exactly one error and NOT credit it as indexed
+	// (issue #426). Like activeOutcome it is per-document state: the scan loop is
+	// sequential (at most one asset in flight), and it is reset at the start of
+	// each representation-generation entry point (generateRepresentations and the
+	// two-phase deriveDocument) so a rejected representation is counted once even
+	// when a document produces several (transcript + per-language translations).
+	quarantinedThisDoc bool
+
 	// activePass selects which work the representation generators perform for the
 	// asset currently being processed under the optional two-phase pass split
 	// (SPEC §8.6.11). runScan sets it around each per-asset call (the scan loop is
@@ -298,6 +308,18 @@ func (s *Service) markActiveSkipped() {
 		return
 	}
 	s.activeOutcome.markSkipped()
+}
+
+// markActiveErrored records a terminal error outcome — the canonical §14.4 code
+// and a content-free message — on the asset currently being processed under an
+// active batch run, for the run manifest (SPEC §8.6.11). The first code recorded
+// wins (markErrorIfUnset), so a specific inner failure is never clobbered by a
+// later one. No-op when no batch run is active.
+func (s *Service) markActiveErrored(code, message string) {
+	if s == nil {
+		return
+	}
+	s.activeOutcome.markErrorIfUnset(code, message)
 }
 
 // ErrTranscriptProviderFailure marks failures originating from the transcript
@@ -1375,13 +1397,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if err := s.finalizeIfGenerated(ctx, &doc, willGenerateReps, finalContentHash); err != nil {
 		return err
 	}
-	if nonFatalErrored {
-		// A non-fatal soft-error path (binary-content, video-no-representation, or
-		// a zero-representation provider failure) already persisted this document
-		// as status="error" and bumped the error counter itself. It must count
-		// solely as an error, so suppress the indexed credit — otherwise the same
-		// doc is counted as both indexed and error and indexed+skipped+errors
-		// exceeds scanned (issue #426).
+	if s.suppressIndexedCredit(nonFatalErrored) {
+		// A non-fatal soft-error path already persisted this document as
+		// status="error" and bumped the error counter itself, so it must count
+		// solely as an error, not also as indexed (otherwise indexed+skipped+errors
+		// exceeds scanned — issue #426).
 		indexedPending = false
 	}
 	s.creditIndexed(indexedPending)
@@ -1531,6 +1551,17 @@ func (s *Service) creditIndexed(indexed bool) {
 	}
 }
 
+// suppressIndexedCredit reports whether the document just processed must NOT be
+// credited as indexed because a non-fatal soft error already counted it as an
+// error (issue #426). Two sources: (1) nonFatalErrored — a rep-generation
+// soft-failure (binary-content, video-no-representation, or a zero-representation
+// provider failure) returned by generateRepresentations; (2) quarantinedThisDoc —
+// an output quality gate (§8.6.6) that rejected a generated OCR/transcript/
+// translation output. Either way the document counts solely as an error.
+func (s *Service) suppressIndexedCredit(nonFatalErrored bool) bool {
+	return nonFatalErrored || s.quarantinedThisDoc
+}
+
 // deriveDocument runs the derivation pass for a single asset under the two-phase
 // split (SPEC §8.6.11): it produces ONLY translated transcripts (§8.6.2) from the
 // already-persisted source transcript, reusing the cached transcript text so it
@@ -1545,6 +1576,12 @@ func (s *Service) creditIndexed(indexed bool) {
 // with no source transcript are recorded as skipped and produce nothing — keeping
 // the derivation pass's per-asset manifest/progress totals faithful (§8.6.11).
 func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) error {
+	// Reset the per-document quality-gate quarantine flag (§8.6.6 / #426) so a
+	// translation rejected in this derivation pass is counted once and cannot leak
+	// its dedup state into the next asset. The derivation pass does not credit the
+	// indexed counter (the transcription pass did), so it only needs the flag reset
+	// for correct per-document error accounting on the translation path.
+	s.quarantinedThisDoc = false
 	// No translation configured, or the multimodal "replace" mode that stands in
 	// for STT→text (so no transcript exists to translate): nothing to derive. This
 	// matches the single-pass gates so the corpus-wide output is identical.
@@ -2347,6 +2384,10 @@ func isEmbeddableAudio(relPath string) bool {
 // hard error: the caller MUST NOT then also credit the document as indexed, or it
 // would be double-counted as both indexed and error (issue #426).
 func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) (bool, error) {
+	// Reset the per-document quality-gate quarantine flag (§8.6.6 / #426). The scan
+	// loop is sequential, so this scopes the flag to the document about to be
+	// processed even though it is Service-level state.
+	s.quarantinedThisDoc = false
 	if s.repGen == nil {
 		return false, nil
 	}
@@ -2582,7 +2623,7 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 
 	s.persistTitleIfFound(ctx, doc, ocrText)
 
-	decision := s.screenOutputQuality(doc.RelPath, "ocr", ocrText, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, ocrText, quality.Context{
 		Modality: quality.ModalityOCR,
 	})
 
@@ -2626,7 +2667,7 @@ func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model
 		s.persistTitleIfFound(ctx, doc, md)
 	}
 
-	decision := s.screenOutputQuality(doc.RelPath, "ocr", md, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, md, quality.Context{
 		Modality: quality.ModalityOCR,
 	})
 
@@ -2775,12 +2816,42 @@ type quarantineDecision struct {
 	category   string
 }
 
+// Quality-gate screening kinds — the `kind` argument to screenOutputQuality.
+// They select the canonical §14.4 error code recorded when a degenerate output
+// is quarantined (§8.6.6). The literal values are also the diagnostic labels in
+// the quarantine log line.
+const (
+	qualityKindOCR         = "ocr"
+	qualityKindTranscript  = "transcript"
+	qualityKindTranslation = "transcript-translation"
+)
+
+// qualityGateFailureCode maps a screening kind to its canonical §14.4 error code
+// (§8.6.6): an OCR / transcript / translation output rejected by the gate is
+// OCR_FAILED / TRANSCRIBE_FAILED / TRANSLATE_FAILED respectively. An unknown kind
+// falls back to the generic EXTRACT_FAILED so the recorded code is always a valid
+// §14.4 constant.
+func qualityGateFailureCode(kind string) string {
+	switch kind {
+	case qualityKindOCR:
+		return manifestErrOCRFailed
+	case qualityKindTranscript:
+		return manifestErrTranscribeFailed
+	case qualityKindTranslation:
+		return manifestErrTranslateFailed
+	default:
+		return manifestErrExtractFailed
+	}
+}
+
 // screenOutputQuality runs the quality gate over generated text. It returns a
 // zero-value (non-quarantine) decision when the gate is disabled (nil) or the
 // verdict is clean, so callers can always insert via the returned decision. On
-// a failed gate it logs a content-free warning and returns the quarantine
-// values. relPath/kind are used only for the diagnostic log line.
-func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx quality.Context) quarantineDecision {
+// a failed gate it logs a content-free warning, records the §8.6.6 per-document
+// error (documents.status=error + canonical §14.4 code, non-fatal), and returns
+// the chunk-level quarantine values. kind selects the canonical code and the
+// diagnostic label; doc identifies the document to mark.
+func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, kind, text string, qctx quality.Context) quarantineDecision {
 	if s.qualityGate == nil {
 		return quarantineDecision{}
 	}
@@ -2798,12 +2869,58 @@ func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx qu
 	// Detail is already redacted/content-free; SanitizeReason bounds/normalizes
 	// it for persistence into chunks.embedding_error.
 	embErr := store.SanitizeReason(detail)
-	s.getLogger().Printf("quality gate quarantined %s output for %s: reason=%s", kind, relPath, reason)
+	s.getLogger().Printf("quality gate quarantined %s output for %s: reason=%s", kind, doc.RelPath, reason)
+	// §8.6.6: a failed output quality gate is a non-fatal per-document error — the
+	// document is marked status=error with the canonical §14.4 code while indexing
+	// continues. This is IN ADDITION to the chunk-level quarantine encoded in the
+	// returned decision (embedding_status=error), which keeps the degenerate text
+	// out of the embedding index.
+	s.recordQualityGateDocError(ctx, doc, kind, reason)
 	return quarantineDecision{
 		quarantine: true,
 		embErr:     embErr,
 		category:   string(store.ErrorCategoryQualityGate),
 	}
+}
+
+// recordQualityGateDocError persists the §8.6.6 per-document error for a
+// quality-gate quarantine and accounts for it exactly once (issue #426):
+//
+//   - it marks documents.status=error via persistNonFatalDocError with a
+//     content-free message that LEADS with the canonical §14.4 code, so the code
+//     is queryable through error_message / RecentFailures (§15.6) without a store
+//     schema change (the documents table has no error_code column, and §8.6.6 only
+//     requires the document be "marked status=error with the appropriate code");
+//   - it records the same canonical code on the active batch manifest outcome
+//     (§8.6.11), whose record carries a dedicated machine-readable error_code;
+//   - it increments the run error counter once and sets quarantinedThisDoc so the
+//     scan loop suppresses the indexed credit (the document counts as exactly one
+//     error, zero indexed — issue #426).
+//
+// It is idempotent per document: a document with several rejected representations
+// (e.g. a transcript plus per-language translations) counts once and keeps the
+// FIRST canonical code, while every rejected representation still quarantines its
+// own chunks via the returned decision. The document's content_hash stays
+// withheld (#402/#413): the row is now status=error, so finalizeContentHash's
+// guard leaves the done-marker unstamped and the document is retried next run
+// (re-screening the cached STT/OCR output, not the provider — bounded cost).
+func (s *Service) recordQualityGateDocError(ctx context.Context, doc model.Document, kind string, reason quality.Reason) {
+	code := qualityGateFailureCode(kind)
+	// Content-free and deterministic (§8.6.6): the message is code + kind + the
+	// enum reason only — no document text — so it carries no secrets. nil secret
+	// patterns are therefore safe (persistNonFatalDocError still redacts, a no-op
+	// here).
+	msg := fmt.Sprintf("%s: output quality gate rejected %s output (%s)", code, kind, reason)
+	// Manifest surface (§8.6.11): first canonical code wins, never clobbered.
+	s.markActiveErrored(code, msg)
+	if s.quarantinedThisDoc {
+		// This document already recorded its canonical per-document error and was
+		// counted; keep the first code and count it once (issue #426).
+		return
+	}
+	s.quarantinedThisDoc = true
+	s.addErrors(1)
+	s.persistNonFatalDocError(ctx, doc, errors.New(msg), nil)
 }
 
 // transcriptExpectedLanguage returns the active STT provider profile's language
@@ -2835,7 +2952,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
 		duration = d
 	}
-	decision := s.screenOutputQuality(doc.RelPath, "transcript", transcriptText, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
 		Duration:         duration,
@@ -3027,7 +3144,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// quality gate exactly like an STT transcript (anti-hallucination). The
 	// expected language is the TARGET language: the gate's language detector
 	// should accept the translated text, not the source.
-	decision := s.screenOutputQuality(doc.RelPath, "transcript-translation", translated, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindTranslation, translated, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: targetLang,
 		Duration:         duration,
