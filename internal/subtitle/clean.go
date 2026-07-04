@@ -204,13 +204,14 @@ func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 			}
 		}
 		if opts.Glossary.Active() {
-			text = opts.Glossary.Apply(text)
-			// A glossary rule may empty a cue (an empty REPLACEMENT deletes text,
-			// e.g. "foo=>"). Drop the now-empty cue like the entry-time empty/URL
-			// passes do. This runs AFTER the collapse bookkeeping, which compares
-			// pre-glossary text, so dropping here never corrupts the run counter;
-			// survivors are still re-indexed gap-free below.
-			if strings.TrimSpace(text) == "" {
+			// Re-trim after the rewrite: a glossary rule may empty a cue (an empty
+			// REPLACEMENT deletes text, e.g. "foo=>") or leave stray leading/
+			// trailing whitespace. Trim it and drop a now-empty cue like the
+			// entry-time empty/URL passes do. This runs AFTER the collapse
+			// bookkeeping (which compares pre-glossary text), so dropping here
+			// never corrupts the run counter; survivors are re-indexed gap-free.
+			text = strings.TrimSpace(opts.Glossary.Apply(text))
+			if text == "" {
 				continue
 			}
 		}
