@@ -377,24 +377,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	if cfg.QualityGatesEnabled {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
 	}
-	svc.transcriptLanguage = sttExpectedLanguage(cfg)
-	// Resolve the STT derivation identity (SPEC §8.6.7) from the same profile the
-	// transcriber uses, so a recorded transcript identity can be compared against
-	// the active one to detect a model swap. Empty when STT is off.
-	if prof, ok := resolveSTTProfile(cfg); ok {
-		svc.sttProvider = strings.TrimSpace(prof.Name)
-		svc.sttModel = strings.TrimSpace(prof.STTModel)
-		// Resolve the diarization binding (SPEC §8.6.8) from the SAME STT profile:
-		// diarization is active when enabled (tri-state) AND the backend advertises
-		// CapDiarize. The diarize derivation identity (§8.6.7) is the backend's
-		// provider name + STT model, so a backend/model swap re-derives. When
-		// inactive the fields stay empty and the STT path is unchanged.
-		if config.DiarizationActive(cfg, prof) {
-			svc.diarizeActive = true
-			svc.diarizeProvider = strings.TrimSpace(prof.Name)
-			svc.diarizeModel = strings.TrimSpace(prof.STTModel)
-		}
-	}
+	svc.resolveTranscriptIdentityFields()
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
 	// translation is enabled we resolve the chat capability and build a
 	// generator; when off (default), or no chat provider resolves, the field
@@ -415,6 +398,35 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.embedMultimodal = provider.NormalizeEmbedMultimodal(ep.EmbedMultimodal)
 	}
 	return svc, nil
+}
+
+// resolveTranscriptIdentityFields populates the transcript derivation-identity
+// fields (transcript language, STT provider/model, and the diarize binding) on s
+// from s.cfg. It is the single source of truth for that resolution, shared by
+// NewService and ActiveDerivationIdentities so the transcript identity the
+// retriever reconstructs for open_file (issue #488) cannot drift from the one
+// ingest folds into the transcript cache key it writes (SPEC §8.6.7).
+func (s *Service) resolveTranscriptIdentityFields() {
+	s.transcriptLanguage = sttExpectedLanguage(s.cfg)
+	// Resolve the STT derivation identity (SPEC §8.6.7) from the same profile the
+	// transcriber uses, so a recorded transcript identity can be compared against
+	// the active one to detect a model swap. Empty when STT is off.
+	prof, ok := resolveSTTProfile(s.cfg)
+	if !ok {
+		return
+	}
+	s.sttProvider = strings.TrimSpace(prof.Name)
+	s.sttModel = strings.TrimSpace(prof.STTModel)
+	// Resolve the diarization binding (SPEC §8.6.8) from the SAME STT profile:
+	// diarization is active when enabled (tri-state) AND the backend advertises
+	// CapDiarize. The diarize derivation identity (§8.6.7) is the backend's
+	// provider name + STT model, so a backend/model swap re-derives. When
+	// inactive the fields stay empty and the STT path is unchanged.
+	if config.DiarizationActive(s.cfg, prof) {
+		s.diarizeActive = true
+		s.diarizeProvider = strings.TrimSpace(prof.Name)
+		s.diarizeModel = strings.TrimSpace(prof.STTModel)
+	}
 }
 
 // SetOnDocumentDeleted registers a compatibility wrapper for callers that still

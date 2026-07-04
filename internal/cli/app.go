@@ -828,6 +828,13 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
+	// Plumb ingest's ACTIVE OCR/transcript derivation identities into open_file's
+	// cache lookup so it keys the OCR/transcript cache the SAME identity-aware way
+	// ingest's writer does (issue #488). The ask path is read-only and builds no
+	// ingest Service, so the identities are computed from the same cfg the ingestor
+	// would use (byte-identical to a Service's getters).
+	ocrIdentity, transcriptIdentity := ingest.ActiveDerivationIdentities(cfg)
+	ret.SetDerivationCacheIdentities(ocrIdentity, transcriptIdentity)
 	ret.SetProtocolVersion(cfg.ProtocolVersion)
 	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
