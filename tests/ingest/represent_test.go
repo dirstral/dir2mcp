@@ -64,12 +64,18 @@ func TestNormalizeUTF8(t *testing.T) {
 			expected: []byte("Hello 世界 🌍"),
 		},
 		{
-			name:  "invalid UTF-8 sequence",
-			input: []byte{0xff, 0xfe, 0x00},
-			// strings.ToValidUTF8 treats consecutive invalid bytes (0xff, 0xfe)
-			// as a single invalid sequence and replaces them with one U+FFFD
-			// (0xEF,0xBF,0xBD); trailing 0x00 is preserved.
-			expected: []byte{0xEF, 0xBF, 0xBD, 0x00},
+			name:  "invalid UTF-8 salvaged to U+FFFD",
+			input: []byte{0x81}, // undefined in Windows-1252, no BOM, not UTF-16
+			// A lone 0x81 is invalid UTF-8 and maps to no Windows-1252 codepoint,
+			// so it decodes to a single U+FFFD (0xEF,0xBF,0xBD).
+			expected: []byte{0xEF, 0xBF, 0xBD},
+		},
+		{
+			name: "UTF-16LE BOM then a lone padding byte",
+			// 0xFF 0xFE is the UTF-16LE BOM; the trailing 0x00 is an incomplete
+			// (odd) code unit and decodes to a single U+FFFD.
+			input:    []byte{0xFF, 0xFE, 0x00},
+			expected: []byte{0xEF, 0xBF, 0xBD},
 		},
 	}
 
