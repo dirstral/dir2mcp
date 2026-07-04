@@ -714,12 +714,6 @@ func translatorFromConfig(cfg config.Config) (model.Generator, provider.Profile,
 	return gen, prof, nil
 }
 
-// translateTranscriberFromConfig resolves the active STT profile and builds a
-// Whisper translate-task transcriber for media.translate.engine=whisper. It
-// reuses the same STT profile resolution as source transcription (resolveSTTProfile)
-// so translation re-decodes the audio on the exact provider that produced the
-// source transcript. Returns an error (leaving translation off) when no STT
-// profile resolves or the profile is not translate-capable (non-whisper).
 // translationConfigured reports whether transcript translation should run: at
 // least one target language plus a resolved engine binding (the chat generator
 // for engine=chat, or the Whisper translate transcriber for engine=whisper).
@@ -729,6 +723,12 @@ func (s *Service) translationConfigured() bool {
 	return len(s.translateTargetLangs) > 0 && (s.translator != nil || s.translateSTT != nil)
 }
 
+// translateTranscriberFromConfig resolves the active STT profile and builds a
+// Whisper translate-task transcriber for media.translate.engine=whisper. It
+// reuses the same STT profile resolution as source transcription (resolveSTTProfile)
+// so translation re-decodes the audio on the exact provider that produced the
+// source transcript. Returns an error (leaving translation off) when no STT
+// profile resolves or the profile is not translate-capable (non-whisper).
 func translateTranscriberFromConfig(cfg config.Config) (model.Transcriber, provider.Profile, error) {
 	prof, ok := resolveSTTProfile(cfg)
 	if !ok {
