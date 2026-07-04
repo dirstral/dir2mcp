@@ -393,6 +393,13 @@ func (a *App) resolveX402Token(cfg *config.Config, opts upOptions) (source strin
 // validateUpConfig runs all post-override config validations (public mode,
 // MCP path prefix, x402, root/state directories).
 func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
+	// Re-validate AFTER the CLI flag overlay (#405). Load() validated the
+	// on-disk config, but applyUpFlagOverrides may have set values Load never
+	// saw, so without this a flag could smuggle an invalid value past validation.
+	if err := cfg.Validate(); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("CONFIG_INVALID: %v", err))
+		return exitConfigInvalid
+	}
 	if cfg.Public || opts.public {
 		if code := a.applyPublicMode(cfg, opts); code != exitSuccess {
 			return code
@@ -1308,6 +1315,10 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 	if code := a.validateUpConfig(&cfg, opts); code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
 	}
+	// Apply the validated chunking.* budgets to the chunker before ingestion
+	// begins (#405): the chunker reads process-level effective sizes, so this
+	// must run before any document is chunked.
+	ingest.ConfigureChunking(cfg.ChunkingMaxTokens, cfg.ChunkingOverlapTokens)
 	nonInteractiveMode := upNonInteractiveMode(opts)
 	if code := a.checkMistralAPIKey(&cfg, opts, nonInteractiveMode); code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
