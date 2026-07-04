@@ -2,6 +2,7 @@ package tests
 
 import (
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/colbertrerank"
 	"github.com/dirstral/dir2mcp/internal/gemini"
@@ -10,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/openai"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
+	"github.com/dirstral/dir2mcp/internal/whisperapi"
 )
 
 func prof(k provider.Kind) provider.Profile {
@@ -64,6 +66,50 @@ func TestTranscriber(t *testing.T) {
 			t.Errorf("Transcriber(%s) must error (not STT-capable)", k)
 		}
 	}
+}
+
+// TestWhisperTranscriberLimits asserts the whisper client honors the profile's
+// STT request-limit overrides (dir2mcp#510/#511): a positive STTMaxPayloadMB /
+// STTRequestTimeoutSec raises the client caps, and zero leaves the built-in
+// defaults untouched.
+func TestWhisperTranscriberLimits(t *testing.T) {
+	defClient := whisperapi.NewClient("http://x", "")
+	defPayload := defClient.MaxPayloadBytes
+	defTimeout := defClient.HTTPClient.Timeout
+
+	t.Run("overrides applied", func(t *testing.T) {
+		p := prof(provider.KindWhisper)
+		p.STTMaxPayloadMB = 200
+		p.STTRequestTimeoutSec = 1800
+		tr, err := providerfactory.Transcriber(p)
+		if err != nil {
+			t.Fatalf("Transcriber(whisper): %v", err)
+		}
+		c, ok := tr.(*whisperapi.Client)
+		if !ok {
+			t.Fatalf("whisper Transcriber is %T, want *whisperapi.Client", tr)
+		}
+		if want := 200 * 1024 * 1024; c.MaxPayloadBytes != want {
+			t.Errorf("MaxPayloadBytes = %d, want %d", c.MaxPayloadBytes, want)
+		}
+		if want := 1800 * time.Second; c.HTTPClient.Timeout != want {
+			t.Errorf("HTTPClient.Timeout = %v, want %v", c.HTTPClient.Timeout, want)
+		}
+	})
+
+	t.Run("zero leaves defaults", func(t *testing.T) {
+		tr, err := providerfactory.Transcriber(prof(provider.KindWhisper))
+		if err != nil {
+			t.Fatalf("Transcriber(whisper): %v", err)
+		}
+		c := tr.(*whisperapi.Client)
+		if c.MaxPayloadBytes != defPayload {
+			t.Errorf("MaxPayloadBytes = %d, want default %d", c.MaxPayloadBytes, defPayload)
+		}
+		if c.HTTPClient.Timeout != defTimeout {
+			t.Errorf("HTTPClient.Timeout = %v, want default %v", c.HTTPClient.Timeout, defTimeout)
+		}
+	})
 }
 
 func TestTTS(t *testing.T) {
