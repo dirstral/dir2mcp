@@ -448,6 +448,83 @@ func TestSidecar_ForceReindex_RetiresStaleSidecarReps(t *testing.T) {
 	}
 }
 
+// TestSidecar_LanguageTokenValidation_RejectsFragmentAndCrossMediaTokens guards
+// issue #431 §8.6.4: a dot-free tail token binds as a language suffix ONLY when
+// it names a real BCP-47 language. A stray filename fragment ("clip.HD.vtt",
+// "clip.2024.vtt") or a cross-media extension token ("clip.mp4.vtt" bound to
+// "clip.mp3", where mediaExt "mp3" != token "mp4") must NOT bind as a bogus
+// "HD"/"2024"/"mp4"-language transcript. A genuine "clip.en.vtt" alongside them
+// still binds, so real sidecars are unaffected.
+func TestSidecar_LanguageTokenValidation_RejectsFragmentAndCrossMediaTokens(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "clip.mp3"), "fake-audio")
+	// A sibling video makes the cross-media "clip.mp4.vtt" realistic (yt-dlp/livevtt
+	// default output) — it must not be pulled onto clip.mp3.
+	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video")
+	// Bogus tokens — must NOT bind to clip.mp3:
+	writeFile(t, filepath.Join(root, "clip.HD.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhd fragment\n")
+	writeFile(t, filepath.Join(root, "clip.2024.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nyear fragment\n")
+	writeFile(t, filepath.Join(root, "clip.mp4.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\ncross media\n")
+	// Genuine language sidecar — must bind:
+	writeFile(t, filepath.Join(root, "clip.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nenglish\n")
+
+	st := &fakeIngestStore{}
+	svc := newSidecarService(t, root, t.TempDir(), st)
+
+	doc := model.Document{DocID: 1, RelPath: "clip.mp3", DocType: "audio"}
+	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
+	if err != nil {
+		t.Fatalf("IngestSidecarTranscripts: %v", err)
+	}
+	if !ingested {
+		t.Fatal("expected the genuine clip.en.vtt sidecar to be ingested")
+	}
+	if len(st.reps) != 1 {
+		t.Fatalf("expected exactly 1 transcript rep (clip.en.vtt only), got %d: %+v", len(st.reps), st.reps)
+	}
+	if st.reps[0].RepType != ingest.TranscriptRepType("en") {
+		t.Fatalf("expected transcript-en rep_type, got %q", st.reps[0].RepType)
+	}
+	for _, bogus := range []string{`"language":"HD"`, `"language":"2024"`, `"language":"mp4"`} {
+		if strings.Contains(st.reps[0].MetaJSON, bogus) {
+			t.Fatalf("bogus language token must not be recorded, meta=%s", st.reps[0].MetaJSON)
+		}
+	}
+}
+
+// TestSidecar_BogusTokenSidecars_DoNotSuppressSTT guards the other half of issue
+// #431 §8.6.4: when a media file's only siblings are fragment/cross-media
+// "sidecars" (no genuine language sidecar), none of them bind, so real STT MUST
+// still run rather than being silently suppressed by a bogus subtitle file.
+func TestSidecar_BogusTokenSidecars_DoNotSuppressSTT(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), "fake-audio")
+	writeFile(t, filepath.Join(root, "song.mp4"), "fake-video")
+	writeFile(t, filepath.Join(root, "song.HD.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhd fragment\n")
+	writeFile(t, filepath.Join(root, "song.mp4.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\ncross media\n")
+
+	st := &fakeIngestStore{}
+	stt := &fakeTranscriber{text: "[00:00] from stt"}
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc.SetTranscriber(stt)
+
+	f := ingest.DiscoveredFile{RelPath: "song.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	if stt.calls != 1 {
+		t.Fatalf("expected STT to run once (bogus-token sidecars must not suppress it), got %d call(s)", stt.calls)
+	}
+	if len(st.reps) != 1 || st.reps[0].RepType != ingest.RepTypeTranscript {
+		t.Fatalf("expected one bare STT transcript rep, got %+v", st.reps)
+	}
+	if strings.Contains(st.reps[0].MetaJSON, `"source":"sidecar"`) {
+		t.Fatalf("STT transcript must not carry sidecar source, got meta %q", st.reps[0].MetaJSON)
+	}
+}
+
 func assertSidecarMeta(t *testing.T, metaJSON, wantLang string) {
 	t.Helper()
 	if metaJSON == "" {

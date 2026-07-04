@@ -758,6 +758,76 @@ func TestMCPToolsCallAskAudio_WithTTSReturnsTextAndAudio(t *testing.T) {
 	}
 }
 
+// TestMCPToolsCallAskAudio_ReportsWAVMimeForWAVBytes guards issue #431: ask_audio
+// must report the audio format the synthesizer actually returned, not a
+// hardcoded audio/mpeg. A Gemini-TTS-style WAV (RIFF/WAVE container) must be
+// labelled audio/wav in BOTH the audio content item and structuredContent.audio
+// so the client can play it; and the reported value must be a member of the
+// (now widened) askAudioOutputSchema enum so the structuredContent gate passes.
+func TestMCPToolsCallAskAudio_ReportsWAVMimeForWAVBytes(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		askResult: model.AskResult{
+			Question:         "What is indexed?",
+			Answer:           "Indexed content is available.",
+			Citations:        []model.Citation{},
+			Hits:             []model.SearchHit{},
+			IndexingComplete: true,
+		},
+	}
+	// Minimal RIFF/WAVE container (44-byte canonical WAV header shape); the audio
+	// payload is irrelevant to MIME sniffing, only the magic bytes matter.
+	wav := make([]byte, 0, 64)
+	wav = append(wav, "RIFF"...)
+	wav = append(wav, 0x24, 0x00, 0x00, 0x00) // chunk size (little-endian, arbitrary)
+	wav = append(wav, "WAVEfmt "...)
+	wav = append(wav, make([]byte, 20)...) // fmt body placeholder
+	tts := &fakeTTSSynthesizer{audio: wav}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever, mcp.WithTTS(tts)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"dir2mcp_ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			Content           []toolContentEnvelope  `json:"content"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatal("expected successful ask_audio response")
+	}
+	if len(envelope.Result.Content) != 2 {
+		t.Fatalf("expected text + audio content items, got %#v", envelope.Result.Content)
+	}
+	if got := envelope.Result.Content[1].MIMEType; got != "audio/wav" {
+		t.Fatalf("audio content item must report the WAV format, got %q", got)
+	}
+	audioRaw, ok := envelope.Result.StructuredContent["audio"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structuredContent.audio object, got %#v", envelope.Result.StructuredContent["audio"])
+	}
+	if gotMime, _ := audioRaw["mime_type"].(string); gotMime != "audio/wav" {
+		t.Fatalf("structuredContent audio mime_type must be audio/wav, got %#v", audioRaw["mime_type"])
+	}
+	wantEncoded := base64.StdEncoding.EncodeToString(wav)
+	if gotData, _ := audioRaw["data"].(string); gotData != wantEncoded {
+		t.Fatalf("unexpected structured audio data: %#v", audioRaw["data"])
+	}
+}
+
 // TestMCPToolsCallStats_ReturnsStructuredContent verifies the happy-path
 // response shape for dir2mcp.stats.
 func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
