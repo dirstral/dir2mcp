@@ -259,18 +259,41 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 
 // EmbedIdentity is the corpus-lifetime embed identity (SPEC 8.1.4):
 // provider name + text/code model + requested text/code output dimension
-// (8.1.6) + multimodal mode (8.1.7). It is recorded in the config
-// snapshot/index and compared on load. Role (8.1.5) is deliberately
-// excluded — it does not affect vector-space compatibility, but the
-// requested dimension and multimodal mode do.
-func EmbedIdentity(p Profile) string {
-	return fmt.Sprintf("%s|%s|%s|%d|%d|%s",
+// (8.1.6) + multimodal mode (8.1.7) + late-chunking mode (issue #332/#446).
+// It is recorded in the config snapshot/index and compared on load. Role
+// (8.1.5) is deliberately excluded — it does not affect vector-space
+// compatibility, but the requested dimension, multimodal mode, and
+// late-chunking mode do.
+//
+// lateChunking is the resolved value of ingest.late_chunking (config, not a
+// provider attribute). It enters the identity because late chunking, once its
+// pooling path is wired, produces context-pooled chunk vectors that are NOT
+// comparable to chunk-then-embed vectors — so building a corpus with the mode
+// on then off (or a distributed worker with a different setting) MUST re-derive
+// rather than silently mix vector spaces (SPEC 8.1.4). The gate is conservative:
+// it keys off the config flag, not the runtime TokenEmbedder capability (which
+// EmbedIdentity cannot observe), so toggling the flag re-derives even in a build
+// with no token-embedding provider — the safe direction.
+func EmbedIdentity(p Profile, lateChunking bool) string {
+	return fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s",
 		strings.TrimSpace(p.Name),
 		strings.TrimSpace(p.EmbedTextModel),
 		strings.TrimSpace(p.EmbedCodeModel),
 		p.EmbedTextDim,
 		p.EmbedCodeDim,
-		NormalizeEmbedMultimodal(p.EmbedMultimodal))
+		NormalizeEmbedMultimodal(p.EmbedMultimodal),
+		normalizeLateChunking(lateChunking))
+}
+
+// normalizeLateChunking renders the late-chunking mode as the stable token
+// used in the embed identity: "on" when enabled, "off" otherwise. Keeping it a
+// named token (rather than a bare bool) leaves room for future pooling modes
+// without another identity-field migration.
+func normalizeLateChunking(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 // NormalizeEmbedMultimodal lower-cases/trims the multimodal mode and maps
@@ -307,21 +330,24 @@ func VerifyEmbedIdentity(recorded, current string) error {
 }
 
 // normalizeEmbedIdentity upgrades a legacy recorded identity to the
-// current 6-field form before comparison, so upgrading an existing corpus
-// that used native dimensions and no multimodal mode does not force a
-// spurious reindex:
-//   - pre-8.1.6 (3 fields: provider|text|code) → append "|0|0|off"
-//   - pre-8.1.7 (5 fields: …|tdim|cdim)        → append "|off"
+// current 7-field form before comparison, so upgrading an existing corpus
+// that used native dimensions, no multimodal mode, and no late chunking does
+// not force a spurious reindex:
+//   - pre-8.1.6 (3 fields: provider|text|code)        → append "|0|0|off|off"
+//   - pre-8.1.7 (5 fields: …|tdim|cdim)               → append "|off|off"
+//   - pre-late-chunking (6 fields: …|multimodal, #446) → append "|off"
 //
-// Empty (fresh index) and already-6-field values are returned unchanged.
+// Empty (fresh index) and already-7-field values are returned unchanged.
 func normalizeEmbedIdentity(id string) string {
 	if id == "" {
 		return ""
 	}
 	switch strings.Count(id, "|") {
 	case 2:
-		return id + "|0|0|off"
+		return id + "|0|0|off|off"
 	case 4:
+		return id + "|off|off"
+	case 5:
 		return id + "|off"
 	default:
 		return id
