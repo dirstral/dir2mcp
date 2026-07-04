@@ -922,6 +922,89 @@ func (s *SQLiteStore) ClearDocumentContentHashes(ctx context.Context) error {
 	return err
 }
 
+// reindexHashBackupTable is the ephemeral table that snapshots
+// documents.content_hash before a reindex clears it. It lets an interrupted or
+// failed reindex restore the incremental "already indexed" gate instead of
+// forcing a full-corpus reprocess on the next sync (issue #418).
+const reindexHashBackupTable = "_reindex_hash_backup"
+
+// BackupContentHashes snapshots (doc_id, content_hash) for every document into
+// an ephemeral backup table so RestoreContentHashes can undo a subsequent
+// ClearDocumentContentHashes if the reindex rebuild is interrupted or fails.
+// Any leftover backup from an earlier interrupted run is dropped first so the
+// snapshot reflects the current, pre-clear state. Idempotent.
+func (s *SQLiteStore) BackupContentHashes(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx,
+		`CREATE TABLE `+reindexHashBackupTable+` AS SELECT doc_id, content_hash FROM documents`)
+	return err
+}
+
+// RestoreContentHashes restores documents.content_hash from the snapshot taken
+// by BackupContentHashes for the backed-up rows, then drops the snapshot. It is
+// a no-op when no snapshot exists (never taken, or already discarded), so it is
+// safe to call on any failure path and is idempotent.
+func (s *SQLiteStore) RestoreContentHashes(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	present, err := reindexHashBackupPresent(ctx, db)
+	if err != nil || !present {
+		return err
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE documents
+		    SET content_hash = (
+		        SELECT b.content_hash FROM `+reindexHashBackupTable+` b
+		        WHERE b.doc_id = documents.doc_id
+		    )
+		  WHERE doc_id IN (SELECT doc_id FROM `+reindexHashBackupTable+`)`); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable)
+	return err
+}
+
+// DiscardContentHashBackup drops the snapshot taken by BackupContentHashes after
+// a durable reindex. Idempotent and safe when no snapshot exists.
+func (s *SQLiteStore) DiscardContentHashBackup(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable)
+	return err
+}
+
+// reindexHashBackupPresent reports whether the ephemeral content-hash snapshot
+// table exists, so restore can be a clean no-op when it does not.
+func reindexHashBackupPresent(ctx context.Context, db *sql.DB) (bool, error) {
+	var name string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		reindexHashBackupTable).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ListDocumentHashes returns the (rel_path, content_hash) pair for every
 // non-deleted document. It backs retrieval-time cross-file de-duplication
 // (SPEC §9.2): the retrieval service maps a hit's rel_path to its content_hash

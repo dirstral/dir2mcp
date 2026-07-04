@@ -231,14 +231,18 @@ func (a *App) prepareDaemonStateDir(stateDir, pidPath string, opts upOptions) in
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", stateDir, err))
 		return exitGeneric
 	}
-	if existing, err := readPIDFile(pidPath); err == nil {
-		if processIsAlive(existing) {
-			writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
-				fmt.Sprintf("dir2mcp is already running for %s (pid %d)", stateDir, existing),
-				"Stop it with `dir2mcp down`, or pass --foreground to run a one-off in this terminal.",
-			)
-			return exitGeneric
-		}
+	// Only refuse when a live daemon that is actually OURS owns the pid file.
+	// A recycled pid (alive, but its start-time token no longer matches — the
+	// OS reassigned it after a crash without cleanup) must not be mistaken for
+	// the daemon and block startup (issue #418); we clear that stale file and
+	// proceed, same as a dead pid.
+	if existing, ownership := classifyPIDFile(pidPath); ownership == pidLive {
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
+			fmt.Sprintf("dir2mcp is already running for %s (pid %d)", stateDir, existing),
+			"Stop it with `dir2mcp down`, or pass --foreground to run a one-off in this terminal.",
+		)
+		return exitGeneric
+	} else if ownership != pidNoFile {
 		_ = removePIDFile(pidPath)
 	}
 	connPath := connectionFilePath(stateDir)
