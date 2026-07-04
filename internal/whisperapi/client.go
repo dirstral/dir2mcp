@@ -269,6 +269,20 @@ func (c *Client) writeTranscriptionFields(writer *multipart.Writer) error {
 	if err := writer.WriteField("response_format", c.responseFormat()); err != nil {
 		return fail("failed to write transcription response_format", err)
 	}
+	// Word-level timestamps are only returned when timestamp_granularities
+	// includes "word": response_format=verbose_json alone yields segment timing
+	// only (the API defaults granularity to "segment"), so without this the
+	// per-word timings that #252 / broadcast segmentation depend on never arrive.
+	// Emit both the OpenAI array form ("timestamp_granularities[]") and the bare
+	// form some OpenAI-compatible servers read, and only for verbose_json so other
+	// formats are byte-for-byte unchanged.
+	if strings.EqualFold(strings.TrimSpace(c.responseFormat()), ResponseFormatVerboseJSON) {
+		for _, field := range []string{"timestamp_granularities[]", "timestamp_granularities"} {
+			if err := writer.WriteField(field, "word"); err != nil {
+				return fail("failed to write transcription timestamp_granularities", err)
+			}
+		}
+	}
 	// Only emit `task` when translating, so plain-transcription requests are
 	// byte-for-byte unchanged and servers that don't recognize the field keep
 	// working for the default path.
