@@ -98,25 +98,30 @@ type Gate struct {
 }
 
 // New builds a Gate from cfg. Defaults are filled via [Config.WithDefaults],
-// and detectors are appended in severity order (empty, repetition,
-// gibberish, language, density). Each detector is included only if its
-// corresponding Enabled flag is set.
+// and detectors are appended in severity order (empty, gibberish, repetition,
+// language, density). Gibberish precedes repetition so that corrupted output
+// (e.g. a run of replacement characters, which is also trivially "repetitive")
+// is reported as its root cause rather than as a repetition loop. Each detector
+// is included only if its corresponding Enabled flag is set.
 func New(cfg Config) *Gate {
 	cfg = cfg.WithDefaults()
 	g := &Gate{}
 	if cfg.Empty.Enabled {
 		g.detectors = append(g.detectors, emptyDetector{minChars: cfg.Empty.MinChars})
 	}
-	if cfg.Repetition.Enabled {
-		g.detectors = append(g.detectors, repetitionDetector{
-			n:        cfg.Repetition.NGram,
-			maxFrac:  cfg.Repetition.MaxRepeatFraction,
-			minWords: cfg.Repetition.MinWords,
-		})
-	}
 	if cfg.Gibberish.Enabled {
 		g.detectors = append(g.detectors, gibberishDetector{
 			maxNonPrintable: cfg.Gibberish.MaxNonPrintableFraction,
+			maxOther:        cfg.Gibberish.MaxOtherFraction,
+			minVowel:        cfg.Gibberish.MinVowelFraction,
+			minVowelSample:  cfg.Gibberish.MinVowelSampleLetters,
+		})
+	}
+	if cfg.Repetition.Enabled {
+		g.detectors = append(g.detectors, repetitionDetector{
+			maxFrac:   cfg.Repetition.MaxRepeatFraction,
+			maxPeriod: cfg.Repetition.MaxPeriod,
+			minRunes:  cfg.Repetition.MinRunes,
 		})
 	}
 	if cfg.Language.Enabled {
