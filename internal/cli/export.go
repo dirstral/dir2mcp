@@ -79,7 +79,19 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 	}
 
 	filter := subtitle.NewWordFilter(cfg.MediaFilterWords)
-	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, filter, cfg.MediaSubtitlesSegmentation)
+	// The glossary was already validated at config load, so a parse error here is
+	// unexpected; surface it rather than silently dropping the glossary.
+	glossary, err := subtitle.NewGlossary(cfg.MediaSubtitlesGlossary)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.glossary: %v", err))
+		return exitConfigInvalid
+	}
+	clean := subtitle.CleanOptions{
+		DropURLs:        cfg.MediaSubtitlesDropURLs,
+		CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
+		Glossary:        glossary,
+	}
+	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, filter, cfg.MediaSubtitlesSegmentation, clean)
 	if code != exitSuccess {
 		return code
 	}
@@ -91,7 +103,7 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 // from its chunks, and renders them in the requested format. It returns the
 // serialized document, or an exit code on error (no transcript, no chunks,
 // unknown language, store failure).
-func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, filter *subtitle.WordFilter, segmentation string) (string, int) {
+func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, filter *subtitle.WordFilter, segmentation string, clean subtitle.CleanOptions) (string, int) {
 	reps, err := ts.TranscriptRepresentations(ctx, opts.relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -128,6 +140,10 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 	// consistent with how ingest strips them before embedding. Cues empty after
 	// filtering are dropped. An empty config leaves cues unchanged.
 	cues = subtitle.FilterCues(cues, filter)
+	// Apply the configured cue-cleaning passes (media.subtitles.glossary /
+	// collapse_repeats / drop_urls) after word-filtering, so filter_words removal
+	// and this cleanup compose. An empty config leaves cues unchanged.
+	cues = subtitle.CleanCues(cues, clean)
 	if len(cues) == 0 {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("document %q transcript has no time-coded cues to export", opts.relPath))
 		return "", exitGeneric
