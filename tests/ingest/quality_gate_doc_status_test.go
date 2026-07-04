@@ -196,6 +196,135 @@ func TestQualityGate_CleanTranscript_IndexedNoError(t *testing.T) {
 	}
 }
 
+// TestQualityGate_QuarantineDoesNotSuppressLaterIndexedCredit pins the
+// per-document reset of the §8.6.6/#426 quarantine flag (the authoritative reset
+// now lives at processDocument entry). A quarantined document leaves the flag
+// true; a subsequent document that takes an early-return path (here an ok cache
+// hit) must still be credited as indexed — the stale flag from the prior document
+// must NOT leak in and suppress its indexed credit.
+func TestQualityGate_QuarantineDoesNotSuppressLaterIndexedCredit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "clean.mp3"), "clean-audio")
+	writeFile(t, filepath.Join(root, "loop.mp3"), "loop-audio")
+	st := newRealStore(t)
+
+	svc, state := qgService(t, root, st)
+	svc.SetSTTIdentity("whisper", "whisper-large-v3")
+	svc.SetTranscriptLanguage("en")
+
+	cleanF := ingest.DiscoveredFile{RelPath: "clean.mp3", SizeBytes: 11, MTimeUnix: time.Now().Unix()}
+	loopF := ingest.DiscoveredFile{RelPath: "loop.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+
+	// 1) Index a clean audio document so it becomes a cache hit on a later scan.
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] welcome to the lecture today\n[00:02] we discuss several distinct topics in depth\n[00:05] including history geography and science across many regions"})
+	if err := svc.ProcessDocument(ctx, cleanF, nil, false); err != nil {
+		t.Fatalf("ProcessDocument(clean.mp3): %v", err)
+	}
+	if snap := state.Snapshot(); snap.Indexed != 1 || snap.Errors != 0 {
+		t.Fatalf("after clean.mp3: indexed=%d errors=%d, want indexed=1 errors=0", snap.Indexed, snap.Errors)
+	}
+
+	// 2) A quarantined document sets quarantinedThisDoc=true and does not clear it.
+	svc.SetTranscriber(&fakeTranscriber{text: strings.Repeat("thank you ", 60)})
+	if err := svc.ProcessDocument(ctx, loopF, nil, false); err != nil {
+		t.Fatalf("ProcessDocument(loop.mp3) hard-failed on a non-fatal quality-gate rejection: %v", err)
+	}
+	if snap := state.Snapshot(); snap.Indexed != 1 || snap.Errors != 1 {
+		t.Fatalf("after loop.mp3: indexed=%d errors=%d, want indexed=1 errors=1", snap.Indexed, snap.Errors)
+	}
+
+	// 3) Re-process the clean document. It is now an ok cache hit — an early-return
+	// path that credits the indexed counter WITHOUT re-entering rep generation. The
+	// stale quarantine flag from loop.mp3 must not suppress this credit, and no new
+	// error may be recorded.
+	if err := svc.ProcessDocument(ctx, cleanF, nil, false); err != nil {
+		t.Fatalf("ProcessDocument(clean.mp3 cache hit): %v", err)
+	}
+	snap := state.Snapshot()
+	if snap.Indexed != 2 {
+		t.Fatalf("cache-hit after a quarantine: indexed=%d, want 2 (flag leaked and suppressed the indexed credit)", snap.Indexed)
+	}
+	if snap.Errors != 1 {
+		t.Fatalf("cache-hit after a quarantine: errors=%d, want 1 (no error may leak across documents)", snap.Errors)
+	}
+}
+
+// TestQualityGate_TranslationRejected_WithholdsHash_BothModes pins two coupled
+// invariants for a translation-gate quarantine across BOTH the single-phase and
+// the two-phase (transcription + derivation) pipelines:
+//
+//   - FIX 2 (#402/#413): each quarantined audio document ends status=error with an
+//     EMPTY content_hash, so the next incremental run retries it. In the two-phase
+//     path the derivation pass re-reads the doc after pass 1 already stamped the
+//     hash, so recordQualityGateDocError must blank it — otherwise the unchanged
+//     -content gate would skip (never retry) the quarantined doc.
+//   - FIX 1 (#426): with two audio documents, the per-document quarantine flag is
+//     reset per document, so BOTH translation rejections are counted (errors=2). A
+//     leaked flag would suppress the second document's error accounting.
+func TestQualityGate_TranslationRejected_WithholdsHash_BothModes(t *testing.T) {
+	t.Parallel()
+	for _, twoPhase := range []bool{false, true} {
+		twoPhase := twoPhase
+		name := "single-phase"
+		if twoPhase {
+			name = "two-phase"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			root := t.TempDir()
+			mustWriteFile(t, filepath.Join(root, "audio", "one.mp3"), []byte("fake-audio-one"))
+			mustWriteFile(t, filepath.Join(root, "audio", "two.mp3"), []byte("fake-audio-two"))
+			st := newRealStore(t)
+
+			cfg := config.Config{
+				RootDir:             root,
+				StateDir:            t.TempDir(),
+				STTProvider:         "off",
+				QualityGatesEnabled: true,
+				MediaBatchTwoPhase:  twoPhase,
+			}
+			svc := mustNewIngestService(t, cfg, st)
+			state := appstate.NewIndexingState(appstate.ModeIncremental)
+			svc.SetIndexingState(state)
+			// A clean source transcript (passes the gate) with a degenerate translation
+			// (rejected by the gate).
+			svc.SetTranscriber(&fakeTranscriber{text: "[00:00] a clean source line\n[00:02] another clean line"})
+			svc.SetSTTIdentity("whisper", "whisper-large-v3")
+			svc.SetTranscriptLanguage("de")
+			svc.SetTranslator(degenerateTranslator{}, "mistral", "m", []string{"en"})
+
+			if err := svc.Run(ctx); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			for _, rel := range []string{"audio/one.mp3", "audio/two.mp3"} {
+				doc := mustGetDoc(t, st, rel)
+				if doc.Status != "error" {
+					t.Fatalf("%s (%s): status=%q, want \"error\"", rel, name, doc.Status)
+				}
+				if !strings.HasPrefix(doc.ErrorMessage, "TRANSLATE_FAILED") {
+					t.Fatalf("%s (%s): error_message=%q, want it to lead with TRANSLATE_FAILED", rel, name, doc.ErrorMessage)
+				}
+				// FIX 2: the done-marker is withheld so the doc is retried next run — the
+				// same behavior in single-phase and two-phase (removing the two-phase
+				// content_hash-inconsistency limitation).
+				if doc.ContentHash != "" {
+					t.Fatalf("%s (%s): content_hash=%q, want \"\" (withheld so the quality-gate quarantine is retried in %s mode)", rel, name, doc.ContentHash, name)
+				}
+			}
+
+			// FIX 1: both documents' translation rejections are counted — the flag did
+			// not leak from the first quarantined document into the second.
+			if snap := state.Snapshot(); snap.Errors != 2 {
+				t.Fatalf("%s: run errors=%d, want 2 (both translation rejections counted; a leaked quarantine flag would suppress the second)", name, snap.Errors)
+			}
+		})
+	}
+}
+
 // TestQualityGate_Disabled_LeavesDocOK proves the master switch: with the gate
 // off (the default), even a degenerate transcript leaves the document status=ok
 // and indexed — the nil gate is a pure no-op with no document-status side effect.

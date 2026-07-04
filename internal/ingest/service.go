@@ -238,10 +238,12 @@ type Service struct {
 	// document currently being processed as a non-fatal per-document error, so the
 	// scan loop must count it as exactly one error and NOT credit it as indexed
 	// (issue #426). Like activeOutcome it is per-document state: the scan loop is
-	// sequential (at most one asset in flight), and it is reset at the start of
-	// each representation-generation entry point (generateRepresentations and the
-	// two-phase deriveDocument) so a rejected representation is counted once even
-	// when a document produces several (transcript + per-language translations).
+	// sequential (at most one asset in flight). The authoritative reset is at
+	// processDocument entry so every document starts clean by construction on every
+	// path; generateRepresentations additionally resets it to re-scope the flag for
+	// sequential archive members (separate processDocumentFromContent calls under a
+	// single processDocument entry). A rejected representation is thus counted once
+	// even when a document produces several (transcript + per-language translations).
 	quarantinedThisDoc bool
 
 	// activePass selects which work the representation generators perform for the
@@ -1310,6 +1312,20 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 }
 
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+	// Authoritative per-document reset of the §8.6.6/#426 quality-gate quarantine
+	// flag. The scan loop is sequential (at most one asset in flight), so resetting
+	// here — at the VERY START, before any early-return branch (build error, remote
+	// skip, archive, cache-hit/skipped, non-ok status) — guarantees every document
+	// begins with a clean flag by construction, matching the per-doc reset pattern
+	// used for activeOutcome/indexedPending. Without this, a stale true from a prior
+	// quarantined document could persist across an early-return path that never
+	// reaches generateRepresentations/deriveDocument (which also reset the flag) and
+	// wrongly suppress this document's indexed credit. The resets inside
+	// generateRepresentations/deriveDocument are kept: they re-scope the flag for
+	// sequential archive members, which run as separate processDocumentFromContent
+	// calls under a single processDocument entry.
+	s.quarantinedThisDoc = false
+
 	// Two-phase derivation pass (SPEC §8.6.11): the transcription pass already did
 	// all document building, upserting, counting, and source-transcript work for
 	// this asset; the derivation pass runs ONLY translation (§8.6.2) and re-doing
@@ -1576,12 +1592,10 @@ func (s *Service) suppressIndexedCredit(nonFatalErrored bool) bool {
 // with no source transcript are recorded as skipped and produce nothing — keeping
 // the derivation pass's per-asset manifest/progress totals faithful (§8.6.11).
 func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) error {
-	// Reset the per-document quality-gate quarantine flag (§8.6.6 / #426) so a
-	// translation rejected in this derivation pass is counted once and cannot leak
-	// its dedup state into the next asset. The derivation pass does not credit the
-	// indexed counter (the transcription pass did), so it only needs the flag reset
-	// for correct per-document error accounting on the translation path.
-	s.quarantinedThisDoc = false
+	// The per-document quality-gate quarantine flag (§8.6.6 / #426) was already
+	// reset at processDocument entry (deriveDocument is reached only from there),
+	// so a translation rejected in this derivation pass is counted once and cannot
+	// leak its dedup state into the next asset without a redundant reset here.
 	// No translation configured, or the multimodal "replace" mode that stands in
 	// for STT→text (so no transcript exists to translate): nothing to derive. This
 	// matches the single-pass gates so the corpus-wide output is identical.
@@ -2900,10 +2914,16 @@ func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, k
 // It is idempotent per document: a document with several rejected representations
 // (e.g. a transcript plus per-language translations) counts once and keeps the
 // FIRST canonical code, while every rejected representation still quarantines its
-// own chunks via the returned decision. The document's content_hash stays
-// withheld (#402/#413): the row is now status=error, so finalizeContentHash's
-// guard leaves the done-marker unstamped and the document is retried next run
-// (re-screening the cached STT/OCR output, not the provider — bounded cost).
+// own chunks via the returned decision. The document's content_hash done-marker is
+// blanked before the error upsert (#402/#413): the row is now status=error AND
+// carries an empty hash, so the next incremental run re-derives it. Blanking is
+// required for the two-phase derivation path, where deriveDocument re-reads the doc
+// AFTER the transcription pass already stamped content_hash — without it a
+// translation-gate rejection would persist status=error yet keep the stamped hash,
+// so the unchanged-content gate would SKIP (never retry) the quarantined document.
+// On the single-phase path the hash is already withheld (withholdContentHash), so
+// blanking it again is a no-op; the two modes are now consistent. Retry re-screens
+// the cached STT/OCR/translation output, not the provider — a bounded cost.
 func (s *Service) recordQualityGateDocError(ctx context.Context, doc model.Document, kind string, reason quality.Reason) {
 	code := qualityGateFailureCode(kind)
 	// Content-free and deterministic (§8.6.6): the message is code + kind + the
@@ -2920,6 +2940,10 @@ func (s *Service) recordQualityGateDocError(ctx context.Context, doc model.Docum
 	}
 	s.quarantinedThisDoc = true
 	s.addErrors(1)
+	// Withhold the content_hash done-marker so the quarantined document is retried
+	// next run in BOTH single-phase and two-phase modes (#402/#413). doc is a value
+	// copy, so this affects only the persisted error row.
+	doc.ContentHash = ""
 	s.persistNonFatalDocError(ctx, doc, errors.New(msg), nil)
 }
 
