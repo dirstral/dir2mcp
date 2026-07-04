@@ -1381,6 +1381,90 @@ func TestMCPToolsCallSearch_RequiredOutputFieldsPresent(t *testing.T) {
 	}
 }
 
+// TestMCPToolsCallSearch_IndexUsedReflectsResolvedAxis verifies the SPEC §15.2
+// contract that index_used is the index the query was ACTUALLY routed to, not
+// the requested name. A default-mode ("auto") code-shaped query that the
+// retriever routes to the code index must be reported as index_used="code",
+// which the pre-fix name-derived logic misreported as "text".
+func TestMCPToolsCallSearch_IndexUsedReflectsResolvedAxis(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		searchHits:       []model.SearchHit{},
+		indexingComplete: true,
+		OnAxis: func(q model.SearchQuery) string {
+			if q.Index == "auto" || q.Index == "" {
+				return "code" // stand in for the auto→code routing decision
+			}
+			return q.Index
+		},
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":96,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"func handleSearch() {","index":"auto"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("unexpected error: %#v", envelope.Result.StructuredContent)
+	}
+	if got := envelope.Result.StructuredContent["index_used"]; got != "code" {
+		t.Fatalf("index_used = %v, want \"code\" (SPEC §15.2: report the index actually used)", got)
+	}
+}
+
+// TestMCPToolsCallSearch_IndexUsedIsAlwaysLegalAxis pins that the tool never
+// emits an index_used outside the SPEC §15.2 enum {text,code,both}, even when a
+// non-conforming retriever reports a bogus axis: the tool clamps it to "text".
+func TestMCPToolsCallSearch_IndexUsedIsAlwaysLegalAxis(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		searchHits:       []model.SearchHit{},
+		indexingComplete: true,
+		OnAxis: func(model.SearchQuery) string {
+			return "garbage-not-a-spec-axis"
+		},
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":97,"method":"tools/call","params":{"name":"dir2mcp_search","arguments":{"query":"anything","index":"auto"}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("unexpected error: %#v", envelope.Result.StructuredContent)
+	}
+	switch got := envelope.Result.StructuredContent["index_used"]; got {
+	case "text", "code", "both":
+		// legal SPEC §15.2 value
+	default:
+		t.Fatalf("index_used = %v, want a legal SPEC §15.2 axis {text,code,both}", got)
+	}
+}
+
 func TestMCPToolsCallAsk_RequiredOutputFieldsPresent(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -2155,6 +2239,10 @@ type askAudioRetrieverStub struct {
 	searchHits []model.SearchHit
 	searchErr  error
 	OnSearch   func(query model.SearchQuery) ([]model.SearchHit, error)
+	// OnAxis, when set, drives the SPEC §15.2 index_used the tool layer reports as
+	// the axis actually dispatched by SearchWithAxis. Nil falls back to the
+	// requested-name mapping so existing tests keep their prior index_used value.
+	OnAxis func(query model.SearchQuery) string
 	// EchoQuestion instructs the stub to copy the incoming question
 	// into the returned AskResult.Question field. This mirrors the
 	// behavior of the previous helper that echoed the input question
@@ -2238,9 +2326,38 @@ func (s *askAudioRetrieverStub) IndexingComplete(_ context.Context) (bool, error
 	return s.indexingComplete, nil
 }
 
+// SearchWithAxis satisfies model.AxisSearcher so the search tool can report a
+// truthful index_used (SPEC §15.2) read from the actual dispatch. It runs the
+// same Search the stub already provides and reports the axis via resolveAxis.
+func (s *askAudioRetrieverStub) SearchWithAxis(ctx context.Context, q model.SearchQuery) ([]model.SearchHit, string, error) {
+	hits, err := s.Search(ctx, q)
+	if err != nil {
+		return nil, "", err
+	}
+	return hits, s.resolveAxis(q), nil
+}
+
+// resolveAxis reports the axis SearchWithAxis dispatched on. With OnAxis unset it
+// mirrors the old requested-name mapping, so tests that don't exercise "auto"
+// routing are unaffected.
+func (s *askAudioRetrieverStub) resolveAxis(q model.SearchQuery) string {
+	if s.OnAxis != nil {
+		return s.OnAxis(q)
+	}
+	switch q.Index {
+	case "code":
+		return "code"
+	case "both":
+		return "both"
+	default:
+		return "text"
+	}
+}
+
 // compile-time assertion that askAudioRetrieverStub satisfies the Retriever
 // interface; helps catch missing methods during refactoring.
 var _ model.Retriever = (*askAudioRetrieverStub)(nil)
+var _ model.AxisSearcher = (*askAudioRetrieverStub)(nil)
 
 type fakeTTSSynthesizer struct {
 	audio []byte

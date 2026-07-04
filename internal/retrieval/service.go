@@ -1039,25 +1039,115 @@ func (s *Service) searchByMode(ctx context.Context, queryText string, k int, que
 	codeIndex := s.codeIndex
 	s.metaMu.RUnlock()
 
-	mode := strings.ToLower(strings.TrimSpace(query.Index))
-	if mode == "" {
-		mode = "auto"
-	}
-	switch mode {
-	case "text":
-		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
+	// resolveSearchAxis is the single source of truth for which physical index a
+	// query resolves to, so the dispatch here and the index_used reported to the
+	// tool layer (SPEC §15.2) can never disagree — including the "auto" mode that
+	// routes a code-shaped query to the code index, and HyDE "replace" mode, where
+	// queryText is the generated hypothesis rather than the original query.
+	axis := resolveSearchAxis(query.Index, queryText)
+	// Record the axis of the FIRST (base-query) dispatch so SearchWithAxis can
+	// report an index_used read from the real dispatch. searchByMode is called
+	// again for the HyDE fuse hypothesis pass and for each cross-lingual variant;
+	// those later dispatches are ignored (first-write-wins) so index_used reflects
+	// the primary query's route. No-op when no recorder is installed.
+	recordDispatchedAxis(ctx, axis)
+	switch axis {
 	case "code":
 		return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
 	case "both":
 		return s.searchBothIndices(ctx, queryText, k, textModel, codeModel, textIndex, codeIndex, query)
-	case "auto":
-		if looksLikeCodeQuery(queryText) {
-			return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
-		}
-		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
-	default:
+	default: // "text"
 		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
 	}
+}
+
+// resolveSearchAxis reports which physical index (text|code|both) searchByMode
+// will use for the given requested index mode and query text. It is the shared
+// resolver behind both the dispatch and the tool layer's index_used field, so a
+// default-mode ("auto") query that routes to the code index is reported as
+// "code" rather than the requested-name-derived "text" (SPEC §15.2).
+func resolveSearchAxis(mode, queryText string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "code":
+		return "code"
+	case "both":
+		return "both"
+	case "text":
+		return "text"
+	case "auto", "":
+		if looksLikeCodeQuery(queryText) {
+			return "code"
+		}
+		return "text"
+	default:
+		return "text"
+	}
+}
+
+// dispatchedAxis carries the physical index axis (text|code|both) that the base
+// query was ACTUALLY dispatched on back out to SearchWithAxis, so the MCP tool
+// layer can report a truthful index_used (SPEC §15.2) that never diverges from
+// the real dispatch — including HyDE "replace" mode, where the axis is resolved
+// from the generated hypothesis rather than the original query.
+type dispatchedAxis struct {
+	mu  sync.Mutex
+	set bool
+	val string
+}
+
+type dispatchedAxisKey struct{}
+
+// withDispatchedAxis installs a dispatch-axis recorder on ctx and returns it.
+func withDispatchedAxis(ctx context.Context) (context.Context, *dispatchedAxis) {
+	rec := &dispatchedAxis{}
+	return context.WithValue(ctx, dispatchedAxisKey{}, rec), rec
+}
+
+// recordDispatchedAxis records the axis of the FIRST dispatch (the base query);
+// later dispatches (HyDE fuse's hypothesis pass, cross-lingual variants) are
+// ignored so index_used reflects the primary query's route. It is a no-op when
+// no recorder is installed (any Search path that does not need the axis).
+func recordDispatchedAxis(ctx context.Context, axis string) {
+	rec, _ := ctx.Value(dispatchedAxisKey{}).(*dispatchedAxis)
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.set {
+		return
+	}
+	rec.set = true
+	rec.val = axis
+}
+
+func (d *dispatchedAxis) axis() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.val
+}
+
+// SearchWithAxis runs Search and additionally reports the physical index axis
+// (text|code|both) the base query was ACTUALLY dispatched on, so the MCP search
+// tool can emit a truthful index_used (SPEC §15.2) read from the real dispatch
+// rather than re-deriving the routing heuristic. Re-deriving would diverge from
+// the dispatch under HyDE "replace" mode, where routing keys off the generated
+// hypothesis, not the original query. It satisfies model.AxisSearcher.
+func (s *Service) SearchWithAxis(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, string, error) {
+	ctx, rec := withDispatchedAxis(ctx)
+	hits, err := s.Search(ctx, query)
+	if err != nil {
+		return nil, "", err
+	}
+	axis := rec.axis()
+	if axis == "" {
+		// No dispatch was recorded (a degenerate path that never reached
+		// searchByMode): fall back to a name-derived axis on the original query so
+		// index_used is still a legal SPEC value.
+		axis = resolveSearchAxis(query.Index, query.Query)
+	}
+	return hits, axis, nil
 }
 
 // searchWithHyDE runs retrieval for the query, applying the opt-in HyDE

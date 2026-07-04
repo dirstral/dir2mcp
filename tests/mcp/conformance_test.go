@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 // startConformanceServer boots an SDKTransport on a loopback listener and
@@ -45,6 +47,45 @@ func startConformanceServer(t *testing.T) (baseURL string, stop func()) {
 		_ = ln.Close()
 	}
 	return "http://" + ln.Addr().String() + "/mcp", stop
+}
+
+// TestSDKTransport_InitializePinsProtocolVersion verifies the initialize
+// response protocolVersion is pinned to the server's supported version
+// (SPEC §11.2 / §5.5) rather than echoing the client's requested value. The
+// request omits protocolVersion, so before the fix the go-sdk fell back to
+// 2025-06-18; the server must instead report ProtocolDefaultVersion.
+func TestSDKTransport_InitializePinsProtocolVersion(t *testing.T) {
+	url, stop := startConformanceServer(t)
+	defer stop()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST initialize: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("initialize status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var envelope struct {
+		Result struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode initialize result: %v", err)
+	}
+	if envelope.Result.ProtocolVersion != protocol.ProtocolDefaultVersion {
+		t.Fatalf("protocolVersion = %q, want %q (SPEC §11.2: pin to the server's supported version)",
+			envelope.Result.ProtocolVersion, protocol.ProtocolDefaultVersion)
+	}
 }
 
 // TestSDKTransport_PartialAcceptNegotiated verifies that a client sending only

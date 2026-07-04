@@ -117,6 +117,18 @@ type Retriever interface {
 	IndexingComplete(ctx context.Context) (bool, error)
 }
 
+// AxisSearcher is an optional Retriever capability that runs a search and also
+// reports the physical index axis (text|code|both) the query was ACTUALLY
+// dispatched on. The MCP search tool uses it to populate a truthful index_used
+// (SPEC §15.2) taken from the real dispatch, so the reported value can never
+// diverge from the axis searched — including HyDE "replace" mode, where routing
+// keys off the generated hypothetical document rather than the original query,
+// and an "auto" query whose route depends on the query text. Retrievers that do
+// not implement it fall back to a name-derived index_used.
+type AxisSearcher interface {
+	SearchWithAxis(ctx context.Context, query SearchQuery) ([]SearchHit, string, error)
+}
+
 type Ingestor interface {
 	Run(ctx context.Context) error
 	Reindex(ctx context.Context) error
