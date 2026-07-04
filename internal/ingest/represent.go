@@ -627,6 +627,16 @@ func ConfigureChunking(maxTokens, overlapTokens int) {
 	if minChars >= maxChars {
 		minChars = maxChars - 1
 	}
+	// Clamp overlap below the window so the raw-text path (chunkRawTextByDocType,
+	// which passes these effective vars straight to chunkTextByChars without
+	// normalizeTextChunkParams) can never receive overlap >= max — that would
+	// stall/loop chunking. Defense-in-depth even though Validate() rejects it.
+	if overlapChars < 0 {
+		overlapChars = 0
+	}
+	if overlapChars >= maxChars {
+		overlapChars = maxChars - 1
+	}
 	effectiveTextChunkMaxChars = maxChars
 	effectiveTextChunkOverlapChars = overlapChars
 	effectiveTextChunkMinChars = minChars
@@ -1457,6 +1467,18 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 // ChunkTextByChars splits text content using the same policy as ingestion.
 func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []ChunkSegment {
 	raw := chunkTextByChars(content, maxChars, overlapChars, minChars)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ChunkRawText is an exported wrapper over chunkRawTextByDocType (which uses the
+// process-level effective chunk sizes set by ConfigureChunking) so tests in the
+// tests/ tree can exercise the raw-text path directly.
+func ChunkRawText(docType, content string) []ChunkSegment {
+	raw := chunkRawTextByDocType(docType, content)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

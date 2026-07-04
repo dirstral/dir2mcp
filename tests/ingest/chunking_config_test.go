@@ -63,3 +63,25 @@ func TestConfigureChunking_MaxTokensCapsChunkSize(t *testing.T) {
 		t.Errorf("resetting chunking to defaults not idempotent: %d != %d", got, len(defaultSegs))
 	}
 }
+
+// TestConfigureChunking_ClampsOverlapForRawText pins that an overlap >= the
+// window (e.g. from a direct ConfigureChunking call that bypasses Validate) is
+// clamped, so the raw-text path can't stall: chunking must terminate and emit
+// bounded chunks. Regression for #405/#532 review.
+func TestConfigureChunking_ClampsOverlapForRawText(t *testing.T) {
+	defer ingest.ConfigureChunking(0, 0)
+	// overlap (1000 tokens) far exceeds the window (10 tokens); without the clamp
+	// chunkTextByChars would never advance.
+	ingest.ConfigureChunking(10, 1000)
+	long := strings.Repeat("alpha beta gamma delta ", 500)
+	segs := ingest.ChunkRawText("text", long)
+	if len(segs) == 0 {
+		t.Fatal("clamped raw-text chunking produced no segments")
+	}
+	capRunes := 10 * approxCharsPerToken
+	for i, s := range segs {
+		if n := utf8.RuneCountInString(s.Text); n > capRunes {
+			t.Errorf("chunk %d has %d runes, exceeds cap %d", i, n, capRunes)
+		}
+	}
+}
