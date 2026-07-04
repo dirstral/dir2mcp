@@ -39,7 +39,10 @@ func TestRepoSplitBoundary_NoDirstralCLIImports(t *testing.T) {
 		}
 		if d.IsDir() {
 			base := filepath.Base(path)
-			if base == ".git" || base == ".dir2mcp" {
+			// Skip .git, the local state dir, and .claude (agent worktrees under
+			// .claude/worktrees are checkouts of this repo — scanning them yields
+			// false positives from their own copies of this test file).
+			if base == ".git" || base == ".dir2mcp" || base == ".claude" {
 				return filepath.SkipDir
 			}
 			return nil
