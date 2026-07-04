@@ -288,8 +288,13 @@ func relaxBroadcastTiming(segs []broadcastSeg) []Cue {
 			if end > next-bcGapMinMS {
 				end = next - bcGapMinMS
 			}
-			if end < segs[i].start {
-				end = segs[i].start
+			// Never pull the end before the spoken end: words are sorted by start
+			// only, so overlapping ASR timings can place the next cue's start before
+			// this cue's spoken end, and the overlap cap above must not shrink the
+			// cue below where speech actually ends (which would truncate it or, when
+			// next <= start, invert it to a zero/negative duration).
+			if end < segs[i].end {
+				end = segs[i].end
 			}
 			segs[i].end = end
 		}

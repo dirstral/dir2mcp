@@ -110,6 +110,31 @@ func TestBuildBroadcastCuesMinDuration(t *testing.T) {
 	}
 }
 
+// TestBuildBroadcastCuesOverlappingTimingsNeverTruncate pins that overlapping
+// ASR word timings (a later cue's start preceding the current cue's spoken end)
+// never cause the min-duration extension to pull a cue's end before its spoken
+// end or produce a non-positive duration.
+func TestBuildBroadcastCuesOverlappingTimingsNeverTruncate(t *testing.T) {
+	// Two short sentence-final utterances whose word windows overlap: the second
+	// word starts (900) before the first ends (1000). The first cue is short
+	// enough to trigger extension, but the tight/overlapping neighbour leaves no
+	// room — it must keep its spoken end, not truncate.
+	words := []word{
+		{start: 0, end: 1000, text: "Da."},
+		{start: 900, end: 1050, text: "Net."},
+	}
+	cues := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)})
+	for _, c := range cues {
+		if c.EndMS <= c.StartMS {
+			t.Errorf("cue %d has non-positive duration (%d -> %d)", c.Index, c.StartMS, c.EndMS)
+		}
+	}
+	// The first cue must not end before its own spoken end (1000 ms).
+	if len(cues) > 0 && cues[0].EndMS < 1000 {
+		t.Errorf("cue 0 end %d truncated below spoken end 1000", cues[0].EndMS)
+	}
+}
+
 // TestBuildBroadcastCuesWrapAndDetok pins two-line balanced wrapping for a long
 // cue and punctuation-flush detokenization of trimmed word tokens.
 func TestBuildBroadcastCuesWrapAndDetok(t *testing.T) {
