@@ -132,6 +132,36 @@ func TestTranscribeSegmentsFormatting(t *testing.T) {
 	}
 }
 
+// TestTranscribeSubSecondSegmentsKeepDistinctMarkers asserts that two segments
+// starting within the same whole second render as distinct [mm:ss.mmm] markers
+// instead of collapsing onto one floored [mm:ss] (issue #431 item c).
+func TestTranscribeSubSecondSegmentsKeepDistinctMarkers(t *testing.T) {
+	const subSecondSegments = `{
+	  "text": "first second",
+	  "language": "en",
+	  "duration": 10.0,
+	  "segments": [
+	    {"start": 5.25, "end": 5.6, "text": "first"},
+	    {"start": 5.75, "end": 6.0, "text": "second"}
+	  ]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, subSecondSegments)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "secret-key")
+	out, err := c.Transcribe(context.Background(), "podcast/ep1.mp3", []byte("audiobytes"))
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	want := "[00:05.250] first\n[00:05.750] second"
+	if out != want {
+		t.Fatalf("transcript = %q, want %q", out, want)
+	}
+}
+
 // TestVerboseJSONResponseFormat asserts response_format=verbose_json is
 // sent when configured.
 func TestVerboseJSONResponseFormat(t *testing.T) {

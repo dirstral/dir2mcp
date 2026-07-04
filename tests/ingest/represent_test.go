@@ -452,18 +452,115 @@ func TestChunkTranscriptByTime_SplitsLongTimestampWindow(t *testing.T) {
 	}
 }
 
-func TestChunkTranscriptByTime_NoTimestampsStillGetsTimeSpans(t *testing.T) {
+// TestChunkTranscriptByTime_NoTimestampsOmitsTiming asserts that a transcript
+// with no [mm:ss] markers (e.g. a Gemini-style STT backend that returns plain
+// text without timing) is still chunked into text, but the chunks carry NO time
+// span rather than a fabricated char-weighted window. Presenting invented
+// timestamps as real is the bug fixed by issue #431 item d: honest omission
+// beats fabrication.
+func TestChunkTranscriptByTime_NoTimestampsOmitsTiming(t *testing.T) {
 	input := strings.Repeat("plain transcript text without timestamps ", 300)
 	chunks := ingest.ChunkTranscriptByTime(input)
 	if len(chunks) == 0 {
-		t.Fatal("expected fallback chunks")
+		t.Fatal("expected text chunks even without timing")
 	}
+	for i, ch := range chunks {
+		if strings.TrimSpace(ch.Text) == "" {
+			t.Fatalf("chunk %d has empty text", i)
+		}
+		if ch.Span.Kind != "" {
+			t.Fatalf("chunk %d expected no span kind (timing absent), got %+v", i, ch.Span)
+		}
+		if ch.Span.StartMS != 0 || ch.Span.EndMS != 0 {
+			t.Fatalf("chunk %d expected zero (unset) time bounds, got %+v", i, ch.Span)
+		}
+	}
+}
+
+// TestChunkTranscriptByTime_SubSecondSegmentsDoNotCollapse asserts that two
+// segments starting within the same whole second keep distinct, ordered start
+// times and non-collapsed spans once the marker carries millisecond precision
+// (issue #431 item c). Before the fix both markers floored to [00:05] and the
+// first span collapsed to a 1 ms sliver, mis-routing its words to the next span.
+func TestChunkTranscriptByTime_SubSecondSegmentsDoNotCollapse(t *testing.T) {
+	input := "[00:05.250] first segment here\n[00:05.750] second segment here\n[00:06.000] third segment here"
+	chunks := ingest.ChunkTranscriptByTime(input)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	wantStarts := []int{5250, 5750, 6000}
 	for i, ch := range chunks {
 		if ch.Span.Kind != "time" {
 			t.Fatalf("chunk %d expected time span, got %+v", i, ch.Span)
 		}
+		if ch.Span.StartMS != wantStarts[i] {
+			t.Fatalf("chunk %d StartMS = %d, want %d", i, ch.Span.StartMS, wantStarts[i])
+		}
 		if ch.Span.EndMS <= ch.Span.StartMS {
-			t.Fatalf("chunk %d expected positive duration, got %+v", i, ch.Span)
+			t.Fatalf("chunk %d span collapsed: %+v", i, ch.Span)
+		}
+	}
+	// The first two must not share a start (the same-second collapse bug).
+	if chunks[0].Span.StartMS == chunks[1].Span.StartMS {
+		t.Fatalf("sub-second segments collapsed to the same start: %d", chunks[0].Span.StartMS)
+	}
+	// The first segment's real end must reach the second's start (no 1 ms sliver).
+	if chunks[0].Span.EndMS != chunks[1].Span.StartMS {
+		t.Fatalf("chunk 0 EndMS = %d, want %d (adjacent to chunk 1 start)", chunks[0].Span.EndMS, chunks[1].Span.StartMS)
+	}
+}
+
+// TestFormatTranscriptTimestamp covers the shared marker formatter every STT
+// backend uses: whole seconds render as [mm:ss] (backward compatible) and
+// sub-second offsets render as [mm:ss.mmm], and both round-trip through the
+// chunker's parser to the original millisecond value (issue #431 item c).
+func TestFormatTranscriptTimestamp(t *testing.T) {
+	cases := []struct {
+		ms   int
+		want string
+	}{
+		{0, "[00:00]"},
+		{5000, "[00:05]"},
+		{65000, "[01:05]"},
+		{5250, "[00:05.250]"},
+		{5050, "[00:05.050]"},
+		{5005, "[00:05.005]"},
+		{5500, "[00:05.500]"},
+		// >1h transcripts (interviews): total minutes, no hour wrapping, must
+		// still round-trip (regression for the >59-minute parse rejection).
+		{3600000, "[60:00]"},
+		{3630500, "[60:30.500]"},
+		{7200000, "[120:00]"},
+	}
+	for _, tc := range cases {
+		got := model.FormatTranscriptTimestamp(tc.ms)
+		if got != tc.want {
+			t.Fatalf("FormatTranscriptTimestamp(%d) = %q, want %q", tc.ms, got, tc.want)
+		}
+		// Round-trip: the marker must chunk to a time span starting at tc.ms.
+		chunks := ingest.ChunkTranscriptByTime(got + " word one two three")
+		if len(chunks) == 0 {
+			t.Fatalf("no chunks for marker %q", got)
+		}
+		if chunks[0].Span.Kind != "time" || chunks[0].Span.StartMS != tc.ms {
+			t.Fatalf("marker %q parsed to %+v, want time span StartMS=%d", got, chunks[0].Span, tc.ms)
+		}
+	}
+}
+
+// TestChunkTranscriptByTime_MultiLineNoTimestampsOmitsTiming asserts the
+// honest-omission path holds even when a no-timing transcript spans several
+// lines: every chunk is emitted with no span rather than an invented window
+// (issue #431 item d).
+func TestChunkTranscriptByTime_MultiLineNoTimestampsOmitsTiming(t *testing.T) {
+	input := "first line of speech\nsecond line of speech\nthird line of speech"
+	chunks := ingest.ChunkTranscriptByTime(input)
+	if len(chunks) == 0 {
+		t.Fatal("expected text chunks even without timing")
+	}
+	for i, ch := range chunks {
+		if ch.Span.Kind != "" {
+			t.Fatalf("chunk %d expected no span kind (timing absent), got %+v", i, ch.Span)
 		}
 	}
 }

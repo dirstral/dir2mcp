@@ -27,7 +27,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -368,9 +367,12 @@ func secondsToMS(sec float64) int {
 	return int(sec*1000 + 0.5)
 }
 
-// parseTranscriptSegments converts timed segments into `[mm:ss] text`
-// lines (the format chunkTranscriptByTime consumes). Returns ("", false)
-// when no non-empty segments are present (caller falls back to flat text).
+// parseTranscriptSegments converts timed segments into `[mm:ss] text` (or
+// `[mm:ss.mmm] text` when the segment starts sub-second) lines, the format
+// chunkTranscriptByTime consumes. Sub-second start times are preserved so
+// distinct in-second segments do not collapse onto one marker (issue #431).
+// Returns ("", false) when no non-empty segments are present (caller falls back
+// to flat text).
 func parseTranscriptSegments(parsed transcribeResponse) (string, bool) {
 	if len(parsed.Segments) == 0 {
 		return "", false
@@ -381,13 +383,7 @@ func parseTranscriptSegments(parsed transcribeResponse) (string, bool) {
 		if text == "" {
 			continue
 		}
-		startSec := int(seg.Start)
-		if startSec < 0 {
-			startSec = 0
-		}
-		mm := startSec / 60
-		ss := startSec % 60
-		lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
+		lines = append(lines, model.FormatTranscriptTimestamp(secondsToMS(seg.Start))+" "+text)
 	}
 	if len(lines) == 0 {
 		return "", false
@@ -444,11 +440,4 @@ func (c *Client) wait(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func pad2(n int) string {
-	if n < 10 {
-		return "0" + strconv.Itoa(n)
-	}
-	return strconv.Itoa(n)
 }

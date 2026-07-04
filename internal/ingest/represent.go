@@ -22,13 +22,16 @@ import (
 	"golang.org/x/text/transform"
 )
 
-// transcriptTimestampBracketedRe matches leading timestamps in [mm:ss] or
-// [hh:mm:ss] form.
-var transcriptTimestampBracketedRe = regexp.MustCompile(`^\s*\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)$`)
+// transcriptTimestampBracketedRe matches leading timestamps in [mm:ss],
+// [hh:mm:ss], or either form with an optional sub-second fraction of 1-3 digits
+// ([mm:ss.mmm]). The fraction preserves millisecond precision so distinct
+// in-second segments do not collapse onto one marker (issue #431); a bare
+// whole-second marker parses as .000, keeping backward compatibility.
+var transcriptTimestampBracketedRe = regexp.MustCompile(`^\s*\[(\d+):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?\]\s*(.*)$`)
 
-// transcriptTimestampBareRe matches leading timestamps in mm:ss or hh:mm:ss
-// form without brackets.
-var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s+|$)(.*)$`)
+// transcriptTimestampBareRe matches the same timestamps as
+// transcriptTimestampBracketedRe but without the surrounding brackets.
+var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d+):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?(?:\s+|$)(.*)$`)
 
 const (
 	// RepTypeRawText is the representation type for raw text content
@@ -970,6 +973,11 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 	}
 	segments := make([]transcriptSegment, 0, len(lines))
 	var current *transcriptSegment
+	// sawTimestamp records whether ANY line carried a real [mm:ss] marker. When
+	// none did, every segment's startMS is a synthetic default and there are no
+	// real anchors to time against, so we must not fabricate spans (issue #431
+	// item d).
+	sawTimestamp := false
 
 	pushCurrent := func() {
 		if current == nil {
@@ -987,6 +995,7 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 	for _, line := range lines {
 		startMS, text, ok := parseTranscriptTimestamp(line)
 		if ok {
+			sawTimestamp = true
 			pushCurrent()
 			current = &transcriptSegment{startMS: startMS, text: strings.TrimSpace(text)}
 			continue
@@ -1005,12 +1014,24 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 	}
 	pushCurrent()
 
-	if len(segments) == 0 {
+	// No timestamp markers anywhere: the transcriber returned plain text with no
+	// real timing (e.g. a Gemini-style STT backend). Emit the chunks WITHOUT a
+	// time span rather than fabricating a char-weighted window that would present
+	// invented timestamps as real (issue #431 item d). This also covers the
+	// degenerate len(segments)==0 case, which by definition had no markers.
+	if !sawTimestamp {
 		trimmed := strings.TrimSpace(content)
 		if trimmed == "" {
 			return nil
 		}
-		return splitTranscriptSegmentWithTiming(trimmed, 0, estimateTranscriptDurationMS(trimmed))
+		if len(segments) == 0 {
+			return splitTranscriptSegmentWithoutTiming(trimmed)
+		}
+		out := make([]chunkSegment, 0, len(segments))
+		for i := range segments {
+			out = append(out, splitTranscriptSegmentWithoutTiming(segments[i].text)...)
+		}
+		return out
 	}
 
 	out := make([]chunkSegment, 0, len(segments))
@@ -1107,6 +1128,29 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 	return out
 }
 
+// splitTranscriptSegmentWithoutTiming chunks text with the same size policy as
+// splitTranscriptSegmentWithTiming but leaves every chunk's Span zero-valued
+// (empty Kind), so no time bounds are attached. It is used when a transcript
+// carried no timestamp markers at all: timing is genuinely absent, and an
+// empty-Kind span makes the chunker persist the chunk with no span row (rather
+// than a fabricated one) and makes subtitle export skip it — honest omission
+// over invented timing (issue #431 item d).
+func splitTranscriptSegmentWithoutTiming(text string) []chunkSegment {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	parts := chunkTextByChars(text, TranscriptChunkMaxChars, TranscriptChunkOverlapChars, TranscriptChunkMinChars)
+	if len(parts) == 0 {
+		return []chunkSegment{{Text: text}}
+	}
+	out := make([]chunkSegment, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, chunkSegment{Text: part.Text})
+	}
+	return out
+}
+
 func parseMMSSComponents(m []string) (minutes, seconds int, ok bool) {
 	var err error
 	minutes, err = strconv.Atoi(m[1])
@@ -1117,7 +1161,10 @@ func parseMMSSComponents(m []string) (minutes, seconds int, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	if minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+	// minutes here is the TOTAL minutes of an [mm:ss] marker (no hour field), so
+	// a transcript longer than an hour renders e.g. [75:30]; accept any
+	// non-negative minute count. Only seconds are bounded to a single unit.
+	if minutes < 0 || seconds < 0 || seconds > 59 {
 		return 0, 0, false
 	}
 	return minutes, seconds, true
@@ -1150,10 +1197,10 @@ func parseTranscriptTimestamp(line string) (int, string, bool) {
 	}
 
 	m := transcriptTimestampBracketedRe.FindStringSubmatch(trimmed)
-	if len(m) != 5 {
+	if len(m) != 6 {
 		m = transcriptTimestampBareRe.FindStringSubmatch(trimmed)
 	}
-	if len(m) != 5 {
+	if len(m) != 6 {
 		return 0, "", false
 	}
 
@@ -1174,8 +1221,28 @@ func parseTranscriptTimestamp(line string) (int, string, bool) {
 		}
 	}
 
-	totalMS := ((hours * 3600) + (minutes * 60) + seconds) * 1000
-	return totalMS, strings.TrimSpace(m[4]), true
+	totalMS := ((hours*3600)+(minutes*60)+seconds)*1000 + fractionToMS(m[4])
+	return totalMS, strings.TrimSpace(m[5]), true
+}
+
+// fractionToMS converts the optional decimal-second fraction captured from a
+// transcript marker (1-3 digits, no leading dot) into milliseconds. The fraction
+// is a tenths/hundredths/thousandths value, so it is right-padded to three
+// digits: "5" -> 500, "05" -> 50, "250" -> 250. An empty fraction (a bare
+// whole-second "[mm:ss]" marker) yields 0, preserving backward-compatible
+// parsing of markers written before sub-second precision existed.
+func fractionToMS(frac string) int {
+	if frac == "" {
+		return 0
+	}
+	for len(frac) < 3 {
+		frac += "0"
+	}
+	ms, err := strconv.Atoi(frac)
+	if err != nil {
+		return 0
+	}
+	return ms
 }
 
 func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment {
