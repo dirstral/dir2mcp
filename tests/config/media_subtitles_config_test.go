@@ -37,6 +37,9 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	cfg.MediaSubtitlesTTMLEnabled = true
 	cfg.MediaSubtitlesSMILEnabled = true
 	cfg.MediaSubtitlesTTMLAlignToleranceMS = 1800
+	cfg.MediaSubtitlesGlossary = []string{"Aju?bei=>Adzhubei"}
+	cfg.MediaSubtitlesCollapseRepeats = 3
+	cfg.MediaSubtitlesDropURLs = true
 
 	if err := config.SaveFile(path, cfg); err != nil {
 		t.Fatalf("SaveFile: %v", err)
@@ -50,6 +53,87 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	}
 	if loaded.MediaSubtitlesTTMLAlignToleranceMS != 1800 {
 		t.Fatalf("align tolerance = %d, want 1800", loaded.MediaSubtitlesTTMLAlignToleranceMS)
+	}
+	if len(loaded.MediaSubtitlesGlossary) != 1 || loaded.MediaSubtitlesGlossary[0] != "Aju?bei=>Adzhubei" {
+		t.Fatalf("glossary did not round-trip: %#v", loaded.MediaSubtitlesGlossary)
+	}
+	if loaded.MediaSubtitlesCollapseRepeats != 3 {
+		t.Fatalf("collapse_repeats = %d, want 3", loaded.MediaSubtitlesCollapseRepeats)
+	}
+	if !loaded.MediaSubtitlesDropURLs {
+		t.Fatalf("drop_urls did not round-trip")
+	}
+}
+
+// TestMediaSubtitlesCleaning_DefaultsOff pins that the cue-cleaning passes are
+// off by default (no glossary, no collapse, no URL drop).
+func TestMediaSubtitlesCleaning_DefaultsOff(t *testing.T) {
+	cfg := config.Default()
+	if len(cfg.MediaSubtitlesGlossary) != 0 {
+		t.Fatalf("glossary should default empty, got %#v", cfg.MediaSubtitlesGlossary)
+	}
+	if cfg.MediaSubtitlesCollapseRepeats != 0 {
+		t.Fatalf("collapse_repeats should default 0, got %d", cfg.MediaSubtitlesCollapseRepeats)
+	}
+	if cfg.MediaSubtitlesDropURLs {
+		t.Fatalf("drop_urls should default false")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate default: %v", err)
+	}
+}
+
+// TestMediaSubtitlesCleaning_NestedYAMLApplies locks the nested
+// media.subtitles.{glossary,collapse_repeats,drop_urls} mapping keys.
+func TestMediaSubtitlesCleaning_NestedYAMLApplies(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, strings.Join([]string{
+		"root_dir: /tmp/repo",
+		"state_dir: /tmp/repo/.dir2mcp",
+		"media:",
+		"  subtitles:",
+		"    glossary:",
+		"      - Aju?bei=>Adzhubei",
+		"      - Khruschev=>Khrushchev",
+		"    collapse_repeats: 3",
+		"    drop_urls: true",
+	}, "\n")+"\n")
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile(nested cleaning): %v", err)
+	}
+	if len(cfg.MediaSubtitlesGlossary) != 2 {
+		t.Fatalf("nested glossary not applied: %#v", cfg.MediaSubtitlesGlossary)
+	}
+	if cfg.MediaSubtitlesCollapseRepeats != 3 {
+		t.Fatalf("nested collapse_repeats = %d, want 3", cfg.MediaSubtitlesCollapseRepeats)
+	}
+	if !cfg.MediaSubtitlesDropURLs {
+		t.Fatalf("nested drop_urls not applied")
+	}
+}
+
+// TestMediaSubtitlesCleaning_RejectsBadConfig pins fail-fast validation: a
+// malformed glossary entry and a negative collapse threshold are rejected.
+func TestMediaSubtitlesCleaning_RejectsBadConfig(t *testing.T) {
+	badGloss := config.Default()
+	badGloss.MediaSubtitlesGlossary = []string{"missing-arrow"}
+	if err := badGloss.Validate(); err == nil {
+		t.Fatalf("malformed glossary entry should be rejected")
+	}
+
+	badRe := config.Default()
+	badRe.MediaSubtitlesGlossary = []string{"a(b=>c"}
+	if err := badRe.Validate(); err == nil {
+		t.Fatalf("invalid glossary regexp should be rejected")
+	}
+
+	badN := config.Default()
+	badN.MediaSubtitlesCollapseRepeats = -1
+	if err := badN.Validate(); err == nil {
+		t.Fatalf("negative collapse_repeats should be rejected")
 	}
 }
 

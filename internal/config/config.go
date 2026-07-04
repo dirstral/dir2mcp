@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/secrets"
+	"github.com/dirstral/dir2mcp/internal/subtitle"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
@@ -487,6 +488,26 @@ type Config struct {
 	// the text subtitle output is still produced.
 	MediaSubtitlesSMILEnabled bool
 
+	// MediaSubtitlesGlossary is an optional list of editorial term replacements
+	// applied to exported VTT/SRT cue text (config `media.subtitles.glossary`).
+	// Each entry is "pattern=>replacement" where pattern is a case-insensitive,
+	// ASCII-word-bounded regular expression (e.g. "Aju?bei=>Adzhubei" to
+	// normalize a transliterated name). Unlike media.filter_words (which deletes
+	// phrases) this REWRITES text and never drops a cue. Empty by default = off.
+	MediaSubtitlesGlossary []string
+
+	// MediaSubtitlesCollapseRepeats drops the Nth-and-later cue in a run of
+	// identical consecutive cues on export (config
+	// `media.subtitles.collapse_repeats`), the whisper repetition-collapse
+	// artifact. A value < 2 disables the pass (the default 0 = off), so
+	// legitimate short repeats survive; a typical setting is 3.
+	MediaSubtitlesCollapseRepeats int
+
+	// MediaSubtitlesDropURLs opts IN to dropping exported cues whose text is a
+	// hallucinated URL / bare domain / credit line (config
+	// `media.subtitles.drop_urls`). OFF by default. Only affects VTT/SRT export.
+	MediaSubtitlesDropURLs bool
+
 	// MediaTrimLeadingSilence opts IN to trimming leading silence from media
 	// transcripts (dir2mcp#258, config `media.trim_leading_silence`). When true
 	// and ffmpeg is available, the duration of dead air before the first speech
@@ -693,6 +714,9 @@ type fileConfig struct {
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
 	MediaSubtitlesSMILEnabled          *bool
+	MediaSubtitlesGlossary             []string
+	MediaSubtitlesCollapseRepeats      *int
+	MediaSubtitlesDropURLs             *bool
 	MediaTrimLeadingSilence            *bool
 	MediaSilenceThresholdDB            *float64
 	MediaVAD                           *bool
@@ -822,6 +846,9 @@ type persistedConfig struct {
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
 	MediaSubtitlesSMILEnabled          bool          `yaml:"media_subtitles_smil_enabled"`
+	MediaSubtitlesGlossary             []string      `yaml:"media_subtitles_glossary"`
+	MediaSubtitlesCollapseRepeats      int           `yaml:"media_subtitles_collapse_repeats"`
+	MediaSubtitlesDropURLs             bool          `yaml:"media_subtitles_drop_urls"`
 	MediaTrimLeadingSilence            bool          `yaml:"media_trim_leading_silence"`
 	MediaSilenceThresholdDB            float64       `yaml:"media_silence_threshold_db"`
 	MediaVAD                           bool          `yaml:"media_vad"`
@@ -1036,8 +1063,13 @@ func Default() Config {
 		MediaSubtitlesTTMLEnabled:          false,
 		MediaSubtitlesTTMLAlignToleranceMS: DefaultMediaSubtitlesAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          false,
-		ServerTLSCertFile:                  "",
-		ServerTLSKeyFile:                   "",
+		// Export-time cue cleaning (clean_srt.py port) is OFF by default: no
+		// glossary rewrites, no repetition-collapse (< 2 disables), no URL drop.
+		MediaSubtitlesGlossary:        nil,
+		MediaSubtitlesCollapseRepeats: 0,
+		MediaSubtitlesDropURLs:        false,
+		ServerTLSCertFile:             "",
+		ServerTLSKeyFile:              "",
 		X402: X402Config{
 			Mode:             "off",
 			FacilitatorURL:   "",
@@ -1159,6 +1191,9 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          cfg.MediaSubtitlesSMILEnabled,
+		MediaSubtitlesGlossary:             append([]string(nil), cfg.MediaSubtitlesGlossary...),
+		MediaSubtitlesCollapseRepeats:      cfg.MediaSubtitlesCollapseRepeats,
+		MediaSubtitlesDropURLs:             cfg.MediaSubtitlesDropURLs,
 		MediaTrimLeadingSilence:            cfg.MediaTrimLeadingSilence,
 		MediaSilenceThresholdDB:            cfg.MediaSilenceThresholdDB,
 		MediaVAD:                           cfg.MediaVAD,
@@ -1953,6 +1988,15 @@ func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesSMILEnabled != nil {
 		cfg.MediaSubtitlesSMILEnabled = *fc.MediaSubtitlesSMILEnabled
 	}
+	if fc.MediaSubtitlesGlossary != nil {
+		cfg.MediaSubtitlesGlossary = normalizeStringSlice(fc.MediaSubtitlesGlossary)
+	}
+	if fc.MediaSubtitlesCollapseRepeats != nil {
+		cfg.MediaSubtitlesCollapseRepeats = *fc.MediaSubtitlesCollapseRepeats
+	}
+	if fc.MediaSubtitlesDropURLs != nil {
+		cfg.MediaSubtitlesDropURLs = *fc.MediaSubtitlesDropURLs
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -2253,6 +2297,9 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
 	"media_subtitles_ttml_align_tolerance_ms": "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":            "media.subtitles.smil.enabled",
+	"media_subtitles_glossary":                "media.subtitles.glossary",
+	"media_subtitles_collapse_repeats":        "media.subtitles.collapse_repeats",
+	"media_subtitles_drop_urls":               "media.subtitles.drop_urls",
 	"media_trim_leading_silence":              "media.trim_leading_silence",
 	"media_silence_threshold_db":              "media.silence_threshold_db",
 	"media_vad":                               "media.vad",
@@ -2386,6 +2433,9 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"media.subtitles.smil.enabled": func(c *fileConfig) **bool {
 		return &c.MediaSubtitlesSMILEnabled
 	},
+	"media.subtitles.drop_urls": func(c *fileConfig) **bool {
+		return &c.MediaSubtitlesDropURLs
+	},
 	"media.trim_leading_silence": func(c *fileConfig) **bool {
 		return &c.MediaTrimLeadingSilence
 	},
@@ -2448,6 +2498,9 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"media.subtitles.ttml.align_tolerance_ms": func(c *fileConfig) **int {
 		return &c.MediaSubtitlesTTMLAlignToleranceMS
 	},
+	"media.subtitles.collapse_repeats": func(c *fileConfig) **int {
+		return &c.MediaSubtitlesCollapseRepeats
+	},
 	"distributed_embed_max_attempts": func(c *fileConfig) **int {
 		return &c.DistributedEmbedMaxAttempts
 	},
@@ -2481,6 +2534,7 @@ var nonNegativeIntKeys = map[string]bool{
 	"media.clip.max_duration_ms":              true,
 	"media.clip.max_bytes":                    true,
 	"media.subtitles.ttml.align_tolerance_ms": true,
+	"media.subtitles.collapse_repeats":        true,
 }
 
 // setFloatFileScalar parses value as a float64 and assigns it to the
@@ -2739,6 +2793,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendValue(&cfg.MediaTranslateTargetLangs, value)
 	case "media.filter_words":
 		appendValue(&cfg.MediaFilterWords, value)
+	case "media.subtitles.glossary":
+		appendValue(&cfg.MediaSubtitlesGlossary, value)
 	case "retrieval.cross_lingual.target_langs":
 		appendValue(&cfg.CrossLingualTargetLangs, value)
 	}
@@ -2749,7 +2805,7 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "retrieval.cross_lingual.target_langs":
+	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "media.subtitles.glossary", "retrieval.cross_lingual.target_langs":
 		return true
 	default:
 		return false
@@ -2865,6 +2921,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
+	writeList("media_subtitles_glossary", cfg.MediaSubtitlesGlossary)
+	writeInt("media_subtitles_collapse_repeats", cfg.MediaSubtitlesCollapseRepeats)
+	writeBool("media_subtitles_drop_urls", cfg.MediaSubtitlesDropURLs)
 	writeBool("media_trim_leading_silence", cfg.MediaTrimLeadingSilence)
 	writeScalar("media_silence_threshold_db", strconv.FormatFloat(cfg.MediaSilenceThresholdDB, 'f', -1, 64))
 	writeBool("media_vad", cfg.MediaVAD)
@@ -3522,6 +3581,16 @@ func (c *Config) validateMediaSubtitles() error {
 	}
 	if c.MediaSubtitlesTTMLAlignToleranceMS == 0 {
 		c.MediaSubtitlesTTMLAlignToleranceMS = DefaultMediaSubtitlesAlignToleranceMS
+	}
+	if c.MediaSubtitlesCollapseRepeats < 0 {
+		return fmt.Errorf("media.subtitles.collapse_repeats must not be negative: %d",
+			c.MediaSubtitlesCollapseRepeats)
+	}
+	// Fail fast on a malformed glossary (bad "pattern=>replacement" entry or an
+	// invalid regexp) at config time rather than at export time. subtitle.NewGlossary
+	// is the single source of truth for the entry grammar.
+	if _, err := subtitle.NewGlossary(c.MediaSubtitlesGlossary); err != nil {
+		return fmt.Errorf("media.subtitles.glossary: %w", err)
 	}
 	return nil
 }
