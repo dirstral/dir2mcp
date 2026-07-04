@@ -546,7 +546,7 @@ func chunkRawTextByDocType(docType, content string) []chunkSegment {
 	if docType == "code" {
 		return chunkCodeByLines(content, 200, 30)
 	}
-	return chunkTextByChars(content, 2500, 250, 200)
+	return chunkTextByChars(content, effectiveTextChunkMaxChars, effectiveTextChunkOverlapChars, effectiveTextChunkMinChars)
 }
 
 func chunkOCRByPages(content string) []chunkSegment {
@@ -570,12 +570,67 @@ func chunkOCRByPages(content string) []chunkSegment {
 
 // Structured-document chunking parameters (spec §7.5 size constraints). They
 // mirror the raw-text defaults so structured and plain text chunk at a
-// comparable granularity.
+// comparable granularity. These are the historical defaults used when no
+// chunking.* config is set; ConfigureChunking may override the effective values
+// below.
 const (
 	structuredChunkMaxChars     = 2500
 	structuredChunkOverlapChars = 250
 	structuredChunkMinChars     = 200
 )
+
+// approxCharsPerToken converts a chunking.*_tokens budget (config is expressed
+// in tokens) into the chunker's rune budget. It is a deliberately rough
+// heuristic (~4 characters per token for typical prose): the goal is that
+// changing chunking.max_tokens moves chunk sizes proportionally, not exact
+// tokenizer parity.
+const approxCharsPerToken = 4
+
+// Effective text/structured chunk sizing (rune budgets). They default to the
+// historical hardcoded values above, so a corpus with no chunking.* config
+// chunks byte-identically to before. ConfigureChunking overrides them from
+// chunking.max_tokens / chunking.overlap_tokens when those are set. The text and
+// structured chunkers share one window so plain and structured documents chunk
+// at a comparable granularity (read by chunkRawTextByDocType and
+// newStructuredChunker).
+var (
+	effectiveTextChunkMaxChars     = structuredChunkMaxChars
+	effectiveTextChunkOverlapChars = structuredChunkOverlapChars
+	effectiveTextChunkMinChars     = structuredChunkMinChars
+)
+
+// ConfigureChunking applies chunking.max_tokens / chunking.overlap_tokens to the
+// text and structured chunkers. Token budgets are converted to rune budgets via
+// approxCharsPerToken. When maxTokens <= 0 (unset) the historical defaults are
+// restored, so existing corpora chunk exactly as before and the call is
+// idempotent. Callers overlay already-validated config here at startup, before
+// ingestion begins; it is not safe to call concurrently with active chunking.
+func ConfigureChunking(maxTokens, overlapTokens int) {
+	if maxTokens <= 0 {
+		effectiveTextChunkMaxChars = structuredChunkMaxChars
+		effectiveTextChunkOverlapChars = structuredChunkOverlapChars
+		effectiveTextChunkMinChars = structuredChunkMinChars
+		return
+	}
+	maxChars := maxTokens * approxCharsPerToken
+	overlapChars := 0
+	if overlapTokens > 0 {
+		overlapChars = overlapTokens * approxCharsPerToken
+	}
+	// Scale the minimum-chunk floor to the configured window (preserving the
+	// default min:max proportion) so a small window does not drop every
+	// non-terminal chunk, and never let it reach the window size.
+	minChars := maxChars * structuredChunkMinChars / structuredChunkMaxChars
+	if minChars < 1 {
+		minChars = 1
+	}
+	if minChars >= maxChars {
+		minChars = maxChars - 1
+	}
+	effectiveTextChunkMaxChars = maxChars
+	effectiveTextChunkOverlapChars = overlapChars
+	effectiveTextChunkMinChars = minChars
+}
 
 // Code chunking is primarily line-based, but a single window (or a single very
 // long line, e.g. a minified JS/CSS bundle) must still be bounded by characters
@@ -629,7 +684,7 @@ type structuredChunker struct {
 
 func newStructuredChunker() *structuredChunker {
 	maxChars, overlapChars, minChars := normalizeTextChunkParams(
-		structuredChunkMaxChars, structuredChunkOverlapChars, structuredChunkMinChars)
+		effectiveTextChunkMaxChars, effectiveTextChunkOverlapChars, effectiveTextChunkMinChars)
 	return &structuredChunker{
 		maxChars:     maxChars,
 		overlapChars: overlapChars,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -112,6 +113,9 @@ func (a *App) loadReindexConfig(global globalOptions) (config.Config, int) {
 		baseDir = ".dir2mcp"
 	}
 	cfg.StateDir = baseDir
+	// A full rebuild re-chunks the whole corpus, so it must honour chunking.*
+	// too (#405). loadConfigWithGlobalOptions already validated the config.
+	ingest.ConfigureChunking(cfg.ChunkingMaxTokens, cfg.ChunkingOverlapTokens)
 	return cfg, exitSuccess
 }
 
