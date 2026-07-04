@@ -48,7 +48,12 @@ func NewGlossary(entries []string) (*Glossary, error) {
 		if from == "" {
 			return nil, fmt.Errorf("glossary entry %q has an empty match pattern", e)
 		}
-		re, err := regexp.Compile(`(?i)\b` + from + `\b`)
+		// Wrap the pattern in a non-capturing group so the word boundaries anchor
+		// the WHOLE pattern: without it a top-level alternation ("Aju|Adju") would
+		// compile to \bAju|Adju\b, which RE2 reads as (\bAju)|(Adju\b) — each
+		// alternative keeping only one boundary — silently allowing partial-word
+		// rewrites and breaking the documented word-bounded guarantee.
+		re, err := regexp.Compile(`(?i)\b(?:` + from + `)\b`)
 		if err != nil {
 			return nil, fmt.Errorf("glossary entry %q: invalid match pattern: %w", e, err)
 		}

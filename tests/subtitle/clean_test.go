@@ -28,6 +28,28 @@ func TestGlossaryReplacesWholeWordCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestGlossaryAlternationStaysWordBounded pins that a top-level alternation in a
+// glossary pattern keeps BOTH word boundaries anchoring the whole pattern (the
+// pattern is wrapped in a non-capturing group), so it never rewrites partial
+// words like "Ajubeyond" or "xAdju".
+func TestGlossaryAlternationStaysWordBounded(t *testing.T) {
+	g, err := subtitle.NewGlossary([]string{"Aju|Adju=>Adzhubei"})
+	if err != nil {
+		t.Fatalf("NewGlossary: %v", err)
+	}
+	cases := map[string]string{
+		"met Aju today":       "met Adzhubei today",  // left alternative, whole word
+		"met Adju today":      "met Adzhubei today",  // right alternative, whole word
+		"Ajubeyond the fold":  "Ajubeyond the fold",  // left alt must not match a prefix
+		"saw xAdju in a note": "saw xAdju in a note", // right alt must not match a suffix
+	}
+	for in, want := range cases {
+		if got := g.Apply(in); got != want {
+			t.Errorf("Apply(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestGlossaryInactiveAndErrors pins that an empty glossary is a no-op and that
 // malformed entries are rejected at construction (so config can fail fast).
 func TestGlossaryInactiveAndErrors(t *testing.T) {
