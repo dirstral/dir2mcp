@@ -526,6 +526,11 @@ func TestFormatTranscriptTimestamp(t *testing.T) {
 		{5050, "[00:05.050]"},
 		{5005, "[00:05.005]"},
 		{5500, "[00:05.500]"},
+		// >1h transcripts (interviews): total minutes, no hour wrapping, must
+		// still round-trip (regression for the >59-minute parse rejection).
+		{3600000, "[60:00]"},
+		{3630500, "[60:30.500]"},
+		{7200000, "[120:00]"},
 	}
 	for _, tc := range cases {
 		got := model.FormatTranscriptTimestamp(tc.ms)

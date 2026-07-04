@@ -27,11 +27,11 @@ import (
 // ([mm:ss.mmm]). The fraction preserves millisecond precision so distinct
 // in-second segments do not collapse onto one marker (issue #431); a bare
 // whole-second marker parses as .000, keeping backward compatibility.
-var transcriptTimestampBracketedRe = regexp.MustCompile(`^\s*\[(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?\]\s*(.*)$`)
+var transcriptTimestampBracketedRe = regexp.MustCompile(`^\s*\[(\d+):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?\]\s*(.*)$`)
 
 // transcriptTimestampBareRe matches the same timestamps as
 // transcriptTimestampBracketedRe but without the surrounding brackets.
-var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?(?:\s+|$)(.*)$`)
+var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d+):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?(?:\s+|$)(.*)$`)
 
 const (
 	// RepTypeRawText is the representation type for raw text content
@@ -1161,7 +1161,10 @@ func parseMMSSComponents(m []string) (minutes, seconds int, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	if minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+	// minutes here is the TOTAL minutes of an [mm:ss] marker (no hour field), so
+	// a transcript longer than an hour renders e.g. [75:30]; accept any
+	// non-negative minute count. Only seconds are bounded to a single unit.
+	if minutes < 0 || seconds < 0 || seconds > 59 {
 		return 0, 0, false
 	}
 	return minutes, seconds, true
