@@ -84,6 +84,56 @@ func TestWhisperTranslate_ProducesEnRepWithOwnTimings(t *testing.T) {
 	}
 }
 
+// TestWhisperTranslate_CarriesWordTimings verifies that when the translate
+// transcriber is structured (returns per-word timings), those words are attached
+// to the English track's time spans — so the translated track can be
+// broadcast-segmented, not just chunk-segmented like the source track.
+func TestWhisperTranslate_CarriesWordTimings(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
+	// Source: one Russian segment (1 span). Translate pass: two English segments
+	// carrying per-word timings that fall inside each segment window.
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет как дела"})
+	svc.SetTranscriptLanguage("ru")
+	svc.SetTranslateTranscriber(
+		&fakeStructuredTranscriber{
+			text: "[00:00] hello there\n[00:03] goodbye friend",
+			words: []model.TimedWord{
+				{Word: "hello", StartMS: 0, EndMS: 500},
+				{Word: "there", StartMS: 500, EndMS: 1000},
+				{Word: "goodbye", StartMS: 3000, EndMS: 3500},
+				{Word: "friend", StartMS: 3500, EndMS: 3900},
+			},
+		},
+		"whisper", "large-v3", []string{"en"})
+
+	doc := model.Document{DocID: 11, RelPath: "audio/interview.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+
+	// Source produced 1 span; the translate pass produced its own 2 spans, which
+	// must carry the 4 injected words between them.
+	if len(st.spans) != 3 {
+		t.Fatalf("expected 1 source + 2 translated spans, got %d (%+v)", len(st.spans), st.spans)
+	}
+	translatedSpans := st.spans[1:]
+	total := 0
+	for _, sp := range translatedSpans {
+		for _, w := range sp.Words {
+			total++
+			if w.T < sp.StartMS || w.T >= sp.EndMS {
+				t.Errorf("translated word %q at %dms outside span [%d,%d)", w.W, w.T, sp.StartMS, sp.EndMS)
+			}
+		}
+	}
+	if total != 4 {
+		t.Fatalf("translated spans carry %d words, want 4 (broadcast segmentation needs them)", total)
+	}
+}
+
 // TestWhisperTranslate_CacheReused verifies the whisper-translate output is
 // cached (under the "-translate" discriminated key) so a second ingest of the
 // same source bytes does NOT re-invoke the translate pass.
