@@ -721,6 +721,13 @@ func resolveSTTProfile(cfg config.Config) (provider.Profile, bool) {
 	if err != nil {
 		return provider.Profile{}, false
 	}
+	// Apply the same global media.* overrides the transcribe path injects onto the
+	// resolved STT profile (VAD toggle + media.stt.* request limits, #258/#510/#511)
+	// so the whisper-translate pass re-decodes long-form audio with the SAME caps
+	// as transcription instead of the client's built-in 50 MB / 120 s defaults.
+	prof.STTVAD = cfg.MediaVAD
+	prof.STTMaxPayloadMB = cfg.MediaSTTMaxPayloadMB
+	prof.STTRequestTimeoutSec = cfg.MediaSTTRequestTimeoutSec
 	return prof, true
 }
 
