@@ -172,15 +172,16 @@ func TestGenerate_HappyPathAndStructuredContent(t *testing.T) {
 // TestGenerate_SendsBoundedMaxTokens locks issue #500: the chat request
 // must always carry a finite max_tokens so a misbehaving/self-hosted model
 // cannot run away past the generation timeout and fail the whole file.
-// NewClient's default (1024) applies when the caller sets nothing; an
-// explicit GenerationMaxTokens overrides it.
+// NewClient's default (4096, matching the anthropic sibling so answer
+// synthesis and annotate JSON are not truncated) applies when the caller sets
+// nothing; an explicit GenerationMaxTokens overrides it.
 func TestGenerate_SendsBoundedMaxTokens(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		override int
 		want     float64
 	}{
-		{name: "default", override: 0, want: 1024},
+		{name: "default", override: 0, want: 4096},
 		{name: "override", override: 42, want: 42},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,6 +199,46 @@ func TestGenerate_SendsBoundedMaxTokens(t *testing.T) {
 				c.GenerationMaxTokens = tc.override
 			}
 			if _, err := c.Generate(context.Background(), "hi"); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			mt, ok := gotBody["max_tokens"]
+			if !ok {
+				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
+			}
+			if got, _ := mt.(float64); got != tc.want {
+				t.Fatalf("max_tokens = %v, want %v", mt, tc.want)
+			}
+		})
+	}
+}
+
+// TestGenerateWithMaxTokens_PerCallCap locks the per-call seam: a caller with a
+// known-short output (e.g. one translated transcript line) can request a tight
+// cap for that call WITHOUT lowering the generous default that Generate
+// (ask/annotate) uses. A positive maxTokens is sent verbatim; a <= 0 maxTokens
+// falls back to the client default, so it behaves like Generate.
+func TestGenerateWithMaxTokens_PerCallCap(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		maxTokens int
+		want      float64
+	}{
+		{name: "tight cap", maxTokens: 512, want: 512},
+		{name: "zero falls back to default", maxTokens: 0, want: 4096},
+		{name: "negative falls back to default", maxTokens: -1, want: 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+				})
+			}))
+			defer srv.Close()
+
+			var bg model.BoundedGenerator = newClient(srv.URL)
+			if _, err := bg.GenerateWithMaxTokens(context.Background(), "hi", tc.maxTokens); err != nil {
 				t.Fatalf("generate: %v", err)
 			}
 			mt, ok := gotBody["max_tokens"]

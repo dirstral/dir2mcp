@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // readOrComputeTranslation returns the source transcript translated into
@@ -88,6 +90,14 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 	return strings.Join(out, "\n"), nil
 }
 
+// translateLineMaxTokens caps a single translated transcript line. One source
+// segment maps to one short output line, so a tight bound is plenty here; it
+// keeps the #500 runaway path tight on chat backends that respect max_tokens
+// WITHOUT lowering the generous default that ask/annotate rely on. It is applied
+// only when the translator implements model.BoundedGenerator; otherwise the call
+// falls back to Generate (the provider's own default cap still bounds it).
+const translateLineMaxTokens = 512
+
 // translateLine translates a single line of transcript text into targetLang via
 // the chat Generator. Empty/whitespace input short-circuits to empty so the chat
 // provider is never called for a marker-only line. The prompt asks for the
@@ -98,6 +108,9 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 		return "", nil
 	}
 	prompt := buildTranslatePrompt(text, targetLang)
+	if bg, ok := s.translator.(model.BoundedGenerator); ok {
+		return bg.GenerateWithMaxTokens(ctx, prompt, translateLineMaxTokens)
+	}
 	translated, err := s.translator.Generate(ctx, prompt)
 	if err != nil {
 		return "", err
