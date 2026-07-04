@@ -321,6 +321,11 @@ func TranslateTranscriber(p provider.Profile) (model.Transcriber, error) {
 	}
 	c.VADFilter = p.STTVAD
 	c.Task = whisperapi.TaskTranslate
+	// The translate pass re-decodes the SAME source audio as transcription, so it
+	// must honor the same configured payload/timeout limits (media.stt.*); without
+	// this the translate client keeps the built-in 50 MB / 120 s defaults and
+	// rejects long-form media that the (limit-applied) transcribe pass accepts.
+	applyWhisperLimits(c, p)
 	return c, nil
 }
 
