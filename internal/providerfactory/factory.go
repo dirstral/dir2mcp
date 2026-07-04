@@ -11,6 +11,7 @@ package providerfactory
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -294,7 +295,10 @@ func applyWhisperLimits(c *whisperapi.Client, p provider.Profile) {
 	if p.STTMaxPayloadMB > 0 {
 		c.MaxPayloadBytes = p.STTMaxPayloadMB * 1024 * 1024
 	}
-	if p.STTRequestTimeoutSec > 0 && c.HTTPClient != nil {
+	if p.STTRequestTimeoutSec > 0 {
+		if c.HTTPClient == nil {
+			c.HTTPClient = &http.Client{}
+		}
 		c.HTTPClient.Timeout = time.Duration(p.STTRequestTimeoutSec) * time.Second
 	}
 }
