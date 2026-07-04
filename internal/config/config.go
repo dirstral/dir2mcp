@@ -487,6 +487,16 @@ type Config struct {
 	// the text subtitle output is still produced.
 	MediaSubtitlesSMILEnabled bool
 
+	// MediaSubtitlesSegmentation selects HOW time-coded VTT/SRT cues are built on
+	// export (config `media.subtitles.segmentation`): "chunk" (default) emits one
+	// cue per stored transcript chunk (a whisper segment) — the historical
+	// behavior; "broadcast" re-segments from per-word timings (spec §8.6.1) into
+	// broadcast-legible cues (<= 6 s, <= 2x42 chars, reading-speed aware) via
+	// subtitle.BuildBroadcastCues. "broadcast" needs word timings; a transcript/
+	// span without them falls back to the chunk builder, so behavior is unchanged
+	// when word timings are absent. Only affects VTT/SRT export, never ingest.
+	MediaSubtitlesSegmentation string
+
 	// MediaTrimLeadingSilence opts IN to trimming leading silence from media
 	// transcripts (dir2mcp#258, config `media.trim_leading_silence`). When true
 	// and ffmpeg is available, the duration of dead air before the first speech
@@ -693,6 +703,7 @@ type fileConfig struct {
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
 	MediaSubtitlesSMILEnabled          *bool
+	MediaSubtitlesSegmentation         *string
 	MediaTrimLeadingSilence            *bool
 	MediaSilenceThresholdDB            *float64
 	MediaVAD                           *bool
@@ -822,6 +833,7 @@ type persistedConfig struct {
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
 	MediaSubtitlesSMILEnabled          bool          `yaml:"media_subtitles_smil_enabled"`
+	MediaSubtitlesSegmentation         string        `yaml:"media_subtitles_segmentation"`
 	MediaTrimLeadingSilence            bool          `yaml:"media_trim_leading_silence"`
 	MediaSilenceThresholdDB            float64       `yaml:"media_silence_threshold_db"`
 	MediaVAD                           bool          `yaml:"media_vad"`
@@ -1036,6 +1048,7 @@ func Default() Config {
 		MediaSubtitlesTTMLEnabled:          false,
 		MediaSubtitlesTTMLAlignToleranceMS: DefaultMediaSubtitlesAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          false,
+		MediaSubtitlesSegmentation:         "chunk",
 		ServerTLSCertFile:                  "",
 		ServerTLSKeyFile:                   "",
 		X402: X402Config{
@@ -1159,6 +1172,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          cfg.MediaSubtitlesSMILEnabled,
+		MediaSubtitlesSegmentation:         cfg.MediaSubtitlesSegmentation,
 		MediaTrimLeadingSilence:            cfg.MediaTrimLeadingSilence,
 		MediaSilenceThresholdDB:            cfg.MediaSilenceThresholdDB,
 		MediaVAD:                           cfg.MediaVAD,
@@ -1953,6 +1967,9 @@ func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesSMILEnabled != nil {
 		cfg.MediaSubtitlesSMILEnabled = *fc.MediaSubtitlesSMILEnabled
 	}
+	if fc.MediaSubtitlesSegmentation != nil {
+		cfg.MediaSubtitlesSegmentation = *fc.MediaSubtitlesSegmentation
+	}
 }
 
 // applyX402FileParsed copies the set x402 file fields onto cfg.X402.
@@ -2253,6 +2270,7 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
 	"media_subtitles_ttml_align_tolerance_ms": "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":            "media.subtitles.smil.enabled",
+	"media_subtitles_segmentation":            "media.subtitles.segmentation",
 	"media_trim_leading_silence":              "media.trim_leading_silence",
 	"media_silence_threshold_db":              "media.silence_threshold_db",
 	"media_vad":                               "media.vad",
@@ -2681,6 +2699,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
+	case "media.subtitles.segmentation":
+		cfg.MediaSubtitlesSegmentation = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -2865,6 +2885,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
+	writeScalar("media_subtitles_segmentation", cfg.MediaSubtitlesSegmentation)
 	writeBool("media_trim_leading_silence", cfg.MediaTrimLeadingSilence)
 	writeScalar("media_silence_threshold_db", strconv.FormatFloat(cfg.MediaSilenceThresholdDB, 'f', -1, 64))
 	writeBool("media_vad", cfg.MediaVAD)
@@ -3523,6 +3544,17 @@ func (c *Config) validateMediaSubtitles() error {
 	if c.MediaSubtitlesTTMLAlignToleranceMS == 0 {
 		c.MediaSubtitlesTTMLAlignToleranceMS = DefaultMediaSubtitlesAlignToleranceMS
 	}
+	segmentation := strings.ToLower(strings.TrimSpace(c.MediaSubtitlesSegmentation))
+	if segmentation == "" {
+		segmentation = Default().MediaSubtitlesSegmentation
+	}
+	switch segmentation {
+	case "chunk", "broadcast":
+	default:
+		return fmt.Errorf("media.subtitles.segmentation must be one of chunk, broadcast: %q",
+			c.MediaSubtitlesSegmentation)
+	}
+	c.MediaSubtitlesSegmentation = segmentation
 	return nil
 }
 
