@@ -45,6 +45,8 @@ type parsedForm struct {
 	hasAuth        bool
 	vadFilter      string
 	hasVADFilter   bool
+	task           string
+	hasTask        bool
 }
 
 func parseMultipart(t *testing.T, r *http.Request) parsedForm {
@@ -79,6 +81,9 @@ func parseMultipart(t *testing.T, r *http.Request) parsedForm {
 		case "vad_filter":
 			out.vadFilter = string(data)
 			out.hasVADFilter = true
+		case "task":
+			out.task = string(data)
+			out.hasTask = true
 		}
 	}
 	return out
@@ -215,6 +220,46 @@ func TestVADFilterField(t *testing.T) {
 			}
 			if tc.wantSet && got.vadFilter != "true" {
 				t.Errorf("vad_filter = %q, want true", got.vadFilter)
+			}
+		})
+	}
+}
+
+// TestTaskField asserts the multipart `task` field is sent only when the client
+// is configured to translate. Plain transcription (the default, and an explicit
+// "transcribe") must omit the field entirely so servers that don't accept it
+// keep working, and translate must decode straight to English via task=translate.
+func TestTaskField(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		task     string
+		wantSet  bool
+		wantTask string
+	}{
+		{"default omits task", "", false, ""},
+		{"explicit transcribe omits task", whisperapi.TaskTranscribe, false, ""},
+		{"translate sends task=translate", whisperapi.TaskTranslate, true, "translate"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var got parsedForm
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = parseMultipart(t, r)
+				_, _ = io.WriteString(w, jsonSegments)
+			}))
+			defer srv.Close()
+
+			c := newClient(srv.URL, "")
+			c.Task = tc.task
+
+			if _, err := c.Transcribe(context.Background(), "a.wav", []byte("x")); err != nil {
+				t.Fatalf("Transcribe: %v", err)
+			}
+			if got.hasTask != tc.wantSet {
+				t.Fatalf("task present = %v, want %v", got.hasTask, tc.wantSet)
+			}
+			if tc.wantSet && got.task != tc.wantTask {
+				t.Errorf("task = %q, want %q", got.task, tc.wantTask)
 			}
 		})
 	}

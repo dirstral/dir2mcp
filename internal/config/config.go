@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
@@ -452,6 +453,16 @@ type Config struct {
 	// consulted when MediaTranslateEnabled is true; enabling translation with an
 	// empty list is CONFIG_INVALID.
 	MediaTranslateTargetLangs []string
+
+	// MediaTranslateEngine selects HOW transcripts are translated (config
+	// `media.translate.engine`): "chat" (default) translates the transcript text
+	// line-by-line via the chat generator; "whisper" re-decodes the source audio
+	// with Whisper's native translate task (audio->English single pass), which
+	// keeps names/terms in the acoustic model's context and produces its own
+	// segment timings. "whisper" requires the STT provider to be kind:whisper and
+	// English-only target_langs (Whisper's only translation target). Only
+	// consulted when MediaTranslateEnabled is true.
+	MediaTranslateEngine string
 	// MediaFilterWords is an optional, general-purpose list of boilerplate /
 	// credits / watermark phrases stripped from transcript and subtitle text
 	// (config `media.filter_words`). Matching is case-insensitive substring
@@ -700,6 +711,7 @@ type fileConfig struct {
 	MediaVariantsSelect                *string
 	MediaTranslateEnabled              *bool
 	MediaTranslateTargetLangs          []string
+	MediaTranslateEngine               *string
 	MediaFilterWords                   []string
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
@@ -831,6 +843,7 @@ type persistedConfig struct {
 	MediaVariantsSelect                string        `yaml:"media_variants_select"`
 	MediaTranslateEnabled              bool          `yaml:"media_translate_enabled"`
 	MediaTranslateTargetLangs          []string      `yaml:"media_translate_target_langs"`
+	MediaTranslateEngine               string        `yaml:"media_translate_engine"`
 	MediaFilterWords                   []string      `yaml:"media_filter_words"`
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
@@ -1048,6 +1061,7 @@ func Default() Config {
 		MediaVariantsSelect:       "best",
 		MediaTranslateEnabled:     false,
 		MediaTranslateTargetLangs: nil,
+		MediaTranslateEngine:      "chat",
 		// Bilingual subtitle export (SPEC §8.6.10) is OFF by default; the align
 		// tolerance carries its spec default so an enabled-but-unspecified config
 		// behaves predictably.
@@ -1173,6 +1187,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaVariantsSelect:                cfg.MediaVariantsSelect,
 		MediaTranslateEnabled:              cfg.MediaTranslateEnabled,
 		MediaTranslateTargetLangs:          append([]string(nil), cfg.MediaTranslateTargetLangs...),
+		MediaTranslateEngine:               cfg.MediaTranslateEngine,
 		MediaFilterWords:                   append([]string(nil), cfg.MediaFilterWords...),
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
@@ -1912,10 +1927,21 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTranslateTargetLangs != nil {
 		cfg.MediaTranslateTargetLangs = normalizeStringSlice(fc.MediaTranslateTargetLangs)
 	}
+	if fc.MediaTranslateEngine != nil {
+		cfg.MediaTranslateEngine = *fc.MediaTranslateEngine
+	}
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
 	applyMediaSubtitlesFileParsed(cfg, fc)
+	applyMediaProcessingFileParsed(cfg, fc)
+	applyMediaBatchFileParsed(cfg, fc)
+}
+
+// applyMediaProcessingFileParsed copies the set media processing/clip file
+// fields onto cfg. Split from applyMediaFileParsed to keep that function under
+// the cyclomatic-complexity budget.
+func applyMediaProcessingFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTrimLeadingSilence != nil {
 		cfg.MediaTrimLeadingSilence = *fc.MediaTrimLeadingSilence
 	}
@@ -1943,7 +1969,6 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaClipMaxBytes != nil {
 		cfg.MediaClipMaxBytes = *fc.MediaClipMaxBytes
 	}
-	applyMediaBatchFileParsed(cfg, fc)
 }
 
 // applyMediaBatchFileParsed copies the set media.batch file fields (SPEC §8.6.11)
@@ -2281,6 +2306,7 @@ var configKeyAliases = map[string]string{
 	"media_variants_select":                   "media.variants.select",
 	"media_translate_enabled":                 "media.translate.enabled",
 	"media_translate_target_langs":            "media.translate.target_langs",
+	"media_translate_engine":                  "media.translate.engine",
 	"media_filter_words":                      "media.filter_words",
 	"filter_words":                            "media.filter_words",
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
@@ -2722,6 +2748,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
+	case "media.translate.engine":
+		cfg.MediaTranslateEngine = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -2902,6 +2930,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_variants_select", cfg.MediaVariantsSelect)
 	writeBool("media_translate_enabled", cfg.MediaTranslateEnabled)
 	writeList("media_translate_target_langs", cfg.MediaTranslateTargetLangs)
+	writeScalar("media_translate_engine", cfg.MediaTranslateEngine)
 	writeList("media_filter_words", cfg.MediaFilterWords)
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
@@ -3466,9 +3495,32 @@ func (c *Config) validateMediaTranslate() error {
 	if !c.MediaTranslateEnabled {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(c.MediaTranslateTargetLangs))
-	out := make([]string, 0, len(c.MediaTranslateTargetLangs))
-	for _, lang := range c.MediaTranslateTargetLangs {
+	out, err := normalizeMediaTranslateTargets(c.MediaTranslateTargetLangs)
+	if err != nil {
+		return err
+	}
+	if len(out) == 0 {
+		return errors.New("media.translate.enabled=true requires a non-empty " +
+			"media.translate.target_langs (no default target language)")
+	}
+	c.MediaTranslateTargetLangs = out
+
+	engine, err := c.validateMediaTranslateEngine(out)
+	if err != nil {
+		return err
+	}
+	c.MediaTranslateEngine = engine
+	return nil
+}
+
+// normalizeMediaTranslateTargets trims, lower-cases and de-duplicates the
+// media.translate.target_langs list, rejecting any tag outside the cache-safe
+// BCP-47 alphabet. Split out of validateMediaTranslate to keep that function
+// under the cyclomatic-complexity budget; behaviour is unchanged.
+func normalizeMediaTranslateTargets(langs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(langs))
+	out := make([]string, 0, len(langs))
+	for _, lang := range langs {
 		l := strings.ToLower(strings.TrimSpace(lang))
 		if l == "" {
 			continue
@@ -3480,7 +3532,7 @@ func (c *Config) validateMediaTranslate() error {
 		for _, r := range l {
 			safe := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
 			if !safe {
-				return fmt.Errorf("media.translate.target_langs contains an invalid language tag %q "+
+				return nil, fmt.Errorf("media.translate.target_langs contains an invalid language tag %q "+
 					"(use BCP-47 letters/digits/hyphen, e.g. \"en\" or \"pt-br\")", lang)
 			}
 		}
@@ -3490,12 +3542,41 @@ func (c *Config) validateMediaTranslate() error {
 		seen[l] = struct{}{}
 		out = append(out, l)
 	}
-	if len(out) == 0 {
-		return errors.New("media.translate.enabled=true requires a non-empty " +
-			"media.translate.target_langs (no default target language)")
+	return out, nil
+}
+
+// validateMediaTranslateEngine resolves and validates the translation engine
+// against the normalized target list. Split out of validateMediaTranslate to
+// keep that function under the cyclomatic-complexity budget; behaviour is
+// unchanged.
+//
+// Translation engine: "chat" (default, line-by-line via the chat generator)
+// or "whisper" (native audio->English translate task). Whisper only produces
+// English and needs a whisper STT provider, so validate those preconditions
+// here where the normalized target list and resolved providers are available.
+func (c *Config) validateMediaTranslateEngine(out []string) (string, error) {
+	engine := strings.ToLower(strings.TrimSpace(c.MediaTranslateEngine))
+	if engine == "" {
+		engine = Default().MediaTranslateEngine
 	}
-	c.MediaTranslateTargetLangs = out
-	return nil
+	switch engine {
+	case "chat":
+	case "whisper":
+		prof, ok := resolveSTTProfileForCapability(*c)
+		if !ok || prof.Kind != provider.KindWhisper {
+			return "", errors.New("CONFIG_INVALID: media.translate.engine=whisper requires the STT provider " +
+				"to be kind:whisper (set stt.provider: whisper), or use media.translate.engine=chat")
+		}
+		for _, lang := range out {
+			if strings.SplitN(lang, "-", 2)[0] != "en" {
+				return "", fmt.Errorf("CONFIG_INVALID: media.translate.engine=whisper only produces English; set "+
+					"media.translate.target_langs: [en] (got %q) or use media.translate.engine=chat", lang)
+			}
+		}
+	default:
+		return "", fmt.Errorf("media.translate.engine must be one of chat, whisper: %q", c.MediaTranslateEngine)
+	}
+	return engine, nil
 }
 
 // crossLingualAutoSentinel is the target-langs value meaning "expand into the
