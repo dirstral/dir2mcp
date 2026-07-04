@@ -195,29 +195,37 @@ func TestHNSWIndex_DirtyFlagSkipsUnchangedSave(t *testing.T) {
 // TestHNSWIndex_DirtyFlagDeleteAndResetMarkDirty pins that Delete and Reset are
 // treated as mutations that require a save.
 func TestHNSWIndex_DirtyFlagDeleteAndResetMarkDirty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), index.TextIndexFileName)
-	idx := index.NewHNSWIndex(path)
-	upsertVec(t, idx, 1, []float32{1, 0})
-	if err := idx.Save(context.Background(), ""); err != nil {
-		t.Fatalf("initial save: %v", err)
+	// Each case gets its OWN fresh index seeded with vector 1, so the "delete"
+	// case always targets an existing vector. Sharing one index across a
+	// randomly-ordered map made this flaky: if "reset" (which clears vectors)
+	// ran first, the later "delete" hit an already-empty index and — correctly —
+	// left it clean (deleting an absent id is not a mutation), spuriously failing.
+	cases := map[string]func(idx *index.HNSWIndex) error{
+		"delete": func(idx *index.HNSWIndex) error { return idx.Delete(context.Background(), []uint64{1}) },
+		"reset":  func(idx *index.HNSWIndex) error { return idx.Reset(context.Background(), "id-2") },
 	}
-
-	for name, mutate := range map[string]func() error{
-		"delete": func() error { return idx.Delete(context.Background(), []uint64{1}) },
-		"reset":  func() error { return idx.Reset(context.Background(), "id-2") },
-	} {
-		if err := mutate(); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if err := os.Remove(path); err != nil {
-			t.Fatalf("%s remove: %v", name, err)
-		}
-		if err := idx.Save(context.Background(), ""); err != nil {
-			t.Fatalf("%s save: %v", name, err)
-		}
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("%s did not mark the index dirty; snapshot missing: %v", name, err)
-		}
+	for name, mutate := range cases {
+		mutate := mutate
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), index.TextIndexFileName)
+			idx := index.NewHNSWIndex(path)
+			upsertVec(t, idx, 1, []float32{1, 0})
+			if err := idx.Save(context.Background(), ""); err != nil {
+				t.Fatalf("initial save: %v", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove initial snapshot: %v", err)
+			}
+			if err := mutate(idx); err != nil {
+				t.Fatalf("mutate: %v", err)
+			}
+			if err := idx.Save(context.Background(), ""); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("%s did not mark the index dirty; snapshot missing: %v", name, err)
+			}
+		})
 	}
 }
 
