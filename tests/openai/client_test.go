@@ -185,13 +185,7 @@ func TestGenerate_SendsBoundedMaxTokens(t *testing.T) {
 		{name: "override", override: 42, want: 42},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotBody map[string]any
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_ = json.NewDecoder(r.Body).Decode(&gotBody)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
-				})
-			}))
+			srv, bodyCh := captureBodyServer(t)
 			defer srv.Close()
 
 			c := newClient(srv.URL)
@@ -201,6 +195,7 @@ func TestGenerate_SendsBoundedMaxTokens(t *testing.T) {
 			if _, err := c.Generate(context.Background(), "hi"); err != nil {
 				t.Fatalf("generate: %v", err)
 			}
+			gotBody := <-bodyCh
 			mt, ok := gotBody["max_tokens"]
 			if !ok {
 				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
@@ -228,19 +223,14 @@ func TestGenerateWithMaxTokens_PerCallCap(t *testing.T) {
 		{name: "negative falls back to default", maxTokens: -1, want: 4096},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotBody map[string]any
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_ = json.NewDecoder(r.Body).Decode(&gotBody)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
-				})
-			}))
+			srv, bodyCh := captureBodyServer(t)
 			defer srv.Close()
 
 			var bg model.BoundedGenerator = newClient(srv.URL)
 			if _, err := bg.GenerateWithMaxTokens(context.Background(), "hi", tc.maxTokens); err != nil {
 				t.Fatalf("generate: %v", err)
 			}
+			gotBody := <-bodyCh
 			mt, ok := gotBody["max_tokens"]
 			if !ok {
 				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
@@ -371,4 +361,25 @@ func asProviderErr(err error, target **model.ProviderError) bool {
 		*target = pe
 	}
 	return ok && strings.HasPrefix(pe.Code, "OPENAI_")
+}
+
+// captureBodyServer returns a test server that decodes each request body and
+// hands it to the test goroutine over the returned channel (race-free under
+// -race, unlike writing a shared map from the handler goroutine), plus a canned
+// chat response. Decode errors fail the request explicitly.
+func captureBodyServer(t *testing.T) (*httptest.Server, <-chan map[string]any) {
+	t.Helper()
+	bodyCh := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		bodyCh <- body
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+		})
+	}))
+	return srv, bodyCh
 }
