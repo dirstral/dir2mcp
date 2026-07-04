@@ -135,6 +135,61 @@ func TestBuildBroadcastCuesOverlappingTimingsNeverTruncate(t *testing.T) {
 	}
 }
 
+// TestBuildBroadcastCuesSpacelessScriptFallsBack pins the CJK/spaceless-script
+// safeguard: Whisper emits one token per character for scripts with no inter-word
+// spaces (Chinese/Japanese/Thai), so the broadcast path — which rejoins tokens
+// with an inserted space — must NOT run. BuildBroadcastCues returns nil so the
+// caller falls back to BuildCues (verbatim chunk text), keeping "你好世界" intact
+// rather than corrupting it into "你 好 世 界".
+func TestBuildBroadcastCuesSpacelessScriptFallsBack(t *testing.T) {
+	words := []word{
+		{start: 0, end: 300, text: "你"},
+		{start: 300, end: 600, text: "好"},
+		{start: 600, end: 900, text: "世"},
+		{start: 900, end: 1200, text: "界"},
+	}
+	if got := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)}); got != nil {
+		t.Fatalf("BuildBroadcastCues on a spaceless (CJK) transcript = %v, want nil (fall back to chunk cues)", got)
+	}
+
+	// The caller's fallback (BuildCues over the stored chunk text) must reproduce
+	// the text verbatim — no fabricated spaces between the ideographs.
+	const cjk = "你好世界"
+	chunks := []subtitle.TranscriptChunk{{Text: cjk, Span: model.Span{Kind: "time", StartMS: 0, EndMS: 1200}}}
+	cues := subtitle.BuildCues(chunks)
+	if len(cues) != 1 {
+		t.Fatalf("BuildCues fallback produced %d cues, want 1", len(cues))
+	}
+	if cues[0].Text != cjk {
+		t.Errorf("fallback cue text = %q, want verbatim %q (no injected spaces)", cues[0].Text, cjk)
+	}
+}
+
+// TestBuildBroadcastCuesCyrillicStillSegments pins that the spaceless-script
+// guard does NOT misfire on a space-delimited script: a Cyrillic transcript is
+// still re-segmented on the broadcast path (proving the detection is runes-not-
+// bytes and the broadcast path is intact for non-Latin space-delimited scripts).
+func TestBuildBroadcastCuesCyrillicStillSegments(t *testing.T) {
+	words := []word{
+		{start: 0, end: 400, text: "Привет"},
+		{start: 400, end: 1400, text: "мир"}, // cur dur 1.4 s (>= 1.2 s min)
+		// 1 s gap -> pause break before the next sentence
+		{start: 2400, end: 2900, text: "друзья"},
+	}
+	cues := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)})
+	if len(cues) != 2 {
+		t.Fatalf("expected 2 Cyrillic cues split at the pause, got %d: %+v", len(cues), cues)
+	}
+	// The broadcast path space-joins Cyrillic tokens (correct for a space-delimited
+	// script), so the first cue reads as spaced words.
+	if !strings.Contains(cues[0].Text, "Привет мир") {
+		t.Errorf("cue 0 text = %q, want to contain %q", cues[0].Text, "Привет мир")
+	}
+	if !strings.Contains(cues[1].Text, "друзья") {
+		t.Errorf("cue 1 text = %q, want to contain %q", cues[1].Text, "друзья")
+	}
+}
+
 // TestBuildBroadcastCuesWrapAndDetok pins two-line balanced wrapping for a long
 // cue and punctuation-flush detokenization of trimmed word tokens.
 func TestBuildBroadcastCuesWrapAndDetok(t *testing.T) {

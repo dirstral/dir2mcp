@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
@@ -123,6 +124,67 @@ func TestFilterConsistentIngestAndExport(t *testing.T) {
 	}
 	if !strings.Contains(exportJoined.String(), "keep this line") {
 		t.Fatalf("export dropped real content: %q", exportJoined.String())
+	}
+}
+
+// TestFilterWordsDroppedFromSpanWords pins FIX 2: filtered phrases are removed
+// from the attached per-word timings (Span.Words), not just from segment Text.
+// Broadcast cues are rebuilt from Span.Words, so a leak here re-introduces the
+// watermark/credit phrase the filter stripped — and a re-segmentation that splits
+// the phrase across a cue boundary defeats the export-time substring backstop.
+// Filtering at the source (the word list) closes the leak for both.
+func TestFilterWordsDroppedFromSpanWords(t *testing.T) {
+	// One timestamped segment; the words carry a filter phrase with a >600ms gap
+	// INSIDE it ("Subscribe" ... pause ... "to our channel"), so broadcast
+	// re-segmentation would split the phrase across two cues — exactly the case a
+	// substring FilterCues backstop cannot catch.
+	const content = "[00:00] Hello world Subscribe to our channel today"
+	words := []model.TimedWord{
+		{Word: "Hello", StartMS: 0, EndMS: 400},
+		{Word: "world", StartMS: 400, EndMS: 1400},
+		{Word: "Subscribe", StartMS: 1400, EndMS: 1800},
+		{Word: "to", StartMS: 2600, EndMS: 2800}, // 800ms gap -> segmentation break mid-phrase
+		{Word: "our", StartMS: 2800, EndMS: 3000},
+		{Word: "channel", StartMS: 3000, EndMS: 3200},
+		{Word: "today", StartMS: 4000, EndMS: 4400},
+	}
+	f := subtitle.NewWordFilter([]string{"Subscribe to our channel"})
+
+	segs := ingest.ChunkTranscriptByTimeWithWordsFiltered(content, words, f)
+
+	// Source of truth: the filtered tokens must be gone from Span.Words.
+	chunks := make([]subtitle.TranscriptChunk, 0, len(segs))
+	for _, s := range segs {
+		for _, w := range s.Span.Words {
+			lw := strings.ToLower(w.W)
+			if lw == "subscribe" || lw == "channel" {
+				t.Fatalf("filtered word %q leaked into Span.Words", w.W)
+			}
+		}
+		chunks = append(chunks, subtitle.TranscriptChunk{Text: s.Text, Span: s.Span})
+	}
+
+	// Consumer: broadcast cues rebuilt from Span.Words must not contain the phrase
+	// (nor its straddling fragments), WITHOUT relying on the export FilterCues
+	// backstop.
+	cues := subtitle.BuildBroadcastCues(chunks)
+	if len(cues) == 0 {
+		t.Fatal("expected broadcast cues from the surviving words, got none")
+	}
+	var joined strings.Builder
+	for _, c := range cues {
+		joined.WriteString(strings.ToLower(c.Text))
+		joined.WriteString(" ")
+	}
+	got := joined.String()
+	for _, banned := range []string{"subscribe", "channel"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("filtered phrase fragment %q leaked into broadcast cues: %q", banned, got)
+		}
+	}
+	// The real content survives.
+	if !strings.Contains(got, "hello world") {
+		t.Fatalf("real content dropped from broadcast cues: %q", got)
 	}
 }
 

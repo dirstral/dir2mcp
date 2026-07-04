@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -187,12 +188,73 @@ type broadcastWord struct {
 // only cue boundaries and timing are computed, never the words. It returns nil
 // when no span carries word timings, so callers fall back to BuildCues (the
 // chunk-per-cue path) and a words-absent transcript is unchanged.
+//
+// Broadcast re-segmentation currently supports only space-delimited scripts
+// (Latin, Cyrillic, Greek, Hangul, …). It rejoins trimmed word tokens with an
+// inserted ASCII space (appendBroadcastToken) and wraps/measures lines on that
+// space, which is correct for scripts that separate words with spaces but would
+// FABRICATE spaces inside a spaceless script (Han/Kana/Thai), where Whisper emits
+// one token per character/syllable — turning "你好世界" into "你 好 世 界" and
+// violating the "text is never modified" contract. When such a script dominates
+// the word tokens, this returns nil so the caller falls back to BuildCues, which
+// reproduces the stored chunk text verbatim (no space injection, no corruption).
 func BuildBroadcastCues(chunks []TranscriptChunk) []Cue {
 	words := collectBroadcastWords(chunks)
 	if len(words) == 0 {
 		return nil
 	}
+	if !wordsNeedSpaceJoining(words) {
+		// Spaceless script (Han/Kana/Thai): the broadcast path's space-joining
+		// would corrupt the text. Fall back to the verbatim chunk-per-cue builder.
+		return nil
+	}
 	return relaxBroadcastTiming(segmentBroadcastWords(words))
+}
+
+// spacelessScriptPercent is the share of alphabetic runes that must belong to a
+// spaceless script (Han/Kana/Thai) before a transcript is treated as spaceless
+// and routed away from the space-joining broadcast path. It is deliberately low:
+// a genuinely space-delimited transcript (Latin/Cyrillic) has ~0% such runes, so
+// even a modest presence is a reliable signal without misclassifying the odd
+// borrowed ideograph in an otherwise Latin caption.
+const spacelessScriptPercent = 30
+
+// isSpacelessRune reports whether r belongs to a script written without
+// inter-word spaces, where per-character ASR tokens must NOT be space-joined:
+// Han (Chinese, incl. CJK extensions and Japanese kanji), Hiragana, Katakana,
+// and Thai. Hangul is intentionally excluded — Korean IS space-delimited, so it
+// stays on the broadcast path.
+func isSpacelessRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) ||
+		unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) ||
+		unicode.Is(unicode.Thai, r)
+}
+
+// wordsNeedSpaceJoining reports whether a transcript's word tokens come from a
+// space-delimited script and can therefore be safely rejoined with inserted
+// spaces (the broadcast path). It inspects only alphabetic runes; a transcript
+// where at least spacelessScriptPercent of them are in a spaceless script
+// (Han/Kana/Thai) returns false so the caller falls back to verbatim chunk cues.
+// A token set with no alphabetic runes (pure punctuation/digits) has no space
+// convention to violate, so it stays on the broadcast path.
+func wordsNeedSpaceJoining(words []broadcastWord) bool {
+	var letters, spaceless int
+	for _, w := range words {
+		for _, r := range w.text {
+			if !unicode.IsLetter(r) {
+				continue
+			}
+			letters++
+			if isSpacelessRune(r) {
+				spaceless++
+			}
+		}
+	}
+	if letters == 0 {
+		return true
+	}
+	return spaceless*100/letters < spacelessScriptPercent
 }
 
 // broadcastSeg is one cue's word-derived span before timing relaxation: the
