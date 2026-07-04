@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"golang.org/x/text/language"
 )
 
 // sidecarExtensions are the subtitle sidecar formats recognised next to a media
@@ -235,6 +236,15 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 			if mediaExt != "" && strings.EqualFold(lang, mediaExt) {
 				// e.g. "clip.mp3.vtt" for media "clip.mp3": the token is the
 				// media's own extension, not a language tag.
+				continue
+			}
+			if !isKnownLanguageTag(lang) {
+				// The single tail token is not a real language tag but a stray
+				// filename fragment — "clip.HD.vtt" (token "HD"), "clip.2024.vtt"
+				// (token "2024"), or a cross-media extension "clip.mp4.vtt" bound to
+				// "clip.mp3" (token "mp4"). Binding such a token would record a bogus
+				// language ("HD"/"2024"/"mp4") AND suppress real STT, so it is not
+				// this media's sidecar and is skipped (issue #431 §8.6.4).
 				continue
 			}
 		default:
@@ -488,6 +498,31 @@ func (s *Service) IngestSidecarTranscripts(ctx context.Context, doc model.Docume
 // (§8.6.4).
 func isSidecarMediaType(docType string) bool {
 	return docType == "audio" || docType == "video"
+}
+
+// isKnownLanguageTag reports whether token is a real BCP-47 language tag whose
+// primary subtag is a registered ISO 639 language, not merely a syntactically
+// well-formed string. It guards the sidecar language-suffix binding (§8.6.4): a
+// dot-free tail token is only treated as a language tag when it actually names a
+// language, so a stray filename fragment ("HD", "2024") or a cross-media
+// extension token ("mp4" for a "clip.mp3" asset) is rejected rather than bound
+// as a bogus-language transcript that also suppresses real STT (issue #431).
+//
+// Validation is on the PRIMARY subtag (matching the §9.5 primary-subtag
+// contract), so region/script/variant-tagged sidecars still bind on their base
+// language: "pt-BR", "zh-Hant", and "en-orig" all validate via base "pt"/"zh"/
+// "en". The dependency on golang.org/x/text/language is confined to this ingest
+// helper; model.LanguagePrimarySubtag/IsValidLanguageTag stay parser-free.
+func isKnownLanguageTag(token string) bool {
+	if !model.IsValidLanguageTag(token) {
+		return false
+	}
+	// ParseBase validates the primary subtag against the ISO 639 registry: it
+	// returns an error for a well-formed-but-unknown subtag ("hd") and for a
+	// not-well-formed one ("mp4"/"2024"), while accepting real codes ("en", "ru",
+	// "pt", "cmn", ...). The confidence is irrelevant; only the error matters.
+	_, err := language.ParseBase(model.LanguagePrimarySubtag(token))
+	return err == nil
 }
 
 // isSidecarExt reports whether ext (lowercased, with leading dot) is a

@@ -995,12 +995,60 @@ func (s *Server) runAskAudioAnswer(ctx context.Context, question, voiceID string
 			StructuredContent: structured,
 		}, nil
 	}
+	// Report the audio format the synthesizer actually returned, sniffed from the
+	// container bytes, rather than a hardcoded "audio/mpeg". ElevenLabs returns
+	// MP3, but Gemini TTS returns WAV; labelling a WAV as audio/mpeg ships an
+	// unplayable blob to the client (issue #431). detectAudioMIME only returns
+	// values allowed by askAudioOutputSchema, so structuredContent stays valid.
+	mimeType := detectAudioMIME(audioBytes)
 	encodedAudio := base64.StdEncoding.EncodeToString(audioBytes)
-	structured["audio"] = map[string]interface{}{"mime_type": "audio/mpeg", "data": encodedAudio}
+	structured["audio"] = map[string]interface{}{"mime_type": mimeType, "data": encodedAudio}
 	return toolCallResult{
-		Content:           []toolContentItem{{Type: "text", Text: answerText}, {Type: "audio", MIMEType: "audio/mpeg", Data: encodedAudio}},
+		Content:           []toolContentItem{{Type: "text", Text: answerText}, {Type: "audio", MIMEType: mimeType, Data: encodedAudio}},
 		StructuredContent: structured,
 	}, nil
+}
+
+// audioMIMEEnum is the closed set of audio MIME types ask_audio may report. It is
+// the single source of truth shared by detectAudioMIME (which classifies the
+// synthesized bytes) and askAudioOutputSchema (which pins the structuredContent
+// enum), so the emitted mime_type is always a schema-valid value. audioMIMEMPEG
+// is both a member and the fallback for unrecognised/short byte streams.
+const audioMIMEMPEG = "audio/mpeg"
+
+var audioMIMEEnum = []string{audioMIMEMPEG, "audio/wav", "audio/ogg", "audio/flac"}
+
+// audioMIMEEnumForSchema returns a fresh copy of audioMIMEEnum for embedding in
+// the ask_audio output schema, so the serialized schema never aliases (and thus
+// can never be mutated through) the package-level enum var.
+func audioMIMEEnumForSchema() []string {
+	return append([]string(nil), audioMIMEEnum...)
+}
+
+// detectAudioMIME classifies synthesized audio bytes by their container magic
+// number so ask_audio reports the format the TTS provider actually returned
+// (issue #431). It recognises the containers dir2mcp's synthesizers emit — WAV
+// (Gemini TTS), MP3 (ElevenLabs/OpenAI), plus Ogg and FLAC for forward
+// compatibility — and falls back to audio/mpeg for empty, truncated, or
+// unrecognised input (the historical default, and a safe schema-valid value).
+// Every return value is a member of audioMIMEEnum.
+func detectAudioMIME(data []byte) string {
+	switch {
+	case len(data) >= 12 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WAVE":
+		return "audio/wav"
+	case len(data) >= 4 && string(data[0:4]) == "fLaC":
+		return "audio/flac"
+	case len(data) >= 4 && string(data[0:4]) == "OggS":
+		return "audio/ogg"
+	case len(data) >= 3 && string(data[0:3]) == "ID3":
+		// MP3 with an ID3v2 tag.
+		return audioMIMEMPEG
+	case len(data) >= 2 && data[0] == 0xFF && (data[1]&0xE0) == 0xE0:
+		// MP3 frame sync (11 set bits): 0xFF followed by 0b111xxxxx.
+		return audioMIMEMPEG
+	default:
+		return audioMIMEMPEG
+	}
 }
 
 func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
@@ -3032,7 +3080,9 @@ func askAudioOutputSchema() map[string]interface{} {
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
-			"mime_type": map[string]interface{}{"type": "string", "enum": []string{"audio/mpeg"}},
+			// The enum mirrors audioMIMEEnum (the set detectAudioMIME can emit) so a
+			// WAV synthesized by Gemini TTS is reportable, not just MP3 (issue #431).
+			"mime_type": map[string]interface{}{"type": "string", "enum": audioMIMEEnumForSchema()},
 			"data":      map[string]interface{}{"type": "string"},
 		},
 		"required": []string{"mime_type", "data"},
