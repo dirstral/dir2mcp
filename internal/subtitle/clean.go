@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Glossary applies editorial term replacements to cue text: whole-word,
@@ -12,8 +14,10 @@ import (
 // DELETES configured phrases, a glossary REWRITES text and never drops a cue.
 // Rules come entirely from configuration (media.subtitles.glossary); an empty
 // glossary is a no-op. Each rule's match side is a regular expression (so a
-// single entry can absorb spelling variants, e.g. "Aju?bei"), wrapped in ASCII
-// word boundaries and matched case-insensitively.
+// single entry can absorb spelling variants, e.g. "Aju?bei"), matched
+// case-insensitively and constrained to whole words. Word boundaries are
+// Unicode-aware (letter/digit/underscore in any script), so rules apply to
+// Cyrillic, CJK, etc. — not only ASCII/Latin transliterations.
 type Glossary struct {
 	rules []glossaryRule
 }
@@ -29,9 +33,11 @@ const glossarySep = "=>"
 
 // NewGlossary compiles glossary entries of the form "pattern=>replacement".
 // Whitespace around the entry and each side is trimmed; blank entries are
-// skipped. The pattern is compiled as a case-insensitive, ASCII-word-bounded
-// regular expression, so an invalid pattern is a configuration error (returned
-// here) rather than a silent no-op. A nil/empty list yields an inactive glossary.
+// skipped. The pattern is compiled case-insensitively, so an invalid pattern is a
+// configuration error (returned here) rather than a silent no-op. Whole-word
+// matching is enforced at apply time by Unicode-aware boundary checks (see Apply),
+// not by RE2's ASCII-only \b — otherwise glossary rules would silently fail on any
+// non-Latin script. A nil/empty list yields an inactive glossary.
 func NewGlossary(entries []string) (*Glossary, error) {
 	g := &Glossary{}
 	for _, e := range entries {
@@ -48,18 +54,62 @@ func NewGlossary(entries []string) (*Glossary, error) {
 		if from == "" {
 			return nil, fmt.Errorf("glossary entry %q has an empty match pattern", e)
 		}
-		// Wrap the pattern in a non-capturing group so the word boundaries anchor
-		// the WHOLE pattern: without it a top-level alternation ("Aju|Adju") would
-		// compile to \bAju|Adju\b, which RE2 reads as (\bAju)|(Adju\b) — each
-		// alternative keeping only one boundary — silently allowing partial-word
-		// rewrites and breaking the documented word-bounded guarantee.
-		re, err := regexp.Compile(`(?i)\b(?:` + from + `)\b`)
+		// Wrap the pattern in a non-capturing group so Apply's boundary check
+		// constrains the WHOLE pattern: without it a top-level alternation
+		// ("Aju|Adju") would bind the surrounding context to only one alternative
+		// and the boundary check would police just part of the match, silently
+		// allowing partial-word rewrites and breaking the whole-word guarantee.
+		re, err := regexp.Compile(`(?i)(?:` + from + `)`)
 		if err != nil {
 			return nil, fmt.Errorf("glossary entry %q: invalid match pattern: %w", e, err)
 		}
 		g.rules = append(g.rules, glossaryRule{re: re, repl: to})
 	}
 	return g, nil
+}
+
+// isWordRune reports whether r is a word constituent for whole-word matching:
+// any Unicode letter or digit, or underscore. This is the Unicode-aware analogue
+// of RE2's ASCII-only \w, so word boundaries hold across Cyrillic, CJK, etc.
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// replaceWholeWord replaces every non-overlapping match of re in text with repl,
+// but only where the match is whole-word: the runes immediately flanking the
+// match must sit on a word boundary (a \b-equivalent transition between a word
+// and a non-word rune), evaluated with Unicode-aware wordness. Non-whole-word
+// matches (e.g. "Aju" inside "Ajubeyond") are left untouched. repl is inserted
+// verbatim (no capture-group expansion).
+func replaceWholeWord(re *regexp.Regexp, text, repl string) string {
+	locs := re.FindAllStringIndex(text, -1)
+	if len(locs) == 0 {
+		return text
+	}
+	var b strings.Builder
+	last := 0
+	for _, loc := range locs {
+		s, e := loc[0], loc[1]
+		leftOK := true
+		if s > 0 {
+			before, _ := utf8.DecodeLastRuneInString(text[:s])
+			first, _ := utf8.DecodeRuneInString(text[s:e])
+			leftOK = isWordRune(before) != isWordRune(first)
+		}
+		rightOK := true
+		if e < len(text) {
+			after, _ := utf8.DecodeRuneInString(text[e:])
+			lastR, _ := utf8.DecodeLastRuneInString(text[s:e])
+			rightOK = isWordRune(lastR) != isWordRune(after)
+		}
+		if leftOK && rightOK {
+			b.WriteString(text[last:s])
+			b.WriteString(repl)
+			last = e
+		}
+	}
+	b.WriteString(text[last:])
+	return b.String()
 }
 
 // Active reports whether the glossary has any rules to apply. When false, Apply
@@ -77,7 +127,7 @@ func (g *Glossary) Apply(text string) string {
 		return text
 	}
 	for _, r := range g.rules {
-		text = r.re.ReplaceAllLiteralString(text, r.repl)
+		text = replaceWholeWord(r.re, text, r.repl)
 	}
 	return text
 }
@@ -105,16 +155,24 @@ func (o CleanOptions) Active() bool {
 	return o.DropURLs || o.CollapseRepeats >= 2 || o.Glossary.Active()
 }
 
-// urlCueRE matches a hallucinated URL / bare domain in cue text. It mirrors the
-// pilot's clean_srt URL rule: an http(s):// or www. prefix, or a token ending in
-// a common TLD. ASCII word boundaries are sufficient for URLs.
-var urlCueRE = regexp.MustCompile(`(?i)(https?://|www\.|\b\S+\.(com|org|net|ru|ua)\b)`)
+// urlCueRE matches a hallucinated URL / bare domain in cue text (whisper emits
+// these over silence or music). It is deliberately locale-agnostic: an http(s)://
+// or www. prefix, or a hostname-shaped label ([\w-]+) followed by a generic
+// dotted TLD (\.[a-z]{2,24}) at an ASCII word boundary. Requiring a letter
+// immediately after the dot and a hostname-shaped label keeps ordinary prose with
+// periods out ("end. Next", "3.14", "Mr. Smith" — the dot is followed by a space
+// or digits, not a TLD), while catching any real domain (.io, .tv, .co, .de, .uk,
+// .gov, .info, …) without hardcoding country-specific ccTLDs. RE2 word boundaries
+// and \w are ASCII-only, which is fine here: real domains are ASCII, and prose in
+// any script (Cyrillic, CJK, …) whose only dots are sentence periods never has a
+// [\w-] label immediately abutting a letter-led TLD.
+var urlCueRE = regexp.MustCompile(`(?i)(https?://|www\.|\b[\w-]+\.[a-z]{2,24}\b)`)
 
 // CleanCues applies the configured cleanup passes to cues in order: drop empty
 // cues, drop URL/credit hallucinations, collapse identical-consecutive runs, and
-// rewrite text via the glossary. Surviving cues are re-indexed gap-free (as
-// FilterCues does). Timing is preserved verbatim. A zero/empty CleanOptions
-// returns cues unchanged.
+// rewrite text via the glossary (dropping any cue the rewrite empties). Surviving
+// cues are re-indexed gap-free (as FilterCues does). Timing is preserved verbatim.
+// A zero/empty CleanOptions returns cues unchanged.
 func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 	if !opts.Active() {
 		return cues
@@ -147,6 +205,14 @@ func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 		}
 		if opts.Glossary.Active() {
 			text = opts.Glossary.Apply(text)
+			// A glossary rule may empty a cue (an empty REPLACEMENT deletes text,
+			// e.g. "foo=>"). Drop the now-empty cue like the entry-time empty/URL
+			// passes do. This runs AFTER the collapse bookkeeping, which compares
+			// pre-glossary text, so dropping here never corrupts the run counter;
+			// survivors are still re-indexed gap-free below.
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
 		}
 		cue.Index = len(out) + 1
 		cue.Text = text
