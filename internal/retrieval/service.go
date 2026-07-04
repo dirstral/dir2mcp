@@ -925,6 +925,88 @@ func (s *Service) EvictDocuments(relPaths []string) {
 	s.metaMu.Unlock()
 }
 
+// chunkLivenessChecker is an optional store capability: it resolves a chunk by
+// id and returns model.ErrNotFound when that chunk has been tombstoned (or never
+// existed). The shipped *store.SQLiteStore satisfies it via ChunkTaskByID, whose
+// query selects only deleted=0 rows. Retrieval type-asserts against it (mirroring
+// the LexicalSearcher / DocumentHashLister optional-capability pattern) to prune
+// chunks a partial incremental reindex soft-deleted via SoftDeleteChunksFromOrdinal
+// but for which no whole-document eviction ever fired (issue #409). Stores that do
+// not implement it skip the liveness pass entirely, so behavior is unchanged.
+type chunkLivenessChecker interface {
+	ChunkTaskByID(ctx context.Context, chunkID uint64) (model.ChunkTask, string, error)
+}
+
+// EvictChunks removes the given chunk labels from the in-memory retrieval
+// metadata and drops their vectors from the text and code indexes. It is the
+// chunk-granularity analogue of EvictDocuments: an in-place edit that shrinks a
+// document tombstones its trailing chunks via SoftDeleteChunksFromOrdinal without
+// a whole-document delete, so those labels are never pruned by EvictDocuments and
+// would keep resolving to their stale snippet/vector until the daemon restarts
+// (issue #409). It is safe for concurrent use with search — the metadata maps are
+// guarded by metaMu and each index owns its own lock. Unknown labels are ignored.
+func (s *Service) EvictChunks(labels []uint64) {
+	if len(labels) == 0 {
+		return
+	}
+	s.metaMu.Lock()
+	textIndex := s.textIndex
+	codeIndex := s.codeIndex
+	for _, label := range labels {
+		delete(s.chunkByLabel, label)
+		for _, byIndex := range s.chunkByIndex {
+			delete(byIndex, label)
+		}
+	}
+	s.metaMu.Unlock()
+
+	// Also drop the vectors so the ANN scan stops returning the tombstoned labels
+	// as candidates. Delete ignores unknown ids, so issuing to both indexes is
+	// safe regardless of which one held a given label. A fresh context is used so
+	// the eviction still completes if the triggering query's context was canceled.
+	if textIndex != nil {
+		_ = textIndex.Delete(context.Background(), labels)
+	}
+	if codeIndex != nil {
+		_ = codeIndex.Delete(context.Background(), labels)
+	}
+}
+
+// pruneTombstonedHits drops (and evicts) hits whose chunk was soft-deleted in the
+// store since it was indexed — the partial incremental-reindex staleness of issue
+// #409, where SoftDeleteChunksFromOrdinal tombstones trailing chunks with no
+// whole-document eviction to prune them from the in-memory index. Each hit's
+// liveness is validated against the store (ChunkTaskByID returns model.ErrNotFound
+// for a tombstoned chunk); tombstoned labels are removed from the retrieval maps
+// and indexes via EvictChunks so subsequent searches never resurface them without
+// a restart. The pass is fail-open: a store that does not implement the liveness
+// capability, a zero label, or any non-ErrNotFound lookup error leaves the hit in
+// place, so a transient store error can never drop otherwise-valid results.
+func (s *Service) pruneTombstonedHits(ctx context.Context, hits []model.SearchHit) []model.SearchHit {
+	if len(hits) == 0 {
+		return hits
+	}
+	checker, ok := s.store.(chunkLivenessChecker)
+	if !ok {
+		return hits
+	}
+	var evict []uint64
+	live := hits[:0]
+	for _, hit := range hits {
+		if hit.ChunkID != 0 {
+			if _, _, err := checker.ChunkTaskByID(ctx, hit.ChunkID); errors.Is(err, model.ErrNotFound) {
+				evict = append(evict, hit.ChunkID)
+				continue
+			}
+		}
+		live = append(live, hit)
+	}
+	if len(evict) > 0 {
+		s.EvictChunks(evict)
+	}
+	return live
+}
+
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
 	kind := strings.ToLower(strings.TrimSpace(indexName))
 	if kind != "text" && kind != "code" {
@@ -1018,11 +1100,16 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// decayed score and newer content survives a tie. Config-only; default 0 ⇒
 	// pass-through (no allocation, no lookups).
 	hits = s.applyRecencyDecay(ctx, hits)
-	// Apply the server-side relevance floor LAST: after scoring/fusion/rerank,
+	// Apply the server-side relevance floor: after scoring/fusion/rerank,
 	// the optional HyDE fusion, any cross-lingual fusion, their dedup/truncation,
 	// and the recency decay, using each hit's final authoritative Score.
 	// Config-only; default 0 ⇒ pass-through.
-	return s.applyMinScoreFloor(hits), nil
+	hits = s.applyMinScoreFloor(hits)
+	// Prune (and evict) any chunk the store has since tombstoned — the partial
+	// incremental-reindex staleness of issue #409. Done LAST, on the small final
+	// result set, so at most k store lookups run per query and deleted content is
+	// never returned (nor cited) even before the next restart.
+	return s.pruneTombstonedHits(ctx, hits), nil
 }
 
 // searchByMode runs the index-mode dispatch (text/code/both/auto) for one query

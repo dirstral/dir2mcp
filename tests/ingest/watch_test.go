@@ -170,6 +170,65 @@ func TestWatch_IndexesFileInNewSubdir(t *testing.T) {
 	waitForPaths(t, st, "nested/deep.txt", true)
 }
 
+// TestWatch_FollowsSymlinkedDir verifies that with ingest.follow_symlinks on,
+// the watcher registers a watch on a symlinked directory tree (matching the
+// discovery walker) so an edit behind the symlink produces an event rather than
+// waiting for the 10-minute safety rescan (issue #409). Without the fix,
+// addWatchDirs's plain WalkDir never descends the symlink, so a file created
+// behind it is not reindexed under the symlinked path within the poll window.
+//
+// The link name ("aaa_link") sorts before the real target ("zzz_data"), so —
+// mirroring the discovery walker's visited-by-resolved-path dedup — the tree is
+// indexed and watched under the symlinked path; that is exactly the path a plain
+// WalkDir watcher would leave unwatched.
+func TestWatch_FollowsSymlinkedDir(t *testing.T) {
+	requireWatchIntegration(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root := t.TempDir()
+
+	// A real directory inside the watched root, plus a symlink (sorting first)
+	// pointing at it. Symlink targets must stay within root to be followed,
+	// matching discovery's containment check.
+	realDir := filepath.Join(root, "zzz_data")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir realDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "seed.txt"), []byte("seed"), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(root, "aaa_link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.IngestFollowSymlinks = true
+	cfg.IngestWatchDebounce = 20 * time.Millisecond
+	svc := mustNewIngestService(t, cfg, st)
+
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("initial Run: %v", err)
+	}
+	// The initial scan follows the symlink first (alphabetical) and indexes the
+	// seed file under the symlinked path.
+	waitForPaths(t, st, "aaa_link/seed.txt", true)
+
+	startWatcher(t, ctx, svc)
+
+	// Create a NEW file behind the symlink after the watcher started. Only a
+	// watch registered on the symlinked directory reindexes it under that path.
+	if err := os.WriteFile(filepath.Join(realDir, "added.txt"), []byte("new"), 0o600); err != nil {
+		t.Fatalf("write added: %v", err)
+	}
+	waitForPaths(t, st, "aaa_link/added.txt", true)
+}
+
 // TestWatch_IndexesFilesInMovedInTree verifies that a directory tree created
 // with nested children already present (e.g. mkdir -p a/b + a file) is picked
 // up: the watcher must register the whole new subtree and index existing files.
