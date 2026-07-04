@@ -236,6 +236,20 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 	if err := writer.WriteField("response_format", c.responseFormat()); err != nil {
 		return fail("failed to write transcription response_format", err)
 	}
+	// Word-level timestamps are only returned when timestamp_granularities
+	// includes "word": response_format=verbose_json alone yields segment timing
+	// only (the API defaults granularity to "segment"), so without this the
+	// per-word timings that #252 depends on never arrive. Emit both the OpenAI
+	// array form ("timestamp_granularities[]") and the bare form some
+	// OpenAI-compatible servers read, and only for verbose_json so other formats
+	// are byte-for-byte unchanged.
+	if strings.EqualFold(strings.TrimSpace(c.responseFormat()), ResponseFormatVerboseJSON) {
+		for _, field := range []string{"timestamp_granularities[]", "timestamp_granularities"} {
+			if err := writer.WriteField(field, "word"); err != nil {
+				return fail("failed to write transcription timestamp_granularities", err)
+			}
+		}
+	}
 	if language := strings.TrimSpace(c.DefaultLanguage); language != "" {
 		if err := writer.WriteField("language", language); err != nil {
 			return fail("failed to write transcription language", err)
