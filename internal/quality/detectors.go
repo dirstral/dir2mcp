@@ -170,7 +170,11 @@ func (s *coherenceStats) classify(r rune) {
 func gatherCoherenceStats(text string) coherenceStats {
 	var s coherenceStats
 	for _, r := range text {
-		if unicode.IsSpace(r) {
+		// Skip whitespace and combining marks: decomposed (NFD) accents are
+		// separate mark runes that would otherwise count as "other" and inflate
+		// symbol density, tripping the gibberish threshold on valid diacritic-rich
+		// text (e.g. Georgian, Vietnamese).
+		if unicode.IsSpace(r) || unicode.IsMark(r) {
 			continue
 		}
 		s.classify(r)

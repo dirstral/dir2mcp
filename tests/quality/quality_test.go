@@ -4,9 +4,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/dirstral/dir2mcp/internal/quality"
 )
+
+// nfdDiacriticText is varied prose where every letter carries a combining acute
+// accent (NFD form), so combining marks are ~half of all runes. Unless the
+// coherence stats skip combining marks, those marks count as non-language
+// "other" symbols and trip the gibberish symbol-density gate (maxOther 0.40).
+// The base prose is varied, so it does not trip the repetition detector.
+var nfdDiacriticText = func() string {
+	base := "The quick brown fox jumps over the lazy dog while nine violins play softly."
+	var b strings.Builder
+	for _, r := range base {
+		b.WriteRune(r)
+		if unicode.IsLetter(r) {
+			b.WriteRune(0x0301) // combining acute accent (U+0301)
+		}
+	}
+	return b.String()
+}()
 
 // cleanTranscript is a plausible, varied transcript that should pass every
 // default detector.
@@ -146,6 +164,15 @@ func TestGate_Evaluate(t *testing.T) {
 			ctx:        quality.Context{Modality: quality.ModalityOCR},
 			wantOK:     false,
 			wantReason: quality.ReasonGibberish,
+		},
+		{
+			// NFD-decomposed diacritics: each accent is a separate combining mark
+			// rune. These must be ignored, not counted as non-language symbols, or
+			// valid diacritic-rich prose trips the gibberish symbol-density gate.
+			name:   "decomposed diacritics pass",
+			text:   nfdDiacriticText,
+			ctx:    quality.Context{Modality: quality.ModalityTranscript},
+			wantOK: true,
 		},
 	}
 

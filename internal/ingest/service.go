@@ -853,7 +853,11 @@ func (s *Service) SetTranslator(translator model.Generator, providerName, modelN
 // selects the whisper translation engine, primarily for tests. Passing a nil
 // transcriber (or empty langs) disables translation. The recorded provider/model
 // are written into translated transcripts' meta_json. Target languages are
-// normalized (trimmed/lower-cased).
+// normalized (trimmed/lower-cased) and filtered to English-compatible tags:
+// whisper's translate task only ever emits English, so a non-English target
+// would otherwise persist English output under the wrong language tag (e.g.
+// transcript:fr). This mirrors the config path, which is English-only before it
+// reaches the whisper engine.
 func (s *Service) SetTranslateTranscriber(transcriber model.Transcriber, providerName, modelName string, targetLangs []string) {
 	s.translateSTT = transcriber
 	s.translateEngine = "whisper"
@@ -861,7 +865,7 @@ func (s *Service) SetTranslateTranscriber(transcriber model.Transcriber, provide
 	s.translateModel = strings.TrimSpace(modelName)
 	norm := make([]string, 0, len(targetLangs))
 	for _, l := range targetLangs {
-		if t := strings.ToLower(strings.TrimSpace(l)); t != "" {
+		if t := strings.ToLower(strings.TrimSpace(l)); t != "" && sameLanguage(t, "en") {
 			norm = append(norm, t)
 		}
 	}
