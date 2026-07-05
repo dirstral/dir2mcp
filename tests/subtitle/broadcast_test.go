@@ -302,8 +302,32 @@ func TestBuildBroadcastCuesHyphenDetok(t *testing.T) {
 			t.Errorf("hyphen detok: expected %q in %q", want, got)
 		}
 	}
-	if strings.Contains(got, " -") {
-		t.Errorf("hyphen detok: stray space before hyphen in %q", got)
+	for _, bad := range []string{"so -called", "что -то"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("hyphen detok: unexpected spaced compound %q in %q", bad, got)
+		}
+	}
+}
+
+// TestBuildBroadcastCuesStandaloneDashNotGlued pins that a bare "-" token (a
+// dialogue dash or numeric range, not a hyphenated-compound tail) stays spaced
+// after a word — "word -" — and is never glued as "word-".
+func TestBuildBroadcastCuesStandaloneDashNotGlued(t *testing.T) {
+	words := []word{
+		{start: 0, end: 300, text: "yes"},
+		{start: 300, end: 600, text: "-"},
+		{start: 600, end: 900, text: "no"},
+	}
+	cues := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)})
+	if len(cues) != 1 {
+		t.Fatalf("expected 1 cue, got %d: %+v", len(cues), cues)
+	}
+	got := strings.ReplaceAll(cues[0].Text, "\n", " ")
+	if strings.Contains(got, "yes-") {
+		t.Errorf("standalone dash glued onto preceding word in %q", got)
+	}
+	if !strings.Contains(got, "yes -") {
+		t.Errorf("expected spaced standalone dash %q in %q", "yes -", got)
 	}
 }
 

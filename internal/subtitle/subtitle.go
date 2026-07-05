@@ -457,8 +457,10 @@ func appendBroadcastToken(text, tok string) string {
 	// "-called". Attach it flush to render "so-called", not "so -called" — but
 	// only after an alphanumeric, so a genuine leading dash (dialogue/range) is
 	// not glued onto the previous word. Cyrillic "что-то", "все-таки" etc. are
-	// covered because IsLetter is Unicode-aware.
-	if firstTok == '-' && (unicode.IsLetter(lastText) || unicode.IsDigit(lastText)) {
+	// covered because IsLetter is Unicode-aware. A bare "-" token (a dialogue
+	// dash or numeric range) is not a compound tail, so require at least one more
+	// rune after the hyphen before gluing.
+	if firstTok == '-' && len([]rune(tok)) > 1 && (unicode.IsLetter(lastText) || unicode.IsDigit(lastText)) {
 		return text + tok
 	}
 	if strings.ContainsRune(bcNoSpaceBefore, firstTok) || strings.ContainsRune(bcNoSpaceAfter, lastText) {
