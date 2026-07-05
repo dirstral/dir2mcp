@@ -260,6 +260,83 @@ func wordsNeedSpaceJoining(words []broadcastWord) bool {
 	return spaceless*100/letters < spacelessScriptPercent
 }
 
+// ReflowChunkCues re-segments chunk-per-cue subtitles into broadcast-legible
+// cues. It is the fallback for a transcript with no per-word timings — most
+// importantly a machine-translation track, whose stored segments can cram a long
+// translated sentence into a sub-second window and spike the reading speed well
+// past legibility. Each source cue's on-screen span is distributed across its own
+// tokens in proportion to token length, synthesizing a per-word timing stream
+// that is then run through the SAME segmentation and timing-relaxation pipeline
+// as BuildBroadcastCues. The arbitrary source-segment boundaries dissolve and
+// cues re-form sentence/pause aware, <= bcMaxChars, >= bcMinDurMS, two-line
+// wrapped, with reading speed made uniform across each contiguous run of speech.
+// A run that genuinely has more text than its time allows stays dense — that is a
+// property of the speech (or an over-long translation), not the segmentation.
+//
+// Proportional-by-length timing approximates when each word is spoken; within a
+// contiguous run (no silence to anchor to) it is the best signal available and is
+// standard subtitling practice. Speaker labels are dropped: the source is a
+// non-diarized fallback, and callers needing diarized cues have word timings and
+// use BuildBroadcastCues. When no cue carries text, the input is returned as-is.
+func ReflowChunkCues(cues []Cue) []Cue {
+	words := synthesizeWordTimings(cues)
+	if len(words) == 0 {
+		return cues
+	}
+	return relaxBroadcastTiming(segmentBroadcastWords(words))
+}
+
+// synthesizeWordTimings converts chunk cues into per-token broadcastWords by
+// distributing on-screen time in proportion to token rune length. Distribution
+// is done over a whole RUN — a maximal group of consecutive cues separated by
+// gaps no larger than bcPauseMS — not per individual cue. This is the key to
+// evening out reading speed: a source segment that crammed a long clause into a
+// sub-second window can borrow time from a sparse neighbour in the same run, so
+// every token in the run ends up at the run's average characters-per-second. A
+// gap wider than bcPauseMS ends the run, preserving the silence as a real gap
+// that downstream segmentation can break on and relaxation can borrow from.
+//
+// A trailing space is counted in each token's weight so a punctuation-only token
+// still gets a slice; newlines in cue text are treated as spaces; tokens are
+// emitted in reading order. Cues are assumed already in playback order (BuildCues
+// sorts them). A run with a non-positive span contributes zero-width words at its
+// start, which the downstream min-duration relaxation then extends.
+func synthesizeWordTimings(cues []Cue) []broadcastWord {
+	var words []broadcastWord
+	for i := 0; i < len(cues); {
+		// Extend the run while the next cue follows within bcPauseMS.
+		j := i
+		for j+1 < len(cues) && cues[j+1].StartMS-cues[j].EndMS <= bcPauseMS {
+			j++
+		}
+		var toks []string
+		for k := i; k <= j; k++ {
+			toks = append(toks, strings.Fields(strings.ReplaceAll(cues[k].Text, "\n", " "))...)
+		}
+		start, end := cues[i].StartMS, cues[j].EndMS
+		if start < 0 {
+			start = 0
+		}
+		if end < start {
+			end = start
+		}
+		span := end - start
+		total := 0
+		for _, t := range toks {
+			total += utf8.RuneCountInString(t) + 1
+		}
+		acc := 0
+		for _, t := range toks {
+			ws := start + span*acc/total
+			acc += utf8.RuneCountInString(t) + 1
+			we := start + span*acc/total
+			words = append(words, broadcastWord{start: ws, end: we, text: t})
+		}
+		i = j + 1
+	}
+	return words
+}
+
 // broadcastSeg is one cue's word-derived span before timing relaxation: the
 // spoken [start,end] window, the rebuilt (trimmed) text, and the diarized
 // speaker carried through to the emitted cue's voice markup.
