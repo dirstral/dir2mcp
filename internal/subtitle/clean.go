@@ -132,6 +132,65 @@ func (g *Glossary) Apply(text string) string {
 	return text
 }
 
+// DropSet drops a whole cue when its text is composed ENTIRELY of configured
+// hallucination phrases (plus punctuation/whitespace). Whisper spams a fixed
+// phrase over silence/music/B-roll — e.g. "Донбасс, Крым, Украина, НАТО" — and
+// broadcast segmentation fragments it across cue boundaries, so neither the
+// URL-drop nor the consecutive-identical CollapseRepeats pass catches it. A drop
+// rule removes such cues WITHOUT harming real speech that merely mentions one of
+// the words: a cue survives as long as any non-phrase letters/digits remain
+// after the phrase matches are stripped (so "Крым сегодня" is kept, "Крым, НАТО"
+// is dropped). Rules come entirely from configuration
+// (media.subtitles.drop_phrases); an empty set is a no-op. Each entry is a
+// case-insensitive regular expression matched anywhere in the cue.
+type DropSet struct {
+	res []*regexp.Regexp
+}
+
+// dropResidualRE matches any letter or digit; a cue with none remaining after
+// phrase-stripping is treated as pure hallucination and dropped.
+var dropResidualRE = regexp.MustCompile(`[\p{L}\p{N}]`)
+
+// NewDropSet compiles drop-phrase patterns. Whitespace around each entry is
+// trimmed and blank entries are skipped. Each pattern is compiled
+// case-insensitively, so an invalid pattern is a configuration error (returned
+// here) rather than a silent no-op. A nil/empty list yields an inactive set.
+func NewDropSet(entries []string) (*DropSet, error) {
+	d := &DropSet{}
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		re, err := regexp.Compile(`(?i)` + e)
+		if err != nil {
+			return nil, fmt.Errorf("drop phrase %q: invalid pattern: %w", e, err)
+		}
+		d.res = append(d.res, re)
+	}
+	return d, nil
+}
+
+// Active reports whether the set has any rules. When false, IsSpam is always
+// false and callers can skip it.
+func (d *DropSet) Active() bool {
+	return d != nil && len(d.res) > 0
+}
+
+// IsSpam reports whether text is composed entirely of configured drop phrases:
+// removing every phrase match leaves no letters or digits behind. An inactive
+// set never reports spam.
+func (d *DropSet) IsSpam(text string) bool {
+	if !d.Active() {
+		return false
+	}
+	stripped := text
+	for _, re := range d.res {
+		stripped = re.ReplaceAllString(stripped, " ")
+	}
+	return !dropResidualRE.MatchString(stripped)
+}
+
 // CleanOptions configures the export-time cue-cleaning pass (port of the pilot's
 // clean_srt.py). All fields are additive and off by default, so a zero
 // CleanOptions leaves cues unchanged. It is applied AFTER WordFilter on export,
@@ -140,6 +199,9 @@ type CleanOptions struct {
 	// DropURLs drops any cue whose text looks like a hallucinated URL / domain /
 	// credit line (whisper emits these over silence or music).
 	DropURLs bool
+	// Drop drops any cue composed entirely of configured hallucination phrases
+	// (whisper keyword-spam over non-speech). Nil/inactive = no drops.
+	Drop *DropSet
 	// CollapseRepeats drops the Nth-and-later cue in a run of identical
 	// consecutive cues (a whisper repetition-collapse artifact), keeping the
 	// first N-1. A value < 2 disables the pass, so legitimate short repeats
@@ -152,7 +214,7 @@ type CleanOptions struct {
 // Active reports whether any cleaning is configured. When false, CleanCues
 // returns its input unchanged so the empty-config export path is a no-op.
 func (o CleanOptions) Active() bool {
-	return o.DropURLs || o.CollapseRepeats >= 2 || o.Glossary.Active()
+	return o.DropURLs || o.Drop.Active() || o.CollapseRepeats >= 2 || o.Glossary.Active()
 }
 
 // urlCueRE matches a hallucinated URL / bare domain in cue text (whisper emits
@@ -186,6 +248,9 @@ func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 			continue
 		}
 		if opts.DropURLs && urlCueRE.MatchString(text) {
+			continue
+		}
+		if opts.Drop.IsSpam(text) {
 			continue
 		}
 		// Repetition-collapse compares the pre-glossary text so a rewrite cannot

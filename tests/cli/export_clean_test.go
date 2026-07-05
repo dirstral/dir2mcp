@@ -54,7 +54,8 @@ func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
 			{"No.", 4000, 5000},                       // 3rd -> dropped (threshold 3)
 			{"No.", 5000, 6000},                       // 4th -> dropped
 			{"Subtitles by www.spam.com", 6000, 8000}, // URL -> dropped
-			{"Real closing line", 8000, 10000},
+			{"Crimea, NATO.", 8000, 9000},             // phrase-only -> dropped by drop_phrases
+			{"Real closing line", 9000, 10000},
 		}
 		for i, c := range chunks {
 			if _, err := tx.InsertChunkWithSpans(ctx,
@@ -82,6 +83,8 @@ func TestExportAppliesCueCleaning(t *testing.T) {
 		"  subtitles:",
 		"    glossary:",
 		"      - Aju?bei=>Adzhubei",
+		"    drop_phrases:",
+		"      - Crimea|NATO",
 		"    collapse_repeats: 3",
 		"    drop_urls: true",
 	}, "\n") + "\n"
@@ -107,6 +110,9 @@ func TestExportAppliesCueCleaning(t *testing.T) {
 	}
 	if n := strings.Count(out, "No."); n != 2 {
 		t.Errorf("repetition-collapse: got %d 'No.' cues, want 2:\n%s", n, out)
+	}
+	if strings.Contains(out, "Crimea, NATO") {
+		t.Errorf("phrase-only cue not dropped by drop_phrases:\n%s", out)
 	}
 	if !strings.Contains(out, "Real closing line") {
 		t.Errorf("real closing cue missing:\n%s", out)
@@ -137,5 +143,8 @@ func TestExportNoCleaningConfigUnchanged(t *testing.T) {
 	}
 	if n := strings.Count(out, "No."); n != 4 {
 		t.Errorf("without config all 4 'No.' cues should survive, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "Crimea, NATO") {
+		t.Errorf("without config the phrase-only cue should survive:\n%s", out)
 	}
 }

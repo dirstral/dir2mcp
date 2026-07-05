@@ -527,6 +527,15 @@ type Config struct {
 	// `media.subtitles.drop_urls`). OFF by default. Only affects VTT/SRT export.
 	MediaSubtitlesDropURLs bool
 
+	// MediaSubtitlesDropPhrases is an optional list of regular expressions; an
+	// exported cue whose text is composed ENTIRELY of matches (plus punctuation)
+	// is dropped (config `media.subtitles.drop_phrases`). This removes whisper
+	// keyword-spam hallucinated over silence/music/B-roll that survives the
+	// URL-drop and consecutive-identical collapse passes, without harming real
+	// speech that merely mentions one of the words. Empty by default. Only affects
+	// VTT/SRT export.
+	MediaSubtitlesDropPhrases []string
+
 	// MediaTrimLeadingSilence opts IN to trimming leading silence from media
 	// transcripts (dir2mcp#258, config `media.trim_leading_silence`). When true
 	// and ffmpeg is available, the duration of dead air before the first speech
@@ -747,6 +756,7 @@ type fileConfig struct {
 	MediaSubtitlesTTMLAlignToleranceMS *int
 	MediaSubtitlesSMILEnabled          *bool
 	MediaSubtitlesGlossary             []string
+	MediaSubtitlesDropPhrases          []string
 	MediaSubtitlesCollapseRepeats      *int
 	MediaSubtitlesDropURLs             *bool
 	MediaTrimLeadingSilence            *bool
@@ -883,6 +893,7 @@ type persistedConfig struct {
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
 	MediaSubtitlesSMILEnabled          bool          `yaml:"media_subtitles_smil_enabled"`
 	MediaSubtitlesGlossary             []string      `yaml:"media_subtitles_glossary"`
+	MediaSubtitlesDropPhrases          []string      `yaml:"media_subtitles_drop_phrases"`
 	MediaSubtitlesCollapseRepeats      int           `yaml:"media_subtitles_collapse_repeats"`
 	MediaSubtitlesDropURLs             bool          `yaml:"media_subtitles_drop_urls"`
 	MediaTrimLeadingSilence            bool          `yaml:"media_trim_leading_silence"`
@@ -1106,8 +1117,10 @@ func Default() Config {
 		MediaSubtitlesTTMLAlignToleranceMS: DefaultMediaSubtitlesAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          false,
 		// Export-time cue cleaning (clean_srt.py port) is OFF by default: no
-		// glossary rewrites, no repetition-collapse (< 2 disables), no URL drop.
+		// glossary rewrites, no phrase drops, no repetition-collapse (< 2
+		// disables), no URL drop.
 		MediaSubtitlesGlossary:        nil,
+		MediaSubtitlesDropPhrases:     nil,
 		MediaSubtitlesCollapseRepeats: 0,
 		MediaSubtitlesDropURLs:        false,
 		ServerTLSCertFile:             "",
@@ -1236,6 +1249,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          cfg.MediaSubtitlesSMILEnabled,
 		MediaSubtitlesGlossary:             append([]string(nil), cfg.MediaSubtitlesGlossary...),
+		MediaSubtitlesDropPhrases:          append([]string(nil), cfg.MediaSubtitlesDropPhrases...),
 		MediaSubtitlesCollapseRepeats:      cfg.MediaSubtitlesCollapseRepeats,
 		MediaSubtitlesDropURLs:             cfg.MediaSubtitlesDropURLs,
 		MediaTrimLeadingSilence:            cfg.MediaTrimLeadingSilence,
@@ -2063,6 +2077,9 @@ func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesGlossary != nil {
 		cfg.MediaSubtitlesGlossary = normalizeStringSlice(fc.MediaSubtitlesGlossary)
 	}
+	if fc.MediaSubtitlesDropPhrases != nil {
+		cfg.MediaSubtitlesDropPhrases = normalizeStringSlice(fc.MediaSubtitlesDropPhrases)
+	}
 	if fc.MediaSubtitlesCollapseRepeats != nil {
 		cfg.MediaSubtitlesCollapseRepeats = *fc.MediaSubtitlesCollapseRepeats
 	}
@@ -2372,6 +2389,7 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_ttml_align_tolerance_ms": "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":            "media.subtitles.smil.enabled",
 	"media_subtitles_glossary":                "media.subtitles.glossary",
+	"media_subtitles_drop_phrases":            "media.subtitles.drop_phrases",
 	"media_subtitles_collapse_repeats":        "media.subtitles.collapse_repeats",
 	"media_subtitles_drop_urls":               "media.subtitles.drop_urls",
 	"media_trim_leading_silence":              "media.trim_leading_silence",
@@ -2881,6 +2899,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendValue(&cfg.MediaFilterWords, value)
 	case "media.subtitles.glossary":
 		appendValue(&cfg.MediaSubtitlesGlossary, value)
+	case "media.subtitles.drop_phrases":
+		appendValue(&cfg.MediaSubtitlesDropPhrases, value)
 	case "retrieval.cross_lingual.target_langs":
 		appendValue(&cfg.CrossLingualTargetLangs, value)
 	}
@@ -2891,7 +2911,7 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "media.subtitles.glossary", "retrieval.cross_lingual.target_langs":
+	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "retrieval.cross_lingual.target_langs":
 		return true
 	default:
 		return false
@@ -3009,6 +3029,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
 	writeList("media_subtitles_glossary", cfg.MediaSubtitlesGlossary)
+	writeList("media_subtitles_drop_phrases", cfg.MediaSubtitlesDropPhrases)
 	writeInt("media_subtitles_collapse_repeats", cfg.MediaSubtitlesCollapseRepeats)
 	writeBool("media_subtitles_drop_urls", cfg.MediaSubtitlesDropURLs)
 	writeBool("media_trim_leading_silence", cfg.MediaTrimLeadingSilence)
@@ -3733,6 +3754,11 @@ func (c *Config) validateMediaSubtitles() error {
 	// is the single source of truth for the entry grammar.
 	if _, err := subtitle.NewGlossary(c.MediaSubtitlesGlossary); err != nil {
 		return fmt.Errorf("media.subtitles.glossary: %w", err)
+	}
+	// Fail fast on a malformed drop phrase (invalid regexp) at config time rather
+	// than at export time. subtitle.NewDropSet owns the pattern grammar.
+	if _, err := subtitle.NewDropSet(c.MediaSubtitlesDropPhrases); err != nil {
+		return fmt.Errorf("media.subtitles.drop_phrases: %w", err)
 	}
 	return nil
 }
