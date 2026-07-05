@@ -148,7 +148,7 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 	for _, r := range rows {
 		chunks = append(chunks, subtitle.TranscriptChunk{Text: r.Text, Span: r.Span})
 	}
-	cues := buildCuesForSegmentation(chunks, segmentation)
+	cues := buildCuesForSegmentation(chunks, segmentation, transcriptRepIsTranslation(rep.MetaJSON))
 	// Apply the configured caption word filter (media.filter_words) on export so
 	// exported VTT/SRT never contain the boilerplate/credits/watermark phrases,
 	// consistent with how ingest strips them before embedding. Cues empty after
@@ -172,16 +172,30 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 }
 
 // buildCuesForSegmentation selects the cue builder by the configured
-// media.subtitles.segmentation mode: "broadcast" re-segments from per-word
-// timings into broadcast-legible cues, falling back to the chunk-per-cue builder
-// when the transcript carries no word timings (BuildBroadcastCues returns nil).
-// Any other value (including the "chunk" default and empty) uses BuildCues, so
-// the historical behavior is unchanged unless broadcast is explicitly selected.
-func buildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation string) []subtitle.Cue {
+// media.subtitles.segmentation mode: "broadcast" re-segments into broadcast-
+// legible cues; any other value (including the "chunk" default and empty) uses
+// BuildCues, so the historical behavior is unchanged unless broadcast is
+// explicitly selected.
+//
+// Within broadcast mode the timing source matters. A native speech-to-text
+// transcript has trustworthy per-word timings, so it re-segments from them
+// (BuildBroadcastCues). A translation track (isTranslation) has fabricated word
+// timings — the translator piles words at one timestamp with zero duration — so
+// honoring them yields dense sub-second cues; it reflows from reliable segment-
+// level timings instead. Reflow is also the fallback when a native transcript
+// carries no word timings at all (BuildBroadcastCues returns nil).
+func buildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation string, isTranslation bool) []subtitle.Cue {
 	if strings.EqualFold(strings.TrimSpace(segmentation), "broadcast") {
-		if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
-			return cues
+		if !isTranslation {
+			if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
+				return cues
+			}
 		}
+		// Translation track, or a transcript with no per-word timings: reflow the
+		// stored chunk cues into broadcast-legible cues rather than emitting raw
+		// chunks, so the broadcast contract — legible line length and reading
+		// speed — holds on this track too instead of degrading to chunk-per-cue.
+		return subtitle.ReflowChunkCues(subtitle.BuildCues(chunks))
 	}
 	return subtitle.BuildCues(chunks)
 }
@@ -287,6 +301,28 @@ func transcriptRepLanguage(metaJSON string) string {
 		}
 	}
 	return ""
+}
+
+// transcriptRepIsTranslation reports whether a transcript representation is a
+// machine-translation track (meta source == "translation"), as opposed to a
+// native speech-to-text transcript. Translation tracks carry per-word timestamps
+// that the translator fabricates — words pile at one timestamp with zero
+// duration — so honoring them in broadcast segmentation yields dense sub-second
+// cues. Such tracks reflow from reliable segment-level timings instead. Returns
+// false when the metadata is absent or unparseable (treat as native transcript).
+func transcriptRepIsTranslation(metaJSON string) bool {
+	trimmed := strings.TrimSpace(metaJSON)
+	if trimmed == "" {
+		return false
+	}
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &meta); err != nil {
+		return false
+	}
+	if s, ok := meta["source"].(string); ok {
+		return strings.EqualFold(strings.TrimSpace(s), "translation")
+	}
+	return false
 }
 
 // writeFileAtomic writes data to path via a sibling temp file + rename so a
