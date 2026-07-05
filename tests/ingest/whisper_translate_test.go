@@ -249,3 +249,33 @@ func TestWhisperTranslate_RoutesThroughQualityGate(t *testing.T) {
 		t.Fatalf("expected clean source transcript chunks to remain pending; chunks=%+v", st.chunks)
 	}
 }
+
+// TestWhisperTranslate_AppliesFilterWords pins that media.filter_words is applied
+// to the translated English track (#538 routed the translate path through the
+// filtered chunker, matching the source track). A pure-boilerplate translated
+// line is dropped entirely, so the translate pass yields fewer spans than its
+// input lines — before #538 the unfiltered chunker would have kept all three.
+func TestWhisperTranslate_AppliesFilterWords(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, MediaFilterWords: []string{"credits roll"}}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет"})
+	svc.SetTranscriptLanguage("ru")
+	// Translated English track: the middle line is pure boilerplate the filter
+	// must strip (and thereby drop its span); the other two survive.
+	svc.SetTranslateTranscriber(
+		&fakeTranscriber{text: "[00:00] hello there\n[00:03] credits roll\n[00:05] goodbye friend"},
+		"whisper", "large-v3", []string{"en"})
+
+	doc := model.Document{DocID: 12, RelPath: "audio/clip.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+
+	// 1 source span + the translated spans. The boilerplate-only "credits roll"
+	// line is dropped, so the translate pass yields 2 spans (not 3).
+	if len(st.spans) != 3 {
+		t.Fatalf("expected 1 source + 2 filtered translated spans, got %d (%+v)", len(st.spans), st.spans)
+	}
+}
