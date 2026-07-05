@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -307,6 +308,16 @@ func relaxBroadcastTiming(segs []broadcastSeg) []Cue {
 				segs[i].start -= room
 			}
 		}
+		// Hard-cap the on-screen duration at bcMaxDurMS. Segmentation bounds the
+		// SPOKEN span, but a single word whisper assigns a huge duration (or a
+		// short cue that swallowed a long inter-word silence) can still leave a
+		// segment whose end is many seconds past its start; the "never truncate
+		// below spoken end" rule above would otherwise preserve a 20s+ cue.
+		// Capping trims only display time (the tail is silence/over-held), never
+		// inverts duration, and cannot introduce overlap since it only shortens.
+		if segs[i].end-segs[i].start > bcMaxDurMS {
+			segs[i].end = segs[i].start + bcMaxDurMS
+		}
 		cues = append(cues, Cue{
 			Index:   i + 1,
 			StartMS: segs[i].start,
@@ -361,6 +372,15 @@ func appendBroadcastToken(text, tok string) string {
 	}
 	firstTok, _ := utf8.DecodeRuneInString(tok)
 	lastText, _ := utf8.DecodeLastRuneInString(text)
+	// A token beginning with an ASCII hyphen-minus is the tail of a hyphenated
+	// compound: whisper trims word tokens, so "so-called" arrives as "so" then
+	// "-called". Attach it flush to render "so-called", not "so -called" — but
+	// only after an alphanumeric, so a genuine leading dash (dialogue/range) is
+	// not glued onto the previous word. Cyrillic "что-то", "все-таки" etc. are
+	// covered because IsLetter is Unicode-aware.
+	if firstTok == '-' && (unicode.IsLetter(lastText) || unicode.IsDigit(lastText)) {
+		return text + tok
+	}
 	if strings.ContainsRune(bcNoSpaceBefore, firstTok) || strings.ContainsRune(bcNoSpaceAfter, lastText) {
 		return text + tok
 	}
@@ -374,23 +394,30 @@ func endsBroadcastSentence(text string) bool {
 	return r == '.' || r == '!' || r == '?' || r == '…'
 }
 
-// wrapBroadcastLines splits text into two balanced lines (a single embedded
-// newline) when it exceeds one line, breaking at the space nearest the middle so
-// neither line runs long. Text that fits on one line, or has no interior space
-// to break at, is returned unchanged. Rune-aware so multibyte scripts wrap by
-// character count, not byte count.
+// wrapBroadcastLines splits text into two lines (a single embedded newline) when
+// it exceeds one line, choosing the space break that MINIMIZES the longer line.
+// Minimizing the max keeps both lines <= bcMaxLine whenever the text admits such
+// a split (breaking nearest-the-middle did not: the middle space could still
+// leave one line a few characters over the 42-char cap). Text that fits on one
+// line, or has no interior space to break at, is returned unchanged. Rune-aware
+// so multibyte scripts wrap by character count, not byte count.
 func wrapBroadcastLines(text string) string {
 	r := []rune(text)
 	if len(r) <= bcMaxLine {
 		return text
 	}
-	mid := len(r) / 2
 	best := -1
+	bestMax := len(r) + 1
 	for i, ch := range r {
 		if ch != ' ' {
 			continue
 		}
-		if best == -1 || abs(i-mid) < abs(best-mid) {
+		longer := i // first line length (runes before the space)
+		if second := len(r) - i - 1; second > longer {
+			longer = second
+		}
+		if longer < bestMax {
+			bestMax = longer
 			best = i
 		}
 	}
@@ -398,14 +425,6 @@ func wrapBroadcastLines(text string) string {
 		return text
 	}
 	return string(r[:best]) + "\n" + string(r[best+1:])
-}
-
-// abs returns the absolute value of an int (used for nearest-to-middle wrapping).
-func abs(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
 
 // RenderVTT serializes cues as a WebVTT document. The output is the literal

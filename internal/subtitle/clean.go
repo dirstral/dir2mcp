@@ -141,6 +141,41 @@ func (d *DropSet) IsSpam(text string) bool {
 	return !dropResidualRE.MatchString(stripped)
 }
 
+// scrubSpaceRE collapses runs of spaces/tabs left behind after a phrase is
+// excised. It deliberately excludes '\n' so an intentional two-line wrap survives
+// the scrub (CleanCues runs after wrapping).
+var scrubSpaceRE = regexp.MustCompile(`[ \t]+`)
+
+// Scrub removes every configured phrase match from text and tidies the result.
+// Unlike IsSpam (a whole-cue verdict), Scrub is used when a hallucinated phrase is
+// glued to REAL speech in the same cue — it excises just the phrase and keeps the
+// sentence. It is a strict no-op when no phrase matches (so the vast majority of
+// cues, including their line-wrap newline, pass through byte-for-byte). Because a
+// Scrub set is configured with the FULL contiguous hallucination phrase (not a
+// word alternation), it never touches a legitimate mention of one of the words.
+func (d *DropSet) Scrub(text string) string {
+	if !d.Active() {
+		return text
+	}
+	matched := false
+	for _, re := range d.res {
+		if re.MatchString(text) {
+			text = re.ReplaceAllString(text, " ")
+			matched = true
+		}
+	}
+	if !matched {
+		return text
+	}
+	// Collapse only spaces/tabs (never the wrap newline), then strip connective
+	// punctuation orphaned at either end by the excision (a leading ", " or a
+	// dangling "—"), keeping sentence-final "." "!" "?" so the surviving sentence
+	// is not de-punctuated.
+	text = scrubSpaceRE.ReplaceAllString(text, " ")
+	text = strings.TrimSpace(text)
+	return strings.TrimSpace(strings.Trim(text, ",;:—- "))
+}
+
 // CleanOptions configures the export-time cue-cleaning pass (port of the pilot's
 // clean_srt.py). All fields are additive and off by default, so a zero
 // CleanOptions leaves cues unchanged. It is applied AFTER WordFilter on export,
@@ -152,6 +187,10 @@ type CleanOptions struct {
 	// Drop drops any cue composed entirely of configured hallucination phrases
 	// (whisper keyword-spam over non-speech). Nil/inactive = no drops.
 	Drop *DropSet
+	// Scrub excises configured hallucination phrases from cues that ALSO carry
+	// real speech (the phrase leaked into the same cue), keeping the sentence.
+	// Configure with the full contiguous phrase. Nil/inactive = no scrubbing.
+	Scrub *DropSet
 	// CollapseRepeats drops the Nth-and-later cue in a run of identical
 	// consecutive cues (a whisper repetition-collapse artifact), keeping the
 	// first N-1. A value < 2 disables the pass, so legitimate short repeats
@@ -164,7 +203,7 @@ type CleanOptions struct {
 // Active reports whether any cleaning is configured. When false, CleanCues
 // returns its input unchanged so the empty-config export path is a no-op.
 func (o CleanOptions) Active() bool {
-	return o.DropURLs || o.Drop.Active() || o.CollapseRepeats >= 2 || o.Glossary.Active()
+	return o.DropURLs || o.Drop.Active() || o.Scrub.Active() || o.CollapseRepeats >= 2 || o.Glossary.Active()
 }
 
 // urlCueRE matches a hallucinated URL / bare domain in cue text. It mirrors the
@@ -194,6 +233,15 @@ func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 		}
 		if opts.Drop.IsSpam(text) {
 			continue
+		}
+		// Excise a hallucinated phrase that leaked into an otherwise-real cue,
+		// then re-check for emptiness (a cue that was ALL phrase plus punctuation
+		// scrubs to nothing and is dropped).
+		if opts.Scrub.Active() {
+			text = opts.Scrub.Scrub(text)
+			if text == "" {
+				continue
+			}
 		}
 		// Repetition-collapse compares the pre-glossary text so a rewrite cannot
 		// mask a collapse run. The comparison anchor (runText) updates only when

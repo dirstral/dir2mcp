@@ -93,9 +93,15 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.drop_phrases: %v", err))
 		return exitConfigInvalid
 	}
+	scrub, err := subtitle.NewDropSet(cfg.MediaSubtitlesScrubPhrases)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.scrub_phrases: %v", err))
+		return exitConfigInvalid
+	}
 	clean := subtitle.CleanOptions{
 		DropURLs:        cfg.MediaSubtitlesDropURLs,
 		Drop:            drop,
+		Scrub:           scrub,
 		CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
 		Glossary:        glossary,
 	}
