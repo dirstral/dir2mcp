@@ -3672,11 +3672,8 @@ func (c *Config) validateNumericBounds() error {
 	if c.IngestWatchDebounce < 0 {
 		return fmt.Errorf("ingest.watch_debounce must be non-negative: %v", c.IngestWatchDebounce)
 	}
-	if c.MediaSTTMaxPayloadMB < 0 {
-		return fmt.Errorf("media.stt.max_payload_mb must be non-negative (0 = client default): %d", c.MediaSTTMaxPayloadMB)
-	}
-	if c.MediaSTTRequestTimeoutSec < 0 {
-		return fmt.Errorf("media.stt.request_timeout_sec must be non-negative (0 = client default): %d", c.MediaSTTRequestTimeoutSec)
+	if err := c.validateMediaSTTNumericBounds(); err != nil {
+		return err
 	}
 	if c.RAGMaxContextChars < 0 {
 		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
@@ -3709,6 +3706,19 @@ func (c *Config) validateNumericBounds() error {
 // NaN/Inf are also rejected at parse time, but are re-guarded here so a
 // programmatically-injected value still fails validation rather than silently
 // corrupting behavior.
+// validateMediaSTTNumericBounds checks the media.stt.* numeric config fields.
+// Split from validateNumericBounds to keep it under the cyclomatic-complexity
+// budget; behaviour is unchanged.
+func (c *Config) validateMediaSTTNumericBounds() error {
+	if c.MediaSTTMaxPayloadMB < 0 {
+		return fmt.Errorf("media.stt.max_payload_mb must be non-negative (0 = client default): %d", c.MediaSTTMaxPayloadMB)
+	}
+	if c.MediaSTTRequestTimeoutSec < 0 {
+		return fmt.Errorf("media.stt.request_timeout_sec must be non-negative (0 = client default): %d", c.MediaSTTRequestTimeoutSec)
+	}
+	return nil
+}
+
 func (c *Config) validateRetrievalNumericBounds() error {
 	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor
 	// would never drop anything, so reject it explicitly.
