@@ -110,6 +110,7 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	cfg.MediaSubtitlesSegmentation = "broadcast"
 	cfg.MediaSubtitlesGlossary = []string{"Aju?bei=>Adzhubei"}
 	cfg.MediaSubtitlesDropPhrases = []string{"Донбасс|Крым|НАТО"}
+	cfg.MediaSubtitlesScrubPhrases = []string{`Крым,?\s*НАТО`}
 	cfg.MediaSubtitlesCollapseRepeats = 3
 	cfg.MediaSubtitlesDropURLs = true
 
@@ -135,6 +136,9 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	if len(loaded.MediaSubtitlesDropPhrases) != 1 || loaded.MediaSubtitlesDropPhrases[0] != "Донбасс|Крым|НАТО" {
 		t.Fatalf("drop_phrases did not round-trip: %#v", loaded.MediaSubtitlesDropPhrases)
 	}
+	if len(loaded.MediaSubtitlesScrubPhrases) != 1 || loaded.MediaSubtitlesScrubPhrases[0] != `Крым,?\s*НАТО` {
+		t.Fatalf("scrub_phrases did not round-trip: %#v", loaded.MediaSubtitlesScrubPhrases)
+	}
 	if loaded.MediaSubtitlesCollapseRepeats != 3 {
 		t.Fatalf("collapse_repeats = %d, want 3", loaded.MediaSubtitlesCollapseRepeats)
 	}
@@ -152,6 +156,9 @@ func TestMediaSubtitlesCleaning_DefaultsOff(t *testing.T) {
 	}
 	if len(cfg.MediaSubtitlesDropPhrases) != 0 {
 		t.Fatalf("drop_phrases should default empty, got %#v", cfg.MediaSubtitlesDropPhrases)
+	}
+	if len(cfg.MediaSubtitlesScrubPhrases) != 0 {
+		t.Fatalf("scrub_phrases should default empty, got %#v", cfg.MediaSubtitlesScrubPhrases)
 	}
 	if cfg.MediaSubtitlesCollapseRepeats != 0 {
 		t.Fatalf("collapse_repeats should default 0, got %d", cfg.MediaSubtitlesCollapseRepeats)
@@ -179,6 +186,8 @@ func TestMediaSubtitlesCleaning_NestedYAMLApplies(t *testing.T) {
 		"      - Khruschev=>Khrushchev",
 		"    drop_phrases:",
 		"      - Донбасс|Крым|Украина|Иван|Плющ|НАТО",
+		"    scrub_phrases:",
+		"      - Донбасс.*НАТО",
 		"    collapse_repeats: 3",
 		"    drop_urls: true",
 	}, "\n")+"\n")
@@ -186,6 +195,9 @@ func TestMediaSubtitlesCleaning_NestedYAMLApplies(t *testing.T) {
 	cfg, err := config.LoadFile(path)
 	if err != nil {
 		t.Fatalf("LoadFile(nested cleaning): %v", err)
+	}
+	if len(cfg.MediaSubtitlesScrubPhrases) != 1 {
+		t.Fatalf("nested scrub_phrases not applied: %#v", cfg.MediaSubtitlesScrubPhrases)
 	}
 	if len(cfg.MediaSubtitlesGlossary) != 2 {
 		t.Fatalf("nested glossary not applied: %#v", cfg.MediaSubtitlesGlossary)
@@ -226,6 +238,12 @@ func TestMediaSubtitlesCleaning_RejectsBadConfig(t *testing.T) {
 	badDrop.MediaSubtitlesDropPhrases = []string{"a(b"}
 	if err := badDrop.Validate(); err == nil {
 		t.Fatalf("invalid drop_phrases regexp should be rejected")
+	}
+
+	badScrub := config.Default()
+	badScrub.MediaSubtitlesScrubPhrases = []string{"a(b"}
+	if err := badScrub.Validate(); err == nil {
+		t.Fatalf("invalid scrub_phrases regexp should be rejected")
 	}
 }
 
