@@ -86,8 +86,16 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.glossary: %v", err))
 		return exitConfigInvalid
 	}
+	// The drop set was already validated at config load, so a parse error here is
+	// unexpected; surface it rather than silently dropping the rules.
+	drop, err := subtitle.NewDropSet(cfg.MediaSubtitlesDropPhrases)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.drop_phrases: %v", err))
+		return exitConfigInvalid
+	}
 	clean := subtitle.CleanOptions{
 		DropURLs:        cfg.MediaSubtitlesDropURLs,
+		Drop:            drop,
 		CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
 		Glossary:        glossary,
 	}

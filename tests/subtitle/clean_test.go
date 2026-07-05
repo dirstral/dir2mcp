@@ -75,6 +75,85 @@ func TestGlossaryInactiveAndErrors(t *testing.T) {
 	}
 }
 
+// TestDropSetSpamDetection pins the drop-phrase semantics: a cue composed
+// ENTIRELY of configured phrases (plus punctuation) is spam, while a cue that
+// also carries real words survives, and an inactive set never flags spam.
+func TestDropSetSpamDetection(t *testing.T) {
+	d, err := subtitle.NewDropSet([]string{"Донбасс|Крым|Украина|Иван|Плющ|НАТО"})
+	if err != nil {
+		t.Fatalf("NewDropSet: %v", err)
+	}
+	if !d.Active() {
+		t.Fatalf("drop set with one rule should be active")
+	}
+	spam := []string{
+		"Донбасс, Крым, Украина, Иван Плющ, НАТО.",
+		"НАТО.",
+		"Крым, НАТО",
+		"украина", // case-insensitive
+	}
+	for _, s := range spam {
+		if !d.IsSpam(s) {
+			t.Errorf("IsSpam(%q) = false, want true", s)
+		}
+	}
+	keep := []string{
+		"Крым сегодня, нет Крыма.", // real words remain
+		"Что дальше будет, никто не знает.",
+		"Иван Плющ был депутатом.", // "был депутатом" survives
+	}
+	for _, s := range keep {
+		if d.IsSpam(s) {
+			t.Errorf("IsSpam(%q) = true, want false", s)
+		}
+	}
+}
+
+// TestDropSetInactiveAndErrors pins that an empty set is inactive (never spam)
+// and that an invalid regexp is rejected at construction.
+func TestDropSetInactiveAndErrors(t *testing.T) {
+	empty, err := subtitle.NewDropSet(nil)
+	if err != nil {
+		t.Fatalf("NewDropSet(nil): %v", err)
+	}
+	if empty.Active() {
+		t.Fatalf("nil drop set should be inactive")
+	}
+	if empty.IsSpam("НАТО.") {
+		t.Fatalf("inactive drop set flagged spam")
+	}
+	if _, err := subtitle.NewDropSet([]string{"a(b"}); err == nil {
+		t.Fatalf("invalid regexp should error")
+	}
+}
+
+// TestCleanCuesDropsPhrases pins that CleanCues drops phrase-only cues while
+// keeping cues that mix a phrase word with real speech, and re-indexes gap-free.
+func TestCleanCuesDropsPhrases(t *testing.T) {
+	d, err := subtitle.NewDropSet([]string{"Крым|НАТО"})
+	if err != nil {
+		t.Fatalf("NewDropSet: %v", err)
+	}
+	cues := []subtitle.Cue{
+		{Index: 1, StartMS: 0, EndMS: 1000, Text: "Крым, НАТО."},
+		{Index: 2, StartMS: 1000, EndMS: 2000, Text: "Крым сегодня наш дом."},
+		{Index: 3, StartMS: 2000, EndMS: 3000, Text: "НАТО"},
+		{Index: 4, StartMS: 3000, EndMS: 4000, Text: "Real speech here"},
+	}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{Drop: d})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 surviving cues, got %d: %+v", len(got), got)
+	}
+	if got[0].Text != "Крым сегодня наш дом." || got[1].Text != "Real speech here" {
+		t.Fatalf("wrong cues survived: %+v", got)
+	}
+	for i := range got {
+		if got[i].Index != i+1 {
+			t.Errorf("survivor %d has Index %d, want %d", i, got[i].Index, i+1)
+		}
+	}
+}
+
 // TestCleanCuesInactiveIsIdentity pins that a zero CleanOptions returns cues
 // unchanged (same order, same content), so the empty-config path is a no-op.
 func TestCleanCuesInactiveIsIdentity(t *testing.T) {
