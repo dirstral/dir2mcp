@@ -310,6 +310,13 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	if totalMS <= 0 {
 		return s.translateStructured(ctx, doc, content)
 	}
+	if totalMS <= windowMS {
+		// The whole recording fits in a single window: windowing would decode it
+		// once anyway, so skip the per-window slicing, extraction, and duplicate
+		// translate calls and decode directly. (Timestamp drift accumulates over
+		// LENGTH, so a sub-window recording has nothing to correct.)
+		return s.translateStructured(ctx, doc, content)
+	}
 
 	var windows []TranslateWindow
 	attempted, failed := 0, 0
