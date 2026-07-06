@@ -207,6 +207,8 @@ func buildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation st
 // meta_json marks it as a machine translation (source == "translation", set by
 // the ingest translate path). Broadcast export always reflows a translation
 // rather than honoring its fabricated per-word timings; see buildCuesForSegmentation.
+// It fails closed: non-empty but unparseable meta_json is treated as a translation
+// so a corrupt rep can never route fabricated timings into the broadcast path.
 func transcriptRepIsTranslation(metaJSON string) bool {
 	trimmed := strings.TrimSpace(metaJSON)
 	if trimmed == "" {
@@ -214,8 +216,18 @@ func transcriptRepIsTranslation(metaJSON string) bool {
 	}
 	var meta map[string]any
 	if err := json.Unmarshal([]byte(trimmed), &meta); err != nil {
-		return false
+		// Fail closed: meta_json is present but unparseable, so we cannot confirm
+		// this is a native transcript with real per-word timings. Treat it as a
+		// translation and reflow rather than risk honoring fabricated timings (see
+		// buildCuesForSegmentation). Native transcript meta_json is always written
+		// by json.Marshal, so this only fires on corruption — and reflowing a
+		// native transcript merely trades re-segmentation for safe timing, whereas
+		// honoring fabricated translation timings is a correctness bug.
+		return true
 	}
+	// A missing "source" key is the normal native-transcript case (only the
+	// translate path sets source="translation"; native reps carry language meta
+	// but no source), so absence means native — not translation.
 	src, _ := meta["source"].(string)
 	return strings.EqualFold(strings.TrimSpace(src), "translation")
 }

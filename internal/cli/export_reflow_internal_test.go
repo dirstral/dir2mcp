@@ -90,3 +90,32 @@ func TestBuildCuesForSegmentationTranslationAlwaysReflows(t *testing.T) {
 		t.Fatalf("translation should take the reflow path; got %+v want %+v", got, want)
 	}
 }
+
+// TestTranscriptRepIsTranslation pins the meta_json classification, including the
+// fail-closed rule: an empty meta or a native rep (no "source" key) is NOT a
+// translation, an explicit source=="translation" is, and non-empty-but-unparseable
+// meta is treated AS a translation so a corrupt rep cannot route fabricated
+// per-word timings into the broadcast path.
+func TestTranscriptRepIsTranslation(t *testing.T) {
+	cases := []struct {
+		name string
+		meta string
+		want bool
+	}{
+		{"empty", "", false},
+		{"blank", "   ", false},
+		{"translation", `{"source":"translation"}`, true},
+		{"translation mixed case", `{"source":"Translation"}`, true},
+		{"native no source", `{"language":"ru","language_source":"detected"}`, false},
+		{"native explicit source", `{"source":"transcription"}`, false},
+		{"malformed fails closed", `{"source":"transl`, true},
+		{"not an object fails closed", `["translation"]`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := transcriptRepIsTranslation(tc.meta); got != tc.want {
+				t.Fatalf("transcriptRepIsTranslation(%q) = %v, want %v", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
