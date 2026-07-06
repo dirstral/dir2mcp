@@ -52,53 +52,200 @@ func MergeTranslateWindows(windows []TranslateWindow, stepMS int) (string, []mod
 	if stepMS <= 0 {
 		stepMS = 1
 	}
-	var lines []string
-	var words []model.TimedWord
+	// Collect whole SEGMENTS (a [mm:ss] line plus the words that fall in it) rather
+	// than filtering lines and words separately: keeping a segment's text and word
+	// timings together lets the overlap de-duplication drop both as a unit.
+	var segs []mergedSegment
 	for i, w := range windows {
 		coreEnd := w.StartMS + stepMS
 		last := i == len(windows)-1
-
-		for _, wd := range w.Res.Words {
-			abs := wd.StartMS + w.StartMS
-			if abs < w.StartMS {
+		for _, s := range windowSegments(w.Res, w.StartMS) {
+			if s.startMS < w.StartMS {
+				s.startMS = w.StartMS
+			}
+			if !last && s.startMS >= coreEnd {
 				continue
 			}
-			if !last && abs >= coreEnd {
-				continue
-			}
-			words = append(words, model.TimedWord{
-				Word:    wd.Word,
-				StartMS: abs,
-				EndMS:   wd.EndMS + w.StartMS,
-			})
+			segs = append(segs, s)
 		}
+	}
+	sort.SliceStable(segs, func(a, b int) bool { return segs[a].startMS < segs[b].startMS })
+	segs = dedupMergedSegments(segs)
+	segs = groupMistimedSegments(segs)
 
-		for _, line := range strings.Split(w.Res.Text, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			startMS, body, ok := parseTranscriptTimestamp(trimmed)
-			if !ok {
-				// A line with no timestamp only carries meaning in the first window;
-				// later windows re-decode the same head text, so drop it as a dup.
-				if i == 0 {
-					lines = append(lines, trimmed)
-				}
-				continue
-			}
-			if strings.TrimSpace(body) == "" {
-				continue
-			}
-			abs := startMS + w.StartMS
-			if !last && abs >= coreEnd {
-				continue
-			}
-			lines = append(lines, formatTimestampMarker(abs)+" "+body)
+	var lines []string
+	var words []model.TimedWord
+	for _, s := range segs {
+		if strings.TrimSpace(s.body) == "" {
+			continue
 		}
+		lines = append(lines, formatTimestampMarker(s.startMS)+" "+s.body)
+		words = append(words, s.words...)
 	}
 	sort.SliceStable(words, func(a, b int) bool { return words[a].StartMS < words[b].StartMS })
 	return strings.Join(lines, "\n"), words
+}
+
+// mergedSegment is one transcript segment in absolute time: its [mm:ss] start, the
+// spoken text, and the per-word timings that fall within it. Carrying words with
+// their segment lets de-duplication move text and timing together.
+type mergedSegment struct {
+	startMS int
+	body    string
+	words   []model.TimedWord
+}
+
+// windowSegments splits one window's translate result into absolute-time segments,
+// pairing each timestamped line with the words whose (window-local) start falls in
+// its span. Timestamps and word starts are offset by the window's start so the
+// result is in absolute time. A leading run of un-timestamped text is attached to
+// a synthetic segment at the window start.
+func windowSegments(res model.TranscriptResult, offsetMS int) []mergedSegment {
+	type lineT struct {
+		start int
+		body  string
+	}
+	var lns []lineT
+	for _, raw := range strings.Split(res.Text, "\n") {
+		t := strings.TrimSpace(raw)
+		if t == "" {
+			continue
+		}
+		st, body, ok := parseTranscriptTimestamp(t)
+		if !ok {
+			if len(lns) > 0 {
+				lns[len(lns)-1].body = strings.TrimSpace(lns[len(lns)-1].body + " " + t)
+			} else {
+				lns = append(lns, lineT{start: 0, body: t})
+			}
+			continue
+		}
+		if strings.TrimSpace(body) == "" {
+			continue
+		}
+		lns = append(lns, lineT{start: st, body: body})
+	}
+	if len(lns) == 0 {
+		return nil
+	}
+	segs := make([]mergedSegment, len(lns))
+	for i, l := range lns {
+		segs[i] = mergedSegment{startMS: l.start + offsetMS, body: l.body}
+	}
+	// Assign each word to the last segment whose local start is <= the word's local
+	// start (segments are in playback order).
+	for _, wd := range res.Words {
+		idx := 0
+		for i := range lns {
+			if lns[i].start <= wd.StartMS {
+				idx = i
+			} else {
+				break
+			}
+		}
+		segs[idx].words = append(segs[idx].words, model.TimedWord{
+			Word: wd.Word, StartMS: wd.StartMS + offsetMS, EndMS: wd.EndMS + offsetMS,
+		})
+	}
+	return segs
+}
+
+// dedupMergedSegments removes near-duplicate segments left by overlapping decode
+// windows. Core-boundary de-duplication (in MergeTranslateWindows) misses a
+// sentence that the two windows time slightly differently, so its start straddles
+// the boundary and both copies survive. Here a segment is dropped when it shares
+// >= 0.75 of its words with a recent kept segment (within 8 s); the more complete
+// wording — and its word timings — is retained, so the transcript never doubles a
+// sentence.
+func dedupMergedSegments(segs []mergedSegment) []mergedSegment {
+	kept := make([]mergedSegment, 0, len(segs))
+	for _, s := range segs {
+		dup := false
+		for j := len(kept) - 1; j >= 0 && j >= len(kept)-4; j-- {
+			if s.startMS-kept[j].startMS > 8000 {
+				break
+			}
+			if segmentWordOverlap(kept[j].body, s.body) >= 0.75 {
+				if len(s.body) > len(kept[j].body) { // keep the fuller decode + its words
+					kept[j].body = s.body
+					kept[j].words = s.words
+				}
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// segmentWordOverlap is the fraction of the smaller segment's distinct words that
+// also appear in the other, comparing case- and punctuation-insensitively.
+func segmentWordOverlap(a, b string) float64 {
+	sa, sb := segmentWordSet(a), segmentWordSet(b)
+	if len(sa) == 0 || len(sb) == 0 {
+		return 0
+	}
+	common := 0
+	for w := range sa {
+		if sb[w] {
+			common++
+		}
+	}
+	den := len(sa)
+	if len(sb) < den {
+		den = len(sb)
+	}
+	return float64(common) / float64(den)
+}
+
+// mergeTargetCPS is the reading speed (characters per second) below which a
+// segment's display span is considered adequate for its text; segments timed
+// tighter than this are merged by groupMistimedSegments.
+const mergeTargetCPS = 17.0
+
+// groupMistimedSegments merges consecutive segments whose display span — the gap
+// until the next segment starts — is too short to read the accumulated text at
+// mergeTargetCPS. These are window-boundary timing artifacts: a segment carries a
+// couple of seconds of speech but the next segment's start lands implausibly
+// close, so a segment-timed export (reflow) would crush it into an unreadable
+// sub-second cue. Merging gives the combined text the combined span, so reflow
+// then splits it into legible, comfortably-paced cues. A genuinely long dense run
+// still breaks into groups once the accumulated text passes a cap, and the group
+// keeps the FIRST (spoken) start as its anchor so timing is preserved.
+func groupMistimedSegments(segs []mergedSegment) []mergedSegment {
+	const maxGroupChars = 300
+	out := make([]mergedSegment, 0, len(segs))
+	for i := 0; i < len(segs); {
+		cur := segs[i]
+		j := i + 1
+		for j < len(segs) {
+			spanToNext := segs[j].startMS - cur.startMS
+			need := int(float64(len(cur.body)) / mergeTargetCPS * 1000)
+			if spanToNext >= need || len(cur.body) > maxGroupChars {
+				break
+			}
+			cur.body = strings.TrimSpace(cur.body + " " + segs[j].body)
+			cur.words = append(cur.words, segs[j].words...)
+			j++
+		}
+		out = append(out, cur)
+		i = j
+	}
+	return out
+}
+
+func segmentWordSet(s string) map[string]bool {
+	m := make(map[string]bool)
+	for _, w := range strings.Fields(strings.ToLower(s)) {
+		w = strings.Trim(w, ".,!?;:\"'()[]…»«")
+		if w != "" {
+			m[w] = true
+		}
+	}
+	return m
 }
 
 // translateStructuredWindowed is the media.translate.whisper_window_sec-aware
@@ -144,6 +291,7 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	}
 
 	var windows []TranslateWindow
+	attempted, failed := 0, 0
 	for start := 0; start < totalMS; start += stepMS {
 		end := start + windowMS
 		if end > totalMS {
@@ -153,11 +301,22 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		if err != nil {
 			return "", nil, fmt.Errorf("extract translate window [%d,%d]ms: %w", start, end, err)
 		}
+		attempted++
 		res, err := st.TranscribeStructured(ctx, doc.RelPath, seg)
 		if err != nil {
-			return "", nil, fmt.Errorf("translate window [%d,%d]ms: %w", start, end, err)
+			// A window over silence or music legitimately decodes to nothing (the
+			// provider reports "no text content"); skip it rather than abort the
+			// whole recording — a long interview routinely has silent stretches and
+			// a silent tail. A systemic failure (provider down) still surfaces below
+			// because every window fails.
+			failed++
+			s.getLogger().Printf("windowed translate: skip window [%d,%d]ms: %v", start, end, err)
+			continue
 		}
 		windows = append(windows, TranslateWindow{StartMS: start, Res: res})
+	}
+	if attempted > 0 && failed == attempted {
+		return "", nil, fmt.Errorf("windowed translate %s: all %d windows failed", doc.RelPath, failed)
 	}
 
 	text, words := MergeTranslateWindows(windows, stepMS)
