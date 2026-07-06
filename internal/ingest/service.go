@@ -3408,6 +3408,25 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 		return "", nil, fmt.Errorf("write whisper-translate cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
+	shouldEnforceAfterWrite := s.markOCRCacheWrite()
+	if shouldEnforceAfterWrite {
+		// Participate in the same cache-policy enforcement as the source
+		// transcript write (readOrComputeTranscriptWithWords) so the translate
+		// cache is bounded under the same operational policy and cannot grow
+		// unbounded.
+		s.ocrCacheMu.RLock()
+		enforceHook := s.ocrCacheEnforce
+		s.ocrCacheMu.RUnlock()
+		var err error
+		if enforceHook != nil {
+			err = enforceHook(cacheDir)
+		} else {
+			err = s.enforceCachePolicy(cacheDir)
+		}
+		if err != nil {
+			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
+		}
+	}
 	return string(translatedBytes), words, nil
 }
 
