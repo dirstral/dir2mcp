@@ -226,6 +226,23 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 		return fail("failed to write transcription input", err)
 	}
 
+	if err := c.writeTranscriptionFields(writer); err != nil {
+		return nil, nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return fail("failed to finalize transcription request body", err)
+	}
+	return buf.Bytes(), writer, nil
+}
+
+// writeTranscriptionFields writes the non-file multipart form fields
+// (model/response_format/timestamp_granularities/language/vad_filter), returning
+// the first write error as a *model.ProviderError. Split out of buildBody to keep
+// it under the cyclomatic-complexity budget; the wire output is unchanged.
+func (c *Client) writeTranscriptionFields(writer *multipart.Writer) error {
+	fail := func(msg string, cause error) error {
+		return &model.ProviderError{Code: "WHISPER_FAILED", Message: msg, Retryable: false, Cause: cause}
+	}
 	modelName := strings.TrimSpace(c.DefaultModel)
 	if modelName == "" {
 		modelName = DefaultModel
@@ -235,6 +252,20 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 	}
 	if err := writer.WriteField("response_format", c.responseFormat()); err != nil {
 		return fail("failed to write transcription response_format", err)
+	}
+	// Word-level timestamps are only returned when timestamp_granularities
+	// includes "word": response_format=verbose_json alone yields segment timing
+	// only (the API defaults granularity to "segment"), so without this the
+	// per-word timings that #252 depends on never arrive. Emit both the OpenAI
+	// array form ("timestamp_granularities[]") and the bare form some
+	// OpenAI-compatible servers read, and only for verbose_json so other formats
+	// are byte-for-byte unchanged.
+	if strings.EqualFold(strings.TrimSpace(c.responseFormat()), ResponseFormatVerboseJSON) {
+		for _, field := range []string{"timestamp_granularities[]", "timestamp_granularities"} {
+			if err := writer.WriteField(field, "word"); err != nil {
+				return fail("failed to write transcription timestamp_granularities", err)
+			}
+		}
 	}
 	if language := strings.TrimSpace(c.DefaultLanguage); language != "" {
 		if err := writer.WriteField("language", language); err != nil {
@@ -246,10 +277,7 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 			return fail("failed to write transcription vad_filter", err)
 		}
 	}
-	if err := writer.Close(); err != nil {
-		return fail("failed to finalize transcription request body", err)
-	}
-	return buf.Bytes(), writer, nil
+	return nil
 }
 
 // responseFormat returns the configured response format, defaulting to
