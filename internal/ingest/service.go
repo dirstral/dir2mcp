@@ -618,6 +618,10 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 		// media.vad (dir2mcp#258) is a global toggle, applied onto whichever STT
 		// profile resolves; providers without VAD support ignore it.
 		prof.STTVAD = cfg.MediaVAD
+		// media.stt.* request limits (dir2mcp#510/#511), likewise applied onto the
+		// resolved STT profile; 0 leaves the whisper client's built-in defaults.
+		prof.STTMaxPayloadMB = cfg.MediaSTTMaxPayloadMB
+		prof.STTRequestTimeoutSec = cfg.MediaSTTRequestTimeoutSec
 		tr, berr := buildTranscriber(prof)
 		if berr != nil {
 			return nil, fmt.Errorf("stt provider %q: %w", sel, berr)

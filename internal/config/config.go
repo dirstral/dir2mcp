@@ -544,6 +544,17 @@ type Config struct {
 	MediaClipMaxDurationMS int
 	MediaClipMaxBytes      int
 
+	// MediaSTTMaxPayloadMB / MediaSTTRequestTimeoutSec tune the self-hosted
+	// whisper STT client's request limits (config `media.stt.max_payload_mb` /
+	// `media.stt.request_timeout_sec`), applied onto whichever whisper STT profile
+	// resolves. The whisper client's built-in caps (50 MB payload, 120 s request
+	// timeout) are too small for long-form media — a 30-min mono file exceeds the
+	// payload cap and takes longer than 120 s to transcribe — so these let an
+	// operator raise them (dir2mcp#510, #511). 0 (default) means "use the client's
+	// built-in default"; negative is CONFIG_INVALID.
+	MediaSTTMaxPayloadMB      int
+	MediaSTTRequestTimeoutSec int
+
 	// MediaBatchTwoPhase / MediaBatchProgress / MediaBatchManifest configure the
 	// optional batch-ergonomics surface for large-archive media ingests (SPEC
 	// §8.6.11; config block `media.batch`). All default OFF/empty so behavior is
@@ -701,6 +712,8 @@ type fileConfig struct {
 	MediaVideoWindowSec                *int
 	MediaClipMaxDurationMS             *int
 	MediaClipMaxBytes                  *int
+	MediaSTTMaxPayloadMB               *int
+	MediaSTTRequestTimeoutSec          *int
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
 	ServerTLSKeyFile                   *string
@@ -829,6 +842,8 @@ type persistedConfig struct {
 	MediaVideoWindowSec                int           `yaml:"media_video_window_sec"`
 	MediaClipMaxDurationMS             int           `yaml:"media_clip_max_duration_ms"`
 	MediaClipMaxBytes                  int           `yaml:"media_clip_max_bytes"`
+	MediaSTTMaxPayloadMB               int           `yaml:"media_stt_max_payload_mb"`
+	MediaSTTRequestTimeoutSec          int           `yaml:"media_stt_request_timeout_sec"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
 	MediaBatchManifest                 string        `yaml:"media_batch_manifest"`
@@ -1026,6 +1041,9 @@ func Default() Config {
 		LanguageDetectionEnabled:  true,
 		MediaClipMaxDurationMS:    DefaultMediaClipMaxDurationMS,
 		MediaClipMaxBytes:         DefaultMediaClipMaxBytes,
+		// 0 = use the whisper client's built-in caps (#510, #511).
+		MediaSTTMaxPayloadMB:      0,
+		MediaSTTRequestTimeoutSec: 0,
 		MediaVariantsGroup:        false,
 		MediaVariantsSelect:       "best",
 		MediaTranslateEnabled:     false,
@@ -1167,6 +1185,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaVideoWindowSec:                cfg.MediaVideoWindowSec,
 		MediaClipMaxDurationMS:             cfg.MediaClipMaxDurationMS,
 		MediaClipMaxBytes:                  cfg.MediaClipMaxBytes,
+		MediaSTTMaxPayloadMB:               cfg.MediaSTTMaxPayloadMB,
+		MediaSTTRequestTimeoutSec:          cfg.MediaSTTRequestTimeoutSec,
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
 		X402Mode:                           cfg.X402.Mode,
@@ -1916,6 +1936,7 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaVideoWindowSec != nil {
 		cfg.MediaVideoWindowSec = *fc.MediaVideoWindowSec
 	}
+	applyMediaSTTFileParsed(cfg, fc)
 	if fc.MediaClipMaxDurationMS != nil {
 		cfg.MediaClipMaxDurationMS = *fc.MediaClipMaxDurationMS
 	}
@@ -1937,6 +1958,18 @@ func applyMediaBatchFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.MediaBatchManifest != nil {
 		cfg.MediaBatchManifest = strings.TrimSpace(*fc.MediaBatchManifest)
+	}
+}
+
+// applyMediaSTTFileParsed copies the set media.stt.* file fields (#510, #511)
+// onto cfg. Split out of applyMediaFileParsed so that function stays under the
+// cyclomatic-complexity budget.
+func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
+	if fc.MediaSTTMaxPayloadMB != nil {
+		cfg.MediaSTTMaxPayloadMB = *fc.MediaSTTMaxPayloadMB
+	}
+	if fc.MediaSTTRequestTimeoutSec != nil {
+		cfg.MediaSTTRequestTimeoutSec = *fc.MediaSTTRequestTimeoutSec
 	}
 }
 
@@ -2261,6 +2294,8 @@ var configKeyAliases = map[string]string{
 	"media_video_window_sec":                  "media.video_window_sec",
 	"media_clip_max_duration_ms":              "media.clip.max_duration_ms",
 	"media_clip_max_bytes":                    "media.clip.max_bytes",
+	"media_stt_max_payload_mb":                "media.stt.max_payload_mb",
+	"media_stt_request_timeout_sec":           "media.stt.request_timeout_sec",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
 	"stt_elevenlabs_model":                    "stt.elevenlabs.model",
@@ -2325,7 +2360,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
-	case "media", "media.variants", "media.translate", "media.clip", "media.diarize", "media.batch":
+	case "media", "media.variants", "media.translate", "media.clip", "media.stt", "media.diarize", "media.batch":
 		return true
 	case "media.subtitles", "media.subtitles.ttml", "media.subtitles.smil":
 		return true
@@ -2445,6 +2480,10 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"media.video_window_sec":     func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
 	"media.clip.max_duration_ms": func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
 	"media.clip.max_bytes":       func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
+	"media.stt.max_payload_mb":   func(c *fileConfig) **int { return &c.MediaSTTMaxPayloadMB },
+	"media.stt.request_timeout_sec": func(c *fileConfig) **int {
+		return &c.MediaSTTRequestTimeoutSec
+	},
 	"media.subtitles.ttml.align_tolerance_ms": func(c *fileConfig) **int {
 		return &c.MediaSubtitlesTTMLAlignToleranceMS
 	},
@@ -2480,6 +2519,8 @@ var nonNegativeIntKeys = map[string]bool{
 	"media.video_window_sec":                  true,
 	"media.clip.max_duration_ms":              true,
 	"media.clip.max_bytes":                    true,
+	"media.stt.max_payload_mb":                true,
+	"media.stt.request_timeout_sec":           true,
 	"media.subtitles.ttml.align_tolerance_ms": true,
 }
 
@@ -2878,6 +2919,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_video_window_sec", cfg.MediaVideoWindowSec)
 	writeInt("media_clip_max_duration_ms", cfg.MediaClipMaxDurationMS)
 	writeInt("media_clip_max_bytes", cfg.MediaClipMaxBytes)
+	writeInt("media_stt_max_payload_mb", cfg.MediaSTTMaxPayloadMB)
+	writeInt("media_stt_request_timeout_sec", cfg.MediaSTTRequestTimeoutSec)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
 	writeScalar("media_batch_manifest", cfg.MediaBatchManifest)
@@ -3629,6 +3672,9 @@ func (c *Config) validateNumericBounds() error {
 	if c.IngestWatchDebounce < 0 {
 		return fmt.Errorf("ingest.watch_debounce must be non-negative: %v", c.IngestWatchDebounce)
 	}
+	if err := c.validateMediaSTTNumericBounds(); err != nil {
+		return err
+	}
 	if c.RAGMaxContextChars < 0 {
 		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
 	}
@@ -3667,6 +3713,19 @@ func (c *Config) validateNumericBounds() error {
 // NaN/Inf are also rejected at parse time, but are re-guarded here so a
 // programmatically-injected value still fails validation rather than silently
 // corrupting behavior.
+// validateMediaSTTNumericBounds checks the media.stt.* numeric config fields.
+// Split from validateNumericBounds to keep it under the cyclomatic-complexity
+// budget; behaviour is unchanged.
+func (c *Config) validateMediaSTTNumericBounds() error {
+	if c.MediaSTTMaxPayloadMB < 0 {
+		return fmt.Errorf("media.stt.max_payload_mb must be non-negative (0 = client default): %d", c.MediaSTTMaxPayloadMB)
+	}
+	if c.MediaSTTRequestTimeoutSec < 0 {
+		return fmt.Errorf("media.stt.request_timeout_sec must be non-negative (0 = client default): %d", c.MediaSTTRequestTimeoutSec)
+	}
+	return nil
+}
+
 func (c *Config) validateRetrievalNumericBounds() error {
 	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor
 	// would never drop anything, so reject it explicitly.
