@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -97,12 +98,37 @@ func TestWhisperTranscriberLimits(t *testing.T) {
 		}
 	})
 
+	t.Run("huge values clamp rather than wrap", func(t *testing.T) {
+		p := prof(provider.KindWhisper)
+		// Values large enough that mb*1MB (int) and sec*1e9ns (int64)
+		// would overflow and wrap to a negative/smaller value.
+		p.STTMaxPayloadMB = math.MaxInt
+		p.STTRequestTimeoutSec = math.MaxInt
+		tr, err := providerfactory.Transcriber(p)
+		if err != nil {
+			t.Fatalf("Transcriber(whisper): %v", err)
+		}
+		c, ok := tr.(*whisperapi.Client)
+		if !ok {
+			t.Fatalf("whisper Transcriber is %T, want *whisperapi.Client", tr)
+		}
+		if c.MaxPayloadBytes < defPayload {
+			t.Errorf("MaxPayloadBytes wrapped/shrank on overflow: got %d, want >= default %d", c.MaxPayloadBytes, defPayload)
+		}
+		if c.HTTPClient.Timeout < defTimeout {
+			t.Errorf("HTTPClient.Timeout wrapped/shrank on overflow: got %v, want >= default %v", c.HTTPClient.Timeout, defTimeout)
+		}
+	})
+
 	t.Run("zero leaves defaults", func(t *testing.T) {
 		tr, err := providerfactory.Transcriber(prof(provider.KindWhisper))
 		if err != nil {
 			t.Fatalf("Transcriber(whisper): %v", err)
 		}
-		c := tr.(*whisperapi.Client)
+		c, ok := tr.(*whisperapi.Client)
+		if !ok {
+			t.Fatalf("whisper Transcriber is %T, want *whisperapi.Client", tr)
+		}
 		if c.MaxPayloadBytes != defPayload {
 			t.Errorf("MaxPayloadBytes = %d, want default %d", c.MaxPayloadBytes, defPayload)
 		}

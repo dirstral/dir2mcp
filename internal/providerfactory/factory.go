@@ -11,6 +11,7 @@ package providerfactory
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -292,11 +293,32 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 // zero value leaves the client's default in place.
 func applyWhisperLimits(c *whisperapi.Client, p provider.Profile) {
 	if p.STTMaxPayloadMB > 0 {
-		c.MaxPayloadBytes = p.STTMaxPayloadMB * 1024 * 1024
+		c.MaxPayloadBytes = mbToBytes(p.STTMaxPayloadMB)
 	}
 	if p.STTRequestTimeoutSec > 0 && c.HTTPClient != nil {
-		c.HTTPClient.Timeout = time.Duration(p.STTRequestTimeoutSec) * time.Second
+		c.HTTPClient.Timeout = secToDuration(p.STTRequestTimeoutSec)
 	}
+}
+
+// mbToBytes converts a megabyte count to bytes, clamping to math.MaxInt
+// instead of silently wrapping to a negative/smaller value when the
+// multiplication would overflow int (32-bit builds or very large configs).
+func mbToBytes(mb int) int {
+	const bytesPerMB = 1024 * 1024
+	if mb > math.MaxInt/bytesPerMB {
+		return math.MaxInt
+	}
+	return mb * bytesPerMB
+}
+
+// secToDuration converts a second count to a time.Duration, clamping to the
+// maximum representable duration (math.MaxInt64 ns) instead of wrapping to a
+// small/negative value when the nanosecond multiplication would overflow int64.
+func secToDuration(sec int) time.Duration {
+	if int64(sec) > math.MaxInt64/int64(time.Second) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(sec) * time.Second
 }
 
 // newElevenLabs builds an ElevenLabs client carrying the profile's
