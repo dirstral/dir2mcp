@@ -117,6 +117,18 @@ type Retriever interface {
 	IndexingComplete(ctx context.Context) (bool, error)
 }
 
+// AxisSearcher is an optional Retriever capability that runs a search and also
+// reports the physical index axis (text|code|both) the query was ACTUALLY
+// dispatched on. The MCP search tool uses it to populate a truthful index_used
+// (SPEC §15.2) taken from the real dispatch, so the reported value can never
+// diverge from the axis searched — including HyDE "replace" mode, where routing
+// keys off the generated hypothetical document rather than the original query,
+// and an "auto" query whose route depends on the query text. Retrievers that do
+// not implement it fall back to a name-derived index_used.
+type AxisSearcher interface {
+	SearchWithAxis(ctx context.Context, query SearchQuery) ([]SearchHit, string, error)
+}
+
 type Ingestor interface {
 	Run(ctx context.Context) error
 	Reindex(ctx context.Context) error
@@ -253,6 +265,19 @@ type StructuredTranscriber interface {
 
 type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)
+}
+
+// BoundedGenerator is an OPTIONAL capability a Generator MAY implement to cap a
+// single completion's output tokens for THIS call, without changing the
+// generous default the generator uses for unbounded callers (answer synthesis,
+// annotation). A caller with a known-short output (e.g. one translated
+// transcript line) type-asserts its Generator against this and, if satisfied,
+// passes a tight cap; a Generator that does not implement it falls back to
+// Generate and behaves exactly as before. A maxTokens <= 0 MUST behave like
+// Generate (use the generator's own default).
+type BoundedGenerator interface {
+	Generator
+	GenerateWithMaxTokens(ctx context.Context, prompt string, maxTokens int) (string, error)
 }
 
 // Reranked is one rescored candidate: Index is the position in the

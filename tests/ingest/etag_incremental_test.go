@@ -341,6 +341,47 @@ func TestRunScan_S3ETagErrorStatusForcesReprocess(t *testing.T) {
 	}
 }
 
+// TestRunScan_S3ETagEmptyContentHashForcesReRead confirms the #502 S3 half of the
+// fix: the remote (S3) ETag fast path runs BEFORE the content_hash recompute, so
+// an object whose recorded content_hash is empty (a withheld #402/#502 done-marker
+// left blank by a crash — e.g. an archive container whose members were not fully
+// extracted) must NOT be ETag-skipped even when its ETag+size match, or the
+// withhold gate would be defeated and the object never reprocessed. An empty
+// content_hash always means "not durably done", so the object is re-read.
+func TestRunScan_S3ETagEmptyContentHashForcesReRead(t *testing.T) {
+	fs := newFakeRemoteFS()
+	fs.add("doc.txt", "etag-stable", "body")
+
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID:     1,
+		RelPath:   "doc.txt",
+		DocType:   "text",
+		SizeBytes: int64(len("body")),
+		// Empty content_hash: a crash left the withheld done-marker blank. ETag/size
+		// still match, and status is a healthy "skipped" — the only signal that this
+		// row was never finalized is the empty content_hash.
+		ContentHash: "",
+		ETag:        "etag-stable",
+		Status:      "skipped",
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	// The empty content_hash must defeat the ETag fast-skip: the object is re-read.
+	if got := fs.openCount("doc.txt"); got == 0 {
+		t.Errorf("object with empty content_hash was ETag-skipped; it must be re-read (withhold gate)")
+	}
+	// After the re-read it is durably finalized with a non-empty content_hash.
+	if doc, _ := st.get("doc.txt"); doc.ContentHash != ingest.ComputeContentHash([]byte("body")) {
+		t.Errorf("content_hash not finalized after re-read: %q", doc.ContentHash)
+	}
+}
+
 // TestRunScan_S3ETagForceReindexBypassesSkip confirms that a forced reindex
 // re-reads even an object whose ETag is unchanged (the skip is incremental-only,
 // SPEC §7.8.3).

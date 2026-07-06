@@ -37,6 +37,15 @@ type fakeIncrementalStore struct {
 	// document (instead of existingDoc) so tests can exercise the read-back the
 	// #402 content_hash finalize performs.
 	reflectUpserts bool
+
+	// reflectByPath makes GetDocumentByPath return the most recently upserted
+	// document whose RelPath matches the requested path (falling back to
+	// existingDoc when none matches). It is required by the #502 archive tests,
+	// where an archive container and its members are distinct rows: the
+	// container's deferred finalize must read back the container row (status
+	// "skipped"), not whichever member happened to be upserted last. It takes
+	// precedence over reflectUpserts when both are set.
+	reflectByPath bool
 }
 
 func (f *fakeIncrementalStore) Init(context.Context) error { return nil }
@@ -51,9 +60,17 @@ func (f *fakeIncrementalStore) UpsertDocument(_ context.Context, doc model.Docum
 	f.upsertedDocs = append(f.upsertedDocs, doc)
 	return nil
 }
-func (f *fakeIncrementalStore) GetDocumentByPath(_ context.Context, _ string) (model.Document, error) {
+func (f *fakeIncrementalStore) GetDocumentByPath(_ context.Context, relPath string) (model.Document, error) {
 	if f.existingErr != nil {
 		return model.Document{}, f.existingErr
+	}
+	if f.reflectByPath {
+		for i := len(f.upsertedDocs) - 1; i >= 0; i-- {
+			if f.upsertedDocs[i].RelPath == relPath {
+				return f.upsertedDocs[i], nil
+			}
+		}
+		return f.existingDoc, nil
 	}
 	if f.reflectUpserts && len(f.upsertedDocs) > 0 {
 		return f.upsertedDocs[len(f.upsertedDocs)-1], nil

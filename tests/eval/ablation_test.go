@@ -9,11 +9,38 @@ const evalK = 5
 
 // configMetrics holds one ablation row's macro-averaged metrics plus the mean
 // number of hits returned per query (a proxy for how aggressively a config
-// trims the candidate set — relevant for the precision-oriented knobs).
+// trims the candidate set — relevant for the precision-oriented knobs) and the
+// total number of cross-file duplicate hits (two returned rel_paths sharing a
+// content_hash) summed over the query set — the direct signal cross-file dedup
+// is supposed to drive to zero.
 type configMetrics struct {
-	cfg      knobConfig
-	mean     RankedMetrics
-	meanHits float64
+	cfg            knobConfig
+	mean           RankedMetrics
+	meanHits       float64
+	crossFileDupes int
+}
+
+// countCrossFileDupes counts how many returned rel_paths are cross-file
+// duplicates of an already-seen result — i.e. share a content_hash with a
+// higher-ranked hit. rel_paths with an unknown/empty content_hash are never
+// grouped (each is its own group), mirroring dedupCrossFileCandidates. The
+// return value is (# returned rel_paths − # distinct content groups), so 0 means
+// every source file appears at most once.
+func countCrossFileDupes(relPaths []string, hashByRelPath map[string]string) int {
+	seen := make(map[string]struct{}, len(relPaths))
+	dupes := 0
+	for _, rp := range relPaths {
+		key := hashByRelPath[rp]
+		if key == "" {
+			key = "\x00relpath\x00" + rp // unknown/empty hash: never grouped
+		}
+		if _, ok := seen[key]; ok {
+			dupes++
+			continue
+		}
+		seen[key] = struct{}{}
+	}
+	return dupes
 }
 
 // ablationMatrix is the set of configurations the harness measures. Each row
@@ -41,6 +68,10 @@ func ablationMatrix() []knobConfig {
 // and returns one configMetrics row per config, in matrix order.
 func runAblation(t *testing.T, corpus evalCorpus) []configMetrics {
 	t.Helper()
+	hashByRelPath := make(map[string]string, len(corpus.docs))
+	for _, d := range corpus.docs {
+		hashByRelPath[d.RelPath] = d.ContentHash
+	}
 	rows := make([]configMetrics, 0, len(ablationMatrix()))
 	for _, cfg := range ablationMatrix() {
 		svc, err := corpus.buildService(cfg)
@@ -48,19 +79,21 @@ func runAblation(t *testing.T, corpus evalCorpus) []configMetrics {
 			t.Fatalf("buildService(%s): %v", cfg.name, err)
 		}
 		perQuery := make([]RankedMetrics, 0, len(corpus.queries))
-		var totalHits int
+		var totalHits, dupes int
 		for _, q := range corpus.queries {
 			retrieved, err := corpus.runQuery(svc, q, cfg, evalK)
 			if err != nil {
 				t.Fatalf("config %q query %q: %v", cfg.name, q.ID, err)
 			}
 			totalHits += len(retrieved)
+			dupes += countCrossFileDupes(retrieved, hashByRelPath)
 			perQuery = append(perQuery, Evaluate(retrieved, relevantSet(q.Relevant), evalK))
 		}
 		rows = append(rows, configMetrics{
-			cfg:      cfg,
-			mean:     MeanMetrics(perQuery),
-			meanHits: float64(totalHits) / float64(len(corpus.queries)),
+			cfg:            cfg,
+			mean:           MeanMetrics(perQuery),
+			meanHits:       float64(totalHits) / float64(len(corpus.queries)),
+			crossFileDupes: dupes,
 		})
 	}
 	return rows
@@ -87,16 +120,16 @@ func TestAblationMatrix(t *testing.T) {
 	rows := runAblation(t, corpus)
 
 	t.Logf("retrieval ablation @k=%d over %d queries:", evalK, len(corpus.queries))
-	t.Logf("%-18s %8s %8s %8s %9s", "config", "recall", "nDCG", "MRR", "meanHits")
+	t.Logf("%-18s %8s %8s %8s %9s %9s", "config", "recall", "nDCG", "MRR", "meanHits", "xfileDup")
 	for _, r := range rows {
-		t.Logf("%-18s %8.4f %8.4f %8.4f %9.2f",
-			r.cfg.name, r.mean.RecallAtK, r.mean.NDCGAtK, r.mean.MRR, r.meanHits)
+		t.Logf("%-18s %8.4f %8.4f %8.4f %9.2f %9d",
+			r.cfg.name, r.mean.RecallAtK, r.mean.NDCGAtK, r.mean.MRR, r.meanHits, r.crossFileDupes)
 	}
 
 	assertBaselineFindsEverything(t, rows)
 	assertHybridImprovesRanking(t, rows)
 	assertRerankImprovesRanking(t, rows)
-	assertDedupTrimsWithoutRecallLoss(t, rows)
+	assertDedupRemovesCrossFileDuplicates(t, rows)
 	assertLangFilterDoesNotHurtRecall(t, rows)
 	assertMinScoreTrimsWithoutRecallLoss(t, rows)
 }
@@ -130,6 +163,14 @@ func assertHybridImprovesRanking(t *testing.T, rows []configMetrics) {
 // assertRerankImprovesRanking: the deterministic lexical reranker is at least as
 // good as plain hybrid on ranking quality (it reorders the fused pool toward the
 // lexically-best candidate) and never regresses recall.
+//
+// Since the #519 over-fetch fix, hybrid fusion keeps a rerank-sized candidate
+// pool instead of truncating to k, so the reranker now reorders the full
+// over-fetch pool (and can rescue a chunk fused at rank k+1..pool) rather than
+// only permuting the top-k. The invariant stays a no-regression FLOOR (rerank
+// must never do worse than plain hybrid): asserting a strict improvement would
+// over-fit this small fixture, and the floor already fails loudly if the wider
+// pool ever let rerank drop a relevant doc.
 func assertRerankImprovesRanking(t *testing.T, rows []configMetrics) {
 	t.Helper()
 	hyb := metricsFor(rows, "hybrid")
@@ -142,15 +183,36 @@ func assertRerankImprovesRanking(t *testing.T, rows []configMetrics) {
 	}
 }
 
-// assertDedupTrimsWithoutRecallLoss: cross-file dedup collapses the byte-
-// identical gardening alias, shrinking the mean hit count, while the canonical
-// relevant doc survives so recall/MRR are unchanged.
-func assertDedupTrimsWithoutRecallLoss(t *testing.T, rows []configMetrics) {
+// assertDedupRemovesCrossFileDuplicates: cross-file dedup collapses the byte-
+// identical gardening alias so no source file appears twice in the top-k, while
+// the canonical relevant doc survives so recall is unchanged.
+//
+// This assertion was re-baselined for the #519 over-fetch fix. Previously hybrid
+// fusion truncated to the final k, so cross-file dedup returned strictly FEWER
+// hits than plain hybrid (it dropped the alias without anything to backfill), and
+// the gate asserted `dedup.meanHits < hybrid.meanHits`. The over-fetch fix widens
+// the fused candidate pool to a rerank-sized set: dedup now removes the alias and
+// backfills to k with the next UNIQUE cross-file result, so both configs return k
+// hits and the old "fewer hits" invariant no longer holds (and was never the real
+// contract — it was a proxy). The correct, stronger property is asserted directly:
+//   - hybrid+dedup returns ZERO cross-file duplicates (every content_hash appears
+//     at most once in the deduped top-k) — the property dedup exists to guarantee;
+//   - plain hybrid DOES surface at least one cross-file duplicate, so the gate is
+//     non-vacuous and would genuinely fail if dedup ever stopped collapsing them;
+//   - recall is not reduced (the canonical relevant doc still survives).
+func assertDedupRemovesCrossFileDuplicates(t *testing.T, rows []configMetrics) {
 	t.Helper()
 	hyb := metricsFor(rows, "hybrid")
 	dd := metricsFor(rows, "hybrid+dedup")
-	if !(dd.meanHits < hyb.meanHits) {
-		t.Fatalf("cross-file dedup must shrink the candidate set: hybrid=%.2f dedup=%.2f", hyb.meanHits, dd.meanHits)
+	// Guard against a vacuous gate: without dedup the corpus/query set must
+	// actually surface a cross-file duplicate into the top-k, otherwise
+	// asserting dedup==0 proves nothing.
+	if hyb.crossFileDupes == 0 {
+		t.Fatalf("ablation fixtures must surface a cross-file duplicate without dedup (got 0); fixtures drifted")
+	}
+	if dd.crossFileDupes != 0 {
+		t.Fatalf("cross-file dedup must leave no duplicate source file in the top-k: hybrid=%d dedup=%d",
+			hyb.crossFileDupes, dd.crossFileDupes)
 	}
 	if dd.mean.RecallAtK < hyb.mean.RecallAtK-eps {
 		t.Fatalf("cross-file dedup must not drop a canonical relevant doc: hybrid=%.4f dedup=%.4f",

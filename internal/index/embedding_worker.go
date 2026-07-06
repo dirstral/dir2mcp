@@ -42,12 +42,18 @@ type EmbeddingWorker struct {
 	OnIndexedChunk func(label uint64, metadata model.ChunkMetadata)
 
 	// LateChunking is the resolved value of config.IngestLateChunking (issue
-	// #332). When true AND the configured Embedder implements model.TokenEmbedder,
-	// the worker is on the late-chunking path (embed whole documents, mean-pool
-	// token vectors per chunk span). When the embedder lacks that capability — as
-	// every shipped provider does today — the worker logs the fallback once and
-	// embeds chunks the existing way. Default false: the worker behaves
-	// byte-for-byte as before. The pure embed/mean-pool step lives in
+	// #332). It records the operator's intent to use the late-chunking path
+	// (embed whole documents, mean-pool token vectors per chunk span) when the
+	// configured Embedder implements model.TokenEmbedder.
+	//
+	// NOT-YET-WIRED (issue #446): the production embed loop does not yet run the
+	// pooling path — the whole-doc-embed + per-chunk mean-pool needs per-document
+	// rune spans and the source document text, neither of which the per-chunk
+	// ChunkTasks the worker leases from NextPending carry today. Until that
+	// plumbing lands the worker embeds chunk-by-chunk regardless of this flag, so
+	// the one-time decision log (logLateChunkDecisionOnce) says so honestly and
+	// never claims the path is "active". Default false: the worker behaves
+	// byte-for-byte as before. The pure embed/mean-pool step already lives in
 	// internal/latechunk; the worker holds the resolved capability gate
 	// (latechunk.Decide) so the decision and any fallback are observable
 	// end-to-end.
@@ -1065,9 +1071,18 @@ func (w *EmbeddingWorker) LateChunkDecision() latechunk.Decision {
 // logLateChunkDecisionOnce emits a single informational line describing the
 // late-chunking decision the first time the worker runs with the feature
 // enabled, so an operator who turned on ingest.late_chunking can see whether it
-// actually engaged or silently fell back to chunk-then-embed (issue #332: never
-// fail silently). It is a no-op when late chunking is disabled (the default), so
+// actually engaged or fell back to chunk-then-embed (issue #332: never fail
+// silently). It is a no-op when late chunking is disabled (the default), so
 // stock runs log nothing new.
+//
+// Honesty note (issue #446): even when the capability gate is satisfied
+// (dec.Active — the embedder exposes token embeddings), the production embed
+// loop does NOT yet run the whole-doc-embed + mean-pool path, so the worker
+// still embeds chunk-then-embed. The log therefore MUST NOT claim the path is
+// "active" in that case (the previous message lied): it reports that the
+// capability is present but the pooling path is not yet wired, so the fallback
+// is in effect. When the token-pooling path is wired, restore an "enabled and
+// active" line here (and branch the embed loop on dec.Active).
 func (w *EmbeddingWorker) logLateChunkDecisionOnce() {
 	if !w.LateChunking || w.lateChunkLogged {
 		return
@@ -1075,7 +1090,7 @@ func (w *EmbeddingWorker) logLateChunkDecisionOnce() {
 	w.lateChunkLogged = true
 	dec := w.LateChunkDecision()
 	if dec.Active {
-		w.logf("late chunking: enabled and active (embedder %T exposes token embeddings)", w.Embedder)
+		w.logf("late chunking: enabled and embedder %T exposes token embeddings, but the token-pooling path is not yet wired (issue #446); still embedding chunk-then-embed", w.Embedder)
 		return
 	}
 	w.logf("late chunking: enabled but falling back to chunk-then-embed (%s; embedder %T)", dec.Fallback, w.Embedder)

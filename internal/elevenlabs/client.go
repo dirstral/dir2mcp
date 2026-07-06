@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -126,9 +125,9 @@ func parseTranscribeResult(parsed transcribeResponse) (string, bool) {
 			if startMS <= 0 {
 				startMS = int(segment.Start * 1000)
 			}
-			mm := (startMS / 1000) / 60
-			ss := (startMS / 1000) % 60
-			lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
+			// Preserve millisecond precision in the marker so distinct in-second
+			// segments do not collapse onto one timestamp (issue #431).
+			lines = append(lines, model.FormatTranscriptTimestamp(startMS)+" "+text)
 		}
 		if len(lines) > 0 {
 			return strings.Join(lines, "\n"), true
@@ -352,11 +351,4 @@ func mapProviderError(statusCode int, message string) error {
 	}
 
 	return pe
-}
-
-func pad2(n int) string {
-	if n < 10 {
-		return "0" + strconv.Itoa(n)
-	}
-	return strconv.Itoa(n)
 }

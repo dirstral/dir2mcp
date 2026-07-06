@@ -331,7 +331,9 @@ func (a *App) emitSetupVerification(global globalOptions) {
 		{"embed", provider.CapEmbed},
 		{"chat", provider.CapChat},
 	} {
-		chk := providerCheck(cfg, c.label, c.cap, false)
+		// deep=false: setup verification only checks resolvability/construction,
+		// never touches the network (probing belongs to `doctor --deep`).
+		chk := providerCheck(context.Background(), cfg, c.label, c.cap, false, false)
 		switch chk.Status {
 		case doctorStatusOK:
 			writef(a.stdout, "%s %s provider ready (%s)\n", s.Success.Render("✓"), c.label, chk.Detail)

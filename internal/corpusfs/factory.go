@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -136,8 +137,8 @@ func New(ctx context.Context, cfg Config) (CorpusFS, error) {
 // capability can hand ffmpeg a range-seekable URL (issue #243); a stub client (no
 // concrete *s3.Client) yields no presigner and MediaURL falls back to Localize.
 func newS3FromConfig(ctx context.Context, cfg Config) (CorpusFS, error) {
-	if strings.TrimSpace(cfg.S3Bucket) == "" {
-		return nil, errors.New("corpusfs: source kind s3 requires a bucket")
+	if err := validateS3SourceConfig(cfg); err != nil {
+		return nil, err
 	}
 	client, err := newS3Client(ctx, cfg)
 	if err != nil {
@@ -152,6 +153,53 @@ func newS3FromConfig(ctx context.Context, cfg Config) (CorpusFS, error) {
 		Prefix:   cfg.S3Prefix,
 		CacheDir: cacheDir,
 	}, presignerForClient(client))
+}
+
+// validateS3SourceConfig enforces the S3 corpus-source invariants before a
+// client is built so misconfiguration fails fast with a clear, actionable error
+// at startup rather than as an opaque endpoint-resolution failure on the first
+// ListObjects (issue #487). It requires a bucket; requires a region when no
+// custom endpoint is configured (AWS endpoint resolution needs one, and the SDK
+// otherwise fails deep in the request path); and, when a custom endpoint is set,
+// requires it to be a syntactically valid http(s) URL with a host.
+func validateS3SourceConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.S3Bucket) == "" {
+		return errors.New("corpusfs: source kind s3 requires a bucket")
+	}
+	region := strings.TrimSpace(cfg.S3Region)
+	endpoint := strings.TrimSpace(cfg.S3Endpoint)
+	if endpoint == "" {
+		if region == "" {
+			return errors.New("corpusfs: source kind s3 requires a region " +
+				"(set source.s3.region, DIR2MCP_SOURCE_S3_REGION, or AWS_REGION) " +
+				"when no custom endpoint is configured")
+		}
+		return nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		// Never echo the raw endpoint: it may embed userinfo
+		// (http://user:pass@host), and a parse-failure error would leak those
+		// credentials into logs/startup output.
+		return errors.New("corpusfs: source.s3.endpoint is not a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("corpusfs: source.s3.endpoint must use http or https, got %q", redactedEndpoint(u))
+	}
+	if u.Host == "" {
+		return errors.New("corpusfs: source.s3.endpoint must include a host")
+	}
+	return nil
+}
+
+// redactedEndpoint renders a parsed endpoint URL as scheme://host, dropping any
+// userinfo, path, or query so credentials embedded in the endpoint
+// (http://user:pass@host) never reach logs or error messages.
+func redactedEndpoint(u *url.URL) string {
+	if u.Host == "" {
+		return u.Scheme
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // presignerForClient returns a presignFunc backed by the SDK's PresignClient when

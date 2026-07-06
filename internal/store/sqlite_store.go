@@ -339,13 +339,39 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	// Order matters: busy_timeout MUST come before journal_mode. Switching to
-	// WAL itself can fail with SQLITE_BUSY if another process holds the
-	// database lock; without busy_timeout already in effect, that PRAGMA
+	// busy_timeout is connection-local and non-persistent: setting it neither
+	// creates nor mutates any on-disk file. Set it first so the WAL switch below
+	// waits rather than returning SQLITE_BUSY immediately when another process
+	// holds the database lock.
+	if _, err := db.ExecContext(ctx, `PRAGMA busy_timeout=5000;`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Reject a database written by a NEWER binary BEFORE any persistent mutation
+	// (#405). PRAGMA journal_mode=WAL below persistently creates/modifies the
+	// -wal file, so the downgrade tripwire MUST run first: a future-schema DB we
+	// do not understand must be left byte-for-byte untouched. Reading
+	// user_version is a pure read and does not create a -wal file.
+	if err := checkSchemaVersion(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Order matters: busy_timeout (set above) MUST come before journal_mode.
+	// Switching to WAL itself can fail with SQLITE_BUSY if another process holds
+	// the database lock; without busy_timeout already in effect, that PRAGMA
 	// returns immediately rather than waiting.
+	//
+	// foreign_keys=ON makes the ON DELETE CASCADE constraints declared on
+	// representations/chunks/spans actually fire (#405). SQLite defaults it
+	// OFF, which left those cascades inert — harmless while every delete path
+	// is a soft-delete (UPDATE deleted=1), but a footgun the moment a hard
+	// DELETE FROM documents is introduced (compaction/vacuum), which would
+	// silently orphan child rows. It MUST be set outside any transaction; the
+	// single-connection pool (SetMaxOpenConns(1)) makes this per-connection
+	// pragma stick for the life of the store handle.
 	for _, pragma := range []string{
-		`PRAGMA busy_timeout=5000;`,
 		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA foreign_keys=ON;`,
 	} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
@@ -353,6 +379,48 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 		}
 	}
 	return db, nil
+}
+
+// schemaVersion is the persistence-layer schema revision this binary
+// understands, stamped into the database file header via PRAGMA user_version
+// (#405). It is a monotonic counter, NOT the product/release version.
+//
+// All migrations to date are additive and idempotent (CREATE ... IF NOT
+// EXISTS, ALTER TABLE ADD COLUMN with defaults), so upgrading or downgrading
+// across them is safe and the floor stays at 1. Bump this ONLY when
+// introducing a non-additive change (a NOT NULL column without a default, a
+// type/tokenizer change, a table rewrite) so that:
+//   - a newer DB opened by an older binary is refused rather than
+//     silently mixed-version corrupted (the downgrade tripwire below), and
+//   - the bump documents exactly which change is not backward compatible.
+const schemaVersion = 1
+
+// checkSchemaVersion reads PRAGMA user_version and refuses to proceed when the
+// database was written by a newer binary (dbVersion > schemaVersion). Older or
+// unstamped databases (user_version == 0, the SQLite default) are accepted and
+// upgraded in place by the additive migrations, then re-stamped by
+// stampSchemaVersion. openDB calls this BEFORE applying journal_mode=WAL (or any
+// other persistent pragma/migration) so a future-schema DB is never mutated —
+// not even its -wal file created — by a binary that does not understand it.
+func checkSchemaVersion(ctx context.Context, db *sql.DB) error {
+	var dbVersion int64
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&dbVersion); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if dbVersion > schemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this binary supports (%d); upgrade dir2mcp to open this corpus", dbVersion, schemaVersion)
+	}
+	return nil
+}
+
+// stampSchemaVersion records the current schemaVersion into the database file
+// header. PRAGMA user_version does not accept bound parameters, so the trusted
+// integer constant is formatted directly (never user input).
+func stampSchemaVersion(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return fmt.Errorf("stamp schema version: %w", err)
+	}
+	return nil
 }
 
 // applyAdditiveColumnMigrations runs ALTER TABLE ADD COLUMN statements that
@@ -442,6 +510,8 @@ func (s *SQLiteStore) initLocked(ctx context.Context) error {
 		return fmt.Errorf("set database file permissions: %w", err)
 	}
 
+	// openDB refuses a database written by a newer binary before applying any
+	// persistent pragma (WAL), so a future-schema DB is rejected untouched (#405).
 	db, err := openDB(ctx, s.path)
 	if err != nil {
 		return err
@@ -566,7 +636,7 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 		_ = db.Close()
 		return err
 	}
-	if err := backfillFTSIfEmpty(ctx, db); err != nil {
+	if err := repairFTSIfDrifted(ctx, db); err != nil {
 		_ = db.Close()
 		return err
 	}
@@ -576,28 +646,52 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 		return err
 	}
 
+	// Stamp the schema version last, once every migration/repair above
+	// succeeded, so a partially-migrated DB is never marked current (#405).
+	if err := stampSchemaVersion(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
+
 	s.db = db
 	return nil
 }
 
-// backfillFTSIfEmpty handles the upgrade path where chunks_fts is created
-// fresh against an existing chunks table. Without this, FTS searches on a
-// pre-existing index return zero hits until each chunk is reprocessed by
-// ingest. The 'rebuild' command re-derives FTS content from the
-// content='chunks' external-content reference.
-func backfillFTSIfEmpty(ctx context.Context, db *sql.DB) error {
-	var exists, chunkCount int64
-	err := db.QueryRowContext(ctx, `SELECT 1 FROM chunks_fts LIMIT 1`).Scan(&exists)
-	if err == nil {
-		return nil
+// repairFTSIfDrifted rebuilds the chunks_fts external-content index whenever it
+// has drifted out of sync with the chunks table (#405). The chunks_ai/ad/au
+// triggers mirror EVERY chunk row (including soft-deleted ones, whose deleted
+// flag is a column update, not a row removal) into chunks_fts, so a healthy
+// index has exactly one FTS entry per chunk row.
+//
+// Drift is measured against the chunks_fts_docsize shadow table, NOT
+// `SELECT COUNT(*) FROM chunks_fts`: on an external-content FTS5 table a plain
+// COUNT proxies back to the content table (chunks), so it can never reveal a
+// missing index entry. chunks_fts_docsize holds one row per actually-indexed
+// document, so COUNT(chunks_fts_docsize) == COUNT(chunks) is the true
+// consistency invariant. (FTS5 always creates _docsize unless the index was
+// declared with columnsize=0, which chunks_fts is not.)
+//
+// This supersedes the earlier "rebuild only when fully empty" probe, which
+// missed PARTIAL drift: a crash mid-rebuild, or any future write path that
+// bypasses the triggers, leaves a partially-populated FTS that the emptiness
+// check waved through — silently losing lexical recall for the missing chunks
+// until an operator ran an explicit rebuild. Any count mismatch (empty OR
+// partial) triggers a full rebuild from the content='chunks' reference; the
+// rebuild re-indexes every chunk row, so the counts match afterward and
+// startup does not loop. Distinct from #373 (NULL bm25 score) and #439
+// (quarantine query-time filter): both of those leave the FTS row set intact.
+func repairFTSIfDrifted(ctx context.Context, db *sql.DB) error {
+	var chunkCount, indexedCount int64
+	// Read both counts in ONE statement so they observe a single, consistent
+	// database snapshot. Two separate COUNT(*) queries can straddle a concurrent
+	// writer's commit and see different snapshots, reporting a spurious mismatch
+	// that triggers a needless (costly) full FTS rebuild.
+	if err := db.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM chunks),
+		(SELECT COUNT(*) FROM chunks_fts_docsize)`).Scan(&chunkCount, &indexedCount); err != nil {
+		return fmt.Errorf("count chunks vs chunks_fts_docsize: %w", err)
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("check chunks_fts empty: %w", err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE deleted = 0`).Scan(&chunkCount); err != nil {
-		return fmt.Errorf("count chunks: %w", err)
-	}
-	if chunkCount == 0 {
+	if chunkCount == indexedCount {
 		return nil
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
@@ -826,6 +920,89 @@ func (s *SQLiteStore) ClearDocumentContentHashes(ctx context.Context) error {
 
 	_, err = db.ExecContext(ctx, `UPDATE documents SET content_hash = ''`)
 	return err
+}
+
+// reindexHashBackupTable is the ephemeral table that snapshots
+// documents.content_hash before a reindex clears it. It lets an interrupted or
+// failed reindex restore the incremental "already indexed" gate instead of
+// forcing a full-corpus reprocess on the next sync (issue #418).
+const reindexHashBackupTable = "_reindex_hash_backup"
+
+// BackupContentHashes snapshots (doc_id, content_hash) for every document into
+// an ephemeral backup table so RestoreContentHashes can undo a subsequent
+// ClearDocumentContentHashes if the reindex rebuild is interrupted or fails.
+// Any leftover backup from an earlier interrupted run is dropped first so the
+// snapshot reflects the current, pre-clear state. Idempotent.
+func (s *SQLiteStore) BackupContentHashes(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx,
+		`CREATE TABLE `+reindexHashBackupTable+` AS SELECT doc_id, content_hash FROM documents`)
+	return err
+}
+
+// RestoreContentHashes restores documents.content_hash from the snapshot taken
+// by BackupContentHashes for the backed-up rows, then drops the snapshot. It is
+// a no-op when no snapshot exists (never taken, or already discarded), so it is
+// safe to call on any failure path and is idempotent.
+func (s *SQLiteStore) RestoreContentHashes(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	present, err := reindexHashBackupPresent(ctx, db)
+	if err != nil || !present {
+		return err
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE documents
+		    SET content_hash = (
+		        SELECT b.content_hash FROM `+reindexHashBackupTable+` b
+		        WHERE b.doc_id = documents.doc_id
+		    )
+		  WHERE doc_id IN (SELECT doc_id FROM `+reindexHashBackupTable+`)`); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable)
+	return err
+}
+
+// DiscardContentHashBackup drops the snapshot taken by BackupContentHashes after
+// a durable reindex. Idempotent and safe when no snapshot exists.
+func (s *SQLiteStore) DiscardContentHashBackup(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable)
+	return err
+}
+
+// reindexHashBackupPresent reports whether the ephemeral content-hash snapshot
+// table exists, so restore can be a clean no-op when it does not.
+func reindexHashBackupPresent(ctx context.Context, db *sql.DB) (bool, error) {
+	var name string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		reindexHashBackupTable).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ListDocumentHashes returns the (rel_path, content_hash) pair for every

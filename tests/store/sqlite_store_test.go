@@ -263,6 +263,71 @@ func TestSQLiteStore_ClearDocumentContentHashes(t *testing.T) {
 	}
 }
 
+// TestSQLiteStore_ContentHashBackupRestore covers the reindex-rollback snapshot
+// (issue #418): a snapshot taken before ClearDocumentContentHashes must restore
+// the prior content_hash on rollback, and a discard must make a later restore a
+// clean no-op so a committed rebuild's hashes are not overwritten.
+func TestSQLiteStore_ContentHashBackupRestore(t *testing.T) {
+	const relPath = "docs/a.md"
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	mustNoErr(t, "Init", st.Init(ctx))
+
+	setHash := func(h string) {
+		t.Helper()
+		mustNoErr(t, "UpsertDocument", st.UpsertDocument(ctx, model.Document{
+			RelPath: relPath, DocType: "md", ContentHash: h, Status: "ready",
+		}))
+	}
+	wantHash := func(stage, want string) {
+		t.Helper()
+		got, err := st.GetDocumentByPath(ctx, relPath)
+		mustNoErr(t, "GetDocumentByPath", err)
+		if got.ContentHash != want {
+			t.Fatalf("%s: content_hash = %q, want %q", stage, got.ContentHash, want)
+		}
+	}
+
+	const original = "hash-original"
+	setHash(original)
+
+	// Restore with no snapshot present is a safe no-op.
+	mustNoErr(t, "restore (no backup)", st.RestoreContentHashes(ctx))
+	wantHash("no-op restore", original)
+
+	// Snapshot -> clear -> restore must bring the original hash back.
+	mustNoErr(t, "BackupContentHashes", st.BackupContentHashes(ctx))
+	mustNoErr(t, "ClearDocumentContentHashes", st.ClearDocumentContentHashes(ctx))
+	wantHash("after clear", "")
+	mustNoErr(t, "RestoreContentHashes", st.RestoreContentHashes(ctx))
+	wantHash("after restore", original)
+
+	// After restore the snapshot is consumed: a second restore is a no-op.
+	mustNoErr(t, "second restore", st.RestoreContentHashes(ctx))
+	wantHash("second restore", original)
+
+	// Snapshot -> discard: a later restore must NOT resurrect the old snapshot,
+	// so a committed rebuild's fresh hash survives.
+	mustNoErr(t, "BackupContentHashes (2)", st.BackupContentHashes(ctx))
+	const rebuilt = "hash-rebuilt"
+	setHash(rebuilt)
+	mustNoErr(t, "DiscardContentHashBackup", st.DiscardContentHashBackup(ctx))
+	mustNoErr(t, "restore after discard", st.RestoreContentHashes(ctx))
+	wantHash("after discard+restore", rebuilt)
+
+	// Discard with nothing to drop is idempotent.
+	mustNoErr(t, "idempotent discard", st.DiscardContentHashBackup(ctx))
+}
+
+// mustNoErr fails the test with a labelled message when err is non-nil.
+func mustNoErr(t *testing.T, what string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s failed: %v", what, err)
+	}
+}
+
 func TestSQLiteStore_EnsureDB_ConcurrentInitClose(t *testing.T) {
 	// this test exercises the window addressed by the recent race fix: calling
 	// ensureDB and Close simultaneously should not trigger a nil-pointer or

@@ -97,10 +97,13 @@ func (a *App) loadEmbedWorkerConfig(global globalOptions) (config.Config, int) {
 //   - the index backend MUST be a shared Tier-C store (qdrant/pgvector), since
 //     the embedded Tier-A/B backends are single-node and unshareable (§8.7.4);
 //   - the embed identity MUST resolve, so the worker can reject jobs from a
-//     different vector space rather than mis-write (§8.1.4, §8.7.3).
+//     different vector space rather than mis-write (§8.1.4, §8.7.3);
+//   - the broker MUST be cross-process (sqlite/external), NOT the in-process
+//     "memory" default — a MemBroker is a process-local queue, so a standalone
+//     worker on it creates its OWN empty queue, never sees the daemon's jobs,
+//     and silently no-ops while printing "pulling jobs" (#434).
 //
-// The broker is validated when it is constructed (buildEmbedBroker); its URL is
-// a runtime-only secret (§16.1.1) and is never logged here.
+// The broker URL is a runtime-only secret (§16.1.1) and is never logged here.
 func (a *App) requireDistributedPrereqs(cfg config.Config, global globalOptions) int {
 	if !cfg.DistributedEmbed.Enabled {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
@@ -113,6 +116,12 @@ func (a *App) requireDistributedPrereqs(cfg config.Config, global globalOptions)
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
 			fmt.Sprintf("CONFIG_INVALID: embed-worker requires a shared Tier-C vector store; index.backend=%q is single-node", cfg.IndexBackend),
 			"Set index.backend=qdrant or index.backend=pgvector — a worker pool must write to a store reachable by all participants (SPEC §8.7.4).")
+		return exitConfigInvalid
+	}
+	if broker := strings.ToLower(strings.TrimSpace(cfg.DistributedEmbed.Broker)); broker == "" || broker == "memory" {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			fmt.Sprintf("CONFIG_INVALID: embed-worker cannot use the in-process %q broker; its job queue is process-local, so a standalone worker never sees the daemon's jobs and would silently do nothing", embedWorkerBrokerLabel(cfg)),
+			"Set distributed_embed.broker=sqlite (a queue db shared with the daemon) or an external broker so the worker and daemon share one queue (SPEC §8.7.4).")
 		return exitConfigInvalid
 	}
 	if strings.TrimSpace(cfg.Providers().EmbedIdentity()) == "" {
@@ -188,7 +197,9 @@ func (a *App) runEmbedWorkerLoop(ctx context.Context, cfg config.Config, global 
 	defer func() { _ = broker.Close() }()
 
 	logger := pickEmbedLogger(a.stderr, global.jsonOutput)
-	embedders := buildAxisEmbedders(chunkSource, textIx, codeIx, embedder, nil, (*appstate.IndexingState)(nil), textModel, codeModel, cfg.RootDir, corpusFS, logger)
+	// The standalone embed-worker (#249) has no local IndexingState, so it needs no
+	// embedded_ok guard (the count hook is inert without a state to increment).
+	embedders := buildAxisEmbedders(chunkSource, textIx, codeIx, embedder, nil, (*appstate.IndexingState)(nil), (*embedqueue.EmbeddedGuard)(nil), textModel, codeModel, cfg.RootDir, corpusFS, logger)
 	if len(embedders) == 0 {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: no index axis configured for embed-worker")
 		return exitConfigInvalid

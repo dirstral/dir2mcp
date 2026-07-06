@@ -343,3 +343,65 @@ func TestTranscriptTranslation_ValidationRejectsEmptyTargets(t *testing.T) {
 		t.Fatalf("translation off must be valid, got %v", err)
 	}
 }
+
+// boundedFakeTranslator implements model.BoundedGenerator and records the
+// per-call max-tokens cap it receives, so the translate path can be asserted to
+// request a tight bound (issue #500 / PR #501 review) instead of the generous
+// answer/annotate default.
+type boundedFakeTranslator struct {
+	mu           sync.Mutex
+	calls        int
+	lastMaxToken int
+}
+
+func (b *boundedFakeTranslator) Generate(_ context.Context, prompt string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls++
+	b.lastMaxToken = 0
+	parts := strings.Split(prompt, "\n\n")
+	return "translated:" + parts[len(parts)-1], nil
+}
+
+func (b *boundedFakeTranslator) GenerateWithMaxTokens(_ context.Context, prompt string, maxTokens int) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls++
+	b.lastMaxToken = maxTokens
+	parts := strings.Split(prompt, "\n\n")
+	return "translated:" + parts[len(parts)-1], nil
+}
+
+func (b *boundedFakeTranslator) observed() (calls, lastMaxToken int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls, b.lastMaxToken
+}
+
+// TestTranscriptTranslation_UsesTightPerCallCap verifies the translate call site
+// passes a tight per-call max-tokens cap (512) when the translator implements
+// model.BoundedGenerator, keeping the #500 runaway path bounded without lowering
+// the generous default that ask/annotate rely on.
+func TestTranscriptTranslation_UsesTightPerCallCap(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
+	tr := &boundedFakeTranslator{}
+	svc.SetTranscriptLanguage("de")
+	svc.SetTranslator(tr, "mistral", "mistral-small-2506", []string{"en"})
+
+	doc := model.Document{DocID: 11, RelPath: "audio/talk.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+
+	calls, lastMaxToken := tr.observed()
+	if calls == 0 {
+		t.Fatalf("expected the bounded translator to be called")
+	}
+	if lastMaxToken != 512 {
+		t.Fatalf("translate max_tokens cap = %d, want 512", lastMaxToken)
+	}
+}

@@ -544,7 +544,14 @@ func parseGitIgnoreRules(absDir, relDir string) ([]gitIgnoreRule, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", gitIgnorePath, err)
 	}
+	return parseGitIgnoreContent(content, relDir), nil
+}
 
+// parseGitIgnoreContent parses the raw bytes of a .gitignore file into rules
+// anchored at relDir (the corpus-relative directory the .gitignore lives in). It
+// is the backend-agnostic core of gitignore parsing so both the local walker
+// (reading files) and the S3 walker (reading objects) apply identical semantics.
+func parseGitIgnoreContent(content []byte, relDir string) []gitIgnoreRule {
 	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(string(content), "\r\n", "\n"), "\r", "\n"), "\n")
 	rules := make([]gitIgnoreRule, 0, len(lines))
 	for _, line := range lines {
@@ -580,7 +587,23 @@ func parseGitIgnoreRules(absDir, relDir string) ([]gitIgnoreRule, error) {
 		})
 	}
 
-	return rules, nil
+	return rules
+}
+
+// keyIgnoredByGitignore reports whether an object key (a corpus-relative slash
+// path to a regular file) is excluded by the gitignore rules. It mirrors the
+// local walker, which prunes an ignored directory before descending: a key is
+// ignored if any ancestor directory segment is ignored (a directory match, which
+// git treats as un-re-includable) or the file path itself matches. rules must
+// already be ordered root-first so gitignore's last-match-wins precedence holds.
+func keyIgnoredByGitignore(rel string, rules []gitIgnoreRule) bool {
+	segs := strings.Split(rel, "/")
+	for i := 1; i < len(segs); i++ {
+		if matchesGitIgnoreRules(rules, strings.Join(segs[:i], "/"), true) {
+			return true
+		}
+	}
+	return matchesGitIgnoreRules(rules, rel, false)
 }
 
 func matchesGitIgnoreRules(rules []gitIgnoreRule, relPath string, isDir bool) bool {
