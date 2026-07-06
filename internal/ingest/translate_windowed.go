@@ -248,6 +248,27 @@ func segmentWordSet(s string) map[string]bool {
 	return m
 }
 
+// TranslateWindowStarts returns the window start offsets (ms) that tile
+// [0, totalMS) at stepMS. A trailing window shorter than overlapMS is dropped:
+// such a stub is both unreliable to decode (a sub-second Whisper clip yields
+// empty/hallucinated text, and avutil.ExtractSegment errors on an empty segment,
+// which would fail the whole file) AND redundant — whenever the tail is below the
+// overlap the preceding window's extent already reaches totalMS, so as the new
+// last window it keeps the tail. Pure so the drop rule is unit-tested.
+func TranslateWindowStarts(totalMS, stepMS, overlapMS int) []int {
+	if stepMS <= 0 {
+		stepMS = 1
+	}
+	var starts []int
+	for start := 0; start < totalMS; start += stepMS {
+		starts = append(starts, start)
+	}
+	if n := len(starts); n >= 2 && totalMS-starts[n-1] < overlapMS {
+		starts = starts[:n-1]
+	}
+	return starts
+}
+
 // translateStructuredWindowed is the media.translate.whisper_window_sec-aware
 // wrapper around translateStructured. With no window configured (<= 0) it is a
 // straight pass-through, so existing corpora are unchanged. With a window it
@@ -272,9 +293,9 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		return "", nil, fmt.Errorf("stage audio for windowed translate: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	if _, err := tmp.Write(content); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", nil, fmt.Errorf("write staged audio: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -292,7 +313,7 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 
 	var windows []TranslateWindow
 	attempted, failed := 0, 0
-	for start := 0; start < totalMS; start += stepMS {
+	for _, start := range TranslateWindowStarts(totalMS, stepMS, WhisperTranslateOverlapMS(windowMS)) {
 		end := start + windowMS
 		if end > totalMS {
 			end = totalMS

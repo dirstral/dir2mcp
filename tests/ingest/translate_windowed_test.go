@@ -164,3 +164,37 @@ func TestMergeTranslateWindowsMergesMistimedSegments(t *testing.T) {
 		t.Errorf("distant segment lost: %q", lines[1])
 	}
 }
+
+// TestTranslateWindowStarts_DropsTooShortFinalWindow pins the fix for the
+// tiny-final-window failure: a trailing window shorter than the overlap is
+// dropped (it would be a sub-second decode that ffmpeg errors on / Whisper
+// hallucinates), while a healthy tail and the single-window / exact-multiple
+// cases are preserved.
+func TestTranslateWindowStarts_DropsTooShortFinalWindow(t *testing.T) {
+	const step, overlap = 100_000, 20_000 // 100s step, 20s overlap (120s window)
+	for _, tc := range []struct {
+		name    string
+		totalMS int
+		want    []int
+	}{
+		{"exact multiple keeps all", 300_000, []int{0, 100_000, 200_000}},
+		{"healthy tail kept", 340_000, []int{0, 100_000, 200_000, 300_000}},
+		{"tiny tail dropped", 305_000, []int{0, 100_000, 200_000}},
+		{"tail just under overlap dropped", 319_999, []int{0, 100_000, 200_000}},
+		{"tail exactly overlap kept", 320_000, []int{0, 100_000, 200_000, 300_000}},
+		{"single window untouched", 80_000, []int{0}},
+		{"sub-step audio untouched", 5_000, []int{0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ingest.TranslateWindowStarts(tc.totalMS, step, overlap)
+			if len(got) != len(tc.want) {
+				t.Fatalf("starts = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("starts = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
