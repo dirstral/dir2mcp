@@ -3246,11 +3246,12 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// timings). Both yield [mm:ss]-marked lines, so everything below — quality
 	// gate, representation upsert, time-span chunking, export — is identical.
 	var (
-		translated string
-		err        error
+		translated      string
+		translatedWords []model.TimedWord
+		err             error
 	)
 	if s.translateEngine == "whisper" {
-		translated, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
+		translated, translatedWords, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
 	} else {
 		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
 	}
@@ -3307,10 +3308,13 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	}
 	s.addRepresentations(1)
 
-	// Chunk the translated text with the same transcript chunker so its time
-	// spans line up with the source segments (the translation preserves each
-	// segment's verbatim [mm:ss] marker).
-	segments := chunkTranscriptByTime(translated)
+	// Chunk the translated text with the same word-aware transcript chunker as the
+	// source path so its time spans line up with the source segments (the
+	// translation preserves each segment's verbatim [mm:ss] marker) AND carry the
+	// whisper-translate per-word timings, enabling broadcast segmentation of the
+	// English track. translatedWords is nil for the chat engine, leaving that path
+	// chunk-only as before.
+	segments := chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
 	if len(segments) == 0 {
 		return nil
 	}
@@ -3690,34 +3694,38 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 // its own [mm:ss] English lines with their own timings. The result is cached
 // under {StateDir}/cache/transcribe with a "-translate" discriminator so it
 // never collides with the source-language transcribe cache for the same bytes.
-func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model.Document, content []byte) (string, error) {
+func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
 	if s.translateSTT == nil {
-		return "", errors.New("whisper translate transcriber not configured")
+		return "", nil, errors.New("whisper translate transcriber not configured")
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return "", fmt.Errorf("create transcript cache dir: %w", err)
+		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
 	// Whisper translate always targets English; key on the media bytes + STT
 	// identity (transcriptCacheKey, matching the source transcript so a provider
 	// change re-derives) plus a "-translate" discriminator and the en suffix so
-	// the file is distinct from the source transcript's cache entry.
+	// the file is distinct from the source transcript's cache entry. Per-word
+	// timings ride along in a .words.json sidecar (as the source transcribe path
+	// does) so the English track can be broadcast-segmented, not just chunked.
 	base := s.transcriptCacheKey(content) + "-translate" + TranscriptLangSuffix("en")
 	cachePath := filepath.Join(cacheDir, base+".txt")
+	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	if cached, err := os.ReadFile(cachePath); err == nil {
-		return string(cached), nil
+		return string(cached), readCachedWords(wordsPath), nil
 	}
 
-	translated, err := s.translateSTT.Transcribe(ctx, doc.RelPath, content)
+	translated, words, err := s.translateStructured(ctx, doc, content)
 	if err != nil {
-		return "", fmt.Errorf("%w: whisper-translate %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
 	translatedBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n"))
 	if err := os.WriteFile(cachePath, translatedBytes, 0o644); err != nil {
-		return "", fmt.Errorf("write whisper-translate cache: %w", err)
+		return "", nil, fmt.Errorf("write whisper-translate cache: %w", err)
 	}
+	s.writeCachedWords(wordsPath, words)
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
 	if shouldEnforceAfterWrite {
 		// Participate in the same cache-policy enforcement as the source
@@ -3737,7 +3745,35 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
-	return string(translatedBytes), nil
+	return string(translatedBytes), words, nil
+}
+
+// transcribeWith runs the given transcriber, preferring the structured
+// (word-timing) capability when available. Providers that do not implement
+// model.StructuredTranscriber return no words, leaving downstream behaviour
+// unchanged. transcribe and translateStructured both delegate here, differing
+// only in which configured transcriber they pass.
+func (s *Service) transcribeWith(ctx context.Context, stt model.Transcriber, relPath string, content []byte) (string, []model.TimedWord, error) {
+	if st, ok := stt.(model.StructuredTranscriber); ok {
+		res, err := st.TranscribeStructured(ctx, relPath, content)
+		if err != nil {
+			return "", nil, err
+		}
+		return res.Text, res.Words, nil
+	}
+	text, err := stt.Transcribe(ctx, relPath, content)
+	if err != nil {
+		return "", nil, err
+	}
+	return text, nil, nil
+}
+
+// translateStructured runs the whisper translate transcriber, preferring the
+// structured (word-timing) capability so the English track carries per-word
+// timings for broadcast segmentation; it degrades to text-only for a translate
+// transcriber that does not implement model.StructuredTranscriber.
+func (s *Service) translateStructured(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+	return s.transcribeWith(ctx, s.translateSTT, doc.RelPath, content)
 }
 
 // transcribe calls the configured transcriber, preferring the structured
@@ -3745,18 +3781,7 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 // model.StructuredTranscriber return no words, leaving downstream behaviour
 // unchanged.
 func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
-	if st, ok := s.transcriber.(model.StructuredTranscriber); ok {
-		res, err := st.TranscribeStructured(ctx, doc.RelPath, content)
-		if err != nil {
-			return "", nil, err
-		}
-		return res.Text, res.Words, nil
-	}
-	text, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
-	if err != nil {
-		return "", nil, err
-	}
-	return text, nil, nil
+	return s.transcribeWith(ctx, s.transcriber, doc.RelPath, content)
 }
 
 // readCachedWords loads per-word timing from the sidecar cache file, returning
@@ -3803,13 +3828,17 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 // ignored.
 func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
-	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
-	// The whisper-translate cache (readOrComputeWhisperTranslation) is keyed on
-	// the same content but with a "-translate" discriminator and a fixed "en"
-	// suffix (it always targets English), so it must be purged too or gated
-	// (possibly secret-bearing) translated text survives the purge.
-	translateBase := s.transcriptCacheKey(content) + "-translate" + TranscriptLangSuffix("en")
-	for _, p := range []string{base + ".txt", base + ".words.json", translateBase + ".txt"} {
+	key := s.transcriptCacheKey(content)
+	base := key + TranscriptLangSuffix(language)
+	// Also purge the whisper-translate English track (+ its .words.json sidecar):
+	// readOrComputeWhisperTranslation keys on the same content bytes with a
+	// "-translate" discriminator and the en suffix, and gated (e.g. secret-pattern
+	// refused) translated text must not be left persisted after a purge.
+	translateBase := key + "-translate" + TranscriptLangSuffix("en")
+	for _, p := range []string{
+		base + ".txt", base + ".words.json",
+		translateBase + ".txt", translateBase + ".words.json",
+	} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			s.getLogger().Printf("purge transcript cache: %v", err)
 		}
