@@ -47,6 +47,7 @@ type parsedForm struct {
 	hasVADFilter   bool
 	task           string
 	hasTask        bool
+	granularities  []string
 }
 
 func parseMultipart(t *testing.T, r *http.Request) parsedForm {
@@ -84,6 +85,8 @@ func parseMultipart(t *testing.T, r *http.Request) parsedForm {
 		case "task":
 			out.task = string(data)
 			out.hasTask = true
+		case "timestamp_granularities[]", "timestamp_granularities":
+			out.granularities = append(out.granularities, string(data))
 		}
 	}
 	return out
@@ -137,6 +140,36 @@ func TestTranscribeSegmentsFormatting(t *testing.T) {
 	}
 }
 
+// TestTranscribeSubSecondSegmentsKeepDistinctMarkers asserts that two segments
+// starting within the same whole second render as distinct [mm:ss.mmm] markers
+// instead of collapsing onto one floored [mm:ss] (issue #431 item c).
+func TestTranscribeSubSecondSegmentsKeepDistinctMarkers(t *testing.T) {
+	const subSecondSegments = `{
+	  "text": "first second",
+	  "language": "en",
+	  "duration": 10.0,
+	  "segments": [
+	    {"start": 5.25, "end": 5.6, "text": "first"},
+	    {"start": 5.75, "end": 6.0, "text": "second"}
+	  ]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, subSecondSegments)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "secret-key")
+	out, err := c.Transcribe(context.Background(), "podcast/ep1.mp3", []byte("audiobytes"))
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	want := "[00:05.250] first\n[00:05.750] second"
+	if out != want {
+		t.Fatalf("transcript = %q, want %q", out, want)
+	}
+}
+
 // TestVerboseJSONResponseFormat asserts response_format=verbose_json is
 // sent when configured.
 func TestVerboseJSONResponseFormat(t *testing.T) {
@@ -156,6 +189,55 @@ func TestVerboseJSONResponseFormat(t *testing.T) {
 	if got.responseFormat != "verbose_json" {
 		t.Errorf("response_format = %q, want verbose_json", got.responseFormat)
 	}
+}
+
+// TestTimestampGranularitiesWord asserts that verbose_json requests carry
+// timestamp_granularities=word (in both the OpenAI array form and the bare form
+// some servers read), so the server returns per-word timings (#252). A non-word
+// response_format must NOT carry the field, keeping that path unchanged.
+func TestTimestampGranularitiesWord(t *testing.T) {
+	t.Run("verbose_json requests word granularity", func(t *testing.T) {
+		var got parsedForm
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = parseMultipart(t, r)
+			_, _ = io.WriteString(w, jsonSegments)
+		}))
+		defer srv.Close()
+
+		c := newClient(srv.URL, "")
+		c.ResponseFormat = whisperapi.ResponseFormatVerboseJSON
+		if _, err := c.Transcribe(context.Background(), "a.wav", []byte("x")); err != nil {
+			t.Fatalf("Transcribe: %v", err)
+		}
+		for _, g := range got.granularities {
+			if g != "word" {
+				t.Errorf("granularity = %q, want word", g)
+			}
+		}
+		// The client sends both field-name forms ("timestamp_granularities[]"
+		// and the bare form), so both are captured — expect two "word" values.
+		if len(got.granularities) != 2 {
+			t.Fatalf("expected both granularity field forms (2 values), got %v", got.granularities)
+		}
+	})
+
+	t.Run("json format omits granularity", func(t *testing.T) {
+		var got parsedForm
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = parseMultipart(t, r)
+			_, _ = io.WriteString(w, jsonSegments)
+		}))
+		defer srv.Close()
+
+		c := newClient(srv.URL, "")
+		c.ResponseFormat = whisperapi.ResponseFormatJSON
+		if _, err := c.Transcribe(context.Background(), "a.wav", []byte("x")); err != nil {
+			t.Fatalf("Transcribe: %v", err)
+		}
+		if len(got.granularities) != 0 {
+			t.Errorf("json format should not send timestamp_granularities, got %v", got.granularities)
+		}
+	})
 }
 
 // TestVADFilterField asserts the OpenAI-compatible vad_filter=true multipart

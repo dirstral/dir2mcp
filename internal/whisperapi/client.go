@@ -27,7 +27,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -251,11 +250,11 @@ func (c *Client) buildBody(relPath string, data []byte) ([]byte, *multipart.Writ
 }
 
 // writeTranscriptionFields writes the non-file multipart form fields
-// (model/response_format/task/language/vad_filter) and returns the first write
-// error as a *model.ProviderError. Split out of buildBody to keep that function
-// under the cyclomatic-complexity budget; the wire output is unchanged (task is
-// only emitted when translating, language only when non-empty, vad_filter only
-// when set).
+// (model/response_format/task/timestamp_granularities/language/vad_filter) and
+// returns the first write error as a *model.ProviderError. Split out of buildBody
+// to keep it under the cyclomatic-complexity budget; the wire output is unchanged
+// (task only when translating, timestamp_granularities only for verbose_json,
+// language only when non-empty, vad_filter only when set).
 func (c *Client) writeTranscriptionFields(writer *multipart.Writer) error {
 	fail := func(msg string, cause error) error {
 		return &model.ProviderError{Code: "WHISPER_FAILED", Message: msg, Retryable: false, Cause: cause}
@@ -276,6 +275,20 @@ func (c *Client) writeTranscriptionFields(writer *multipart.Writer) error {
 	if task := c.task(); task == TaskTranslate {
 		if err := writer.WriteField("task", task); err != nil {
 			return fail("failed to write transcription task", err)
+		}
+	}
+	// Word-level timestamps are only returned when timestamp_granularities
+	// includes "word": response_format=verbose_json alone yields segment timing
+	// only (the API defaults granularity to "segment"), so without this the
+	// per-word timings that #252 depends on never arrive. Emit both the OpenAI
+	// array form ("timestamp_granularities[]") and the bare form some
+	// OpenAI-compatible servers read, and only for verbose_json so other formats
+	// are byte-for-byte unchanged.
+	if strings.EqualFold(strings.TrimSpace(c.responseFormat()), ResponseFormatVerboseJSON) {
+		for _, field := range []string{"timestamp_granularities[]", "timestamp_granularities"} {
+			if err := writer.WriteField(field, "word"); err != nil {
+				return fail("failed to write transcription timestamp_granularities", err)
+			}
 		}
 	}
 	if language := strings.TrimSpace(c.DefaultLanguage); language != "" {
@@ -418,9 +431,12 @@ func secondsToMS(sec float64) int {
 	return int(sec*1000 + 0.5)
 }
 
-// parseTranscriptSegments converts timed segments into `[mm:ss] text`
-// lines (the format chunkTranscriptByTime consumes). Returns ("", false)
-// when no non-empty segments are present (caller falls back to flat text).
+// parseTranscriptSegments converts timed segments into `[mm:ss] text` (or
+// `[mm:ss.mmm] text` when the segment starts sub-second) lines, the format
+// chunkTranscriptByTime consumes. Sub-second start times are preserved so
+// distinct in-second segments do not collapse onto one marker (issue #431).
+// Returns ("", false) when no non-empty segments are present (caller falls back
+// to flat text).
 func parseTranscriptSegments(parsed transcribeResponse) (string, bool) {
 	if len(parsed.Segments) == 0 {
 		return "", false
@@ -431,13 +447,7 @@ func parseTranscriptSegments(parsed transcribeResponse) (string, bool) {
 		if text == "" {
 			continue
 		}
-		startSec := int(seg.Start)
-		if startSec < 0 {
-			startSec = 0
-		}
-		mm := startSec / 60
-		ss := startSec % 60
-		lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
+		lines = append(lines, model.FormatTranscriptTimestamp(secondsToMS(seg.Start))+" "+text)
 	}
 	if len(lines) == 0 {
 		return "", false
@@ -494,11 +504,4 @@ func (c *Client) wait(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func pad2(n int) string {
-	if n < 10 {
-		return "0" + strconv.Itoa(n)
-	}
-	return strconv.Itoa(n)
 }

@@ -3,6 +3,7 @@ package tests
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -63,6 +64,41 @@ func TestLateChunking_NestedAndFlatKeys(t *testing.T) {
 				t.Fatalf("expected IngestLateChunking=true for %s yaml", tc.name)
 			}
 		})
+	}
+}
+
+// TestLateChunking_EntersEmbedIdentity pins issue #446 F2: the late-chunking
+// mode is folded into the corpus-lifetime embed identity (SPEC 8.1.4), so
+// building a corpus with ingest.late_chunking on then off (or a distributed
+// worker with a different setting) re-derives rather than silently mixing
+// context-pooled and chunk-then-embed vectors in one vector space.
+func TestLateChunking_EntersEmbedIdentity(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "mk")
+
+	off := loadCfg(t, "version: 1\n")
+	if off.IngestLateChunking {
+		t.Fatal("precondition: late chunking must default off")
+	}
+	offID := off.Providers().EmbedIdentity()
+	if !strings.HasSuffix(offID, "|off") {
+		t.Fatalf("identity %q must end with the off late-chunking token", offID)
+	}
+
+	on := loadCfg(t, "ingest:\n  late_chunking: true\n")
+	if !on.IngestLateChunking {
+		t.Fatal("precondition: late chunking must be enabled")
+	}
+	onID := on.Providers().EmbedIdentity()
+	if !strings.HasSuffix(onID, "|on") {
+		t.Fatalf("identity %q must end with the on late-chunking token", onID)
+	}
+	if onID == offID {
+		t.Fatalf("toggling late chunking must change the embed identity: %q == %q", onID, offID)
+	}
+	// The mode is the ONLY difference: strip the trailing token and the rest of
+	// the identity must be byte-identical, so nothing else drifted.
+	if strings.TrimSuffix(onID, "|on") != strings.TrimSuffix(offID, "|off") {
+		t.Fatalf("only the late-chunking token may differ: on=%q off=%q", onID, offID)
 	}
 }
 

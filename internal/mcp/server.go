@@ -628,6 +628,16 @@ func (s *Server) storeSession(id string, authScope string) {
 	s.persistSession(id, si)
 }
 
+// forgetSession removes a session from the in-memory map and the persistence
+// store. It is used for explicit DELETE session termination so the id cannot be
+// replayed after the client tears the session down.
+func (s *Server) forgetSession(id string) {
+	s.sessionMu.Lock()
+	delete(s.sessions, id)
+	s.sessionMu.Unlock()
+	s.deletePersistedSession(id)
+}
+
 func (s *Server) runSessionCleanup(ctx context.Context) {
 	ticker := time.NewTicker(s.sessionSweepInterval())
 	defer ticker.Stop()

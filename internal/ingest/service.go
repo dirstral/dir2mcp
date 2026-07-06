@@ -155,6 +155,20 @@ type Service struct {
 	// (0, err) is treated as "do not trim".
 	DetectLeadingSilenceFunc func(ctx context.Context, path string) (time.Duration, error)
 
+	// ArchiveMaxMembers and ArchiveMaxTotalBytes bound archive fan-out to contain
+	// decompression bombs (#408): the number of members ingested per archive and
+	// the aggregate uncompressed bytes buffered. A value <= 0 uses the package
+	// defaults (archiveMaxMembers / archiveMaxTotalBytes). Exposed so tests can
+	// exercise the caps without building multi-hundred-MiB fixtures.
+	ArchiveMaxMembers    int
+	ArchiveMaxTotalBytes int64
+
+	// MaxMediaChunksPerDoc bounds the number of direct-embedding media chunks
+	// (PDF pages or A/V time windows) generated for one document (#408). A value
+	// <= 0 uses the package default (maxMediaChunksPerDoc). Exposed so tests can
+	// exercise the cap without huge media inputs.
+	MaxMediaChunksPerDoc int
+
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
 	// Access must go through the logger() helper or SetLogger; the field
@@ -230,6 +244,18 @@ type Service struct {
 	// batch run is active, making recordOutput a no-op on the hot path.
 	activeOutcome *assetOutcome
 
+	// quarantinedThisDoc records that the output quality gate (§8.6.6) marked the
+	// document currently being processed as a non-fatal per-document error, so the
+	// scan loop must count it as exactly one error and NOT credit it as indexed
+	// (issue #426). Like activeOutcome it is per-document state: the scan loop is
+	// sequential (at most one asset in flight). The authoritative reset is at
+	// processDocument entry so every document starts clean by construction on every
+	// path; generateRepresentations additionally resets it to re-scope the flag for
+	// sequential archive members (separate processDocumentFromContent calls under a
+	// single processDocument entry). A rejected representation is thus counted once
+	// even when a document produces several (transcript + per-language translations).
+	quarantinedThisDoc bool
+
 	// activePass selects which work the representation generators perform for the
 	// asset currently being processed under the optional two-phase pass split
 	// (SPEC §8.6.11). runScan sets it around each per-asset call (the scan loop is
@@ -294,6 +320,18 @@ func (s *Service) markActiveSkipped() {
 		return
 	}
 	s.activeOutcome.markSkipped()
+}
+
+// markActiveErrored records a terminal error outcome — the canonical §14.4 code
+// and a content-free message — on the asset currently being processed under an
+// active batch run, for the run manifest (SPEC §8.6.11). The first code recorded
+// wins (markErrorIfUnset), so a specific inner failure is never clobbered by a
+// later one. No-op when no batch run is active.
+func (s *Service) markActiveErrored(code, message string) {
+	if s == nil {
+		return
+	}
+	s.activeOutcome.markErrorIfUnset(code, message)
 }
 
 // ErrTranscriptProviderFailure marks failures originating from the transcript
@@ -373,24 +411,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	if cfg.QualityGatesEnabled {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
 	}
-	svc.transcriptLanguage = sttExpectedLanguage(cfg)
-	// Resolve the STT derivation identity (SPEC §8.6.7) from the same profile the
-	// transcriber uses, so a recorded transcript identity can be compared against
-	// the active one to detect a model swap. Empty when STT is off.
-	if prof, ok := resolveSTTProfile(cfg); ok {
-		svc.sttProvider = strings.TrimSpace(prof.Name)
-		svc.sttModel = strings.TrimSpace(prof.STTModel)
-		// Resolve the diarization binding (SPEC §8.6.8) from the SAME STT profile:
-		// diarization is active when enabled (tri-state) AND the backend advertises
-		// CapDiarize. The diarize derivation identity (§8.6.7) is the backend's
-		// provider name + STT model, so a backend/model swap re-derives. When
-		// inactive the fields stay empty and the STT path is unchanged.
-		if config.DiarizationActive(cfg, prof) {
-			svc.diarizeActive = true
-			svc.diarizeProvider = strings.TrimSpace(prof.Name)
-			svc.diarizeModel = strings.TrimSpace(prof.STTModel)
-		}
-	}
+	svc.resolveTranscriptIdentityFields()
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
 	// translation is enabled we resolve the chat capability and build a
 	// generator; when off (default), or no chat provider resolves, the field
@@ -435,6 +456,35 @@ func (svc *Service) resolveTranslateBinding(cfg config.Config) {
 		} else if terr != nil {
 			svc.getLogger().Printf("transcript translation disabled: %v", terr)
 		}
+	}
+}
+
+// resolveTranscriptIdentityFields populates the transcript derivation-identity
+// fields (transcript language, STT provider/model, and the diarize binding) on s
+// from s.cfg. It is the single source of truth for that resolution, shared by
+// NewService and ActiveDerivationIdentities so the transcript identity the
+// retriever reconstructs for open_file (issue #488) cannot drift from the one
+// ingest folds into the transcript cache key it writes (SPEC §8.6.7).
+func (s *Service) resolveTranscriptIdentityFields() {
+	s.transcriptLanguage = sttExpectedLanguage(s.cfg)
+	// Resolve the STT derivation identity (SPEC §8.6.7) from the same profile the
+	// transcriber uses, so a recorded transcript identity can be compared against
+	// the active one to detect a model swap. Empty when STT is off.
+	prof, ok := resolveSTTProfile(s.cfg)
+	if !ok {
+		return
+	}
+	s.sttProvider = strings.TrimSpace(prof.Name)
+	s.sttModel = strings.TrimSpace(prof.STTModel)
+	// Resolve the diarization binding (SPEC §8.6.8) from the SAME STT profile:
+	// diarization is active when enabled (tri-state) AND the backend advertises
+	// CapDiarize. The diarize derivation identity (§8.6.7) is the backend's
+	// provider name + STT model, so a backend/model swap re-derives. When
+	// inactive the fields stay empty and the STT path is unchanged.
+	if config.DiarizationActive(s.cfg, prof) {
+		s.diarizeActive = true
+		s.diarizeProvider = strings.TrimSpace(prof.Name)
+		s.diarizeModel = strings.TrimSpace(prof.STTModel)
 	}
 }
 
@@ -603,6 +653,10 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 		// media.vad (dir2mcp#258) is a global toggle, applied onto whichever STT
 		// profile resolves; providers without VAD support ignore it.
 		prof.STTVAD = cfg.MediaVAD
+		// media.stt.* request limits (dir2mcp#510/#511), likewise applied onto the
+		// resolved STT profile; 0 leaves the whisper client's built-in defaults.
+		prof.STTMaxPayloadMB = cfg.MediaSTTMaxPayloadMB
+		prof.STTRequestTimeoutSec = cfg.MediaSTTRequestTimeoutSec
 		tr, berr := buildTranscriber(prof)
 		if berr != nil {
 			return nil, fmt.Errorf("stt provider %q: %w", sel, berr)
@@ -1221,6 +1275,18 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if !etagUnchanged(f, existing, forceReindex) {
 		return false, nil
 	}
+	// An empty recorded content_hash means the document was never durably
+	// finalized — a withheld #402/#502 done-marker left blank by a crash before
+	// the representation-commit (or, for an archive container, before member
+	// extraction completed). The ETag+size may match, but the object still needs
+	// processing, so do NOT take the fast-skip path: fall through to the full
+	// read/hash path which re-runs the withheld work. A fully-indexed document
+	// always carries a non-empty content_hash, so the normal S3 fast-path is
+	// unaffected. This is what makes the withhold gate effective for S3 archives
+	// (the ETag skip runs before the content_hash recompute).
+	if strings.TrimSpace(existing.ContentHash) == "" {
+		return false, nil
+	}
 	// A media object's own ETag does not reflect changes to an adjacent subtitle
 	// sidecar (.srt/.vtt/.ttml): buildDocumentWithContent folds the sidecar
 	// fingerprint into ContentHash, but the ETag fast-path runs before that
@@ -1331,6 +1397,20 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 }
 
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+	// Authoritative per-document reset of the §8.6.6/#426 quality-gate quarantine
+	// flag. The scan loop is sequential (at most one asset in flight), so resetting
+	// here — at the VERY START, before any early-return branch (build error, remote
+	// skip, archive, cache-hit/skipped, non-ok status) — guarantees every document
+	// begins with a clean flag by construction, matching the per-doc reset pattern
+	// used for activeOutcome/indexedPending. Without this, a stale true from a prior
+	// quarantined document could persist across an early-return path that never
+	// reaches generateRepresentations/deriveDocument (which also reset the flag) and
+	// wrongly suppress this document's indexed credit. The resets inside
+	// generateRepresentations/deriveDocument are kept: they re-scope the flag for
+	// sequential archive members, which run as separate processDocumentFromContent
+	// calls under a single processDocument entry.
+	s.quarantinedThisDoc = false
+
 	// Two-phase derivation pass (SPEC §8.6.11): the transcription pass already did
 	// all document building, upserting, counting, and source-transcript work for
 	// this asset; the derivation pass runs ONLY translation (§8.6.2) and re-doing
@@ -1364,6 +1444,10 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
+	// #502: also withhold the marker for an archive container this run will
+	// (re)extract; finalContentHash still carries the original hash for the deferred
+	// finalize (withholdContentHash captured it before this blank).
+	withholdArchiveContentHash(&doc, needsProcessing)
 
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
@@ -1385,7 +1469,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// The archive document itself remains "skipped" (no direct text content).
 	if doc.DocType == "archive" {
 		s.creditIndexed(indexedPending)
-		return s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing)
+		return s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing, finalContentHash)
 	}
 
 	if !needsProcessing || doc.Status != "ok" {
@@ -1414,13 +1498,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if err := s.finalizeIfGenerated(ctx, &doc, willGenerateReps, finalContentHash); err != nil {
 		return err
 	}
-	if nonFatalErrored {
-		// A non-fatal soft-error path (binary-content, video-no-representation, or
-		// a zero-representation provider failure) already persisted this document
-		// as status="error" and bumped the error counter itself. It must count
-		// solely as an error, so suppress the indexed credit — otherwise the same
-		// doc is counted as both indexed and error and indexed+skipped+errors
-		// exceeds scanned (issue #426).
+	if s.suppressIndexedCredit(nonFatalErrored) {
+		// A non-fatal soft-error path already persisted this document as
+		// status="error" and bumped the error counter itself, so it must count
+		// solely as an error, not also as indexed (otherwise indexed+skipped+errors
+		// exceeds scanned — issue #426).
 		indexedPending = false
 	}
 	s.creditIndexed(indexedPending)
@@ -1444,6 +1526,21 @@ func withholdContentHash(doc *model.Document, needsProcessing bool) (finalConten
 		doc.ContentHash = ""
 	}
 	return finalContentHash, willGenerateReps
+}
+
+// withholdArchiveContentHash withholds the content_hash done marker for an archive
+// container this run will (re)extract (#502). withholdContentHash does not cover
+// archives — they persist as status="skipped", not "ok" — but they still use
+// content_hash as the incremental gate for whether member extraction re-runs.
+// Blanking it here (and stamping it only after processArchiveMembers completes)
+// closes the same crash window #402/#485 closed for the representation-commit path,
+// on the archive-extraction path. It is a no-op for non-archives and for archives
+// this run will not re-extract. Kept separate from processDocument to hold that
+// method within the cyclomatic-complexity budget.
+func withholdArchiveContentHash(doc *model.Document, needsProcessing bool) {
+	if needsProcessing && doc.DocType == "archive" {
+		doc.ContentHash = ""
+	}
 }
 
 // finalizeIfGenerated stamps the withheld #402 done marker via finalizeContentHash
@@ -1477,6 +1574,16 @@ func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, 
 // columns) after the #413 guard; not-found → recreate the row from doc (there is
 // no current row whose columns must be preserved); store error → propagate.
 func (s *Service) finalizeContentHash(ctx context.Context, doc *model.Document, contentHash string) error {
+	return s.finalizeContentHashForStatus(ctx, doc, contentHash, "ok")
+}
+
+// finalizeContentHashForStatus is finalizeContentHash generalized over the
+// document's healthy "done" status. The representation-commit path finalizes an
+// "ok" document; the archive-extraction path (#502) finalizes a container that
+// persists as status="skipped". healthyStatus is the status the freshly re-read
+// row must still be in for the withheld marker to be stamped — the #413 guard
+// that never resurrects an out-of-band status="error" into a done state.
+func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.Document, contentHash, healthyStatus string) error {
 	current, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
 	if err != nil {
 		if !isNotFoundError(err) {
@@ -1491,9 +1598,10 @@ func (s *Service) finalizeContentHash(ctx context.Context, doc *model.Document, 
 		}
 		return nil
 	}
-	// #413 guard: a non-fatal per-representation failure may have persisted
-	// status="error" out-of-band; never resurrect it into a done state.
-	if current.Status != "ok" {
+	// #413 guard: a non-fatal per-representation failure (or archive-subtype
+	// failure) may have persisted a status other than the expected healthy one
+	// out-of-band; never resurrect it into a done state.
+	if current.Status != healthyStatus {
 		return nil
 	}
 	// Stamp the withheld done marker onto the re-read row so out-of-band writes
@@ -1544,6 +1652,17 @@ func (s *Service) creditIndexed(indexed bool) {
 	}
 }
 
+// suppressIndexedCredit reports whether the document just processed must NOT be
+// credited as indexed because a non-fatal soft error already counted it as an
+// error (issue #426). Two sources: (1) nonFatalErrored — a rep-generation
+// soft-failure (binary-content, video-no-representation, or a zero-representation
+// provider failure) returned by generateRepresentations; (2) quarantinedThisDoc —
+// an output quality gate (§8.6.6) that rejected a generated OCR/transcript/
+// translation output. Either way the document counts solely as an error.
+func (s *Service) suppressIndexedCredit(nonFatalErrored bool) bool {
+	return nonFatalErrored || s.quarantinedThisDoc
+}
+
 // deriveDocument runs the derivation pass for a single asset under the two-phase
 // split (SPEC §8.6.11): it produces ONLY translated transcripts (§8.6.2) from the
 // already-persisted source transcript, reusing the cached transcript text so it
@@ -1558,6 +1677,10 @@ func (s *Service) creditIndexed(indexed bool) {
 // with no source transcript are recorded as skipped and produce nothing — keeping
 // the derivation pass's per-asset manifest/progress totals faithful (§8.6.11).
 func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) error {
+	// The per-document quality-gate quarantine flag (§8.6.6 / #426) was already
+	// reset at processDocument entry (deriveDocument is reached only from there),
+	// so a translation rejected in this derivation pass is counted once and cannot
+	// leak its dedup state into the next asset without a redundant reset here.
 	// No translation configured, or the multimodal "replace" mode that stands in
 	// for STT→text (so no transcript exists to translate): nothing to derive. This
 	// matches the single-pass gates so the corpus-wide output is identical.
@@ -1648,9 +1771,10 @@ func (s *Service) readDocumentContent(ctx context.Context, relPath string) ([]by
 // content changed (or a full reindex was requested) it extracts and processes
 // the members; otherwise it retains the existing member paths in seen so that
 // markMissingAsDeleted does not tombstone them.
-func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool) error {
+func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool, finalContentHash string) error {
 	if needsProcessing {
-		if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
+		complete, err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen)
+		if err != nil {
 			if !errors.Is(err, errUnsupportedArchiveFormat) {
 				// Context cancellation (shutdown mid-archive) and any other
 				// non-sentinel error must propagate WITHOUT persisting a durable
@@ -1692,6 +1816,26 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 			s.addSkipped(-1)
 			return fmt.Errorf("process archive members %s: %w", f.RelPath, err)
 		}
+		if !complete {
+			// #502 (member granularity): a member failed, or a localize/extraction
+			// failure left the archive "skipped". Extraction did not FULLY complete,
+			// so leave the container's content_hash withheld (blank, from the initial
+			// upsert) — the next incremental scan re-extracts and retries the failed
+			// members. The members that DID succeed this run are already ingested
+			// (#398 best-effort); the only consequence is a re-extraction next scan
+			// until every member is durably processed. Stamping the done marker here
+			// would permanently skip the failed members on subsequent scans.
+			return nil
+		}
+		// #502: member extraction FULLY completed — stamp the withheld content_hash
+		// done marker now. The initial upsert blanked it, so a crash anywhere between
+		// that upsert and this point leaves the container with an empty hash and the
+		// next scan re-extracts instead of skipping on a premature marker. The
+		// container persists as status="skipped", so finalize preserves that healthy
+		// status.
+		if err := s.finalizeContentHashForStatus(ctx, &doc, finalContentHash, "skipped"); err != nil {
+			return err
+		}
 	} else if seen != nil {
 		// Archive content unchanged: retain existing members in seen.
 		s.retainArchiveMembers(ctx, f.RelPath, seen)
@@ -1699,20 +1843,54 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 	return nil
 }
 
+// archiveMaxMembersEff resolves the effective per-archive member-count cap:
+// the Service override when positive, else the package default (#408).
+func (s *Service) archiveMaxMembersEff() int {
+	if s.ArchiveMaxMembers > 0 {
+		return s.ArchiveMaxMembers
+	}
+	return archiveMaxMembers
+}
+
+// archiveMaxTotalBytesEff resolves the effective per-archive aggregate-bytes cap:
+// the Service override when positive, else the package default (#408).
+func (s *Service) archiveMaxTotalBytesEff() int64 {
+	if s.ArchiveMaxTotalBytes > 0 {
+		return s.ArchiveMaxTotalBytes
+	}
+	return archiveMaxTotalBytes
+}
+
 // processArchiveMembers extracts members from an archive and ingests each one
 // as an independent document. One bad member is logged and skipped without
-// aborting the rest.
-func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+// aborting the rest (#398 best-effort).
+//
+// It returns complete=true only when extraction FULLY succeeded: the archive
+// localized, extracted without error, and every member was durably processed.
+// complete=false signals the caller to leave the container's content_hash
+// withheld (blank) so the next incremental scan re-extracts and retries — the
+// members that DID succeed this run are still ingested, but a container whose
+// members did not all land must not be stamped "done", or the failed members
+// would be permanently skipped on subsequent scans (the #502 crash window, at
+// member granularity). Tradeoff: a partially-failing archive is re-extracted on
+// every scan until all its members succeed (successful members are cheap cache
+// hits; only the failed ones do real work). A non-nil error is a hard per-archive
+// failure (unsupported format sentinel or context cancellation) the caller
+// persists/propagates separately; complete is meaningless when err != nil.
+func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) (complete bool, err error) {
 	// Archive readers need a real filesystem path. Localize returns the in-root
 	// path for a local corpus (no-op cleanup) or a temp download for an object
 	// store, so this works uniformly across backends.
 	localPath, cleanup, err := s.corpusFS().Localize(ctx, f.RelPath)
 	if err != nil {
 		s.getLogger().Printf("archive localize %s: %v", f.RelPath, err)
-		return nil // localize failure is non-fatal; archive stays "skipped"
+		// localize failure is non-fatal but leaves extraction incomplete; the
+		// archive stays "skipped" and its content_hash must not be finalized so
+		// the next scan retries.
+		return false, nil
 	}
 	defer cleanup()
-	members, err := extractArchiveMembers(localPath, f.RelPath)
+	members, truncated, err := extractArchiveMembers(localPath, f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff())
 	if err != nil {
 		if errors.Is(err, errUnsupportedArchiveFormat) {
 			// #398: .xz/.7z/.rar (and any other classified-but-unextractable
@@ -1720,24 +1898,42 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 			// known but unsearchable, with zero diagnostics. Return the error so the
 			// caller records the archive as status="error" and counts it, making the
 			// gap visible and retriable instead of vanishing.
-			return fmt.Errorf("unsupported archive format for %s: %w", f.RelPath, err)
+			return false, fmt.Errorf("unsupported archive format for %s: %w", f.RelPath, err)
 		}
 		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
-		return nil // corrupt/other extraction failure is non-fatal; archive stays "skipped"
+		// corrupt/other extraction failure is non-fatal; archive stays "skipped"
+		// and its content_hash stays withheld so the next scan retries.
+		return false, nil
 	}
+	if truncated {
+		// #408 decompression-bomb guard: extraction stopped once the archive hit
+		// the member-count or aggregate-uncompressed-size cap. The members read
+		// before the cap are still ingested below; surface a clear warning so the
+		// truncation is visible rather than a silent partial ingest.
+		s.getLogger().Printf(
+			"archive %s: member fan-out exceeded caps (max_members=%d, max_total_bytes=%d); ingesting the first %d member(s), remaining entries skipped (#408)",
+			f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff(), len(members),
+		)
+	}
+	allMembersOK := true
 	for _, m := range members {
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 		if err := s.processDocumentFromContent(ctx, m.RelPath, m.Content, f.MTimeUnix, secretPatterns, forceReindex); err != nil {
 			s.getLogger().Printf("archive member %s: %v", m.RelPath, err)
-			// continue with next member
+			allMembersOK = false // extraction did not fully complete; retry next scan
+			// continue with next member (#398 best-effort)
 		}
 		if seen != nil {
 			seen[m.RelPath] = struct{}{}
 		}
 	}
-	return nil
+	// Truncation (#408) is a deliberate, deterministic cap — the dropped members
+	// can never be recovered by re-extraction, so it does NOT withhold the marker
+	// (that would re-extract on every scan forever with no benefit). Only genuine
+	// per-member failures leave the archive incomplete.
+	return allMembersOK, nil
 }
 
 // retainArchiveMembers adds all existing members of an unchanged archive to
@@ -2078,6 +2274,38 @@ const (
 	videoWindowCapMS = 120 * 1000
 )
 
+// maxMediaChunksPerDoc bounds the number of direct-embedding media chunks (PDF
+// pages or A/V time windows) generated for a single document. Without a ceiling
+// a 10k-page PDF or a multi-hour recording fans out into thousands of multimodal
+// embed inputs and ffmpeg segment extractions — an accidental or hostile
+// amplification/DoS vector (#408). Chunks past the cap are dropped with a durable
+// "truncated at N of M" warning rather than silently processed or dropped.
+const maxMediaChunksPerDoc = 512
+
+// maxMediaChunksEff resolves the effective per-document media-chunk cap: the
+// Service override when positive, else the package default (#408).
+func (s *Service) maxMediaChunksEff() int {
+	if s.MaxMediaChunksPerDoc > 0 {
+		return s.MaxMediaChunksPerDoc
+	}
+	return maxMediaChunksPerDoc
+}
+
+// capMediaSpans truncates spans to the per-document media-chunk cap, emitting a
+// diagnostic when it does so (#408). Media chunks past the cap are not embedded
+// directly; the document's text path (OCR/transcript) is unaffected.
+func (s *Service) capMediaSpans(doc model.Document, spans []model.Span) []model.Span {
+	limit := s.maxMediaChunksEff()
+	if len(spans) <= limit {
+		return spans
+	}
+	s.getLogger().Printf(
+		"multimodal: %s produced %d media chunk(s), exceeding the per-document cap (%d); truncated at %d — %d chunk(s) will not be embedded directly (#408)",
+		doc.RelPath, len(spans), limit, limit, len(spans)-limit,
+	)
+	return spans[:limit]
+}
+
 // resolveMediaWindowMS returns the window length (ms) to use for windowing
 // media of the given doc type. A positive configured value (cfgSec seconds)
 // overrides the default; values exceeding the per-modality cap are clamped
@@ -2112,16 +2340,16 @@ func (s *Service) mediaSpansFor(ctx context.Context, doc model.Document, content
 	case "image":
 		return []model.Span{{Kind: "page", Page: 1}}
 	case "pdf":
-		return s.pdfPageSpans(doc, content)
+		return s.capMediaSpans(doc, s.pdfPageSpans(doc, content))
 	case "audio":
 		if !isEmbeddableAudio(doc.RelPath) {
 			return nil
 		}
 		windowMS := s.resolveMediaWindowMS(s.cfg.MediaAudioWindowSec, audioWindowMS, audioWindowCapMS, "audio")
-		return s.mediaTimeSpans(ctx, doc, windowMS)
+		return s.capMediaSpans(doc, s.mediaTimeSpans(ctx, doc, windowMS))
 	case "video":
 		windowMS := s.resolveMediaWindowMS(s.cfg.MediaVideoWindowSec, videoWindowMS, videoWindowCapMS, "video")
-		return s.mediaTimeSpans(ctx, doc, windowMS)
+		return s.capMediaSpans(doc, s.mediaTimeSpans(ctx, doc, windowMS))
 	default:
 		return nil
 	}
@@ -2255,6 +2483,10 @@ func isEmbeddableAudio(relPath string) bool {
 // hard error: the caller MUST NOT then also credit the document as indexed, or it
 // would be double-counted as both indexed and error (issue #426).
 func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) (bool, error) {
+	// Reset the per-document quality-gate quarantine flag (§8.6.6 / #426). The scan
+	// loop is sequential, so this scopes the flag to the document about to be
+	// processed even though it is Service-level state.
+	s.quarantinedThisDoc = false
 	if s.repGen == nil {
 		return false, nil
 	}
@@ -2490,7 +2722,7 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 
 	s.persistTitleIfFound(ctx, doc, ocrText)
 
-	decision := s.screenOutputQuality(doc.RelPath, "ocr", ocrText, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, ocrText, quality.Context{
 		Modality: quality.ModalityOCR,
 	})
 
@@ -2534,7 +2766,7 @@ func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model
 		s.persistTitleIfFound(ctx, doc, md)
 	}
 
-	decision := s.screenOutputQuality(doc.RelPath, "ocr", md, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, md, quality.Context{
 		Modality: quality.ModalityOCR,
 	})
 
@@ -2683,12 +2915,42 @@ type quarantineDecision struct {
 	category   string
 }
 
+// Quality-gate screening kinds — the `kind` argument to screenOutputQuality.
+// They select the canonical §14.4 error code recorded when a degenerate output
+// is quarantined (§8.6.6). The literal values are also the diagnostic labels in
+// the quarantine log line.
+const (
+	qualityKindOCR         = "ocr"
+	qualityKindTranscript  = "transcript"
+	qualityKindTranslation = "transcript-translation"
+)
+
+// qualityGateFailureCode maps a screening kind to its canonical §14.4 error code
+// (§8.6.6): an OCR / transcript / translation output rejected by the gate is
+// OCR_FAILED / TRANSCRIBE_FAILED / TRANSLATE_FAILED respectively. An unknown kind
+// falls back to the generic EXTRACT_FAILED so the recorded code is always a valid
+// §14.4 constant.
+func qualityGateFailureCode(kind string) string {
+	switch kind {
+	case qualityKindOCR:
+		return manifestErrOCRFailed
+	case qualityKindTranscript:
+		return manifestErrTranscribeFailed
+	case qualityKindTranslation:
+		return manifestErrTranslateFailed
+	default:
+		return manifestErrExtractFailed
+	}
+}
+
 // screenOutputQuality runs the quality gate over generated text. It returns a
 // zero-value (non-quarantine) decision when the gate is disabled (nil) or the
 // verdict is clean, so callers can always insert via the returned decision. On
-// a failed gate it logs a content-free warning and returns the quarantine
-// values. relPath/kind are used only for the diagnostic log line.
-func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx quality.Context) quarantineDecision {
+// a failed gate it logs a content-free warning, records the §8.6.6 per-document
+// error (documents.status=error + canonical §14.4 code, non-fatal), and returns
+// the chunk-level quarantine values. kind selects the canonical code and the
+// diagnostic label; doc identifies the document to mark.
+func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, kind, text string, qctx quality.Context) quarantineDecision {
 	if s.qualityGate == nil {
 		return quarantineDecision{}
 	}
@@ -2706,12 +2968,68 @@ func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx qu
 	// Detail is already redacted/content-free; SanitizeReason bounds/normalizes
 	// it for persistence into chunks.embedding_error.
 	embErr := store.SanitizeReason(detail)
-	s.getLogger().Printf("quality gate quarantined %s output for %s: reason=%s", kind, relPath, reason)
+	s.getLogger().Printf("quality gate quarantined %s output for %s: reason=%s", kind, doc.RelPath, reason)
+	// §8.6.6: a failed output quality gate is a non-fatal per-document error — the
+	// document is marked status=error with the canonical §14.4 code while indexing
+	// continues. This is IN ADDITION to the chunk-level quarantine encoded in the
+	// returned decision (embedding_status=error), which keeps the degenerate text
+	// out of the embedding index.
+	s.recordQualityGateDocError(ctx, doc, kind, reason)
 	return quarantineDecision{
 		quarantine: true,
 		embErr:     embErr,
 		category:   string(store.ErrorCategoryQualityGate),
 	}
+}
+
+// recordQualityGateDocError persists the §8.6.6 per-document error for a
+// quality-gate quarantine and accounts for it exactly once (issue #426):
+//
+//   - it marks documents.status=error via persistNonFatalDocError with a
+//     content-free message that LEADS with the canonical §14.4 code, so the code
+//     is queryable through error_message / RecentFailures (§15.6) without a store
+//     schema change (the documents table has no error_code column, and §8.6.6 only
+//     requires the document be "marked status=error with the appropriate code");
+//   - it records the same canonical code on the active batch manifest outcome
+//     (§8.6.11), whose record carries a dedicated machine-readable error_code;
+//   - it increments the run error counter once and sets quarantinedThisDoc so the
+//     scan loop suppresses the indexed credit (the document counts as exactly one
+//     error, zero indexed — issue #426).
+//
+// It is idempotent per document: a document with several rejected representations
+// (e.g. a transcript plus per-language translations) counts once and keeps the
+// FIRST canonical code, while every rejected representation still quarantines its
+// own chunks via the returned decision. The document's content_hash done-marker is
+// blanked before the error upsert (#402/#413): the row is now status=error AND
+// carries an empty hash, so the next incremental run re-derives it. Blanking is
+// required for the two-phase derivation path, where deriveDocument re-reads the doc
+// AFTER the transcription pass already stamped content_hash — without it a
+// translation-gate rejection would persist status=error yet keep the stamped hash,
+// so the unchanged-content gate would SKIP (never retry) the quarantined document.
+// On the single-phase path the hash is already withheld (withholdContentHash), so
+// blanking it again is a no-op; the two modes are now consistent. Retry re-screens
+// the cached STT/OCR/translation output, not the provider — a bounded cost.
+func (s *Service) recordQualityGateDocError(ctx context.Context, doc model.Document, kind string, reason quality.Reason) {
+	code := qualityGateFailureCode(kind)
+	// Content-free and deterministic (§8.6.6): the message is code + kind + the
+	// enum reason only — no document text — so it carries no secrets. nil secret
+	// patterns are therefore safe (persistNonFatalDocError still redacts, a no-op
+	// here).
+	msg := fmt.Sprintf("%s: output quality gate rejected %s output (%s)", code, kind, reason)
+	// Manifest surface (§8.6.11): first canonical code wins, never clobbered.
+	s.markActiveErrored(code, msg)
+	if s.quarantinedThisDoc {
+		// This document already recorded its canonical per-document error and was
+		// counted; keep the first code and count it once (issue #426).
+		return
+	}
+	s.quarantinedThisDoc = true
+	s.addErrors(1)
+	// Withhold the content_hash done-marker so the quarantined document is retried
+	// next run in BOTH single-phase and two-phase modes (#402/#413). doc is a value
+	// copy, so this affects only the persisted error row.
+	doc.ContentHash = ""
+	s.persistNonFatalDocError(ctx, doc, errors.New(msg), nil)
 }
 
 // transcriptExpectedLanguage returns the active STT provider profile's language
@@ -2743,7 +3061,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
 		duration = d
 	}
-	decision := s.screenOutputQuality(doc.RelPath, "transcript", transcriptText, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
 		Duration:         duration,
@@ -2948,7 +3266,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// quality gate exactly like an STT transcript (anti-hallucination). The
 	// expected language is the TARGET language: the gate's language detector
 	// should accept the translated text, not the source.
-	decision := s.screenOutputQuality(doc.RelPath, "transcript-translation", translated, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindTranslation, translated, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: targetLang,
 		Duration:         duration,

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // emptyDetector flags output that is effectively empty after trimming
@@ -28,82 +30,179 @@ func (d emptyDetector) Inspect(text string, _ Context) *Finding {
 	return nil
 }
 
-// repetitionDetector flags output dominated by a single repeated word
-// n-gram, the classic STT "thank you for watching" hallucination loop.
+// repetitionDetector flags output dominated by a single short repeating unit,
+// the classic STT "thank you for watching" hallucination loop. It is
+// script-agnostic: instead of counting whitespace-delimited words (which is
+// blind to scripts without word boundaries, such as a looping CJK phrase), it
+// measures the largest share of the normalized rune stream that a single
+// repeating period explains. A period-p loop makes rune r[i] equal r[i+p]
+// almost everywhere; natural language has no such dominant period at any lag.
 type repetitionDetector struct {
-	n        int
-	maxFrac  float64
-	minWords int
+	maxFrac   float64
+	maxPeriod int
+	minRunes  int
 }
 
 func (repetitionDetector) Name() string { return "repetition" }
 
 func (d repetitionDetector) Inspect(text string, _ Context) *Finding {
-	words := strings.Fields(strings.ToLower(text))
-	if len(words) < d.minWords || len(words) < d.n {
+	rs := normalizeRunes(text)
+	n := len(rs)
+	if n < d.minRunes {
 		return nil
 	}
-	counts := make(map[string]int)
-	total := 0
-	topCount := 0
-	for i := 0; i+d.n <= len(words); i++ {
-		gram := strings.Join(words[i:i+d.n], " ")
-		counts[gram]++
-		total++
-		if counts[gram] > topCount {
-			topCount = counts[gram]
+	// Only consider periods whose repeated span covers at least half the text,
+	// so a genuine dominant loop qualifies while short high-lag windows cannot
+	// inflate the fraction by chance.
+	maxLag := d.maxPeriod
+	if maxLag > n/2 {
+		maxLag = n / 2
+	}
+	if maxLag < 1 {
+		return nil
+	}
+	bestFrac := 0.0
+	bestLag := 0
+	for p := 1; p <= maxLag; p++ {
+		overlap := n - p
+		matches := 0
+		for i := 0; i < overlap; i++ {
+			if rs[i] == rs[i+p] {
+				matches++
+			}
+		}
+		frac := float64(matches) / float64(overlap)
+		if frac > bestFrac {
+			bestFrac = frac
+			bestLag = p
 		}
 	}
-	if total == 0 {
-		return nil
-	}
-	frac := float64(topCount) / float64(total)
-	if frac > d.maxFrac {
+	if bestFrac > d.maxFrac {
 		// Detail is intentionally content-free: report only the repetition
-		// metrics, never the repeated phrase itself (which is raw input text).
+		// metrics (the period length and coverage), never the repeated text.
 		return &Finding{
 			Reason: ReasonRepetitionLoop,
-			Detail: fmt.Sprintf("top %d-gram repeats %d/%d (%.0f%%)",
-				d.n, topCount, total, frac*100),
-			Score: frac,
+			Detail: fmt.Sprintf("dominant period %d runes covers %.0f%% of content",
+				bestLag, bestFrac*100),
+			Score: bestFrac,
 		}
 	}
 	return nil
 }
 
-// gibberishDetector flags output with too high a fraction of replacement,
-// control, or private-use runes, a signal of corrupted decoding.
+// normalizeRunes lowercases text and collapses every run of whitespace into a
+// single space, returning the result as a rune slice. This makes repetition
+// detection insensitive to spacing and case while preserving the character
+// sequence that a loop repeats, in any script.
+func normalizeRunes(text string) []rune {
+	rs := make([]rune, 0, len(text))
+	prevSpace := false
+	for _, r := range strings.ToLower(text) {
+		if unicode.IsSpace(r) {
+			if !prevSpace && len(rs) > 0 {
+				rs = append(rs, ' ')
+			}
+			prevSpace = true
+			continue
+		}
+		rs = append(rs, r)
+		prevSpace = false
+	}
+	// Drop a trailing collapsed space, if any.
+	if len(rs) > 0 && rs[len(rs)-1] == ' ' {
+		rs = rs[:len(rs)-1]
+	}
+	return rs
+}
+
+// gibberishDetector flags incoherent output using three script-agnostic
+// signals, in order of confidence:
+//
+//  1. non-printable runes (replacement/control/private-use) — corrupted
+//     decoding;
+//  2. symbol density — a high fraction of visible runes that are neither
+//     letters, digits, nor punctuation (printable-ASCII symbol soup);
+//  3. vowel deficiency — among vowel-bearing alphabetic letters
+//     (Latin/Cyrillic/Greek), a vowel share below a low floor (consonant
+//     mash such as "qwrtplkjhg"). This signal self-skips for scripts without a
+//     vowel/consonant distinction (Han, Arabic, Hebrew, …) and for samples too
+//     small to judge, so legitimate multilingual text is never flagged.
 type gibberishDetector struct {
 	maxNonPrintable float64
+	maxOther        float64
+	minVowel        float64
+	minVowelSample  int
 }
 
 func (gibberishDetector) Name() string { return "gibberish" }
 
-func (d gibberishDetector) Inspect(text string, _ Context) *Finding {
-	total := 0
-	bad := 0
+// coherenceStats tallies, over the visible (non-whitespace) runes of some
+// text, the counts each gibberish signal needs.
+type coherenceStats struct {
+	visible     int // all non-whitespace runes
+	bad         int // replacement/control/private-use runes
+	other       int // visible runes that are not letter, digit, or punctuation
+	vowelScript int // letters in a vowel-bearing script (Latin/Cyrillic/Greek)
+	vowels      int // vowels among vowelScript letters
+}
+
+// classify folds a single visible rune into the stats.
+func (s *coherenceStats) classify(r rune) {
+	s.visible++
+	switch {
+	case r == utf8.RuneError || r == '�' ||
+		unicode.Is(unicode.C, r) || unicode.Is(unicode.Co, r):
+		s.bad++
+	case unicode.IsLetter(r):
+		if isVowelBearingLetter(r) {
+			s.vowelScript++
+			if isVowel(r) {
+				s.vowels++
+			}
+		}
+	case unicode.IsDigit(r) || unicode.IsPunct(r):
+		// Digits and punctuation are ordinary in prose; ignore.
+	default:
+		s.other++
+	}
+}
+
+func gatherCoherenceStats(text string) coherenceStats {
+	var s coherenceStats
 	for _, r := range text {
 		if unicode.IsSpace(r) {
 			continue
 		}
-		total++
-		if r == utf8.RuneError || r == '�' ||
-			unicode.Is(unicode.C, r) || unicode.Is(unicode.Co, r) {
-			bad++
-		}
+		s.classify(r)
 	}
-	if total == 0 {
+	return s
+}
+
+func (d gibberishDetector) Inspect(text string, _ Context) *Finding {
+	s := gatherCoherenceStats(text)
+	if s.visible == 0 {
 		return nil
 	}
-	frac := float64(bad) / float64(total)
-	if frac > d.maxNonPrintable {
-		return &Finding{
-			Reason: ReasonGibberish,
-			Detail: fmt.Sprintf("%d/%d non-printable runes (%.0f%%)", bad, total, frac*100),
-			Score:  frac,
+
+	if f := float64(s.bad) / float64(s.visible); f > d.maxNonPrintable {
+		return gibberishFinding(fmt.Sprintf("%d/%d non-printable runes (%.0f%%)", s.bad, s.visible, f*100), f)
+	}
+	if f := float64(s.other) / float64(s.visible); f > d.maxOther {
+		return gibberishFinding(fmt.Sprintf("%d/%d non-language symbols (%.0f%%)", s.other, s.visible, f*100), f)
+	}
+	if s.vowelScript >= d.minVowelSample {
+		if f := float64(s.vowels) / float64(s.vowelScript); f < d.minVowel {
+			return gibberishFinding(fmt.Sprintf("%d/%d vowels among alphabetic letters (%.0f%%)",
+				s.vowels, s.vowelScript, f*100), 1-f)
 		}
 	}
 	return nil
+}
+
+// gibberishFinding builds a ReasonGibberish finding from an already
+// content-free detail string and score.
+func gibberishFinding(detail string, score float64) *Finding {
+	return &Finding{Reason: ReasonGibberish, Detail: detail, Score: score}
 }
 
 // languageDetector flags output whose script does not match the expected
@@ -148,7 +247,11 @@ func (d languageDetector) Inspect(text string, ctx Context) *Finding {
 }
 
 // densityDetector flags output that is implausibly sparse relative to the
-// source media duration or the number of source segments.
+// number of source segments (a clear signal of dropped content). The
+// duration-based floor is opt-in: a low chars-per-minute rate is a legitimate
+// outcome for music or long silences, so it is applied only when
+// minCharsPerMinute is configured above zero, and never quarantines sparse
+// audio on its own by default.
 type densityDetector struct {
 	minCharsPerMinute float64
 	minSegmentRatio   float64
@@ -159,7 +262,7 @@ func (densityDetector) Name() string { return "density" }
 func (d densityDetector) Inspect(text string, ctx Context) *Finding {
 	chars := float64(utf8.RuneCountInString(strings.TrimSpace(text)))
 
-	if ctx.Duration > 0 {
+	if d.minCharsPerMinute > 0 && ctx.Duration > 0 {
 		minutes := ctx.Duration.Minutes()
 		cpm := chars / minutes
 		if cpm < d.minCharsPerMinute {
@@ -283,6 +386,52 @@ var languageScript = map[string]script{
 	"zh": scriptHan,
 	"ko": scriptHangul,
 	"hi": scriptDevanagari,
+}
+
+// baseVowels holds the lowercase base (diacritic-stripped) vowel letters for
+// the alphabetic scripts that distinguish vowels from consonants: Latin,
+// Greek, and Cyrillic. Accented forms fold to these bases via [foldBase], so
+// the set stays small yet covers heavily accented languages.
+var baseVowels = func() map[rune]struct{} {
+	m := make(map[rune]struct{})
+	for _, r := range "aeiou" + "αεηιουω" + "аеиоуыэюяіїєў" {
+		m[r] = struct{}{}
+	}
+	return m
+}()
+
+// isVowelBearingLetter reports whether r belongs to an alphabetic script that
+// distinguishes vowels from consonants. Scripts without that distinction
+// (Han, Kana, Arabic, Hebrew, Devanagari, …) return false so the vowel-floor
+// signal self-skips for them.
+func isVowelBearingLetter(r rune) bool {
+	switch scriptOf(r) {
+	case scriptLatin, scriptCyrillic, scriptGreek:
+		return true
+	default:
+		return false
+	}
+}
+
+// isVowel reports whether r is a vowel in its script, tolerating diacritics
+// (e.g. "é", "ü", "ậ", "ή"). ASCII letters take a fast path.
+func isVowel(r rune) bool {
+	lr := unicode.ToLower(r)
+	if lr < utf8.RuneSelf {
+		_, ok := baseVowels[lr]
+		return ok
+	}
+	_, ok := baseVowels[foldBase(lr)]
+	return ok
+}
+
+// foldBase returns the base letter of r with combining diacritics removed, by
+// taking the first rune of its canonical (NFD) decomposition.
+func foldBase(r rune) rune {
+	for _, b := range norm.NFD.String(string(r)) {
+		return b
+	}
+	return r
 }
 
 // scriptForLanguage returns the dominant script for a language tag, or

@@ -169,6 +169,79 @@ func TestGenerate_HappyPathAndStructuredContent(t *testing.T) {
 	}
 }
 
+// TestGenerate_SendsBoundedMaxTokens locks issue #500: the chat request
+// must always carry a finite max_tokens so a misbehaving/self-hosted model
+// cannot run away past the generation timeout and fail the whole file.
+// NewClient's default (4096, matching the anthropic sibling so answer
+// synthesis and annotate JSON are not truncated) applies when the caller sets
+// nothing; an explicit GenerationMaxTokens overrides it.
+func TestGenerate_SendsBoundedMaxTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override int
+		want     float64
+	}{
+		{name: "default", override: 0, want: 4096},
+		{name: "override", override: 42, want: 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, bodyCh := captureBodyServer(t)
+			defer srv.Close()
+
+			c := newClient(srv.URL)
+			if tc.override != 0 {
+				c.GenerationMaxTokens = tc.override
+			}
+			if _, err := c.Generate(context.Background(), "hi"); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			gotBody := <-bodyCh
+			mt, ok := gotBody["max_tokens"]
+			if !ok {
+				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
+			}
+			if got, _ := mt.(float64); got != tc.want {
+				t.Fatalf("max_tokens = %v, want %v", mt, tc.want)
+			}
+		})
+	}
+}
+
+// TestGenerateWithMaxTokens_PerCallCap locks the per-call seam: a caller with a
+// known-short output (e.g. one translated transcript line) can request a tight
+// cap for that call WITHOUT lowering the generous default that Generate
+// (ask/annotate) uses. A positive maxTokens is sent verbatim; a <= 0 maxTokens
+// falls back to the client default, so it behaves like Generate.
+func TestGenerateWithMaxTokens_PerCallCap(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		maxTokens int
+		want      float64
+	}{
+		{name: "tight cap", maxTokens: 512, want: 512},
+		{name: "zero falls back to default", maxTokens: 0, want: 4096},
+		{name: "negative falls back to default", maxTokens: -1, want: 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, bodyCh := captureBodyServer(t)
+			defer srv.Close()
+
+			var bg model.BoundedGenerator = newClient(srv.URL)
+			if _, err := bg.GenerateWithMaxTokens(context.Background(), "hi", tc.maxTokens); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			gotBody := <-bodyCh
+			mt, ok := gotBody["max_tokens"]
+			if !ok {
+				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
+			}
+			if got, _ := mt.(float64); got != tc.want {
+				t.Fatalf("max_tokens = %v, want %v", mt, tc.want)
+			}
+		})
+	}
+}
+
 // TestGenerate_UsesGenerationTimeoutNotDefault locks the fix for the
 // PR #191 review: NewClient always sets HTTPClient (30s), so the
 // per-call GenerationTimeout must still be applied. With a 50ms
@@ -288,4 +361,25 @@ func asProviderErr(err error, target **model.ProviderError) bool {
 		*target = pe
 	}
 	return ok && strings.HasPrefix(pe.Code, "OPENAI_")
+}
+
+// captureBodyServer returns a test server that decodes each request body and
+// hands it to the test goroutine over the returned channel (race-free under
+// -race, unlike writing a shared map from the handler goroutine), plus a canned
+// chat response. Decode errors fail the request explicitly.
+func captureBodyServer(t *testing.T) (*httptest.Server, <-chan map[string]any) {
+	t.Helper()
+	bodyCh := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		bodyCh <- body
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+		})
+	}))
+	return srv, bodyCh
 }

@@ -63,7 +63,9 @@ func TestMCPTranscribe_RefusesExcludedPath(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":701,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{"rel_path":"private/voice.wav"}}}`)
 	defer func() { _ = resp.Body.Close() }()
-	assertToolCallErrorCode(t, resp, protocol.ErrorCodePermissionDenied)
+	// A path blocked by exclusion policy is the canonical §14.2 FORBIDDEN, not
+	// PERMISSION_DENIED (which is reserved for OS-level access failures).
+	assertToolCallErrorCode(t, resp, protocol.ErrorCodeForbidden)
 }
 
 // TestMCPTranscribe_RefusesOversizeAudio verifies the on-demand read is bounded
@@ -100,7 +102,8 @@ func TestMCPAnnotate_RefusesExcludedPath(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":703,"method":"tools/call","params":{"name":"dir2mcp_annotate","arguments":{"rel_path":"secret.key","schema_json":{"type":"object"}}}}`)
 	defer func() { _ = resp.Body.Close() }()
-	assertToolCallErrorCode(t, resp, protocol.ErrorCodePermissionDenied)
+	// Excluded path ⇒ canonical §14.2 FORBIDDEN, not PERMISSION_DENIED.
+	assertToolCallErrorCode(t, resp, protocol.ErrorCodeForbidden)
 }
 
 // TestMCPAnnotate_RefusesSecretContent verifies annotate applies the same
@@ -116,7 +119,8 @@ func TestMCPAnnotate_RefusesSecretContent(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":704,"method":"tools/call","params":{"name":"dir2mcp_annotate","arguments":{"rel_path":"note.txt","schema_json":{"type":"object"}}}}`)
 	defer func() { _ = resp.Body.Close() }()
-	assertToolCallErrorCodeAndMessage(t, resp, protocol.ErrorCodePermissionDenied, nil, []string{exampleAWSKey})
+	// Content blocked by secret-pattern policy ⇒ canonical §14.2 FORBIDDEN.
+	assertToolCallErrorCodeAndMessage(t, resp, protocol.ErrorCodeForbidden, nil, []string{exampleAWSKey})
 }
 
 // TestMCPTranscribe_RefusesSecretTranscript verifies the transcript output is
@@ -145,7 +149,8 @@ func TestMCPTranscribe_RefusesSecretTranscript(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":705,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{"rel_path":"voice.wav"}}}`)
 	defer func() { _ = resp.Body.Close() }()
-	assertToolCallErrorCodeAndMessage(t, resp, protocol.ErrorCodePermissionDenied, nil, []string{exampleAWSKey})
+	// Transcript blocked by secret-pattern policy ⇒ canonical §14.2 FORBIDDEN.
+	assertToolCallErrorCodeAndMessage(t, resp, protocol.ErrorCodeForbidden, nil, []string{exampleAWSKey})
 }
 
 // TestMCPTranscribe_PurgesSecretTranscriptCache verifies the disk-persistence gap
@@ -176,7 +181,8 @@ func TestMCPTranscribe_PurgesSecretTranscriptCache(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":706,"method":"tools/call","params":{"name":"dir2mcp_transcribe","arguments":{"rel_path":"voice.wav"}}}`)
 	defer func() { _ = resp.Body.Close() }()
-	assertToolCallErrorCode(t, resp, protocol.ErrorCodePermissionDenied)
+	// Transcript blocked by secret-pattern policy ⇒ canonical §14.2 FORBIDDEN.
+	assertToolCallErrorCode(t, resp, protocol.ErrorCodeForbidden)
 
 	assertNoSecretOnDisk(t, filepath.Join(cfg.StateDir, "cache", "transcribe"), exampleAWSKey)
 }

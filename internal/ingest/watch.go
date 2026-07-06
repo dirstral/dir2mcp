@@ -64,7 +64,7 @@ func (s *Service) Watch(ctx context.Context) error {
 	}
 	defer func() { _ = watcher.Close() }()
 
-	if err := s.addWatchDirs(watcher, absRoot); err != nil {
+	if err := s.addWatchDirs(watcher, absRoot, DiscoverOptionsFromConfig(s.cfg).FollowSymlinks); err != nil {
 		// A failure to register some dirs is non-fatal — the safety rescan
 		// still catches changes there. Log and continue.
 		s.getLogger().Printf("watch: registering directories: %v", err)
@@ -198,6 +198,23 @@ func (w *fsWatchLoop) handleEvent(ev fsnotify.Event) {
 // immediately rather than at the next safety rescan. It only walks the
 // directory tree (no document I/O), so it stays cheap on the event loop.
 func (w *fsWatchLoop) registerNewTree(absDir string) {
+	addDir := func(path string) {
+		if err := w.watcher.Add(path); err != nil {
+			w.svc.getLogger().Printf("watch: add %s: %v", path, err)
+		}
+	}
+	// Regular files already present in the new tree are armed for indexing;
+	// discovery filters are applied later in process().
+	armFile := func(path string) { w.arm(path, false) }
+
+	// With symlink following on, descend symlinked subdirectories too so the
+	// watch coverage matches the discovery walker (internal/corpusfs/local.go),
+	// which follows them when IngestFollowSymlinks is set. The default (off) path
+	// keeps the historical WalkDir behavior byte-for-byte.
+	if w.opts.FollowSymlinks {
+		walkWatchTree(absDir, resolvedRoot(w.absRoot), map[string]struct{}{}, addDir, armFile)
+		return
+	}
 	_ = filepath.WalkDir(absDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -206,14 +223,10 @@ func (w *fsWatchLoop) registerNewTree(absDir string) {
 			if path != absDir && shouldSkipDirectory(d.Name()) {
 				return filepath.SkipDir
 			}
-			if err := w.watcher.Add(path); err != nil {
-				w.svc.getLogger().Printf("watch: add %s: %v", path, err)
-			}
+			addDir(path)
 			return nil
 		}
-		// Regular file already present in the new tree — arm it for indexing.
-		// Discovery filters are applied later in process().
-		w.arm(path, false)
+		armFile(path)
 		return nil
 	})
 }
@@ -347,8 +360,22 @@ func matchesGitignoreForFile(absRoot, relPath string) (bool, error) {
 // fsnotify is not recursive, so each directory must be added individually. A
 // single unwatchable directory does not abort registration of its siblings;
 // per-directory failures are aggregated and returned.
-func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string) error {
+func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, followSymlinks bool) error {
 	var errs []error
+	add := func(path string) {
+		if addErr := watcher.Add(path); addErr != nil {
+			errs = append(errs, fmt.Errorf("watch %s: %w", path, addErr))
+		}
+	}
+	// When symlink following is enabled, register watches on symlinked
+	// subdirectories too, matching the discovery walker (internal/corpusfs/local.go)
+	// so an fsnotify-driven edit under a symlinked tree is observed rather than
+	// waiting for the 10-minute safety rescan (issue #409). Cycles terminate via
+	// the resolved-path visited set. The default (off) path is unchanged.
+	if followSymlinks {
+		walkWatchTree(absRoot, resolvedRoot(absRoot), map[string]struct{}{}, add, nil)
+		return errors.Join(errs...)
+	}
 	_ = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries; safety rescan still covers them
@@ -359,12 +386,94 @@ func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string) error 
 		if path != absRoot && shouldSkipDirectory(d.Name()) {
 			return filepath.SkipDir
 		}
-		if addErr := watcher.Add(path); addErr != nil {
-			errs = append(errs, fmt.Errorf("watch %s: %w", path, addErr))
-		}
+		add(path)
 		return nil
 	})
 	return errors.Join(errs...)
+}
+
+// resolvedRoot resolves absRoot to its canonical path for use as the containment
+// anchor of a symlink-following watch walk. A resolve failure falls back to the
+// lexical (cleaned) root so the walk still proceeds.
+func resolvedRoot(absRoot string) string {
+	if r, err := filepath.EvalSymlinks(absRoot); err == nil {
+		return filepath.Clean(r)
+	}
+	return filepath.Clean(absRoot)
+}
+
+// withinResolvedRoot reports whether candidate resolves inside rootResolved,
+// mirroring the discovery walker's isWithinRoot containment check
+// (internal/corpusfs/local.go): the watcher follows a symlink only when its
+// target stays inside the corpus, so it never watches (or indexes) content the
+// initial scan would not.
+func withinResolvedRoot(rootResolved, candidate string) bool {
+	rel, err := filepath.Rel(rootResolved, filepath.Clean(candidate))
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// walkWatchTree recursively visits absDir, invoking onDir for every non-skipped
+// directory and onFile (when non-nil) for every regular file, descending into
+// symlinked directories too. It is used only on the symlink-following watch
+// path and mirrors the discovery walker (internal/corpusfs/local.go): the
+// visited set holds resolved (EvalSymlinks) directory paths already entered so a
+// symlink cycle terminates AND a target reachable via both its real and a
+// symlinked name is walked once (under whichever name is seen first); a
+// symlinked directory is followed only when its target stays within rootResolved.
+// onDir/onFile receive the lexical path (through the symlink) so emitted fsnotify
+// events map back to a path under the watched root.
+func walkWatchTree(absDir, rootResolved string, visited map[string]struct{}, onDir func(string), onFile func(string)) {
+	resolved := resolvedRoot(absDir)
+	if !withinResolvedRoot(rootResolved, resolved) {
+		return
+	}
+	if _, seen := visited[resolved]; seen {
+		return
+	}
+	visited[resolved] = struct{}{}
+
+	onDir(absDir)
+
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return // unreadable dir; safety rescan still covers it
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		child := filepath.Join(absDir, name)
+		switch {
+		case entry.IsDir():
+			if shouldSkipDirectory(name) {
+				continue
+			}
+			walkWatchTree(child, rootResolved, visited, onDir, onFile)
+		case entry.Type()&os.ModeSymlink != 0:
+			// Resolve the link to decide dir-vs-file; descend symlinked dirs
+			// (containment is enforced on entry) and arm symlinked regular files.
+			target, statErr := os.Stat(child)
+			if statErr != nil {
+				continue
+			}
+			if target.IsDir() {
+				if shouldSkipDirectory(name) {
+					continue
+				}
+				walkWatchTree(child, rootResolved, visited, onDir, onFile)
+			} else if onFile != nil && target.Mode().IsRegular() {
+				onFile(child)
+			}
+		default:
+			if onFile != nil {
+				onFile(child)
+			}
+		}
+	}
 }
 
 // processDelete tombstones a single removed path and evicts it from retrieval,

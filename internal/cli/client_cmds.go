@@ -91,7 +91,10 @@ func (a *App) runUninstall(_ context.Context, global globalOptions, args []strin
 // install healthy?", the client flavour answers "is this client wired
 // up correctly?".
 func (a *App) runDoctor(ctx context.Context, global globalOptions, args []string) int {
-	if len(args) == 0 {
+	// No positional, or a leading flag (e.g. `doctor --deep`): the
+	// daemon-side preflight. A client name never starts with '-', so
+	// flags unambiguously belong to the server flavour.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return a.runServerDoctor(ctx, global, args)
 	}
 	client, rest, ok := extractClient(a, global.jsonOutput, "doctor", args)

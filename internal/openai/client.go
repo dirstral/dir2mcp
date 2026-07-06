@@ -36,10 +36,23 @@ const (
 	defaultBaseURL           = "https://api.openai.com/v1"
 	defaultRequestTimeout    = 30 * time.Second
 	defaultGenerationTimeout = 120 * time.Second
-	defaultMaxRetries        = 3
-	defaultInitialBackoff    = 250 * time.Millisecond
-	defaultMaxBackoff        = 2 * time.Second
-	defaultBatchSize         = 64
+	// defaultGenerationMaxTokens bounds a single /chat/completions
+	// completion. Without a cap a misbehaving model (common with small,
+	// self-hosted/CPU chat backends) can generate far past the requested
+	// output — e.g. a subtitle-line translation that never stops — until the
+	// generation timeout fires and the whole file fails with OPENAI_FAILED
+	// (issue #500). A finite cap turns that unbounded runaway into a bounded
+	// request. It matches the anthropic sibling's 4096 so it is generous enough
+	// for RAG answer synthesis and annotate JSON (a tighter cap silently
+	// truncated long answers and could corrupt annotate JSON → ANNOTATE_FAILED);
+	// short-output callers pass a per-call cap via GenerateWithMaxTokens instead
+	// of lowering this. Operators on very slow backends can lower it via
+	// Client.GenerationMaxTokens.
+	defaultGenerationMaxTokens = 4096
+	defaultMaxRetries          = 3
+	defaultInitialBackoff      = 250 * time.Millisecond
+	defaultMaxBackoff          = 2 * time.Second
+	defaultBatchSize           = 64
 
 	// DefaultEmbedModel / DefaultChatModel / DefaultSTTModel /
 	// DefaultTTSModel / DefaultTTSVoice are fallbacks used only when the
@@ -77,6 +90,10 @@ type Client struct {
 	MaxBackoff        time.Duration
 	BatchSize         int
 	GenerationTimeout time.Duration
+	// GenerationMaxTokens caps a single chat completion (max_tokens). <= 0
+	// falls back to defaultGenerationMaxTokens; it is never sent unbounded.
+	// See issue #500.
+	GenerationMaxTokens int
 	// DefaultEmbedModel/DefaultChatModel/DefaultSTTModel/DefaultTTSModel/
 	// DefaultTTSVoice are used when the corresponding call is made with
 	// an empty value.
@@ -89,9 +106,10 @@ type Client struct {
 
 // compile-time assertions that *Client implements the model contracts.
 var (
-	_ model.Embedder    = (*Client)(nil)
-	_ model.Generator   = (*Client)(nil)
-	_ model.Transcriber = (*Client)(nil)
+	_ model.Embedder         = (*Client)(nil)
+	_ model.Generator        = (*Client)(nil)
+	_ model.BoundedGenerator = (*Client)(nil)
+	_ model.Transcriber      = (*Client)(nil)
 )
 
 // NewClient constructs a client with safe default retry/timeout settings.
@@ -105,19 +123,20 @@ func NewClient(baseURL, apiKey string) *Client {
 		baseURL = defaultBaseURL
 	}
 	return &Client{
-		BaseURL:           strings.TrimRight(baseURL, "/"),
-		APIKey:            apiKey,
-		HTTPClient:        &http.Client{Timeout: defaultRequestTimeout},
-		MaxRetries:        defaultMaxRetries,
-		InitialBackoff:    defaultInitialBackoff,
-		MaxBackoff:        defaultMaxBackoff,
-		BatchSize:         defaultBatchSize,
-		GenerationTimeout: defaultGenerationTimeout,
-		DefaultEmbedModel: DefaultEmbedModel,
-		DefaultChatModel:  DefaultChatModel,
-		DefaultSTTModel:   DefaultSTTModel,
-		DefaultTTSModel:   DefaultTTSModel,
-		DefaultTTSVoice:   DefaultTTSVoice,
+		BaseURL:             strings.TrimRight(baseURL, "/"),
+		APIKey:              apiKey,
+		HTTPClient:          &http.Client{Timeout: defaultRequestTimeout},
+		MaxRetries:          defaultMaxRetries,
+		InitialBackoff:      defaultInitialBackoff,
+		MaxBackoff:          defaultMaxBackoff,
+		BatchSize:           defaultBatchSize,
+		GenerationTimeout:   defaultGenerationTimeout,
+		GenerationMaxTokens: defaultGenerationMaxTokens,
+		DefaultEmbedModel:   DefaultEmbedModel,
+		DefaultChatModel:    DefaultChatModel,
+		DefaultSTTModel:     DefaultSTTModel,
+		DefaultTTSModel:     DefaultTTSModel,
+		DefaultTTSVoice:     DefaultTTSVoice,
 	}
 }
 
@@ -259,6 +278,9 @@ type generateMessage struct {
 type generateRequest struct {
 	Model    string            `json:"model"`
 	Messages []generateMessage `json:"messages"`
+	// MaxTokens is always > 0 after clamping (see generate), so it is always
+	// emitted — no omitempty — to keep every completion bounded (issue #500).
+	MaxTokens int `json:"max_tokens"`
 }
 
 type generateResponse struct {
@@ -270,8 +292,24 @@ type generateResponse struct {
 	Usage usage.OpenAIUsage `json:"usage"`
 }
 
-// Generate implements model.Generator via {base}/chat/completions.
+// Generate implements model.Generator via {base}/chat/completions. It uses
+// the client's generous default cap (GenerationMaxTokens, else
+// defaultGenerationMaxTokens) so answer synthesis and annotation are not
+// truncated.
 func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
+	return c.generate(ctx, prompt, 0)
+}
+
+// GenerateWithMaxTokens is like Generate but caps this single completion at
+// maxTokens (max_tokens). A maxTokens <= 0 falls back to the client default,
+// so it is safe to pass 0. It lets a caller with a known-short output (e.g. a
+// single translated transcript line) request a tight bound WITHOUT lowering the
+// generous default that ask/annotate rely on. It satisfies model.BoundedGenerator.
+func (c *Client) GenerateWithMaxTokens(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	return c.generate(ctx, prompt, maxTokens)
+}
+
+func (c *Client) generate(ctx context.Context, prompt string, maxTokensOverride int) (string, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return "", &model.ProviderError{Code: "OPENAI_AUTH", Message: "missing OpenAI API key", Retryable: false}
 	}
@@ -288,6 +326,15 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	if timeout <= 0 {
 		timeout = defaultGenerationTimeout
 	}
+	// Per-call override wins when positive; otherwise fall back to the client
+	// default, then the package default. The value sent is always > 0.
+	maxTokens := maxTokensOverride
+	if maxTokens <= 0 {
+		maxTokens = c.GenerationMaxTokens
+	}
+	if maxTokens <= 0 {
+		maxTokens = defaultGenerationMaxTokens
+	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -296,7 +343,7 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 				return "", err
 			}
 		}
-		text, err := c.generateOnce(ctx, chatModel, prompt, timeout)
+		text, err := c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
 		if err == nil {
 			return text, nil
 		}
@@ -309,10 +356,11 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	return "", lastErr
 }
 
-func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, timeout time.Duration) (string, error) {
+func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration) (string, error) {
 	body, err := json.Marshal(generateRequest{
-		Model:    chatModel,
-		Messages: []generateMessage{{Role: "user", Content: prompt}},
+		Model:     chatModel,
+		Messages:  []generateMessage{{Role: "user", Content: prompt}},
+		MaxTokens: maxTokens,
 	})
 	if err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to marshal generation request", Retryable: false, Cause: err}

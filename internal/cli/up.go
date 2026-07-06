@@ -125,6 +125,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return exitConfigInvalid
 	}
 	wireIngestorHooks(ing, indexingState, ret.EvictDocuments)
+	wireDerivationCacheIdentities(ret, ing)
 
 	corpusFS, err := buildCorpusFS(ctx, cfg)
 	if err != nil {
@@ -154,7 +155,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer cancel()
 	defer func() { _ = ln.Close() }()
 
-	cleanupPIDFile, code := a.setupDaemonChildIfApplicable(cfg.StateDir, opts, cancel)
+	cleanupPIDFile, code := a.setupServerSingleInstance(cfg.StateDir, opts, cancel)
 	if code != exitSuccess {
 		return code
 	}
@@ -392,6 +393,13 @@ func (a *App) resolveX402Token(cfg *config.Config, opts upOptions) (source strin
 // validateUpConfig runs all post-override config validations (public mode,
 // MCP path prefix, x402, root/state directories).
 func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
+	// Re-validate AFTER the CLI flag overlay (#405). Load() validated the
+	// on-disk config, but applyUpFlagOverrides may have set values Load never
+	// saw, so without this a flag could smuggle an invalid value past validation.
+	if err := cfg.Validate(); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("CONFIG_INVALID: %v", err))
+		return exitConfigInvalid
+	}
 	if cfg.Public || opts.public {
 		if code := a.applyPublicMode(cfg, opts); code != exitSuccess {
 			return code
@@ -1087,6 +1095,34 @@ type corpusFSSetter interface {
 	SetCorpusFS(fsys corpusfs.CorpusFS)
 }
 
+// derivationCacheIdentityProvider is the subset of the ingest pipeline that
+// exposes its ACTIVE OCR/transcript derivation identities (SPEC §8.6.7). The
+// concrete *ingest.Service implements it. It is asserted on the live ingestor so
+// the retriever's open_file cache lookup can be keyed the SAME identity-aware way
+// ingest's writer keys the cache it wrote (issue #488) — using the ACTUAL active
+// extractor/STT binding the ingestor runs with, not just a config re-derivation.
+// A test ingestor that does not implement it simply leaves the retriever on the
+// historical bytes-only key.
+type derivationCacheIdentityProvider interface {
+	ActiveOCRIdentity() string
+	ActiveTranscriptIdentity() string
+}
+
+// wireDerivationCacheIdentities plumbs the live ingestor's ACTIVE OCR/transcript
+// derivation identities (SPEC §8.6.7) into open_file's cache lookup so it keys the
+// OCR/transcript cache the SAME identity-aware way ingest's writer does (issue
+// #488). Sourced from the live ingestor (not a config re-derivation) so it
+// reflects the exact extractor/STT binding this daemon writes cache entries with.
+// An ingestor that does not expose the identities (a test fake) leaves the
+// retriever on the historical bytes-only key.
+func wireDerivationCacheIdentities(ret *retrieval.Service, ing model.Ingestor) {
+	ids, ok := ing.(derivationCacheIdentityProvider)
+	if !ok {
+		return
+	}
+	ret.SetDerivationCacheIdentities(ids.ActiveOCRIdentity(), ids.ActiveTranscriptIdentity())
+}
+
 // sourceIsRemote reports whether the configured corpus source is an object-store
 // backend (currently S3) rather than a local/NFS filesystem. Retrieval-time
 // reads are routed through the corpus filesystem only for remote backends; local
@@ -1279,6 +1315,10 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 	if code := a.validateUpConfig(&cfg, opts); code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
 	}
+	// Apply the validated chunking.* budgets to the chunker before ingestion
+	// begins (#405): the chunker reads process-level effective sizes, so this
+	// must run before any document is chunked.
+	ingest.ConfigureChunking(cfg.ChunkingMaxTokens, cfg.ChunkingOverlapTokens)
 	nonInteractiveMode := upNonInteractiveMode(opts)
 	if code := a.checkMistralAPIKey(&cfg, opts, nonInteractiveMode); code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
@@ -1403,36 +1443,96 @@ func (a *App) publishConnection(cfg config.Config, mcpURL string, auth authMater
 	return connection, exitSuccess
 }
 
-// setupDaemonChildIfApplicable performs the two daemon-child-only
-// preconditions that have to happen BEFORE writing connection.json: the
-// SIGTERM handler install and the O_EXCL pid-file claim. The handler is
-// installed first so a SIGTERM that arrives during the window between
-// here and the event loop is converted into a graceful cancel rather
-// than killing the child abruptly. The pid-file claim must come before
-// connection.json so a second daemon racing for the same state dir
-// loses deterministically and exits before touching anything else.
+// setupServerSingleInstance performs the preconditions that must happen
+// BEFORE writing connection.json: the daemon-child SIGTERM handler and,
+// in EVERY run mode, the single-instance pid-file lock. The handler is
+// installed first (daemon child only) so a SIGTERM in the window between
+// here and the event loop becomes a graceful cancel. The pid lock must
+// come before connection.json so a second server racing for the same
+// state dir loses deterministically and exits before touching anything.
 //
-// Returns the deferred cleanup closure (a no-op when not running as
-// daemon child) and an exit code; runUp returns immediately when the
-// code is non-zero (the helper has already written the error).
+// Crucially the lock is taken for foreground/service (`up --foreground`,
+// the launchd/systemd target) too, not just the double-fork daemon child
+// — two processes holding the same meta.sqlite + HNSW index files with
+// divergent in-memory state corrupt the index (#434). The daemon child
+// relies on its parent having reconciled a stale pid file first; the
+// foreground/service path has no parent, so acquireSingleInstanceLock
+// reconciles a dead owner itself before its O_EXCL claim.
 //
-// Extracted from runUp to keep that function under the
-// cyclomatic-complexity budget after PR #174's daemon-child setup grew.
-func (a *App) setupDaemonChildIfApplicable(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
+// Returns the deferred cleanup closure (removes the pid file on exit)
+// and an exit code; runUp returns immediately when the code is non-zero
+// (the helper has already written the error).
+func (a *App) setupServerSingleInstance(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
 	cleanup = func() {}
-	if !isRunningAsDaemonChild() {
-		return cleanup, exitSuccess
+	if isRunningAsDaemonChild() {
+		installDaemonChildSignalHandler(cancel)
 	}
-	installDaemonChildSignalHandler(cancel)
-	pidPath := pidFilePath(stateDir)
-	if err := claimPIDFile(pidPath, os.Getpid()); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
-			fmt.Sprintf("claim pid file %s: %v", pidPath, err),
-			"another dir2mcp daemon is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
-		)
+	release, err := acquireSingleInstanceLock(stateDir)
+	if err != nil {
+		// Only the genuine already-running/locked case gets the "another
+		// server is running" hint. Environmental failures (e.g. no
+		// permission to create or write the pid file) surface their real
+		// error unadorned so the hint does not mislead (#434).
+		if errors.Is(err, errAlreadyRunning) {
+			writeCLIError(a.stderr, opts.jsonOutput, exitGeneric,
+				err.Error(),
+				"Another dir2mcp server is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
+			)
+		} else {
+			writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, err.Error())
+		}
 		return cleanup, exitGeneric
 	}
-	return func() { _ = removePIDFile(pidPath) }, exitSuccess
+	return release, exitSuccess
+}
+
+// errAlreadyRunning marks the single-instance lock failure caused by a
+// live server already owning the state dir (or winning the O_EXCL race),
+// as distinct from environmental failures (permission creating/writing
+// the pid file). The caller checks it with errors.Is so only the genuine
+// already-running case gets the "another server is running" hint.
+var errAlreadyRunning = errors.New("dir2mcp is already running")
+
+// acquireSingleInstanceLock claims the per-state-dir pid file so at most
+// one server process ever writes a given corpus's sqlite + index. It
+// reconciles a stale pid file (owner process dead) so a clean restart is
+// not blocked by a crash, then claims with O_EXCL so two live starters
+// racing the same directory cannot both win. A live owner — or losing
+// the O_EXCL race — returns an "already running" error the caller
+// surfaces; the returned release removes the pid file on shutdown.
+func acquireSingleInstanceLock(stateDir string) (release func(), err error) {
+	pidPath := pidFilePath(stateDir)
+	// Reconcile a stale pid file whose owner is gone so the O_EXCL claim
+	// below has a clear field; a LIVE owner means a second writer, which
+	// we must refuse.
+	if existing, rerr := readPIDFile(pidPath); rerr == nil {
+		if processIsAlive(existing) {
+			return nil, fmt.Errorf("%w for %s (pid %d)", errAlreadyRunning, stateDir, existing)
+		}
+		_ = removePIDFile(pidPath)
+	} else if !errors.Is(rerr, os.ErrNotExist) {
+		// The pid file exists but is empty/corrupt/unparseable
+		// (readPIDFile errored with something other than "not exist").
+		// Its content names no live process, so treat it as a dead owner
+		// and clear it — otherwise a single malformed pid file would
+		// permanently brick startup: the O_EXCL claim below would fail
+		// and every run would report a bogus "already running" (#434). A
+		// live owner is never removed here because a live owner yields a
+		// parseable pid (the rerr == nil branch above), not an error.
+		_ = removePIDFile(pidPath)
+	}
+	if cerr := claimPIDFile(pidPath, os.Getpid()); cerr != nil {
+		if errors.Is(cerr, os.ErrExist) {
+			// Lost the race between the stale check and the claim: another
+			// starter won. Surface its pid when we can still read it.
+			if existing, rerr := readPIDFile(pidPath); rerr == nil {
+				return nil, fmt.Errorf("%w for %s (pid %d)", errAlreadyRunning, stateDir, existing)
+			}
+			return nil, fmt.Errorf("%w for %s (pid file %s already claimed)", errAlreadyRunning, stateDir, pidPath)
+		}
+		return nil, fmt.Errorf("claim pid file %s: %w", pidPath, cerr)
+	}
+	return func() { _ = removePIDFile(pidPath) }, nil
 }
 
 // installInteractionForUp picks the right termination interaction for

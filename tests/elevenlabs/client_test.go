@@ -187,7 +187,10 @@ func TestElevenLabsTranscribe_ReturnsTimestampedSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Transcribe failed: %v", err)
 	}
-	if text != "[00:00] hello\n[00:02] world" {
+	// start=2.4s must keep its sub-second precision as [00:02.400] rather than
+	// flooring to [00:02] and losing 400 ms (issue #431 item c). A whole-second
+	// start (0) still renders as the bare [00:00].
+	if text != "[00:00] hello\n[00:02.400] world" {
 		t.Fatalf("unexpected transcript: %q", text)
 	}
 	assertTranscribeRequest(t, got)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/langdetect"
 	"github.com/dirstral/dir2mcp/internal/provider"
 )
@@ -148,6 +149,62 @@ func joinTranscriptIdentity(sttIdentity, diarizeIdentity string) string {
 		return sttIdentity
 	}
 	return sttIdentity + "#" + diarizeIdentity
+}
+
+// ActiveOCRIdentity is the exported accessor for the OCR/extraction derivation
+// identity ingest folds into the OCR cache key it writes (ocrCacheKey). It is
+// byte-identical to that fold: empty when no extractor is configured (the
+// bytes-only key path), otherwise the canonical CapOCR identity. The retriever
+// plumbs this into open_file via SetDerivationCacheIdentities so the OCR cache
+// LOOKUP keys the cache the SAME identity-aware way ingest's writer does (issue
+// #488). It is a thin wrapper: the identity computation stays in activeOCRIdentity.
+func (s *Service) ActiveOCRIdentity() string {
+	return s.activeOCRIdentity()
+}
+
+// ActiveTranscriptIdentity is the exported accessor for the transcript
+// derivation identity ingest folds into the transcript cache key it writes
+// (transcriptCacheKey). It returns EXACTLY what that key folds, which is the
+// crucial detail for byte-identity: transcriptCacheKey uses the bytes-only key
+// (folds nothing) when neither an STT provider nor model is resolved, even though
+// the underlying activeTranscriptIdentity always renders a non-empty "stt|…"
+// string. This accessor therefore returns "" on that same no-STT guard so the
+// retriever's open_file lookup lands on ingest's bytes-only key instead of
+// folding a spurious identity and missing (issue #488). With STT configured it
+// returns the full canonical CapSTT(+diarize) identity, identical to what
+// transcriptCacheKey folds.
+func (s *Service) ActiveTranscriptIdentity() string {
+	// Mirror transcriptCacheKey's guard exactly (internal/ingest/derivation.go):
+	// no resolved STT provider+model ⇒ ingest writes the bytes-only key, so the
+	// retriever must fold no identity.
+	if strings.TrimSpace(s.sttProvider) == "" && strings.TrimSpace(s.sttModel) == "" {
+		return ""
+	}
+	return s.activeTranscriptIdentity()
+}
+
+// ActiveDerivationIdentities computes the ACTIVE OCR and transcript derivation
+// identities (SPEC §8.6.7) for cfg WITHOUT constructing a full ingest Service or
+// touching a store. It exists for retriever-only paths that have no ingest
+// Service to borrow the getters from — the read-only `ask` CLI — so open_file's
+// OCR/transcript cache lookup can still be keyed the identity-aware way ingest's
+// writer keys it (issue #488). The returned strings are byte-identical to
+// (*Service).ActiveOCRIdentity / ActiveTranscriptIdentity on a Service built from
+// the same cfg the way the CLI builds its ingestor (NewService + the config
+// extractor), because both resolve the transcript fields through the shared
+// resolveTranscriptIdentityFields and the extractor through DocumentExtractorFromConfig.
+// Prefer a live Service's getters when one exists on the path; use this only
+// where none does.
+func ActiveDerivationIdentities(cfg config.Config) (ocr, transcript string) {
+	s := &Service{cfg: cfg}
+	// The extractor is not resolved by NewService; the CLI ingestor wires it via
+	// SetDocumentExtractor(DocumentExtractorFromConfig(cfg)). Mirror that here so
+	// the OCR identity matches what ingest actually runs with.
+	if extractor := DocumentExtractorFromConfig(cfg); extractor != nil {
+		s.extractor = extractor
+	}
+	s.resolveTranscriptIdentityFields()
+	return s.ActiveOCRIdentity(), s.ActiveTranscriptIdentity()
 }
 
 // activeOCRIdentity is the OCR/extraction derivation identity of the currently

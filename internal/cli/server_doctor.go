@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -36,16 +38,20 @@ const (
 
 // runServerDoctor produces a daemon-side preflight report covering
 // config loadability, state-dir writability, provider resolution for
-// each capability the server uses, extractor availability, and recent
-// indexing-failure aggregation. It does NOT contact remote providers
-// — keeping the command fast and side-effect-free was deliberately
-// preferred over deeper "ping" checks that would slow it down and
-// could fail for transient unrelated reasons.
+// each capability the server uses, extractor availability, daemon
+// liveness/port drift, a stuck-pending-embedding backlog, and recent
+// indexing-failure aggregation.
+//
+// By default it does NOT contact remote providers — keeping the command
+// fast and side-effect-free was deliberately preferred over "ping"
+// checks that could fail for transient unrelated reasons. The opt-in
+// --deep flag activates a single cheap probe embed so a present-but-
+// invalid/expired credential fails loudly instead of passing as ok (a
+// constructed-but-never-called client cannot detect bad creds — #434).
 func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []string) int {
-	if len(args) > 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
-			fmt.Sprintf("dir2mcp doctor (server-side) does not accept arguments: %s", strings.Join(args, " ")))
-		return exitConfigInvalid
+	deep, code := parseDoctorFlags(a, global, args)
+	if code != exitSuccess {
+		return code
 	}
 
 	cfg, cfgErr := loadConfigWithGlobalOptions(global)
@@ -59,13 +65,34 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 
 	checks = append(checks,
 		stateDirCheck(cfg.StateDir),
-		providerCheck(cfg, "embed", provider.CapEmbed, true),
-		providerCheck(cfg, "chat", provider.CapChat, false),
+		providerCheck(ctx, cfg, "embed", provider.CapEmbed, true, deep),
+		providerCheck(ctx, cfg, "chat", provider.CapChat, false, false),
 		extractorCheck(cfg),
 		extractionCoverageCheck(ctx, a, cfg),
 		indexingFailureCheck(ctx, a, cfg),
+		daemonLivenessCheck(cfg),
+		stuckPendingCheck(ctx, a, cfg),
 	)
 	return a.renderDoctorReport(global, checks)
+}
+
+// parseDoctorFlags parses the server-side doctor flags. Only --deep is
+// accepted; positional arguments are rejected (a client name would have
+// been routed to the client-side doctor before reaching here).
+func parseDoctorFlags(a *App, global globalOptions, args []string) (deep bool, code int) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	deepFlag := fs.Bool("deep", false, "actively probe providers (a cheap embed call) instead of only constructing clients")
+	if err := fs.Parse(args); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid doctor flags: %v", err))
+		return false, exitConfigInvalid
+	}
+	if fs.NArg() > 0 {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			fmt.Sprintf("dir2mcp doctor (server-side) does not accept arguments: %s", strings.Join(fs.Args(), " ")))
+		return false, exitConfigInvalid
+	}
+	return *deepFlag, exitSuccess
 }
 
 // configCheck reports whether the layered config loaded cleanly.
@@ -100,7 +127,14 @@ func stateDirCheck(stateDir string) doctorCheck {
 // check fails fast on a configured-but-unusable profile. required
 // distinguishes capabilities that must be present (embed) from those
 // that degrade gracefully when absent (chat).
-func providerCheck(cfg config.Config, label string, cap provider.Capability, required bool) doctorCheck {
+//
+// When deep is set (only for the embed capability, via `doctor --deep`)
+// the built embedder is exercised with a single cheap probe embed so a
+// present-but-invalid/expired credential surfaces as an error instead
+// of passing as ok — constructing a client never touches the network,
+// so it cannot detect bad creds (#434). The probe error is a provider
+// error (status code + code, never the key/URL), so it is safe to show.
+func providerCheck(ctx context.Context, cfg config.Config, label string, cap provider.Capability, required, deep bool) doctorCheck {
 	prof, err := cfg.Providers().Resolve(cap)
 	if err != nil {
 		status := doctorStatusError
@@ -114,12 +148,32 @@ func providerCheck(cfg config.Config, label string, cap provider.Capability, req
 		return doctorCheck{Name: "provider." + label, Status: status, Detail: err.Error()}
 	}
 	if cap == provider.CapEmbed {
-		if _, ferr := providerfactory.Embedder(prof); ferr != nil {
+		emb, ferr := providerfactory.Embedder(prof)
+		if ferr != nil {
 			return doctorCheck{Name: "provider." + label, Status: doctorStatusError,
 				Detail: fmt.Sprintf("profile %q unusable: %v", prof.Name, ferr)}
 		}
+		if deep {
+			if perr := probeEmbedder(ctx, emb, prof); perr != nil {
+				return doctorCheck{Name: "provider." + label, Status: doctorStatusError,
+					Detail: fmt.Sprintf("profile %q failed live probe (credential invalid/expired or endpoint unreachable): %v", prof.Name, perr)}
+			}
+			return doctorCheck{Name: "provider." + label, Status: doctorStatusOK, Detail: prof.Name + " (probe ok)"}
+		}
 	}
 	return doctorCheck{Name: "provider." + label, Status: doctorStatusOK, Detail: prof.Name}
+}
+
+// probeEmbedder issues one bounded, throwaway query-role embed so the
+// doctor can distinguish a working credential from a present-but-bad
+// one. The input is a fixed non-sensitive string and the result is
+// discarded; only the error matters. A short timeout keeps `doctor
+// --deep` responsive even when the endpoint hangs.
+func probeEmbedder(ctx context.Context, emb model.Embedder, prof provider.Profile) error {
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := emb.Embed(pctx, prof.EmbedTextModel, model.EmbedQuery, []string{"dir2mcp doctor probe"})
+	return err
 }
 
 // extractorCheck delegates to ingest.DescribeDocumentExtractor so the
@@ -320,6 +374,85 @@ func summarizeFailureCategories(categories map[string]int64) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", e.category, e.count))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// daemonProcess reports the pid recorded for this state dir and whether
+// that process is currently alive. A missing/unreadable pid file yields
+// (0, false). Used by both the liveness and stuck-pending checks.
+func daemonProcess(stateDir string) (pid int, alive bool) {
+	p, err := readPIDFile(pidFilePath(stateDir))
+	if err != nil {
+		return 0, false
+	}
+	return p, processIsAlive(p)
+}
+
+// daemonLivenessCheck reports whether a daemon is registered/alive for
+// this state dir and whether its recorded listen port is still
+// resolvable. It catches the port-drift class (#434): a daemon killed
+// with SIGKILL or stopped by the service manager can leave a stale pid
+// file or a connection.json pointing at a dead port, so clients hold a
+// URL that no longer serves. All checks are local file reads — no
+// network — so the row is cheap and always safe to run.
+func daemonLivenessCheck(cfg config.Config) doctorCheck {
+	const name = "daemon_liveness"
+	pid, err := readPIDFile(pidFilePath(cfg.StateDir))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no daemon registered (not running)"}
+		}
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf("pid file unreadable: %v", err)}
+	}
+	if !processIsAlive(pid) {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"stale pid file: pid %d is not running; a prior daemon exited without cleanup — run `dir2mcp down` to clear it", pid)}
+	}
+	port := readPreviousListenPort(cfg.StateDir)
+	if port == "" {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"daemon running (pid %d) but connection.json is missing/unreadable; clients may hold a stale URL", pid)}
+	}
+	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf("daemon running (pid %d) on port %s", pid, port)}
+}
+
+// stuckPendingCheck surfaces a pending-embedding backlog that nothing is
+// draining. The existing extraction_coverage row only fires at
+// EmbeddedOK==0; a corpus with 40/100 chunks embedded and no running
+// daemon previously passed as ok even though the remaining 60 were stuck
+// forever (#434). This warns when chunks remain pending AND no daemon is
+// alive to embed them; while a daemon is running, a backlog is normal
+// mid-index and stays ok.
+func stuckPendingCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
+	const name = "pending_backlog"
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no index yet"}
+		}
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("stat %s: %v", metaPath, err)}
+	}
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	sqliteStore, ok := st.(*store.SQLiteStore)
+	if !ok {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: "store is not SQLite-backed; pending aggregation unavailable"}
+	}
+	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("initialize store: %v", err)}
+	}
+	stats, err := sqliteStore.CorpusStats(ctx)
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
+	}
+	if stats.EmbeddedPending == 0 {
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "0 chunks pending embedding"}
+	}
+	if _, alive := daemonProcess(cfg.StateDir); alive {
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
+			"%d chunk(s) pending; a daemon is running and draining them", stats.EmbeddedPending)}
+	}
+	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+		"%d chunk(s) stuck pending embedding and no daemon is running to drain them; start it with `dir2mcp up` (or run `dir2mcp reindex`)", stats.EmbeddedPending)}
 }
 
 // renderDoctorReport emits checks as either JSON (one object with an

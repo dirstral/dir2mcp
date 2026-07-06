@@ -11,7 +11,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -744,8 +743,10 @@ func (c *Client) buildTranscribeBody(relPath string, data []byte) ([]byte, *mult
 }
 
 // parseMistralTranscriptSegments converts timed segments in a transcription
-// response into timestamped lines.  Returns ("", false) when no non-empty
-// segments are present.
+// response into timestamped lines (`[mm:ss] text`, or `[mm:ss.mmm] text` when a
+// segment starts sub-second). Sub-second precision is preserved so distinct
+// in-second segments do not collapse onto one marker (issue #431). Returns
+// ("", false) when no non-empty segments are present.
 func parseMistralTranscriptSegments(parsed transcribeResponse) (string, bool) {
 	if len(parsed.Segments) == 0 {
 		return "", false
@@ -756,15 +757,21 @@ func parseMistralTranscriptSegments(parsed transcribeResponse) (string, bool) {
 		if text == "" {
 			continue
 		}
-		startSec := int(seg.Start)
-		mm := startSec / 60
-		ss := startSec % 60
-		lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
+		lines = append(lines, model.FormatTranscriptTimestamp(secondsToMS(seg.Start))+" "+text)
 	}
 	if len(lines) > 0 {
 		return strings.Join(lines, "\n"), true
 	}
 	return "", false
+}
+
+// secondsToMS converts fractional seconds to whole milliseconds, clamping
+// negative values to 0.
+func secondsToMS(sec float64) int {
+	if sec <= 0 {
+		return 0
+	}
+	return int(sec*1000 + 0.5)
 }
 
 func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -843,13 +850,6 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		}
 	}
 	return text, nil
-}
-
-func pad2(n int) string {
-	if n < 10 {
-		return "0" + strconv.Itoa(n)
-	}
-	return strconv.Itoa(n)
 }
 
 func (c *Client) generateWithRetry(ctx context.Context, prompt string) (string, error) {

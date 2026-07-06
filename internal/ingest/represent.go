@@ -17,15 +17,21 @@ import (
 	"github.com/dirstral/dir2mcp/internal/langdetect"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
-// transcriptTimestampBracketedRe matches leading timestamps in [mm:ss] or
-// [hh:mm:ss] form.
-var transcriptTimestampBracketedRe = regexp.MustCompile(`^\s*\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)$`)
+// transcriptTimestampBracketedRe matches leading timestamps in [mm:ss],
+// [hh:mm:ss], or either form with an optional sub-second fraction of 1-3 digits
+// ([mm:ss.mmm]). The fraction preserves millisecond precision so distinct
+// in-second segments do not collapse onto one marker (issue #431); a bare
+// whole-second marker parses as .000, keeping backward compatibility.
+var transcriptTimestampBracketedRe = regexp.MustCompile(`^\s*\[(\d+):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?\]\s*(.*)$`)
 
-// transcriptTimestampBareRe matches leading timestamps in mm:ss or hh:mm:ss
-// form without brackets.
-var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s+|$)(.*)$`)
+// transcriptTimestampBareRe matches the same timestamps as
+// transcriptTimestampBracketedRe but without the surrounding brackets.
+var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d+):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?(?:\s+|$)(.*)$`)
 
 const (
 	// RepTypeRawText is the representation type for raw text content
@@ -331,7 +337,13 @@ func normalizeUTF8(content []byte) []byte {
 
 // NormalizeUTF8 ensures content is valid UTF-8 and uses LF line endings.
 func NormalizeUTF8(content []byte) []byte {
-	// Salvage any invalid UTF-8 by replacing with U+FFFD.
+	// Transcode from a detected source encoding (BOM / UTF-16 / legacy
+	// single-byte) to UTF-8 and strip a leading UTF-8 BOM before validation
+	// (#417). Without this, a UTF-16 file reads as NUL-interleaved garbage and a
+	// Latin-1/Windows-1252 file loses every accented byte to U+FFFD.
+	content = decodeToUTF8(content)
+
+	// Salvage any residual invalid UTF-8 by replacing with U+FFFD.
 	if !utf8.Valid(content) {
 		out := strings.ToValidUTF8(string(content), "\uFFFD")
 		content = []byte(out)
@@ -342,6 +354,125 @@ func NormalizeUTF8(content []byte) []byte {
 	content = bytes.ReplaceAll(content, []byte("\r"), []byte("\n"))
 
 	return content
+}
+
+// Byte-order marks for the Unicode encodings decodeToUTF8 recognizes.
+var (
+	bomUTF8    = []byte{0xEF, 0xBB, 0xBF}
+	bomUTF16BE = []byte{0xFE, 0xFF}
+	bomUTF16LE = []byte{0xFF, 0xFE}
+)
+
+// decodeToUTF8 transcodes content to UTF-8 from a detected source encoding
+// before normalization (SPEC \u00A77.4 "normalize to UTF-8"). Detection is
+// deterministic and script-agnostic \u2014 it improves CJK, Cyrillic and Latin text
+// uniformly and hardcodes no locale:
+//   - a Unicode BOM (UTF-8, UTF-16 LE/BE) is authoritative: the BOM is consumed
+//     and, for UTF-16, the payload is transcoded;
+//   - a BOM-less UTF-16 stream is recognized from its NUL-interleaving pattern.
+//     UTF-16-encoded ASCII/Latin text is "valid UTF-8" only because its padding
+//     NUL bytes are themselves valid UTF-8, so this MUST run before utf8.Valid;
+//   - otherwise valid UTF-8 is kept as-is;
+//   - remaining invalid-UTF-8 bytes are treated as a legacy single-byte encoding
+//     (Windows-1252, the superset of ISO-8859-1) rather than destroyed into
+//     U+FFFD, so accented Latin bytes (\u00E9=0xE9, \u00FC=0xFC) survive.
+//
+// It never fails: a transcode error falls back to the original bytes so the
+// caller's U+FFFD salvage still applies.
+func decodeToUTF8(content []byte) []byte {
+	if len(content) == 0 {
+		return content
+	}
+	switch {
+	case bytes.HasPrefix(content, bomUTF8):
+		return content[len(bomUTF8):]
+	case bytes.HasPrefix(content, bomUTF16LE):
+		return transcodeUTF16(content[len(bomUTF16LE):], unicode.LittleEndian)
+	case bytes.HasPrefix(content, bomUTF16BE):
+		return transcodeUTF16(content[len(bomUTF16BE):], unicode.BigEndian)
+	}
+	if endian, ok := sniffUTF16(content); ok {
+		return transcodeUTF16(content, endian)
+	}
+	if utf8.Valid(content) {
+		return content
+	}
+	// Invalid UTF-8 with no NUL padding: a legacy single-byte encoding. Decode
+	// as Windows-1252 (a superset of ISO-8859-1 over 0xA0-0xFF) so accented text
+	// is recovered instead of replaced with U+FFFD.
+	if out, _, err := transform.Bytes(charmap.Windows1252.NewDecoder(), content); err == nil {
+		return out
+	}
+	return content
+}
+
+// transcodeUTF16 decodes UTF-16 bytes of the given endianness to UTF-8. The BOM,
+// if any, has already been consumed by the caller, so IgnoreBOM is used.
+//
+// A BOM or the NUL-interleaving heuristic has already classified this stream as
+// UTF-16, so the output must be proper UTF-8 text or U+FFFD replacement chars —
+// never the raw interleaved-NUL bytes. Returning the raw bytes on error would be
+// unsafe: NUL padding is itself valid UTF-8, so those bytes pass utf8.Valid and
+// the caller's U+FFFD salvage never fires, leaving NUL-interleaved garbage. On a
+// transform error (e.g. an odd trailing byte that leaves an incomplete final
+// code unit) we therefore emit the successfully decoded prefix followed by a
+// single U+FFFD for the stray unit.
+func transcodeUTF16(content []byte, endian unicode.Endianness) []byte {
+	dec := unicode.UTF16(endian, unicode.IgnoreBOM).NewDecoder()
+	out, _, err := transform.Bytes(dec, content)
+	if err != nil {
+		return append(out, "�"...)
+	}
+	return out
+}
+
+// sniffUTF16MinBytes is the smallest input sniffUTF16 will classify; below it the
+// NUL-distribution signal is too weak to trust.
+const sniffUTF16MinBytes = 4
+
+// sniffUTF16NULPercent is the minimum share (percent) of bytes at a single parity
+// that must be NUL for a BOM-less UTF-16 classification.
+const sniffUTF16NULPercent = 30
+
+// sniffUTF16 detects a BOM-less UTF-16 stream from its NUL-byte distribution:
+// UTF-16-encoded ASCII/Latin text pads every code unit with a 0x00 byte at a
+// fixed parity (odd offsets for little-endian, even for big-endian). A large,
+// parity-aligned share of NULs is a strong signal; plain UTF-8 text never
+// contains NUL, so this does not misfire on legitimate UTF-8. It is deliberately
+// conservative (script-agnostic, no locale assumptions).
+func sniffUTF16(content []byte) (unicode.Endianness, bool) {
+	// Truncate the parity window to an even length so a stray trailing byte
+	// (corruption, padding, or an incomplete final code unit) does not defeat
+	// detection of an otherwise UTF-16 stream. The dropped odd byte is decoded
+	// best-effort (as U+FFFD) by transcodeUTF16.
+	n := len(content) &^ 1
+	if n < sniffUTF16MinBytes {
+		return unicode.LittleEndian, false
+	}
+	if n > binarySniffLen {
+		n = binarySniffLen &^ 1 // keep the window even so parity is meaningful
+	}
+	var evenNUL, oddNUL int
+	for i := 0; i < n; i++ {
+		if content[i] != 0x00 {
+			continue
+		}
+		if i%2 == 0 {
+			evenNUL++
+		} else {
+			oddNUL++
+		}
+	}
+	units := n / 2 // one NUL padding byte per UTF-16 code unit at most
+	threshold := units * sniffUTF16NULPercent / 100
+	switch {
+	case oddNUL > evenNUL && oddNUL >= threshold:
+		return unicode.LittleEndian, true
+	case evenNUL > oddNUL && evenNUL >= threshold:
+		return unicode.BigEndian, true
+	default:
+		return unicode.LittleEndian, false
+	}
 }
 
 // ShouldGenerateRawText determines if a document should have raw_text representation.
@@ -415,7 +546,7 @@ func chunkRawTextByDocType(docType, content string) []chunkSegment {
 	if docType == "code" {
 		return chunkCodeByLines(content, 200, 30)
 	}
-	return chunkTextByChars(content, 2500, 250, 200)
+	return chunkTextByChars(content, effectiveTextChunkMaxChars, effectiveTextChunkOverlapChars, effectiveTextChunkMinChars)
 }
 
 func chunkOCRByPages(content string) []chunkSegment {
@@ -439,12 +570,77 @@ func chunkOCRByPages(content string) []chunkSegment {
 
 // Structured-document chunking parameters (spec §7.5 size constraints). They
 // mirror the raw-text defaults so structured and plain text chunk at a
-// comparable granularity.
+// comparable granularity. These are the historical defaults used when no
+// chunking.* config is set; ConfigureChunking may override the effective values
+// below.
 const (
 	structuredChunkMaxChars     = 2500
 	structuredChunkOverlapChars = 250
 	structuredChunkMinChars     = 200
 )
+
+// approxCharsPerToken converts a chunking.*_tokens budget (config is expressed
+// in tokens) into the chunker's rune budget. It is a deliberately rough
+// heuristic (~4 characters per token for typical prose): the goal is that
+// changing chunking.max_tokens moves chunk sizes proportionally, not exact
+// tokenizer parity.
+const approxCharsPerToken = 4
+
+// Effective text/structured chunk sizing (rune budgets). They default to the
+// historical hardcoded values above, so a corpus with no chunking.* config
+// chunks byte-identically to before. ConfigureChunking overrides them from
+// chunking.max_tokens / chunking.overlap_tokens when those are set. The text and
+// structured chunkers share one window so plain and structured documents chunk
+// at a comparable granularity (read by chunkRawTextByDocType and
+// newStructuredChunker).
+var (
+	effectiveTextChunkMaxChars     = structuredChunkMaxChars
+	effectiveTextChunkOverlapChars = structuredChunkOverlapChars
+	effectiveTextChunkMinChars     = structuredChunkMinChars
+)
+
+// ConfigureChunking applies chunking.max_tokens / chunking.overlap_tokens to the
+// text and structured chunkers. Token budgets are converted to rune budgets via
+// approxCharsPerToken. When maxTokens <= 0 (unset) the historical defaults are
+// restored, so existing corpora chunk exactly as before and the call is
+// idempotent. Callers overlay already-validated config here at startup, before
+// ingestion begins; it is not safe to call concurrently with active chunking.
+func ConfigureChunking(maxTokens, overlapTokens int) {
+	if maxTokens <= 0 {
+		effectiveTextChunkMaxChars = structuredChunkMaxChars
+		effectiveTextChunkOverlapChars = structuredChunkOverlapChars
+		effectiveTextChunkMinChars = structuredChunkMinChars
+		return
+	}
+	maxChars := maxTokens * approxCharsPerToken
+	overlapChars := 0
+	if overlapTokens > 0 {
+		overlapChars = overlapTokens * approxCharsPerToken
+	}
+	// Scale the minimum-chunk floor to the configured window (preserving the
+	// default min:max proportion) so a small window does not drop every
+	// non-terminal chunk, and never let it reach the window size.
+	minChars := maxChars * structuredChunkMinChars / structuredChunkMaxChars
+	if minChars < 1 {
+		minChars = 1
+	}
+	if minChars >= maxChars {
+		minChars = maxChars - 1
+	}
+	// Clamp overlap below the window so the raw-text path (chunkRawTextByDocType,
+	// which passes these effective vars straight to chunkTextByChars without
+	// normalizeTextChunkParams) can never receive overlap >= max — that would
+	// stall/loop chunking. Defense-in-depth even though Validate() rejects it.
+	if overlapChars < 0 {
+		overlapChars = 0
+	}
+	if overlapChars >= maxChars {
+		overlapChars = maxChars - 1
+	}
+	effectiveTextChunkMaxChars = maxChars
+	effectiveTextChunkOverlapChars = overlapChars
+	effectiveTextChunkMinChars = minChars
+}
 
 // Code chunking is primarily line-based, but a single window (or a single very
 // long line, e.g. a minified JS/CSS bundle) must still be bounded by characters
@@ -498,7 +694,7 @@ type structuredChunker struct {
 
 func newStructuredChunker() *structuredChunker {
 	maxChars, overlapChars, minChars := normalizeTextChunkParams(
-		structuredChunkMaxChars, structuredChunkOverlapChars, structuredChunkMinChars)
+		effectiveTextChunkMaxChars, effectiveTextChunkOverlapChars, effectiveTextChunkMinChars)
 	return &structuredChunker{
 		maxChars:     maxChars,
 		overlapChars: overlapChars,
@@ -842,6 +1038,11 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 	}
 	segments := make([]transcriptSegment, 0, len(lines))
 	var current *transcriptSegment
+	// sawTimestamp records whether ANY line carried a real [mm:ss] marker. When
+	// none did, every segment's startMS is a synthetic default and there are no
+	// real anchors to time against, so we must not fabricate spans (issue #431
+	// item d).
+	sawTimestamp := false
 
 	pushCurrent := func() {
 		if current == nil {
@@ -859,6 +1060,7 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 	for _, line := range lines {
 		startMS, text, ok := parseTranscriptTimestamp(line)
 		if ok {
+			sawTimestamp = true
 			pushCurrent()
 			current = &transcriptSegment{startMS: startMS, text: strings.TrimSpace(text)}
 			continue
@@ -877,12 +1079,24 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 	}
 	pushCurrent()
 
-	if len(segments) == 0 {
+	// No timestamp markers anywhere: the transcriber returned plain text with no
+	// real timing (e.g. a Gemini-style STT backend). Emit the chunks WITHOUT a
+	// time span rather than fabricating a char-weighted window that would present
+	// invented timestamps as real (issue #431 item d). This also covers the
+	// degenerate len(segments)==0 case, which by definition had no markers.
+	if !sawTimestamp {
 		trimmed := strings.TrimSpace(content)
 		if trimmed == "" {
 			return nil
 		}
-		return splitTranscriptSegmentWithTiming(trimmed, 0, estimateTranscriptDurationMS(trimmed))
+		if len(segments) == 0 {
+			return splitTranscriptSegmentWithoutTiming(trimmed)
+		}
+		out := make([]chunkSegment, 0, len(segments))
+		for i := range segments {
+			out = append(out, splitTranscriptSegmentWithoutTiming(segments[i].text)...)
+		}
+		return out
 	}
 
 	out := make([]chunkSegment, 0, len(segments))
@@ -979,6 +1193,29 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 	return out
 }
 
+// splitTranscriptSegmentWithoutTiming chunks text with the same size policy as
+// splitTranscriptSegmentWithTiming but leaves every chunk's Span zero-valued
+// (empty Kind), so no time bounds are attached. It is used when a transcript
+// carried no timestamp markers at all: timing is genuinely absent, and an
+// empty-Kind span makes the chunker persist the chunk with no span row (rather
+// than a fabricated one) and makes subtitle export skip it — honest omission
+// over invented timing (issue #431 item d).
+func splitTranscriptSegmentWithoutTiming(text string) []chunkSegment {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	parts := chunkTextByChars(text, TranscriptChunkMaxChars, TranscriptChunkOverlapChars, TranscriptChunkMinChars)
+	if len(parts) == 0 {
+		return []chunkSegment{{Text: text}}
+	}
+	out := make([]chunkSegment, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, chunkSegment{Text: part.Text})
+	}
+	return out
+}
+
 func parseMMSSComponents(m []string) (minutes, seconds int, ok bool) {
 	var err error
 	minutes, err = strconv.Atoi(m[1])
@@ -989,7 +1226,10 @@ func parseMMSSComponents(m []string) (minutes, seconds int, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	if minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+	// minutes here is the TOTAL minutes of an [mm:ss] marker (no hour field), so
+	// a transcript longer than an hour renders e.g. [75:30]; accept any
+	// non-negative minute count. Only seconds are bounded to a single unit.
+	if minutes < 0 || seconds < 0 || seconds > 59 {
 		return 0, 0, false
 	}
 	return minutes, seconds, true
@@ -1022,10 +1262,10 @@ func parseTranscriptTimestamp(line string) (int, string, bool) {
 	}
 
 	m := transcriptTimestampBracketedRe.FindStringSubmatch(trimmed)
-	if len(m) != 5 {
+	if len(m) != 6 {
 		m = transcriptTimestampBareRe.FindStringSubmatch(trimmed)
 	}
-	if len(m) != 5 {
+	if len(m) != 6 {
 		return 0, "", false
 	}
 
@@ -1046,8 +1286,28 @@ func parseTranscriptTimestamp(line string) (int, string, bool) {
 		}
 	}
 
-	totalMS := ((hours * 3600) + (minutes * 60) + seconds) * 1000
-	return totalMS, strings.TrimSpace(m[4]), true
+	totalMS := ((hours*3600)+(minutes*60)+seconds)*1000 + fractionToMS(m[4])
+	return totalMS, strings.TrimSpace(m[5]), true
+}
+
+// fractionToMS converts the optional decimal-second fraction captured from a
+// transcript marker (1-3 digits, no leading dot) into milliseconds. The fraction
+// is a tenths/hundredths/thousandths value, so it is right-padded to three
+// digits: "5" -> 500, "05" -> 50, "250" -> 250. An empty fraction (a bare
+// whole-second "[mm:ss]" marker) yields 0, preserving backward-compatible
+// parsing of markers written before sub-second precision existed.
+func fractionToMS(frac string) int {
+	if frac == "" {
+		return 0
+	}
+	for len(frac) < 3 {
+		frac += "0"
+	}
+	ms, err := strconv.Atoi(frac)
+	if err != nil {
+		return 0
+	}
+	return ms
 }
 
 func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment {
@@ -1207,6 +1467,18 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 // ChunkTextByChars splits text content using the same policy as ingestion.
 func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []ChunkSegment {
 	raw := chunkTextByChars(content, maxChars, overlapChars, minChars)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ChunkRawText is an exported wrapper over chunkRawTextByDocType (which uses the
+// process-level effective chunk sizes set by ConfigureChunking) so tests in the
+// tests/ tree can exercise the raw-text path directly.
+func ChunkRawText(docType, content string) []ChunkSegment {
+	raw := chunkRawTextByDocType(docType, content)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

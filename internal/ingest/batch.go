@@ -28,11 +28,14 @@ import (
 // Canonical §14.4 error codes recorded in a manifest record's `error_code`
 // field (§7.7). EXTRACT_FAILED is the generic representation/derivation failure;
 // TRANSCRIBE_FAILED is distinguished via the package's transcript-failure
-// sentinel. Finer classification (TRANSLATE_FAILED/OCR_FAILED) is a follow-up
-// alongside the two-phase pass split.
+// sentinel. OCR_FAILED / TRANSLATE_FAILED are the finer output-quality-gate
+// classifications (§8.6.6): a degenerate OCR/translation output rejected by the
+// gate records the matching code via qualityGateFailureCode (service.go).
 const (
 	manifestErrTranscribeFailed = "TRANSCRIBE_FAILED"
 	manifestErrExtractFailed    = "EXTRACT_FAILED"
+	manifestErrOCRFailed        = "OCR_FAILED"
+	manifestErrTranslateFailed  = "TRANSLATE_FAILED"
 )
 
 // manifestErrorCode maps a per-asset processing error to a canonical §14.4 code
