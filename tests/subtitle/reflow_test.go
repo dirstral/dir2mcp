@@ -47,26 +47,61 @@ func TestReflowChunkCuesEmpty(t *testing.T) {
 	}
 }
 
-// TestReflowChunkCuesEvensReadingSpeed pins the core behaviour: a dense source
-// cue (a long clause crammed into a sub-second slot) that sits in the same
-// contiguous run as a sparse neighbour borrows time from it, so no output cue
-// reads far faster than the run average. The run here is ~90 chars over 6 s
-// (~15 cps), so every cue must land well under a 22 cps legibility ceiling —
-// which the dense input cue alone (~55 chars in 0.6 s ≈ 90 cps) badly violated.
-func TestReflowChunkCuesEvensReadingSpeed(t *testing.T) {
+// TestReflowChunkCuesPreservesSegmentTiming pins the timing-preservation
+// invariant: because time is distributed strictly within each source cue's own
+// span, a word never migrates toward the middle of a run of cues. Here a short,
+// text-heavy cue is followed by a one-word cue that lasts nine seconds. A
+// run-wide proportional split would drop the late word ("MARKER") near the end
+// of the dense text — seconds after it is actually spoken — but per-cue timing
+// keeps it anchored to its own [500,9500] window.
+func TestReflowChunkCuesPreservesSegmentTiming(t *testing.T) {
 	in := []subtitle.Cue{
-		{Index: 1, StartMS: 0, EndMS: 600, Text: "We have submitted a formal request to the ministry today."},
-		{Index: 2, StartMS: 600, EndMS: 6000, Text: "Yes."},
+		{Index: 1, StartMS: 0, EndMS: 500, Text: "alpha bravo charlie delta echo foxtrot golf hotel"},
+		{Index: 2, StartMS: 500, EndMS: 9500, Text: "MARKER"},
+	}
+	out := subtitle.ReflowChunkCues(in)
+	var found *subtitle.Cue
+	for i := range out {
+		if strings.Contains(out[i].Text, "MARKER") {
+			found = &out[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("MARKER not found in reflow output: %+v", out)
+	}
+	// MARKER is spoken at 500 ms; its cue must start near there, not be dragged
+	// thousands of ms later by run-wide redistribution. Allow generous slack for
+	// legitimate lead-in / merge, but far tighter than the multi-second drift the
+	// run-based bug produced.
+	if found.StartMS > 2000 {
+		t.Errorf("MARKER cue starts at %d ms, dragged far from its spoken time (500 ms)", found.StartMS)
+	}
+}
+
+// TestReflowChunkCuesRelaxesIntoGap pins the reading-speed mechanism that IS
+// available without moving words across cues: a dense cue followed by silence
+// has its on-screen time extended into that silence (never overlapping the next
+// cue), pulling its reading speed down toward the target. A dense cue with no
+// following gap legitimately stays dense — that is a property of the speech.
+func TestReflowChunkCuesRelaxesIntoGap(t *testing.T) {
+	in := []subtitle.Cue{
+		{Index: 1, StartMS: 0, EndMS: 900, Text: "A dense line with quite a lot of words to read."},
+		// ~8 s of silence before the next cue: borrowable display time.
+		{Index: 2, StartMS: 9000, EndMS: 10000, Text: "Later."},
 	}
 	out := subtitle.ReflowChunkCues(in)
 	if len(out) == 0 {
 		t.Fatal("ReflowChunkCues returned no cues")
 	}
-	if got := maxCPS(out); got > 22 {
-		t.Errorf("max reading speed %.1f cps exceeds 22 after reflow; cues=%+v", got, out)
+	// The first cue (~47 chars) started at ~52 cps over 900 ms; extending into the
+	// gap must bring it under the legibility ceiling without overlapping cue 2.
+	first := out[0]
+	if dur := first.EndMS - first.StartMS; dur <= 900 {
+		t.Errorf("dense cue not extended into the following silence: dur=%d ms", dur)
 	}
-	if before := maxCPS(in); before <= 22 {
-		t.Fatalf("test precondition: input should be dense (>22 cps), got %.1f", before)
+	if got := maxCPS(out); got > 22 {
+		t.Errorf("max reading speed %.1f cps exceeds 22 after relaxing into the gap", got)
 	}
 }
 
