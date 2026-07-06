@@ -286,6 +286,30 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 	}
 }
 
+// TranslateTranscriber builds a Transcriber that runs Whisper's native
+// translate task (audio->English single pass) instead of transcription. It is
+// only meaningful for kind:whisper — the only STT provider with a translate
+// task — so any other kind is rejected. Used by the ingest translate path when
+// media.translate.engine=whisper (config validation guarantees the STT provider
+// is kind:whisper before this is reached). Language is intentionally NOT set:
+// task=translate always targets English, and pinning the source language would
+// only ever hurt auto-detection.
+func TranslateTranscriber(p provider.Profile) (model.Transcriber, error) {
+	if p.Kind != provider.KindWhisper {
+		return nil, fmt.Errorf("provider kind %q cannot serve the Whisper translate task (audio->English single pass); it requires kind %q", p.Kind, provider.KindWhisper)
+	}
+	c := whisperapi.NewClient(p.BaseURL, p.APIKey)
+	if p.STTModel != "" {
+		c.DefaultModel = p.STTModel
+	}
+	c.VADFilter = p.STTVAD
+	c.Task = whisperapi.TaskTranslate
+	// Long-form media translate needs the same raised payload/timeout caps as the
+	// normal STT path (dir2mcp#510/#511), so apply them here too.
+	applyWhisperLimits(c, p)
+	return c, nil
+}
+
 // applyWhisperLimits overrides the whisper client's built-in request caps from
 // the resolved profile when set (>0). The defaults (50 MB payload, 120 s
 // timeout) are too small for long-form media, so an operator can raise them via
