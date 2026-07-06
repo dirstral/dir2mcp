@@ -303,9 +303,10 @@ func (c *Client) responseFormat() string {
 }
 
 // task returns the configured Whisper task, defaulting to TaskTranscribe so the
-// existing transcription contract is unchanged. Any non-empty value other than
-// the default is passed through, and only TaskTranslate is actually emitted on
-// the wire (see buildBody).
+// existing transcription contract is unchanged. The returned value only affects
+// the wire when it equals TaskTranslate: buildBody emits the multipart `task`
+// field solely for TaskTranslate and ignores every other value (including any
+// server-specific string), leaving plain-transcription requests unchanged.
 func (c *Client) task() string {
 	if t := strings.TrimSpace(c.Task); t != "" {
 		return t

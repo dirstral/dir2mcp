@@ -3,6 +3,8 @@ package tests
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -116,6 +118,52 @@ func TestWhisperTranslate_CacheReused(t *testing.T) {
 	run(tr2)
 	if tr2.calls != 0 {
 		t.Fatalf("expected cached whisper translation reused (0 calls) on second run, got %d", tr2.calls)
+	}
+}
+
+// TestWhisperTranslate_PurgeRemovesTranslateCache proves PurgeTranscriptCache
+// removes the "-translate" whisper-translate cache file, not just the source
+// transcript entry. The translate cache can carry gated (possibly secret-
+// bearing) English text, so a purge that left it on disk would defeat the
+// MCP secret-pattern gate that calls this to erase refused transcripts.
+func TestWhisperTranslate_PurgeRemovesTranslateCache(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	content := []byte("audio-bytes-to-purge")
+
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет"})
+	svc.SetTranscriptLanguage("ru")
+	svc.SetTranslateTranscriber(
+		&fakeTranscriber{text: "[00:00] hello"},
+		"whisper", "large-v3", []string{"en"})
+
+	doc := model.Document{DocID: 7, RelPath: "audio/clip.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, content); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+
+	cacheDir := filepath.Join(stateDir, "cache", "transcribe")
+	translateFiles := func() []string {
+		matches, err := filepath.Glob(filepath.Join(cacheDir, "*-translate*.txt"))
+		if err != nil {
+			t.Fatalf("glob translate cache: %v", err)
+		}
+		return matches
+	}
+
+	if got := translateFiles(); len(got) == 0 {
+		entries, _ := os.ReadDir(cacheDir)
+		t.Fatalf("expected a whisper-translate cache file after ingest, dir contents=%+v", entries)
+	}
+
+	// Purge with the SOURCE language (ru): the translate cache is fixed to "en",
+	// so purge must still find and remove it.
+	svc.PurgeTranscriptCache(content, "ru")
+
+	if got := translateFiles(); len(got) != 0 {
+		t.Fatalf("expected whisper-translate cache file removed by PurgeTranscriptCache, still present: %v", got)
 	}
 }
 

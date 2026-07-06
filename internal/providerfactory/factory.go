@@ -293,7 +293,7 @@ func Transcriber(p provider.Profile) (model.Transcriber, error) {
 // only ever hurt auto-detection.
 func TranslateTranscriber(p provider.Profile) (model.Transcriber, error) {
 	if p.Kind != provider.KindWhisper {
-		return nil, unsupported(p, provider.CapSTT)
+		return nil, fmt.Errorf("provider kind %q cannot serve the Whisper translate task (audio->English single pass); it requires kind %q", p.Kind, provider.KindWhisper)
 	}
 	c := whisperapi.NewClient(p.BaseURL, p.APIKey)
 	if p.STTModel != "" {

@@ -3400,6 +3400,25 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 	if err := os.WriteFile(cachePath, translatedBytes, 0o644); err != nil {
 		return "", fmt.Errorf("write whisper-translate cache: %w", err)
 	}
+	shouldEnforceAfterWrite := s.markOCRCacheWrite()
+	if shouldEnforceAfterWrite {
+		// Participate in the same cache-policy enforcement as the source
+		// transcript write (readOrComputeTranscriptWithWords) so the translate
+		// cache is bounded under the same operational policy and cannot grow
+		// unbounded.
+		s.ocrCacheMu.RLock()
+		enforceHook := s.ocrCacheEnforce
+		s.ocrCacheMu.RUnlock()
+		var err error
+		if enforceHook != nil {
+			err = enforceHook(cacheDir)
+		} else {
+			err = s.enforceCachePolicy(cacheDir)
+		}
+		if err != nil {
+			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
+		}
+	}
 	return string(translatedBytes), nil
 }
 
@@ -3467,7 +3486,12 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
-	for _, p := range []string{base + ".txt", base + ".words.json"} {
+	// The whisper-translate cache (readOrComputeWhisperTranslation) is keyed on
+	// the same content but with a "-translate" discriminator and a fixed "en"
+	// suffix (it always targets English), so it must be purged too or gated
+	// (possibly secret-bearing) translated text survives the purge.
+	translateBase := s.transcriptCacheKey(content) + "-translate" + TranscriptLangSuffix("en")
+	for _, p := range []string{base + ".txt", base + ".words.json", translateBase + ".txt"} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			s.getLogger().Printf("purge transcript cache: %v", err)
 		}
