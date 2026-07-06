@@ -1,8 +1,9 @@
-package ingest
+package tests
 
 import (
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -14,8 +15,8 @@ func TestWhisperTranslateOverlapMS(t *testing.T) {
 		{0, 0},
 	}
 	for _, c := range cases {
-		if got := whisperTranslateOverlapMS(c.window); got != c.want {
-			t.Errorf("whisperTranslateOverlapMS(%d) = %d, want %d", c.window, got, c.want)
+		if got := ingest.WhisperTranslateOverlapMS(c.window); got != c.want {
+			t.Errorf("WhisperTranslateOverlapMS(%d) = %d, want %d", c.window, got, c.want)
 		}
 	}
 }
@@ -25,8 +26,8 @@ func TestWhisperTranslateOverlapMS(t *testing.T) {
 // from exactly one window (the one whose core they fall in), except the final
 // window which keeps everything through the end.
 func TestMergeTranslateWindows(t *testing.T) {
-	windows := []translateWindow{
-		{startMS: 0, res: model.TranscriptResult{
+	windows := []ingest.TranslateWindow{
+		{StartMS: 0, Res: model.TranscriptResult{
 			Text: "[0:00] a\n[0:03] b\n[0:04] c", // "c" at abs 4000 is in the overlap
 			Words: []model.TimedWord{
 				{Word: "a", StartMS: 0, EndMS: 500},
@@ -34,7 +35,7 @@ func TestMergeTranslateWindows(t *testing.T) {
 				{Word: "c", StartMS: 4500, EndMS: 5000}, // abs 4500 -> outside core, dropped
 			},
 		}},
-		{startMS: 4000, res: model.TranscriptResult{
+		{StartMS: 4000, Res: model.TranscriptResult{
 			Text: "[0:00] c\n[0:02] d", // "c" re-decoded here (abs 4000), "d" at abs 6000
 			Words: []model.TimedWord{
 				{Word: "c", StartMS: 500, EndMS: 1000},  // abs 4500
@@ -42,7 +43,7 @@ func TestMergeTranslateWindows(t *testing.T) {
 			},
 		}},
 	}
-	text, words := mergeTranslateWindows(windows, 4000)
+	text, words := ingest.MergeTranslateWindows(windows, 4000)
 
 	// Words: a@0, b@3000 (window 0 core), then c@4500, d@6000 (window 1, the last,
 	// keeps all). The window-0 "c" at 4500 was dropped as the overlap duplicate.
@@ -71,13 +72,13 @@ func TestMergeTranslateWindows(t *testing.T) {
 // TestMergeTranslateWindowsSingle pins that a single window is a straight offset
 // (no dedup drops anything, since it is the final window).
 func TestMergeTranslateWindowsSingle(t *testing.T) {
-	windows := []translateWindow{
-		{startMS: 2000, res: model.TranscriptResult{
+	windows := []ingest.TranslateWindow{
+		{StartMS: 2000, Res: model.TranscriptResult{
 			Text:  "[0:01] hello",
 			Words: []model.TimedWord{{Word: "hello", StartMS: 1000, EndMS: 1500}},
 		}},
 	}
-	text, words := mergeTranslateWindows(windows, 4000)
+	text, words := ingest.MergeTranslateWindows(windows, 4000)
 	if len(words) != 1 || words[0].StartMS != 3000 {
 		t.Fatalf("expected one word offset to 3000ms, got %+v", words)
 	}

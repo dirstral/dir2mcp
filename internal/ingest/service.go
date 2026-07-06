@@ -3392,7 +3392,13 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 	// the file is distinct from the source transcript's cache entry. Per-word
 	// timings ride along in a .words.json sidecar (as the source transcribe path
 	// does) so the English track can be broadcast-segmented, not just chunked.
+	// The windowing size changes the produced timings, so fold it into the key —
+	// otherwise a changed media.translate.whisper_window_sec would silently reuse
+	// stale text/words from a different window setting.
 	base := s.transcriptCacheKey(content) + "-translate" + TranscriptLangSuffix("en")
+	if s.cfg.MediaTranslateWhisperWindowSec > 0 {
+		base += fmt.Sprintf("-w%d", s.cfg.MediaTranslateWhisperWindowSec)
+	}
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	if cached, err := os.ReadFile(cachePath); err == nil {

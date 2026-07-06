@@ -12,20 +12,22 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
-// translateWindow is one decoded audio window: the offset (ms from the start of
+// TranslateWindow is one decoded audio window: the offset (ms from the start of
 // the whole recording) at which the window began, and the window-local translate
-// result (its timestamps start at 0 for the window).
-type translateWindow struct {
-	startMS int
-	res     model.TranscriptResult
+// result (its timestamps start at 0 for the window). Exported so the pure merge
+// logic can be unit-tested from the tests/ tree (AGENTS.md: no new _test.go under
+// internal/).
+type TranslateWindow struct {
+	StartMS int
+	Res     model.TranscriptResult
 }
 
-// whisperTranslateOverlapMS derives the overlap between consecutive decode windows
+// WhisperTranslateOverlapMS derives the overlap between consecutive decode windows
 // from the window length: enough lookahead that a sentence straddling a boundary
 // is fully decoded in the window it starts in, capped so the overlap never
 // dominates the window. Deriving it (rather than exposing a second knob) keeps the
 // public surface to a single media.translate.whisper_window_sec setting.
-func whisperTranslateOverlapMS(windowMS int) int {
+func WhisperTranslateOverlapMS(windowMS int) int {
 	overlap := windowMS / 5
 	if overlap > 10000 {
 		overlap = 10000
@@ -36,7 +38,7 @@ func whisperTranslateOverlapMS(windowMS int) int {
 	return overlap
 }
 
-// mergeTranslateWindows stitches per-window translate results (each in
+// MergeTranslateWindows stitches per-window translate results (each in
 // window-local time) into one transcript in absolute time. Each window's segment
 // lines and words are offset by the window's start, then de-duplicated against the
 // overlap by keeping only those whose absolute start falls in the window's CORE
@@ -46,19 +48,19 @@ func whisperTranslateOverlapMS(windowMS int) int {
 //
 // It is a pure function of its inputs so the windowing/merge logic is unit-tested
 // without a live transcriber.
-func mergeTranslateWindows(windows []translateWindow, stepMS int) (string, []model.TimedWord) {
+func MergeTranslateWindows(windows []TranslateWindow, stepMS int) (string, []model.TimedWord) {
 	if stepMS <= 0 {
 		stepMS = 1
 	}
 	var lines []string
 	var words []model.TimedWord
 	for i, w := range windows {
-		coreEnd := w.startMS + stepMS
+		coreEnd := w.StartMS + stepMS
 		last := i == len(windows)-1
 
-		for _, wd := range w.res.Words {
-			abs := wd.StartMS + w.startMS
-			if abs < w.startMS {
+		for _, wd := range w.Res.Words {
+			abs := wd.StartMS + w.StartMS
+			if abs < w.StartMS {
 				continue
 			}
 			if !last && abs >= coreEnd {
@@ -67,11 +69,11 @@ func mergeTranslateWindows(windows []translateWindow, stepMS int) (string, []mod
 			words = append(words, model.TimedWord{
 				Word:    wd.Word,
 				StartMS: abs,
-				EndMS:   wd.EndMS + w.startMS,
+				EndMS:   wd.EndMS + w.StartMS,
 			})
 		}
 
-		for _, line := range strings.Split(w.res.Text, "\n") {
+		for _, line := range strings.Split(w.Res.Text, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" {
 				continue
@@ -88,7 +90,7 @@ func mergeTranslateWindows(windows []translateWindow, stepMS int) (string, []mod
 			if strings.TrimSpace(body) == "" {
 				continue
 			}
-			abs := startMS + w.startMS
+			abs := startMS + w.StartMS
 			if !last && abs >= coreEnd {
 				continue
 			}
@@ -112,7 +114,7 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	if windowMS <= 0 || !ok {
 		return s.translateStructured(ctx, doc, content)
 	}
-	stepMS := windowMS - whisperTranslateOverlapMS(windowMS)
+	stepMS := windowMS - WhisperTranslateOverlapMS(windowMS)
 	if stepMS <= 0 {
 		stepMS = windowMS
 	}
@@ -141,7 +143,7 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		return s.translateStructured(ctx, doc, content)
 	}
 
-	var windows []translateWindow
+	var windows []TranslateWindow
 	for start := 0; start < totalMS; start += stepMS {
 		end := start + windowMS
 		if end > totalMS {
@@ -155,9 +157,9 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		if err != nil {
 			return "", nil, fmt.Errorf("translate window [%d,%d]ms: %w", start, end, err)
 		}
-		windows = append(windows, translateWindow{startMS: start, res: res})
+		windows = append(windows, TranslateWindow{StartMS: start, Res: res})
 	}
 
-	text, words := mergeTranslateWindows(windows, stepMS)
+	text, words := MergeTranslateWindows(windows, stepMS)
 	return text, words, nil
 }
