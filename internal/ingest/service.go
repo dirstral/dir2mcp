@@ -3399,7 +3399,7 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 		return string(cached), readCachedWords(wordsPath), nil
 	}
 
-	translated, words, err := s.translateStructured(ctx, doc, content)
+	translated, words, err := s.translateStructuredWindowed(ctx, doc, content)
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
