@@ -258,11 +258,38 @@ func rotateLogIfLarge(path string) error {
 	return nil
 }
 
+// pidRecord is the parsed content of a daemon pid file: the registered pid
+// plus, when the writing binary recorded it, an opaque start-time token that
+// pins the pid to a specific process instance. StartToken is empty for a pid
+// file written by a pre-#418 binary (a bare integer) or on a platform where
+// processStartToken is unavailable; callers then fall back to bare liveness.
+type pidRecord struct {
+	PID        int
+	StartToken string
+}
+
+// pidOwnership classifies a daemon pid file relative to the calling host so
+// down/up/reindex/status can act correctly in the presence of pid reuse
+// (issue #418): after a crash without cleanup the OS can recycle the recorded
+// pid to an unrelated process, which a bare liveness check would mistake for
+// the live daemon.
+type pidOwnership int
+
+const (
+	pidNoFile    pidOwnership = iota // no pid file present
+	pidMalformed                     // pid file unreadable / not a valid pid
+	pidDead                          // names a process that is not alive (stale)
+	pidRecycled                      // names a LIVE process that is not our daemon
+	pidLive                          // names our live daemon (verified, or unverifiable)
+)
+
 // claimPIDFile creates the pid file at path with O_EXCL so that two
 // daemons racing to start in the same state directory cannot both
 // succeed — only the kernel-level "create-if-not-exists" winner ends up
 // owning the file. Returns an error wrapping os.ErrExist when another
-// process has already claimed it.
+// process has already claimed it. The record includes this process's
+// start-time token (when available) so a later down/up can tell our live
+// daemon apart from an unrelated process that inherited a recycled pid.
 //
 // The child (not the parent) calls this once it has bound its listener.
 // Doing the claim in the child rather than the parent fixes two
@@ -277,14 +304,32 @@ func rotateLogIfLarge(path string) error {
 //     with O_EXCL on the file, the second child loses deterministically
 //     and exits without touching the first one's listener or files.
 func claimPIDFile(path string, pid int) error {
+	token, _ := processStartToken(pid)
+	return writePIDRecord(path, pid, token, true)
+}
+
+// writePIDRecord writes the pid (and, when non-empty, its start-time token)
+// to path. When exclusive is true it uses O_EXCL so a second racing writer
+// fails with os.ErrExist (the daemon-claim path); otherwise it truncates,
+// which is only used by the exported test helper.
+func writePIDRecord(path string, pid int, startToken string, exclusive bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create pid file directory: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if exclusive {
+		flags = os.O_CREATE | os.O_EXCL | os.O_WRONLY
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
 		return err // pass through os.ErrExist for callers to type-check
 	}
-	if _, err := fmt.Fprintf(f, "%d\n", pid); err != nil {
+	var buf strings.Builder
+	_, _ = fmt.Fprintf(&buf, "%d\n", pid)
+	if startToken != "" {
+		_, _ = fmt.Fprintf(&buf, "start=%s\n", startToken)
+	}
+	if _, err := f.WriteString(buf.String()); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
 		return fmt.Errorf("write pid file: %w", err)
@@ -298,24 +343,72 @@ func claimPIDFile(path string, pid int) error {
 
 // readPIDFile parses the pid from a pid file. Returns os.ErrNotExist when
 // the file is absent so callers can treat "no daemon registered" as a
-// distinct case from "pid file is malformed".
+// distinct case from "pid file is malformed". Extra lines (the start-time
+// token) are ignored so callers that only need the pid stay simple.
 func readPIDFile(path string) (int, error) {
-	raw, err := os.ReadFile(path)
+	rec, err := readPIDRecord(path)
 	if err != nil {
 		return 0, err
 	}
-	s := strings.TrimSpace(string(raw))
-	if s == "" {
-		return 0, fmt.Errorf("pid file %s is empty", path)
-	}
-	pid, err := strconv.Atoi(s)
+	return rec.PID, nil
+}
+
+// readPIDRecord parses the pid file into a pidRecord. The first line is the
+// pid (as written by every binary, past and present); an optional
+// `start=<token>` line pins that pid to a specific process instance. Returns
+// os.ErrNotExist when the file is absent so callers can distinguish "no
+// daemon registered" from a malformed file.
+func readPIDRecord(path string) (pidRecord, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("pid file %s contains non-integer %q", path, s)
+		return pidRecord{}, err
+	}
+	lines := strings.Split(string(raw), "\n")
+	first := strings.TrimSpace(lines[0])
+	if first == "" {
+		return pidRecord{}, fmt.Errorf("pid file %s is empty", path)
+	}
+	pid, err := strconv.Atoi(first)
+	if err != nil {
+		return pidRecord{}, fmt.Errorf("pid file %s contains non-integer %q", path, first)
 	}
 	if pid <= 0 {
-		return 0, fmt.Errorf("pid file %s contains non-positive pid %d", path, pid)
+		return pidRecord{}, fmt.Errorf("pid file %s contains non-positive pid %d", path, pid)
 	}
-	return pid, nil
+	rec := pidRecord{PID: pid}
+	for _, ln := range lines[1:] {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(ln), "start="); ok {
+			rec.StartToken = v
+		}
+	}
+	return rec, nil
+}
+
+// classifyPIDFile reads the pid file at path and reports both the recorded
+// pid and how it relates to the calling host, so down/up/reindex/status can
+// avoid the pid-reuse hazards in issue #418. When the record carries a
+// start-time token and the live process's current token disagrees, the pid
+// was recycled to an unrelated process (pidRecycled) and must NOT be
+// signalled or mistaken for the daemon. When no token is recorded or the
+// platform can't read one, an alive pid degrades to pidLive — identical to
+// the pre-#418 bare-liveness behaviour.
+func classifyPIDFile(path string) (int, pidOwnership) {
+	rec, err := readPIDRecord(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, pidNoFile
+		}
+		return 0, pidMalformed
+	}
+	if !processIsAlive(rec.PID) {
+		return rec.PID, pidDead
+	}
+	if rec.StartToken != "" {
+		if tok, ok := processStartToken(rec.PID); ok && tok != rec.StartToken {
+			return rec.PID, pidRecycled
+		}
+	}
+	return rec.PID, pidLive
 }
 
 // removePIDFile deletes the pid file. Idempotent: a missing file is not
@@ -326,6 +419,19 @@ func removePIDFile(path string) error {
 		return nil
 	}
 	return err
+}
+
+// ProcessStartTokenForTest exposes processStartToken so external lifecycle
+// tests can tell whether pid-reuse protection is active on this platform (ok)
+// and obtain a real token to build a deliberately-mismatching pid record.
+// Test-only surface; not used by production code.
+func ProcessStartTokenForTest(pid int) (string, bool) { return processStartToken(pid) }
+
+// WritePIDRecordForTest writes a pid file carrying an arbitrary start-time
+// token so external tests can simulate a recycled pid (a live pid whose
+// recorded token no longer matches the live process). Test-only surface.
+func WritePIDRecordForTest(path string, pid int, startToken string) error {
+	return writePIDRecord(path, pid, startToken, false)
 }
 
 // processIsAlive reports whether a process with the given pid is currently

@@ -16,11 +16,19 @@ import (
 type fakeEmbeddedSource struct {
 	byKind   map[string][]uint64
 	repended []uint64
-	listErr  error
-	repErr   error
+	// rependBatches records the size of each RependEmbeddedChunks call so tests
+	// can assert re-pending is flushed in bounded batches (issue #503) rather than
+	// one terminal call.
+	rependBatches []int
+	// seeks records the afterChunkID cursor passed to each ListEmbeddedChunkMetadata
+	// call so tests can assert the keyset walk advances monotonically.
+	seeks   []int64
+	listErr error
+	repErr  error
 }
 
 func (f *fakeEmbeddedSource) ListEmbeddedChunkMetadata(_ context.Context, kind string, limit int, afterChunkID int64) ([]model.ChunkTask, error) {
+	f.seeks = append(f.seeks, afterChunkID)
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -46,7 +54,22 @@ func (f *fakeEmbeddedSource) RependEmbeddedChunks(_ context.Context, labels []ui
 		return f.repErr
 	}
 	f.repended = append(f.repended, labels...)
+	f.rependBatches = append(f.rependBatches, len(labels))
 	return nil
+}
+
+// absentIndex is a model.Index that implements index.VectorPresence and reports
+// every chunk as missing, standing in for a snapshot that lost all its vectors.
+// It lets the batching test drive a large missing set without materializing a
+// real HNSW graph.
+type absentIndex struct{ model.Index }
+
+func (absentIndex) HasVectors(_ context.Context, chunkIDs []uint64) (map[uint64]bool, error) {
+	present := make(map[uint64]bool, len(chunkIDs))
+	for _, id := range chunkIDs {
+		present[id] = false
+	}
+	return present, nil
 }
 
 // stubIndex is a minimal model.Index that deliberately does NOT implement
@@ -115,6 +138,67 @@ func TestReconcileEmbeddedVectors_DurableBackendNoop(t *testing.T) {
 	}
 	if n != 0 || len(src.repended) != 0 {
 		t.Fatalf("expected durable backend no-op, got n=%d repended=%v", n, src.repended)
+	}
+}
+
+// TestReconcileEmbeddedVectors_RependsInBoundedBatches pins the #503 fix: a large
+// missing set is re-pended across multiple bounded batches as the scan proceeds
+// (not one terminal O(total) call), and the union of every batch equals the full
+// missing set — so bounding peak memory preserves correctness.
+func TestReconcileEmbeddedVectors_RependsInBoundedBatches(t *testing.T) {
+	// Enough embedded chunks — all reported missing — that the buffer crosses the
+	// re-pend batch threshold several times, forcing multiple flushes.
+	const total = 2500
+	want := make([]uint64, 0, total)
+	for id := uint64(1); id <= total; id++ {
+		want = append(want, id)
+	}
+	src := &fakeEmbeddedSource{byKind: map[string][]uint64{index.KindText: want}}
+
+	n, err := index.ReconcileEmbeddedVectors(context.Background(), src, absentIndex{}, index.KindText)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != total {
+		t.Fatalf("re-pended count = %d, want %d", n, total)
+	}
+	// Bounded batching: more than one flush, and no single flush carried the whole
+	// missing set (peak buffer is bounded well below total on a large corpus).
+	if len(src.rependBatches) < 2 {
+		t.Fatalf("expected re-pend to be flushed in multiple batches, got %d call(s): %v",
+			len(src.rependBatches), src.rependBatches)
+	}
+	sum := 0
+	for i, size := range src.rependBatches {
+		if size == 0 {
+			t.Fatalf("batch %d was empty: %v", i, src.rependBatches)
+		}
+		if size >= total {
+			t.Fatalf("batch %d size %d not bounded below total %d: %v", i, size, total, src.rependBatches)
+		}
+		sum += size
+	}
+	if sum != total {
+		t.Fatalf("batch sizes sum to %d, want %d: %v", sum, total, src.rependBatches)
+	}
+	// The keyset cursor is monotonic non-decreasing across pages — each fetch seeks
+	// strictly past the previous page's largest chunk_id, so no row is scanned twice
+	// and the flush invariant (buffered ID chunk_id <= afterChunkID) can hold.
+	for i := 1; i < len(src.seeks); i++ {
+		if src.seeks[i] <= src.seeks[i-1] {
+			t.Fatalf("seek cursor not monotonic at page %d: %v", i, src.seeks)
+		}
+	}
+	// Correctness preserved: the union of all batches is exactly the missing set.
+	got := append([]uint64(nil), src.repended...)
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	if len(got) != len(want) {
+		t.Fatalf("re-pended %d chunks, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("re-pended set diverges at %d: got %d want %d", i, got[i], want[i])
+		}
 	}
 }
 

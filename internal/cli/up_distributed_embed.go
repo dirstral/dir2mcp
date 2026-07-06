@@ -7,7 +7,6 @@ import (
 	"log"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -69,17 +68,38 @@ func startDistributedEmbedding(
 		return errors.New("distributed embedding: embed identity could not be resolved")
 	}
 
+	// Single-coordinator guard (issue #435 C3): refuse to start a second
+	// coordinator for this corpus. The default broker is in-process and cannot
+	// dedup across processes, so two daemons on one corpus would otherwise both
+	// enqueue + double-embed the same chunks. The lock releases automatically if
+	// this process dies (OS drops the advisory flock).
+	coordLock, err := embedqueue.AcquireCoordinatorLock(filepath.Join(cfg.StateDir, "embed-coordinator.lock"))
+	if err != nil {
+		if errors.Is(err, embedqueue.ErrCoordinatorLocked) {
+			return errors.New("distributed embedding: another dir2mcp is already embedding this corpus (coordinator lock held); refusing to start a second coordinator")
+		}
+		return fmt.Errorf("distributed embedding: acquire coordinator lock: %w", err)
+	}
+
 	broker, err := buildEmbedBroker(ctx, cfg)
 	if err != nil {
+		_ = coordLock.Release()
 		return fmt.Errorf("distributed embedding: build broker: %w", err)
 	}
 
+	// Guard embedded_ok against redelivery double-counting (issue #435 C2): the
+	// per-upsert hook fires on every successful (re-)embed, so gate the COUNT to a
+	// chunk's first success. Shared across both axes' hooks.
+	embeddedGuard := embedqueue.NewEmbeddedGuard()
+
 	// Build a per-kind embedder reusing the in-process embedding path so the
 	// distributed worker shares all embed/media-load/index/mark logic.
-	embedders := buildAxisEmbedders(chunkSource, textIndex, codeIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger)
+	embedders := buildAxisEmbedders(chunkSource, textIndex, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger)
 	if len(embedders) == 0 {
-		// Post-open abort: close the broker so its SQLite handle is not leaked.
+		// Post-open abort: close the broker and release the lock so its SQLite
+		// handle and the coordinator lock are not leaked.
 		_ = broker.Close()
+		_ = coordLock.Release()
 		return errors.New("distributed embedding: no index axis configured")
 	}
 
@@ -121,11 +141,13 @@ func startDistributedEmbedding(
 		}()
 	}
 
-	// Close the broker when the run context ends so its handle (e.g. a SQLite DB)
-	// is released on shutdown.
+	// Close the broker and release the coordinator lock when the run context ends
+	// so its handle (e.g. a SQLite DB) and the single-coordinator guard are
+	// released on shutdown.
 	spawn(func() {
 		<-ctx.Done()
 		_ = broker.Close()
+		_ = coordLock.Release()
 	})
 
 	// Coordinator: periodically enqueue chunks that are still pending. Each pass
@@ -148,29 +170,38 @@ func startDistributedEmbedding(
 // runCoordinatorLoop enqueues pending chunks on a fixed interval until ctx is
 // cancelled. Re-enqueuing is safe: already-embedded chunks are no longer pending,
 // and a duplicate job is idempotent at the embed layer (SPEC §8.7.3).
+//
+// It delegates the loop + stall detection to embedqueue.RunCoordinator (issue #435
+// C4). A transient enqueue error stays best-effort (logged + non-blocking errCh
+// send) so a blip never stalls the loop, but a SUSTAINED failure (StallThreshold
+// consecutive errors) escalates to a durable, non-droppable signal — a
+// context-aware BLOCKING errCh send — so a stalled coordinator surfaces as an
+// embed_error event instead of a silently-idle daemon.
 func runCoordinatorLoop(ctx context.Context, coord *embedqueue.Coordinator, errCh chan<- error, logger *log.Logger) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		if _, err := coord.EnqueuePending(ctx, ""); err != nil &&
-			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	embedqueue.RunCoordinator(ctx, coord, embedqueue.CoordinatorLoopOptions{
+		OnError: func(err error) {
 			if logger != nil {
 				logger.Printf("distributed embedding: enqueue pending: %v", err)
 			}
-			// Also surface it as a structured event (the human logger is discarded
-			// in JSON mode). Non-blocking: a transient enqueue error must not stall
-			// the loop if errCh is full.
+			// Non-blocking: a transient enqueue error must not stall the loop if
+			// errCh is momentarily full.
 			select {
 			case errCh <- fmt.Errorf("distributed embedding: enqueue pending: %w", err):
 			default:
 			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
+		},
+		OnStall: func(consecutive int, err error) {
+			if logger != nil {
+				logger.Printf("distributed embedding: enqueue STALLED after %d consecutive failures: %v", consecutive, err)
+			}
+			// Durable escalation: block until the signal is consumed (or shutdown)
+			// so a sustained stall is never dropped by a full channel.
+			select {
+			case errCh <- fmt.Errorf("distributed embedding: enqueue stalled after %d consecutive failures: %w", consecutive, err):
+			case <-ctx.Done():
+			}
+		},
+	})
 }
 
 // newEmbedStep builds an index.EmbeddingWorker configured for one axis and
@@ -183,6 +214,7 @@ func newEmbedStep(
 	embedder model.Embedder,
 	ret *retrieval.Service,
 	indexingState *appstate.IndexingState,
+	embeddedGuard *embedqueue.EmbeddedGuard,
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
 	logger *log.Logger,
@@ -202,10 +234,13 @@ func newEmbedStep(
 		BatchSize:    distributedEmbedBatchSize,
 		Logger:       logger,
 		OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
+			// Refreshing metadata is idempotent, so it runs on every (re-)embed.
 			if ret != nil {
 				ret.SetChunkMetadataForIndex(kind, label, metadata.ToSearchHit())
 			}
-			if indexingState != nil {
+			// The count is NOT idempotent, so gate it to a chunk's first successful
+			// embed — a redelivered/retried job re-fires this hook (issue #435 C2).
+			if indexingState != nil && embeddedGuard.First(kind, label) {
 				indexingState.AddEmbeddedOK(1)
 			}
 		},
@@ -224,16 +259,17 @@ func buildAxisEmbedders(
 	embedder model.Embedder,
 	ret *retrieval.Service,
 	indexingState *appstate.IndexingState,
+	embeddedGuard *embedqueue.EmbeddedGuard,
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
 	logger *log.Logger,
 ) map[string]embedqueue.Embedder {
 	embedders := make(map[string]embedqueue.Embedder)
 	if textIndex != nil {
-		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger, "text")
+		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, "text")
 	}
 	if codeIndex != nil {
-		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, textModel, codeModel, rootDir, corpusFS, logger, "code")
+		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, "code")
 	}
 	return embedders
 }

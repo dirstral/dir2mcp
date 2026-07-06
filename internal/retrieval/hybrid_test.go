@@ -79,6 +79,34 @@ func TestFuseRRF_ZeroKDefaults(t *testing.T) {
 	}
 }
 
+// TestRerankFusionPoolSize pins the #519 rerank-pool fix: hybrid fusion keeps a
+// candidate pool sized for the downstream rerank stage (not truncated to the
+// final k), so the reranker can rescue a chunk fused below rank k.
+func TestRerankFusionPoolSize(t *testing.T) {
+	cases := []struct {
+		name       string
+		k          int
+		rerankPool int
+		want       int
+	}{
+		{"small k, default pool", 10, defaultRerankCandidatePool, defaultRerankCandidatePool},
+		{"pool unset falls back to default", 10, 0, defaultRerankCandidatePool},
+		{"k larger than pool is honored", 80, 50, 80},
+		{"pool below hybrid floor lifts to floor", 5, 20, hybridCandidatePoolSize},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rerankFusionPoolSize(tc.k, tc.rerankPool); got != tc.want {
+				t.Fatalf("rerankFusionPoolSize(%d, %d) = %d, want %d", tc.k, tc.rerankPool, got, tc.want)
+			}
+			// The pool must never be smaller than k, or rerank cannot return k hits.
+			if got := rerankFusionPoolSize(tc.k, tc.rerankPool); got < tc.k {
+				t.Fatalf("pool %d < k %d", got, tc.k)
+			}
+		})
+	}
+}
+
 func scores(hits []model.SearchHit) []float64 {
 	out := make([]float64, len(hits))
 	for i, h := range hits {

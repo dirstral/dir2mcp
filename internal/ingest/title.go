@@ -34,6 +34,13 @@ func ExtractTitle(body string) string {
 	if body == "" {
 		return ""
 	}
+	// Strip a leading UTF-8 BOM (U+FEFF): it is valid UTF-8 and unicode.IsSpace
+	// does not treat it as space, so TrimSpace leaves it in front of a `# Heading`
+	// line — hiding the heading from titleFromMarkdownHeading (#417).
+	body = strings.TrimPrefix(body, "\uFEFF")
+	if body == "" {
+		return ""
+	}
 	body = truncateOnRuneBoundary(body, titleScanLimit)
 	lines := strings.Split(body, "\n")
 

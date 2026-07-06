@@ -386,6 +386,11 @@ type ProviderResolution struct {
 	byName     map[string]provider.Profile
 	precedence []provider.Profile
 	doc        providersDoc
+	// lateChunking is the resolved ingest.late_chunking flag (issue #332/#446),
+	// stamped by Config.Providers so EmbedIdentity folds the late-chunking mode
+	// into the corpus-lifetime identity (SPEC 8.1.4). It is not a provider
+	// attribute, so it lives on the resolution rather than on a Profile.
+	lateChunking bool
 }
 
 // providersResolution builds the resolution from the parsed doc + env.
@@ -620,7 +625,7 @@ func (r ProviderResolution) EmbedIdentity() string {
 	if err != nil {
 		return ""
 	}
-	return provider.EmbedIdentity(p)
+	return provider.EmbedIdentity(p, r.lateChunking)
 }
 
 // Providers returns the provider resolution for cfg using os.Getenv for
@@ -629,7 +634,11 @@ func (r ProviderResolution) EmbedIdentity() string {
 func (cfg Config) Providers() ProviderResolution {
 	base := builtinProfiles()
 	seedLegacy(base, cfg)
-	return cfg.providersDoc.resolve(base, nil)
+	r := cfg.providersDoc.resolve(base, nil)
+	// Fold the resolved ingest.late_chunking flag onto the resolution so the
+	// embed identity captures the late-chunking mode (issue #332/#446).
+	r.lateChunking = cfg.IngestLateChunking
+	return r
 }
 
 // ProviderEnvVarRefs returns the distinct environment variable names

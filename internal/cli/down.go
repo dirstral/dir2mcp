@@ -37,23 +37,30 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 	}
 
 	pidPath := pidFilePath(cfg.StateDir)
-	pid, err := readPIDFile(pidPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, 0, false, "no_pid_file")
-			return exitSuccess
-		}
+	pid, ownership := classifyPIDFile(pidPath)
+	switch ownership {
+	case pidNoFile:
+		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, 0, false, "no_pid_file")
+		return exitSuccess
+	case pidMalformed:
 		// Malformed pid file is suspicious — surface and continue cleanup so
 		// `down` always leaves a clean state behind.
-		writef(a.stderr, "warning: %v; removing stale pid file\n", err)
+		writef(a.stderr, "warning: pid file %s is malformed; removing it\n", pidPath)
 		_ = removePIDFile(pidPath)
 		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, 0, false, "malformed_pid_file")
 		return exitSuccess
-	}
-
-	if !processIsAlive(pid) {
+	case pidDead:
 		_ = removePIDFile(pidPath)
 		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, false, "stale_pid")
+		return exitSuccess
+	case pidRecycled:
+		// The recorded pid is alive but its start-time token no longer matches:
+		// the OS recycled it to an unrelated process after our daemon crashed
+		// without cleanup. Signalling it would SIGTERM/SIGKILL a bystander
+		// (issue #418) — so clean up the stale pid file and stop, killing
+		// nothing.
+		_ = removePIDFile(pidPath)
+		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, false, "recycled_pid")
 		return exitSuccess
 	}
 
@@ -95,6 +102,8 @@ func writeDownInfo(stdout io.Writer, jsonMode bool, stateDir string, pid int, st
 		writef(stdout, "stopped dir2mcp daemon (pid %d) for %s\n", pid, stateDir)
 	case "stale_pid":
 		writef(stdout, "no dir2mcp daemon was running for %s (cleared stale pid %d)\n", stateDir, pid)
+	case "recycled_pid":
+		writef(stdout, "no dir2mcp daemon running for %s; pid %d was recycled to an unrelated process and left untouched (cleared stale pid file)\n", stateDir, pid)
 	case "no_pid_file":
 		writef(stdout, "no dir2mcp daemon registered for %s\n", stateDir)
 	case "malformed_pid_file":

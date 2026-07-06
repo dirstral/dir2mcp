@@ -126,6 +126,32 @@ type WordSpan struct {
 	W string `json:"w"`
 }
 
+// FormatTranscriptTimestamp renders an absolute media offset (milliseconds) as
+// the leading per-segment marker that transcribers emit and the ingest chunker
+// consumes. It is the single source of truth for that wire format so every STT
+// backend stays byte-for-byte consistent (generic, provider-neutral).
+//
+// A whole-second offset renders as "[mm:ss]" (unchanged from the historical
+// format); a sub-second offset renders as "[mm:ss.mmm]" so that two segments
+// inside the same second do not collapse onto one marker and word/subtitle
+// timings keep their millisecond precision (issue #431 item c). Minutes are not
+// wrapped into an hours field, matching prior provider output; a negative offset
+// is clamped to zero. The companion parser (ingest.parseTranscriptTimestamp)
+// accepts both forms, treating a bare whole-second marker as ".000".
+func FormatTranscriptTimestamp(startMS int) string {
+	if startMS < 0 {
+		startMS = 0
+	}
+	totalSeconds := startMS / 1000
+	ms := startMS % 1000
+	mm := totalSeconds / 60
+	ss := totalSeconds % 60
+	if ms == 0 {
+		return fmt.Sprintf("[%02d:%02d]", mm, ss)
+	}
+	return fmt.Sprintf("[%02d:%02d.%03d]", mm, ss, ms)
+}
+
 // RegionSpan localizes a chunk to a rectangular area within a page range of a
 // structured document (dirstral-spec §5.4 "region" span kind). It is the
 // in-memory shape of the spans.extra_json blob for region spans.

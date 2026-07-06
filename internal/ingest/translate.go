@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // readOrComputeTranslation returns the source transcript translated into
@@ -88,6 +90,14 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 	return strings.Join(out, "\n"), nil
 }
 
+// translateLineMaxTokens caps a single translated transcript line. One source
+// segment maps to one short output line, so a tight bound is plenty here; it
+// keeps the #500 runaway path tight on chat backends that respect max_tokens
+// WITHOUT lowering the generous default that ask/annotate rely on. It is applied
+// only when the translator implements model.BoundedGenerator; otherwise the call
+// falls back to Generate (the provider's own default cap still bounds it).
+const translateLineMaxTokens = 512
+
 // translateLine translates a single line of transcript text into targetLang via
 // the chat Generator. Empty/whitespace input short-circuits to empty so the chat
 // provider is never called for a marker-only line. The prompt asks for the
@@ -98,6 +108,9 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 		return "", nil
 	}
 	prompt := buildTranslatePrompt(text, targetLang)
+	if bg, ok := s.translator.(model.BoundedGenerator); ok {
+		return bg.GenerateWithMaxTokens(ctx, prompt, translateLineMaxTokens)
+	}
 	translated, err := s.translator.Generate(ctx, prompt)
 	if err != nil {
 		return "", err
@@ -147,18 +160,28 @@ func splitTimestampMarker(line string) (marker, text string) {
 	return strings.TrimRight(trimmed[:idx], " \t"), body
 }
 
-// formatTimestampMarker renders a millisecond offset as a bracketed [mm:ss] or
-// [hh:mm:ss] marker, matching the transcript timestamp format.
+// formatTimestampMarker renders a millisecond offset as a bracketed [mm:ss] /
+// [hh:mm:ss] marker, or the [.mmm] sub-second form when the offset is not on a
+// whole second, matching the transcript timestamp format (issue #431). It is
+// only a fallback for the "body not locatable" branch of splitTimestampMarker;
+// the common path preserves the source marker verbatim.
 func formatTimestampMarker(ms int) string {
 	if ms < 0 {
 		ms = 0
 	}
 	totalSec := ms / 1000
+	frac := ms % 1000
 	h := totalSec / 3600
 	m := (totalSec % 3600) / 60
 	sec := totalSec % 60
+	var base string
 	if h > 0 {
-		return fmt.Sprintf("[%02d:%02d:%02d]", h, m, sec)
+		base = fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
+	} else {
+		base = fmt.Sprintf("%02d:%02d", m, sec)
 	}
-	return fmt.Sprintf("[%02d:%02d]", m, sec)
+	if frac != 0 {
+		return fmt.Sprintf("[%s.%03d]", base, frac)
+	}
+	return "[" + base + "]"
 }

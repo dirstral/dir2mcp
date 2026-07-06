@@ -20,10 +20,14 @@ const (
 )
 
 const (
-	ErrorCodeUnauthorized      = "UNAUTHORIZED"
-	ErrorCodeSessionNotFound   = "SESSION_NOT_FOUND"
-	ErrorCodeIndexNotReady     = "INDEX_NOT_READY"
-	ErrorCodeFileNotFound      = "FILE_NOT_FOUND"
+	ErrorCodeUnauthorized    = "UNAUTHORIZED"
+	ErrorCodeSessionNotFound = "SESSION_NOT_FOUND"
+	ErrorCodeIndexNotReady   = "INDEX_NOT_READY"
+	ErrorCodeFileNotFound    = "FILE_NOT_FOUND"
+	// ErrorCodeForbidden is the canonical §14.2 code for a path or content
+	// blocked by policy (exclusion globs, secret-pattern match). Distinct from
+	// ErrorCodePermissionDenied, which is reserved for OS-level access failures.
+	ErrorCodeForbidden         = "FORBIDDEN"
 	ErrorCodePermissionDenied  = "PERMISSION_DENIED"
 	ErrorCodeRateLimitExceeded = "RATE_LIMIT_EXCEEDED"
 	// ErrorCodeRateLimited is kept as a compatibility alias.
@@ -46,6 +50,7 @@ const (
 const (
 	RPCMethodInitialize               = "initialize"
 	RPCMethodNotificationsInitialized = "notifications/initialized"
+	RPCMethodNotificationsCancelled   = "notifications/cancelled"
 	RPCMethodToolsList                = "tools/list"
 	RPCMethodToolsCall                = "tools/call"
 )

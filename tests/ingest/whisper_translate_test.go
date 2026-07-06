@@ -3,6 +3,8 @@ package tests
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -247,5 +249,89 @@ func TestWhisperTranslate_RoutesThroughQualityGate(t *testing.T) {
 	}
 	if !sawPending {
 		t.Fatalf("expected clean source transcript chunks to remain pending; chunks=%+v", st.chunks)
+	}
+}
+
+// TestWhisperTranslate_AppliesFilterWords pins that media.filter_words is applied
+// to the translated English track (#538 routed the translate path through the
+// filtered chunker, matching the source track). A pure-boilerplate translated
+// line is dropped entirely, so the translate pass yields fewer spans than its
+// input lines — before #538 the unfiltered chunker would have kept all three.
+func TestWhisperTranslate_AppliesFilterWords(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, MediaFilterWords: []string{"credits roll"}}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет"})
+	svc.SetTranscriptLanguage("ru")
+	// Translated English track: the middle line is pure boilerplate the filter
+	// must strip (and thereby drop its span); the other two survive.
+	svc.SetTranslateTranscriber(
+		&fakeTranscriber{text: "[00:00] hello there\n[00:03] credits roll\n[00:05] goodbye friend"},
+		"whisper", "large-v3", []string{"en"})
+
+	doc := model.Document{DocID: 12, RelPath: "audio/clip.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+
+	// 1 source span + the translated spans. The boilerplate-only "credits roll"
+	// line is dropped, so the translate pass yields 2 spans (not 3).
+	if len(st.spans) != 3 {
+		t.Fatalf("expected 1 source + 2 filtered translated spans, got %d (%+v)", len(st.spans), st.spans)
+	}
+}
+
+// TestWhisperTranslate_PurgeRemovesTranslateCache proves PurgeTranscriptCache
+// deletes the whisper-translate English track AND its .words.json sidecar, not
+// just the source transcript cache. Translated text can be secret-gated, so a
+// purge that left it on disk under {StateDir}/cache/transcribe would leak
+// refused content. A structured translate transcriber is used so the sidecar is
+// actually written.
+func TestWhisperTranslate_PurgeRemovesTranslateCache(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	content := []byte("audio-bytes-to-purge")
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет"})
+	svc.SetTranscriptLanguage("ru")
+	svc.SetTranslateTranscriber(
+		&fakeStructuredTranscriber{
+			text: "[00:00] hello there\n[00:03] goodbye friend",
+			words: []model.TimedWord{
+				{Word: "hello", StartMS: 0, EndMS: 500},
+				{Word: "goodbye", StartMS: 3000, EndMS: 3500},
+			},
+		},
+		"whisper", "large-v3", []string{"en"})
+
+	doc := model.Document{DocID: 21, RelPath: "audio/interview.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, content); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+
+	cacheDir := filepath.Join(stateDir, "cache", "transcribe")
+	txt, err := filepath.Glob(filepath.Join(cacheDir, "*-translate*.txt"))
+	if err != nil {
+		t.Fatalf("glob translate txt: %v", err)
+	}
+	words, err := filepath.Glob(filepath.Join(cacheDir, "*-translate*.words.json"))
+	if err != nil {
+		t.Fatalf("glob translate words: %v", err)
+	}
+	if len(txt) == 0 || len(words) == 0 {
+		entries, _ := os.ReadDir(cacheDir)
+		t.Fatalf("expected translate cache text+words on disk before purge, got txt=%v words=%v (dir=%v)", txt, words, entries)
+	}
+
+	// Purge on the SOURCE language: the translate track (keyed on "en"
+	// unconditionally) must still be removed.
+	svc.PurgeTranscriptCache(content, "ru")
+
+	for _, p := range append(append([]string{}, txt...), words...) {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("translate cache file %s survived purge (stat err=%v)", p, err)
+		}
 	}
 }

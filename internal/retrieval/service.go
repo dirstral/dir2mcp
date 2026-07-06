@@ -130,6 +130,17 @@ type Service struct {
 	chunkByIndex        map[string]map[uint64]model.SearchHit
 	rootDir             string
 	stateDir            string
+	// ocrCacheIdentity / transcriptCacheIdentity are the ACTIVE OCR-extraction and
+	// STT(+diarize) derivation identities (SPEC §8.6.7) of the ingest pipeline,
+	// plumbed in via SetDerivationCacheIdentities so open_file's OCR/transcript
+	// cache LOOKUP keys the cache the SAME identity-aware way ingest's writer does
+	// (internal/ingest/derivation.go ocrCacheKey/transcriptCacheKey). Without them
+	// retrieval keyed on the source bytes alone and missed every entry ingest wrote
+	// on a docling/mistral/STT corpus (issue #488). An empty identity selects the
+	// historical bytes-only key — exactly what ingest writes when no
+	// extractor/transcriber is configured — so the no-OCR path is unchanged.
+	ocrCacheIdentity        string
+	transcriptCacheIdentity string
 	// corpusFS, when non-nil, routes open_file raw-text reads and OCR/transcript
 	// source-byte hashing through the corpus filesystem abstraction instead of the
 	// local filesystem. It is injected only for object-store backends (S3) so a
@@ -761,6 +772,30 @@ func (s *Service) SetStateDir(stateDir string) {
 	s.metaMu.Unlock()
 }
 
+// SetDerivationCacheIdentities plumbs the ingest pipeline's ACTIVE OCR and
+// transcript derivation identities (SPEC §8.6.7) into open_file's OCR/transcript
+// cache lookup so a docling/mistral/STT corpus's cached text is FOUND instead of
+// missed (issue #488). Pass ingest's active OCR identity (Service.activeOCRIdentity)
+// as ocrIdentity and its active transcript identity (activeTranscriptIdentity,
+// which already folds diarize) as transcriptIdentity. An empty string selects the
+// bytes-only key ingest writes when the respective extractor/transcriber is not
+// configured, preserving the pre-#488 no-OCR behavior. Passing the ACTIVE identity
+// (not a store-recorded one, which can carry a differing model_version) is what
+// keeps this lookup byte-identical to ingest's writer.
+func (s *Service) SetDerivationCacheIdentities(ocrIdentity, transcriptIdentity string) {
+	// Trim to stay byte-identical to ingest's canonical identity, whose fields are
+	// each TrimSpace'd by derivationIdentity (internal/ingest/derivation.go); any
+	// stray leading/trailing whitespace here would silently force a cache miss.
+	// Trimming ingest's already-trimmed output is a no-op, matching sibling setters
+	// (SetStateDir/SetProtocolVersion).
+	ocrIdentity = strings.TrimSpace(ocrIdentity)
+	transcriptIdentity = strings.TrimSpace(transcriptIdentity)
+	s.metaMu.Lock()
+	s.ocrCacheIdentity = ocrIdentity
+	s.transcriptCacheIdentity = transcriptIdentity
+	s.metaMu.Unlock()
+}
+
 func (s *Service) SetProtocolVersion(protocolVersion string) {
 	protocolVersion = strings.TrimSpace(protocolVersion)
 	if protocolVersion == "" {
@@ -890,6 +925,88 @@ func (s *Service) EvictDocuments(relPaths []string) {
 	s.metaMu.Unlock()
 }
 
+// chunkLivenessChecker is an optional store capability: it resolves a chunk by
+// id and returns model.ErrNotFound when that chunk has been tombstoned (or never
+// existed). The shipped *store.SQLiteStore satisfies it via ChunkTaskByID, whose
+// query selects only deleted=0 rows. Retrieval type-asserts against it (mirroring
+// the LexicalSearcher / DocumentHashLister optional-capability pattern) to prune
+// chunks a partial incremental reindex soft-deleted via SoftDeleteChunksFromOrdinal
+// but for which no whole-document eviction ever fired (issue #409). Stores that do
+// not implement it skip the liveness pass entirely, so behavior is unchanged.
+type chunkLivenessChecker interface {
+	ChunkTaskByID(ctx context.Context, chunkID uint64) (model.ChunkTask, string, error)
+}
+
+// EvictChunks removes the given chunk labels from the in-memory retrieval
+// metadata and drops their vectors from the text and code indexes. It is the
+// chunk-granularity analogue of EvictDocuments: an in-place edit that shrinks a
+// document tombstones its trailing chunks via SoftDeleteChunksFromOrdinal without
+// a whole-document delete, so those labels are never pruned by EvictDocuments and
+// would keep resolving to their stale snippet/vector until the daemon restarts
+// (issue #409). It is safe for concurrent use with search — the metadata maps are
+// guarded by metaMu and each index owns its own lock. Unknown labels are ignored.
+func (s *Service) EvictChunks(labels []uint64) {
+	if len(labels) == 0 {
+		return
+	}
+	s.metaMu.Lock()
+	textIndex := s.textIndex
+	codeIndex := s.codeIndex
+	for _, label := range labels {
+		delete(s.chunkByLabel, label)
+		for _, byIndex := range s.chunkByIndex {
+			delete(byIndex, label)
+		}
+	}
+	s.metaMu.Unlock()
+
+	// Also drop the vectors so the ANN scan stops returning the tombstoned labels
+	// as candidates. Delete ignores unknown ids, so issuing to both indexes is
+	// safe regardless of which one held a given label. A fresh context is used so
+	// the eviction still completes if the triggering query's context was canceled.
+	if textIndex != nil {
+		_ = textIndex.Delete(context.Background(), labels)
+	}
+	if codeIndex != nil {
+		_ = codeIndex.Delete(context.Background(), labels)
+	}
+}
+
+// pruneTombstonedHits drops (and evicts) hits whose chunk was soft-deleted in the
+// store since it was indexed — the partial incremental-reindex staleness of issue
+// #409, where SoftDeleteChunksFromOrdinal tombstones trailing chunks with no
+// whole-document eviction to prune them from the in-memory index. Each hit's
+// liveness is validated against the store (ChunkTaskByID returns model.ErrNotFound
+// for a tombstoned chunk); tombstoned labels are removed from the retrieval maps
+// and indexes via EvictChunks so subsequent searches never resurface them without
+// a restart. The pass is fail-open: a store that does not implement the liveness
+// capability, a zero label, or any non-ErrNotFound lookup error leaves the hit in
+// place, so a transient store error can never drop otherwise-valid results.
+func (s *Service) pruneTombstonedHits(ctx context.Context, hits []model.SearchHit) []model.SearchHit {
+	if len(hits) == 0 {
+		return hits
+	}
+	checker, ok := s.store.(chunkLivenessChecker)
+	if !ok {
+		return hits
+	}
+	var evict []uint64
+	live := hits[:0]
+	for _, hit := range hits {
+		if hit.ChunkID != 0 {
+			if _, _, err := checker.ChunkTaskByID(ctx, hit.ChunkID); errors.Is(err, model.ErrNotFound) {
+				evict = append(evict, hit.ChunkID)
+				continue
+			}
+		}
+		live = append(live, hit)
+	}
+	if len(evict) > 0 {
+		s.EvictChunks(evict)
+	}
+	return live
+}
+
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
 	kind := strings.ToLower(strings.TrimSpace(indexName))
 	if kind != "text" && kind != "code" {
@@ -983,11 +1100,16 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// decayed score and newer content survives a tie. Config-only; default 0 ⇒
 	// pass-through (no allocation, no lookups).
 	hits = s.applyRecencyDecay(ctx, hits)
-	// Apply the server-side relevance floor LAST: after scoring/fusion/rerank,
+	// Apply the server-side relevance floor: after scoring/fusion/rerank,
 	// the optional HyDE fusion, any cross-lingual fusion, their dedup/truncation,
 	// and the recency decay, using each hit's final authoritative Score.
 	// Config-only; default 0 ⇒ pass-through.
-	return s.applyMinScoreFloor(hits), nil
+	hits = s.applyMinScoreFloor(hits)
+	// Prune (and evict) any chunk the store has since tombstoned — the partial
+	// incremental-reindex staleness of issue #409. Done LAST, on the small final
+	// result set, so at most k store lookups run per query and deleted content is
+	// never returned (nor cited) even before the next restart.
+	return s.pruneTombstonedHits(ctx, hits), nil
 }
 
 // searchByMode runs the index-mode dispatch (text/code/both/auto) for one query
@@ -1004,25 +1126,115 @@ func (s *Service) searchByMode(ctx context.Context, queryText string, k int, que
 	codeIndex := s.codeIndex
 	s.metaMu.RUnlock()
 
-	mode := strings.ToLower(strings.TrimSpace(query.Index))
-	if mode == "" {
-		mode = "auto"
-	}
-	switch mode {
-	case "text":
-		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
+	// resolveSearchAxis is the single source of truth for which physical index a
+	// query resolves to, so the dispatch here and the index_used reported to the
+	// tool layer (SPEC §15.2) can never disagree — including the "auto" mode that
+	// routes a code-shaped query to the code index, and HyDE "replace" mode, where
+	// queryText is the generated hypothesis rather than the original query.
+	axis := resolveSearchAxis(query.Index, queryText)
+	// Record the axis of the FIRST (base-query) dispatch so SearchWithAxis can
+	// report an index_used read from the real dispatch. searchByMode is called
+	// again for the HyDE fuse hypothesis pass and for each cross-lingual variant;
+	// those later dispatches are ignored (first-write-wins) so index_used reflects
+	// the primary query's route. No-op when no recorder is installed.
+	recordDispatchedAxis(ctx, axis)
+	switch axis {
 	case "code":
 		return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
 	case "both":
 		return s.searchBothIndices(ctx, queryText, k, textModel, codeModel, textIndex, codeIndex, query)
-	case "auto":
-		if looksLikeCodeQuery(queryText) {
-			return s.searchSingleIndex(ctx, queryText, k, codeModel, codeIndex, "code", query, allowRerank)
-		}
-		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
-	default:
+	default: // "text"
 		return s.searchSingleIndex(ctx, queryText, k, textModel, textIndex, "text", query, allowRerank)
 	}
+}
+
+// resolveSearchAxis reports which physical index (text|code|both) searchByMode
+// will use for the given requested index mode and query text. It is the shared
+// resolver behind both the dispatch and the tool layer's index_used field, so a
+// default-mode ("auto") query that routes to the code index is reported as
+// "code" rather than the requested-name-derived "text" (SPEC §15.2).
+func resolveSearchAxis(mode, queryText string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "code":
+		return "code"
+	case "both":
+		return "both"
+	case "text":
+		return "text"
+	case "auto", "":
+		if looksLikeCodeQuery(queryText) {
+			return "code"
+		}
+		return "text"
+	default:
+		return "text"
+	}
+}
+
+// dispatchedAxis carries the physical index axis (text|code|both) that the base
+// query was ACTUALLY dispatched on back out to SearchWithAxis, so the MCP tool
+// layer can report a truthful index_used (SPEC §15.2) that never diverges from
+// the real dispatch — including HyDE "replace" mode, where the axis is resolved
+// from the generated hypothesis rather than the original query.
+type dispatchedAxis struct {
+	mu  sync.Mutex
+	set bool
+	val string
+}
+
+type dispatchedAxisKey struct{}
+
+// withDispatchedAxis installs a dispatch-axis recorder on ctx and returns it.
+func withDispatchedAxis(ctx context.Context) (context.Context, *dispatchedAxis) {
+	rec := &dispatchedAxis{}
+	return context.WithValue(ctx, dispatchedAxisKey{}, rec), rec
+}
+
+// recordDispatchedAxis records the axis of the FIRST dispatch (the base query);
+// later dispatches (HyDE fuse's hypothesis pass, cross-lingual variants) are
+// ignored so index_used reflects the primary query's route. It is a no-op when
+// no recorder is installed (any Search path that does not need the axis).
+func recordDispatchedAxis(ctx context.Context, axis string) {
+	rec, _ := ctx.Value(dispatchedAxisKey{}).(*dispatchedAxis)
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.set {
+		return
+	}
+	rec.set = true
+	rec.val = axis
+}
+
+func (d *dispatchedAxis) axis() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.val
+}
+
+// SearchWithAxis runs Search and additionally reports the physical index axis
+// (text|code|both) the base query was ACTUALLY dispatched on, so the MCP search
+// tool can emit a truthful index_used (SPEC §15.2) read from the real dispatch
+// rather than re-deriving the routing heuristic. Re-deriving would diverge from
+// the dispatch under HyDE "replace" mode, where routing keys off the generated
+// hypothesis, not the original query. It satisfies model.AxisSearcher.
+func (s *Service) SearchWithAxis(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, string, error) {
+	ctx, rec := withDispatchedAxis(ctx)
+	hits, err := s.Search(ctx, query)
+	if err != nil {
+		return nil, "", err
+	}
+	axis := rec.axis()
+	if axis == "" {
+		// No dispatch was recorded (a degenerate path that never reached
+		// searchByMode): fall back to a name-derived axis on the original query so
+		// index_used is still a legal SPEC value.
+		axis = resolveSearchAxis(query.Index, query.Query)
+	}
+	return hits, axis, nil
 }
 
 // searchWithHyDE runs retrieval for the query, applying the opt-in HyDE
@@ -1534,11 +1746,13 @@ func (s *Service) readSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusF
 }
 
 // hashSourceBytes computes the sha256 hex digest of the corpus document at
-// relPath — the key under which ingest stored the document's OCR/transcript
-// cache entry. It streams the source bytes through the CorpusFS Open seam when a
-// backend is injected (so an S3 object is hashed without a local copy) and
-// otherwise reads the local resolved path, rejecting a directory target with the
-// same DOC_TYPE_UNSUPPORTED mapping the raw-text path uses.
+// relPath — the BASE content hash ingest folds (with the derivation identity)
+// into the OCR/transcript cache key. It streams the source bytes through the
+// CorpusFS Open seam when a backend is injected (so an S3 object is hashed
+// without a local copy) and otherwise reads the local resolved path, rejecting a
+// directory target with the same DOC_TYPE_UNSUPPORTED mapping the raw-text path
+// uses. It is the fallback for ocrCacheKeyForOpen: a store that can report the
+// already-known base hash (ocrSourceHashProvider) skips this full object GET.
 func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) (string, error) {
 	var reader io.Reader
 	if corpusFS != nil {
@@ -1578,23 +1792,25 @@ func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusF
 // openFileFromOCRCache reads the precomputed OCR (or transcript) representation
 // for a binary document. The cache layout mirrors what
 // internal/ingest.Service.readOrComputeOCR / readOrComputeTranscript write:
-// <stateDir>/cache/ocr/<sha256-of-source-bytes>.md for OCR, and
-// <stateDir>/cache/transcribe/<sha256-of-source-bytes>*.txt for transcripts.
-// When no cache file exists (e.g. ingest is still running), the function
-// returns model.ErrOCRNotReady so callers can surface an actionable error
-// rather than fall back to raw bytes.
+// <stateDir>/cache/ocr/<key>.md for OCR, and
+// <stateDir>/cache/transcribe/<key>*.txt for transcripts. The <key> is the
+// identity-aware key ingest wrote — sha256(sha256(bytes)+"\x00"+identity) with the
+// active OCR/transcript derivation identity folded in (SPEC §8.6.7) — NOT a
+// bytes-only hash; see ocrCacheKeyForOpen. When no cache file exists (e.g. ingest
+// is still running), the function returns model.ErrOCRNotReady so callers can
+// surface an actionable error rather than fall back to raw bytes.
 func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, maxChars int) (string, bool, error) {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
 		stateDir = filepath.Join(".", ".dir2mcp")
 	}
 
-	hashHex, err := s.hashSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
+	cacheKey, err := s.ocrCacheKeyForOpen(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
 		return "", false, err
 	}
 
-	candidates := openFileOCRCacheCandidates(stateDir, hashHex, relPath)
+	candidates := openFileOCRCacheCandidates(stateDir, cacheKey, relPath)
 	for _, candidate := range candidates {
 		data, readErr := os.ReadFile(candidate)
 		if readErr != nil {
@@ -1614,20 +1830,21 @@ func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.Co
 }
 
 // openFileOCRCacheCandidates returns the set of cache paths to consult, in
-// preference order, for a given source document. Audio transcripts are stored
+// preference order, for a given source document. cacheKey is the identity-aware
+// filename stem ingest wrote (ocrCacheKeyForOpen). Audio transcripts are stored
 // with an optional language suffix (or none), so we glob for any matching
 // file. PDFs use a single .md path.
-func openFileOCRCacheCandidates(stateDir, hashHex, relPath string) []string {
+func openFileOCRCacheCandidates(stateDir, cacheKey, relPath string) []string {
 	ext := strings.ToLower(filepath.Ext(relPath))
 	switch {
 	case ext == ".pdf" || isImageExt(ext):
 		// PDF and image extraction both write extracted markdown to cache/ocr.
-		return []string{filepath.Join(stateDir, "cache", "ocr", hashHex+".md")}
+		return []string{filepath.Join(stateDir, "cache", "ocr", cacheKey+".md")}
 	case isAudioExt(ext):
-		// transcripts are written as <hash>[<-lang>].txt; default-language
+		// transcripts are written as <key>[<-lang>].txt; default-language
 		// transcripts have no suffix, so the unsuffixed file is preferred.
-		out := []string{filepath.Join(stateDir, "cache", "transcribe", hashHex+".txt")}
-		matches, err := filepath.Glob(filepath.Join(stateDir, "cache", "transcribe", hashHex+"-*.txt"))
+		out := []string{filepath.Join(stateDir, "cache", "transcribe", cacheKey+".txt")}
+		matches, err := filepath.Glob(filepath.Join(stateDir, "cache", "transcribe", cacheKey+"-*.txt"))
 		if err == nil {
 			sort.Strings(matches)
 			out = append(out, matches...)
@@ -1636,6 +1853,115 @@ func openFileOCRCacheCandidates(stateDir, hashHex, relPath string) []string {
 	default:
 		return nil
 	}
+}
+
+// ocrSourceHashProvider is the OPTIONAL store capability that returns the EXACT
+// base content hash ingest folded into an OCR/transcript cache key — the
+// sha256-hex over the document's raw source bytes (ingest.ComputeContentHash),
+// NOT the sidecar-folded content_hash the store persists for the incremental gate
+// (§7.6). When a store can supply it, open_file derives the identity-aware cache
+// key WITHOUT a full object GET (issue #488 perf). A store that does not implement
+// it, or returns ok=false, transparently falls back to streaming+hashing the
+// source bytes, so correctness never depends on this optimization.
+type ocrSourceHashProvider interface {
+	OCRSourceContentHash(ctx context.Context, relPath string) (hash string, ok bool, err error)
+}
+
+// ocrCacheKeyForOpen derives the on-disk OCR/transcript cache filename stem for
+// relPath, reproducing the identity-aware key ingest wrote (SPEC §8.6.7). It
+// folds the ACTIVE OCR (pdf/image) or transcript (audio) derivation identity into
+// the base content hash exactly as internal/ingest.Service.ocrCacheKey /
+// transcriptCacheKey do, so open_file lands on ingest's cache entry instead of
+// missing every identity-scoped entry (issue #488). The base content hash is
+// taken from the store when it can report the already-known value (skipping a full
+// object GET); otherwise it is computed by streaming the source bytes.
+func (s *Service) ocrCacheKeyForOpen(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) (string, error) {
+	s.metaMu.RLock()
+	ocrIdentity := s.ocrCacheIdentity
+	transcriptIdentity := s.transcriptCacheIdentity
+	store := s.store
+	s.metaMu.RUnlock()
+
+	identity := cacheIdentityForExt(relPath, ocrIdentity, transcriptIdentity)
+
+	contentHash, err := s.sourceContentHash(ctx, corpusFS, store, resolvedAbs, relPath)
+	if err != nil {
+		return "", err
+	}
+	return foldDerivationCacheKey(contentHash, identity), nil
+}
+
+// sourceContentHash returns the base content hash for relPath, preferring the
+// store's already-known value (ocrSourceHashProvider) so the identity-aware key
+// can be derived WITHOUT a full object GET (#488 perf). A store that lacks the
+// capability, reports ok=false, or errors falls back to streaming+hashing the
+// bytes — the optimization is best-effort and never changes the resulting key.
+func (s *Service) sourceContentHash(ctx context.Context, corpusFS corpusfs.CorpusFS, store model.Store, resolvedAbs, relPath string) (string, error) {
+	if provider, ok := store.(ocrSourceHashProvider); ok {
+		if hash, ok, err := provider.OCRSourceContentHash(ctx, relPath); err != nil {
+			s.logf("open_file: source-hash lookup for %q failed, hashing bytes: %v", relPath, err)
+		} else if ok && isSHA256Hex(hash) {
+			return hash, nil
+		} else if ok && hash != "" {
+			// The store reported a value that is not a canonical sha256 hex digest
+			// (wrong length / non-hex / uppercase). Trusting it would fold a bogus
+			// base hash into the cache key, deterministically missing the entry
+			// ingest wrote and regressing open_file to OCR_NOT_READY. Fall back to
+			// hashing the bytes so the key stays byte-identical to ingest's.
+			s.logf("open_file: store source-hash for %q is not sha256-hex, hashing bytes", relPath)
+		}
+	}
+	return s.hashSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
+}
+
+// isSHA256Hex reports whether s is exactly 64 lowercase hexadecimal characters —
+// the canonical form of a sha256 digest ingest folds into the derivation cache
+// key. A store-provided base hash MUST pass this before it is trusted; anything
+// else falls back to hashing the source bytes so the key stays byte-identical.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// cacheIdentityForExt selects which active derivation identity governs relPath's
+// cache key: the OCR-extraction identity for PDF/image documents and the
+// transcript identity for audio, matching ingest's per-representation keying.
+// Any other extension (no OCR/transcript representation) folds in no identity.
+func cacheIdentityForExt(relPath, ocrIdentity, transcriptIdentity string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	switch {
+	case ext == ".pdf" || isImageExt(ext):
+		return ocrIdentity
+	case isAudioExt(ext):
+		return transcriptIdentity
+	default:
+		return ""
+	}
+}
+
+// foldDerivationCacheKey reproduces the identity-folding in
+// internal/ingest.Service.ocrCacheKey / transcriptCacheKey
+// (internal/ingest/derivation.go): with a non-empty active derivation identity it
+// returns sha256-hex(contentHash + "\x00" + identity), folding the OCR/STT
+// provider+model identity into the key so open_file lands on the same cache entry
+// ingest wrote (SPEC §8.6.7). An empty identity — no extractor/transcriber
+// configured, or an unwired retriever — preserves the historical bytes-only key,
+// which is exactly what ingest writes in that case.
+func foldDerivationCacheKey(contentHash, identity string) string {
+	if identity == "" {
+		return contentHash
+	}
+	combined := strings.Join([]string{contentHash, identity}, "\x00")
+	sum := sha256.Sum256([]byte(combined))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
