@@ -3411,23 +3411,32 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 	return string(translatedBytes), words, nil
 }
 
-// translateStructured runs the whisper translate transcriber, preferring the
-// structured (word-timing) capability so the English track carries per-word
-// timings for broadcast segmentation; it degrades to text-only for a translate
-// transcriber that does not implement model.StructuredTranscriber.
-func (s *Service) translateStructured(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
-	if st, ok := s.translateSTT.(model.StructuredTranscriber); ok {
-		res, err := st.TranscribeStructured(ctx, doc.RelPath, content)
+// transcribeWith runs the given transcriber, preferring the structured
+// (word-timing) capability when available. Providers that do not implement
+// model.StructuredTranscriber return no words, leaving downstream behaviour
+// unchanged. transcribe and translateStructured both delegate here, differing
+// only in which configured transcriber they pass.
+func (s *Service) transcribeWith(ctx context.Context, stt model.Transcriber, relPath string, content []byte) (string, []model.TimedWord, error) {
+	if st, ok := stt.(model.StructuredTranscriber); ok {
+		res, err := st.TranscribeStructured(ctx, relPath, content)
 		if err != nil {
 			return "", nil, err
 		}
 		return res.Text, res.Words, nil
 	}
-	text, err := s.translateSTT.Transcribe(ctx, doc.RelPath, content)
+	text, err := stt.Transcribe(ctx, relPath, content)
 	if err != nil {
 		return "", nil, err
 	}
 	return text, nil, nil
+}
+
+// translateStructured runs the whisper translate transcriber, preferring the
+// structured (word-timing) capability so the English track carries per-word
+// timings for broadcast segmentation; it degrades to text-only for a translate
+// transcriber that does not implement model.StructuredTranscriber.
+func (s *Service) translateStructured(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+	return s.transcribeWith(ctx, s.translateSTT, doc.RelPath, content)
 }
 
 // transcribe calls the configured transcriber, preferring the structured
@@ -3435,18 +3444,7 @@ func (s *Service) translateStructured(ctx context.Context, doc model.Document, c
 // model.StructuredTranscriber return no words, leaving downstream behaviour
 // unchanged.
 func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
-	if st, ok := s.transcriber.(model.StructuredTranscriber); ok {
-		res, err := st.TranscribeStructured(ctx, doc.RelPath, content)
-		if err != nil {
-			return "", nil, err
-		}
-		return res.Text, res.Words, nil
-	}
-	text, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
-	if err != nil {
-		return "", nil, err
-	}
-	return text, nil, nil
+	return s.transcribeWith(ctx, s.transcriber, doc.RelPath, content)
 }
 
 // readCachedWords loads per-word timing from the sidecar cache file, returning
@@ -3493,8 +3491,17 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 // ignored.
 func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
-	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
-	for _, p := range []string{base + ".txt", base + ".words.json"} {
+	key := s.transcriptCacheKey(content)
+	base := key + TranscriptLangSuffix(language)
+	// Also purge the whisper-translate English track (+ its .words.json sidecar):
+	// readOrComputeWhisperTranslation keys on the same content bytes with a
+	// "-translate" discriminator and the en suffix, and gated (e.g. secret-pattern
+	// refused) translated text must not be left persisted after a purge.
+	translateBase := key + "-translate" + TranscriptLangSuffix("en")
+	for _, p := range []string{
+		base + ".txt", base + ".words.json",
+		translateBase + ".txt", translateBase + ".words.json",
+	} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			s.getLogger().Printf("purge transcript cache: %v", err)
 		}
