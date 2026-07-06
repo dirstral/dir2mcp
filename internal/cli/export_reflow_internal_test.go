@@ -8,28 +8,38 @@ import (
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
-func TestTranscriptRepIsTranslation(t *testing.T) {
-	cases := []struct {
-		name string
-		meta string
-		want bool
-	}{
-		{"translation source", `{"source":"translation","language":"en"}`, true},
-		{"case-insensitive", `{"source":"Translation"}`, true},
-		{"stt source", `{"source":"stt","language":"tk"}`, false},
-		{"missing source", `{"language":"en"}`, false},
-		{"empty meta", ``, false},
-		{"malformed json", `{not valid`, false},
-	}
-	for _, tc := range cases {
-		if got := transcriptRepIsTranslation(tc.meta); got != tc.want {
-			t.Errorf("%s: transcriptRepIsTranslation(%q) = %v, want %v", tc.name, tc.meta, got, tc.want)
-		}
+// TestBuildCuesForSegmentationUsesWordTimings pins that in broadcast mode a
+// transcript carrying per-word timings re-segments from them (BuildBroadcastCues):
+// two well-separated spoken words with a real pause between them must split into
+// two cues, which the word-timed path does and a chunk/reflow path would not.
+func TestBuildCuesForSegmentationUsesWordTimings(t *testing.T) {
+	chunks := []subtitle.TranscriptChunk{{
+		Text: "Hello. Later.",
+		Span: model.Span{Kind: "time", StartMS: 0, EndMS: 12000, Words: []model.WordSpan{
+			{T: 0, D: 400, W: "Hello."},
+			{T: 10000, D: 400, W: "Later."},
+		}},
+	}}
+	cues := buildCuesForSegmentation(chunks, "broadcast")
+	if len(cues) != 2 {
+		t.Fatalf("word-timed path should split at the 10 s pause into 2 cues, got %d: %+v", len(cues), cues)
 	}
 }
 
-// maxSegCPS is the highest characters-per-second over a cue slice.
-func maxSegCPS(cues []subtitle.Cue) float64 {
+// TestBuildCuesForSegmentationReflowsWhenNoWordTimings pins the fallback: a
+// broadcast-mode transcript with NO per-word timings (e.g. a line-by-line chat
+// translation) reflows its chunk cues into broadcast-legible ones rather than
+// emitting the raw over-long chunk. A single long, sub-second chunk must be
+// broken up and read comfortably (<= 22 cps) after reflow.
+func TestBuildCuesForSegmentationReflowsWhenNoWordTimings(t *testing.T) {
+	chunks := []subtitle.TranscriptChunk{{
+		Text: "We have submitted a formal request to the ministry today.",
+		Span: model.Span{Kind: "time", StartMS: 0, EndMS: 6000}, // no Words
+	}}
+	cues := buildCuesForSegmentation(chunks, "broadcast")
+	if len(cues) == 0 {
+		t.Fatal("expected reflowed cues, got none")
+	}
 	worst := 0.0
 	for _, c := range cues {
 		dur := float64(c.EndMS-c.StartMS) / 1000.0
@@ -39,56 +49,13 @@ func maxSegCPS(cues []subtitle.Cue) float64 {
 		if cps := float64(len([]rune(strings.ReplaceAll(c.Text, "\n", "")))) / dur; cps > worst {
 			worst = cps
 		}
+		for _, line := range strings.Split(c.Text, "\n") {
+			if n := len([]rune(line)); n > 42 {
+				t.Errorf("reflowed line %q is %d chars, exceeds 42", line, n)
+			}
+		}
 	}
-	return worst
-}
-
-// TestBuildCuesForSegmentationTranslationIgnoresWordTimings pins the routing:
-// given a segment whose fabricated word timings pile every word at the segment
-// start with zero duration (the translator failure mode), the native path
-// honors them and crushes the text into a dense cue, while the translation path
-// reflows from the reliable 5 s segment span into a comfortably legible cue.
-func TestBuildCuesForSegmentationTranslationIgnoresWordTimings(t *testing.T) {
-	text := "we have submitted a formal request to the ministry today"
-	var words []model.WordSpan
-	for _, w := range strings.Fields(text) {
-		words = append(words, model.WordSpan{T: 1000, D: 0, W: w}) // all piled at 1000 ms
-	}
-	chunks := []subtitle.TranscriptChunk{{
-		Text: text,
-		Span: model.Span{Kind: "time", StartMS: 1000, EndMS: 6000, Words: words},
-	}}
-
-	native := buildCuesForSegmentation(chunks, "broadcast", false)
-	trans := buildCuesForSegmentation(chunks, "broadcast", true)
-	if len(native) == 0 || len(trans) == 0 {
-		t.Fatalf("expected cues from both paths: native=%d trans=%d", len(native), len(trans))
-	}
-
-	nativeCPS, transCPS := maxSegCPS(native), maxSegCPS(trans)
-	if transCPS >= nativeCPS {
-		t.Errorf("translation reflow should read slower than honoring piled timings: native=%.1f cps trans=%.1f cps", nativeCPS, transCPS)
-	}
-	if transCPS > 22 {
-		t.Errorf("translation reflow reading speed %.1f cps exceeds 22", transCPS)
-	}
-}
-
-// TestBuildCuesForSegmentationNativeUsesWordTimings pins that a native transcript
-// (isTranslation=false) still re-segments from its per-word timings — spread
-// (non-piled) word timings must produce word-timed broadcast cues, not a reflow.
-func TestBuildCuesForSegmentationNativeUsesWordTimings(t *testing.T) {
-	// Two well-separated spoken words: a real pause between them must split into
-	// two cues under the word-timed path.
-	chunks := []subtitle.TranscriptChunk{{
-		Text: "Hello. Later.",
-		Span: model.Span{Kind: "time", StartMS: 0, EndMS: 12000, Words: []model.WordSpan{
-			{T: 0, D: 400, W: "Hello."},
-			{T: 10000, D: 400, W: "Later."},
-		}},
-	}}
-	native := buildCuesForSegmentation(chunks, "broadcast", false)
-	if len(native) != 2 {
-		t.Fatalf("native word-timed path should split at the 10 s pause into 2 cues, got %d: %+v", len(native), native)
+	if worst > 22 {
+		t.Errorf("reflow reading speed %.1f cps exceeds 22", worst)
 	}
 }
