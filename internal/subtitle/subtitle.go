@@ -173,11 +173,14 @@ const (
 )
 
 // broadcastWord is one per-word timing collapsed from a WordSpan: absolute start
-// and end in ms plus the trimmed token text.
+// and end in ms, the trimmed token text, and the diarized speaker of its span
+// (empty for a non-diarized transcript) so the segmenter never merges two
+// speakers into one cue.
 type broadcastWord struct {
-	start int
-	end   int
-	text  string
+	start   int
+	end     int
+	text    string
+	speaker string
 }
 
 // BuildBroadcastCues re-segments a transcript's per-word timings (model.Span.Words,
@@ -258,40 +261,48 @@ func wordsNeedSpaceJoining(words []broadcastWord) bool {
 }
 
 // broadcastSeg is one cue's word-derived span before timing relaxation: the
-// spoken [start,end] window and the rebuilt (trimmed) text.
+// spoken [start,end] window, the rebuilt (trimmed) text, and the diarized
+// speaker carried through to the emitted cue's voice markup.
 type broadcastSeg struct {
-	start int
-	end   int
-	text  string
+	start   int
+	end     int
+	text    string
+	speaker string
 }
 
 // segmentBroadcastWords groups ordered words into segments, starting a new
-// segment whenever shouldBreakBroadcast fires. Text is rebuilt incrementally via
-// appendBroadcastToken so break decisions see the exact rendered length.
+// segment whenever the speaker changes or shouldBreakBroadcast fires. Text is
+// rebuilt incrementally via appendBroadcastToken so break decisions see the exact
+// rendered length.
 func segmentBroadcastWords(words []broadcastWord) []broadcastSeg {
 	var segs []broadcastSeg
 	haveCur := false
 	var curStart, curLastEnd int
-	var curText string
+	var curText, curSpeaker string
 
 	flush := func() {
 		if !haveCur {
 			return
 		}
 		if t := strings.TrimSpace(curText); t != "" {
-			segs = append(segs, broadcastSeg{start: curStart, end: curLastEnd, text: t})
+			segs = append(segs, broadcastSeg{start: curStart, end: curLastEnd, text: t, speaker: curSpeaker})
 		}
 		haveCur = false
 		curText = ""
+		curSpeaker = ""
 	}
 
 	for _, w := range words {
-		if haveCur && shouldBreakBroadcast(curText, curStart, curLastEnd, w) {
+		// A speaker change is a hard cue boundary: BuildCues keeps one cue per
+		// (single-speaker) span, so the broadcast path must never merge two
+		// speakers' words into one cue when re-segmenting from word timings.
+		if haveCur && (w.speaker != curSpeaker || shouldBreakBroadcast(curText, curStart, curLastEnd, w)) {
 			flush()
 		}
 		if !haveCur {
 			curStart = w.start
 			curText = w.text
+			curSpeaker = w.speaker
 			haveCur = true
 		} else {
 			curText = appendBroadcastToken(curText, w.text)
@@ -304,20 +315,21 @@ func segmentBroadcastWords(words []broadcastWord) []broadcastSeg {
 
 // shouldBreakBroadcast reports whether word w must start a new cue rather than
 // extend the current one: it would overflow the char or duration cap, or a
-// speech pause / sentence end offers a natural boundary once the current cue has
-// met the minimum on-screen time.
+// speech pause / sentence end offers a natural boundary. The minimum on-screen
+// time (bcMinDurMS) is deliberately NOT gated here — it is a display constraint
+// enforced later by relaxBroadcastTiming, which buys the time from surrounding
+// silence. Gating a natural break on spoken duration would merge a short but
+// complete utterance (e.g. a 300 ms "Yes." before a 2 s pause) into the next cue.
 func shouldBreakBroadcast(curText string, curStart, curLastEnd int, w broadcastWord) bool {
-	cdur := curLastEnd - curStart // current duration, excluding the new word
 	gap := w.start - curLastEnd
 	switch {
 	case utf8.RuneCountInString(appendBroadcastToken(curText, w.text)) > bcMaxChars:
 		return true
 	case w.end-curStart > bcMaxDurMS:
 		return true
-	case gap > bcPauseMS && cdur >= bcMinDurMS:
+	case gap > bcPauseMS:
 		return true
-	case endsBroadcastSentence(curText) && cdur >= bcMinDurMS &&
-		utf8.RuneCountInString(curText) >= bcSentMinLen:
+	case endsBroadcastSentence(curText) && utf8.RuneCountInString(curText) >= bcSentMinLen:
 		return true
 	default:
 		return false
@@ -374,6 +386,7 @@ func relaxBroadcastTiming(segs []broadcastSeg) []Cue {
 			StartMS: segs[i].start,
 			EndMS:   segs[i].end,
 			Text:    wrapBroadcastLines(segs[i].text),
+			Speaker: segs[i].speaker,
 		})
 	}
 	return cues
@@ -382,12 +395,18 @@ func relaxBroadcastTiming(segs []broadcastSeg) []Cue {
 // collectBroadcastWords flattens the per-word timings of every "time" span into
 // playback order. A word's end is start+duration (WordSpan.D is a duration, not
 // an end); negative starts/durations are clamped so timing is always valid.
-// Empty tokens are skipped.
+// Empty tokens are skipped. Each word carries its span's diarized speaker (label
+// preferred, stable id fallback — matching BuildCues, SPEC §8.6.3) so the
+// segmenter can preserve voice markup and break on a speaker change.
 func collectBroadcastWords(chunks []TranscriptChunk) []broadcastWord {
 	var words []broadcastWord
 	for _, ch := range chunks {
 		if !strings.EqualFold(strings.TrimSpace(ch.Span.Kind), "time") {
 			continue
+		}
+		speaker := strings.TrimSpace(ch.Span.SpeakerLabel)
+		if speaker == "" {
+			speaker = strings.TrimSpace(ch.Span.Speaker)
 		}
 		for _, w := range ch.Span.Words {
 			tok := strings.TrimSpace(w.W)
@@ -402,7 +421,7 @@ func collectBroadcastWords(chunks []TranscriptChunk) []broadcastWord {
 			if dur < 0 {
 				dur = 0
 			}
-			words = append(words, broadcastWord{start: start, end: start + dur, text: tok})
+			words = append(words, broadcastWord{start: start, end: start + dur, text: tok, speaker: speaker})
 		}
 	}
 	sort.SliceStable(words, func(i, j int) bool {

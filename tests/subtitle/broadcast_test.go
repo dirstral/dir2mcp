@@ -45,6 +45,59 @@ func TestBuildBroadcastCuesEmpty(t *testing.T) {
 	}
 }
 
+// speakerChunk wraps a word list into a single diarized "time" chunk carrying
+// the given speaker label, for the speaker-boundary tests.
+func speakerChunk(speaker string, words []word) subtitle.TranscriptChunk {
+	c := timeChunkWithWords(words)
+	c.Span.SpeakerLabel = speaker
+	return c
+}
+
+// TestBuildBroadcastCuesBreaksOnSpeakerChange pins that a speaker change is a
+// hard cue boundary and that each cue carries its speaker through to voice
+// markup. The two speakers are contiguous in time with NO pause, so without a
+// speaker-aware break their words (well under the char and duration caps) would
+// merge into one cue — regressing BuildCues, which keeps one cue per span.
+func TestBuildBroadcastCuesBreaksOnSpeakerChange(t *testing.T) {
+	chunks := []subtitle.TranscriptChunk{
+		speakerChunk("Alice", []word{{0, 400, "Hello"}, {400, 800, "there"}}),
+		speakerChunk("Bob", []word{{800, 1200, "Hi"}, {1200, 1600, "back"}}),
+	}
+	cues := subtitle.BuildBroadcastCues(chunks)
+	if len(cues) != 2 {
+		t.Fatalf("expected a break at the speaker change, got %d: %+v", len(cues), cues)
+	}
+	if cues[0].Speaker != "Alice" || cues[1].Speaker != "Bob" {
+		t.Errorf("speaker metadata lost: cue0=%q cue1=%q, want Alice/Bob", cues[0].Speaker, cues[1].Speaker)
+	}
+	if !strings.Contains(cues[0].Text, "Hello there") {
+		t.Errorf("cue 0 text = %q, want Alice's words", cues[0].Text)
+	}
+	if !strings.Contains(cues[1].Text, "Hi back") {
+		t.Errorf("cue 1 text = %q, want Bob's words", cues[1].Text)
+	}
+}
+
+// TestBuildBroadcastCuesShortUtteranceBeforePauseBreaks pins that a natural
+// break is NOT gated on spoken duration: a short but complete utterance before a
+// real pause gets its own cue rather than merging across the pause. The minimum
+// on-screen time is a display constraint bought later from silence by
+// relaxBroadcastTiming, not a reason to withhold the segmentation break.
+func TestBuildBroadcastCuesShortUtteranceBeforePauseBreaks(t *testing.T) {
+	words := []word{
+		{start: 0, end: 300, text: "Yes."}, // 300 ms spoken, far under the 1200 ms min
+		// 700 ms gap (> 600 ms pause threshold) -> break despite the short duration.
+		{start: 1000, end: 1500, text: "Continue"},
+	}
+	cues := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)})
+	if len(cues) != 2 {
+		t.Fatalf("short utterance before a pause must break into its own cue, got %d: %+v", len(cues), cues)
+	}
+	if strings.Contains(cues[0].Text, "Continue") {
+		t.Errorf("cue 0 merged across the pause: %q", cues[0].Text)
+	}
+}
+
 // TestBuildBroadcastCuesMaxDuration pins the 6 s hard cap: a steady stream of
 // short words with no pause and no sentence end must still break so no cue spans
 // more than 6 s.
