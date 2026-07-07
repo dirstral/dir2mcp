@@ -3758,7 +3758,11 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 
 	translated, words, err := s.translateStructuredWindowed(ctx, doc, content)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+		// A whisper-translate decode is a TRANSLATION failure (§14.4 TRANSLATE_FAILED),
+		// not a transcript one — tag it with the translate sentinel directly so the
+		// error chain is unambiguous (previously it carried ErrTranscriptProviderFailure
+		// and relied on manifestErrorCode's ordering to still classify it correctly).
+		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
 	}
 	translatedBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n"))
 	if err := os.WriteFile(cachePath, translatedBytes, 0o644); err != nil {
