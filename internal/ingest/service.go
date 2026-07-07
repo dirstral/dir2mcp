@@ -368,6 +368,78 @@ var errNoVideoRepresentation = errors.New(
 	"video produced no representation: no subtitle sidecar found, video is not transcribed (STT is audio-only), " +
 		"and multimodal keyframe embedding is off — enable embed_multimodal or provide a .vtt/.srt sidecar to make it searchable")
 
+// extractorSupportsExt reports whether the selected document extractor can
+// actually read the given file extension (#394). SPEC §7.4B routes every
+// pdf/image/document doc_type to one configured extractor, but no single
+// extractor reads every format in those coarse buckets, so a format outside the
+// active engine's set must be skipped with a visible diagnostic rather than
+// handed to an extractor that fails silently or hard-errors on it.
+//
+// `structured` is true for the docling family (local CLI or docling-serve — the
+// engines that emit a DoclingDocument), false for the flat Mistral-OCR path.
+//   - Flat OCR (Mistral) reads exactly the ocrMIMEType allowlist:
+//     pdf/png/jpg/jpeg/webp. Everything else routed to it (all Office/OpenDocument
+//     documents and the gif/bmp/tiff/svg images) is rejected upstream (#394
+//     defect 3).
+//   - docling additionally imports OpenXML Office (docx/pptx/xlsx) and tiff/bmp
+//     raster images, but does NOT import the OpenDocument family (.odt/.odp/.ods),
+//     RTF, legacy binary .doc, or gif/svg (#394 defects 2 & 3). Every other
+//     extension is left "supported" so nothing docling handles today regresses;
+//     content support for the unreadable formats is tracked in #393.
+func extractorSupportsExt(structured bool, ext string) bool {
+	switch ext {
+	case ".pdf", ".png", ".jpg", ".jpeg", ".webp":
+		// Read by both docling and Mistral OCR.
+		return true
+	}
+	if !structured {
+		return false
+	}
+	switch ext {
+	case ".odt", ".odp", ".ods", ".rtf", ".doc", ".gif", ".svg":
+		// Not imported by docling; content support tracked in #393.
+		return false
+	default:
+		return true
+	}
+}
+
+// extractorCanReadExt reports whether the currently-selected extractor can read
+// the asset's format. Docling-family extractors implement structuredExtractor;
+// the flat Mistral-OCR path does not.
+func (s *Service) extractorCanReadExt(relPath string) bool {
+	if s.extractor == nil {
+		return false
+	}
+	_, structured := s.extractor.(structuredExtractor)
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	return extractorSupportsExt(structured, ext)
+}
+
+// extractorLabel is a short human name for the active extractor, used in the
+// #394 unsupported-format diagnostic. It reflects the same structured/flat split
+// extractorCanReadExt uses, not the concrete provider profile name.
+func (s *Service) extractorLabel() string {
+	if _, structured := s.extractor.(structuredExtractor); structured {
+		return "docling"
+	}
+	return "the OCR provider"
+}
+
+// unsupportedExtractionErr builds the durable, non-fatal diagnostic for a
+// pdf/image/document asset whose format the active extractor cannot read (#394).
+// Before #394 such a format was handed to the extractor anyway, which either
+// failed silently (docling → empty output → a silent empty rep) or hard-errored
+// (Mistral OCR → "unsupported file extension"); it is now skipped with this
+// clear message instead. Content support for the unreadable formats is #393.
+func unsupportedExtractionErr(relPath, extractor string) error {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	return fmt.Errorf(
+		"unsupported format for extraction: the active extractor (%s) cannot read %s files; "+
+			"install a capable extractor or convert the file to a supported format (tracked in #393)",
+		extractor, ext)
+}
+
 type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
 }
@@ -2292,26 +2364,41 @@ func (s *Service) addRepresentations(delta int64) {
 // `augment` keeps OCR and adds the media chunks. It returns whether any media
 // chunks were produced so the caller can apply the same `replace`-skips-text
 // rule to the audio transcript path.
-func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte) (bool, error) {
+func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp) (mediaProduced, nonFatalErrored bool, err error) {
 	// A non-empty span set means media chunks will be produced. In `replace` we
 	// then skip OCR; in `augment` OCR is kept alongside.
 	spans := s.mediaSpansFor(ctx, doc, content)
-	mediaProduced := len(spans) > 0
+	mediaProduced = len(spans) > 0
 	skipOCR := s.embedMultimodal == "replace" && mediaProduced
 
 	if ShouldGenerateExtractedMarkdown(doc.DocType) && s.extractor != nil && !skipOCR {
-		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
-			return false, err
+		if s.extractorCanReadExt(doc.RelPath) {
+			if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
+				return false, false, err
+			}
+			s.addRepresentations(1)
+		} else if !mediaProduced {
+			// #394: the active extractor cannot read this format. Rather than hand
+			// it to an extractor that fails silently (docling → empty) or hard-errors
+			// (Mistral OCR → "unsupported file extension"), record a clear, non-fatal
+			// unsupported-format diagnostic so the unsearchable asset is durably
+			// visible (status="error" / RecentFailures) and the run continues. Skipped
+			// only when direct multimodal embedding is not also making the doc
+			// searchable; content support for these formats is #393.
+			cause := unsupportedExtractionErr(doc.RelPath, s.extractorLabel())
+			s.getLogger().Printf("skipping extraction for %s (%s): %v", doc.RelPath, doc.DocType, cause)
+			s.addErrors(1)
+			s.persistNonFatalDocError(ctx, doc, cause, secretPatterns)
+			nonFatalErrored = true
 		}
-		s.addRepresentations(1)
 	}
 	if mediaProduced {
 		if err := s.repGen.GenerateMediaChunks(ctx, doc, computeRepHash(content), spans); err != nil {
-			return false, err
+			return false, false, err
 		}
 		s.addRepresentations(1)
 	}
-	return mediaProduced, nil
+	return mediaProduced, nonFatalErrored, nil
 }
 
 // Default media-window lengths for direct audio/video embedding (SPEC 8.1.7).
@@ -2577,9 +2664,16 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return false, nil
 	}
 
-	mediaProduced, err := s.generateExtractedAndMediaRepresentations(ctx, doc, content)
+	mediaProduced, nonFatalErrored, err := s.generateExtractedAndMediaRepresentations(ctx, doc, content, secretPatterns)
 	if err != nil {
 		return false, err
+	}
+	if nonFatalErrored {
+		// #394: the extractor path persisted the document as status="error" (an
+		// unsupported format) and counted it as an error itself. A pdf/image/document
+		// asset has no transcript path, so return the soft-error signal now — the
+		// caller must not also credit it as indexed (issue #426).
+		return true, nil
 	}
 	// In `replace`, direct media embedding stands in for STT→text, so skip the
 	// transcript when audio media chunks were produced (SPEC 8.1.7). `augment`
