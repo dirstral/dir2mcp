@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -472,33 +471,14 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 // (SPEC §15.6 "Implementations SHOULD cap at 20 entries by default").
 const statsRecentFailuresLimit = 20
 
-// statsErrorMessageRedactors is a small safety net of common credential
-// shapes applied at the MCP boundary before emitting recent_failures.
-// The write-side already runs the operator's configured
-// `secret_patterns` against err.Error() (see ingest.RedactSecretsInMessage,
-// PR #212) — this is belt-and-suspenders for the cases where the
-// operator hasn't configured any patterns or where a non-SQLite store
-// backend persists raw text. SPEC §15.6: "error_message MUST NOT
-// contain secrets". Kept tight (high-confidence shapes only) to avoid
-// false positives that would hide the actionable failure description.
-var statsErrorMessageRedactors = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}`),
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                                 // AWS access key
-	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),                                           // OpenAI / Mistral / Anthropic style
-	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9_]{20,}`),                                      // GitHub PAT / OAuth
-	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),                                     // Slack
-	regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-.]{10,}\.[A-Za-z0-9_\-]{5,}`), // JWT
-}
-
-// redactStatsErrorMessage runs the high-confidence credential
-// redactors over msg, replacing each match with the literal
-// "[REDACTED]". Returns msg unchanged when no pattern matches.
-func redactStatsErrorMessage(msg string) string {
-	for _, rx := range statsErrorMessageRedactors {
-		msg = rx.ReplaceAllString(msg, "[REDACTED]")
-	}
-	return msg
-}
+// Credential redaction for recent_failures error_message (SPEC §15.6
+// "error_message MUST NOT contain secrets") is the shared
+// ingest.RedactHighConfidenceCredentials — the same high-confidence safety net
+// the CLI `status` coverage report uses, so the two surfaces cannot drift. The
+// write-side already runs the operator's configured `secret_patterns` against
+// err.Error() (ingest.RedactSecretsInMessage, PR #212); this is
+// belt-and-suspenders for when no patterns are configured or a non-SQLite store
+// persisted raw text.
 
 // loadRecentFailuresForStats returns the per-doc projection emitted in
 // dir2mcp_stats's optional recent_failures array: rel_path, doc_type,
@@ -536,7 +516,7 @@ func loadRecentFailuresForStats(ctx context.Context, st model.Store) []map[strin
 			"rel_path":      d.RelPath,
 			"doc_type":      d.DocType,
 			"mtime_unix":    d.MTimeUnix,
-			"error_message": redactStatsErrorMessage(d.ErrorMessage),
+			"error_message": ingest.RedactHighConfidenceCredentials(d.ErrorMessage),
 		})
 	}
 	return out

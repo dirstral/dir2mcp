@@ -41,7 +41,46 @@ type Document struct {
 	// output (that schema is fixed by SPEC §15.5 with
 	// additionalProperties:false); it is a diagnostic-bundle field.
 	ErrorMessage string
+	// SkipReason is the stable classification of *why* a document was
+	// recorded as skipped (never indexed) rather than ingested — one of
+	// the SkipReason* constants below. Empty for ingested ("ok") and
+	// errored documents; populated only on status="skipped" /
+	// "secret_excluded" rows. Aggregated into CorpusStats.SkipSummary so
+	// `status`/`reindex` can report honest coverage ("what wasn't indexed
+	// & why", #414/#395). It is a plain string (mirroring
+	// FailureSummary.Categories) so the model package does not depend on
+	// internal/store.
+	SkipReason string
 }
+
+// SkipReason* enumerate the stable reasons a discovered file is recorded as
+// skipped (never indexed) rather than ingested or errored. Persisted in
+// documents.skip_reason and grouped by CorpusStats.SkipSummary. Kept as plain
+// string constants so callers across packages share one vocabulary without an
+// import cycle back to internal/store.
+const (
+	// SkipReasonUnsupportedFormat: the file's format has no configured
+	// extractor/OCR/transcriber path (e.g. .odt/.rtf without a reader).
+	SkipReasonUnsupportedFormat = "unsupported_format"
+	// SkipReasonBinaryIgnored: a binary artifact classified as non-textual
+	// and deliberately not ingested.
+	SkipReasonBinaryIgnored = "binary_ignored"
+	// SkipReasonArchive: an archive container persisted as a skipped row; its
+	// members are extracted separately and are not directly indexable.
+	SkipReasonArchive = "archive"
+	// SkipReasonIgnoreRule: a file matched a built-in ignore classification
+	// (e.g. .env variants) and was excluded from the pipeline.
+	SkipReasonIgnoreRule = "ignore_rule"
+	// SkipReasonSecretExcluded: content matched a secret pattern, so the file
+	// was excluded from ingestion (status="secret_excluded").
+	SkipReasonSecretExcluded = "secret_excluded"
+	// SkipReasonPathExcluded: the rel_path matched a configured path-exclude
+	// glob and was dropped at scan time (no durable row is persisted).
+	SkipReasonPathExcluded = "path_excluded"
+	// SkipReasonSizeCap: the file exceeded ingest.max_file_mb and was dropped
+	// at discovery.
+	SkipReasonSizeCap = "size_cap"
+)
 
 type Representation struct {
 	RepID       int64
@@ -542,6 +581,30 @@ type CorpusStats struct {
 	// so existing consumers continue to see a flat shape on healthy
 	// corpora.
 	FailureSummary *FailureSummary `json:"failure_summary,omitempty"`
+	// SkipSummary groups documents that were recorded as skipped (never
+	// indexed) by their SkipReason ("archive", "secret_excluded",
+	// "unsupported_format", …) plus a small sample of representative
+	// {rel_path, reason} pairs. It is the honest-coverage surface (#414/#395):
+	// "what wasn't indexed & why". Omitted from JSON when nothing was skipped
+	// so healthy corpora keep a flat shape. Only durably-persisted skip rows
+	// contribute here; discovery-time drops that persist no row (path-excludes)
+	// are surfaced separately by the in-run reindex summary.
+	SkipSummary *SkipSummary `json:"skip_summary,omitempty"`
+}
+
+// SkipSummary aggregates skipped (never-indexed) documents for honest-coverage
+// reporting. Categories is keyed by the string form of model.SkipReason* (kept
+// as plain map[string]int64 so the model package needs no store dependency).
+type SkipSummary struct {
+	Categories map[string]int64 `json:"categories"`
+	Samples    []SkipSample     `json:"samples,omitempty"`
+}
+
+// SkipSample is one representative skipped document: enough to see which files
+// a given reason applies to without dumping the whole documents table.
+type SkipSample struct {
+	RelPath string `json:"rel_path"`
+	Reason  string `json:"reason"`
 }
 
 // FailureSummary aggregates chunk embedding errors for diagnostics.
