@@ -1,6 +1,37 @@
 package model
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
+
+// TestMatchGlob_CompilationMemoized pins that MatchGlob memoizes compilation so a
+// pattern reused across candidate hits (matchFilters / Filter.Match hot path) is
+// compiled once, results stay correct on repeat, and many distinct patterns never
+// break matching (the cache is bounded, uncached past the cap).
+func TestMatchGlob_CompilationMemoized(t *testing.T) {
+	pat := "docs/**/*.memoize_probe_zzz.md"
+	if m, err := MatchGlob(pat, "docs/a/b/x.memoize_probe_zzz.md"); err != nil || !m {
+		t.Fatalf("MatchGlob = (%v,%v), want (true,nil)", m, err)
+	}
+	if _, ok := globCache.Load(pat); !ok {
+		t.Fatal("pattern not memoized after first MatchGlob")
+	}
+	for i := 0; i < 5; i++ {
+		if m, _ := MatchGlob(pat, "docs/x.memoize_probe_zzz.md"); !m {
+			t.Fatal("cached glob lost a valid match")
+		}
+		if m, _ := MatchGlob(pat, "nope.txt"); m {
+			t.Fatal("cached glob gained a spurious match")
+		}
+	}
+	// Past the cache cap, compilation still works (just uncached) and never panics.
+	for i := 0; i < globCacheMax+20; i++ {
+		if _, err := MatchGlob(fmt.Sprintf("d%d/*.x", i), "nope"); err != nil {
+			t.Fatalf("distinct pattern %d errored past cap: %v", i, err)
+		}
+	}
+}
 
 // TestMatchGlob_CanonicalSemantics pins the one canonical path-glob dialect that
 // both the search/ask file_glob filter and the list_files glob now share

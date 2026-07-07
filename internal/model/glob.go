@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // Canonical path-glob matcher shared by the search/ask `file_glob` filter and
@@ -57,11 +59,46 @@ func (g *CompiledGlob) Match(relPath string) bool {
 	return g.re.MatchString(relPath)
 }
 
-// MatchGlob reports whether relPath matches pattern under the canonical dialect.
-// It is a convenience wrapper around CompileGlob for one-shot matches; hot paths
-// that reuse a pattern should CompileGlob once and reuse the result.
-func MatchGlob(pattern, relPath string) (bool, error) {
+// globCache memoizes CompileGlob so a pattern reused across many candidate hits
+// in a query hot path (matchFilters / Filter.Match, issue #441) is compiled ONCE
+// rather than per candidate — regexp.Compile per hit is a real regression on a
+// widened candidate pool. Glob patterns are low-cardinality (operator config +
+// per-query filters); growth is bounded by globCacheMax so an unbounded stream of
+// distinct patterns can't grow the cache without limit (past the cap, compilation
+// still works, just uncached). Entries are immutable, so the sync.Map is safe.
+var (
+	globCache    sync.Map // pattern string -> globCacheEntry
+	globCacheLen atomic.Int64
+)
+
+const globCacheMax = 1024
+
+type globCacheEntry struct {
+	g   *CompiledGlob
+	err error
+}
+
+func compileGlobCached(pattern string) (*CompiledGlob, error) {
+	if v, ok := globCache.Load(pattern); ok {
+		e := v.(globCacheEntry)
+		return e.g, e.err
+	}
 	g, err := CompileGlob(pattern)
+	if globCacheLen.Load() < globCacheMax {
+		if _, loaded := globCache.LoadOrStore(pattern, globCacheEntry{g: g, err: err}); !loaded {
+			globCacheLen.Add(1)
+		}
+	}
+	return g, err
+}
+
+// MatchGlob reports whether relPath matches pattern under the canonical dialect.
+// Compilation is memoized (globCache), so calling it per candidate hit in a
+// filter hot path compiles the pattern only once. A caller with a single pattern
+// and many paths may still CompileGlob once and reuse the *CompiledGlob to skip
+// even the cache lookup.
+func MatchGlob(pattern, relPath string) (bool, error) {
+	g, err := compileGlobCached(pattern)
 	if err != nil {
 		return false, err
 	}
