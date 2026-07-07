@@ -3,7 +3,6 @@ package model
 import (
 	"encoding/json"
 	"fmt"
-	"path"
 	"strings"
 )
 
@@ -243,7 +242,9 @@ type IndexHit struct {
 //   - PathPrefix: keep only rel_paths with this prefix, normalized via
 //     NormalizePathPrefix and matched case-insensitively (ASCII) to agree with
 //     the store's list_files LIKE query (issue #286).
-//   - PathGlob:   keep only rel_paths matching this path.Match glob.
+//   - PathGlob:   keep only rel_paths matching this canonical path glob
+//     (MatchGlob: segment-aware `*`, recursive `**`, ASCII case-insensitive —
+//     the same matcher list_files uses, issue #441).
 //   - DocTypes:   keep only these doc types (case-insensitive).
 //   - ExcludeOrphans: drop chunks with an empty rel_path (orphaned/evicted).
 //   - Speaker: keep only time-spanned transcript chunks attributed to this
@@ -276,8 +277,9 @@ func (f Filter) IsZero() bool {
 // Match reports whether the payload satisfies every active predicate. It
 // reproduces the semantics of retrieval's matchFilters: an empty rel_path is
 // rejected when ExcludeOrphans is set; PathPrefix is normalized and matched via
-// MatchesPathPrefix (consistent with list_files); PathGlob uses path.Match;
-// DocTypes is a case-insensitive set membership.
+// MatchesPathPrefix (consistent with list_files); PathGlob uses the canonical
+// MatchGlob (also shared with list_files, issue #441); DocTypes is a
+// case-insensitive set membership.
 func (f Filter) Match(p IndexPayload) bool {
 	relPath := p.RelPath
 	if f.ExcludeOrphans && strings.TrimSpace(relPath) == "" {
@@ -289,7 +291,7 @@ func (f Filter) Match(p IndexPayload) bool {
 		return false
 	}
 	if f.PathGlob != "" {
-		matched, err := path.Match(f.PathGlob, relPath)
+		matched, err := MatchGlob(f.PathGlob, relPath)
 		if err != nil || !matched {
 			return false
 		}

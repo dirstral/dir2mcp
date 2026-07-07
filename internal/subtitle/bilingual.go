@@ -33,12 +33,17 @@ const DefaultAlignToleranceMS = 2500
 // AlignBilingual aligns secondary-language cues onto primary-language cues for
 // bilingual TTML export (SPEC §8.6.10). The primary cues define the cue set and
 // their time regions are authoritative; each secondary cue is merged into the
-// primary cue whose start is closest to the secondary's start within
-// toleranceMS. A secondary cue with no primary cue in tolerance is emitted as
-// its own secondary-only cue (never dropped). Alignment is deterministic: inputs
-// are sorted by (start,end), the nearest-start primary wins, ties break to the
-// earlier primary, and a primary already carrying a secondary run keeps its
-// first match so a later secondary falls through to its own cue.
+// primary cue whose TIME REGION it overlaps most. Overlap — not start distance —
+// is the primary signal: a translation shares its source cue's time region, so
+// the cue with the greatest temporal overlap is the correct pairing even when a
+// neighboring cue happens to start closer (issue #441). Only when a secondary
+// overlaps no unassigned primary does alignment fall back to the nearest primary
+// by inter-cue gap, and then only within toleranceMS. A secondary cue with no
+// primary in range is emitted as its own secondary-only cue (never dropped).
+// Alignment is deterministic: inputs are sorted by (start,end); the greatest-
+// overlap (else nearest-gap) primary wins; ties break to the earlier primary;
+// and a primary already carrying a secondary run keeps its first match so a
+// later secondary falls through to its own cue.
 //
 // A non-positive toleranceMS falls back to DefaultAlignToleranceMS. Passing nil
 // secondary cues yields the primaries rendered as monolingual bilingual cues.
@@ -64,7 +69,7 @@ func AlignBilingual(primary, secondary []Cue, primaryLang, secondaryLang string,
 
 	var orphans []BilingualCue
 	for _, s := range sec {
-		idx := nearestPrimary(prim, assigned, s.StartMS, toleranceMS)
+		idx := bestPrimary(prim, assigned, s, toleranceMS)
 		if idx < 0 {
 			// No primary within tolerance (or all candidates already carry a
 			// secondary run): emit the secondary as its own cue rather than drop
@@ -94,26 +99,66 @@ func AlignBilingual(primary, secondary []Cue, primaryLang, secondaryLang string,
 	return merged
 }
 
-// nearestPrimary returns the index of the unassigned primary cue whose start is
-// closest to startMS within toleranceMS, or -1 when none qualifies. Ties (equal
-// distance) resolve to the earlier (lower-index) primary for determinism.
-func nearestPrimary(prim []Cue, assigned []bool, startMS, toleranceMS int) int {
-	best := -1
+// bestPrimary returns the index of the unassigned primary cue that best matches
+// secondary cue s, or -1 when none qualifies. Selection is overlap-first
+// (issue #441): the unassigned primary whose time region overlaps s the most
+// wins outright, since a translation shares its source cue's region regardless
+// of small start offsets — so a translation of a long cue is no longer stolen by
+// a short neighbor that merely starts nearer, and a secondary that clearly
+// overlaps one primary is not greedily mis-paired to an adjacent one within
+// tolerance. Overlapping candidates are NOT gated by toleranceMS: a shared time
+// region is a match however the starts line up. Only when s overlaps no
+// unassigned primary does it fall back to the nearest primary by START distance
+// within toleranceMS (the pre-existing tolerance contract, unchanged). Ties
+// (equal overlap, or equal start distance in the fallback) resolve to the
+// earlier (lower-index) primary for determinism.
+func bestPrimary(prim []Cue, assigned []bool, s Cue, toleranceMS int) int {
+	bestOverlap := 0
+	bestOverlapIdx := -1
 	bestDelta := toleranceMS + 1
+	bestDeltaIdx := -1
 	for i, p := range prim {
 		if assigned[i] {
 			continue
 		}
-		delta := startMS - p.StartMS
+		if ov := overlapMS(s, p); ov > 0 {
+			if ov > bestOverlap {
+				bestOverlap = ov
+				bestOverlapIdx = i
+			}
+			continue
+		}
+		delta := s.StartMS - p.StartMS
 		if delta < 0 {
 			delta = -delta
 		}
 		if delta <= toleranceMS && delta < bestDelta {
-			best = i
 			bestDelta = delta
+			bestDeltaIdx = i
 		}
 	}
-	return best
+	if bestOverlapIdx >= 0 {
+		return bestOverlapIdx
+	}
+	return bestDeltaIdx
+}
+
+// overlapMS returns the length in milliseconds of the temporal overlap between
+// two cues' [start,end] regions, or 0 when they do not overlap (touching regions
+// count as 0 overlap and fall through to the start-distance fallback).
+func overlapMS(a, b Cue) int {
+	lo := a.StartMS
+	if b.StartMS > lo {
+		lo = b.StartMS
+	}
+	hi := a.EndMS
+	if b.EndMS < hi {
+		hi = b.EndMS
+	}
+	if hi <= lo {
+		return 0
+	}
+	return hi - lo
 }
 
 // sortedByStart returns a copy of cues ordered by (start, end) so alignment and
