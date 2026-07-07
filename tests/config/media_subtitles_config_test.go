@@ -25,6 +25,76 @@ func TestMediaSubtitles_DefaultsOff(t *testing.T) {
 	}
 }
 
+// TestMediaSubtitlesSegmentation_DefaultsChunk pins that cue segmentation
+// defaults to "chunk" (one cue per stored transcript chunk), the historical
+// behavior, so nothing changes unless broadcast is explicitly selected.
+func TestMediaSubtitlesSegmentation_DefaultsChunk(t *testing.T) {
+	cfg := config.Default()
+	if cfg.MediaSubtitlesSegmentation != "chunk" {
+		t.Fatalf("media.subtitles.segmentation default = %q, want chunk", cfg.MediaSubtitlesSegmentation)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate default: %v", err)
+	}
+	if cfg.MediaSubtitlesSegmentation != "chunk" {
+		t.Fatalf("segmentation after validate = %q, want chunk", cfg.MediaSubtitlesSegmentation)
+	}
+}
+
+// TestMediaSubtitlesSegmentation_NormalizesAndValidates pins case/whitespace
+// normalization to lowercase, acceptance of the two valid modes, that an empty
+// value normalizes to the chunk default, and that an unknown value is rejected.
+func TestMediaSubtitlesSegmentation_NormalizesAndValidates(t *testing.T) {
+	for _, in := range []string{"broadcast", "BROADCAST", "  Broadcast  ", "chunk"} {
+		cfg := config.Default()
+		cfg.MediaSubtitlesSegmentation = in
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate(%q): %v", in, err)
+		}
+		want := strings.ToLower(strings.TrimSpace(in))
+		if cfg.MediaSubtitlesSegmentation != want {
+			t.Fatalf("segmentation %q normalized to %q, want %q", in, cfg.MediaSubtitlesSegmentation, want)
+		}
+	}
+
+	empty := config.Default()
+	empty.MediaSubtitlesSegmentation = ""
+	if err := empty.Validate(); err != nil {
+		t.Fatalf("Validate(empty segmentation): %v", err)
+	}
+	if empty.MediaSubtitlesSegmentation != "chunk" {
+		t.Fatalf("empty segmentation should default to chunk, got %q", empty.MediaSubtitlesSegmentation)
+	}
+
+	bad := config.Default()
+	bad.MediaSubtitlesSegmentation = "sentence"
+	if err := bad.Validate(); err == nil {
+		t.Fatalf("unknown segmentation mode should be rejected")
+	}
+}
+
+// TestMediaSubtitlesSegmentation_NestedYAMLApplies locks the nested
+// media.subtitles.segmentation mapping key so it binds via the YAML scanner.
+func TestMediaSubtitlesSegmentation_NestedYAMLApplies(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, strings.Join([]string{
+		"root_dir: /tmp/repo",
+		"state_dir: /tmp/repo/.dir2mcp",
+		"media:",
+		"  subtitles:",
+		"    segmentation: broadcast",
+	}, "\n")+"\n")
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile(nested segmentation): %v", err)
+	}
+	if cfg.MediaSubtitlesSegmentation != "broadcast" {
+		t.Fatalf("nested segmentation = %q, want broadcast", cfg.MediaSubtitlesSegmentation)
+	}
+}
+
 // TestMediaSubtitles_RoundTrip pins SaveFile/LoadFile round-trip of the new
 // keys so the snapshot faithfully persists an enabled config.
 func TestMediaSubtitles_RoundTrip(t *testing.T) {
@@ -37,6 +107,7 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	cfg.MediaSubtitlesTTMLEnabled = true
 	cfg.MediaSubtitlesSMILEnabled = true
 	cfg.MediaSubtitlesTTMLAlignToleranceMS = 1800
+	cfg.MediaSubtitlesSegmentation = "broadcast"
 	cfg.MediaSubtitlesGlossary = []string{"Aju?bei=>Adzhubei"}
 	cfg.MediaSubtitlesCollapseRepeats = 3
 	cfg.MediaSubtitlesDropURLs = true
@@ -53,6 +124,9 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	}
 	if loaded.MediaSubtitlesTTMLAlignToleranceMS != 1800 {
 		t.Fatalf("align tolerance = %d, want 1800", loaded.MediaSubtitlesTTMLAlignToleranceMS)
+	}
+	if loaded.MediaSubtitlesSegmentation != "broadcast" {
+		t.Fatalf("segmentation did not round-trip: %q", loaded.MediaSubtitlesSegmentation)
 	}
 	if len(loaded.MediaSubtitlesGlossary) != 1 || loaded.MediaSubtitlesGlossary[0] != "Aju?bei=>Adzhubei" {
 		t.Fatalf("glossary did not round-trip: %#v", loaded.MediaSubtitlesGlossary)

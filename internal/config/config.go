@@ -507,6 +507,16 @@ type Config struct {
 	// the text subtitle output is still produced.
 	MediaSubtitlesSMILEnabled bool
 
+	// MediaSubtitlesSegmentation selects HOW time-coded VTT/SRT cues are built on
+	// export (config `media.subtitles.segmentation`): "chunk" (default) emits one
+	// cue per stored transcript chunk (a whisper segment) — the historical
+	// behavior; "broadcast" re-segments from per-word timings (spec §8.6.1) into
+	// broadcast-legible cues (<= 6 s, <= 2x42 chars, reading-speed aware) via
+	// subtitle.BuildBroadcastCues. "broadcast" needs word timings; a transcript/
+	// span without them falls back to the chunk builder, so behavior is unchanged
+	// when word timings are absent. Only affects VTT/SRT export, never ingest.
+	MediaSubtitlesSegmentation string
+
 	// MediaSubtitlesGlossary is an optional list of editorial term replacements
 	// applied to exported VTT/SRT cue text (config `media.subtitles.glossary`).
 	// Each entry is "pattern=>replacement" where pattern is a case-insensitive,
@@ -746,6 +756,7 @@ type fileConfig struct {
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
 	MediaSubtitlesSMILEnabled          *bool
+	MediaSubtitlesSegmentation         *string
 	MediaSubtitlesGlossary             []string
 	MediaSubtitlesCollapseRepeats      *int
 	MediaSubtitlesDropURLs             *bool
@@ -882,6 +893,7 @@ type persistedConfig struct {
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
 	MediaSubtitlesSMILEnabled          bool          `yaml:"media_subtitles_smil_enabled"`
+	MediaSubtitlesSegmentation         string        `yaml:"media_subtitles_segmentation"`
 	MediaSubtitlesGlossary             []string      `yaml:"media_subtitles_glossary"`
 	MediaSubtitlesCollapseRepeats      int           `yaml:"media_subtitles_collapse_repeats"`
 	MediaSubtitlesDropURLs             bool          `yaml:"media_subtitles_drop_urls"`
@@ -1105,6 +1117,7 @@ func Default() Config {
 		MediaSubtitlesTTMLEnabled:          false,
 		MediaSubtitlesTTMLAlignToleranceMS: DefaultMediaSubtitlesAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          false,
+		MediaSubtitlesSegmentation:         "chunk",
 		// Export-time cue cleaning (clean_srt.py port) is OFF by default: no
 		// glossary rewrites, no repetition-collapse (< 2 disables), no URL drop.
 		MediaSubtitlesGlossary:        nil,
@@ -1235,6 +1248,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          cfg.MediaSubtitlesSMILEnabled,
+		MediaSubtitlesSegmentation:         cfg.MediaSubtitlesSegmentation,
 		MediaSubtitlesGlossary:             append([]string(nil), cfg.MediaSubtitlesGlossary...),
 		MediaSubtitlesCollapseRepeats:      cfg.MediaSubtitlesCollapseRepeats,
 		MediaSubtitlesDropURLs:             cfg.MediaSubtitlesDropURLs,
@@ -2060,6 +2074,9 @@ func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesSMILEnabled != nil {
 		cfg.MediaSubtitlesSMILEnabled = *fc.MediaSubtitlesSMILEnabled
 	}
+	if fc.MediaSubtitlesSegmentation != nil {
+		cfg.MediaSubtitlesSegmentation = *fc.MediaSubtitlesSegmentation
+	}
 	if fc.MediaSubtitlesGlossary != nil {
 		cfg.MediaSubtitlesGlossary = normalizeStringSlice(fc.MediaSubtitlesGlossary)
 	}
@@ -2371,6 +2388,7 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
 	"media_subtitles_ttml_align_tolerance_ms": "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":            "media.subtitles.smil.enabled",
+	"media_subtitles_segmentation":            "media.subtitles.segmentation",
 	"media_subtitles_glossary":                "media.subtitles.glossary",
 	"media_subtitles_collapse_repeats":        "media.subtitles.collapse_repeats",
 	"media_subtitles_drop_urls":               "media.subtitles.drop_urls",
@@ -2819,6 +2837,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
+	case "media.subtitles.segmentation":
+		cfg.MediaSubtitlesSegmentation = strPtr(value)
 	case "media.translate.engine":
 		cfg.MediaTranslateEngine = strPtr(value)
 	case "media.batch.manifest":
@@ -3008,6 +3028,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
+	writeScalar("media_subtitles_segmentation", cfg.MediaSubtitlesSegmentation)
 	writeList("media_subtitles_glossary", cfg.MediaSubtitlesGlossary)
 	writeInt("media_subtitles_collapse_repeats", cfg.MediaSubtitlesCollapseRepeats)
 	writeBool("media_subtitles_drop_urls", cfg.MediaSubtitlesDropURLs)
@@ -3724,6 +3745,17 @@ func (c *Config) validateMediaSubtitles() error {
 	if c.MediaSubtitlesTTMLAlignToleranceMS == 0 {
 		c.MediaSubtitlesTTMLAlignToleranceMS = DefaultMediaSubtitlesAlignToleranceMS
 	}
+	segmentation := strings.ToLower(strings.TrimSpace(c.MediaSubtitlesSegmentation))
+	if segmentation == "" {
+		segmentation = Default().MediaSubtitlesSegmentation
+	}
+	switch segmentation {
+	case "chunk", "broadcast":
+	default:
+		return fmt.Errorf("media.subtitles.segmentation must be one of chunk, broadcast: %q",
+			c.MediaSubtitlesSegmentation)
+	}
+	c.MediaSubtitlesSegmentation = segmentation
 	if c.MediaSubtitlesCollapseRepeats < 0 {
 		return fmt.Errorf("media.subtitles.collapse_repeats must not be negative: %d",
 			c.MediaSubtitlesCollapseRepeats)

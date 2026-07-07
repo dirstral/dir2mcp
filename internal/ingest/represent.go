@@ -922,11 +922,41 @@ func chunkTranscriptByTimeWithWords(content string, words []model.TimedWord) []c
 func chunkTranscriptByTimeWithWordsFiltered(content string, words []model.TimedWord, filter *subtitle.WordFilter) []chunkSegment {
 	segs := chunkTranscriptByTime(content)
 	segs = applyWordFilterToSegments(segs, filter)
+	// Filter the word list at the SOURCE, before attaching it to spans. The
+	// segment Text filter above only cleans Text; Span.Words is rebuilt into
+	// broadcast cues, so leaving filtered phrases in the word list would
+	// re-introduce exactly the boilerplate/credit/watermark phrases the filter
+	// stripped. Dropping the matched words here fixes the leak for every
+	// word-consumer (broadcast cues and any future one), not just at export.
+	words = filterTimedWords(words, filter)
 	if len(words) == 0 || len(segs) == 0 {
 		return segs
 	}
 	attachWordsToTimeSpans(segs, words)
 	return segs
+}
+
+// filterTimedWords removes the per-word timestamps whose tokens fall inside an
+// active filter phrase (using the same WordFilter that strips segment text), so
+// anything that later rebuilds text from these words is already clean. A
+// nil/inactive filter or empty word list returns the input unchanged. Timing on
+// the surviving words is preserved verbatim.
+func filterTimedWords(words []model.TimedWord, filter *subtitle.WordFilter) []model.TimedWord {
+	if !filter.Active() || len(words) == 0 {
+		return words
+	}
+	tokens := make([]string, len(words))
+	for i, w := range words {
+		tokens[i] = w.Word
+	}
+	keep := filter.FilterTokens(tokens)
+	out := make([]model.TimedWord, 0, len(words))
+	for i, w := range words {
+		if keep[i] {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // applyWordFilterToSegments strips configured filter phrases from each segment's
@@ -1515,6 +1545,20 @@ func ChunkTranscriptByTimeWithWords(content string, words []model.TimedWord) []C
 // the tests/ tree. A nil/inactive filter is identical to ChunkTranscriptByTime.
 func ChunkTranscriptByTimeFiltered(content string, filter *subtitle.WordFilter) []ChunkSegment {
 	raw := chunkTranscriptByTimeWithWordsFiltered(content, nil, filter)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ChunkTranscriptByTimeWithWordsFiltered is the exported counterpart of
+// chunkTranscriptByTimeWithWordsFiltered, exposed for tests in the tests/ tree.
+// It applies both the word-timing attachment and the caption word filter, so the
+// attached Span.Words are already stripped of filtered phrases. A nil/inactive
+// filter with nil words is identical to ChunkTranscriptByTime.
+func ChunkTranscriptByTimeWithWordsFiltered(content string, words []model.TimedWord, filter *subtitle.WordFilter) []ChunkSegment {
+	raw := chunkTranscriptByTimeWithWordsFiltered(content, words, filter)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

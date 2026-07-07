@@ -84,6 +84,64 @@ func FilterCues(cues []Cue, filter *WordFilter) []Cue {
 	return out
 }
 
+// FilterTokens is the word-level counterpart of Apply: given an ordered slice of
+// word tokens it reports, per token, whether the token SURVIVES the filter.
+// Consumers that rebuild text from per-word timings (e.g. broadcast subtitle
+// cues) call this so the words they render are as clean as the filtered segment
+// text — a substring filter on the joined text alone cannot reach the word list.
+//
+// The tokens are joined with single ASCII spaces (the neutral reconstruction of
+// spoken text) and every configured phrase is matched against that joined string
+// exactly as Apply matches; any token that OVERLAPS a matched phrase span is
+// marked for removal, so a phrase spanning several tokens drops all of them —
+// even a phrase that a later re-segmentation would split across a cue or line
+// boundary. Returns a keep-mask of len(tokens); an inactive filter (or no
+// phrases) keeps every token. Over-removal (a token only partially covered by a
+// match) is preferred to leakage, matching the conservative intent of the filter.
+func (f *WordFilter) FilterTokens(tokens []string) []bool {
+	keep := make([]bool, len(tokens))
+	for i := range keep {
+		keep[i] = true
+	}
+	if !f.Active() || len(tokens) == 0 {
+		return keep
+	}
+	// Join the tokens and record, for each byte of the joined string, the
+	// originating token index (-1 for an inserted separator space), so a matched
+	// phrase span can be mapped back to the tokens it covers.
+	var b strings.Builder
+	tokenOf := make([]int, 0)
+	for i, tok := range tokens {
+		if i > 0 {
+			b.WriteByte(' ')
+			tokenOf = append(tokenOf, -1)
+		}
+		for j := 0; j < len(tok); j++ {
+			tokenOf = append(tokenOf, i)
+		}
+		b.WriteString(tok)
+	}
+	folded, srcOf := foldWithOffsets(b.String())
+	for _, phrase := range f.lowered {
+		from := 0
+		for {
+			rel := strings.Index(folded[from:], phrase)
+			if rel < 0 {
+				break
+			}
+			matchStart := from + rel
+			matchEnd := matchStart + len(phrase)
+			for p := srcOf[matchStart]; p < srcOf[matchEnd] && p < len(tokenOf); p++ {
+				if ti := tokenOf[p]; ti >= 0 {
+					keep[ti] = false
+				}
+			}
+			from = matchEnd
+		}
+	}
+	return keep
+}
+
 // removeAllFold deletes every case-insensitive occurrence of phraseLow (already
 // lower-cased) from s, preserving the casing of the surviving text.
 //

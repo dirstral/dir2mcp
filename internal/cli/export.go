@@ -91,7 +91,7 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 		CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
 		Glossary:        glossary,
 	}
-	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, filter, clean)
+	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, filter, clean, cfg.MediaSubtitlesSegmentation)
 	if code != exitSuccess {
 		return code
 	}
@@ -103,7 +103,7 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 // from its chunks, and renders them in the requested format. It returns the
 // serialized document, or an exit code on error (no transcript, no chunks,
 // unknown language, store failure).
-func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, filter *subtitle.WordFilter, clean subtitle.CleanOptions) (string, int) {
+func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, filter *subtitle.WordFilter, clean subtitle.CleanOptions, segmentation string) (string, int) {
 	reps, err := ts.TranscriptRepresentations(ctx, opts.relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -134,7 +134,7 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 	for _, r := range rows {
 		chunks = append(chunks, subtitle.TranscriptChunk{Text: r.Text, Span: r.Span})
 	}
-	cues := subtitle.BuildCues(chunks)
+	cues := buildCuesForSegmentation(chunks, segmentation)
 	// Apply the configured caption word filter (media.filter_words) on export so
 	// exported VTT/SRT never contain the boilerplate/credits/watermark phrases,
 	// consistent with how ingest strips them before embedding. Cues empty after
@@ -155,6 +155,21 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 	default: // "srt" (validated in parseExportOptions)
 		return subtitle.RenderSRT(cues), exitSuccess
 	}
+}
+
+// buildCuesForSegmentation selects the cue builder by the configured
+// media.subtitles.segmentation mode: "broadcast" re-segments from per-word
+// timings into broadcast-legible cues, falling back to the chunk-per-cue builder
+// when the transcript carries no word timings (BuildBroadcastCues returns nil).
+// Any other value (including the "chunk" default and empty) uses BuildCues, so
+// the historical behavior is unchanged unless broadcast is explicitly selected.
+func buildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation string) []subtitle.Cue {
+	if strings.EqualFold(strings.TrimSpace(segmentation), "broadcast") {
+		if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
+			return cues
+		}
+	}
+	return subtitle.BuildCues(chunks)
 }
 
 // emitExport writes the rendered subtitle document to --out (atomically) or to
