@@ -89,7 +89,7 @@ func TestAsk_StripsHallucinatedInlineCitation(t *testing.T) {
 // directly (issue #403 F3): file-like tags absent from the citation set are
 // dropped; matching tags (by full path or basename) and prose brackets stay.
 func TestStripHallucinatedCitations_Unit(t *testing.T) {
-	citations := []model.Citation{{RelPath: "docs/a.md"}, {RelPath: "reports/q3.pdf"}}
+	citations := []model.Citation{{RelPath: "docs/a.md"}, {RelPath: "reports/q3.pdf"}, {RelPath: "src/main.go"}}
 	cases := []struct {
 		name string
 		in   string
@@ -98,6 +98,9 @@ func TestStripHallucinatedCitations_Unit(t *testing.T) {
 		{"keeps known full path", "See [docs/a.md].", "See [docs/a.md]."},
 		{"keeps known basename", "See [q3.pdf].", "See [q3.pdf]."},
 		{"keeps span suffix", "See [reports/q3.pdf#p=3].", "See [reports/q3.pdf#p=3]."},
+		{"keeps custom line suffix", "See [src/main.go:L12-48].", "See [src/main.go:L12-48]."},
+		{"keeps standard line suffix", "See [src/main.go:12].", "See [src/main.go:12]."},
+		{"keeps standard line range", "See [src/main.go:12-48].", "See [src/main.go:12-48]."},
 		{"drops unknown file", "See [ghost.pdf] here.", "See here."},
 		{"keeps footnote", "Result [1] holds.", "Result [1] holds."},
 		{"keeps prose bracket", "Note [see appendix] please.", "Note [see appendix] please."},

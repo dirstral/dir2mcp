@@ -3318,8 +3318,13 @@ func stripHallucinatedCitations(answer string, citations []model.Citation) strin
 	return strings.TrimSpace(out)
 }
 
+// citationLineSuffixRe matches a trailing line-number suffix on a citation path:
+// a colon, an optional "L", then a digit — covering both the custom ":L12"/
+// ":L12-48" form and the standard "file:12"/"file:12-48" form.
+var citationLineSuffixRe = regexp.MustCompile(`:L?\d`)
+
 // citationTagPath extracts the leading rel_path token from the inside of an
-// inline citation tag, discarding any span suffix (#p=, @t=, :L, section
+// inline citation tag, discarding any span suffix (#p=, @t=, :12 / :L12, section
 // breadcrumb " › "). Returns "" when nothing path-like leads the tag.
 func citationTagPath(inner string) string {
 	inner = strings.TrimSpace(inner)
@@ -3330,11 +3335,19 @@ func citationTagPath(inner string) string {
 	if i := strings.Index(inner, " › "); i >= 0 {
 		inner = inner[:i]
 	}
-	// Then any span suffix marker; ":L" is the code line-range separator.
-	for _, sep := range []string{"#", "@", ":L"} {
+	// Then the page/time span markers.
+	for _, sep := range []string{"#", "@"} {
 		if i := strings.Index(inner, sep); i >= 0 {
 			inner = inner[:i]
 		}
+	}
+	// Cut a trailing line-number suffix — the custom ":L12"/":L12-48" form AND the
+	// standard "file:12"/"file:12-48" form a model is likely to emit. A colon
+	// followed by an optional "L" and a digit is a line marker (colons are invalid
+	// in Windows paths and rare in relative paths elsewhere), so this resolves both
+	// to the bare path instead of leaving ":12" attached and stripping a valid tag.
+	if loc := citationLineSuffixRe.FindStringIndex(inner); loc != nil {
+		inner = inner[:loc[0]]
 	}
 	// A remaining space means a free-form phrase (e.g. "lease §12"); keep only
 	// the leading token so "lease.pdf §12" still resolves to "lease.pdf".
