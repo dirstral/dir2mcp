@@ -715,6 +715,27 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 	return subtitle.NewWordFilter(s.cfg.MediaFilterWords)
 }
 
+// captionDropScrub builds the shared subtitle drop/scrub sets from
+// media.subtitles.drop_phrases / scrub_phrases (issue #545). The same sets clean
+// STT transcript chunks and sidecar-cue chunks before embedding, mirroring how
+// the export path (subtitle.CleanCues) cleans the exported sidecar — so a
+// wholly-spam chunk is never indexed and a chunk with a leaked phrase is embedded
+// scrubbed, keeping the index and sidecar in agreement. Empty config yields
+// inactive (nil) sets, which the cleaning treats as a no-op. The patterns were
+// already validated at config load (config.Validate → subtitle.NewDropSet), so a
+// compile error here is unexpected; it is logged and treated as no cleaning
+// (nil set) rather than failing ingestion.
+func (s *Service) captionDropScrub() (drop, scrub *subtitle.DropSet) {
+	var err error
+	if drop, err = subtitle.NewDropSet(s.cfg.MediaSubtitlesDropPhrases); err != nil {
+		s.getLogger().Printf("media.subtitles.drop_phrases invalid at ingest, ignoring: %v", err)
+	}
+	if scrub, err = subtitle.NewDropSet(s.cfg.MediaSubtitlesScrubPhrases); err != nil {
+		s.getLogger().Printf("media.subtitles.scrub_phrases invalid at ingest, ignoring: %v", err)
+	}
+	return drop, scrub
+}
+
 func sttExpectedLanguage(cfg config.Config) string {
 	prof, ok := resolveSTTProfile(cfg)
 	if !ok {
@@ -3106,6 +3127,11 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	})
 
 	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
+	// Strip configured subtitle drop/scrub phrases from the chunk text BEFORE
+	// embedding (issue #545), so whisper keyword-spam never pollutes the index —
+	// the same cleaning the export path applies to the sidecar. Off by default.
+	dropSet, scrubSet := s.captionDropScrub()
+	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
 	if len(segments) == 0 {
 		return nil
 	}
@@ -3322,6 +3348,31 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		Duration:         duration,
 	})
 
+	// Chunk the translated text with the same word-aware transcript chunker as the
+	// source path so its time spans line up with the source segments (the
+	// translation preserves each segment's verbatim [mm:ss] marker) AND carry the
+	// whisper-translate per-word timings, enabling broadcast segmentation of the
+	// English track. translatedWords is nil for the chat engine, leaving that path
+	// chunk-only as before.
+	segments := chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
+	// Strip configured subtitle drop/scrub phrases from the translated chunk text
+	// before embedding (issue #545), consistent with the source transcript path.
+	dropSet, scrubSet := s.captionDropScrub()
+	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
+	// Bail BEFORE creating the representation when the translation was fully
+	// stripped (drop/scrub emptied every segment): otherwise we would leave a
+	// dangling rep row with no chunks and inflate the representation count. The
+	// source transcript path bails before UpsertRepresentation for the same reason.
+	if len(segments) == 0 {
+		return nil
+	}
+	// Apply the same leading-silence trim offset as the source transcript so the
+	// translated time windows stay aligned with the source (dir2mcp#258). A zero
+	// offset (trim disabled / no silence detected) is a no-op.
+	if trimOffsetMS > 0 {
+		shiftTranscriptSpans(segments, trimOffsetMS)
+	}
+
 	meta := transcriptMeta{
 		Source:            translationSource,
 		Language:          targetLang,
@@ -3357,22 +3408,6 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	}
 	s.addRepresentations(1)
 
-	// Chunk the translated text with the same word-aware transcript chunker as the
-	// source path so its time spans line up with the source segments (the
-	// translation preserves each segment's verbatim [mm:ss] marker) AND carry the
-	// whisper-translate per-word timings, enabling broadcast segmentation of the
-	// English track. translatedWords is nil for the chat engine, leaving that path
-	// chunk-only as before.
-	segments := chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
-	if len(segments) == 0 {
-		return nil
-	}
-	// Apply the same leading-silence trim offset as the source transcript so the
-	// translated time windows stay aligned with the source (dir2mcp#258). A zero
-	// offset (trim disabled / no silence detected) is a no-op.
-	if trimOffsetMS > 0 {
-		shiftTranscriptSpans(segments, trimOffsetMS)
-	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return fmt.Errorf("persist translated transcript chunks: %w", err)
 	}
