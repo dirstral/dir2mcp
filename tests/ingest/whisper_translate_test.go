@@ -252,6 +252,42 @@ func TestWhisperTranslate_RoutesThroughQualityGate(t *testing.T) {
 	}
 }
 
+// TestWhisperTranslate_FullyScrubbedCreatesNoDanglingRep pins the #545 review
+// fix: when drop/scrub strips a translation to nothing, NO translated
+// representation row is created (and the representation count is not inflated).
+// The empty-segment check now runs before UpsertRepresentation, matching the
+// source transcript path, so a fully-spam translation leaves no dangling rep.
+func TestWhisperTranslate_FullyScrubbedCreatesNoDanglingRep(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{
+		StateDir:                  stateDir,
+		MediaSubtitlesDropPhrases: []string{"subscribe now"},
+	}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет"})
+	svc.SetTranscriptLanguage("ru")
+	// The entire translated line is spam the drop set removes, so every translated
+	// segment is dropped and the translation collapses to empty.
+	svc.SetTranslateTranscriber(
+		&fakeTranscriber{text: "[00:00] subscribe now"},
+		"whisper", "large-v3", []string{"en"})
+
+	doc := model.Document{DocID: 31, RelPath: "audio/clip.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+
+	for _, r := range st.reps {
+		if r.RepType == ingest.TranscriptRepType("en") {
+			t.Fatalf("fully-scrubbed translation created a dangling %q rep: %+v", ingest.TranscriptRepType("en"), r)
+		}
+	}
+	if len(st.reps) != 1 {
+		t.Fatalf("expected only the source transcript rep (no dangling translated rep), got %d: %+v", len(st.reps), st.reps)
+	}
+}
+
 // TestWhisperTranslate_AppliesFilterWords pins that media.filter_words is applied
 // to the translated English track (#538 routed the translate path through the
 // filtered chunker, matching the source track). A pure-boilerplate translated
