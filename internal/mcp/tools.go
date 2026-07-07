@@ -1112,10 +1112,11 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 		}
 	}
 
+	sttProvider, sttModel := resolvedSTTProvenance(s.cfg)
 	structured := map[string]interface{}{
 		"rel_path":        relPath,
-		"provider":        defaultSTTProvider,
-		"model":           defaultSTTModel,
+		"provider":        sttProvider,
+		"model":           sttModel,
 		"indexed":         indexed,
 		"segments":        segments,
 		"transcribed":     transcribed,
@@ -1126,6 +1127,25 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 		Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("transcribed %s", relPath)}},
 		StructuredContent: structured,
 	}, nil
+}
+
+// resolvedSTTProvenance returns the provider name + model of the STT backend the
+// server is actually configured to use, so transcribe / transcribe_and_ask report
+// truthful provenance in their tool results instead of the hardcoded
+// mistral/voxtral-mini-latest constants (issue #440 F5): with an ElevenLabs,
+// Whisper, Gemini, or auto-resolved backend the emitted provider/model now match
+// the transcriber that produced the transcript. It falls back to the historical
+// defaults only when no STT profile resolves (STT off/unconfigured), a defensive
+// path a real transcription never reaches.
+func resolvedSTTProvenance(cfg config.Config) (providerName, sttModel string) {
+	name, mdl, ok := ingest.ResolveSTTProviderModel(cfg)
+	if !ok {
+		return defaultSTTProvider, defaultSTTModel
+	}
+	if strings.TrimSpace(mdl) == "" {
+		mdl = defaultSTTModel
+	}
+	return name, mdl
 }
 
 func parseAnnotateArgs(args map[string]interface{}) (relPath string, schemaJSON map[string]interface{}, indexFlattenedText bool, maxChars int, toolErr *toolExecutionError) {
@@ -1311,9 +1331,10 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 		return toolCallResult{}, mapSearchError(askErr)
 	}
 
+	sttProvider, sttModel := resolvedSTTProvenance(s.cfg)
 	structured := buildAskStructuredContent(askResult)
-	structured["transcript_provider"] = defaultSTTProvider
-	structured["transcript_model"] = defaultSTTModel
+	structured["transcript_provider"] = sttProvider
+	structured["transcript_model"] = sttModel
 	structured["transcribed"] = strings.TrimSpace(transcriptText) != ""
 	structured["transcribed_now"] = transcribedNow
 
@@ -3109,8 +3130,12 @@ func transcribeOutputSchema() map[string]interface{} {
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
-			"rel_path":        map[string]interface{}{"type": "string"},
-			"provider":        map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}},
+			"rel_path": map[string]interface{}{"type": "string"},
+			// provider is the resolved STT profile name (issue #440 F5), which may be
+			// any STT-capable profile (mistral-ocr, elevenlabs, whisper, gemini, a
+			// user-declared profile, …), so it is an open string rather than a pinned
+			// enum that would exclude the very backends the field now reports truthfully.
+			"provider":        map[string]interface{}{"type": "string"},
 			"model":           map[string]interface{}{"type": "string"},
 			"indexed":         map[string]interface{}{"type": "boolean"},
 			"transcribed":     map[string]interface{}{"type": "boolean"},
@@ -3197,7 +3222,10 @@ func transcribeAndAskOutputSchema() map[string]interface{} {
 		return askOutputSchema()
 	}
 
-	properties["transcript_provider"] = map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}}
+	// transcript_provider is the resolved STT profile name (issue #440 F5); like
+	// transcribe's `provider` it is an open string, not a pinned two-value enum,
+	// so whisper/gemini/user-profile backends are reported truthfully.
+	properties["transcript_provider"] = map[string]interface{}{"type": "string"}
 	properties["transcript_model"] = map[string]interface{}{"type": "string"}
 	properties["transcribed"] = map[string]interface{}{"type": "boolean"}
 	properties["transcribed_now"] = map[string]interface{}{"type": "boolean"}

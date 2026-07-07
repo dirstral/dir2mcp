@@ -102,13 +102,26 @@ func builtinProfiles() map[string]providerProfileYAML {
 // builtinPrecedence is the deterministic auto-selection order (SPEC
 // 8.1.3): Mistral first (historical default), then the rest. User-only
 // profiles are appended in declared order after these.
+//
+// `mistral-ocr` (kind: mistral — the Voxtral STT / Mistral-OCR path) precedes
+// `mistral` (kind: openai — the OpenAI-compatible chat/embed path). This
+// ordering is what makes `stt_provider: auto` resolve to the intended Voxtral
+// backend: for STT, `mistral` is only EndpointDependent (an arbitrary
+// api.mistral.ai/v1 base URL is not guaranteed to serve /v1/audio/transcriptions)
+// while `mistral-ocr` is statically Supported, and 8.1.3 auto selection takes the
+// FIRST eligible+capable profile in precedence order. With `mistral` first, auto
+// STT silently bound the OpenAI-compat transcriber and never used the seeded
+// Voxtral model (issue #440 F4). `mistral-ocr` carries no embed/chat capability,
+// so ordering it ahead of `mistral` leaves embed/chat/ocr auto selection
+// unchanged — it is skipped for those and `mistral` still wins.
+//
 // `local` is intentionally excluded: it is credential-less and would
 // otherwise silently win auto-selection when no real credential is
 // set, masking a missing-credential misconfig (and pointing at a
 // localhost endpoint that is usually not running). It remains fully
 // usable via an explicit `model.<cap>.provider: local` binding.
 var builtinPrecedence = []string{
-	"mistral", "mistral-ocr", "openai", "gemini", "cohere",
+	"mistral-ocr", "mistral", "openai", "gemini", "cohere",
 	"anthropic", "elevenlabs", "openrouter",
 }
 
@@ -318,6 +331,19 @@ func mergeProfiles(base, user map[string]providerProfileYAML) (map[string]provid
 			if f.src != "" {
 				*f.dst = f.src
 			}
+		}
+		// Carry the per-axis requested embedding dimensions (SPEC 8.1.6,
+		// Matryoshka/MRL). These are ints, not strings, so they are merged
+		// separately: a non-zero override wins, zero leaves the built-in dim
+		// intact. Omitting them here silently dropped a `providers:` profile
+		// override of embed_text_dim/embed_code_dim (issue #440 F1), resetting
+		// the effective embedding dimension and recording dim=0 in the embed
+		// identity.
+		if up.EmbedTextDim != 0 {
+			base.EmbedTextDim = up.EmbedTextDim
+		}
+		if up.EmbedCodeDim != 0 {
+			base.EmbedCodeDim = up.EmbedCodeDim
 		}
 		merged[name] = base
 	}

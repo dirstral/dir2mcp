@@ -202,6 +202,41 @@ func TestProviders_EmbedDimensionKnob(t *testing.T) {
 	}
 }
 
+// TestProviders_ProfileOverrideKeepsEmbedDims pins issue #440 F1: overriding a
+// built-in profile via the `providers:` map with embed_text_dim/embed_code_dim
+// must carry those Matryoshka dims (SPEC 8.1.6) through mergeProfiles onto the
+// resolved profile and into the embed identity. Before the fix the int dim fields
+// were dropped on the override branch (only string models were merged), so the
+// override was silently ignored, the provider embedded at its native dimension,
+// and the embed identity recorded dim=0.
+func TestProviders_ProfileOverrideKeepsEmbedDims(t *testing.T) {
+	// Blank the higher-precedence embed creds so gemini is the resolved embed
+	// provider and the override target.
+	for _, k := range []string{"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("GEMINI_API_KEY", "gk")
+	yaml := "version: 1\n" +
+		"providers:\n" +
+		"  gemini:\n" +
+		"    embed_text_dim: 768\n" +
+		"    embed_code_dim: 256\n"
+	r := loadCfg(t, yaml).Providers()
+	p, err := r.Resolve(provider.CapEmbed)
+	if err != nil {
+		t.Fatalf("resolve embed: %v", err)
+	}
+	if p.Name != "gemini" {
+		t.Fatalf("embed provider = %q, want gemini", p.Name)
+	}
+	if p.EmbedTextDim != 768 || p.EmbedCodeDim != 256 {
+		t.Fatalf("profile-override dims dropped: text:%d code:%d, want 768/256", p.EmbedTextDim, p.EmbedCodeDim)
+	}
+	if !strings.Contains(r.EmbedIdentity(), "|768|256|") {
+		t.Fatalf("embed identity %q must encode the overridden dims", r.EmbedIdentity())
+	}
+}
+
 // TestProviders_EmbedMultimodalKnob pins SPEC 8.1.7: model.embed.multimodal
 // parses, resolves onto the embed profile, and enters the embed identity.
 func TestProviders_EmbedMultimodalKnob(t *testing.T) {

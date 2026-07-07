@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 )
@@ -174,6 +175,19 @@ func MeanPoolSpans(tok model.TokenEmbedding, spans []Span) (vectors [][]float32,
 // fallbackIdx slice lists span indices that no token overlapped (nil vector at
 // that index); a runtime token-embed failure returns a FallbackEmbedError-tagged
 // error so the caller embeds the whole document the old way. dec MUST be Active.
+//
+// Each returned chunk vector is L2-normalized to unit length (issue #446 F3): the
+// pooled arithmetic mean of contextual token vectors has no fixed norm, and while
+// that is harmless under cosine similarity (which normalizes internally, as the
+// default HNSW index does), a vector store configured for raw inner/dot-product
+// distance (a Qdrant/pgvector deployment MAY be) assumes unit-norm vectors. The
+// query side already produces provider-normalized embeddings via Embed, so
+// normalizing here keeps the late-chunked corpus vectors comparable to queries in
+// that space too. Pooling stays in MeanPoolSpan/MeanPoolSpans as a pure arithmetic
+// mean (that is the documented, unit-tested contract); normalization is applied
+// only here, on the index-bound document path. A degenerate zero-magnitude pooled
+// vector is returned unchanged (it cannot be normalized and, being all-zero, is an
+// upstream token-embedding anomaly rather than something this step should mask).
 func EmbedDocument(ctx context.Context, dec Decision, modelName string, docText string, spans []Span) (vectors [][]float32, fallbackIdx []int, err error) {
 	if !dec.Active || dec.Embedder == nil {
 		return nil, nil, fmt.Errorf("latechunk: EmbedDocument called with inactive decision (%s)", dec.Fallback)
@@ -185,7 +199,34 @@ func EmbedDocument(ctx context.Context, dec Decision, modelName string, docText 
 	if len(toks) != 1 {
 		return nil, nil, fmt.Errorf("%s: token-embedder returned %d results for 1 input", FallbackEmbedError, len(toks))
 	}
-	return MeanPoolSpans(toks[0], spans)
+	vectors, fallbackIdx, err = MeanPoolSpans(toks[0], spans)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range vectors {
+		// nil vectors are per-span fallbacks (no token overlapped); leave them nil
+		// so the caller still sees which spans to embed the old way.
+		if vectors[i] != nil {
+			l2NormalizeInPlace(vectors[i])
+		}
+	}
+	return vectors, fallbackIdx, nil
+}
+
+// l2NormalizeInPlace scales v to unit L2 norm in place. A zero-magnitude vector
+// (no direction to preserve) is left unchanged rather than dividing by zero.
+func l2NormalizeInPlace(v []float32) {
+	var sumSq float64
+	for _, x := range v {
+		sumSq += float64(x) * float64(x)
+	}
+	if sumSq == 0 {
+		return
+	}
+	inv := float32(1 / math.Sqrt(sumSq))
+	for i := range v {
+		v[i] *= inv
+	}
 }
 
 // IsEmbedFallback reports whether err is a runtime token-embed failure from

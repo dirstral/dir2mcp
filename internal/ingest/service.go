@@ -854,6 +854,22 @@ func resolveSTTProfile(cfg config.Config) (provider.Profile, bool) {
 	return prof, true
 }
 
+// ResolveSTTProviderModel returns the resolved active STT provider profile name
+// and its STT model for cfg (SPEC 8.1.3), mirroring the exact selection
+// TranscriberFromConfigWithLanguage / resolveSTTProfile perform. It exists so the
+// MCP tool layer can report the transcriber ACTUALLY used as provenance instead
+// of a hardcoded "mistral"/"voxtral-mini-latest" pair (issue #440 F5): with
+// stt_provider=elevenlabs/whisper/gemini/auto the reported provider now matches
+// the backend that produced the transcript. ok=false when STT is off or no
+// STT-capable profile resolves, in which case the caller keeps its own fallback.
+func ResolveSTTProviderModel(cfg config.Config) (providerName, sttModel string, ok bool) {
+	prof, resolved := resolveSTTProfile(cfg)
+	if !resolved {
+		return "", "", false
+	}
+	return strings.TrimSpace(prof.Name), strings.TrimSpace(prof.STTModel), true
+}
+
 // translatorFromConfig resolves the chat-capability binding used to translate
 // transcripts (SPEC §8.6.2: "uses the chat capability unless a dedicated
 // binding is configured") and builds a model.Generator from it. A dedicated

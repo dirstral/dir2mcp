@@ -54,6 +54,63 @@ func TestAlignBilingualWithinTolerance(t *testing.T) {
 	}
 }
 
+// TestAlignBilingualOverlapWins pins the issue #441 fix: pairing is overlap-first,
+// so a secondary is merged into the primary whose TIME REGION it overlaps most —
+// not merely the primary whose start is nearest. A greedy start-only matcher with
+// a 2500 ms tolerance would mis-pair these; overlap-aware alignment does not.
+func TestAlignBilingualOverlapWins(t *testing.T) {
+	// Two adjacent primaries. The secondary starts 100 ms before P1 but sits
+	// squarely inside P1's region; a start-distance matcher within tolerance could
+	// steal it onto P0 (start distance 1900 ms < 2500 ms). Overlap must win.
+	primary := []subtitle.Cue{
+		{StartMS: 0, EndMS: 1800, Text: "P0"},
+		{StartMS: 2000, EndMS: 3800, Text: "P1"},
+	}
+	secondary := []subtitle.Cue{
+		{StartMS: 1900, EndMS: 3700, Text: "S1"},
+	}
+	got := subtitle.AlignBilingual(primary, secondary, "en", "fr", 2500)
+
+	var p1 *subtitle.BilingualCue
+	for i := range got {
+		if got[i].PrimaryText == "P1" {
+			p1 = &got[i]
+		}
+		if got[i].PrimaryText == "P0" && got[i].SecondaryText != "" {
+			t.Fatalf("secondary mis-paired onto P0 (start-nearest): %+v", got[i])
+		}
+	}
+	if p1 == nil {
+		t.Fatalf("P1 cue missing: %+v", got)
+	}
+	if p1.SecondaryText != "S1" || p1.SecondaryLang != "fr" {
+		t.Fatalf("secondary S1 should merge into P1 (max overlap), got %+v", *p1)
+	}
+}
+
+// TestAlignBilingualLongCueNotStolen pins fix 3.2: a translation of a long cue is
+// not stolen by a short neighbor that merely starts nearer. The secondary overlaps
+// the long primary heavily; the short primary starts closer but shares no region.
+func TestAlignBilingualLongCueNotStolen(t *testing.T) {
+	primary := []subtitle.Cue{
+		{StartMS: 1000, EndMS: 1200, Text: "SHORT"},
+		{StartMS: 1300, EndMS: 6000, Text: "LONG"},
+	}
+	secondary := []subtitle.Cue{
+		// Starts 500 ms after SHORT (nearest start) but overlaps LONG for ~4 s.
+		{StartMS: 1500, EndMS: 5800, Text: "T"},
+	}
+	got := subtitle.AlignBilingual(primary, secondary, "en", "fr", 2500)
+	for _, c := range got {
+		if c.PrimaryText == "SHORT" && c.SecondaryText != "" {
+			t.Fatalf("translation stolen by short neighbor: %+v", c)
+		}
+		if c.PrimaryText == "LONG" && c.SecondaryText != "T" {
+			t.Fatalf("translation should merge into LONG (max overlap), got %+v", c)
+		}
+	}
+}
+
 // TestAlignBilingualDeterministic pins deterministic alignment: repeated runs
 // over identical inputs produce identical cue slices.
 func TestAlignBilingualDeterministic(t *testing.T) {
