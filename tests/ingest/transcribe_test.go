@@ -2,9 +2,11 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,5 +318,49 @@ func TestGenerateTranscriptRepresentation_AttachesWordSpans(t *testing.T) {
 	wordsCache := filepath.Join(stateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".words.json")
 	if _, err := os.Stat(wordsCache); err != nil {
 		t.Fatalf("expected words sidecar cache at %s: %v", wordsCache, err)
+	}
+
+	// §8.6.9: a word-timed transcript declares word granularity via meta_json.words.
+	if got := transcriptMetaWordsFlag(t, st.reps[0].MetaJSON); got != true {
+		t.Errorf("meta_json.words = %v, want true for a word-timed transcript (meta=%s)", got, st.reps[0].MetaJSON)
+	}
+}
+
+// transcriptMetaWordsFlag decodes the §8.6.9 word-granularity flag from a
+// transcript representation's meta_json. A missing key decodes to false, which
+// §8.6.9 defines as "segment granularity only".
+func transcriptMetaWordsFlag(t *testing.T, metaJSON string) bool {
+	t.Helper()
+	var meta struct {
+		Words bool `json:"words"`
+	}
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		t.Fatalf("meta_json %q is not valid JSON: %v", metaJSON, err)
+	}
+	return meta.Words
+}
+
+// TestGenerateTranscriptRepresentation_SegmentOnlyOmitsWordsFlag asserts a
+// segment-only transcript (a plain, non-structured transcriber) records no
+// word-granularity flag, so meta_json.words is absent/false (§8.6.9).
+func TestGenerateTranscriptRepresentation_SegmentOnlyOmitsWordsFlag(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})
+
+	doc := model.Document{DocID: 89, RelPath: "audio/segment.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("segment-only-bytes")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation failed: %v", err)
+	}
+	if len(st.reps) != 1 {
+		t.Fatalf("expected one transcript representation, got %d", len(st.reps))
+	}
+	if got := transcriptMetaWordsFlag(t, st.reps[0].MetaJSON); got != false {
+		t.Errorf("meta_json.words = %v, want false/absent for a segment-only transcript (meta=%s)", got, st.reps[0].MetaJSON)
+	}
+	if strings.Contains(st.reps[0].MetaJSON, `"words"`) {
+		t.Errorf("segment-only transcript must omit the words key, got %s", st.reps[0].MetaJSON)
 	}
 }

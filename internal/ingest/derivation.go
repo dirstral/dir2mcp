@@ -82,17 +82,22 @@ func (s *Service) activeDiarizeIdentity() string {
 // active STT derivation identity (provider/model/language, §5.2/§8.6.7) so a
 // later STT model swap can be detected and the transcript re-derived. When
 // diarization is active it additionally records diarized + the diarize
-// provider/model (§8.6.8) so a diarize-backend swap re-derives too. Fields are
+// provider/model (§8.6.8) so a diarize-backend swap re-derives too. hasWords
+// sets the §8.6.9 `words` granularity flag when the transcript's segments carry
+// per-word timing. Fields are
 // omitted (omitempty) when unset, so a setup with no resolved STT identity still
 // produces valid meta_json (and an empty recorded identity that the gate treats
 // as "always passes").
-func (s *Service) sttTranscriptMetaJSON(speakers []Speaker, text string) (string, error) {
+func (s *Service) sttTranscriptMetaJSON(speakers []Speaker, text string, hasWords bool) (string, error) {
 	meta := transcriptMeta{
 		Source:     sttSource,
 		Language:   strings.TrimSpace(s.transcriptLanguage),
 		Timestamps: true,
-		Provider:   strings.TrimSpace(s.sttProvider),
-		Model:      strings.TrimSpace(s.sttModel),
+		// §8.6.9: declare word-level timing granularity when at least one segment
+		// carries a populated words array (omitempty ⇒ segment-only stays absent).
+		Words:    hasWords,
+		Provider: strings.TrimSpace(s.sttProvider),
+		Model:    strings.TrimSpace(s.sttModel),
 	}
 	// §8.8 precedence: an operator pin (media.language / per-provider
 	// stt_language, §16.2) is the "configured" language and always wins. With no

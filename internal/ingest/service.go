@@ -3144,7 +3144,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// attribution that is actually present on the segments.
 	s.applyDiarization(ctx, doc, content, segments)
 
-	metaJSON, err := s.sttTranscriptMetaJSON(distinctSpeakers(segments), transcriptText)
+	metaJSON, err := s.sttTranscriptMetaJSON(distinctSpeakers(segments), transcriptText, segmentsHaveWordTiming(segments))
 	if err != nil {
 		return fmt.Errorf("marshal transcript meta: %w", err)
 	}
@@ -3380,6 +3380,9 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		TranslateProvider: s.translateProvider,
 		TranslateModel:    s.translateModel,
 		Timestamps:        true,
+		// §8.6.9: a whisper-translate pass carries per-word timings onto the
+		// translated segments; the chat engine leaves them empty (segment-only).
+		Words: segmentsHaveWordTiming(segments),
 	}
 	// A translated transcript's effective language is its TARGET language (SPEC
 	// §5.2/§8.8), which the operator chose (media.translate.target_langs, §16.2) —
