@@ -44,20 +44,15 @@ var recencyNow = time.Date(2026, time.June, 19, 0, 0, 0, 0, time.UTC)
 // {1, 0}: chunk 1 (older) → 1.00, chunk 2 (newer) → 0.60. Without decay chunk 1
 // outranks chunk 2; with a half-life shorter than chunk 1's extra age the decay
 // must flip the order so the newer chunk 2 wins.
+// newRecencyService is the fixed two-doc specialisation used by most recency
+// tests: chunk 1 = cosine 1.00 (old.md), chunk 2 = cosine 0.60 (new.md). It
+// delegates to buildRecencyService to avoid duplicating the index/store/embedder
+// wiring.
 func newRecencyService(t *testing.T, halfLife time.Duration, mtimes map[string]int64) *retrieval.Service {
 	t.Helper()
-	idx := index.NewHNSWIndex("")
-	addVec(t, idx, 1, []float32{1, 0})     // cosine 1.00 (OLD doc)
-	addVec(t, idx, 2, []float32{0.6, 0.8}) // cosine 0.60 (NEW doc)
-
-	svc := retrieval.NewService(&fakeRecencyStore{mtimes: mtimes}, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, nil)
-	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "old.md", Snippet: "alpha old"})
-	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "new.md", Snippet: "alpha new"})
-	svc.SetRecencyHalfLife(halfLife)
-	svc.SetNowFunc(func() time.Time { return recencyNow })
-	return svc
+	return buildRecencyService(t, halfLife, mtimes,
+		map[uint64][]float32{1: {1, 0}, 2: {0.6, 0.8}},
+		map[uint64]string{1: "old.md", 2: "new.md"})
 }
 
 func searchRecency(t *testing.T, svc *retrieval.Service) []model.SearchHit {

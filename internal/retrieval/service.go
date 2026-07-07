@@ -3594,7 +3594,10 @@ func slicePage(content string, page int) (string, bool) {
 		return strings.Trim(parts[page-1], "\n"), true
 	}
 	if page == 1 {
-		return content, true
+		// parts[0], not content: a single-page doc ending in a form-feed splits to
+		// ["text", ""] and the trailing-empty drop above leaves ["text"], so
+		// returning content would re-attach the stripped \f (#427 review).
+		return parts[0], true
 	}
 	return "", false
 }

@@ -24,6 +24,24 @@ func TestSlicePage_NoPhantomTrailingPage(t *testing.T) {
 	}
 }
 
+// TestSlicePage_SinglePageTrailingFormFeed pins the #427 review fix: a single-page
+// document ending in a form-feed must return the clean text, not re-attach the
+// stripped \f (the trailing-empty drop leaves one segment, so page 1 returns
+// parts[0], not the raw content).
+func TestSlicePage_SinglePageTrailingFormFeed(t *testing.T) {
+	if got, ok := slicePage("only page\f", 1); !ok || got != "only page" {
+		t.Fatalf("single page w/ trailing form-feed: got (%q,%v), want (%q,true)", got, ok, "only page")
+	}
+	// A plain single-page doc (no form-feed) is unchanged.
+	if got, ok := slicePage("just text", 1); !ok || got != "just text" {
+		t.Fatalf("plain single page: got (%q,%v), want (%q,true)", got, ok, "just text")
+	}
+	// Page 2 of a single-page doc is out of range.
+	if got, ok := slicePage("only page\f", 2); ok || got != "" {
+		t.Fatalf("single-page page 2: got (%q,%v), want (\"\",false)", got, ok)
+	}
+}
+
 // TestTimePrefixRe_MinutesOver99 pins #427: single-field MM:SS transcript lines
 // past 99 minutes (e.g. "[100:30]", "[123:45]") must parse for open_file time
 // slicing; the lead field previously capped at 2 digits and silently dropped them.
