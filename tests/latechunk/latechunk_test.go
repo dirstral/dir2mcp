@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/latechunk"
@@ -201,8 +202,20 @@ func TestDecide_NilEmbedderFallsBack(t *testing.T) {
 	}
 }
 
+// l2Norm returns the Euclidean norm of v.
+func l2Norm(v []float32) float64 {
+	var sumSq float64
+	for _, x := range v {
+		sumSq += float64(x) * float64(x)
+	}
+	return math.Sqrt(sumSq)
+}
+
 // TestEmbedDocument_PoolsPerSpan exercises the full active path: embed the whole
-// document once via the fake token embedder, then mean-pool per chunk span.
+// document once via the fake token embedder, then mean-pool per chunk span. The
+// index-bound document path L2-normalizes each pooled vector (issue #446 F3), so
+// the expected vectors are the unit-normalized means (pooling itself, tested via
+// MeanPoolSpan above, stays a pure arithmetic mean).
 func TestEmbedDocument_PoolsPerSpan(t *testing.T) {
 	dec := latechunk.Decide(true, fakeTokenEmbedder{tok: fourTokenDoc()})
 	spans := []latechunk.Span{{Start: 0, End: 4}, {Start: 4, End: 8}}
@@ -213,13 +226,37 @@ func TestEmbedDocument_PoolsPerSpan(t *testing.T) {
 	if len(fallbackIdx) != 0 {
 		t.Fatalf("unexpected per-span fallbacks: %v", fallbackIdx)
 	}
-	if want := []float32{0.5, 0.5, 0}; !vecsAlmostEqual(vecs[0], want) {
+	// span [0,4): mean of (1,0,0),(0,1,0) = (0.5,0.5,0), normalized to unit norm.
+	if want := normalize([]float32{0.5, 0.5, 0}); !vecsAlmostEqual(vecs[0], want) {
 		t.Fatalf("span 0 = %v, want %v", vecs[0], want)
 	}
-	// span [4,8) overlaps tok2 (0,0,1) and tok3 (1,1,1): mean = (0.5,0.5,1).
-	if want := []float32{0.5, 0.5, 1}; !vecsAlmostEqual(vecs[1], want) {
+	// span [4,8) overlaps tok2 (0,0,1) and tok3 (1,1,1): mean = (0.5,0.5,1),
+	// normalized to unit norm.
+	if want := normalize([]float32{0.5, 0.5, 1}); !vecsAlmostEqual(vecs[1], want) {
 		t.Fatalf("span 1 = %v, want %v", vecs[1], want)
 	}
+	// Both index-bound vectors must be unit-norm so an inner/dot-product backend
+	// (which assumes unit vectors) compares them correctly against normalized
+	// query embeddings.
+	for i, v := range vecs {
+		if n := l2Norm(v); n < 1-1e-6 || n > 1+1e-6 {
+			t.Fatalf("vec %d not unit-norm: |%v| = %v", i, v, n)
+		}
+	}
+}
+
+// normalize returns a unit-L2-norm copy of v (test helper mirroring the
+// normalization EmbedDocument applies on the index-bound path).
+func normalize(v []float32) []float32 {
+	n := l2Norm(v)
+	if n == 0 {
+		return v
+	}
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = float32(float64(x) / n)
+	}
+	return out
 }
 
 // TestEmbedDocument_RuntimeErrorIsFallback verifies a runtime token-embed
