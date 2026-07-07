@@ -277,3 +277,75 @@ func TestBuildBroadcastCuesWrapAndDetok(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildBroadcastCuesHyphenDetok pins that a hyphenated compound whisper emits
+// as split trimmed tokens ("so", "-called") renders flush ("so-called"), in both
+// Latin and Cyrillic, and never as "so -called". A leading dash after a
+// non-alphanumeric is left spaced (not glued onto punctuation).
+func TestBuildBroadcastCuesHyphenDetok(t *testing.T) {
+	words := []word{
+		{start: 0, end: 300, text: "the"},
+		{start: 300, end: 600, text: "so"},
+		{start: 600, end: 900, text: "-called"},
+		{start: 900, end: 1200, text: "expert"},
+		{start: 1200, end: 1500, text: "что"},
+		{start: 1500, end: 1800, text: "-то"},
+		{start: 1800, end: 2100, text: "said"},
+	}
+	cues := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)})
+	if len(cues) != 1 {
+		t.Fatalf("expected 1 cue, got %d: %+v", len(cues), cues)
+	}
+	got := strings.ReplaceAll(cues[0].Text, "\n", " ")
+	for _, want := range []string{"so-called", "что-то"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hyphen detok: expected %q in %q", want, got)
+		}
+	}
+	for _, bad := range []string{"so -called", "что -то"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("hyphen detok: unexpected spaced compound %q in %q", bad, got)
+		}
+	}
+}
+
+// TestBuildBroadcastCuesStandaloneDashNotGlued pins that a bare "-" token (a
+// dialogue dash or numeric range, not a hyphenated-compound tail) stays spaced
+// after a word — "word -" — and is never glued as "word-".
+func TestBuildBroadcastCuesStandaloneDashNotGlued(t *testing.T) {
+	words := []word{
+		{start: 0, end: 300, text: "yes"},
+		{start: 300, end: 600, text: "-"},
+		{start: 600, end: 900, text: "no"},
+	}
+	cues := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)})
+	if len(cues) != 1 {
+		t.Fatalf("expected 1 cue, got %d: %+v", len(cues), cues)
+	}
+	got := strings.ReplaceAll(cues[0].Text, "\n", " ")
+	if strings.Contains(got, "yes-") {
+		t.Errorf("standalone dash glued onto preceding word in %q", got)
+	}
+	if !strings.Contains(got, "yes -") {
+		t.Errorf("expected spaced standalone dash %q in %q", "yes -", got)
+	}
+}
+
+// TestBuildBroadcastCuesCapsRunawayDuration pins the display-duration cap: a
+// single word whisper assigns a huge duration (e.g. 25 s over B-roll silence)
+// must not produce a 25 s cue — display time is capped at 6 s.
+func TestBuildBroadcastCuesCapsRunawayDuration(t *testing.T) {
+	words := []word{
+		{start: 0, end: 25000, text: "solo"}, // one word, 25 s spoken end
+	}
+	cues := subtitle.BuildBroadcastCues([]subtitle.TranscriptChunk{timeChunkWithWords(words)})
+	if len(cues) != 1 {
+		t.Fatalf("expected 1 cue, got %d: %+v", len(cues), cues)
+	}
+	if dur := cues[0].EndMS - cues[0].StartMS; dur > 6000 {
+		t.Errorf("runaway single-word cue duration %d ms exceeds 6000 ms cap", dur)
+	}
+	if cues[0].EndMS <= cues[0].StartMS {
+		t.Errorf("cue has non-positive duration (%d -> %d)", cues[0].StartMS, cues[0].EndMS)
+	}
+}
