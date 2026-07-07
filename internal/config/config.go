@@ -3981,13 +3981,21 @@ func (c *Config) validateMediaSTTNumericBounds() error {
 	return nil
 }
 
-func (c *Config) validateRetrievalNumericBounds() error {
-	// retrieval.min_score is a relevance floor applied to MIN-MAX NORMALIZED
-	// scores in [0,1] (#411); 0 disables it. A negative floor would never drop
-	// anything, and a floor > 1 would silently drop EVERY hit, so both are
-	// rejected explicitly.
+// validateMinScore validates retrieval.min_score. The floor is applied to
+// MIN-MAX NORMALIZED scores in [0,1] (#411); 0 disables it. A negative floor
+// would never drop anything, and a floor > 1 would silently drop EVERY hit, so
+// both are rejected explicitly. Split out to keep validateRetrievalNumericBounds
+// under the cyclomatic-complexity budget.
+func (c *Config) validateMinScore() error {
 	if c.RetrievalMinScore < 0 || c.RetrievalMinScore > 1 || math.IsNaN(c.RetrievalMinScore) || math.IsInf(c.RetrievalMinScore, 0) {
 		return fmt.Errorf("retrieval.min_score must be in [0,1] (normalized relevance; 0 disables the floor): %v", c.RetrievalMinScore)
+	}
+	return nil
+}
+
+func (c *Config) validateRetrievalNumericBounds() error {
+	if err := c.validateMinScore(); err != nil {
+		return err
 	}
 	// retrieval.recency_half_life is a time-decay half-life; 0 disables it. A
 	// negative half-life would amplify rather than decay older content.
