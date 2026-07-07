@@ -228,7 +228,11 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	if gotLanguage != "fr" {
 		t.Fatalf("expected language hint to be forwarded, got %q", gotLanguage)
 	}
-	if got := envelope.Result.StructuredContent["provider"]; got != "mistral" {
+	// The reported provider is the resolved STT profile name (issue #440 F5),
+	// which for the default/Mistral STT path is the Voxtral-backed `mistral-ocr`
+	// profile — matching the derivation provenance — not the old hardcoded
+	// "mistral" constant.
+	if got := envelope.Result.StructuredContent["provider"]; got != "mistral-ocr" {
 		t.Fatalf("unexpected provider: %#v", got)
 	}
 	if got, ok := envelope.Result.StructuredContent["transcribed"].(bool); !ok || !got {
@@ -492,7 +496,9 @@ func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 	if got := envelope.Result.StructuredContent["answer"]; got != "alpha answer" {
 		t.Fatalf("unexpected answer: %#v", got)
 	}
-	if got := envelope.Result.StructuredContent["transcript_provider"]; got != "mistral" {
+	// Resolved STT profile name (issue #440 F5): the Voxtral-backed `mistral-ocr`
+	// profile, not the old hardcoded "mistral" constant.
+	if got := envelope.Result.StructuredContent["transcript_provider"]; got != "mistral-ocr" {
 		t.Fatalf("unexpected transcript_provider: %#v", got)
 	}
 }
