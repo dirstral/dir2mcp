@@ -266,6 +266,17 @@ type Service struct {
 	// transcript. The split changes ordering and reporting only, never the final
 	// representations/chunks/embeddings/citations.
 	activePass processPass
+
+	// runSkipReasons counts path-excluded drops by skip_reason for the CURRENT
+	// scan only. Path-excludes can be numerous (a broad glob can drop thousands
+	// of files), so — unlike archive/secret/size-cap skips — they are NOT
+	// persisted as documents rows; they live here for the run and are surfaced
+	// via SkipReasonCounts() merged into the reindex summary. This makes them a
+	// best-effort, in-process signal: the count is NOT durable across a restart
+	// and is not visible to a separate `status` process reading the store.
+	// Reset at the start of each runScan.
+	runSkipReasons   map[string]int64
+	runSkipReasonsMu sync.Mutex
 }
 
 // processPass is the per-asset work selector for the optional two-phase pass
@@ -1183,6 +1194,11 @@ func (s *Service) runScan(ctx context.Context) error {
 	if s.indexingState != nil {
 		s.indexingState.ResetProgress()
 	}
+	// Reset the in-run per-reason skip counter so each scan reports only its own
+	// path-excluded drops (these are not persisted; see runSkipReasons).
+	s.runSkipReasonsMu.Lock()
+	s.runSkipReasons = nil
+	s.runSkipReasonsMu.Unlock()
 
 	discoverOpts := DiscoverOptionsFromConfig(s.cfg)
 	// Attach the optional directory-discovery scan cache (issue #267 item 5) for
@@ -1206,9 +1222,16 @@ func (s *Service) runScan(ctx context.Context) error {
 		capBytes = corpusfs.DefaultMaxFileSizeBytes()
 	}
 	capMB := float64(capBytes) / (1024 * 1024)
+	// Persist a minimal skipped row for each size-capped file (skip_reason=
+	// size_cap) so the honest-coverage aggregate (CorpusStats.SkipSummary)
+	// reports *why* it was not indexed, not just that skipped>0 (#414/#497).
+	// Collected here and upserted after `seen` is built so those rows are
+	// registered as seen and markMissingAsDeleted does not tombstone them.
+	oversize := make(map[string]int64)
 	discoverOpts.OnOversize = func(relPath string, size int64) {
 		s.addScanned(1)
 		s.addSkipped(1)
+		oversize[relPath] = size
 		s.getLogger().Printf(
 			"discovery: skipping %s (%d bytes) — exceeds ingest.max_file_mb cap (%.0f MB); raise ingest.max_file_mb to include it",
 			relPath, size, capMB,
@@ -1251,6 +1274,10 @@ func (s *Service) runScan(ctx context.Context) error {
 	}()
 
 	seen := make(map[string]struct{}, len(discovered))
+
+	// Register size-capped drops as durable skipped rows before the pass(es)
+	// run so they survive markMissingAsDeleted and feed the coverage aggregate.
+	s.persistOversizeSkips(ctx, oversize, seen)
 
 	// Optional two-phase pass split (SPEC §8.6.11): run media ingest as two ordered
 	// passes over the corpus — a transcription pass (STT/sidecar → source
@@ -1311,6 +1338,7 @@ func (s *Service) scanPass(ctx context.Context, pass processPass, discovered []D
 		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
 			if countCorpus {
 				s.addSkipped(1)
+				s.addRunSkipReason(model.SkipReasonPathExcluded)
 			}
 			if outcome != nil {
 				outcome.markSkipped()
@@ -2145,10 +2173,12 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	}
 	if skipExtraction {
 		doc.Status = "skipped"
+		doc.SkipReason = skipReasonForDocType(docType)
 	}
 
 	if !skipExtraction && hasSecretMatch(contentSample(content), secretPatterns) {
 		doc.Status = "secret_excluded"
+		doc.SkipReason = model.SkipReasonSecretExcluded
 	}
 
 	existingDoc, err := s.store.GetDocumentByPath(ctx, relPath)
@@ -2236,14 +2266,55 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 	// enter the pipeline.
 	if docType == "archive" || docType == "binary_ignored" || docType == "ignore" {
 		doc.Status = "skipped"
+		doc.SkipReason = skipReasonForDocType(docType)
 		return doc, content, nil
 	}
 
 	if hasSecretMatch(contentSample(content), secretPatterns) {
 		doc.Status = "secret_excluded"
+		doc.SkipReason = model.SkipReasonSecretExcluded
 	}
 
 	return doc, content, nil
+}
+
+// persistOversizeSkips upserts a minimal skipped document row for each file
+// dropped at discovery for exceeding the ingest size cap (#497), stamping
+// skip_reason=size_cap so CorpusStats.SkipSummary can report it. Each path is
+// also registered in seen so markMissingAsDeleted (which runs after the scan)
+// does not tombstone the freshly-persisted row. Best-effort per path: a failed
+// upsert is logged and skipped rather than aborting the whole scan.
+func (s *Service) persistOversizeSkips(ctx context.Context, oversize map[string]int64, seen map[string]struct{}) {
+	for relPath, size := range oversize {
+		seen[relPath] = struct{}{}
+		doc := model.Document{
+			RelPath:    relPath,
+			DocType:    ClassifyDocType(relPath),
+			SizeBytes:  size,
+			Status:     "skipped",
+			SkipReason: model.SkipReasonSizeCap,
+		}
+		if err := s.store.UpsertDocument(ctx, doc); err != nil {
+			s.getLogger().Printf("discovery: persist size-cap skip row for %s: %v", relPath, err)
+		}
+	}
+}
+
+// skipReasonForDocType maps a never-ingested doc_type classification to its
+// stable model.SkipReason. It is the single source of truth for the
+// doc_type→skip_reason mapping so the top-level scan and archive-member paths
+// agree. An unrecognized type falls back to unsupported_format.
+func skipReasonForDocType(docType string) string {
+	switch docType {
+	case "archive":
+		return model.SkipReasonArchive
+	case "binary_ignored":
+		return model.SkipReasonBinaryIgnored
+	case "ignore":
+		return model.SkipReasonIgnoreRule
+	default:
+		return model.SkipReasonUnsupportedFormat
+	}
 }
 
 func contentSample(content []byte) []byte {
@@ -2352,6 +2423,35 @@ func (s *Service) addSkipped(delta int64) {
 	if s.indexingState != nil {
 		s.indexingState.AddSkipped(delta)
 	}
+}
+
+// addRunSkipReason increments the in-run, non-persisted per-reason skip counter
+// (currently only path-excludes). Safe for concurrent callers, though the scan
+// loop is sequential today.
+func (s *Service) addRunSkipReason(reason string) {
+	s.runSkipReasonsMu.Lock()
+	defer s.runSkipReasonsMu.Unlock()
+	if s.runSkipReasons == nil {
+		s.runSkipReasons = map[string]int64{}
+	}
+	s.runSkipReasons[reason]++
+}
+
+// SkipReasonCounts returns a copy of the in-run per-reason skip counts recorded
+// during the most recent scan (path-excludes). These are NOT persisted, so they
+// reflect only work this process performed; a fresh `status` process reading the
+// store will not see them. Returns nil when nothing was recorded.
+func (s *Service) SkipReasonCounts() map[string]int64 {
+	s.runSkipReasonsMu.Lock()
+	defer s.runSkipReasonsMu.Unlock()
+	if len(s.runSkipReasons) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(s.runSkipReasons))
+	for k, v := range s.runSkipReasons {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *Service) addDeleted(delta int64) {
