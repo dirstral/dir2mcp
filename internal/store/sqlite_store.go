@@ -1781,21 +1781,76 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	}
 
 	normalizedPrefix := model.NormalizePathPrefix(prefix)
+	trimmedGlob := strings.TrimSpace(glob)
 
-	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message FROM documents`
+	selectCols := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message FROM documents`
 	where := []string{"deleted = 0"}
-	args := make([]any, 0, 4)
+	prefixArgs := make([]any, 0, 1)
 	if normalizedPrefix != "" {
 		where = append(where, `rel_path LIKE ? ESCAPE '\'`)
-		args = append(args, escapeLike(normalizedPrefix)+"%")
+		prefixArgs = append(prefixArgs, escapeLike(normalizedPrefix)+"%")
 	}
-	if strings.TrimSpace(glob) != "" {
-		where = append(where, "rel_path GLOB ?")
-		args = append(args, glob)
+	whereClause := " WHERE " + strings.Join(where, " AND ")
+
+	// The `glob` filter uses the SAME canonical matcher as the search/ask
+	// `file_glob` filter (model.MatchGlob, issue #441): segment-aware `*`,
+	// recursive `**`, ASCII case-insensitive. SQLite `GLOB` cannot express those
+	// semantics (its `*` crosses `/` and it has no `**`), so when a glob is set we
+	// evaluate it in Go over the prefix-matched rows and paginate in Go. Without a
+	// glob the query keeps its efficient SQL LIMIT/OFFSET pagination unchanged.
+	if trimmedGlob == "" {
+		return s.listFilesSQLPaged(ctx, db, selectCols, whereClause, prefixArgs, limit, offset)
 	}
-	query += " WHERE " + strings.Join(where, " AND ")
-	query += " ORDER BY rel_path LIMIT ? OFFSET ?"
-	args = append(args, limit, offset)
+
+	matcher, err := model.CompileGlob(trimmedGlob)
+	if err != nil {
+		// A malformed glob matches nothing rather than erroring, mirroring the
+		// search/ask side; list_files with no match is not an error.
+		return []model.Document{}, 0, nil
+	}
+
+	query := selectCols + whereClause + " ORDER BY rel_path"
+	rows, err := db.QueryContext(ctx, query, prefixArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	matched := make([]model.Document, 0, limit)
+	var total int64
+	for rows.Next() {
+		doc, scanErr := scanListFilesRow(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		if !matcher.Match(doc.RelPath) {
+			continue
+		}
+		total++
+		// Only materialize the requested page; earlier rows advance offset and
+		// later rows only bump the total count.
+		if int64(offset) < total && int64(len(matched)) < int64(limit) {
+			matched = append(matched, doc)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	return matched, total, nil
+}
+
+// listFilesSQLPaged runs the glob-free ListFiles path: prefix filtering plus
+// SQL-side ORDER BY / LIMIT / OFFSET pagination and a matching COUNT.
+func (s *SQLiteStore) listFilesSQLPaged(
+	ctx context.Context,
+	db *sql.DB,
+	selectCols, whereClause string,
+	prefixArgs []any,
+	limit, offset int,
+) ([]model.Document, int64, error) {
+	query := selectCols + whereClause + " ORDER BY rel_path LIMIT ? OFFSET ?"
+	args := append(append([]any{}, prefixArgs...), limit, offset)
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1805,26 +1860,10 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 
 	docs := make([]model.Document, 0, limit)
 	for rows.Next() {
-		var doc model.Document
-		var deleted int
-		if err := rows.Scan(
-			&doc.DocID,
-			&doc.RelPath,
-			&doc.DocType,
-			&doc.SourceType,
-			&doc.SizeBytes,
-			&doc.MTimeUnix,
-			&doc.ContentHash,
-			&doc.ETag,
-			&doc.SidecarFingerprint,
-			&doc.Status,
-			&deleted,
-			&doc.Title,
-			&doc.ErrorMessage,
-		); err != nil {
-			return nil, 0, err
+		doc, scanErr := scanListFilesRow(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
 		}
-		doc.Deleted = deleted == 1
 		docs = append(docs, doc)
 	}
 	if err := rows.Err(); err != nil {
@@ -1832,17 +1871,37 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	}
 
 	var total int64
-	countQuery := "SELECT COUNT(*) FROM documents"
-	countArgs := make([]any, 0)
-	if len(where) > 0 {
-		countQuery += " WHERE " + strings.Join(where, " AND ")
-		countArgs = append(countArgs, args[:len(args)-2]...)
-	}
-	if err := db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+	countQuery := "SELECT COUNT(*) FROM documents" + whereClause
+	if err := db.QueryRowContext(ctx, countQuery, prefixArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	return docs, total, nil
+}
+
+// scanListFilesRow scans one documents row into a model.Document for ListFiles.
+func scanListFilesRow(rows *sql.Rows) (model.Document, error) {
+	var doc model.Document
+	var deleted int
+	if err := rows.Scan(
+		&doc.DocID,
+		&doc.RelPath,
+		&doc.DocType,
+		&doc.SourceType,
+		&doc.SizeBytes,
+		&doc.MTimeUnix,
+		&doc.ContentHash,
+		&doc.ETag,
+		&doc.SidecarFingerprint,
+		&doc.Status,
+		&deleted,
+		&doc.Title,
+		&doc.ErrorMessage,
+	); err != nil {
+		return model.Document{}, err
+	}
+	doc.Deleted = deleted == 1
+	return doc, nil
 }
 
 // RecentFailures returns up to limit documents that ended ingest with

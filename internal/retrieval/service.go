@@ -10,7 +10,6 @@ import (
 	"log"
 	"math"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -3352,7 +3351,10 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	}
 
 	if query.FileGlob != "" {
-		matched, err := path.Match(query.FileGlob, hit.RelPath)
+		// Canonical glob (segment-aware `*`, recursive `**`, ASCII
+		// case-insensitive) shared with list_files so the same pattern selects the
+		// same files on both surfaces (issue #441).
+		matched, err := model.MatchGlob(query.FileGlob, hit.RelPath)
 		if err != nil || !matched {
 			return false
 		}
