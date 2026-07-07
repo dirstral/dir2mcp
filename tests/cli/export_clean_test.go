@@ -51,11 +51,12 @@ func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
 			{"Letter signed by Ajubei", 0, 2000}, // glossary -> Adzhubei
 			{"No.", 2000, 3000},                  // run of 4 identical "No."
 			{"No.", 3000, 4000},
-			{"No.", 4000, 5000},                       // 3rd -> dropped (threshold 3)
-			{"No.", 5000, 6000},                       // 4th -> dropped
-			{"Subtitles by www.spam.com", 6000, 8000}, // URL -> dropped
-			{"Crimea, NATO.", 8000, 9000},             // phrase-only -> dropped by drop_phrases
-			{"Real closing line", 9000, 10000},
+			{"No.", 4000, 5000},                           // 3rd -> dropped (threshold 3)
+			{"No.", 5000, 6000},                           // 4th -> dropped
+			{"Subtitles by www.spam.com", 6000, 8000},     // URL -> dropped
+			{"Crimea, NATO.", 8000, 9000},                 // phrase-only -> dropped by drop_phrases
+			{"Crimea, NATO. Genuine words.", 9000, 10000}, // leaked phrase -> scrubbed, sentence kept
+			{"Real closing line", 10000, 11000},
 		}
 		for i, c := range chunks {
 			if _, err := tx.InsertChunkWithSpans(ctx,
@@ -85,6 +86,8 @@ func TestExportAppliesCueCleaning(t *testing.T) {
 		"      - Aju?bei=>Adzhubei",
 		"    drop_phrases:",
 		"      - Crimea|NATO",
+		"    scrub_phrases:",
+		"      - Crimea,?\\s*NATO\\.?",
 		"    collapse_repeats: 3",
 		"    drop_urls: true",
 	}, "\n") + "\n"
@@ -112,7 +115,10 @@ func TestExportAppliesCueCleaning(t *testing.T) {
 		t.Errorf("repetition-collapse: got %d 'No.' cues, want 2:\n%s", n, out)
 	}
 	if strings.Contains(out, "Crimea, NATO") {
-		t.Errorf("phrase-only cue not dropped by drop_phrases:\n%s", out)
+		t.Errorf("phrase not removed (drop_phrases + scrub_phrases):\n%s", out)
+	}
+	if !strings.Contains(out, "Genuine words.") {
+		t.Errorf("scrub_phrases dropped the whole leaked cue instead of keeping the sentence:\n%s", out)
 	}
 	if !strings.Contains(out, "Real closing line") {
 		t.Errorf("real closing cue missing:\n%s", out)

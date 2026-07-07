@@ -154,6 +154,54 @@ func TestCleanCuesDropsPhrases(t *testing.T) {
 	}
 }
 
+// TestDropSetScrub pins the scrub semantics: a configured full phrase is excised
+// from a cue that also carries real speech, leaving the sentence tidy; a cue that
+// is ALL phrase scrubs to empty; and a legitimate mention that does not contain
+// the full phrase is untouched.
+func TestDropSetScrub(t *testing.T) {
+	// Full contiguous hallucination phrase (flexible punctuation/spacing).
+	d, err := subtitle.NewDropSet([]string{`Донбасс,?\s*Крым,?\s*Украина,?\s*Иван\s+Плющ,?\s*НАТО\.?`})
+	if err != nil {
+		t.Fatalf("NewDropSet: %v", err)
+	}
+	cases := map[string]string{
+		"Донбасс, Крым, Украина, Иван Плющ, НАТО. Реальный текст.": "Реальный текст.",
+		"Донбасс, Крым, Украина, Иван Плющ, НАТО.":                 "",                                        // all phrase -> empty
+		"покойный Иван Плющ, председатель Совета":                  "покойный Иван Плющ, председатель Совета", // real mention, no full phrase
+	}
+	for in, want := range cases {
+		if got := d.Scrub(in); got != want {
+			t.Errorf("Scrub(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestCleanCuesScrubsLeakedPhrase pins that CleanCues excises a leaked phrase from
+// a mixed cue, drops a cue that scrubs to empty, and re-indexes gap-free.
+func TestCleanCuesScrubsLeakedPhrase(t *testing.T) {
+	d, err := subtitle.NewDropSet([]string{`Крым,?\s*НАТО\.?`})
+	if err != nil {
+		t.Fatalf("NewDropSet: %v", err)
+	}
+	cues := []subtitle.Cue{
+		{Index: 1, StartMS: 0, EndMS: 1000, Text: "Крым, НАТО. Настоящая речь."},
+		{Index: 2, StartMS: 1000, EndMS: 2000, Text: "Крым, НАТО."},
+		{Index: 3, StartMS: 2000, EndMS: 3000, Text: "Ordinary line"},
+	}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{Scrub: d})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 surviving cues, got %d: %+v", len(got), got)
+	}
+	if got[0].Text != "Настоящая речь." || got[1].Text != "Ordinary line" {
+		t.Fatalf("wrong cues survived: %+v", got)
+	}
+	for i := range got {
+		if got[i].Index != i+1 {
+			t.Errorf("survivor %d has Index %d, want %d", i, got[i].Index, i+1)
+		}
+	}
+}
+
 // TestCleanCuesInactiveIsIdentity pins that a zero CleanOptions returns cues
 // unchanged (same order, same content), so the empty-config path is a no-op.
 func TestCleanCuesInactiveIsIdentity(t *testing.T) {
