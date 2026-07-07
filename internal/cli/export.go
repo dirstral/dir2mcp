@@ -150,7 +150,7 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 	for _, r := range rows {
 		chunks = append(chunks, subtitle.TranscriptChunk{Text: r.Text, Span: r.Span})
 	}
-	cues := buildCuesForSegmentation(chunks, segmentation)
+	cues := buildCuesForSegmentation(chunks, segmentation, transcriptRepIsTranslation(rep.MetaJSON))
 	// Apply the configured caption word filter (media.filter_words) on export so
 	// exported VTT/SRT never contain the boilerplate/credits/watermark phrases,
 	// consistent with how ingest strips them before embedding. Cues empty after
@@ -174,18 +174,62 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 }
 
 // buildCuesForSegmentation selects the cue builder by the configured
-// media.subtitles.segmentation mode: "broadcast" re-segments from per-word
-// timings into broadcast-legible cues, falling back to the chunk-per-cue builder
-// when the transcript carries no word timings (BuildBroadcastCues returns nil).
-// Any other value (including the "chunk" default and empty) uses BuildCues, so
-// the historical behavior is unchanged unless broadcast is explicitly selected.
-func buildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation string) []subtitle.Cue {
+// media.subtitles.segmentation mode: "broadcast" re-segments into broadcast-
+// legible cues; any other value (including the "chunk" default and empty) uses
+// BuildCues, so the historical behavior is unchanged unless broadcast is
+// explicitly selected.
+//
+// In broadcast mode the source of the timing matters:
+//   - A native STT transcript that carries real per-word timings re-segments
+//     from them (BuildBroadcastCues).
+//   - A translation (isTranslation) is always reflowed. Any per-word timings a
+//     translate provider emits are FABRICATED — words pile at a single timestamp
+//     with zero duration — so honoring them would cram a whole clause into a
+//     sub-second cue and spike reading speed. ReflowChunkCues instead distributes
+//     each run's on-screen time across its tokens. This gates on the source, not
+//     on timings-present, so a future translate provider that emits word timings
+//     can never bypass the reflow.
+//   - A native transcript with no per-word timings (BuildBroadcastCues returns
+//     nil) is reflowed too.
+func buildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation string, isTranslation bool) []subtitle.Cue {
 	if strings.EqualFold(strings.TrimSpace(segmentation), "broadcast") {
-		if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
-			return cues
+		if !isTranslation {
+			if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
+				return cues
+			}
 		}
+		return subtitle.ReflowChunkCues(subtitle.BuildCues(chunks))
 	}
 	return subtitle.BuildCues(chunks)
+}
+
+// transcriptRepIsTranslation reports whether a transcript representation's
+// meta_json marks it as a machine translation (source == "translation", set by
+// the ingest translate path). Broadcast export always reflows a translation
+// rather than honoring its fabricated per-word timings; see buildCuesForSegmentation.
+// It fails closed: non-empty but unparseable meta_json is treated as a translation
+// so a corrupt rep can never route fabricated timings into the broadcast path.
+func transcriptRepIsTranslation(metaJSON string) bool {
+	trimmed := strings.TrimSpace(metaJSON)
+	if trimmed == "" {
+		return false
+	}
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &meta); err != nil {
+		// Fail closed: meta_json is present but unparseable, so we cannot confirm
+		// this is a native transcript with real per-word timings. Treat it as a
+		// translation and reflow rather than risk honoring fabricated timings (see
+		// buildCuesForSegmentation). Native transcript meta_json is always written
+		// by json.Marshal, so this only fires on corruption — and reflowing a
+		// native transcript merely trades re-segmentation for safe timing, whereas
+		// honoring fabricated translation timings is a correctness bug.
+		return true
+	}
+	// A missing "source" key is the normal native-transcript case (only the
+	// translate path sets source="translation"; native reps carry language meta
+	// but no source), so absence means native — not translation.
+	src, _ := meta["source"].(string)
+	return strings.EqualFold(strings.TrimSpace(src), "translation")
 }
 
 // emitExport writes the rendered subtitle document to --out (atomically) or to
