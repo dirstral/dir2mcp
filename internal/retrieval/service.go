@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1532,8 +1533,9 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		s.metaMu.RUnlock()
 		// buildRAGPrompt compresses only the model-facing snippet text; the
 		// `hits` and `citations` built above are never mutated, so cited spans
-		// remain byte-for-byte identical to what was retrieved.
-		prompt := buildRAGPrompt(question, hits, systemPrompt, maxContextChars, compressor)
+		// remain byte-for-byte identical to what was retrieved. usedIdx reports
+		// which hits actually reached the model's context window (issue #403 F1).
+		prompt, usedIdx := buildRAGPrompt(question, hits, systemPrompt, maxContextChars, compressor)
 		var generated string
 		genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
 			var gErr error
@@ -1549,6 +1551,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		} else {
 			if trimmed := strings.TrimSpace(generated); trimmed != "" {
 				answer = trimmed
+				// Faithfulness (issue #403): the answer came from the model, so
+				// its citations MUST reference only the chunks the model actually
+				// saw. Restrict citations to the in-context set (F1) and strip any
+				// inline [rel_path] tag the model hallucinated for a document not
+				// in that set (F3).
+				citations = citationsForIndices(hits, usedIdx)
+				answer = stripHallucinatedCitations(answer, citations)
 			}
 		}
 	}
@@ -3123,7 +3132,14 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string, maxContextChars int, compressor contextCompressor) string {
+// buildRAGPrompt assembles the system+question+context prompt sent to the
+// generator and returns, alongside the prompt string, the indices (into hits)
+// of the chunks that were actually placed in the context window. Only those
+// chunks were seen by the model, so callers MUST restrict the answer's
+// citations to this set — a chunk dropped by the doc-count cap (8) or the
+// maxContextChars budget was never given to the LLM and citing it overstates
+// grounding (issue #403 F1).
+func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
 	systemPrompt = strings.TrimSpace(systemPrompt)
 	if systemPrompt == "" {
 		systemPrompt = defaultRAGSystemPrompt
@@ -3147,6 +3163,7 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 	if limit > 8 {
 		limit = 8
 	}
+	used := make([]int, 0, limit)
 	for i := 0; i < limit && remaining > 0; i++ {
 		h := hits[i]
 		// Preserve the bracketed [rel_path] citation tag structurally so the
@@ -3193,6 +3210,7 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 		if lineLen <= remaining {
 			b.WriteString(line)
 			remaining -= lineLen
+			used = append(used, i)
 			continue
 		}
 
@@ -3205,11 +3223,12 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 			truncated := truncateRunes(header+snippet, fitLen)
 			if strings.TrimSpace(truncated) != "" {
 				b.WriteString(truncated + closing)
+				used = append(used, i)
 			}
 		}
 		remaining = 0
 	}
-	return b.String()
+	return b.String(), used
 }
 
 // neutralizeRAGMarkers replaces any occurrence of the untrusted-document fence
@@ -3257,6 +3276,135 @@ func truncateSnippet(s string, maxRunes int) string {
 	}
 	return strings.TrimSpace(string(r[:maxRunes])) + "..."
 }
+
+// citationsForIndices projects hits[idx] into the citation shape for the given
+// set of indices, preserving order. It is used to restrict an ask answer's
+// citations to exactly the chunks placed in the model's context window so a
+// citation never points at a chunk the model never saw (issue #403 F1).
+func citationsForIndices(hits []model.SearchHit, idx []int) []model.Citation {
+	out := make([]model.Citation, 0, len(idx))
+	for _, i := range idx {
+		if i < 0 || i >= len(hits) {
+			continue
+		}
+		h := hits[i]
+		out = append(out, model.Citation{
+			ChunkID: h.ChunkID,
+			RelPath: h.RelPath,
+			Title:   h.Title,
+			Span:    h.Span,
+		})
+	}
+	return out
+}
+
+// inlineCitationRe matches a single bracketed inline citation tag such as
+// [report.pdf], [report.pdf#p=3], [src/main.go:L12-48] or [interview.mp4@t=…].
+// The character class excludes nested brackets so it never spans two tags.
+var inlineCitationRe = regexp.MustCompile(`\s?\[[^\[\]]*\]`)
+
+// stripHallucinatedCitations removes inline [rel_path] citation tags whose path
+// is not among the provided (in-context) citations (issue #403 F3). Only tags
+// that look like a file citation — the leading token carries a path separator or
+// a file extension — are considered; free-form bracketed prose ([1], [note],
+// markdown link labels) is left untouched. A tag whose path matches a provided
+// citation by full rel_path or by basename is kept; anything else is a model
+// hallucination diverging from the structured citations and is dropped.
+func stripHallucinatedCitations(answer string, citations []model.Citation) string {
+	if strings.TrimSpace(answer) == "" {
+		return answer
+	}
+	allowed := make(map[string]struct{}, len(citations)*2)
+	for _, c := range citations {
+		rel := strings.TrimSpace(c.RelPath)
+		if rel == "" {
+			continue
+		}
+		allowed[rel] = struct{}{}
+		allowed[path.Base(rel)] = struct{}{}
+	}
+	removed := false
+	out := inlineCitationRe.ReplaceAllStringFunc(answer, func(match string) string {
+		trimmed := strings.TrimSpace(match)
+		inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+		p := citationTagPath(inner)
+		if p == "" || !looksLikeCitationPath(p) {
+			// Not a file citation (footnote marker, prose, link label): keep.
+			return match
+		}
+		if _, ok := allowed[p]; ok {
+			return match
+		}
+		if _, ok := allowed[path.Base(p)]; ok {
+			return match
+		}
+		// Hallucinated citation: path not among the chunks sent to the model.
+		removed = true
+		return ""
+	})
+	// A clean answer is returned byte-for-byte — no reflow. inlineCitationRe's
+	// leading \s? already absorbs the space before a removed tag, so no interior
+	// whitespace collapse is needed (that would corrupt intentional formatting
+	// like code indents / aligned markdown); only trim a space a removed edge tag
+	// may have left at the very start or end.
+	if !removed {
+		return answer
+	}
+	return strings.TrimSpace(out)
+}
+
+// citationLineSuffixRe matches a trailing line-number suffix on a citation path:
+// a colon, an optional "L", then a digit — covering both the custom ":L12"/
+// ":L12-48" form and the standard "file:12"/"file:12-48" form.
+var citationLineSuffixRe = regexp.MustCompile(`:L?\d`)
+
+// citationTagPath extracts the leading rel_path token from the inside of an
+// inline citation tag, discarding any span suffix (#p=, @t=, :12 / :L12, section
+// breadcrumb " › "). Returns "" when nothing path-like leads the tag.
+func citationTagPath(inner string) string {
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return ""
+	}
+	// Cut the section breadcrumb first (e.g. "report.pdf#p=3 › Results").
+	if i := strings.Index(inner, " › "); i >= 0 {
+		inner = inner[:i]
+	}
+	// Then the page/time span markers.
+	for _, sep := range []string{"#", "@"} {
+		if i := strings.Index(inner, sep); i >= 0 {
+			inner = inner[:i]
+		}
+	}
+	// Cut a trailing line-number suffix — the custom ":L12"/":L12-48" form AND the
+	// standard "file:12"/"file:12-48" form a model is likely to emit. A colon
+	// followed by an optional "L" and a digit is a line marker (colons are invalid
+	// in Windows paths and rare in relative paths elsewhere), so this resolves both
+	// to the bare path instead of leaving ":12" attached and stripping a valid tag.
+	if loc := citationLineSuffixRe.FindStringIndex(inner); loc != nil {
+		inner = inner[:loc[0]]
+	}
+	// A remaining space means a free-form phrase (e.g. "lease §12"); keep only
+	// the leading token so "lease.pdf §12" still resolves to "lease.pdf".
+	if i := strings.IndexAny(inner, " \t"); i >= 0 {
+		inner = inner[:i]
+	}
+	return strings.TrimSpace(inner)
+}
+
+// looksLikeCitationPath reports whether a token is plausibly a document path —
+// it carries a path separator or a trailing file extension. This keeps
+// stripHallucinatedCitations from touching non-citation brackets like [1].
+func looksLikeCitationPath(p string) bool {
+	if strings.Contains(p, "/") {
+		return true
+	}
+	return citationExtensionRe.MatchString(p)
+}
+
+// citationExtensionRe matches a trailing "dot + short alphanumeric extension"
+// so bare filenames like "lease.pdf" or "main.go" read as citation paths.
+var citationExtensionRe = regexp.MustCompile(`\.[A-Za-z0-9]{1,6}$`)
 
 func ensureAnswerAttributions(answer string, citations []model.Citation) string {
 	answer = strings.TrimSpace(answer)
