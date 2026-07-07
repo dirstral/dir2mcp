@@ -38,14 +38,20 @@ const (
 	manifestErrExtractFailed    = "EXTRACT_FAILED"
 	manifestErrOCRFailed        = "OCR_FAILED"
 	manifestErrTranslateFailed  = "TRANSLATE_FAILED"
+	// manifestErrFileTooLarge (§14.4) classifies an asset over the ingest size cap.
+	manifestErrFileTooLarge = "FILE_TOO_LARGE"
+	// manifestErrBinarySkipped (§14.4) is recorded on the skipped manifest entry
+	// for a non-textual binary asset dropped from ingestion.
+	manifestErrBinarySkipped = "BINARY_SKIPPED"
 )
 
 // manifestErrorCode maps a per-asset processing error to a canonical §14.4 code
-// for the run manifest. It distinguishes translation, OCR, and transcript
-// provider failures via their sentinels (TRANSLATE_FAILED / OCR_FAILED /
-// TRANSCRIBE_FAILED); any other representation/derivation failure is recorded as
-// the generic EXTRACT_FAILED. Translate is matched first because a Whisper-engine
-// translation failure is a translation failure, not a transcription one.
+// for the run manifest. It distinguishes translation, OCR, transcript provider
+// failures, and an over-cap file via their sentinels (TRANSLATE_FAILED /
+// OCR_FAILED / TRANSCRIBE_FAILED / FILE_TOO_LARGE); any other
+// representation/derivation failure is recorded as the generic EXTRACT_FAILED.
+// Translate is matched first because a Whisper-engine translation failure is a
+// translation failure, not a transcription one.
 func manifestErrorCode(err error) string {
 	switch {
 	case errors.Is(err, ErrTranslateProviderFailure):
@@ -54,6 +60,8 @@ func manifestErrorCode(err error) string {
 		return manifestErrOCRFailed
 	case errors.Is(err, ErrTranscriptProviderFailure):
 		return manifestErrTranscribeFailed
+	case errors.Is(err, ErrFileTooLarge):
+		return manifestErrFileTooLarge
 	default:
 		return manifestErrExtractFailed
 	}
@@ -179,6 +187,23 @@ func (o *assetOutcome) markSkipped() {
 	if o.status != batchStatusError {
 		o.status = batchStatusSkipped
 	}
+}
+
+// markSkippedWithCode records a terminal skipped outcome and stamps a canonical
+// §14.4 code on it (e.g. BINARY_SKIPPED), so a skip that carries a machine
+// classification surfaces in the run manifest's error_code. No-op on a nil
+// receiver; a recorded error still wins over a late skip.
+func (o *assetOutcome) markSkippedWithCode(code string) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.status == batchStatusError {
+		return
+	}
+	o.status = batchStatusSkipped
+	o.errorCode = code
 }
 
 // record materializes the deterministic manifest record from the accumulated
@@ -344,6 +369,27 @@ func (b *batchRun) finalize(o *assetOutcome) {
 	b.mu.Unlock()
 	b.write(o.record(pass))
 	b.advance()
+}
+
+// recordSkippedWithCode writes a single skipped manifest record carrying a
+// canonical §14.4 code for an asset that never entered the per-asset processing
+// loop (e.g. a file dropped at discovery for exceeding the size cap, #497). It
+// is manifest-only and deliberately does NOT advance progress: the file was
+// never counted in a pass total, so advancing here would push the counter past
+// the total. No-op on nil or when the manifest is disabled.
+func (b *batchRun) recordSkippedWithCode(relPath, code string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	pass := b.pass
+	b.mu.Unlock()
+	b.write(batchManifestRecord{
+		RelPath:   relPath,
+		Status:    batchStatusSkipped,
+		ErrorCode: code,
+		Pass:      pass,
+	})
 }
 
 // close flushes and closes the manifest file. Safe to call on nil.

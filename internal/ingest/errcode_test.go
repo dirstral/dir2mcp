@@ -51,6 +51,56 @@ func TestManifestErrorCode(t *testing.T) {
 	}
 }
 
+// TestManifestErrorCode_FileTooLarge proves an over-cap file error (wrapped
+// ErrFileTooLarge, as the size-check sites wrap it) maps to the canonical §14.4
+// FILE_TOO_LARGE code rather than the generic EXTRACT_FAILED.
+func TestManifestErrorCode_FileTooLarge(t *testing.T) {
+	err := fmt.Errorf("%w: file %s too large (%d bytes); limit %d", ErrFileTooLarge, "big.txt", 20_000_000, 10_485_760)
+	if got := manifestErrorCode(err); got != manifestErrFileTooLarge {
+		t.Fatalf("manifestErrorCode = %q, want %q", got, manifestErrFileTooLarge)
+	}
+}
+
+// TestGenerateRawTextFromContent_OversizeTaggedFileTooLarge proves the raw-text
+// size check wraps ErrFileTooLarge, so an oversize document is classified
+// FILE_TOO_LARGE on the run manifest.
+func TestGenerateRawTextFromContent_OversizeTaggedFileTooLarge(t *testing.T) {
+	rg := &RepresentationGenerator{} // size check runs before any store access
+	content := make([]byte, defaultMaxFileSizeBytes+1)
+	err := rg.GenerateRawTextFromContent(context.Background(), model.Document{RelPath: "big.txt"}, content)
+	if err == nil {
+		t.Fatal("expected an oversize error, got nil")
+	}
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("error not tagged ErrFileTooLarge: %v", err)
+	}
+	if got := manifestErrorCode(err); got != manifestErrFileTooLarge {
+		t.Fatalf("manifestErrorCode = %q, want %q", got, manifestErrFileTooLarge)
+	}
+}
+
+// TestAssetOutcome_BinarySkippedCode proves a binary-skip records a skipped
+// manifest outcome carrying the canonical §14.4 BINARY_SKIPPED code, so a
+// non-textual binary is machine-visible in the run manifest.
+func TestAssetOutcome_BinarySkippedCode(t *testing.T) {
+	o := newAssetOutcome("blob.bin")
+	o.markSkippedWithCode(manifestErrBinarySkipped)
+	rec := o.record("")
+	if rec.Status != batchStatusSkipped {
+		t.Fatalf("status = %q, want %q", rec.Status, batchStatusSkipped)
+	}
+	if rec.ErrorCode != manifestErrBinarySkipped {
+		t.Fatalf("error_code = %q, want %q", rec.ErrorCode, manifestErrBinarySkipped)
+	}
+	// A recorded error must win over a later skip signal (no silent downgrade).
+	o2 := newAssetOutcome("blob.bin")
+	o2.markErrorIfUnset(manifestErrExtractFailed, "boom")
+	o2.markSkippedWithCode(manifestErrBinarySkipped)
+	if got := o2.record(""); got.Status != batchStatusError || got.ErrorCode != manifestErrExtractFailed {
+		t.Fatalf("error must win: status=%q code=%q", got.Status, got.ErrorCode)
+	}
+}
+
 // failingExtractor is a model.DocumentExtractor whose Extract always errors,
 // simulating an OCR provider/transport failure.
 type failingExtractor struct{}

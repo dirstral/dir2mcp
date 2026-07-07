@@ -260,7 +260,7 @@ func (a *App) applyTLSConfig(cfg *config.Config, opts upOptions) (tlsCertFile, t
 		tlsKeyFile = strings.TrimSpace(cfg.ServerTLSKeyFile)
 	}
 	if err := validateTLSFlags(tlsCertFile, tlsKeyFile); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("CONFIG_INVALID: %v", err))
+		writeCLIErrorWithCode(a.stderr, opts.jsonOutput, exitConfigInvalid, protocol.ErrorCodeTLSConfigInvalid, fmt.Sprintf("TLS_CONFIG_INVALID: %v", err))
 		return "", "", exitConfigInvalid
 	}
 	cfg.ServerTLSCertFile = tlsCertFile
@@ -1320,7 +1320,7 @@ func (a *App) bindServerListener(cfg config.Config, jsonOutput bool) (net.Listen
 		ln, err = net.Listen("tcp", cfg.ListenAddr)
 	}
 	if err != nil {
-		writeCLIError(a.stderr, jsonOutput, exitServerBindFailure, fmt.Sprintf("bind server: %v", err))
+		writeCLIErrorWithCode(a.stderr, jsonOutput, exitServerBindFailure, protocol.ErrorCodeBindFailed, fmt.Sprintf("bind server: %v", err))
 		return nil, exitServerBindFailure
 	}
 	return ln, exitSuccess

@@ -244,6 +244,12 @@ type Service struct {
 	// batch run is active, making recordOutput a no-op on the hot path.
 	activeOutcome *assetOutcome
 
+	// pendingOversize accumulates files dropped at discovery for exceeding the
+	// ingest size cap (#497). They never become assets in the scan loop, so their
+	// canonical §14.4 FILE_TOO_LARGE manifest entries are emitted once, after the
+	// batch run is created. Populated by the OnOversize discovery callback.
+	pendingOversize []string
+
 	// quarantinedThisDoc records that the output quality gate (§8.6.6) marked the
 	// document currently being processed as a non-fatal per-document error, so the
 	// scan loop must count it as exactly one error and NOT credit it as indexed
@@ -350,6 +356,12 @@ var ErrOCRProviderFailure = errors.New("ocr provider failure")
 // canonical §14.4 TRANSLATE_FAILED code on the run manifest (manifestErrorCode),
 // distinct from the transcript's TRANSCRIBE_FAILED.
 var ErrTranslateProviderFailure = errors.New("translation provider failure")
+
+// ErrFileTooLarge marks a document rejected because its size exceeds the ingest
+// size cap (§14.4). Wrapped at the size-check sites so manifestErrorCode
+// classifies it as the canonical FILE_TOO_LARGE code rather than the generic
+// EXTRACT_FAILED.
+var ErrFileTooLarge = errors.New("file too large")
 
 // errBinaryOnRawTextPath marks a document that classified into a text-oriented
 // doc type (SPEC §7.4) but whose bytes are binary — most notably a .parquet file,
@@ -1206,9 +1218,13 @@ func (s *Service) runScan(ctx context.Context) error {
 		capBytes = corpusfs.DefaultMaxFileSizeBytes()
 	}
 	capMB := float64(capBytes) / (1024 * 1024)
+	s.pendingOversize = nil
 	discoverOpts.OnOversize = func(relPath string, size int64) {
 		s.addScanned(1)
 		s.addSkipped(1)
+		// Remember the drop so a FILE_TOO_LARGE manifest entry (§14.4) can be
+		// emitted once the batch run exists (discovery runs before it is created).
+		s.pendingOversize = append(s.pendingOversize, relPath)
 		s.getLogger().Printf(
 			"discovery: skipping %s (%d bytes) — exceeds ingest.max_file_mb cap (%.0f MB); raise ingest.max_file_mb to include it",
 			relPath, size, capMB,
@@ -1249,6 +1265,14 @@ func (s *Service) runScan(ctx context.Context) error {
 		s.batch = nil
 		s.activePass = passSingle
 	}()
+
+	// Emit a FILE_TOO_LARGE manifest entry (§14.4) for each file dropped at
+	// discovery for exceeding the ingest size cap (#497). These never enter the
+	// per-asset loop, so this is their only manifest producer. Manifest-only and
+	// no-op when the manifest is disabled.
+	for _, relPath := range s.pendingOversize {
+		s.batch.recordSkippedWithCode(relPath, manifestErrFileTooLarge)
+	}
 
 	seen := make(map[string]struct{}, len(discovered))
 
@@ -1767,7 +1791,15 @@ func (s *Service) creditInitialStatus(doc model.Document) (indexedPending, termi
 		return true, false
 	case "skipped", "secret_excluded":
 		s.addSkipped(1)
-		s.markActiveSkipped()
+		// A file skipped because it classified as a non-textual binary carries the
+		// canonical §14.4 BINARY_SKIPPED code on its manifest entry; every other
+		// skip (cache hit, unchanged content, ignore/archive type) stays a plain
+		// skip with no code.
+		if doc.DocType == "binary_ignored" {
+			s.activeOutcome.markSkippedWithCode(manifestErrBinarySkipped)
+		} else {
+			s.markActiveSkipped()
+		}
 		return false, false
 	case "error":
 		// although buildDocumentWithContent will never return a document with
