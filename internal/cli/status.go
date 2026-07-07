@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -110,25 +110,6 @@ func (a *App) loadRecentFailuresForStatus(ctx context.Context, cfg config.Config
 		return nil
 	}
 	return docs
-}
-
-// statusErrorMessageRedactors is a compact safety net of high-confidence
-// credential patterns scrubbed from a failure message before it is printed by
-// `status`, mirroring the MCP stats surface (internal/mcp redactStatsErrorMessage).
-var statusErrorMessageRedactors = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\b(sk|pk|rk)[-_](live|test|prod)?[-_]?[A-Za-z0-9]{16,}`),
-	regexp.MustCompile(`(?i)\b(AKIA|ASIA)[A-Z0-9]{16}\b`),
-	regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-.]{10,}\.[A-Za-z0-9_\-]{5,}`),
-	regexp.MustCompile(`(?i)(authorization|api[_-]?key|token|secret|password|passwd)\s*[:=]\s*\S+`),
-}
-
-// redactStatusErrorMessage scrubs high-confidence credentials from a failure
-// message before display. Returns msg unchanged when nothing matches.
-func redactStatusErrorMessage(msg string) string {
-	for _, rx := range statusErrorMessageRedactors {
-		msg = rx.ReplaceAllString(msg, "[REDACTED]")
-	}
-	return msg
 }
 
 // daemonIsLive reports whether a live daemon that is actually OURS currently
@@ -269,7 +250,7 @@ func (a *App) renderRecentFailuresBlock(s styles, recentFailures []model.Documen
 		s.dim(fmt.Sprintf("%d shown", len(recentFailures))),
 	)
 	for _, d := range recentFailures {
-		msg := redactStatusErrorMessage(strings.TrimSpace(d.ErrorMessage))
+		msg := ingest.RedactCredentialsForDisplay(strings.TrimSpace(d.ErrorMessage))
 		if msg == "" {
 			writef(a.stdout, "    %s\n", s.Red.Render(d.RelPath))
 			continue
@@ -293,7 +274,7 @@ func recentFailuresJSON(recentFailures []model.Document) []map[string]interface{
 			"rel_path":      d.RelPath,
 			"doc_type":      d.DocType,
 			"mtime_unix":    d.MTimeUnix,
-			"error_message": redactStatusErrorMessage(d.ErrorMessage),
+			"error_message": ingest.RedactCredentialsForDisplay(d.ErrorMessage),
 		})
 	}
 	return out

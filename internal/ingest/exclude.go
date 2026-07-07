@@ -65,6 +65,58 @@ func RedactSecretsInMessage(msg string, patterns []*regexp.Regexp) string {
 	return out
 }
 
+// highConfidenceCredentialRedactors is the shared safety net of high-confidence
+// credential SHAPES — unambiguous token forms scrubbed from a failure message
+// before it is shown on any diagnostic surface. It is the common base used by
+// both RedactHighConfidenceCredentials (MCP recent_failures) and
+// RedactCredentialsForDisplay (CLI `status`), so the two surfaces cannot drift.
+// It deliberately contains only unambiguous shapes — never a generic
+// `keyword: value` form — so a redaction here never hides the actionable part of
+// an error (SPEC §15.6 recent_failures actionability).
+var highConfidenceCredentialRedactors = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}`),                              // Bearer token
+	regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),                                     // AWS access key (long-term / temporary)
+	regexp.MustCompile(`(?i)\b(?:sk|pk|rk)[-_][A-Za-z0-9_\-]{16,}`),                         // Stripe / OpenAI (sk-proj-…) / Anthropic-style key
+	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9_]{20,}`),                                     // GitHub PAT / OAuth
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),                                    // Slack
+	regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-.]{10,}\.[A-Za-z0-9_\-]{5,}`), // JWT
+}
+
+// displayKeyValueRedactor additionally scrubs generic `keyword: value` /
+// `keyword=value` credential assignments. It is applied ONLY on the CLI display
+// surface (RedactCredentialsForDisplay), where redacting `password=hunter2` in
+// the operator's terminal is worth the small risk of also masking a benign
+// `token: expired` — a tradeoff the MCP recent_failures surface deliberately
+// does not make (it feeds a client that needs the actionable failure text).
+var displayKeyValueRedactor = regexp.MustCompile(`(?i)(authorization|api[_-]?key|token|secret|password|passwd)\s*[:=]\s*\S+`)
+
+func applyRedactors(msg string, redactors []*regexp.Regexp) string {
+	if msg == "" {
+		return msg
+	}
+	for _, rx := range redactors {
+		msg = rx.ReplaceAllString(msg, "[REDACTED]")
+	}
+	return msg
+}
+
+// RedactHighConfidenceCredentials replaces any substring matching a
+// high-confidence credential shape with "[REDACTED]". Used by the MCP
+// recent_failures surface (SPEC §15.6 "error_message MUST NOT contain secrets").
+// Returns msg unchanged when nothing matches.
+func RedactHighConfidenceCredentials(msg string) string {
+	return applyRedactors(msg, highConfidenceCredentialRedactors)
+}
+
+// RedactCredentialsForDisplay applies the high-confidence redactors plus the
+// generic `keyword: value` redactor. Used by the CLI `status` coverage report,
+// a human-facing surface that can afford more aggressive scrubbing than the
+// MCP tool output. Returns msg unchanged when nothing matches.
+func RedactCredentialsForDisplay(msg string) string {
+	msg = applyRedactors(msg, highConfidenceCredentialRedactors)
+	return applyRedactors(msg, []*regexp.Regexp{displayKeyValueRedactor})
+}
+
 func matchesAnyPathExclude(relPath string, globs []string) bool {
 	return MatchesAnyPathExclude(relPath, globs)
 }
