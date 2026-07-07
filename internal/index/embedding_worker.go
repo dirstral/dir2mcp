@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
@@ -40,6 +41,16 @@ type EmbeddingWorker struct {
 	ModelForCode   string
 	BatchSize      int
 	OnIndexedChunk func(label uint64, metadata model.ChunkMetadata)
+
+	// MaxInputRunes caps the rune length of a single TEXT embed input. A chunk
+	// longer than this is skipped up-front — marked embedding_failure with a
+	// clear reason (skipOversizeText) — instead of being sent to the provider,
+	// where an over-token input 400s the whole HTTP batch and, absent per-item
+	// isolation, poisons its healthy siblings (issue #399 items 1+2). Pre-skipping
+	// also avoids the wasted round-trip + bisection that isolation would otherwise
+	// cost. 0 selects defaultMaxEmbedInputRunes. Media chunks (embedded from bytes,
+	// not text) are exempt; their size is governed by the provider's byte ceiling.
+	MaxInputRunes int
 
 	// LateChunking is the resolved value of config.IngestLateChunking (issue
 	// #332). It records the operator's intent to use the late-chunking path
@@ -714,7 +725,57 @@ func (w *EmbeddingWorker) EmbedAndIndex(ctx context.Context, indexKind string, t
 	if err != nil {
 		return 0, err
 	}
+	// Skip oversized text inputs before sending: a single anomalous chunk (a
+	// giant unbroken line/table far past the model's max input tokens) is
+	// contained with a clear skip-reason instead of 400ing the provider and
+	// poisoning the batch (issue #399 item 2). Its healthy siblings still embed.
+	validTasks, labels = w.skipOversizeText(ctx, validTasks, labels)
+	if len(validTasks) == 0 {
+		return 0, nil
+	}
 	return w.embedIndexBatch(ctx, indexKind, modelName, validTasks, labels)
+}
+
+// defaultMaxEmbedInputRunes is the built-in per-input rune cap used when
+// EmbeddingWorker.MaxInputRunes is unset. ~32k runes ≈ 8k tokens, at/above the
+// max input of the common text-embedding models (OpenAI text-embedding-3 8191,
+// Mistral 8192), so a normal chunk — the chunker targets far fewer tokens —
+// always passes and only a genuinely anomalous input is skipped.
+const defaultMaxEmbedInputRunes = 32000
+
+// skipOversizeText partitions tasks into those within the per-input rune cap
+// (returned, aligned 1:1 with their labels) and oversized TEXT chunks, which it
+// marks embedding_failure with a clear skip-reason and drops from the batch
+// (issue #399 item 2). Skipping up-front — rather than letting the provider 400
+// and relying on bisection to isolate it — avoids the wasted round-trip and
+// keeps a single anomalous chunk from ever threatening its siblings. Media
+// chunks are exempt (they embed from bytes, not text; their size is bounded by
+// the provider's byte ceiling). A MarkFailed write error is logged but not
+// fatal: the chunk simply stays pending for a later cycle, never mis-embedded.
+func (w *EmbeddingWorker) skipOversizeText(ctx context.Context, tasks []model.ChunkTask, labels []uint64) ([]model.ChunkTask, []uint64) {
+	maxRunes := w.MaxInputRunes
+	if maxRunes <= 0 {
+		maxRunes = defaultMaxEmbedInputRunes
+	}
+	keptTasks := make([]model.ChunkTask, 0, len(tasks))
+	keptLabels := make([]uint64, 0, len(labels))
+	var oversize []uint64
+	for i, t := range tasks {
+		if !isMediaModality(t.Modality) && utf8.RuneCountInString(t.Text) > maxRunes {
+			oversize = append(oversize, labels[i])
+			continue
+		}
+		keptTasks = append(keptTasks, t)
+		keptLabels = append(keptLabels, labels[i])
+	}
+	if len(oversize) > 0 {
+		reason := fmt.Sprintf("input exceeds max embed input size of %d runes; skipped to avoid poisoning the batch", maxRunes)
+		w.logf("skipping %d oversize text chunk(s) (> %d runes) [kind labels=%v]: %s", len(oversize), maxRunes, oversize, reason)
+		if mfErr := w.Source.MarkFailedWithCategory(ctx, oversize, string(store.ErrorCategoryEmbeddingFailure), reason); mfErr != nil {
+			w.logf("mark oversize failed update error: %v labels=%v", mfErr, oversize)
+		}
+	}
+	return keptTasks, keptLabels
 }
 
 // embedIndexBatch embeds validTasks (aligned 1:1 with labels), upserts the

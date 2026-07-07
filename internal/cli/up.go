@@ -495,11 +495,60 @@ func (a *App) checkMistralAPIKey(cfg *config.Config, opts upOptions, nonInteract
 	// adapter (resolveModelClients -> providerfactory.Embedder). Fail
 	// fast here rather than letting a non-read-only server ingest with
 	// a nil embedder and silently produce no embeddings.
-	if _, ferr := providerfactory.Embedder(prof); ferr != nil {
+	emb, ferr := providerfactory.Embedder(prof)
+	if ferr != nil {
 		return a.reportEmbedPreflightError(opts, nonInteractiveMode,
 			fmt.Sprintf("CONFIG_INVALID: embedding provider %q is unusable: %v", prof.Name, ferr), hint)
 	}
+	// A resolvable + buildable adapter is still not proof the credential works:
+	// a typo'd/expired key (or a wrong embed model, #396) passes every check
+	// above and then 401/403/404s on the first real embed, failing the WHOLE
+	// corpus mid-run (issue #399 item 3). Probe once here so that surfaces as a
+	// clear CONFIG_INVALID at startup instead. The probe is fail-open on
+	// transient/network errors (server-first: a flaky link must not block a
+	// correctly-configured server, and a momentarily-down local endpoint is a
+	// connection error, hence transient). Operators who cannot afford a startup
+	// network round-trip (air-gapped bring-up, deterministic CI) opt out with
+	// DIR2MCP_SKIP_EMBED_PROBE — set to any non-empty value, mirroring
+	// DIR2MCP_DISABLE_KEYCHAIN.
+	if strings.TrimSpace(os.Getenv(skipEmbedProbeEnvVar)) == "" {
+		if perr := a.probeEmbedProvider(emb, prof); perr != nil {
+			return a.reportEmbedPreflightError(opts, nonInteractiveMode,
+				fmt.Sprintf("CONFIG_INVALID: embedding provider %q failed a preflight probe: %v", prof.Name, perr), hint)
+		}
+	}
 	return exitSuccess
+}
+
+// skipEmbedProbeEnvVar, when set to any non-empty value, disables the §2.5
+// startup credential probe (issue #399 item 3). The provider-resolution and
+// adapter-build preflight checks still run; only the one-shot network embed is
+// skipped, so an invalid credential resurfaces at first real embed rather than
+// at startup. Intended for air-gapped bring-up and hermetic tests.
+const skipEmbedProbeEnvVar = "DIR2MCP_SKIP_EMBED_PROBE"
+
+// probeEmbedProvider issues one throwaway embed to confirm the resolved
+// provider's credential and model actually work, so a present-but-invalid key
+// (or wrong embed model) fails preflight loudly instead of silently failing the
+// whole corpus mid-run (issue #399 item 3, #396). It returns nil (fail-open) for
+// a transient/network error — including a context deadline and a
+// connection-refused from a not-yet-up local endpoint — so only a definitive
+// credential/config rejection blocks startup. Uses a bounded background context
+// because the preflight call chain is not context-threaded.
+func (a *App) probeEmbedProvider(emb model.Embedder, prof provider.Profile) error {
+	if emb == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := emb.Embed(ctx, prof.EmbedTextModel, model.EmbedDocument, []string{"dir2mcp preflight probe"}); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || store.IsTransientError(err) {
+			// Fail-open: a transient failure is not a credential/config problem.
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // reportEmbedPreflightError emits the §2.5 preflight failure in the
