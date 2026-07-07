@@ -94,6 +94,47 @@ func (m *PersistenceManager) LoadAll(ctx context.Context) error {
 	return nil
 }
 
+// AutosaveTicker is an optional capability (issue #429 C-a): an index that can
+// throttle its periodic autosave, skipping the full snapshot/compaction when the
+// accumulated mutations are below a threshold and the max interval has not
+// elapsed. The autosave ticker prefers it; StopAndSave/SaveAll always use the
+// force path (Save) so shutdown durability is unaffected. Backends that do not
+// implement it fall back to Save on every tick (the pre-C-a behavior).
+type AutosaveTicker interface {
+	AutosaveTick(ctx context.Context, path string) error
+}
+
+// autosaveTick is the periodic-save path invoked by the ticker goroutine. Unlike
+// SaveAll (the force path used by StopAndSave), it routes each index through its
+// AutosaveTicker capability when available, so a long ingest doesn't rewrite the
+// whole index on every tick (issue #429 C-a). It shares saveMu with SaveAll/Load
+// so saves never overlap.
+func (m *PersistenceManager) autosaveTick() error {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
+	var combined error
+	for _, idx := range m.indices {
+		if idx.Index == nil {
+			continue
+		}
+		p, ok := idx.Index.(model.Persistable)
+		if !ok {
+			continue
+		}
+		var err error
+		if t, ok := idx.Index.(AutosaveTicker); ok {
+			err = t.AutosaveTick(context.Background(), idx.Path)
+		} else {
+			err = p.Save(context.Background(), idx.Path)
+		}
+		if err != nil {
+			combined = errors.Join(combined, err)
+		}
+	}
+	return combined
+}
+
 func (m *PersistenceManager) SaveAll() error {
 	// protect against concurrent callers; the underlying model.Index
 	// implementations are not required to be goroutine‑safe so we serialize
@@ -177,7 +218,7 @@ func (m *PersistenceManager) Start(ctx context.Context) {
 			case <-runCtx.Done():
 				return
 			case <-ticker.C:
-				if err := m.SaveAll(); err != nil {
+				if err := m.autosaveTick(); err != nil {
 					m.emitError(err)
 				}
 			}
