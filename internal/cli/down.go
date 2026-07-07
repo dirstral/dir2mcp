@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 // runDown stops the dir2mcp daemon registered for the current state
@@ -84,16 +86,17 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 	// just stopped will be respawned at next login/boot. Inform the operator
 	// (do NOT auto-uninstall) so `down` in a teardown script isn't mistaken
 	// for a permanent stop (#434).
-	writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, true, "stopped", a.corpusServiceManaged(global))
+	writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, true, "stopped", a.corpusServiceManaged(cfg))
 	return exitSuccess
 }
 
 // corpusServiceManaged reports whether a launchd/systemd unit is installed
 // for the current corpus. Best-effort: any resolution/backend error (e.g. an
 // unsupported platform) yields false so the informational note is simply
-// omitted and `down` never fails over it.
-func (a *App) corpusServiceManaged(global globalOptions) bool {
-	sc, _, err := a.resolveServiceContext(global, "")
+// omitted and `down` never fails over it. Takes the already-loaded config so it
+// doesn't reload it.
+func (a *App) corpusServiceManaged(cfg config.Config) bool {
+	sc, err := serviceContextFromConfig(cfg, "")
 	if err != nil {
 		return false
 	}

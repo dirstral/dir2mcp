@@ -118,6 +118,17 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 	if err != nil {
 		return serviceContext{}, config.Config{}, fmt.Errorf("load config: %w", err)
 	}
+	sc, err := serviceContextFromConfig(cfg, nameOverride)
+	if err != nil {
+		return serviceContext{}, config.Config{}, err
+	}
+	return sc, cfg, nil
+}
+
+// serviceContextFromConfig derives the service context from an already-loaded
+// config, so callers holding a config (e.g. `down`) don't pay a redundant
+// config reload. nameOverride is assumed pre-validated by the caller.
+func serviceContextFromConfig(cfg config.Config, nameOverride string) (serviceContext, error) {
 	name := resolveClaudeServerName(&cfg, nameOverride)
 	abs, err := filepath.Abs(cfg.RootDir)
 	if err != nil {
@@ -132,7 +143,7 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 	}
 	bin, err := os.Executable()
 	if err != nil {
-		return serviceContext{}, config.Config{}, fmt.Errorf("locate dir2mcp executable: %w", err)
+		return serviceContext{}, fmt.Errorf("locate dir2mcp executable: %w", err)
 	}
 	return serviceContext{
 		label:      serviceLabel(name),
@@ -141,7 +152,7 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 		stateDir:   stateDir,
 		binaryPath: bin,
 		logPath:    filepath.Join(stateDir, "service.log"),
-	}, cfg, nil
+	}, nil
 }
 
 // runServiceInstall handles `dir2mcp service install`.
@@ -525,8 +536,12 @@ func renderSystemdExecStart(spec serviceSpec) string {
 	quoted := make([]string, 0, len(tokens))
 	for _, tok := range tokens {
 		esc := iniEscape(tok)
-		if strings.ContainsAny(esc, " \t") {
-			esc = "\"" + esc + "\""
+		// Quote a token containing whitespace or a double quote. Within a
+		// double-quoted token systemd processes \" and \\ escapes, so escape any
+		// embedded quote (iniEscape already doubled backslashes) — otherwise a
+		// path containing " would break out of the quoting and split the command.
+		if strings.ContainsAny(esc, " \t\"") {
+			esc = "\"" + strings.ReplaceAll(esc, `"`, `\"`) + "\""
 		}
 		quoted = append(quoted, esc)
 	}
@@ -539,7 +554,12 @@ func renderSystemdExecStart(spec serviceSpec) string {
 // value containing a carriage return or newline would break the single-line
 // key=value format and is rejected upstream (rejectMultilineSpec); iniEscape
 // assumes that guard has already run.
+// iniEscape makes a value safe to place after `Key=` in a systemd unit. It
+// doubles backslashes first — a value ending in `\` would otherwise act as a
+// line-continuation, and systemd unescapes `\\`→`\` — then doubles `%` (the
+// specifier char). Newlines are rejected upstream by the install path.
 func iniEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
 	return strings.ReplaceAll(s, "%", "%%")
 }
 

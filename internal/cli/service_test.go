@@ -149,6 +149,31 @@ func TestRenderSystemdUnit(t *testing.T) {
 	}
 }
 
+// TestIniEscapeBackslash pins that a value ending in `\` is doubled so systemd
+// does not read it as a line-continuation into the next directive.
+func TestIniEscapeBackslash(t *testing.T) {
+	if got := iniEscape(`/srv/corpus\`); got != `/srv/corpus\\` {
+		t.Errorf("trailing backslash not doubled: %q", got)
+	}
+	if got := iniEscape(`a\b%c`); got != `a\\b%%c` {
+		t.Errorf("backslash+percent escaping wrong: %q", got)
+	}
+}
+
+// TestRenderSystemdExecStart_EmbeddedQuote pins that a token containing a double
+// quote is quoted AND its embedded quote escaped, so it can't break out of the
+// quoting and split the command line.
+func TestRenderSystemdExecStart_EmbeddedQuote(t *testing.T) {
+	spec := serviceSpec{
+		BinaryPath: "/usr/local/bin/dir2mcp",
+		Args:       []string{"up", `--config`, `/srv/a"b/c.yaml`},
+	}
+	got := renderSystemdExecStart(spec)
+	if !strings.Contains(got, `"/srv/a\"b/c.yaml"`) {
+		t.Errorf("embedded quote not escaped+quoted: %q", got)
+	}
+}
+
 // TestRejectMultilineSpec pins the newline guard: a value with \r or \n must
 // be rejected (it would break the INI key=value line format), the same
 // protection persistCredentialsFromEnv applies to dotenv values.
