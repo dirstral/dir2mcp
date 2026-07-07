@@ -1031,8 +1031,20 @@ func exitCodeLabel(exitCode int) string {
 
 // writeCLIError writes an error to stderr, as a structured JSON payload when
 // jsonOutput is set (with a hand-rolled fallback if encoding fails) or as
-// plain text with optional hint lines otherwise.
+// plain text with optional hint lines otherwise. The JSON `code` field is
+// derived from the exit code via exitCodeLabel; callers needing a specific
+// canonical §14 code (e.g. BIND_FAILED, TLS_CONFIG_INVALID) use
+// writeCLIErrorWithCode instead.
 func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message string, hints ...string) {
+	writeCLIErrorWithCode(stderr, jsonOutput, exitCode, exitCodeLabel(exitCode), message, hints...)
+}
+
+// writeCLIErrorWithCode is writeCLIError with an explicit machine-readable
+// `code` for the JSON payload, decoupling the emitted error code from the
+// process exit code. It lets a failure keep its canonical §14 code (e.g. a bind
+// failure carries exit code exitServerBindFailure but code "BIND_FAILED") rather
+// than the coarser exit-code label. The plain-text path is unaffected.
+func writeCLIErrorWithCode(stderr io.Writer, jsonOutput bool, exitCode int, code, message string, hints ...string) {
 	if jsonOutput {
 		filteredHints := make([]string, 0, len(hints))
 		for _, hint := range hints {
@@ -1043,7 +1055,7 @@ func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message stri
 		}
 		payload := cliErrorPayload{
 			Error: cliError{
-				Code:    exitCodeLabel(exitCode),
+				Code:    code,
 				Message: strings.TrimSpace(message),
 				Hints:   filteredHints,
 			},
@@ -1063,7 +1075,7 @@ func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message stri
 			writef(
 				stderr,
 				"{\"error\":{\"code\":%q,\"message\":%s},\"exit_code\":%d}\n",
-				exitCodeLabel(exitCode),
+				code,
 				escapedMessage,
 				exitCode,
 			)

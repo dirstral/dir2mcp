@@ -212,6 +212,41 @@ type BBox struct {
 	CoordOrigin string  `json:"coord_origin"`
 }
 
+// NormalizeCoordOrigin constrains a bbox coord_origin to the §5.4 enum
+// {TOPLEFT, BOTTOMLEFT}. Empty defaults to TOPLEFT (the spec's SHOULD-normalize
+// target) and any other unrecognized value is clamped to TOPLEFT, so an emitted
+// span always satisfies the published Span schema's enum constraint.
+func NormalizeCoordOrigin(origin string) string {
+	if strings.EqualFold(strings.TrimSpace(origin), "BOTTOMLEFT") {
+		return "BOTTOMLEFT"
+	}
+	return "TOPLEFT"
+}
+
+// NormalizeRegionLabel collapses a region span label to the §5.4 eight-value
+// enum {paragraph, section_header, list_item, table, caption, code, formula,
+// picture}. docling emits "title" (LabelTitle), which is outside the enum, so it
+// collapses to section_header; any other non-empty unknown collapses to the
+// neutral "paragraph". An empty label is left empty (the field is omitempty and
+// optional), so a label-less span keeps its shape. Only the stored/emitted label
+// is normalized — the internal LabelTitle used for document-title detection is
+// untouched.
+func NormalizeRegionLabel(label string) string {
+	trimmed := strings.TrimSpace(label)
+	if trimmed == "" {
+		return ""
+	}
+	switch strings.ToLower(trimmed) {
+	case "paragraph", "section_header", "list_item", "table",
+		"caption", "code", "formula", "picture":
+		return strings.ToLower(trimmed)
+	case "title":
+		return "section_header"
+	default:
+		return "paragraph"
+	}
+}
+
 // IndexPayload is the per-vector metadata an Index stores alongside the dense
 // vector (issue #247). It carries everything retrieval needs to materialise a
 // SearchHit and everything a Filter needs to predicate on, so an external or

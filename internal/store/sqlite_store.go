@@ -17,6 +17,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 )
 
 const relPathErrorMessage = "rel_path must be a non-empty relative path without parent-traversal or absolute paths"
@@ -395,6 +396,60 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 //   - the bump documents exactly which change is not backward compatible.
 const schemaVersion = 1
 
+// indexFormatVersion is the on-disk index format this binary reads and writes.
+// It is persisted in settings under "index_format_version" on first init. Bump
+// ONLY on a non-backward-compatible index format change; a mismatch between the
+// persisted value and this constant surfaces the canonical §14.3
+// INDEX_VERSION_MISMATCH so an operator reindexes with a compatible binary
+// rather than reading a format this binary does not understand.
+const indexFormatVersion = "1"
+
+// IndexVersionMismatchError reports that a corpus's persisted
+// index_format_version does not match indexFormatVersion. It carries the
+// canonical §14.3 code and is NOT retryable — the corpus must be reindexed with
+// a compatible binary.
+type IndexVersionMismatchError struct {
+	Persisted string
+	Expected  string
+}
+
+func (e *IndexVersionMismatchError) Error() string {
+	return fmt.Sprintf(
+		"%s: corpus index_format_version %q does not match this binary's %q; reindex the corpus",
+		protocol.ErrorCodeIndexVersionMismatch, e.Persisted, e.Expected,
+	)
+}
+
+// Code returns the canonical §14.3 error code for this failure.
+func (e *IndexVersionMismatchError) Code() string { return protocol.ErrorCodeIndexVersionMismatch }
+
+// Retryable reports that an index-version mismatch is not retryable.
+func (e *IndexVersionMismatchError) Retryable() bool { return false }
+
+// checkIndexFormatVersion refuses to open a corpus whose persisted
+// index_format_version differs from indexFormatVersion (§14.3). It runs AFTER
+// bootstrapSettingsLocked, which inserts the current version for a fresh DB
+// (ON CONFLICT DO NOTHING), so an existing corpus keeps its recorded value: a
+// v1 corpus matches (no false positive), while a corpus stamped by a future,
+// incompatible binary is rejected rather than silently misread. A legacy DB
+// with the row absent, or an empty value, is treated as current.
+func checkIndexFormatVersion(ctx context.Context, db *sql.DB) error {
+	var persisted string
+	err := db.QueryRowContext(ctx,
+		`SELECT value FROM settings WHERE key = 'index_format_version' LIMIT 1`).Scan(&persisted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read index_format_version: %w", err)
+	}
+	persisted = strings.TrimSpace(persisted)
+	if persisted == "" || persisted == indexFormatVersion {
+		return nil
+	}
+	return &IndexVersionMismatchError{Persisted: persisted, Expected: indexFormatVersion}
+}
+
 // checkSchemaVersion reads PRAGMA user_version and refuses to proceed when the
 // database was written by a newer binary (dbVersion > schemaVersion). Older or
 // unstamped databases (user_version == 0, the SQLite default) are accepted and
@@ -651,6 +706,14 @@ CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outco
 	}
 
 	if err := bootstrapSettingsLocked(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
+
+	// Refuse a corpus written in an incompatible index format (§14.3). Runs after
+	// bootstrap so a fresh DB carries the current version and only a genuine
+	// mismatch (a future/incompatible binary's stamp) is rejected.
+	if err := checkIndexFormatVersion(ctx, db); err != nil {
 		_ = db.Close()
 		return err
 	}
@@ -2736,7 +2799,7 @@ func bootstrapSettingsLocked(ctx context.Context, db *sql.DB) error {
 	defaults := map[string]string{
 		"schema_version":       "1",
 		"protocol_version":     "2025-11-25",
-		"index_format_version": "1",
+		"index_format_version": indexFormatVersion,
 		"embed_text_model":     "mistral-embed",
 		"embed_code_model":     "codestral-embed",
 		"ocr_model":            mistral.DefaultOCRModel,
@@ -2932,6 +2995,14 @@ func timeSpanExtraJSON(words []model.WordSpan, speaker, speakerLabel string) (st
 // regionSpanToRow validates and flattens a region span: the page range goes to
 // start/end and the bbox/section/label payload is marshaled to extra_json. A
 // region MUST carry a bbox and a valid page range (spec §5.4).
+//
+// It is the persistence boundary that enforces the §5.4 Span constraints so a
+// stored span always round-trips against the published Span schema (a strict
+// client would otherwise reject an out-of-enum value with "Failed to call
+// tool"): coord_origin is normalized to {TOPLEFT,BOTTOMLEFT}, label to the
+// eight-value enum, and the bbox.page ∈ [start_page,end_page] invariant (§5.4
+// MUST) is validated — hard-rejected, because a bbox on a page outside the
+// chunk's range is a provenance error, not something to silently clamp.
 func regionSpanToRow(r *model.RegionSpan) (kind string, start int, end int, extraJSON string, err error) {
 	if r == nil {
 		return "", 0, 0, "", errors.New("invalid region span: missing region payload")
@@ -2942,7 +3013,21 @@ func regionSpanToRow(r *model.RegionSpan) (kind string, start int, end int, extr
 	if r.BBox == nil {
 		return "", 0, 0, "", errors.New("invalid region span: missing bbox")
 	}
-	encoded, mErr := json.Marshal(r)
+	// §5.4 MUST: start_page ≤ bbox.page ≤ end_page (bbox.page is the primary page).
+	if r.BBox.Page < r.StartPage || r.BBox.Page > r.EndPage {
+		return "", 0, 0, "", fmt.Errorf(
+			"invalid region span: bbox.page %d outside page range [%d,%d]",
+			r.BBox.Page, r.StartPage, r.EndPage,
+		)
+	}
+	// Normalize coord_origin + label to their §5.4 enums on a copy so the stored
+	// extra_json conforms without mutating the caller's span.
+	normalized := *r
+	bbox := *r.BBox
+	bbox.CoordOrigin = model.NormalizeCoordOrigin(bbox.CoordOrigin)
+	normalized.BBox = &bbox
+	normalized.Label = model.NormalizeRegionLabel(r.Label)
+	encoded, mErr := json.Marshal(&normalized)
 	if mErr != nil {
 		return "", 0, 0, "", fmt.Errorf("marshal region span: %w", mErr)
 	}

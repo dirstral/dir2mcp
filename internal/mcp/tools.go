@@ -2635,7 +2635,7 @@ func buildRegionSpan(span model.Span) map[string]interface{} {
 			"t":            r.BBox.T,
 			"r":            r.BBox.R,
 			"b":            r.BBox.B,
-			"coord_origin": r.BBox.CoordOrigin,
+			"coord_origin": model.NormalizeCoordOrigin(r.BBox.CoordOrigin),
 		},
 		"section": section,
 	}
@@ -2933,7 +2933,7 @@ func spanDefinitionSchema() map[string]interface{} {
 							"t":            map[string]interface{}{"type": "number"},
 							"r":            map[string]interface{}{"type": "number"},
 							"b":            map[string]interface{}{"type": "number"},
-							"coord_origin": map[string]interface{}{"type": "string"},
+							"coord_origin": map[string]interface{}{"enum": []string{"TOPLEFT", "BOTTOMLEFT"}},
 						},
 						"required": []string{"page", "l", "t", "r", "b", "coord_origin"},
 					},
