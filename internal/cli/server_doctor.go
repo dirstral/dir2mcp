@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -247,17 +248,13 @@ func extractionCoverageCheck(ctx context.Context, a *App, cfg config.Config) doc
 		}
 	}
 
-	// (A) Extractable documents exist but no extractor will run: those
-	// documents produce no representation, no chunks, and never appear in any
-	// answer. This is a hard configuration dead-end, so it is an error.
+	// (A/A') Extractable documents exist: report either a hard dead-end (no
+	// extractor at all) or partial coverage (an active extractor that cannot read
+	// some present formats). Factored out to keep this function's branching under
+	// the complexity budget.
 	if extractable > 0 {
-		if d := ingest.DescribeDocumentExtractor(cfg); d.Name == "" {
-			detail := fmt.Sprintf(
-				"%d document(s) need extraction (pdf/image/document) but no extractor is available: %s. "+
-					"They produce no searchable text. Enable an extractor (set ingest.extractor to auto/docling/mistral, "+
-					"not off), then make one available (install docling or set MISTRAL_API_KEY), and run `dir2mcp reindex`.",
-				extractable, d.Reason)
-			return doctorCheck{Name: name, Status: doctorStatusError, Detail: detail}
+		if check, reported := extractionAvailabilityCheck(ctx, sqliteStore, cfg, name, extractable); reported {
+			return check
 		}
 	}
 
@@ -274,6 +271,108 @@ func extractionCoverageCheck(ctx context.Context, a *App, cfg config.Config) doc
 
 	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
 		"%d extractable doc(s); %d/%d chunks embedded", extractable, stats.EmbeddedOK, stats.ChunksTotal)}
+}
+
+// extractionAvailabilityCheck reports the extractor-coverage verdict for a
+// corpus that has extractable documents. It returns (check, true) when it has a
+// verdict to surface — either:
+//
+//	(A)  no extractor is available at all → a hard configuration dead-end (error); or
+//	(A') an extractor is active but cannot read some formats present in the corpus
+//	     → those documents are skipped with a non-fatal unsupported-format
+//	     diagnostic (#394), so partial coverage is a warning that NAMES the exact
+//	     uncovered extensions (within §7.7's "surface the reason" mandate) so the
+//	     remedy is actionable — "install docling / add a provider for .odt, .tiff"
+//	     (#395) — instead of an opaque failure count.
+//
+// It returns (_, false) when every extractable format is covered, letting the
+// caller fall through to the embedding checks.
+func extractionAvailabilityCheck(ctx context.Context, sqliteStore *store.SQLiteStore, cfg config.Config, name string, extractable int64) (doctorCheck, bool) {
+	decision := ingest.DescribeDocumentExtractorContext(ctx, cfg)
+	if decision.Name == "" {
+		detail := fmt.Sprintf(
+			"%d document(s) need extraction (pdf/image/document) but no extractor is available: %s. "+
+				"They produce no searchable text. Enable an extractor (set ingest.extractor to auto/docling/mistral, "+
+				"not off), then make one available (install docling or set MISTRAL_API_KEY), and run `dir2mcp reindex`.",
+			extractable, decision.Reason)
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: detail}, true
+	}
+	extCounts, err := sqliteStore.ExtractableExtensionCounts(ctx, "ok")
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}, true
+	}
+	structured := extractorIsStructured(decision.Name)
+	uncovered, docs := uncoveredExtractableExtensions(extCounts, structured)
+	if len(uncovered) == 0 {
+		return doctorCheck{}, false
+	}
+	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+		"%d document(s) in %d format(s) are uncovered by the active extractor (%s): %s. "+
+			"They produce no searchable text (skipped with an unsupported-format error). %s",
+		docs, len(uncovered), decision.Name, strings.Join(uncovered, ", "),
+		uncoveredExtractionRemedy(uncovered, structured))}, true
+}
+
+// extractorIsStructured maps a resolved extractor name (ExtractorDecision.Name)
+// to the structured/flat distinction the ingest capability table uses: the
+// docling family (docling / docling-serve) emits a DoclingDocument and reads the
+// broader structured set; mistral-ocr is the flat path. It mirrors the
+// structuredExtractor type-assertion Service.extractorCanReadExt performs at
+// runtime, so the doctor's coverage verdict matches what indexing will actually
+// route.
+func extractorIsStructured(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "docling", "docling-serve":
+		return true
+	default:
+		return false
+	}
+}
+
+// uncoveredExtractableExtensions returns the sorted, distinct extensions present
+// in extCounts that the active extraction engine cannot read, plus the total
+// document count they account for. It consults the SAME consolidated capability
+// table the indexing path routes on (ingest.ExtractorSupportsExt), so the doctor
+// names exactly the formats that will be skipped with an unsupported-format
+// diagnostic (#394/#395). `structured` selects the docling-family verdict; false
+// is the flat OCR path. Extension-less assets (bucketed under "") are ignored —
+// they carry no format to name.
+func uncoveredExtractableExtensions(extCounts map[string]int64, structured bool) (exts []string, docs int64) {
+	for ext, n := range extCounts {
+		if ext == "" {
+			continue
+		}
+		if ingest.ExtractorSupportsExt(structured, ext) {
+			continue
+		}
+		exts = append(exts, ext)
+		docs += n
+	}
+	sort.Strings(exts)
+	return exts, docs
+}
+
+// uncoveredExtractionRemedy tailors the remediation hint to the active engine.
+// On the flat OCR path, the OpenXML Office + tiff/bmp formats become readable by
+// installing docling, so it is named; the OpenDocument/RTF/.doc/gif/svg family is
+// read by neither engine today (content support is #393). On the structured
+// (docling) path, every uncovered format is in that neither-engine set, so
+// installing docling would not help and the hint says so.
+func uncoveredExtractionRemedy(uncovered []string, structured bool) string {
+	if structured {
+		return "docling cannot import these formats; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format."
+	}
+	doclingWouldCover := false
+	for _, ext := range uncovered {
+		if ingest.ExtractorSupportsExt(true, ext) {
+			doclingWouldCover = true
+			break
+		}
+	}
+	if doclingWouldCover {
+		return "Install docling (or set ingest.extractor=docling) to cover the Office/tiff/bmp formats; the remaining OpenDocument/RTF/.doc/gif/svg formats need a future pandoc-style extractor (#393)."
+	}
+	return "These formats are read by no available extractor; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format."
 }
 
 // indexingFailureCheck reads the store-level FailureSummary (set by

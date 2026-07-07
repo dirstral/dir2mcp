@@ -105,6 +105,50 @@ func (s *SQLiteStore) ActiveDocCountsByStatus(ctx context.Context, status string
 	return counts, rows.Err()
 }
 
+// ExtractableExtensionCounts returns per-lowercased-extension counts of
+// non-deleted, index-eligible documents whose doc_type requires a document
+// extractor to become searchable (the pdf/image/document buckets). It powers the
+// doctor extraction-coverage diagnostic, which names the SPECIFIC corpus
+// extensions the active extractor cannot read (#395).
+//
+// The doc_type filter mirrors ingest.ShouldGenerateExtractedMarkdown's
+// extractable set (pdf/image/document); store sits below ingest in the import
+// graph and cannot import it, so the list is duplicated here. Rows with an empty
+// extension are bucketed under "" so the caller can still see uncovered
+// extension-less assets. When status is non-empty the count is restricted to
+// documents in that status (e.g. "ok" for index-eligible rows), matching
+// ActiveDocCountsByStatus.
+func (s *SQLiteStore) ExtractableExtensionCounts(ctx context.Context, status string) (map[string]int64, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	query := `SELECT rel_path FROM documents WHERE deleted = 0 AND doc_type IN ('pdf','image','document')`
+	args := []any{}
+	if trimmed := strings.TrimSpace(status); trimmed != "" {
+		query = `SELECT rel_path FROM documents WHERE deleted = 0 AND doc_type IN ('pdf','image','document') AND status = ?`
+		args = append(args, trimmed)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var relPath string
+		if err := rows.Scan(&relPath); err != nil {
+			return nil, err
+		}
+		ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+		counts[ext]++
+	}
+	return counts, rows.Err()
+}
+
 // activeDocCountsWith encapsulates the query logic previously found in
 // SQLiteStore.ActiveDocCounts.  It accepts any dbExecutor so callers can reuse
 // an existing *sql.DB or a *sql.Tx without having to open a handle again.

@@ -391,42 +391,6 @@ var errNoVideoRepresentation = errors.New(
 	"video produced no representation: no subtitle sidecar found, video is not transcribed (STT is audio-only), " +
 		"and multimodal keyframe embedding is off — enable embed_multimodal or provide a .vtt/.srt sidecar to make it searchable")
 
-// extractorSupportsExt reports whether the selected document extractor can
-// actually read the given file extension (#394). SPEC §7.4B routes every
-// pdf/image/document doc_type to one configured extractor, but no single
-// extractor reads every format in those coarse buckets, so a format outside the
-// active engine's set must be skipped with a visible diagnostic rather than
-// handed to an extractor that fails silently or hard-errors on it.
-//
-// `structured` is true for the docling family (local CLI or docling-serve — the
-// engines that emit a DoclingDocument), false for the flat Mistral-OCR path.
-//   - Flat OCR (Mistral) reads exactly the ocrMIMEType allowlist:
-//     pdf/png/jpg/jpeg/webp. Everything else routed to it (all Office/OpenDocument
-//     documents and the gif/bmp/tiff/svg images) is rejected upstream (#394
-//     defect 3).
-//   - docling additionally imports OpenXML Office (docx/pptx/xlsx) and tiff/bmp
-//     raster images, but does NOT import the OpenDocument family (.odt/.odp/.ods),
-//     RTF, legacy binary .doc, or gif/svg (#394 defects 2 & 3). Every other
-//     extension is left "supported" so nothing docling handles today regresses;
-//     content support for the unreadable formats is tracked in #393.
-func extractorSupportsExt(structured bool, ext string) bool {
-	switch ext {
-	case ".pdf", ".png", ".jpg", ".jpeg", ".webp":
-		// Read by both docling and Mistral OCR.
-		return true
-	}
-	if !structured {
-		return false
-	}
-	switch ext {
-	case ".odt", ".odp", ".ods", ".rtf", ".doc", ".gif", ".svg":
-		// Not imported by docling; content support tracked in #393.
-		return false
-	default:
-		return true
-	}
-}
-
 // extractorCanReadExt reports whether the currently-selected extractor can read
 // the asset's format. Docling-family extractors implement structuredExtractor;
 // the flat Mistral-OCR path does not.
