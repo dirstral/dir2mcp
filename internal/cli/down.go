@@ -40,18 +40,18 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 	pid, ownership := classifyPIDFile(pidPath)
 	switch ownership {
 	case pidNoFile:
-		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, 0, false, "no_pid_file")
+		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, 0, false, "no_pid_file", false)
 		return exitSuccess
 	case pidMalformed:
 		// Malformed pid file is suspicious — surface and continue cleanup so
 		// `down` always leaves a clean state behind.
 		writef(a.stderr, "warning: pid file %s is malformed; removing it\n", pidPath)
 		_ = removePIDFile(pidPath)
-		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, 0, false, "malformed_pid_file")
+		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, 0, false, "malformed_pid_file", false)
 		return exitSuccess
 	case pidDead:
 		_ = removePIDFile(pidPath)
-		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, false, "stale_pid")
+		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, false, "stale_pid", false)
 		return exitSuccess
 	case pidRecycled:
 		// The recorded pid is alive but its start-time token no longer matches:
@@ -60,7 +60,7 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 		// (issue #418) — so clean up the stale pid file and stop, killing
 		// nothing.
 		_ = removePIDFile(pidPath)
-		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, false, "recycled_pid")
+		writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, false, "recycled_pid", false)
 		return exitSuccess
 	}
 
@@ -80,26 +80,54 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 	if err := os.Remove(connPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		writef(a.stderr, "warning: remove %s: %v\n", connPath, err)
 	}
-	writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, true, "stopped")
+	// If this corpus is also under launchd/systemd supervision, the daemon we
+	// just stopped will be respawned at next login/boot. Inform the operator
+	// (do NOT auto-uninstall) so `down` in a teardown script isn't mistaken
+	// for a permanent stop (#434).
+	writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, true, "stopped", a.corpusServiceManaged(global))
 	return exitSuccess
+}
+
+// corpusServiceManaged reports whether a launchd/systemd unit is installed
+// for the current corpus. Best-effort: any resolution/backend error (e.g. an
+// unsupported platform) yields false so the informational note is simply
+// omitted and `down` never fails over it.
+func (a *App) corpusServiceManaged(global globalOptions) bool {
+	sc, _, err := a.resolveServiceContext(global, "")
+	if err != nil {
+		return false
+	}
+	mgr, err := newServiceManager()
+	if err != nil {
+		return false
+	}
+	state, err := mgr.status(sc.label)
+	if err != nil {
+		return false
+	}
+	return state.Installed
 }
 
 // writeDownInfo emits the user-facing result of `down`. JSON mode emits a
 // structured object so scripts can branch on the outcome; humans get a
 // short prose line.
-func writeDownInfo(stdout io.Writer, jsonMode bool, stateDir string, pid int, stopped bool, reason string) {
+func writeDownInfo(stdout io.Writer, jsonMode bool, stateDir string, pid int, stopped bool, reason string, serviceManaged bool) {
 	if jsonMode {
 		_ = emitJSON(stdout, map[string]interface{}{
-			"state_dir": stateDir,
-			"pid":       pid,
-			"stopped":   stopped,
-			"reason":    reason,
+			"state_dir":       stateDir,
+			"pid":             pid,
+			"stopped":         stopped,
+			"reason":          reason,
+			"service_managed": serviceManaged,
 		})
 		return
 	}
 	switch reason {
 	case "stopped":
 		writef(stdout, "stopped dir2mcp daemon (pid %d) for %s\n", pid, stateDir)
+		if serviceManaged {
+			writeln(stdout, "note: this corpus is service-managed; it will restart at next login/boot — run `dir2mcp service uninstall` to remove permanently")
+		}
 	case "stale_pid":
 		writef(stdout, "no dir2mcp daemon was running for %s (cleared stale pid %d)\n", stateDir, pid)
 	case "recycled_pid":
