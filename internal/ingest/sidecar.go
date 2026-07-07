@@ -96,6 +96,16 @@ type transcriptMeta struct {
 	Timestamps         bool     `json:"timestamps"`
 	Format             string   `json:"format,omitempty"`
 
+	// Words records the transcript's finest CAPTURED timing granularity (SPEC
+	// §8.6.9): true iff at least one segment carries a populated extra_json.words
+	// array (per-word timing, §8.6.1). Omitted (omitempty) when no segment carries
+	// word timing, so a segment-only transcript's meta_json is unchanged. Per
+	// §8.6.9 a consumer MUST treat absent/false as "segment granularity only" and
+	// degrade gracefully — never error because word timing is missing. It is a
+	// discovery hint (a consumer can tell word timing is available without
+	// inspecting every span); it never changes chunking or citations (§8.6.9).
+	Words bool `json:"words,omitempty"`
+
 	// Provider / Model / ModelVersion record the STT derivation identity on a
 	// machine-transcribed transcript (Source == "stt", spec §5.2/§8.6.7): the
 	// resolved STT provider profile name, its model, and an optional model
@@ -431,6 +441,10 @@ func (s *Service) persistSidecarTranscript(ctx context.Context, doc model.Docume
 	if lang != "" {
 		meta.LanguageSource = langSourceDeclared
 	}
+	// §8.6.9: declare word-level granularity when a cue carried per-word timing
+	// (omitempty ⇒ a segment-only sidecar's meta_json is unchanged). Cue-based
+	// sidecars are usually segment-only, so this is normally false/absent.
+	meta.Words = segmentsHaveWordTiming(segments)
 	// A sidecar that carried <v> voice tags yields speaker-attributed segments
 	// (SPEC §8.6.8). Such a transcript is diarized WITHOUT a model, so it records
 	// diarized:true and the speakers set but NO diarize_provider/model (mirrors

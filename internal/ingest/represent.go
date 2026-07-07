@@ -1118,6 +1118,20 @@ func attachWordsToTimeSpans(segs []chunkSegment, words []model.TimedWord) {
 	}
 }
 
+// segmentsHaveWordTiming reports whether any transcript segment carries a
+// populated per-word timing array on its span (SPEC §8.6.9). It drives the
+// transcript-level meta_json `words` granularity flag: true iff at least one
+// segment has word-level timing attached, so a consumer can tell word timing is
+// available without inspecting every span. It never affects chunking.
+func segmentsHaveWordTiming(segs []chunkSegment) bool {
+	for i := range segs {
+		if len(segs[i].Span.Words) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // timeSpanIndexForWord returns the index of the time-spanned chunk that owns a
 // word starting at startMS, or -1 when no chunk does. A word inside [StartMS,
 // EndMS) belongs to that chunk; a word at/after the last time chunk's EndMS is
