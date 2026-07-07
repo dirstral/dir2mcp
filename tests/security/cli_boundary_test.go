@@ -173,6 +173,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"daemon_other.go":                        {},
 		"daemon_unix.go":                         {},
 		"down.go":                                {},
+		"down_internal_test.go":                  {},
 		"embed_options_test.go":                  {},
 		"embed_preflight_probe_internal_test.go": {},
 		"embed_worker.go":                        {},
@@ -195,6 +196,8 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"service.go":                             {},
 		"service_darwin.go":                      {},
 		"service_darwin_test.go":                 {},
+		"service_linux.go":                       {},
+		"service_linux_test.go":                  {},
 		"service_other.go":                       {},
 		"service_test.go":                        {},
 		"status.go":                              {},
@@ -207,6 +210,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"up.go":                                  {},
 		"up_daemon.go":                           {},
 		"up_distributed_embed.go":                {},
+		"up_graceful_stop_test.go":               {},
 	}
 
 	var unexpected []string

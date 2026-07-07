@@ -245,6 +245,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh)
 	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, ing, logSink, &bgWG)
 
+	// The server is now serving. A signal-triggered shutdown from here on is
+	// a normal, successful termination (a supervisor/`down`-requested stop),
+	// not an interrupted command — so it must exit 0, not exitSignalInterrupt.
+	// See resolveProcessExitCode (#434).
+	a.serverGracefulStop = true
+
 	return a.runEventLoop(runCtx, cancel, &cfg, st, indexingState, emitter, serverErrCh, ingestErrCh, embedErrCh, stdinQuitCh, logSink)
 }
 

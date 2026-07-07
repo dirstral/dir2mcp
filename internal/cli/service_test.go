@@ -48,6 +48,21 @@ func TestRenderLaunchdPlist(t *testing.T) {
 		}
 	}
 
+	// KeepAlive must be a dict with SuccessfulExit=false (respawn on crash
+	// only, not on a graceful exit-0 stop), not an unconditional <true/>.
+	// Guard on the substring order so KeepAlive is followed by the dict.
+	keepAliveDict := "<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>"
+	if !strings.Contains(out, keepAliveDict) {
+		t.Errorf("plist KeepAlive is not a SuccessfulExit=false dict:\n%s", out)
+	}
+	if strings.Contains(out, "<key>KeepAlive</key>\n  <true/>") {
+		t.Errorf("plist still uses unconditional KeepAlive <true/>:\n%s", out)
+	}
+	// ThrottleInterval widens the default 10s respawn backoff.
+	if !strings.Contains(out, "<key>ThrottleInterval</key>\n  <integer>30</integer>") {
+		t.Errorf("plist missing ThrottleInterval=30:\n%s", out)
+	}
+
 	// WorkingDirectory carries an ampersand: it must be XML-escaped so
 	// the plist stays well-formed.
 	if !strings.Contains(out, "legal &amp; co") {
@@ -58,6 +73,151 @@ func TestRenderLaunchdPlist(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "<?xml") {
 		t.Errorf("plist missing XML header: %q", out[:min(20, len(out))])
+	}
+}
+
+// TestRenderSystemdUnit pins the systemd user-unit contract: the
+// crash-loop-safe supervision block (Restart=on-failure + backoff +
+// StartLimit), the optional .env.local EnvironmentFile, append: log
+// redirection, and the INI-specific escaping (%→%%, space-quoted ExecStart)
+// that is the analog of the plist XML escaping. Unit-tested on every platform.
+func TestRenderSystemdUnit(t *testing.T) {
+	spec := serviceSpec{
+		Label:      "com.dirstral.dir2mcp-demo-abc123",
+		BinaryPath: "/usr/local/bin/dir2mcp",
+		WorkingDir: "/srv/corpus 50%",
+		Args:       []string{"up", "--foreground", "--config", "/srv/my config.yaml"},
+		LogPath:    "/srv/corpus 50%/.dir2mcp/service.log",
+	}
+	out := renderSystemdUnit(spec)
+
+	for _, want := range []string{
+		"[Unit]",
+		"[Service]",
+		"Type=simple",
+		"[Install]",
+		"WantedBy=default.target",
+		"Restart=on-failure",
+		"RestartSec=30",
+		"StartLimitIntervalSec=300",
+		"StartLimitBurst=5",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("systemd unit missing %q\n---\n%s", want, out)
+		}
+	}
+
+	// Start-rate limits are [Unit]-level directives; systemd ignores them under
+	// [Service]. Assert they appear before the [Service] header so the crash-loop
+	// cap actually applies.
+	if svc := strings.Index(out, "[Service]"); svc >= 0 {
+		if lim := strings.Index(out, "StartLimitIntervalSec="); lim < 0 || lim > svc {
+			t.Errorf("StartLimitIntervalSec must be in [Unit] (before [Service]):\n%s", out)
+		}
+		if burst := strings.Index(out, "StartLimitBurst="); burst < 0 || burst > svc {
+			t.Errorf("StartLimitBurst must be in [Unit] (before [Service]):\n%s", out)
+		}
+	}
+
+	// EnvironmentFile points at the corpus .env.local and is optional (leading
+	// `-`), with % doubled to %%.
+	if !strings.Contains(out, "EnvironmentFile=-/srv/corpus 50%%/.env.local") {
+		t.Errorf("systemd unit missing optional .env.local EnvironmentFile with %%%% escape:\n%s", out)
+	}
+
+	// Log redirection must use append: so the log survives restarts.
+	if !strings.Contains(out, "StandardOutput=append:/srv/corpus 50%%/.dir2mcp/service.log") {
+		t.Errorf("systemd unit StandardOutput not append:-redirected/escaped:\n%s", out)
+	}
+	if !strings.Contains(out, "StandardError=append:/srv/corpus 50%%/.dir2mcp/service.log") {
+		t.Errorf("systemd unit StandardError not append:-redirected/escaped:\n%s", out)
+	}
+
+	// WorkingDirectory: literal % doubled.
+	if !strings.Contains(out, "WorkingDirectory=/srv/corpus 50%%") {
+		t.Errorf("systemd unit WorkingDirectory not %%-escaped:\n%s", out)
+	}
+
+	// ExecStart: binary + args, with the space-containing token quoted.
+	if !strings.Contains(out, `ExecStart=/usr/local/bin/dir2mcp up --foreground --config "/srv/my config.yaml"`) {
+		t.Errorf("systemd unit ExecStart not space-quoted:\n%s", out)
+	}
+
+	// A raw single-% must never survive (would be a systemd specifier).
+	if strings.Contains(strings.ReplaceAll(out, "%%", ""), "%") {
+		t.Errorf("systemd unit contains an unescaped single %%:\n%s", out)
+	}
+}
+
+// TestIniEscapeBackslash pins that a value ending in `\` is doubled so systemd
+// does not read it as a line-continuation into the next directive.
+func TestIniEscapeBackslash(t *testing.T) {
+	if got := iniEscape(`/srv/corpus\`); got != `/srv/corpus\\` {
+		t.Errorf("trailing backslash not doubled: %q", got)
+	}
+	if got := iniEscape(`a\b%c`); got != `a\\b%%c` {
+		t.Errorf("backslash+percent escaping wrong: %q", got)
+	}
+}
+
+// TestRenderSystemdExecStart_EmbeddedQuote pins that a token containing a double
+// quote is quoted AND its embedded quote escaped, so it can't break out of the
+// quoting and split the command line.
+func TestRenderSystemdExecStart_EmbeddedQuote(t *testing.T) {
+	spec := serviceSpec{
+		BinaryPath: "/usr/local/bin/dir2mcp",
+		Args:       []string{"up", `--config`, `/srv/a"b/c.yaml`},
+	}
+	got := renderSystemdExecStart(spec)
+	if !strings.Contains(got, `"/srv/a\"b/c.yaml"`) {
+		t.Errorf("embedded quote not escaped+quoted: %q", got)
+	}
+}
+
+// TestRejectMultilineSpec pins the newline guard: a value with \r or \n must
+// be rejected (it would break the INI key=value line format), the same
+// protection persistCredentialsFromEnv applies to dotenv values.
+func TestRejectMultilineSpec(t *testing.T) {
+	ok := serviceSpec{Label: "com.dirstral.x", BinaryPath: "/bin/dir2mcp", WorkingDir: "/x", Args: []string{"up"}, LogPath: "/x/l.log"}
+	if err := rejectMultilineSpec(ok); err != nil {
+		t.Errorf("clean spec rejected: %v", err)
+	}
+	for _, bad := range []serviceSpec{
+		{Label: "com.dirstral.x\n", BinaryPath: "/bin/dir2mcp", WorkingDir: "/x"},
+		{Label: "com.dirstral.x", BinaryPath: "/bin/dir2\rmcp", WorkingDir: "/x"},
+		{Label: "com.dirstral.x", BinaryPath: "/bin/dir2mcp", WorkingDir: "/x", Args: []string{"up\n--foreground"}},
+		{Label: "com.dirstral.x", BinaryPath: "/bin/dir2mcp", WorkingDir: "/x", LogPath: "/x/l\n.log"},
+	} {
+		if err := rejectMultilineSpec(bad); err == nil {
+			t.Errorf("expected rejection for spec with newline: %+v", bad)
+		}
+	}
+}
+
+// TestResolveProcessExitCode pins the #434 exit-code contract: a
+// signal-triggered graceful stop of the long-running server exits 0 (so
+// launchd/systemd don't treat a `down` as a crash and respawn), while an
+// interactive command interrupted mid-flight still reports the interrupt code
+// and any crash keeps its own non-zero code.
+func TestResolveProcessExitCode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ctxErr      error
+		code        int
+		gracefulSrv bool
+		want        int
+	}{
+		{"server graceful SIGTERM exits 0", context.Canceled, exitSuccess, true, exitSuccess},
+		{"interactive interrupt maps to signal code", context.Canceled, exitSuccess, false, exitSignalInterrupt},
+		{"server crash keeps its non-zero code", context.Canceled, exitGeneric, true, exitGeneric},
+		{"clean exit without cancel unchanged", nil, exitSuccess, false, exitSuccess},
+		{"deadline (not cancel) unchanged", context.DeadlineExceeded, exitSuccess, false, exitSuccess},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveProcessExitCode(tc.ctxErr, tc.code, tc.gracefulSrv); got != tc.want {
+				t.Errorf("resolveProcessExitCode(%v,%d,%v)=%d, want %d", tc.ctxErr, tc.code, tc.gracefulSrv, got, tc.want)
+			}
+		})
 	}
 }
 
