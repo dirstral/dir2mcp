@@ -338,6 +338,19 @@ func (s *Service) markActiveErrored(code, message string) {
 // provider call itself (as opposed to persistence/cache write failures).
 var ErrTranscriptProviderFailure = errors.New("transcript provider failure")
 
+// ErrOCRProviderFailure marks failures originating from the OCR/document
+// extraction provider call itself (as opposed to persistence/cache write
+// failures). It is classified as the canonical §14.4 OCR_FAILED code on the run
+// manifest (manifestErrorCode), distinct from the generic EXTRACT_FAILED.
+var ErrOCRProviderFailure = errors.New("ocr provider failure")
+
+// ErrTranslateProviderFailure marks failures originating from the translation
+// provider call itself — either the chat engine or Whisper's native translate
+// task (as opposed to persistence/cache write failures). It is classified as the
+// canonical §14.4 TRANSLATE_FAILED code on the run manifest (manifestErrorCode),
+// distinct from the transcript's TRANSCRIBE_FAILED.
+var ErrTranslateProviderFailure = errors.New("translation provider failure")
+
 // errBinaryOnRawTextPath marks a document that classified into a text-oriented
 // doc type (SPEC §7.4) but whose bytes are binary — most notably a .parquet file,
 // which classifies as "data". Indexing it as raw text would normalize the binary
@@ -1738,6 +1751,12 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	if err := s.deriveTranscriptTranslations(ctx, doc, content); err != nil {
 		s.getLogger().Printf("two-phase derivation translation skipped for %s: %v", f.RelPath, err)
 		s.addErrors(1)
+		// §8.6.11/§14.4: record the canonical translation-failure code
+		// (TRANSLATE_FAILED for a provider failure) on the derivation-pass manifest
+		// record; the source transcript (persisted in the transcription pass) stays
+		// searchable, so documents.status is untouched. No-op with no batch run.
+		code := manifestErrorCode(err)
+		s.markActiveErrored(code, code+": transcript translation failed")
 	}
 	return nil
 }
@@ -3155,6 +3174,14 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
 		s.addErrors(1)
+		// §8.6.11/§14.4: record the canonical translation-failure code
+		// (TRANSLATE_FAILED for a provider failure) on the run manifest so the
+		// manifest faithfully reports the failed derivation. The source transcript
+		// was already persisted and stays searchable, so documents.status is left
+		// "ok" (best-effort translation, #426). This is a manifest-only signal and
+		// a no-op when no batch run is active.
+		code := manifestErrorCode(err)
+		s.markActiveErrored(code, code+": transcript translation failed")
 	}
 	return nil
 }
@@ -3275,7 +3302,10 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
 	}
 	if err != nil {
-		return fmt.Errorf("translate transcript for %s into %q: %w", doc.RelPath, targetLang, err)
+		// §14.4: a translation provider/transport failure (chat OR whisper engine)
+		// is classified TRANSLATE_FAILED — distinct from the transcript's
+		// TRANSCRIBE_FAILED — when recorded on the run manifest (manifestErrorCode).
+		return fmt.Errorf("%w: translate transcript for %s into %q: %w", ErrTranslateProviderFailure, doc.RelPath, targetLang, err)
 	}
 	translated = strings.TrimSpace(translated)
 	if translated == "" {
@@ -3574,7 +3604,10 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	// (cache miss), not for cache hits.
 	ocrText, err := s.extractor.Extract(ctx, doc.RelPath, content)
 	if err != nil {
-		return "", fmt.Errorf("document extract %s: %w", doc.RelPath, err)
+		// §14.4: a provider/transport OCR failure is classified OCR_FAILED (not the
+		// generic EXTRACT_FAILED) once it reaches the run manifest via
+		// manifestErrorCode.
+		return "", fmt.Errorf("%w: document extract %s: %w", ErrOCRProviderFailure, doc.RelPath, err)
 	}
 
 	ocrBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(ocrText, "\r\n", "\n"), "\r", "\n"))
@@ -3744,7 +3777,11 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 
 	translated, words, err := s.translateStructuredWindowed(ctx, doc, content)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+		// A whisper-translate decode is a TRANSLATION failure (§14.4 TRANSLATE_FAILED),
+		// not a transcript one — tag it with the translate sentinel directly so the
+		// error chain is unambiguous (previously it carried ErrTranscriptProviderFailure
+		// and relied on manifestErrorCode's ordering to still classify it correctly).
+		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
 	}
 	translatedBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n"))
 	if err := os.WriteFile(cachePath, translatedBytes, 0o644); err != nil {

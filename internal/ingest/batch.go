@@ -26,11 +26,13 @@ import (
 // unconfigured, so a default ingest is byte-identical to today.
 
 // Canonical §14.4 error codes recorded in a manifest record's `error_code`
-// field (§7.7). EXTRACT_FAILED is the generic representation/derivation failure;
-// TRANSCRIBE_FAILED is distinguished via the package's transcript-failure
-// sentinel. OCR_FAILED / TRANSLATE_FAILED are the finer output-quality-gate
-// classifications (§8.6.6): a degenerate OCR/translation output rejected by the
-// gate records the matching code via qualityGateFailureCode (service.go).
+// field (§7.7). EXTRACT_FAILED is the generic representation/derivation failure.
+// TRANSCRIBE_FAILED / OCR_FAILED / TRANSLATE_FAILED are distinguished via the
+// package's provider-failure sentinels (ErrTranscriptProviderFailure /
+// ErrOCRProviderFailure / ErrTranslateProviderFailure) in manifestErrorCode, and
+// ALSO cover the degenerate-output quality-gate sub-case (§8.6.6): an OCR /
+// transcript / translation output rejected by the gate records the matching code
+// via qualityGateFailureCode (service.go).
 const (
 	manifestErrTranscribeFailed = "TRANSCRIBE_FAILED"
 	manifestErrExtractFailed    = "EXTRACT_FAILED"
@@ -39,13 +41,22 @@ const (
 )
 
 // manifestErrorCode maps a per-asset processing error to a canonical §14.4 code
-// for the run manifest. It distinguishes a transcript-provider failure; any other
-// representation/derivation failure is recorded as the generic EXTRACT_FAILED.
+// for the run manifest. It distinguishes translation, OCR, and transcript
+// provider failures via their sentinels (TRANSLATE_FAILED / OCR_FAILED /
+// TRANSCRIBE_FAILED); any other representation/derivation failure is recorded as
+// the generic EXTRACT_FAILED. Translate is matched first because a Whisper-engine
+// translation failure is a translation failure, not a transcription one.
 func manifestErrorCode(err error) string {
-	if errors.Is(err, ErrTranscriptProviderFailure) {
+	switch {
+	case errors.Is(err, ErrTranslateProviderFailure):
+		return manifestErrTranslateFailed
+	case errors.Is(err, ErrOCRProviderFailure):
+		return manifestErrOCRFailed
+	case errors.Is(err, ErrTranscriptProviderFailure):
 		return manifestErrTranscribeFailed
+	default:
+		return manifestErrExtractFailed
 	}
-	return manifestErrExtractFailed
 }
 
 // batchManifestStatus is a terminal per-asset outcome (SPEC §8.6.11).
