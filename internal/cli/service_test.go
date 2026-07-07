@@ -107,6 +107,18 @@ func TestRenderSystemdUnit(t *testing.T) {
 		}
 	}
 
+	// Start-rate limits are [Unit]-level directives; systemd ignores them under
+	// [Service]. Assert they appear before the [Service] header so the crash-loop
+	// cap actually applies.
+	if svc := strings.Index(out, "[Service]"); svc >= 0 {
+		if lim := strings.Index(out, "StartLimitIntervalSec="); lim < 0 || lim > svc {
+			t.Errorf("StartLimitIntervalSec must be in [Unit] (before [Service]):\n%s", out)
+		}
+		if burst := strings.Index(out, "StartLimitBurst="); burst < 0 || burst > svc {
+			t.Errorf("StartLimitBurst must be in [Unit] (before [Service]):\n%s", out)
+		}
+	}
+
 	// EnvironmentFile points at the corpus .env.local and is optional (leading
 	// `-`), with % doubled to %%.
 	if !strings.Contains(out, "EnvironmentFile=-/srv/corpus 50%%/.env.local") {

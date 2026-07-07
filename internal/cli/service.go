@@ -493,7 +493,12 @@ func renderSystemdUnit(spec serviceSpec) string {
 
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
-	b.WriteString("Description=" + iniEscape("dir2mcp knowledge server ("+spec.Label+")") + "\n\n")
+	b.WriteString("Description=" + iniEscape("dir2mcp knowledge server ("+spec.Label+")") + "\n")
+	// Start-rate limits are UNIT-level directives — systemd ignores them under
+	// [Service] — so a crash-looping unit is capped at 5 starts per 300s and then
+	// held failed instead of hot-looping forever.
+	b.WriteString("StartLimitIntervalSec=300\n")
+	b.WriteString("StartLimitBurst=5\n\n")
 
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=simple\n")
@@ -505,9 +510,7 @@ func renderSystemdUnit(spec serviceSpec) string {
 	b.WriteString("StandardOutput=append:" + iniEscape(spec.LogPath) + "\n")
 	b.WriteString("StandardError=append:" + iniEscape(spec.LogPath) + "\n")
 	b.WriteString("Restart=on-failure\n")
-	b.WriteString("RestartSec=30\n")
-	b.WriteString("StartLimitIntervalSec=300\n")
-	b.WriteString("StartLimitBurst=5\n\n")
+	b.WriteString("RestartSec=30\n\n")
 
 	b.WriteString("[Install]\n")
 	b.WriteString("WantedBy=default.target\n")
