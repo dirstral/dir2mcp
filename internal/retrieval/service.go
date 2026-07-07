@@ -933,15 +933,17 @@ func (s *Service) EvictDocuments(relPaths []string) {
 	s.metaMu.Unlock()
 }
 
-// chunkLivenessChecker is an optional store capability: it resolves a chunk by
-// id and returns model.ErrNotFound when that chunk has been tombstoned (or never
-// existed). The shipped *store.SQLiteStore satisfies it via ChunkTaskByID, whose
-// query selects only deleted=0 rows. Retrieval type-asserts against it (mirroring
-// the LexicalSearcher / DocumentHashLister optional-capability pattern) to prune
-// chunks a partial incremental reindex soft-deleted via SoftDeleteChunksFromOrdinal
-// but for which no whole-document eviction ever fired (issue #409). Stores that do
-// not implement it skip the liveness pass entirely, so behavior is unchanged.
-type chunkLivenessChecker interface {
+// chunkByIDer is an optional store capability: it resolves a chunk by id,
+// returning its ChunkTask + full text, or model.ErrNotFound when that chunk has
+// been tombstoned (or never existed). The shipped *store.SQLiteStore satisfies it
+// via ChunkTaskByID, whose query selects only deleted=0 rows. Two retrieval passes
+// type-assert against it (mirroring the LexicalSearcher / DocumentHashLister
+// optional-capability pattern): the liveness pass prunes chunks a partial
+// incremental reindex soft-deleted but for which no whole-document eviction fired
+// (issue #409), and reranking fetches each candidate's full text to score the
+// whole chunk rather than a truncated snippet (issue #399 item 5). Stores that do
+// not implement it skip both passes, so behavior is unchanged.
+type chunkByIDer interface {
 	ChunkTaskByID(ctx context.Context, chunkID uint64) (model.ChunkTask, string, error)
 }
 
@@ -994,7 +996,7 @@ func (s *Service) pruneTombstonedHits(ctx context.Context, hits []model.SearchHi
 	if len(hits) == 0 {
 		return hits
 	}
-	checker, ok := s.store.(chunkLivenessChecker)
+	checker, ok := s.store.(chunkByIDer)
 	if !ok {
 		return hits
 	}
@@ -2605,26 +2607,18 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	return s.diversifyAndTruncate(out, k)
 }
 
-// chunkTextFetcher is an optional store capability that resolves a chunk's full
-// text by id. The shipped *store.SQLiteStore satisfies it via ChunkTaskByID
-// (same method the liveness pass uses). Reranking type-asserts against it to
-// score the whole chunk rather than a truncated snippet (issue #399 item 5).
-type chunkTextFetcher interface {
-	ChunkTaskByID(ctx context.Context, chunkID uint64) (model.ChunkTask, string, error)
-}
-
 // rerankDocs returns the text sent to the reranker for each candidate. The
 // cross-encoder should score the FULL chunk text, but the BM25 path only carries
 // a ~240-char snippet (sqlite_bm25.go) — so scoring hit.Snippet silently
 // degrades rerank precision (issue #399 item 5). When the store exposes the
-// chunkTextFetcher capability this fetches each candidate's full text; it falls
+// chunkByIDer capability this fetches each candidate's full text; it falls
 // back to the hit's Snippet when the store lacks the capability, the chunk id is
 // zero, the lookup errors, or the chunk carries no text (media chunks). The
 // per-candidate lookups only run when rerank is enabled, so the common
 // no-reranker path is untouched.
 func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) []string {
 	docs := make([]string, len(cand))
-	fetcher, _ := s.store.(chunkTextFetcher)
+	fetcher, _ := s.store.(chunkByIDer)
 	for i, h := range cand {
 		docs[i] = h.Snippet
 		if fetcher == nil || h.ChunkID == 0 {
