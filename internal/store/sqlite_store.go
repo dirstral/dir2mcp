@@ -478,6 +478,14 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// specific filter, so a corpus indexed before any language was recorded
 		// simply has empty values here (no migration of existing rows needed, §9.5).
 		`ALTER TABLE chunks ADD COLUMN language TEXT NOT NULL DEFAULT ''`,
+		// skip_reason records *why* a document was recorded as skipped (never
+		// indexed) rather than ingested — one of the model.SkipReason* strings
+		// ("archive", "binary_ignored", "ignore_rule", "secret_excluded",
+		// "unsupported_format", …). Empty for ingested ("ok") and errored rows.
+		// Aggregated into CorpusStats.SkipSummary so status/reindex can report
+		// honest coverage ("what wasn't indexed & why", #414/#395). Existing rows
+		// default to '' (unknown reason), which the aggregate normalizes.
+		`ALTER TABLE documents ADD COLUMN skip_reason TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -529,7 +537,8 @@ CREATE TABLE IF NOT EXISTS documents (
   etag TEXT NOT NULL DEFAULT '',
   sidecar_fingerprint TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'ok',
-  deleted INTEGER NOT NULL DEFAULT 0
+  deleted INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS representations (
@@ -726,8 +735,8 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 	// such two-phase write, so the always-replace semantics are correct.
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message, skip_reason)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rel_path) DO UPDATE SET
 		   doc_type=excluded.doc_type,
 		   source_type=excluded.source_type,
@@ -739,7 +748,8 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		   status=excluded.status,
 		   deleted=excluded.deleted,
 		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END,
-		   error_message=excluded.error_message`,
+		   error_message=excluded.error_message,
+		   skip_reason=excluded.skip_reason`,
 		relPath,
 		normalizeDocType(doc.DocType),
 		normalizeSourceType(doc.SourceType),
@@ -752,6 +762,7 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		boolToInt(doc.Deleted),
 		strings.TrimSpace(doc.Title),
 		sanitizeDocErrorMessage(doc.ErrorMessage),
+		strings.TrimSpace(doc.SkipReason),
 	)
 	return err
 }
@@ -1738,7 +1749,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	var deleted int
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message, skip_reason
 		 FROM documents WHERE rel_path = ?`,
 		normalizedPath,
 	)
@@ -1756,6 +1767,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 		&deleted,
 		&doc.Title,
 		&doc.ErrorMessage,
+		&doc.SkipReason,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Document{}, os.ErrNotExist
@@ -1783,7 +1795,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	normalizedPrefix := model.NormalizePathPrefix(prefix)
 	trimmedGlob := strings.TrimSpace(glob)
 
-	selectCols := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message FROM documents`
+	selectCols := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message, skip_reason FROM documents`
 	where := []string{"deleted = 0"}
 	prefixArgs := make([]any, 0, 1)
 	if normalizedPrefix != "" {
@@ -1897,6 +1909,7 @@ func scanListFilesRow(rows *sql.Rows) (model.Document, error) {
 		&deleted,
 		&doc.Title,
 		&doc.ErrorMessage,
+		&doc.SkipReason,
 	); err != nil {
 		return model.Document{}, err
 	}
@@ -1926,7 +1939,7 @@ func (s *SQLiteStore) RecentFailures(ctx context.Context, limit int) ([]model.Do
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message, skip_reason
 		 FROM documents
 		 WHERE status = 'error' AND deleted = 0
 		 ORDER BY mtime_unix DESC, rel_path ASC
@@ -1956,6 +1969,7 @@ func (s *SQLiteStore) RecentFailures(ctx context.Context, limit int) ([]model.Do
 			&deleted,
 			&doc.Title,
 			&doc.ErrorMessage,
+			&doc.SkipReason,
 		); err != nil {
 			return nil, err
 		}
@@ -2039,6 +2053,12 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 		return model.CorpusStats{}, err
 	}
 	stats.FailureSummary = summary
+
+	skipSummary, err := loadSkipSummary(ctx, db, skipSummaryMaxSamples)
+	if err != nil {
+		return model.CorpusStats{}, err
+	}
+	stats.SkipSummary = skipSummary
 
 	return stats, nil
 }
