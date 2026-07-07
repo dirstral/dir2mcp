@@ -75,6 +75,11 @@ type DiscoverOptions struct {
 	// #267 item 5) passed through to the local-filesystem walker. nil = disabled
 	// (a full re-walk every run). See corpusfs.ScanCache.
 	ScanCache corpusfs.ScanCache
+	// OnOversize, when non-nil, is invoked once for each regular file excluded at
+	// discovery solely because its size exceeds MaxSizeBytes. It makes the
+	// size-cap drop observable instead of silent (issue #497); the file is still
+	// excluded. See corpusfs.Options.OnOversize.
+	OnOversize func(relPath string, size int64)
 }
 
 // DefaultDiscoverOptions returns discovery defaults used by ingestion.
@@ -97,6 +102,7 @@ func (o DiscoverOptions) corpusfsOptions() corpusfs.Options {
 		UseGitIgnore:   o.UseGitIgnore,
 		FollowSymlinks: o.FollowSymlinks,
 		ScanCache:      o.ScanCache,
+		OnOversize:     o.OnOversize,
 	}
 }
 

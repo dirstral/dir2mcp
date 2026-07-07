@@ -299,6 +299,9 @@ func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options) (Discovere
 	}
 	size := aws.ToInt64(obj.Size)
 	if size > opts.MaxSizeBytes {
+		if opts.OnOversize != nil {
+			opts.OnOversize(rel, size)
+		}
 		return DiscoveredFile{}, false
 	}
 	var mtime int64
