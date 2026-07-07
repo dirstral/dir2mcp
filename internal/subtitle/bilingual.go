@@ -38,10 +38,10 @@ const DefaultAlignToleranceMS = 2500
 // the cue with the greatest temporal overlap is the correct pairing even when a
 // neighboring cue happens to start closer (issue #441). Only when a secondary
 // overlaps no unassigned primary does alignment fall back to the nearest primary
-// by inter-cue gap, and then only within toleranceMS. A secondary cue with no
+// by start distance, and then only within toleranceMS. A secondary cue with no
 // primary in range is emitted as its own secondary-only cue (never dropped).
 // Alignment is deterministic: inputs are sorted by (start,end); the greatest-
-// overlap (else nearest-gap) primary wins; ties break to the earlier primary;
+// overlap (else nearest-start) primary wins; ties break to the earlier primary;
 // and a primary already carrying a secondary run keeps its first match so a
 // later secondary falls through to its own cue.
 //
