@@ -32,6 +32,21 @@ const (
 	ErrorCodeRateLimitExceeded = "RATE_LIMIT_EXCEEDED"
 	// ErrorCodeRateLimited is kept as a compatibility alias.
 	ErrorCodeRateLimited = ErrorCodeRateLimitExceeded
+
+	// Canonical §14 codes for ingest/startup/index failures. Each names a
+	// specific, machine-recognizable failure so operators (and conformance
+	// clients) get a stable code rather than only free-text prose.
+	//
+	//   ErrorCodeFileTooLarge         §14.4 — asset exceeds the ingest size cap.
+	//   ErrorCodeBinarySkipped        §14.4 — asset skipped as non-textual binary.
+	//   ErrorCodeIndexVersionMismatch §14.3 — on-disk index format ≠ this binary's.
+	//   ErrorCodeBindFailed           §14.1 — the server could not bind its listener.
+	//   ErrorCodeTLSConfigInvalid     §14.1 — TLS cert/key flags failed validation.
+	ErrorCodeFileTooLarge         = "FILE_TOO_LARGE"
+	ErrorCodeBinarySkipped        = "BINARY_SKIPPED"
+	ErrorCodeIndexVersionMismatch = "INDEX_VERSION_MISMATCH"
+	ErrorCodeBindFailed           = "BIND_FAILED"
+	ErrorCodeTLSConfigInvalid     = "TLS_CONFIG_INVALID"
 )
 
 const (

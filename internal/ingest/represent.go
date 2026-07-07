@@ -155,7 +155,7 @@ func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc mode
 		return fmt.Errorf("stat file %s: %w", doc.RelPath, err)
 	}
 	if info.Size() > defaultMaxFileSizeBytes {
-		return fmt.Errorf("file %s too large (%d bytes); limit %d", doc.RelPath, info.Size(), defaultMaxFileSizeBytes)
+		return fmt.Errorf("%w: file %s too large (%d bytes); limit %d", ErrFileTooLarge, doc.RelPath, info.Size(), defaultMaxFileSizeBytes)
 	}
 
 	// Read file content first so we can delegate to the new helper which
@@ -178,7 +178,7 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 	// Guard against huge files to avoid OOM.  We mirror the same limit used by
 	// discovery since raw-text ingestion should follow the same policy.
 	if int64(len(content)) > defaultMaxFileSizeBytes {
-		return fmt.Errorf("file %s too large (%d bytes); limit %d", doc.RelPath, len(content), defaultMaxFileSizeBytes)
+		return fmt.Errorf("%w: file %s too large (%d bytes); limit %d", ErrFileTooLarge, doc.RelPath, len(content), defaultMaxFileSizeBytes)
 	}
 
 	// Validate and normalize UTF-8
