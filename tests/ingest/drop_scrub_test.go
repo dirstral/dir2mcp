@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
@@ -113,6 +114,34 @@ func TestScrubExcisesLeakedPhrase(t *testing.T) {
 	// dropped: the real lines plus the scrubbed mixed line remain.
 	if len(got) != len(base)-1 {
 		t.Fatalf("expected the pure-spam line dropped after scrub: got %d, base %d", len(got), len(base))
+	}
+}
+
+// TestScrubFiltersWordTimings pins that scrubbing a leaked phrase also excises
+// the phrase's per-word timings from Span.Words — otherwise a downstream
+// word-level consumer (broadcast re-segmentation) would rebuild the scrubbed
+// spam from the leftover word timings, re-introducing what the scrub removed.
+func TestScrubFiltersWordTimings(t *testing.T) {
+	words := []model.TimedWord{
+		{Word: "hello", StartMS: 0, EndMS: 400},
+		{Word: "Крым", StartMS: 500, EndMS: 900}, // leaked spam token between real speech
+		{Word: "world", StartMS: 1000, EndMS: 1400},
+	}
+	base := ingest.ChunkTranscriptByTimeWithWords("[00:00] hello Крым world", words)
+	got := ingest.ApplyDropScrubToSegments(base, mustDropSet(t, nil), mustDropSet(t, []string{"Крым"}))
+
+	var toks []string
+	for _, seg := range got {
+		for _, w := range seg.Span.Words {
+			toks = append(toks, w.W)
+			if strings.Contains(w.W, "Крым") {
+				t.Fatalf("scrubbed word leaked into Span.Words: %v", toks)
+			}
+		}
+	}
+	// The real words keep their timings; only the scrubbed token is gone.
+	if len(toks) != 2 {
+		t.Fatalf("expected 2 surviving word timings (hello, world), got %v", toks)
 	}
 }
 

@@ -1010,10 +1010,47 @@ func applyDropScrubToSegments(segs []chunkSegment, drop, scrub *subtitle.DropSet
 				continue
 			}
 			seg.Text = scrubbed
+			// Excise the scrubbed words from the per-word timings too: Span.Words is
+			// later rebuilt into broadcast cues / other word-level consumers, so
+			// leaving the removed phrase's words here would re-introduce the spam the
+			// scrub just removed from Text.
+			seg.Span.Words = filterWordSpansToText(seg.Span.Words, scrubbed)
 		}
 		out = append(out, seg)
 	}
 	return out
+}
+
+// filterWordSpansToText drops per-word timings whose token is no longer present
+// in text, so a scrubbed segment's Span.Words carries only its surviving words.
+// Matching is a case-insensitive multiset over whitespace tokens with surrounding
+// punctuation trimmed, so a word kept N times in text keeps N of its timings (and
+// a word removed by the scrub, absent from text, keeps none). Empty input is
+// returned unchanged.
+func filterWordSpansToText(words []model.WordSpan, text string) []model.WordSpan {
+	if len(words) == 0 {
+		return words
+	}
+	counts := make(map[string]int)
+	for _, tok := range strings.Fields(text) {
+		counts[normalizeWordToken(tok)]++
+	}
+	out := make([]model.WordSpan, 0, len(words))
+	for _, w := range words {
+		key := normalizeWordToken(w.W)
+		if key != "" && counts[key] > 0 {
+			counts[key]--
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// normalizeWordToken lowercases a token and trims surrounding punctuation so a
+// whisper word token ("Aju?bei,") compares equal to its occurrence in rebuilt
+// segment text.
+func normalizeWordToken(s string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(s), ".,!?;:…»«()[]{}\"'“”‘’-—"))
 }
 
 // shiftTranscriptSpans subtracts offsetMS from every "time" span's bounds and
