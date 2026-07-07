@@ -109,6 +109,7 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	cfg.MediaSubtitlesTTMLAlignToleranceMS = 1800
 	cfg.MediaSubtitlesSegmentation = "broadcast"
 	cfg.MediaSubtitlesGlossary = []string{"Aju?bei=>Adzhubei"}
+	cfg.MediaSubtitlesDropPhrases = []string{"Донбасс|Крым|НАТО"}
 	cfg.MediaSubtitlesCollapseRepeats = 3
 	cfg.MediaSubtitlesDropURLs = true
 
@@ -131,6 +132,9 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	if len(loaded.MediaSubtitlesGlossary) != 1 || loaded.MediaSubtitlesGlossary[0] != "Aju?bei=>Adzhubei" {
 		t.Fatalf("glossary did not round-trip: %#v", loaded.MediaSubtitlesGlossary)
 	}
+	if len(loaded.MediaSubtitlesDropPhrases) != 1 || loaded.MediaSubtitlesDropPhrases[0] != "Донбасс|Крым|НАТО" {
+		t.Fatalf("drop_phrases did not round-trip: %#v", loaded.MediaSubtitlesDropPhrases)
+	}
 	if loaded.MediaSubtitlesCollapseRepeats != 3 {
 		t.Fatalf("collapse_repeats = %d, want 3", loaded.MediaSubtitlesCollapseRepeats)
 	}
@@ -145,6 +149,9 @@ func TestMediaSubtitlesCleaning_DefaultsOff(t *testing.T) {
 	cfg := config.Default()
 	if len(cfg.MediaSubtitlesGlossary) != 0 {
 		t.Fatalf("glossary should default empty, got %#v", cfg.MediaSubtitlesGlossary)
+	}
+	if len(cfg.MediaSubtitlesDropPhrases) != 0 {
+		t.Fatalf("drop_phrases should default empty, got %#v", cfg.MediaSubtitlesDropPhrases)
 	}
 	if cfg.MediaSubtitlesCollapseRepeats != 0 {
 		t.Fatalf("collapse_repeats should default 0, got %d", cfg.MediaSubtitlesCollapseRepeats)
@@ -170,6 +177,8 @@ func TestMediaSubtitlesCleaning_NestedYAMLApplies(t *testing.T) {
 		"    glossary:",
 		"      - Aju?bei=>Adzhubei",
 		"      - Khruschev=>Khrushchev",
+		"    drop_phrases:",
+		"      - Донбасс|Крым|Украина|Иван|Плющ|НАТО",
 		"    collapse_repeats: 3",
 		"    drop_urls: true",
 	}, "\n")+"\n")
@@ -180,6 +189,9 @@ func TestMediaSubtitlesCleaning_NestedYAMLApplies(t *testing.T) {
 	}
 	if len(cfg.MediaSubtitlesGlossary) != 2 {
 		t.Fatalf("nested glossary not applied: %#v", cfg.MediaSubtitlesGlossary)
+	}
+	if len(cfg.MediaSubtitlesDropPhrases) != 1 {
+		t.Fatalf("nested drop_phrases not applied: %#v", cfg.MediaSubtitlesDropPhrases)
 	}
 	if cfg.MediaSubtitlesCollapseRepeats != 3 {
 		t.Fatalf("nested collapse_repeats = %d, want 3", cfg.MediaSubtitlesCollapseRepeats)
@@ -208,6 +220,12 @@ func TestMediaSubtitlesCleaning_RejectsBadConfig(t *testing.T) {
 	badN.MediaSubtitlesCollapseRepeats = -1
 	if err := badN.Validate(); err == nil {
 		t.Fatalf("negative collapse_repeats should be rejected")
+	}
+
+	badDrop := config.Default()
+	badDrop.MediaSubtitlesDropPhrases = []string{"a(b"}
+	if err := badDrop.Validate(); err == nil {
+		t.Fatalf("invalid drop_phrases regexp should be rejected")
 	}
 }
 
