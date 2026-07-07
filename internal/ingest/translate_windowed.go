@@ -329,6 +329,24 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		return s.translateStructured(ctx, doc, content)
 	}
 
+	windows, err := s.decodeTranslateWindows(ctx, doc, tmpPath, st, totalMS, windowMS, stepMS)
+	if err != nil {
+		return "", nil, err
+	}
+
+	text, words := MergeTranslateWindows(windows, stepMS)
+	return text, words, nil
+}
+
+// decodeTranslateWindows extracts and translates each scheduled window from the
+// staged audio at tmpPath, returning only the windows that decoded to content
+// (in schedule order). A window whose decode fails — silence, music, a transient
+// provider error — is skipped rather than aborting the whole recording, since a
+// long interview routinely has silent stretches. If EVERY attempted window fails
+// that is a systemic failure (e.g. provider down) and is returned as an error.
+// Split out of translateStructuredWindowed to keep that function under the
+// cyclomatic-complexity budget.
+func (s *Service) decodeTranslateWindows(ctx context.Context, doc model.Document, tmpPath string, st model.StructuredTranscriber, totalMS, windowMS, stepMS int) ([]TranslateWindow, error) {
 	var windows []TranslateWindow
 	attempted, failed := 0, 0
 	for _, start := range TranslateWindowStarts(totalMS, stepMS, WhisperTranslateOverlapMS(windowMS)) {
@@ -338,16 +356,11 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		}
 		seg, err := avutil.ExtractSegment(ctx, tmpPath, start, end)
 		if err != nil {
-			return "", nil, fmt.Errorf("extract translate window [%d,%d]ms: %w", start, end, err)
+			return nil, fmt.Errorf("extract translate window [%d,%d]ms: %w", start, end, err)
 		}
 		attempted++
 		res, err := st.TranscribeStructured(ctx, doc.RelPath, seg)
 		if err != nil {
-			// A window over silence or music legitimately decodes to nothing (the
-			// provider reports "no text content"); skip it rather than abort the
-			// whole recording — a long interview routinely has silent stretches and
-			// a silent tail. A systemic failure (provider down) still surfaces below
-			// because every window fails.
 			failed++
 			s.getLogger().Printf("windowed translate: skip window [%d,%d]ms: %v", start, end, err)
 			continue
@@ -355,9 +368,7 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		windows = append(windows, TranslateWindow{StartMS: start, Res: res})
 	}
 	if attempted > 0 && failed == attempted {
-		return "", nil, fmt.Errorf("windowed translate %s: all %d windows failed", doc.RelPath, failed)
+		return nil, fmt.Errorf("windowed translate %s: all %d windows failed", doc.RelPath, failed)
 	}
-
-	text, words := MergeTranslateWindows(windows, stepMS)
-	return text, words, nil
+	return windows, nil
 }
