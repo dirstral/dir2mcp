@@ -14,13 +14,15 @@ import (
 // similarity) with the server-side relevance floor configured.
 //
 // The three candidates have deterministic cosine scores against the query
-// vector {1, 0}: chunk 1 → 1.00, chunk 2 → 0.60, chunk 3 → 0.28.
+// vector {1, 0}: chunk 1 → 1.00, chunk 2 → 0.50, chunk 3 → 0.00. Because the
+// floor is applied on the result set's MIN-MAX normalized [0,1] scores (#411,
+// scale-free across cosine/RRF/rerank), these map to normalized {1.0, 0.5, 0.0}.
 func newMinScoreFloorService(t *testing.T, floor float64) *retrieval.Service {
 	t.Helper()
 	idx := index.NewHNSWIndex("")
-	addVec(t, idx, 1, []float32{1, 0})       // cosine 1.00
-	addVec(t, idx, 2, []float32{0.6, 0.8})   // cosine 0.60 (unit vector)
-	addVec(t, idx, 3, []float32{0.28, 0.96}) // cosine 0.28 (unit vector)
+	addVec(t, idx, 1, []float32{1, 0})           // cosine 1.00 → normalized 1.0
+	addVec(t, idx, 2, []float32{0.5, 0.8660254}) // cosine 0.50 → normalized 0.5 (unit vector)
+	addVec(t, idx, 3, []float32{0, 1})           // cosine 0.00 → normalized 0.0
 
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
@@ -46,10 +48,10 @@ func searchFloorChunkIDs(t *testing.T, svc *retrieval.Service) []uint64 {
 }
 
 // TestSearch_MinScoreFloor_DropsSubThresholdHits pins the core behavior: with a
-// floor of 0.5, the two strong hits (scores 1.00 and 0.60) survive and the weak
-// hit (0.28) is dropped before results reach the model.
+// floor of 0.3, the two strong hits (normalized 1.0 and 0.5) survive and the weak
+// hit (normalized 0.0) is dropped before results reach the model.
 func TestSearch_MinScoreFloor_DropsSubThresholdHits(t *testing.T) {
-	svc := newMinScoreFloorService(t, 0.5)
+	svc := newMinScoreFloorService(t, 0.3)
 	got := searchFloorChunkIDs(t, svc)
 	want := []uint64{1, 2}
 	if len(got) != len(want) {
@@ -84,10 +86,11 @@ func TestSearch_MinScoreFloor_NegativeIsPassThrough(t *testing.T) {
 }
 
 // TestSearch_MinScoreFloor_BoundaryKeepsEqual pins the cutoff semantics: a hit
-// whose score equals the floor is KEPT (strict less-than drops). With floor
-// 0.60, chunks 1 (1.00) and 2 (0.60, equal) survive; chunk 3 (0.28) is dropped.
+// whose normalized score equals the floor is KEPT (strict less-than drops). With
+// floor 0.50, chunks 1 (norm 1.0) and 2 (norm 0.5, equal) survive; chunk 3 (norm
+// 0.0) is dropped.
 func TestSearch_MinScoreFloor_BoundaryKeepsEqual(t *testing.T) {
-	svc := newMinScoreFloorService(t, 0.6)
+	svc := newMinScoreFloorService(t, 0.5)
 	got := searchFloorChunkIDs(t, svc)
 	want := []uint64{1, 2}
 	if len(got) != len(want) {
@@ -101,8 +104,8 @@ func TestSearch_MinScoreFloor_BoundaryKeepsEqual(t *testing.T) {
 }
 
 // TestSearch_MinScoreFloor_DropsAllWhenAboveEveryScore pins that an aggressive
-// floor above every candidate's score yields zero hits (the floor may legitimately
-// return fewer than k — even zero — hits).
+// floor above every candidate's normalized score (max is 1.0) yields zero hits
+// (the floor may legitimately return fewer than k — even zero — hits).
 func TestSearch_MinScoreFloor_DropsAllWhenAboveEveryScore(t *testing.T) {
 	svc := newMinScoreFloorService(t, 1.5)
 	got := searchFloorChunkIDs(t, svc)

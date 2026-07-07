@@ -185,10 +185,12 @@ type Service struct {
 	// grouping for that path (entries are never collapsed together).
 	groupKeyByRelPath map[string]string
 	// minScore is a server-side relevance floor (config retrieval.min_score):
-	// hits whose final (authoritative) Score is strictly below it are dropped
-	// from Search results, after scoring/fusion/rerank/dedup/truncation. It is
-	// config-only (never an MCP tool parameter). Default 0 ⇒ disabled
-	// (pass-through). Wired from config.RetrievalMinScore at construction.
+	// hits whose score — MIN-MAX NORMALIZED to [0,1] over the result set, so the
+	// floor is scale-free across cosine/RRF/rerank modes (#411) — is strictly
+	// below it are dropped from Search results, after
+	// scoring/fusion/rerank/dedup/truncation. It is config-only (never an MCP tool
+	// parameter). Default 0 ⇒ disabled (pass-through). Wired from
+	// config.RetrievalMinScore at construction. See applyMinScoreFloor.
 	minScore float64
 	// genModel is the resolved chat/generation model name, used only to label
 	// and price the generate stage in per-query metrics (issue #327). Empty
@@ -462,10 +464,13 @@ func (s *Service) SetCrossFileDedupEnabled(enabled bool) {
 }
 
 // SetMinScore wires the server-side relevance floor (config retrieval.min_score).
-// Hits whose final authoritative Score is strictly below floor are dropped from
-// Search results, after scoring/fusion/rerank and after dedup/truncation. A
-// floor <= 0 disables the cutoff (pass-through). The engine wires this from
-// config.RetrievalMinScore at construction time, mirroring SetCrossFileDedupEnabled.
+// Hits whose min-max-normalized [0,1] score is strictly below floor are dropped
+// from Search results, after scoring/fusion/rerank and after dedup/truncation
+// (the floor is applied on the normalized score, not the raw authoritative one,
+// so it is scale-free across cosine/RRF/rerank modes — see applyMinScoreFloor,
+// #411). A floor <= 0 disables the cutoff (pass-through). The engine wires this
+// from config.RetrievalMinScore at construction time, mirroring
+// SetCrossFileDedupEnabled.
 func (s *Service) SetMinScore(floor float64) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
@@ -1406,12 +1411,27 @@ func (s *Service) applyRecencyDecay(ctx context.Context, hits []model.SearchHit)
 	return out
 }
 
-// applyMinScoreFloor drops hits whose final authoritative Score is strictly
-// below the configured relevance floor (config retrieval.min_score). A floor
-// <= 0 disables the cutoff and returns hits unchanged (pass-through), preserving
-// the slice identity so callers see no allocation when unconfigured. Order is
-// preserved. This runs as the very last retrieval step so the comparison uses
-// the post-rerank score (or, when rerank is off, the fused score).
+// applyMinScoreFloor drops hits whose relevance falls strictly below the
+// configured relevance floor (config retrieval.min_score). A floor <= 0 disables
+// the cutoff and returns hits unchanged (pass-through), preserving the slice
+// identity so callers see no allocation when unconfigured. Order is preserved.
+// This runs as the very last retrieval step, so the comparison sees the fully
+// resolved result set (post scoring/fusion/rerank/dedup/recency).
+//
+// The floor is compared against each hit's score MIN-MAX NORMALIZED to [0,1]
+// over the result set — NOT the raw authoritative Score — because that raw score
+// lives on an incommensurable scale per retrieval mode (#411): pure-vector is
+// cosine similarity (~0..1); hybrid / HyDE-fuse / cross-lingual is an RRF score
+// whose theoretical max is 2/(rrfK+1) ≈ 0.033; rerank is a provider-specific
+// scale. Worse, the hybrid path falls back to raw cosine hits when BM25 returns
+// nothing, so the same corpus/config can emit RRF-scaled scores for one query
+// and cosine-scaled for the next. A raw `Score < floor` comparison therefore has
+// no consistent meaning: a cosine-shaped floor (0.3–0.5) silently drops EVERY
+// RRF hit and returns empty. Normalizing per result set makes the floor
+// scale-free and mode-agnostic: it is a RELATIVE floor in [0,1] where 0 keeps
+// everything, 1 keeps only the top-scoring hit(s), and a degenerate all-equal
+// set is never wiped (normalizedRelevance maps it to all-1). The reported Score
+// field is left UNCHANGED (unnormalized), preserving the tool/citation contract.
 func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 	s.metaMu.RLock()
 	floor := s.minScore
@@ -1419,9 +1439,10 @@ func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 	if floor <= 0 || len(hits) == 0 {
 		return hits
 	}
+	rel := normalizedRelevance(hits)
 	out := make([]model.SearchHit, 0, len(hits))
-	for _, h := range hits {
-		if h.Score < floor {
+	for i, h := range hits {
+		if rel[i] < floor {
 			continue
 		}
 		out = append(out, h)

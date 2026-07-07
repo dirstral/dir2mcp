@@ -220,12 +220,18 @@ type Config struct {
 	// rerank/truncation. Default false (every candidate is returned as before).
 	DedupRetrieval bool
 	// RetrievalMinScore is a server-side relevance floor (config
-	// `retrieval.min_score`): candidate hits whose final (authoritative) score is
-	// strictly below this value are dropped after scoring/fusion/rerank and after
-	// dedup/truncation, before results reach the model. It is config-only (NOT an
-	// MCP tool parameter) so no tool input/output schema changes. Default 0 =
-	// disabled (no floor): behavior is unchanged unless configured, preserving the
-	// local-first, no-surprises default. Negative values are CONFIG_INVALID.
+	// `retrieval.min_score`): candidate hits whose score — MIN-MAX NORMALIZED to
+	// [0,1] over the result set — is strictly below this value are dropped after
+	// scoring/fusion/rerank and after dedup/truncation, before results reach the
+	// model. The floor is applied on the normalized score (a RELATIVE floor in
+	// [0,1]: 0 keeps everything, 1 keeps only the top hit) rather than the raw
+	// authoritative score, because raw scores are incommensurable across retrieval
+	// modes — cosine (~0..1) vs RRF (max ≈ 0.033) vs a provider rerank scale — so a
+	// single raw threshold would silently wipe out all hybrid/RRF results (#411).
+	// It is config-only (NOT an MCP tool parameter) so no tool input/output schema
+	// changes. Default 0 = disabled (no floor): behavior is unchanged unless
+	// configured, preserving the local-first, no-surprises default. Negative
+	// values are CONFIG_INVALID.
 	RetrievalMinScore float64
 	// CostPriceOverrides maps a model name to per-1K-token USD prices,
 	// overriding the built-in defaults used by the per-query query_metrics
@@ -3975,11 +3981,21 @@ func (c *Config) validateMediaSTTNumericBounds() error {
 	return nil
 }
 
+// validateMinScore validates retrieval.min_score. The floor is applied to
+// MIN-MAX NORMALIZED scores in [0,1] (#411); 0 disables it. A negative floor
+// would never drop anything, and a floor > 1 would silently drop EVERY hit, so
+// both are rejected explicitly. Split out to keep validateRetrievalNumericBounds
+// under the cyclomatic-complexity budget.
+func (c *Config) validateMinScore() error {
+	if c.RetrievalMinScore < 0 || c.RetrievalMinScore > 1 || math.IsNaN(c.RetrievalMinScore) || math.IsInf(c.RetrievalMinScore, 0) {
+		return fmt.Errorf("retrieval.min_score must be in [0,1] (normalized relevance; 0 disables the floor): %v", c.RetrievalMinScore)
+	}
+	return nil
+}
+
 func (c *Config) validateRetrievalNumericBounds() error {
-	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor
-	// would never drop anything, so reject it explicitly.
-	if c.RetrievalMinScore < 0 || math.IsNaN(c.RetrievalMinScore) || math.IsInf(c.RetrievalMinScore, 0) {
-		return fmt.Errorf("retrieval.min_score must be a non-negative finite number: %v", c.RetrievalMinScore)
+	if err := c.validateMinScore(); err != nil {
+		return err
 	}
 	// retrieval.recency_half_life is a time-decay half-life; 0 disables it. A
 	// negative half-life would amplify rather than decay older content.
