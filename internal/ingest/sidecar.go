@@ -331,9 +331,15 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 	}
 	sort.Strings(langs)
 
+	// Build the drop/scrub sets once for all languages; they are config-derived
+	// and language-independent. They strip configured subtitle drop/scrub phrases
+	// from the chunk text before embedding (issue #545), the same cleaning the
+	// export path applies to the sidecar. Off by default (inactive sets = no-op).
+	dropSet, scrubSet := s.captionDropScrub()
 	ingested := false
 	for _, lang := range langs {
 		segments := chunkSubtitleCuesFiltered(groups[lang], s.captionWordFilter())
+		segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
 		if len(segments) == 0 {
 			continue
 		}

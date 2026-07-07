@@ -702,6 +702,27 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 	return subtitle.NewWordFilter(s.cfg.MediaFilterWords)
 }
 
+// captionDropScrub builds the shared subtitle drop/scrub sets from
+// media.subtitles.drop_phrases / scrub_phrases (issue #545). The same sets clean
+// STT transcript chunks and sidecar-cue chunks before embedding, mirroring how
+// the export path (subtitle.CleanCues) cleans the exported sidecar — so a
+// wholly-spam chunk is never indexed and a chunk with a leaked phrase is embedded
+// scrubbed, keeping the index and sidecar in agreement. Empty config yields
+// inactive (nil) sets, which the cleaning treats as a no-op. The patterns were
+// already validated at config load (config.Validate → subtitle.NewDropSet), so a
+// compile error here is unexpected; it is logged and treated as no cleaning
+// (nil set) rather than failing ingestion.
+func (s *Service) captionDropScrub() (drop, scrub *subtitle.DropSet) {
+	var err error
+	if drop, err = subtitle.NewDropSet(s.cfg.MediaSubtitlesDropPhrases); err != nil {
+		s.getLogger().Printf("media.subtitles.drop_phrases invalid at ingest, ignoring: %v", err)
+	}
+	if scrub, err = subtitle.NewDropSet(s.cfg.MediaSubtitlesScrubPhrases); err != nil {
+		s.getLogger().Printf("media.subtitles.scrub_phrases invalid at ingest, ignoring: %v", err)
+	}
+	return drop, scrub
+}
+
 func sttExpectedLanguage(cfg config.Config) string {
 	prof, ok := resolveSTTProfile(cfg)
 	if !ok {
@@ -3068,6 +3089,11 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	})
 
 	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
+	// Strip configured subtitle drop/scrub phrases from the chunk text BEFORE
+	// embedding (issue #545), so whisper keyword-spam never pollutes the index —
+	// the same cleaning the export path applies to the sidecar. Off by default.
+	dropSet, scrubSet := s.captionDropScrub()
+	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
 	if len(segments) == 0 {
 		return nil
 	}
@@ -3315,6 +3341,10 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// English track. translatedWords is nil for the chat engine, leaving that path
 	// chunk-only as before.
 	segments := chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
+	// Strip configured subtitle drop/scrub phrases from the translated chunk text
+	// before embedding (issue #545), consistent with the source transcript path.
+	dropSet, scrubSet := s.captionDropScrub()
+	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
 	if len(segments) == 0 {
 		return nil
 	}

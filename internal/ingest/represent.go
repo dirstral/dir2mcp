@@ -980,6 +980,42 @@ func applyWordFilterToSegments(segs []chunkSegment, filter *subtitle.WordFilter)
 	return out
 }
 
+// applyDropScrubToSegments applies the configured subtitle drop/scrub cleaning
+// (config media.subtitles.drop_phrases / scrub_phrases) to each chunk segment's
+// text at INGEST, before embedding — mirroring applyWordFilterToSegments for
+// media.filter_words, so the same phrases that are stripped from the exported
+// sidecar are also stripped from what gets chunked and embedded (issue #545).
+// A segment whose text is composed ENTIRELY of drop phrases (DropSet.IsSpam) is
+// dropped, so whisper keyword-spam over non-speech is never embedded; a segment
+// carrying a leaked phrase glued to real speech is scrubbed (DropSet.Scrub) and
+// kept, and dropped only if the scrub empties it. Both sets are the exact same
+// subtitle primitives the export path invokes (subtitle.CleanCues →
+// DropSet.IsSpam/Scrub) built from the same config keys, so the index and the
+// exported sidecar agree cue-for-cue. Nil/inactive sets return segs unchanged,
+// so the empty-config path is a byte-for-byte no-op. Drop is applied before
+// scrub (matching CleanCues ordering); spans (timing) are preserved verbatim on
+// surviving segments.
+func applyDropScrubToSegments(segs []chunkSegment, drop, scrub *subtitle.DropSet) []chunkSegment {
+	if !drop.Active() && !scrub.Active() {
+		return segs
+	}
+	out := make([]chunkSegment, 0, len(segs))
+	for _, seg := range segs {
+		if drop.IsSpam(seg.Text) {
+			continue
+		}
+		if scrub.Active() {
+			scrubbed := scrub.Scrub(seg.Text)
+			if strings.TrimSpace(scrubbed) == "" {
+				continue
+			}
+			seg.Text = scrubbed
+		}
+		out = append(out, seg)
+	}
+	return out
+}
+
 // shiftTranscriptSpans subtracts offsetMS from every "time" span's bounds and
 // from every attached word timestamp, clamping at 0 (dir2mcp#258 leading-silence
 // trim). It mutates segs in place and is deterministic for a given input. A
@@ -1561,6 +1597,24 @@ func ChunkTranscriptByTimeWithWordsFiltered(content string, words []model.TimedW
 	raw := chunkTranscriptByTimeWithWordsFiltered(content, words, filter)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ApplyDropScrubToSegments is the exported counterpart of
+// applyDropScrubToSegments, exposed for tests in the tests/ tree. It applies the
+// configured subtitle drop/scrub cleaning to chunk segments exactly as the ingest
+// path does after chunking (before persistence/embedding). Nil/inactive sets
+// return the input unchanged.
+func ApplyDropScrubToSegments(segs []ChunkSegment, drop, scrub *subtitle.DropSet) []ChunkSegment {
+	raw := make([]chunkSegment, len(segs))
+	for i, seg := range segs {
+		raw[i] = chunkSegment(seg)
+	}
+	cleaned := applyDropScrubToSegments(raw, drop, scrub)
+	out := make([]ChunkSegment, 0, len(cleaned))
+	for _, seg := range cleaned {
 		out = append(out, ChunkSegment(seg))
 	}
 	return out
