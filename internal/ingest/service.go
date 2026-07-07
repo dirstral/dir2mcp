@@ -119,11 +119,21 @@ type Service struct {
 	// translation is enabled (enabling with an empty list is CONFIG_INVALID).
 	translateTargetLangs []string
 
-	// translateProvider/translateModel record the resolved chat provider/model
-	// used for translation so each translated transcript representation can carry
-	// its translation derivation identity in meta_json (SPEC §5.2/§8.6.7).
+	// translateProvider/translateModel record the resolved provider/model used
+	// for translation so each translated transcript representation can carry its
+	// translation derivation identity in meta_json (SPEC §5.2/§8.6.7). For the
+	// chat engine these are the chat provider/model; for the whisper engine they
+	// are the STT provider/model.
 	translateProvider string
 	translateModel    string
+
+	// translateEngine selects how transcripts are translated (config
+	// media.translate.engine): "chat" (default, line-by-line via s.translator) or
+	// "whisper" (native audio->English translate task via s.translateSTT).
+	translateEngine string
+	// translateSTT runs Whisper's translate task; set only when
+	// translateEngine == "whisper", nil for the chat engine.
+	translateSTT model.Transcriber
 
 	// embedMultimodal is the resolved multimodal embedding mode (SPEC
 	// 8.1.7): "off" (default), "augment", or "replace". When augment/
@@ -234,6 +244,18 @@ type Service struct {
 	// batch run is active, making recordOutput a no-op on the hot path.
 	activeOutcome *assetOutcome
 
+	// quarantinedThisDoc records that the output quality gate (§8.6.6) marked the
+	// document currently being processed as a non-fatal per-document error, so the
+	// scan loop must count it as exactly one error and NOT credit it as indexed
+	// (issue #426). Like activeOutcome it is per-document state: the scan loop is
+	// sequential (at most one asset in flight). The authoritative reset is at
+	// processDocument entry so every document starts clean by construction on every
+	// path; generateRepresentations additionally resets it to re-scope the flag for
+	// sequential archive members (separate processDocumentFromContent calls under a
+	// single processDocument entry). A rejected representation is thus counted once
+	// even when a document produces several (transcript + per-language translations).
+	quarantinedThisDoc bool
+
 	// activePass selects which work the representation generators perform for the
 	// asset currently being processed under the optional two-phase pass split
 	// (SPEC §8.6.11). runScan sets it around each per-asset call (the scan loop is
@@ -298,6 +320,18 @@ func (s *Service) markActiveSkipped() {
 		return
 	}
 	s.activeOutcome.markSkipped()
+}
+
+// markActiveErrored records a terminal error outcome — the canonical §14.4 code
+// and a content-free message — on the asset currently being processed under an
+// active batch run, for the run manifest (SPEC §8.6.11). The first code recorded
+// wins (markErrorIfUnset), so a specific inner failure is never clobbered by a
+// later one. No-op when no batch run is active.
+func (s *Service) markActiveErrored(code, message string) {
+	if s == nil {
+		return
+	}
+	s.activeOutcome.markErrorIfUnset(code, message)
 }
 
 // ErrTranscriptProviderFailure marks failures originating from the transcript
@@ -383,8 +417,39 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	// generator; when off (default), or no chat provider resolves, the field
 	// stays nil and the translate step self-skips so behaviour is unchanged.
 	svc.translateTargetLangs = append([]string(nil), cfg.MediaTranslateTargetLangs...)
+	svc.translateEngine = strings.ToLower(strings.TrimSpace(cfg.MediaTranslateEngine))
+	if svc.translateEngine == "" {
+		svc.translateEngine = "chat"
+	}
+	svc.resolveTranslateBinding(cfg)
+	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
+	// unresolvable embed profile leaves it off (text-only).
+	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
+		svc.embedMultimodal = provider.NormalizeEmbedMultimodal(ep.EmbedMultimodal)
+	}
+	return svc, nil
+}
+
+// resolveTranslateBinding resolves the optional transcript-translation binding
+// (SPEC §8.6.2). Split out of NewService to keep that constructor under the
+// cyclomatic-complexity budget; behaviour is unchanged. When translation is
+// enabled we resolve the chat capability and build a generator; when off
+// (default), or no chat provider resolves, the field stays nil and the
+// translate step self-skips so behaviour is unchanged.
+func (svc *Service) resolveTranslateBinding(cfg config.Config) {
 	if cfg.MediaTranslateEnabled && len(svc.translateTargetLangs) > 0 {
-		if tr, prof, terr := translatorFromConfig(cfg); terr == nil && tr != nil {
+		if svc.translateEngine == "whisper" {
+			// Whisper's native translate task (audio->English) instead of the chat
+			// generator. Config validation guarantees the STT provider is
+			// kind:whisper and the targets are English-only before we get here.
+			if tr, prof, terr := translateTranscriberFromConfig(cfg); terr == nil && tr != nil {
+				svc.translateSTT = tr
+				svc.translateProvider = prof.Name
+				svc.translateModel = strings.TrimSpace(prof.STTModel)
+			} else if terr != nil {
+				svc.getLogger().Printf("whisper transcript translation disabled: %v", terr)
+			}
+		} else if tr, prof, terr := translatorFromConfig(cfg); terr == nil && tr != nil {
 			svc.translator = tr
 			svc.translateProvider = prof.Name
 			svc.translateModel = strings.TrimSpace(prof.ChatModel)
@@ -392,12 +457,6 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 			svc.getLogger().Printf("transcript translation disabled: %v", terr)
 		}
 	}
-	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
-	// unresolvable embed profile leaves it off (text-only).
-	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
-		svc.embedMultimodal = provider.NormalizeEmbedMultimodal(ep.EmbedMultimodal)
-	}
-	return svc, nil
 }
 
 // resolveTranscriptIdentityFields populates the transcript derivation-identity
@@ -594,6 +653,10 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 		// media.vad (dir2mcp#258) is a global toggle, applied onto whichever STT
 		// profile resolves; providers without VAD support ignore it.
 		prof.STTVAD = cfg.MediaVAD
+		// media.stt.* request limits (dir2mcp#510/#511), likewise applied onto the
+		// resolved STT profile; 0 leaves the whisper client's built-in defaults.
+		prof.STTMaxPayloadMB = cfg.MediaSTTMaxPayloadMB
+		prof.STTRequestTimeoutSec = cfg.MediaSTTRequestTimeoutSec
 		tr, berr := buildTranscriber(prof)
 		if berr != nil {
 			return nil, fmt.Errorf("stt provider %q: %w", sel, berr)
@@ -705,6 +768,33 @@ func translatorFromConfig(cfg config.Config) (model.Generator, provider.Profile,
 	return gen, prof, nil
 }
 
+// translationConfigured reports whether transcript translation should run: at
+// least one target language plus a resolved engine binding (the chat generator
+// for engine=chat, or the Whisper translate transcriber for engine=whisper).
+// Both translate gates consult this so the two engines self-skip identically
+// when translation is off or unresolved.
+func (s *Service) translationConfigured() bool {
+	return len(s.translateTargetLangs) > 0 && (s.translator != nil || s.translateSTT != nil)
+}
+
+// translateTranscriberFromConfig resolves the active STT profile and builds a
+// Whisper translate-task transcriber for media.translate.engine=whisper. It
+// reuses the same STT profile resolution as source transcription (resolveSTTProfile)
+// so translation re-decodes the audio on the exact provider that produced the
+// source transcript. Returns an error (leaving translation off) when no STT
+// profile resolves or the profile is not translate-capable (non-whisper).
+func translateTranscriberFromConfig(cfg config.Config) (model.Transcriber, provider.Profile, error) {
+	prof, ok := resolveSTTProfile(cfg)
+	if !ok {
+		return nil, provider.Profile{}, errors.New("resolve STT provider for whisper translation: no STT provider")
+	}
+	tr, err := providerfactory.TranslateTranscriber(prof)
+	if err != nil {
+		return nil, provider.Profile{}, fmt.Errorf("build whisper translate transcriber (%s): %w", prof.Name, err)
+	}
+	return tr, prof, nil
+}
+
 // healthCheckInterval returns the configured base poll interval for connector
 // health probes. It mirrors the behaviour described in VISION.md: when the
 // configuration value is zero (or the receiver is nil) the default from
@@ -765,6 +855,25 @@ func (s *Service) SetTranscriber(transcriber model.Transcriber) {
 // transcripts' meta_json. Target languages are normalized (trimmed/lower-cased).
 func (s *Service) SetTranslator(translator model.Generator, providerName, modelName string, targetLangs []string) {
 	s.translator = translator
+	s.translateProvider = strings.TrimSpace(providerName)
+	s.translateModel = strings.TrimSpace(modelName)
+	norm := make([]string, 0, len(targetLangs))
+	for _, l := range targetLangs {
+		if t := strings.ToLower(strings.TrimSpace(l)); t != "" {
+			norm = append(norm, t)
+		}
+	}
+	s.translateTargetLangs = norm
+}
+
+// SetTranslateTranscriber overrides the whisper translate-task binding and
+// selects the whisper translation engine, primarily for tests. Passing a nil
+// transcriber (or empty langs) disables translation. The recorded provider/model
+// are written into translated transcripts' meta_json. Target languages are
+// normalized (trimmed/lower-cased).
+func (s *Service) SetTranslateTranscriber(transcriber model.Transcriber, providerName, modelName string, targetLangs []string) {
+	s.translateSTT = transcriber
+	s.translateEngine = "whisper"
 	s.translateProvider = strings.TrimSpace(providerName)
 	s.translateModel = strings.TrimSpace(modelName)
 	norm := make([]string, 0, len(targetLangs))
@@ -1288,6 +1397,20 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 }
 
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+	// Authoritative per-document reset of the §8.6.6/#426 quality-gate quarantine
+	// flag. The scan loop is sequential (at most one asset in flight), so resetting
+	// here — at the VERY START, before any early-return branch (build error, remote
+	// skip, archive, cache-hit/skipped, non-ok status) — guarantees every document
+	// begins with a clean flag by construction, matching the per-doc reset pattern
+	// used for activeOutcome/indexedPending. Without this, a stale true from a prior
+	// quarantined document could persist across an early-return path that never
+	// reaches generateRepresentations/deriveDocument (which also reset the flag) and
+	// wrongly suppress this document's indexed credit. The resets inside
+	// generateRepresentations/deriveDocument are kept: they re-scope the flag for
+	// sequential archive members, which run as separate processDocumentFromContent
+	// calls under a single processDocument entry.
+	s.quarantinedThisDoc = false
+
 	// Two-phase derivation pass (SPEC §8.6.11): the transcription pass already did
 	// all document building, upserting, counting, and source-transcript work for
 	// this asset; the derivation pass runs ONLY translation (§8.6.2) and re-doing
@@ -1375,13 +1498,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if err := s.finalizeIfGenerated(ctx, &doc, willGenerateReps, finalContentHash); err != nil {
 		return err
 	}
-	if nonFatalErrored {
-		// A non-fatal soft-error path (binary-content, video-no-representation, or
-		// a zero-representation provider failure) already persisted this document
-		// as status="error" and bumped the error counter itself. It must count
-		// solely as an error, so suppress the indexed credit — otherwise the same
-		// doc is counted as both indexed and error and indexed+skipped+errors
-		// exceeds scanned (issue #426).
+	if s.suppressIndexedCredit(nonFatalErrored) {
+		// A non-fatal soft-error path already persisted this document as
+		// status="error" and bumped the error counter itself, so it must count
+		// solely as an error, not also as indexed (otherwise indexed+skipped+errors
+		// exceeds scanned — issue #426).
 		indexedPending = false
 	}
 	s.creditIndexed(indexedPending)
@@ -1531,6 +1652,17 @@ func (s *Service) creditIndexed(indexed bool) {
 	}
 }
 
+// suppressIndexedCredit reports whether the document just processed must NOT be
+// credited as indexed because a non-fatal soft error already counted it as an
+// error (issue #426). Two sources: (1) nonFatalErrored — a rep-generation
+// soft-failure (binary-content, video-no-representation, or a zero-representation
+// provider failure) returned by generateRepresentations; (2) quarantinedThisDoc —
+// an output quality gate (§8.6.6) that rejected a generated OCR/transcript/
+// translation output. Either way the document counts solely as an error.
+func (s *Service) suppressIndexedCredit(nonFatalErrored bool) bool {
+	return nonFatalErrored || s.quarantinedThisDoc
+}
+
 // deriveDocument runs the derivation pass for a single asset under the two-phase
 // split (SPEC §8.6.11): it produces ONLY translated transcripts (§8.6.2) from the
 // already-persisted source transcript, reusing the cached transcript text so it
@@ -1545,10 +1677,14 @@ func (s *Service) creditIndexed(indexed bool) {
 // with no source transcript are recorded as skipped and produce nothing — keeping
 // the derivation pass's per-asset manifest/progress totals faithful (§8.6.11).
 func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) error {
+	// The per-document quality-gate quarantine flag (§8.6.6 / #426) was already
+	// reset at processDocument entry (deriveDocument is reached only from there),
+	// so a translation rejected in this derivation pass is counted once and cannot
+	// leak its dedup state into the next asset without a redundant reset here.
 	// No translation configured, or the multimodal "replace" mode that stands in
 	// for STT→text (so no transcript exists to translate): nothing to derive. This
 	// matches the single-pass gates so the corpus-wide output is identical.
-	if s.translator == nil || len(s.translateTargetLangs) == 0 {
+	if !s.translationConfigured() {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -2347,6 +2483,10 @@ func isEmbeddableAudio(relPath string) bool {
 // hard error: the caller MUST NOT then also credit the document as indexed, or it
 // would be double-counted as both indexed and error (issue #426).
 func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) (bool, error) {
+	// Reset the per-document quality-gate quarantine flag (§8.6.6 / #426). The scan
+	// loop is sequential, so this scopes the flag to the document about to be
+	// processed even though it is Service-level state.
+	s.quarantinedThisDoc = false
 	if s.repGen == nil {
 		return false, nil
 	}
@@ -2582,7 +2722,7 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 
 	s.persistTitleIfFound(ctx, doc, ocrText)
 
-	decision := s.screenOutputQuality(doc.RelPath, "ocr", ocrText, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, ocrText, quality.Context{
 		Modality: quality.ModalityOCR,
 	})
 
@@ -2626,7 +2766,7 @@ func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model
 		s.persistTitleIfFound(ctx, doc, md)
 	}
 
-	decision := s.screenOutputQuality(doc.RelPath, "ocr", md, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, md, quality.Context{
 		Modality: quality.ModalityOCR,
 	})
 
@@ -2775,12 +2915,42 @@ type quarantineDecision struct {
 	category   string
 }
 
+// Quality-gate screening kinds — the `kind` argument to screenOutputQuality.
+// They select the canonical §14.4 error code recorded when a degenerate output
+// is quarantined (§8.6.6). The literal values are also the diagnostic labels in
+// the quarantine log line.
+const (
+	qualityKindOCR         = "ocr"
+	qualityKindTranscript  = "transcript"
+	qualityKindTranslation = "transcript-translation"
+)
+
+// qualityGateFailureCode maps a screening kind to its canonical §14.4 error code
+// (§8.6.6): an OCR / transcript / translation output rejected by the gate is
+// OCR_FAILED / TRANSCRIBE_FAILED / TRANSLATE_FAILED respectively. An unknown kind
+// falls back to the generic EXTRACT_FAILED so the recorded code is always a valid
+// §14.4 constant.
+func qualityGateFailureCode(kind string) string {
+	switch kind {
+	case qualityKindOCR:
+		return manifestErrOCRFailed
+	case qualityKindTranscript:
+		return manifestErrTranscribeFailed
+	case qualityKindTranslation:
+		return manifestErrTranslateFailed
+	default:
+		return manifestErrExtractFailed
+	}
+}
+
 // screenOutputQuality runs the quality gate over generated text. It returns a
 // zero-value (non-quarantine) decision when the gate is disabled (nil) or the
 // verdict is clean, so callers can always insert via the returned decision. On
-// a failed gate it logs a content-free warning and returns the quarantine
-// values. relPath/kind are used only for the diagnostic log line.
-func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx quality.Context) quarantineDecision {
+// a failed gate it logs a content-free warning, records the §8.6.6 per-document
+// error (documents.status=error + canonical §14.4 code, non-fatal), and returns
+// the chunk-level quarantine values. kind selects the canonical code and the
+// diagnostic label; doc identifies the document to mark.
+func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, kind, text string, qctx quality.Context) quarantineDecision {
 	if s.qualityGate == nil {
 		return quarantineDecision{}
 	}
@@ -2798,12 +2968,68 @@ func (s *Service) screenOutputQuality(relPath, kind string, text string, qctx qu
 	// Detail is already redacted/content-free; SanitizeReason bounds/normalizes
 	// it for persistence into chunks.embedding_error.
 	embErr := store.SanitizeReason(detail)
-	s.getLogger().Printf("quality gate quarantined %s output for %s: reason=%s", kind, relPath, reason)
+	s.getLogger().Printf("quality gate quarantined %s output for %s: reason=%s", kind, doc.RelPath, reason)
+	// §8.6.6: a failed output quality gate is a non-fatal per-document error — the
+	// document is marked status=error with the canonical §14.4 code while indexing
+	// continues. This is IN ADDITION to the chunk-level quarantine encoded in the
+	// returned decision (embedding_status=error), which keeps the degenerate text
+	// out of the embedding index.
+	s.recordQualityGateDocError(ctx, doc, kind, reason)
 	return quarantineDecision{
 		quarantine: true,
 		embErr:     embErr,
 		category:   string(store.ErrorCategoryQualityGate),
 	}
+}
+
+// recordQualityGateDocError persists the §8.6.6 per-document error for a
+// quality-gate quarantine and accounts for it exactly once (issue #426):
+//
+//   - it marks documents.status=error via persistNonFatalDocError with a
+//     content-free message that LEADS with the canonical §14.4 code, so the code
+//     is queryable through error_message / RecentFailures (§15.6) without a store
+//     schema change (the documents table has no error_code column, and §8.6.6 only
+//     requires the document be "marked status=error with the appropriate code");
+//   - it records the same canonical code on the active batch manifest outcome
+//     (§8.6.11), whose record carries a dedicated machine-readable error_code;
+//   - it increments the run error counter once and sets quarantinedThisDoc so the
+//     scan loop suppresses the indexed credit (the document counts as exactly one
+//     error, zero indexed — issue #426).
+//
+// It is idempotent per document: a document with several rejected representations
+// (e.g. a transcript plus per-language translations) counts once and keeps the
+// FIRST canonical code, while every rejected representation still quarantines its
+// own chunks via the returned decision. The document's content_hash done-marker is
+// blanked before the error upsert (#402/#413): the row is now status=error AND
+// carries an empty hash, so the next incremental run re-derives it. Blanking is
+// required for the two-phase derivation path, where deriveDocument re-reads the doc
+// AFTER the transcription pass already stamped content_hash — without it a
+// translation-gate rejection would persist status=error yet keep the stamped hash,
+// so the unchanged-content gate would SKIP (never retry) the quarantined document.
+// On the single-phase path the hash is already withheld (withholdContentHash), so
+// blanking it again is a no-op; the two modes are now consistent. Retry re-screens
+// the cached STT/OCR/translation output, not the provider — a bounded cost.
+func (s *Service) recordQualityGateDocError(ctx context.Context, doc model.Document, kind string, reason quality.Reason) {
+	code := qualityGateFailureCode(kind)
+	// Content-free and deterministic (§8.6.6): the message is code + kind + the
+	// enum reason only — no document text — so it carries no secrets. nil secret
+	// patterns are therefore safe (persistNonFatalDocError still redacts, a no-op
+	// here).
+	msg := fmt.Sprintf("%s: output quality gate rejected %s output (%s)", code, kind, reason)
+	// Manifest surface (§8.6.11): first canonical code wins, never clobbered.
+	s.markActiveErrored(code, msg)
+	if s.quarantinedThisDoc {
+		// This document already recorded its canonical per-document error and was
+		// counted; keep the first code and count it once (issue #426).
+		return
+	}
+	s.quarantinedThisDoc = true
+	s.addErrors(1)
+	// Withhold the content_hash done-marker so the quarantined document is retried
+	// next run in BOTH single-phase and two-phase modes (#402/#413). doc is a value
+	// copy, so this affects only the persisted error row.
+	doc.ContentHash = ""
+	s.persistNonFatalDocError(ctx, doc, errors.New(msg), nil)
 }
 
 // transcriptExpectedLanguage returns the active STT provider profile's language
@@ -2835,7 +3061,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
 		duration = d
 	}
-	decision := s.screenOutputQuality(doc.RelPath, "transcript", transcriptText, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
 		Duration:         duration,
@@ -2960,7 +3186,7 @@ func (s *Service) applyDiarization(ctx context.Context, doc model.Document, cont
 // sidecar per-language reps; routes through the output quality gate; and records
 // source_language + translate provider/model in meta_json.
 func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration, trimOffsetMS int) error {
-	if s.translator == nil || len(s.translateTargetLangs) == 0 {
+	if !s.translationConfigured() {
 		return nil
 	}
 	sourceLang := strings.TrimSpace(s.transcriptLanguage)
@@ -3014,7 +3240,21 @@ func sameLanguage(a, b string) bool {
 // so re-ingesting an unchanged document reuses the cached translation instead of
 // re-calling the chat provider.
 func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration, trimOffsetMS int) error {
-	translated, err := s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
+	// Source the English text either from the chat generator (line-by-line over
+	// the source transcript) or, for engine=whisper, from Whisper's native
+	// translate task (a second pass over the audio that re-segments with its own
+	// timings). Both yield [mm:ss]-marked lines, so everything below — quality
+	// gate, representation upsert, time-span chunking, export — is identical.
+	var (
+		translated      string
+		translatedWords []model.TimedWord
+		err             error
+	)
+	if s.translateEngine == "whisper" {
+		translated, translatedWords, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
+	} else {
+		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
+	}
 	if err != nil {
 		return fmt.Errorf("translate transcript for %s into %q: %w", doc.RelPath, targetLang, err)
 	}
@@ -3027,7 +3267,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// quality gate exactly like an STT transcript (anti-hallucination). The
 	// expected language is the TARGET language: the gate's language detector
 	// should accept the translated text, not the source.
-	decision := s.screenOutputQuality(doc.RelPath, "transcript-translation", translated, quality.Context{
+	decision := s.screenOutputQuality(ctx, doc, qualityKindTranslation, translated, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: targetLang,
 		Duration:         duration,
@@ -3068,10 +3308,13 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	}
 	s.addRepresentations(1)
 
-	// Chunk the translated text with the same transcript chunker so its time
-	// spans line up with the source segments (the translation preserves each
-	// segment's verbatim [mm:ss] marker).
-	segments := chunkTranscriptByTime(translated)
+	// Chunk the translated text with the same word-aware transcript chunker as the
+	// source path so its time spans line up with the source segments (the
+	// translation preserves each segment's verbatim [mm:ss] marker) AND carry the
+	// whisper-translate per-word timings, enabling broadcast segmentation of the
+	// English track. translatedWords is nil for the chat engine, leaving that path
+	// chunk-only as before.
+	segments := chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
 	if len(segments) == 0 {
 		return nil
 	}
@@ -3444,23 +3687,107 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	return string(transcriptBytes), words, nil
 }
 
-// transcribe calls the configured transcriber, preferring the structured
+// readOrComputeWhisperTranslation produces the English transcript for
+// media.translate.engine=whisper by re-decoding the SOURCE audio with Whisper's
+// native translate task (task=translate). Unlike the chat path it deliberately
+// ignores the source transcript text: Whisper re-segments the audio and returns
+// its own [mm:ss] English lines with their own timings. The result is cached
+// under {StateDir}/cache/transcribe with a "-translate" discriminator so it
+// never collides with the source-language transcribe cache for the same bytes.
+func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+	if s.translateSTT == nil {
+		return "", nil, errors.New("whisper translate transcriber not configured")
+	}
+
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
+	}
+
+	// Whisper translate always targets English; key on the media bytes + STT
+	// identity (transcriptCacheKey, matching the source transcript so a provider
+	// change re-derives) plus a "-translate" discriminator and the en suffix so
+	// the file is distinct from the source transcript's cache entry. Per-word
+	// timings ride along in a .words.json sidecar (as the source transcribe path
+	// does) so the English track can be broadcast-segmented, not just chunked.
+	// The windowing size changes the produced timings, so fold it into the key —
+	// otherwise a changed media.translate.whisper_window_sec would silently reuse
+	// stale text/words from a different window setting.
+	base := s.transcriptCacheKey(content) + "-translate" + TranscriptLangSuffix("en")
+	if s.cfg.MediaTranslateWhisperWindowSec > 0 {
+		base += fmt.Sprintf("-w%d", s.cfg.MediaTranslateWhisperWindowSec)
+	}
+	cachePath := filepath.Join(cacheDir, base+".txt")
+	wordsPath := filepath.Join(cacheDir, base+".words.json")
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		return string(cached), readCachedWords(wordsPath), nil
+	}
+
+	translated, words, err := s.translateStructuredWindowed(ctx, doc, content)
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+	}
+	translatedBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n"))
+	if err := os.WriteFile(cachePath, translatedBytes, 0o644); err != nil {
+		return "", nil, fmt.Errorf("write whisper-translate cache: %w", err)
+	}
+	s.writeCachedWords(wordsPath, words)
+	shouldEnforceAfterWrite := s.markOCRCacheWrite()
+	if shouldEnforceAfterWrite {
+		// Participate in the same cache-policy enforcement as the source
+		// transcript write (readOrComputeTranscriptWithWords) so the translate
+		// cache is bounded under the same operational policy and cannot grow
+		// unbounded.
+		s.ocrCacheMu.RLock()
+		enforceHook := s.ocrCacheEnforce
+		s.ocrCacheMu.RUnlock()
+		var err error
+		if enforceHook != nil {
+			err = enforceHook(cacheDir)
+		} else {
+			err = s.enforceCachePolicy(cacheDir)
+		}
+		if err != nil {
+			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
+		}
+	}
+	return string(translatedBytes), words, nil
+}
+
+// transcribeWith runs the given transcriber, preferring the structured
 // (word-timing) capability when available. Providers that do not implement
 // model.StructuredTranscriber return no words, leaving downstream behaviour
-// unchanged.
-func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
-	if st, ok := s.transcriber.(model.StructuredTranscriber); ok {
-		res, err := st.TranscribeStructured(ctx, doc.RelPath, content)
+// unchanged. transcribe and translateStructured both delegate here, differing
+// only in which configured transcriber they pass.
+func (s *Service) transcribeWith(ctx context.Context, stt model.Transcriber, relPath string, content []byte) (string, []model.TimedWord, error) {
+	if st, ok := stt.(model.StructuredTranscriber); ok {
+		res, err := st.TranscribeStructured(ctx, relPath, content)
 		if err != nil {
 			return "", nil, err
 		}
 		return res.Text, res.Words, nil
 	}
-	text, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
+	text, err := stt.Transcribe(ctx, relPath, content)
 	if err != nil {
 		return "", nil, err
 	}
 	return text, nil, nil
+}
+
+// translateStructured runs the whisper translate transcriber, preferring the
+// structured (word-timing) capability so the English track carries per-word
+// timings for broadcast segmentation; it degrades to text-only for a translate
+// transcriber that does not implement model.StructuredTranscriber.
+func (s *Service) translateStructured(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+	return s.transcribeWith(ctx, s.translateSTT, doc.RelPath, content)
+}
+
+// transcribe calls the configured transcriber, preferring the structured
+// (word-timing) capability when available. Providers that do not implement
+// model.StructuredTranscriber return no words, leaving downstream behaviour
+// unchanged.
+func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+	return s.transcribeWith(ctx, s.transcriber, doc.RelPath, content)
 }
 
 // readCachedWords loads per-word timing from the sidecar cache file, returning
@@ -3507,8 +3834,17 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 // ignored.
 func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
-	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
-	for _, p := range []string{base + ".txt", base + ".words.json"} {
+	key := s.transcriptCacheKey(content)
+	base := key + TranscriptLangSuffix(language)
+	// Also purge the whisper-translate English track (+ its .words.json sidecar):
+	// readOrComputeWhisperTranslation keys on the same content bytes with a
+	// "-translate" discriminator and the en suffix, and gated (e.g. secret-pattern
+	// refused) translated text must not be left persisted after a purge.
+	translateBase := key + "-translate" + TranscriptLangSuffix("en")
+	for _, p := range []string{
+		base + ".txt", base + ".words.json",
+		translateBase + ".txt", translateBase + ".words.json",
+	} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			s.getLogger().Printf("purge transcript cache: %v", err)
 		}

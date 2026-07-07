@@ -267,6 +267,19 @@ type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)
 }
 
+// BoundedGenerator is an OPTIONAL capability a Generator MAY implement to cap a
+// single completion's output tokens for THIS call, without changing the
+// generous default the generator uses for unbounded callers (answer synthesis,
+// annotation). A caller with a known-short output (e.g. one translated
+// transcript line) type-asserts its Generator against this and, if satisfied,
+// passes a tight cap; a Generator that does not implement it falls back to
+// Generate and behaves exactly as before. A maxTokens <= 0 MUST behave like
+// Generate (use the generator's own default).
+type BoundedGenerator interface {
+	Generator
+	GenerateWithMaxTokens(ctx context.Context, prompt string, maxTokens int) (string, error)
+}
+
 // Reranked is one rescored candidate: Index is the position in the
 // documents slice passed to Rerank; RelevanceScore is the provider's
 // relevance (higher = better). Results are returned best-first.

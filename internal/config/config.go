@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
@@ -452,6 +453,24 @@ type Config struct {
 	// consulted when MediaTranslateEnabled is true; enabling translation with an
 	// empty list is CONFIG_INVALID.
 	MediaTranslateTargetLangs []string
+
+	// MediaTranslateEngine selects HOW transcripts are translated (config
+	// `media.translate.engine`): "chat" (default) translates the transcript text
+	// line-by-line via the chat generator; "whisper" re-decodes the source audio
+	// with Whisper's native translate task (audio->English single pass), which
+	// keeps names/terms in the acoustic model's context and produces its own
+	// segment timings. "whisper" requires the STT provider to be kind:whisper and
+	// English-only target_langs (Whisper's only translation target). Only
+	// consulted when MediaTranslateEnabled is true.
+	MediaTranslateEngine string
+	// MediaTranslateWhisperWindowSec bounds the audio window Whisper's translate
+	// task decodes at a time (config `media.translate.whisper_window_sec`). A
+	// single full-audio translate decode drifts its timestamps on long recordings;
+	// when this is > 0 the audio is decoded in overlapping windows of this length
+	// and each window's timestamps are offset by its start, so drift cannot
+	// accumulate. 0 (default) preserves the historical single-pass behavior. Only
+	// consulted for MediaTranslateEngine="whisper".
+	MediaTranslateWhisperWindowSec int
 	// MediaFilterWords is an optional, general-purpose list of boilerplate /
 	// credits / watermark phrases stripped from transcript and subtitle text
 	// (config `media.filter_words`). Matching is case-insensitive substring
@@ -553,6 +572,17 @@ type Config struct {
 	// Defaults: 120000 ms (2 min) and 26214400 bytes (25 MiB).
 	MediaClipMaxDurationMS int
 	MediaClipMaxBytes      int
+
+	// MediaSTTMaxPayloadMB / MediaSTTRequestTimeoutSec tune the self-hosted
+	// whisper STT client's request limits (config `media.stt.max_payload_mb` /
+	// `media.stt.request_timeout_sec`), applied onto whichever whisper STT profile
+	// resolves. The whisper client's built-in caps (50 MB payload, 120 s request
+	// timeout) are too small for long-form media — a 30-min mono file exceeds the
+	// payload cap and takes longer than 120 s to transcribe — so these let an
+	// operator raise them (dir2mcp#510, #511). 0 (default) means "use the client's
+	// built-in default"; negative is CONFIG_INVALID.
+	MediaSTTMaxPayloadMB      int
+	MediaSTTRequestTimeoutSec int
 
 	// MediaBatchTwoPhase / MediaBatchProgress / MediaBatchManifest configure the
 	// optional batch-ergonomics surface for large-archive media ingests (SPEC
@@ -699,6 +729,8 @@ type fileConfig struct {
 	MediaVariantsSelect                *string
 	MediaTranslateEnabled              *bool
 	MediaTranslateTargetLangs          []string
+	MediaTranslateEngine               *string
+	MediaTranslateWhisperWindowSec     *int
 	MediaFilterWords                   []string
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
@@ -712,6 +744,8 @@ type fileConfig struct {
 	MediaVideoWindowSec                *int
 	MediaClipMaxDurationMS             *int
 	MediaClipMaxBytes                  *int
+	MediaSTTMaxPayloadMB               *int
+	MediaSTTRequestTimeoutSec          *int
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
 	ServerTLSKeyFile                   *string
@@ -829,6 +863,8 @@ type persistedConfig struct {
 	MediaVariantsSelect                string        `yaml:"media_variants_select"`
 	MediaTranslateEnabled              bool          `yaml:"media_translate_enabled"`
 	MediaTranslateTargetLangs          []string      `yaml:"media_translate_target_langs"`
+	MediaTranslateEngine               string        `yaml:"media_translate_engine"`
+	MediaTranslateWhisperWindowSec     int           `yaml:"media_translate_whisper_window_sec"`
 	MediaFilterWords                   []string      `yaml:"media_filter_words"`
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
@@ -841,6 +877,8 @@ type persistedConfig struct {
 	MediaVideoWindowSec                int           `yaml:"media_video_window_sec"`
 	MediaClipMaxDurationMS             int           `yaml:"media_clip_max_duration_ms"`
 	MediaClipMaxBytes                  int           `yaml:"media_clip_max_bytes"`
+	MediaSTTMaxPayloadMB               int           `yaml:"media_stt_max_payload_mb"`
+	MediaSTTRequestTimeoutSec          int           `yaml:"media_stt_request_timeout_sec"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
 	MediaBatchManifest                 string        `yaml:"media_batch_manifest"`
@@ -1038,10 +1076,14 @@ func Default() Config {
 		LanguageDetectionEnabled:  true,
 		MediaClipMaxDurationMS:    DefaultMediaClipMaxDurationMS,
 		MediaClipMaxBytes:         DefaultMediaClipMaxBytes,
+		// 0 = use the whisper client's built-in caps (#510, #511).
+		MediaSTTMaxPayloadMB:      0,
+		MediaSTTRequestTimeoutSec: 0,
 		MediaVariantsGroup:        false,
 		MediaVariantsSelect:       "best",
 		MediaTranslateEnabled:     false,
 		MediaTranslateTargetLangs: nil,
+		MediaTranslateEngine:      "chat",
 		// Bilingual subtitle export (SPEC §8.6.10) is OFF by default; the align
 		// tolerance carries its spec default so an enabled-but-unspecified config
 		// behaves predictably.
@@ -1168,6 +1210,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaVariantsSelect:                cfg.MediaVariantsSelect,
 		MediaTranslateEnabled:              cfg.MediaTranslateEnabled,
 		MediaTranslateTargetLangs:          append([]string(nil), cfg.MediaTranslateTargetLangs...),
+		MediaTranslateEngine:               cfg.MediaTranslateEngine,
+		MediaTranslateWhisperWindowSec:     cfg.MediaTranslateWhisperWindowSec,
 		MediaFilterWords:                   append([]string(nil), cfg.MediaFilterWords...),
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
@@ -1181,6 +1225,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaVideoWindowSec:                cfg.MediaVideoWindowSec,
 		MediaClipMaxDurationMS:             cfg.MediaClipMaxDurationMS,
 		MediaClipMaxBytes:                  cfg.MediaClipMaxBytes,
+		MediaSTTMaxPayloadMB:               cfg.MediaSTTMaxPayloadMB,
+		MediaSTTRequestTimeoutSec:          cfg.MediaSTTRequestTimeoutSec,
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
 		X402Mode:                           cfg.X402.Mode,
@@ -1906,10 +1952,24 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTranslateTargetLangs != nil {
 		cfg.MediaTranslateTargetLangs = normalizeStringSlice(fc.MediaTranslateTargetLangs)
 	}
+	if fc.MediaTranslateEngine != nil {
+		cfg.MediaTranslateEngine = *fc.MediaTranslateEngine
+	}
+	if fc.MediaTranslateWhisperWindowSec != nil {
+		cfg.MediaTranslateWhisperWindowSec = *fc.MediaTranslateWhisperWindowSec
+	}
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
 	applyMediaSubtitlesFileParsed(cfg, fc)
+	applyMediaProcessingFileParsed(cfg, fc)
+	applyMediaBatchFileParsed(cfg, fc)
+}
+
+// applyMediaProcessingFileParsed copies the set media processing/clip file
+// fields onto cfg. Split from applyMediaFileParsed to keep that function under
+// the cyclomatic-complexity budget.
+func applyMediaProcessingFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTrimLeadingSilence != nil {
 		cfg.MediaTrimLeadingSilence = *fc.MediaTrimLeadingSilence
 	}
@@ -1930,13 +1990,13 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaVideoWindowSec != nil {
 		cfg.MediaVideoWindowSec = *fc.MediaVideoWindowSec
 	}
+	applyMediaSTTFileParsed(cfg, fc)
 	if fc.MediaClipMaxDurationMS != nil {
 		cfg.MediaClipMaxDurationMS = *fc.MediaClipMaxDurationMS
 	}
 	if fc.MediaClipMaxBytes != nil {
 		cfg.MediaClipMaxBytes = *fc.MediaClipMaxBytes
 	}
-	applyMediaBatchFileParsed(cfg, fc)
 }
 
 // applyMediaBatchFileParsed copies the set media.batch file fields (SPEC §8.6.11)
@@ -1951,6 +2011,18 @@ func applyMediaBatchFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.MediaBatchManifest != nil {
 		cfg.MediaBatchManifest = strings.TrimSpace(*fc.MediaBatchManifest)
+	}
+}
+
+// applyMediaSTTFileParsed copies the set media.stt.* file fields (#510, #511)
+// onto cfg. Split out of applyMediaFileParsed so that function stays under the
+// cyclomatic-complexity budget.
+func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
+	if fc.MediaSTTMaxPayloadMB != nil {
+		cfg.MediaSTTMaxPayloadMB = *fc.MediaSTTMaxPayloadMB
+	}
+	if fc.MediaSTTRequestTimeoutSec != nil {
+		cfg.MediaSTTRequestTimeoutSec = *fc.MediaSTTRequestTimeoutSec
 	}
 }
 
@@ -2265,6 +2337,8 @@ var configKeyAliases = map[string]string{
 	"media_variants_select":                   "media.variants.select",
 	"media_translate_enabled":                 "media.translate.enabled",
 	"media_translate_target_langs":            "media.translate.target_langs",
+	"media_translate_engine":                  "media.translate.engine",
+	"media_translate_whisper_window_sec":      "media.translate.whisper_window_sec",
 	"media_filter_words":                      "media.filter_words",
 	"filter_words":                            "media.filter_words",
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
@@ -2279,6 +2353,8 @@ var configKeyAliases = map[string]string{
 	"media_video_window_sec":                  "media.video_window_sec",
 	"media_clip_max_duration_ms":              "media.clip.max_duration_ms",
 	"media_clip_max_bytes":                    "media.clip.max_bytes",
+	"media_stt_max_payload_mb":                "media.stt.max_payload_mb",
+	"media_stt_request_timeout_sec":           "media.stt.request_timeout_sec",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
 	"stt_elevenlabs_model":                    "stt.elevenlabs.model",
@@ -2343,7 +2419,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
-	case "media", "media.variants", "media.translate", "media.clip", "media.diarize", "media.batch":
+	case "media", "media.variants", "media.translate", "media.clip", "media.stt", "media.diarize", "media.batch":
 		return true
 	case "media.subtitles", "media.subtitles.ttml", "media.subtitles.smil":
 		return true
@@ -2448,21 +2524,26 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 // keeps setIntFileScalar a flat dispatch (one new entry per key) rather than an
 // ever-growing switch that trips the cyclomatic-complexity gate.
 var intFileScalarTargets = map[string]func(*fileConfig) **int{
-	"rate_limit_rps":             func(c *fileConfig) **int { return &c.RateLimitRPS },
-	"rate_limit_burst":           func(c *fileConfig) **int { return &c.RateLimitBurst },
-	"rag.k_default":              func(c *fileConfig) **int { return &c.RAGKDefault },
-	"retrieval.adaptive.k_min":   func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMin },
-	"retrieval.adaptive.k_max":   func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMax },
-	"rag.max_context_chars":      func(c *fileConfig) **int { return &c.RAGMaxContextChars },
-	"rag.oversample_factor":      func(c *fileConfig) **int { return &c.RAGOversampleFactor },
-	"chunking.max_tokens":        func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
-	"chunking.overlap_tokens":    func(c *fileConfig) **int { return &c.ChunkingOverlapTokens },
-	"ingest.max_file_mb":         func(c *fileConfig) **int { return &c.IngestMaxFileMB },
-	"rerank.candidate_pool":      func(c *fileConfig) **int { return &c.RerankCandidatePool },
-	"media.audio_window_sec":     func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
-	"media.video_window_sec":     func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
-	"media.clip.max_duration_ms": func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
-	"media.clip.max_bytes":       func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
+	"rate_limit_rps":                     func(c *fileConfig) **int { return &c.RateLimitRPS },
+	"rate_limit_burst":                   func(c *fileConfig) **int { return &c.RateLimitBurst },
+	"rag.k_default":                      func(c *fileConfig) **int { return &c.RAGKDefault },
+	"retrieval.adaptive.k_min":           func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMin },
+	"retrieval.adaptive.k_max":           func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMax },
+	"rag.max_context_chars":              func(c *fileConfig) **int { return &c.RAGMaxContextChars },
+	"rag.oversample_factor":              func(c *fileConfig) **int { return &c.RAGOversampleFactor },
+	"chunking.max_tokens":                func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
+	"chunking.overlap_tokens":            func(c *fileConfig) **int { return &c.ChunkingOverlapTokens },
+	"ingest.max_file_mb":                 func(c *fileConfig) **int { return &c.IngestMaxFileMB },
+	"rerank.candidate_pool":              func(c *fileConfig) **int { return &c.RerankCandidatePool },
+	"media.audio_window_sec":             func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
+	"media.translate.whisper_window_sec": func(c *fileConfig) **int { return &c.MediaTranslateWhisperWindowSec },
+	"media.video_window_sec":             func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
+	"media.clip.max_duration_ms":         func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
+	"media.clip.max_bytes":               func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
+	"media.stt.max_payload_mb":           func(c *fileConfig) **int { return &c.MediaSTTMaxPayloadMB },
+	"media.stt.request_timeout_sec": func(c *fileConfig) **int {
+		return &c.MediaSTTRequestTimeoutSec
+	},
 	"media.subtitles.ttml.align_tolerance_ms": func(c *fileConfig) **int {
 		return &c.MediaSubtitlesTTMLAlignToleranceMS
 	},
@@ -2495,9 +2576,12 @@ var nonNegativeIntKeys = map[string]bool{
 	"retrieval.adaptive.k_min":                true,
 	"retrieval.adaptive.k_max":                true,
 	"media.audio_window_sec":                  true,
+	"media.translate.whisper_window_sec":      true,
 	"media.video_window_sec":                  true,
 	"media.clip.max_duration_ms":              true,
 	"media.clip.max_bytes":                    true,
+	"media.stt.max_payload_mb":                true,
+	"media.stt.request_timeout_sec":           true,
 	"media.subtitles.ttml.align_tolerance_ms": true,
 }
 
@@ -2701,6 +2785,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaVariantsSelect = strPtr(value)
 	case "media.subtitles.segmentation":
 		cfg.MediaSubtitlesSegmentation = strPtr(value)
+	case "media.translate.engine":
+		cfg.MediaTranslateEngine = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -2881,6 +2967,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_variants_select", cfg.MediaVariantsSelect)
 	writeBool("media_translate_enabled", cfg.MediaTranslateEnabled)
 	writeList("media_translate_target_langs", cfg.MediaTranslateTargetLangs)
+	writeScalar("media_translate_engine", cfg.MediaTranslateEngine)
 	writeList("media_filter_words", cfg.MediaFilterWords)
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
@@ -2896,9 +2983,12 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 		writeBool("media_diarize_enabled", *cfg.MediaDiarizeEnabled)
 	}
 	writeInt("media_audio_window_sec", cfg.MediaAudioWindowSec)
+	writeInt("media_translate_whisper_window_sec", cfg.MediaTranslateWhisperWindowSec)
 	writeInt("media_video_window_sec", cfg.MediaVideoWindowSec)
 	writeInt("media_clip_max_duration_ms", cfg.MediaClipMaxDurationMS)
 	writeInt("media_clip_max_bytes", cfg.MediaClipMaxBytes)
+	writeInt("media_stt_max_payload_mb", cfg.MediaSTTMaxPayloadMB)
+	writeInt("media_stt_request_timeout_sec", cfg.MediaSTTRequestTimeoutSec)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
 	writeScalar("media_batch_manifest", cfg.MediaBatchManifest)
@@ -3444,9 +3534,32 @@ func (c *Config) validateMediaTranslate() error {
 	if !c.MediaTranslateEnabled {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(c.MediaTranslateTargetLangs))
-	out := make([]string, 0, len(c.MediaTranslateTargetLangs))
-	for _, lang := range c.MediaTranslateTargetLangs {
+	out, err := normalizeMediaTranslateTargets(c.MediaTranslateTargetLangs)
+	if err != nil {
+		return err
+	}
+	if len(out) == 0 {
+		return errors.New("media.translate.enabled=true requires a non-empty " +
+			"media.translate.target_langs (no default target language)")
+	}
+	c.MediaTranslateTargetLangs = out
+
+	engine, err := c.validateMediaTranslateEngine(out)
+	if err != nil {
+		return err
+	}
+	c.MediaTranslateEngine = engine
+	return nil
+}
+
+// normalizeMediaTranslateTargets trims, lower-cases and de-duplicates the
+// media.translate.target_langs list, rejecting any tag outside the cache-safe
+// BCP-47 alphabet. Split out of validateMediaTranslate to keep that function
+// under the cyclomatic-complexity budget; behaviour is unchanged.
+func normalizeMediaTranslateTargets(langs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(langs))
+	out := make([]string, 0, len(langs))
+	for _, lang := range langs {
 		l := strings.ToLower(strings.TrimSpace(lang))
 		if l == "" {
 			continue
@@ -3458,7 +3571,7 @@ func (c *Config) validateMediaTranslate() error {
 		for _, r := range l {
 			safe := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
 			if !safe {
-				return fmt.Errorf("media.translate.target_langs contains an invalid language tag %q "+
+				return nil, fmt.Errorf("media.translate.target_langs contains an invalid language tag %q "+
 					"(use BCP-47 letters/digits/hyphen, e.g. \"en\" or \"pt-br\")", lang)
 			}
 		}
@@ -3468,12 +3581,41 @@ func (c *Config) validateMediaTranslate() error {
 		seen[l] = struct{}{}
 		out = append(out, l)
 	}
-	if len(out) == 0 {
-		return errors.New("media.translate.enabled=true requires a non-empty " +
-			"media.translate.target_langs (no default target language)")
+	return out, nil
+}
+
+// validateMediaTranslateEngine resolves and validates the translation engine
+// against the normalized target list. Split out of validateMediaTranslate to
+// keep that function under the cyclomatic-complexity budget; behaviour is
+// unchanged.
+//
+// Translation engine: "chat" (default, line-by-line via the chat generator)
+// or "whisper" (native audio->English translate task). Whisper only produces
+// English and needs a whisper STT provider, so validate those preconditions
+// here where the normalized target list and resolved providers are available.
+func (c *Config) validateMediaTranslateEngine(out []string) (string, error) {
+	engine := strings.ToLower(strings.TrimSpace(c.MediaTranslateEngine))
+	if engine == "" {
+		engine = Default().MediaTranslateEngine
 	}
-	c.MediaTranslateTargetLangs = out
-	return nil
+	switch engine {
+	case "chat":
+	case "whisper":
+		prof, ok := resolveSTTProfileForCapability(*c)
+		if !ok || prof.Kind != provider.KindWhisper {
+			return "", errors.New("CONFIG_INVALID: media.translate.engine=whisper requires the STT provider " +
+				"to be kind:whisper (set stt.provider: whisper), or use media.translate.engine=chat")
+		}
+		for _, lang := range out {
+			if strings.SplitN(lang, "-", 2)[0] != "en" {
+				return "", fmt.Errorf("CONFIG_INVALID: media.translate.engine=whisper only produces English; set "+
+					"media.translate.target_langs: [en] (got %q) or use media.translate.engine=chat", lang)
+			}
+		}
+	default:
+		return "", fmt.Errorf("media.translate.engine must be one of chat, whisper: %q", c.MediaTranslateEngine)
+	}
+	return engine, nil
 }
 
 // crossLingualAutoSentinel is the target-langs value meaning "expand into the
@@ -3661,6 +3803,9 @@ func (c *Config) validateNumericBounds() error {
 	if c.IngestWatchDebounce < 0 {
 		return fmt.Errorf("ingest.watch_debounce must be non-negative: %v", c.IngestWatchDebounce)
 	}
+	if err := c.validateMediaSTTNumericBounds(); err != nil {
+		return err
+	}
 	if c.RAGMaxContextChars < 0 {
 		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
 	}
@@ -3699,6 +3844,19 @@ func (c *Config) validateNumericBounds() error {
 // NaN/Inf are also rejected at parse time, but are re-guarded here so a
 // programmatically-injected value still fails validation rather than silently
 // corrupting behavior.
+// validateMediaSTTNumericBounds checks the media.stt.* numeric config fields.
+// Split from validateNumericBounds to keep it under the cyclomatic-complexity
+// budget; behaviour is unchanged.
+func (c *Config) validateMediaSTTNumericBounds() error {
+	if c.MediaSTTMaxPayloadMB < 0 {
+		return fmt.Errorf("media.stt.max_payload_mb must be non-negative (0 = client default): %d", c.MediaSTTMaxPayloadMB)
+	}
+	if c.MediaSTTRequestTimeoutSec < 0 {
+		return fmt.Errorf("media.stt.request_timeout_sec must be non-negative (0 = client default): %d", c.MediaSTTRequestTimeoutSec)
+	}
+	return nil
+}
+
 func (c *Config) validateRetrievalNumericBounds() error {
 	// retrieval.min_score is a relevance floor; 0 disables it. A negative floor
 	// would never drop anything, so reject it explicitly.
