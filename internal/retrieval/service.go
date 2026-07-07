@@ -31,7 +31,10 @@ var (
 	codeKeywordRe   = regexp.MustCompile(`\b(func|class|package|import|return|if|for|while|switch|case)\b`)
 	codePunctRe     = regexp.MustCompile(`[(){}\[\];]`)
 	fileExtensionRe = regexp.MustCompile(`\.(js|ts|py|go|java|rb|cpp|c|cs|html|css|json|yaml|yml)\b`)
-	timePrefixRe    = regexp.MustCompile(`^\s*\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\]?\s*(.*)$`)
+	// The lead field allows up to 3 digits so single-field MM:SS transcripts
+	// past 99 minutes (e.g. "[100:30]") still parse for open_file time slicing
+	// (#427); with the optional third field present it is the HH of HH:MM:SS.
+	timePrefixRe = regexp.MustCompile(`^\s*\[?(\d{1,3}):(\d{2})(?::(\d{2}))?\]?\s*(.*)$`)
 )
 
 var defaultPathExcludes = []string{
@@ -1087,11 +1090,27 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 		k = 15
 	}
 
+	// When recency decay is active it re-scores each hit by its source-document
+	// age and can reorder candidates — promoting a fresh, highly-relevant doc
+	// that pure relevance ranked at k+1..k+n. Retrieving only k would truncate
+	// those away before decay ever sees them (and, if decay then pushed some
+	// top-k hits below the floor, return fewer than k), so widen the retrieval
+	// pool to the fusion/rerank pool size, decay that wider pool, then truncate
+	// to the caller's k below (#427). With decay off, poolK == k so the pipeline
+	// is byte-identical to before.
+	poolK := k
+	s.metaMu.RLock()
+	decayActive := s.recencyHalfLife > 0
+	s.metaMu.RUnlock()
+	if decayActive && poolK < recencyDecayCandidatePool {
+		poolK = recencyDecayCandidatePool
+	}
+
 	// Cross-lingual query expansion (#325) wraps the HyDE/per-mode pipeline: when
 	// active it runs that pipeline once per query-language variant and RRF-fuses
 	// the result sets; when inactive it reduces to a single searchWithHyDE call,
 	// so the un-expanded path is unchanged.
-	hits, err := s.searchExpanded(ctx, query, k)
+	hits, err := s.searchExpanded(ctx, query, poolK)
 	if err != nil {
 		return nil, err
 	}
@@ -1105,6 +1124,10 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// and the recency decay, using each hit's final authoritative Score.
 	// Config-only; default 0 ⇒ pass-through.
 	hits = s.applyMinScoreFloor(hits)
+	// Truncate to the caller's k only now — after decay reordering and the floor
+	// have run over the wider pool — so decay determines top-k membership and the
+	// floor can surface k+1..k+n survivors. A no-op when poolK == k (#427).
+	hits = truncateSearchHits(hits, k)
 	// Prune (and evict) any chunk the store has since tombstoned — the partial
 	// incremental-reindex staleness of issue #409. Done LAST, on the small final
 	// result set, so at most k store lookups run per query and deleted content is
@@ -1303,6 +1326,12 @@ func (s *Service) generateHyDEDocument(ctx context.Context, gen model.Generator,
 	return truncateHyDEAnswer(generated)
 }
 
+// recencyDecayCandidatePool is the widened retrieval pool size used when the
+// opt-in recency decay is active, so decay re-ranks a pool larger than the
+// caller's k before the final truncation (#427). Matches the fusion/rerank
+// candidate pool sizes so decay sees the same breadth of candidates.
+const recencyDecayCandidatePool = 50
+
 // applyRecencyDecay multiplies each hit's final authoritative Score by an
 // exponential time-decay exp(-ln2 * age / half_life), where age is the hit's
 // source document mtime relative to a fixed "now" captured once at the start of
@@ -1355,7 +1384,15 @@ func (s *Service) applyRecencyDecay(ctx context.Context, hits []model.SearchHit)
 			continue
 		}
 		factor := math.Exp(-math.Ln2 * ageSec / halfLifeSec)
-		out[i].Score *= factor
+		// Multiplicative decay (factor ∈ (0,1]) only lowers a POSITIVE score with
+		// age; applied to a negative score it moves it toward 0 — i.e. raises it —
+		// so an older doc would outrank a newer one (rank inversion, #427).
+		// Negative similarities are reachable (in-process cosine, pgvector,
+		// qdrant) and unfiltered when min_score=0. Only decay non-negative scores;
+		// a score <= 0 is left untouched so decay never inverts ordering.
+		if out[i].Score > 0 {
+			out[i].Score *= factor
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -3542,6 +3579,14 @@ func slicePage(content string, page int) (string, bool) {
 		page = 1
 	}
 	parts := strings.Split(content, "\f")
+	// A form-feed terminator on the final page yields a trailing empty segment
+	// (e.g. "p1\fp2\f" splits into 3 parts), which would otherwise present a
+	// phantom empty page beyond the last real one — open_file page=3 on a
+	// 2-page doc returning "" with ok=true. Drop it so the page count reflects
+	// real pages and an out-of-range index errors instead (#427).
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
 	if len(parts) > 1 {
 		if page > len(parts) {
 			return "", false

@@ -177,3 +177,83 @@ func TestSearch_Recency_FutureDatedNotAmplified(t *testing.T) {
 		}
 	}
 }
+
+// buildRecencyService is a variant of newRecencyService that lets a test choose
+// each candidate's raw cosine (via its stored vector) so negative-similarity and
+// top-k-membership behaviors can be pinned. Query vector is {1,0}; a candidate
+// vector v yields cosine = v·{1,0}/|v|.
+func buildRecencyService(t *testing.T, halfLife time.Duration, mtimes map[string]int64, vecs map[uint64][]float32, paths map[uint64]string) *retrieval.Service {
+	t.Helper()
+	idx := index.NewHNSWIndex("")
+	for id, v := range vecs {
+		addVec(t, idx, id, v)
+	}
+	svc := retrieval.NewService(&fakeRecencyStore{mtimes: mtimes}, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	for id, p := range paths {
+		svc.SetChunkMetadata(id, model.SearchHit{RelPath: p, Snippet: "alpha " + p})
+	}
+	svc.SetRecencyHalfLife(halfLife)
+	svc.SetNowFunc(func() time.Time { return recencyNow })
+	return svc
+}
+
+// TestSearch_Recency_NegativeScoreNoInversion pins #427 (finding 2): multiplicative
+// decay must not invert ordering for NEGATIVE scores. chunk 1 (raw -0.60, NEWER)
+// should outrank chunk 2 (raw -1.00, OLDER). The buggy `score *= factor` pushes the
+// old, very-negative chunk 2 toward 0 (≈ -0.0002), lifting it above chunk 1 — an
+// inversion. The fix leaves non-positive scores untouched, preserving pure order.
+func TestSearch_Recency_NegativeScoreNoInversion(t *testing.T) {
+	mtimes := map[string]int64{
+		"new.md": recencyNow.Unix(),                            // chunk 1: fresh
+		"old.md": recencyNow.Add(-365 * 24 * time.Hour).Unix(), // chunk 2: 365d old
+	}
+	svc := buildRecencyService(t, 30*24*time.Hour, mtimes,
+		map[uint64][]float32{
+			1: {-0.6, 0.8}, // cosine -0.60 (NEWER, less negative ⇒ should rank first)
+			2: {-1, 0},     // cosine -1.00 (OLDER, more negative)
+		},
+		map[uint64]string{1: "new.md", 2: "old.md"},
+	)
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "alpha", K: 10})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	got := recencyChunkIDs(hits)
+	want := []uint64{1, 2}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("negative-score decay must not invert: want %v, got %v", want, got)
+	}
+}
+
+// TestSearch_Recency_DecayAffectsTopKMembership pins #427 (finding 1): decay must
+// run over a wider pool BEFORE the final top-k truncation, so a fresh doc that pure
+// relevance ranks at k+1 can still surface. With K=1, chunk 1 (raw 1.00, 365d old)
+// is the sole pre-decay top-1; the newer chunk 2 (raw 0.60, fresh) sits at k+1.
+// Before the fix, decay ran after truncation and could never promote chunk 2, so
+// the result was [1]. After the fix, decay re-ranks the wider pool and chunk 2 wins.
+func TestSearch_Recency_DecayAffectsTopKMembership(t *testing.T) {
+	mtimes := map[string]int64{
+		"old.md": recencyNow.Add(-365 * 24 * time.Hour).Unix(),
+		"new.md": recencyNow.Unix(),
+	}
+	svc := buildRecencyService(t, 30*24*time.Hour, mtimes,
+		map[uint64][]float32{
+			1: {1, 0},     // cosine 1.00 (OLD) — pre-decay rank #1
+			2: {0.6, 0.8}, // cosine 0.60 (NEW) — pre-decay rank #2 (k+1 when K=1)
+		},
+		map[uint64]string{1: "old.md", 2: "new.md"},
+	)
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "alpha", K: 1})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	got := recencyChunkIDs(hits)
+	if len(got) != 1 {
+		t.Fatalf("K=1 must return exactly 1 hit, got %v", got)
+	}
+	if got[0] != 2 {
+		t.Fatalf("decay must promote the fresh k+1 doc into top-1: want [2], got %v", got)
+	}
+}
