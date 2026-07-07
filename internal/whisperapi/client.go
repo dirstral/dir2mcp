@@ -327,6 +327,21 @@ func (c *Client) task() string {
 	return TaskTranscribe
 }
 
+// transcriptionURL builds the OpenAI-compatible transcription endpoint from a
+// base URL, tolerating both accepted base_url shapes: the host root
+// (http://host:9001) and a base already ending in /v1 (http://host:9001/v1, as
+// some READMEs suggested). Both resolve to exactly one
+// /v1/audio/transcriptions path, so a stray trailing /v1 no longer doubles into
+// a 404 (dir2mcp#496).
+func transcriptionURL(baseURL string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	// Strip a single trailing /v1 segment so we never emit /v1/v1/... .
+	if trimmed := strings.TrimSuffix(base, "/v1"); trimmed != base {
+		base = trimmed
+	}
+	return base + "/v1/audio/transcriptions"
+}
+
 func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	if strings.TrimSpace(c.BaseURL) == "" {
 		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "missing whisper base_url", Retryable: false}
@@ -336,7 +351,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		return model.TranscriptResult{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/audio/transcriptions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, transcriptionURL(c.BaseURL), bytes.NewReader(body))
 	if err != nil {
 		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "failed to build transcription request", Retryable: false, Cause: err}
 	}

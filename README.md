@@ -473,8 +473,8 @@ providers:
     base_url: http://gpu-vps:8080/v1
     embed_text_model: bge-m3
   whisper:                   # self-hosted STT (POST {base_url}/v1/audio/transcriptions)
-    kind: whisper
-    base_url: http://gpu-vps:9001/v1
+    kind: whisper            # base_url is the host ROOT; /v1/audio/transcriptions is appended
+    base_url: http://gpu-vps:9001
     stt_model: large-v3
   gpu-ocr:                   # self-hosted bespoke OCR (POST {base_url}/v1/ocr)
     kind: mistral            # base_url is the host ROOT; /v1/ocr is appended
@@ -489,7 +489,7 @@ stt_provider: whisper        # STT uses the legacy selector
 ```
 
 - **Capability mapping** (which route serves each capability, spec §8.5): embed → `POST {base_url}/v1/embeddings`; chat → `/v1/chat/completions`; STT → `/v1/audio/transcriptions` (endpoint-dependent, validated at first use). **OCR has no OpenAI analog** — bind it only to a `kind: mistral` `/v1/ocr` endpoint (or use [docling-serve](#docling-extraction-over-http-docling-serve)); binding `model.ocr.provider` to a `kind: openai` profile is rejected as `CONFIG_INVALID`.
-- **`base_url` shape differs by kind:** a `kind: openai` `base_url` already includes `/v1`; a `kind: mistral` OCR `base_url` is the **host root** (the client appends `/v1/ocr`).
+- **`base_url` shape differs by kind:** a `kind: openai` `base_url` already includes `/v1`; a `kind: mistral` OCR `base_url` and a `kind: whisper` STT `base_url` are the **host root** (the client appends `/v1/ocr` and `/v1/audio/transcriptions` respectively). The whisper client tolerates a stray trailing `/v1` and will not double it.
 - No shipped self-hosted defaults — you must declare the profile and bind it explicitly; nothing silently auto-selects a self-hosted endpoint.
 - For a full GPU-VPS topology (corpus over NFS/S3, vector backend, systemd), see [docs/dual-machine-deployment.md](docs/dual-machine-deployment.md).
 

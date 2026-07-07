@@ -617,3 +617,38 @@ func TestTranscribeStructuredWordsAbsent(t *testing.T) {
 func TestClientImplementsStructuredTranscriber(t *testing.T) {
 	var _ model.StructuredTranscriber = whisperapi.NewClient("http://x", "")
 }
+
+// TestBaseURLNormalizationSingleV1 asserts that whatever base_url shape an
+// operator configures — host root, a trailing slash, or a stray trailing /v1
+// (as an old README example suggested) — the client posts to exactly one
+// /v1/audio/transcriptions path and never doubles into /v1/v1/... 404 (#496).
+func TestBaseURLNormalizationSingleV1(t *testing.T) {
+	cases := []struct {
+		name       string
+		baseSuffix string // appended to the httptest server URL
+	}{
+		{name: "host root", baseSuffix: ""},
+		{name: "trailing slash", baseSuffix: "/"},
+		{name: "trailing /v1", baseSuffix: "/v1"},
+		{name: "trailing /v1/", baseSuffix: "/v1/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, jsonSegments)
+			}))
+			defer srv.Close()
+
+			c := newClient(srv.URL+tc.baseSuffix, "")
+			if _, err := c.Transcribe(context.Background(), "a/b.mp3", []byte("audiobytes")); err != nil {
+				t.Fatalf("Transcribe: %v", err)
+			}
+			if gotPath != "/v1/audio/transcriptions" {
+				t.Fatalf("request path = %q, want /v1/audio/transcriptions", gotPath)
+			}
+		})
+	}
+}
