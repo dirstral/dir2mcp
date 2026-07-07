@@ -502,6 +502,15 @@ func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []by
 // that extractWithRetry can invoke it repeatedly.
 // ocrMIMEType returns the MIME type for the given file extension, or ("", false)
 // if the extension is not supported for OCR.
+//
+// The set of extensions accepted here is the flat-OCR readable set and MUST stay
+// in lockstep with the consolidated capability table's flatOCRReadableExt
+// (internal/ingest/capability.go) — the single source of truth for extraction
+// routing (#395). mistral lives below ingest in the import graph and cannot
+// import it, so the mapping is duplicated here (it also owns the ext→MIME
+// strings, a mistral-specific concern); the two are kept from diverging by
+// ingest.TestOCRMIMESetMatchesCapabilityTable, which cross-checks this function
+// against the table.
 func ocrMIMEType(ext string) (string, bool) {
 	switch ext {
 	case ".pdf":
@@ -515,6 +524,17 @@ func ocrMIMEType(ext string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// SupportsOCRExt reports whether the flat Mistral-OCR path accepts the given
+// file extension, i.e. whether ocrMIMEType maps it to a MIME type. It exists so
+// the ingest capability table (the single source of truth for extraction
+// routing, #395) can cross-check that its flat-OCR extension set has not drifted
+// from this package's OCR allowlist, without exporting the ext→MIME mapping
+// itself. ext is expected lowercased with its leading dot.
+func SupportsOCRExt(ext string) bool {
+	_, ok := ocrMIMEType(ext)
+	return ok
 }
 
 // extractOCRText assembles the text content from an OCR response, preferring
