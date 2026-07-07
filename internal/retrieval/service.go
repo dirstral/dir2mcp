@@ -152,8 +152,11 @@ type Service struct {
 	ragSystemPrompt     string
 	ragMaxContextChars  int
 	metaMu              sync.RWMutex
+	// chunkByLabel is the single in-memory chunk-metadata store keyed by chunk_id
+	// label. A chunk_id belongs to exactly one axis (text or code) in production,
+	// so the previous per-index split (chunkByIndex) held a redundant second copy
+	// of every SearchHit; it was collapsed into this one map (issue #429 F4/D1).
 	chunkByLabel        map[uint64]model.SearchHit
-	chunkByIndex        map[string]map[uint64]model.SearchHit
 	rootDir             string
 	stateDir            string
 	// ocrCacheIdentity / transcriptCacheIdentity are the ACTIVE OCR-extraction and
@@ -337,10 +340,6 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		ragSystemPrompt:     defaultRAGSystemPrompt,
 		ragMaxContextChars:  defaultRAGMaxContext,
 		chunkByLabel:        make(map[uint64]model.SearchHit),
-		chunkByIndex: map[string]map[uint64]model.SearchHit{
-			"text": make(map[uint64]model.SearchHit),
-			"code": make(map[uint64]model.SearchHit),
-		},
 		rootDir:             ".",
 		stateDir:            filepath.Join(".", ".dir2mcp"),
 		protocolVersion:     "2025-11-25",
@@ -903,8 +902,6 @@ func (s *Service) SetSecretPatterns(patterns []string) error {
 func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
 	s.metaMu.Lock()
 	s.chunkByLabel[label] = metadata
-	s.chunkByIndex["text"][label] = metadata
-	s.chunkByIndex["code"][label] = metadata
 	s.metaMu.Unlock()
 }
 
@@ -955,9 +952,6 @@ func (s *Service) EvictDocuments(relPaths []string) {
 	s.metaMu.Lock()
 	for _, label := range labelsToDelete {
 		delete(s.chunkByLabel, label)
-		for _, byIndex := range s.chunkByIndex {
-			delete(byIndex, label)
-		}
 	}
 	s.metaMu.Unlock()
 }
@@ -993,9 +987,6 @@ func (s *Service) EvictChunks(labels []uint64) {
 	codeIndex := s.codeIndex
 	for _, label := range labels {
 		delete(s.chunkByLabel, label)
-		for _, byIndex := range s.chunkByIndex {
-			delete(byIndex, label)
-		}
 	}
 	s.metaMu.Unlock()
 
@@ -1046,16 +1037,13 @@ func (s *Service) pruneTombstonedHits(ctx context.Context, hits []model.SearchHi
 	return live
 }
 
+// SetChunkMetadataForIndex registers a chunk's metadata. The indexName axis is
+// accepted for API compatibility but no longer selects a per-index store: a
+// chunk_id belongs to exactly one axis in production, so metadata is kept once in
+// chunkByLabel (issue #429 D1).
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
-	kind := strings.ToLower(strings.TrimSpace(indexName))
-	if kind != "text" && kind != "code" {
-		s.SetChunkMetadata(label, metadata)
-		return
-	}
-
 	s.metaMu.Lock()
 	s.chunkByLabel[label] = metadata
-	s.chunkByIndex[kind][label] = metadata
 	s.metaMu.Unlock()
 }
 
@@ -2364,13 +2352,6 @@ func collectStoreStatsFallback(ctx context.Context, st model.Store) (docStatusCo
 
 func (s *Service) searchHitForLabel(indexName string, label uint64) model.SearchHit {
 	s.metaMu.RLock()
-	if byIndex, ok := s.chunkByIndex[indexName]; ok {
-		if meta, exists := byIndex[label]; exists {
-			s.metaMu.RUnlock()
-			meta.ChunkID = label
-			return meta
-		}
-	}
 	meta, ok := s.chunkByLabel[label]
 	s.metaMu.RUnlock()
 
@@ -2971,15 +2952,7 @@ func (s *Service) searchHitFromIndexHit(indexName string, h model.IndexHit) mode
 func (s *Service) hasInMemoryMetadata() bool {
 	s.metaMu.RLock()
 	defer s.metaMu.RUnlock()
-	if len(s.chunkByLabel) > 0 {
-		return true
-	}
-	for _, byIndex := range s.chunkByIndex {
-		if len(byIndex) > 0 {
-			return true
-		}
-	}
-	return false
+	return len(s.chunkByLabel) > 0
 }
 
 // collectFilteredHits walks one batch of index hits and appends matching hits to

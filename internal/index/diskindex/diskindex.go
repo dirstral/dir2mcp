@@ -46,9 +46,11 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	"golang.org/x/exp/mmap"
 
+	"github.com/dirstral/dir2mcp/internal/index/topk"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -97,6 +99,23 @@ type DiskIndex struct {
 	identity  string
 	appendEnd int64          // current end-of-file offset for the append log
 	reader    *mmap.ReaderAt // mmap view of the segment, nil until first read/Load
+
+	// version is a monotonically increasing mutation counter bumped under the
+	// write lock on every appended record (Upsert/Delete) and Reset. savedVersion
+	// records the version captured by the last successful Save; when they are equal
+	// the on-disk segment already reflects the in-memory state, so the periodic
+	// autosave skips the full compaction rewrite (issue #429 F7). All the fields
+	// below are guarded by mu.
+	version      uint64
+	savedVersion uint64
+
+	// autosaveThreshold / autosaveMaxInterval / lastSaveTime throttle the periodic
+	// autosave exactly as the memory backend does (issue #429 C-a): AutosaveTick
+	// compacts only once threshold mutations have accumulated or maxInterval has
+	// elapsed; the force path (Save) always compacts when dirty.
+	autosaveThreshold   uint64
+	autosaveMaxInterval time.Duration
+	lastSaveTime        time.Time
 }
 
 // compile-time assertions: DiskIndex satisfies the core contract and both
@@ -112,9 +131,33 @@ var (
 // which case Save/Load require an explicit path argument.
 func New(path string) *DiskIndex {
 	return &DiskIndex{
-		path:     path,
-		locators: make(map[uint64]locator),
+		path:                path,
+		locators:            make(map[uint64]locator),
+		autosaveThreshold:   defaultAutosaveThreshold,
+		autosaveMaxInterval: defaultAutosaveMaxInterval,
+		lastSaveTime:        time.Now(),
 	}
+}
+
+// defaultAutosaveThreshold / defaultAutosaveMaxInterval mirror
+// index.DefaultAutosaveThreshold / DefaultAutosaveMaxInterval; they are redefined
+// here (rather than imported) because internal/index imports this package, so the
+// dependency cannot run the other way (issue #429 C-a).
+const (
+	defaultAutosaveThreshold   = 50000
+	defaultAutosaveMaxInterval = 5 * time.Minute
+)
+
+// SetAutosavePolicy overrides the periodic-autosave throttle (issue #429 C-a),
+// mirroring HNSWIndex.SetAutosavePolicy: a tick compacts only once threshold
+// mutations have accumulated or maxInterval has elapsed since the last save.
+// threshold==0 disables delta-gating; maxInterval<=0 disables the time fallback.
+// The force path (Save/StopAndSave) always compacts when dirty.
+func (d *DiskIndex) SetAutosavePolicy(threshold uint64, maxInterval time.Duration) {
+	d.mu.Lock()
+	d.autosaveThreshold = threshold
+	d.autosaveMaxInterval = maxInterval
+	d.mu.Unlock()
 }
 
 // Upsert appends the vector+payload as the newest record and points the locator
@@ -199,6 +242,10 @@ func (d *DiskIndex) appendRecord(chunkID uint64, tombstone bool, vector []float3
 			payloadLen: uint32(len(payloadBytes)),
 		}
 	}
+	// A record landed durably: mark the index dirty so the next Save compacts it.
+	// Delete only calls this for ids it knows exist, so tombstones bump version
+	// only on a real removal — matching HNSWIndex's changed-only Delete accounting.
+	d.version++
 	// The mmap view is now stale (file grew); drop it so the next read re-maps.
 	return d.invalidateReaderLocked()
 }
@@ -255,44 +302,77 @@ func (d *DiskIndex) Search(ctx context.Context, vector []float32, k int, filter 
 		return []model.IndexHit{}, nil
 	}
 
+	cands, err := d.scoreTopK(reader, vector, k, filter)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(cands, func(a, b int) bool {
+		return topk.Before(cands[a].Score, cands[b].Score, cands[a].ChunkID, cands[b].ChunkID)
+	})
+	hits := make([]model.IndexHit, len(cands))
+	for i, c := range cands {
+		hits[i] = model.IndexHit{ChunkID: c.ChunkID, Score: c.Score, Payload: c.Payload}
+	}
+	return hits, nil
+}
+
+// scoreTopK scans every dimension-matching locator, scoring each candidate into a
+// bounded top-k heap, and returns the (unordered) retained best k. Caller holds
+// the read lock and passes the live mmap reader. A single query-sized byte buffer
+// + float32 slice is reused across candidates, so the whole scan's vector-read
+// allocation is O(1) rather than one []byte+[]float32 per candidate (issue #429
+// F2); the scratch is never retained past a score, so reuse is safe.
+func (d *DiskIndex) scoreTopK(reader *mmap.ReaderAt, vector []float32, k int, filter model.Filter) ([]topk.Candidate, error) {
 	applyFilter := !filter.IsZero()
-	scored := make([]model.IndexHit, 0, len(d.locators))
+	h := topk.New(k)
+	vecBytes := make([]byte, len(vector)*4)
+	vecScratch := make([]float32, len(vector))
 	for id, loc := range d.locators {
 		if int(loc.vecLen) != len(vector) {
 			continue // dimension mismatch; skip like HNSW does
 		}
-		vec, payload, rerr := readRecordAt(reader, loc)
-		if rerr != nil {
-			return nil, rerr
+		if err := scoreCandidate(reader, id, loc, vector, vecBytes, vecScratch, applyFilter, filter, h); err != nil {
+			return nil, err
 		}
-		if applyFilter && !filter.Match(payload) {
-			continue
-		}
-		scored = append(scored, model.IndexHit{
-			ChunkID: id,
-			Score:   cosineSimilarity(vector, vec),
-			Payload: payload,
-		})
 	}
-
-	sortHits(scored)
-	if len(scored) > k {
-		scored = scored[:k]
-	}
-	return scored, nil
+	return h.Items(), nil
 }
 
-// sortHits orders hits best-first with a deterministic chunkID tiebreak,
-// matching HNSWIndex.Search.
-func sortHits(hits []model.IndexHit) {
-	const eps = 1e-6
-	sort.Slice(hits, func(a, b int) bool {
-		diff := math.Abs(float64(hits[a].Score) - float64(hits[b].Score))
-		if diff <= eps {
-			return hits[a].ChunkID < hits[b].ChunkID
+// scoreCandidate reads, filters, scores, and conditionally admits one candidate
+// to the heap. When filtering, the payload is decoded first so the predicate can
+// reject the candidate before it is scored; otherwise the (expensive gob) payload
+// decode is deferred and paid only for candidates that survive the heap guard —
+// the disk analogue of the memory backend's in-place scoring (issue #429 F1/F2).
+func scoreCandidate(reader *mmap.ReaderAt, id uint64, loc locator, vector []float32, vecBytes []byte, vecScratch []float32, applyFilter bool, filter model.Filter, h *topk.Heap) error {
+	var payload model.IndexPayload
+	havePayload := false
+	if applyFilter {
+		p, err := readPayloadAt(reader, loc)
+		if err != nil {
+			return err
 		}
-		return hits[a].Score > hits[b].Score
-	})
+		if !filter.Match(p) {
+			return nil
+		}
+		payload, havePayload = p, true
+	}
+	if _, err := reader.ReadAt(vecBytes, loc.offset+int64(recordHdrLen)); err != nil {
+		return err
+	}
+	fillFloat32s(vecScratch, vecBytes)
+	score := cosineSimilarity(vector, vecScratch)
+	if h.Full() && !h.Better(score, id) {
+		return nil
+	}
+	if !havePayload {
+		p, err := readPayloadAt(reader, loc)
+		if err != nil {
+			return err
+		}
+		payload = p
+	}
+	h.Push(topk.Candidate{ChunkID: id, Score: score, Payload: payload})
+	return nil
 }
 
 // CanFilter reports that the backend evaluates filters itself: Search applies
@@ -328,6 +408,7 @@ func (d *DiskIndex) Reset(ctx context.Context, identity string) error {
 	d.locators = make(map[uint64]locator)
 	d.identity = identity
 	d.appendEnd = 0
+	d.version++
 
 	if d.path == "" {
 		return nil
@@ -374,6 +455,16 @@ func (d *DiskIndex) Save(ctx context.Context, path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// When nothing has changed since the last durable save, the on-disk segment
+	// already reflects our state: skip the whole-segment compaction rewrite (no
+	// temp file, no fsync, no rename) so an idle corpus's autosave is a no-op
+	// (issue #429 F7). Save holds the write lock throughout, so no mutation can
+	// race between this check and advancing savedVersion below.
+	if d.version == d.savedVersion {
+		return nil
+	}
+	captured := d.version
+
 	reader, err := d.readerLocked()
 	if err != nil {
 		return err
@@ -398,10 +489,50 @@ func (d *DiskIndex) Save(ctx context.Context, path string) error {
 	d.path = path
 	d.locators = newLocators
 	d.appendEnd = newEnd
+	// The compacted segment landed durably; record the version it captured so a
+	// subsequent Save with no intervening mutation is a no-op.
+	d.savedVersion = captured
+	d.lastSaveTime = time.Now()
 	if err := d.invalidateReaderLocked(); err != nil {
 		return err
 	}
 	return writeIdentitySidecar(identitySidecarPath(path), d.identity)
+}
+
+// AutosaveTick is the periodic-save entrypoint (issue #429 C-a): it compacts via
+// Save only when the index is dirty AND either the accumulated mutation delta has
+// reached autosaveThreshold or autosaveMaxInterval has elapsed since the last
+// save. Otherwise it is a no-op, so a long ingest no longer recompacts the whole
+// segment on every 15s tick. StopAndSave still calls the force path (Save), so
+// the throttled tail is always persisted at shutdown.
+func (d *DiskIndex) AutosaveTick(ctx context.Context, path string) error {
+	d.mu.RLock()
+	delta := d.version - d.savedVersion
+	threshold := d.autosaveThreshold
+	maxInterval := d.autosaveMaxInterval
+	sinceSave := time.Since(d.lastSaveTime)
+	d.mu.RUnlock()
+
+	if !shouldAutosave(delta, threshold, maxInterval, sinceSave) {
+		return nil
+	}
+	return d.Save(ctx, path)
+}
+
+// shouldAutosave decides whether a periodic autosave tick should compact now
+// (issue #429 C-a). It mirrors index.shouldAutosave exactly (the two backends
+// cannot share a helper without an import cycle): never save a clean index; save
+// immediately once delta reaches the threshold; below the threshold save only
+// after maxInterval has elapsed. A zero threshold saves on any dirty tick; a
+// non-positive maxInterval disables the time-based fallback.
+func shouldAutosave(delta, threshold uint64, maxInterval, sinceSave time.Duration) bool {
+	if delta == 0 {
+		return false
+	}
+	if threshold == 0 || delta >= threshold {
+		return true
+	}
+	return maxInterval > 0 && sinceSave >= maxInterval
 }
 
 // compactInto writes the header and every live record to out (buffered),
@@ -587,6 +718,20 @@ func writeRecord(w io.Writer, chunkID uint64, tombstone bool, vector []float32, 
 	return recordHdrLen + len(vecBytes) + len(payloadBytes), nil
 }
 
+// readPayloadAt reads and gob-decodes only the payload for a locator, without
+// touching the vector bytes. Search uses it for lazy payload materialisation:
+// the payload is decoded only for candidates that survive the top-k heap guard
+// (or up front when a filter must inspect it), not for every scanned record.
+func readPayloadAt(reader *mmap.ReaderAt, loc locator) (model.IndexPayload, error) {
+	vecBytesLen := int(loc.vecLen) * 4
+	buf := make([]byte, int(loc.payloadLen))
+	// The payload follows the record header and the vector bytes.
+	if _, err := reader.ReadAt(buf, loc.offset+int64(recordHdrLen)+int64(vecBytesLen)); err != nil {
+		return model.IndexPayload{}, err
+	}
+	return decodePayload(buf)
+}
+
 // readRecordAt reads the vector and payload for a locator from the mmap reader.
 func readRecordAt(reader *mmap.ReaderAt, loc locator) ([]float32, model.IndexPayload, error) {
 	vecBytesLen := int(loc.vecLen) * 4
@@ -724,10 +869,17 @@ func float32sToBytes(v []float32) []byte {
 
 func bytesToFloat32s(b []byte) []float32 {
 	out := make([]float32, len(b)/4)
-	for i := range out {
-		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
-	}
+	fillFloat32s(out, b)
 	return out
+}
+
+// fillFloat32s decodes little-endian float32s from b into the caller-provided
+// dst (no allocation). dst must be sized for b (len(b)/4 elements); Search reuses
+// a single query-sized dst across every candidate (issue #429 F2).
+func fillFloat32s(dst []float32, b []byte) {
+	for i := range dst {
+		dst[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
 }
 
 func cosineSimilarity(a, b []float32) float32 {

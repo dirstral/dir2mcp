@@ -11,7 +11,9 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/dirstral/dir2mcp/internal/index/topk"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -22,6 +24,17 @@ import (
 const (
 	TextIndexFileName = "vectors_text.v2.hnsw"
 	CodeIndexFileName = "vectors_code.v2.hnsw"
+)
+
+// DefaultAutosaveThreshold / DefaultAutosaveMaxInterval are the default periodic
+// autosave throttle (issue #429 C-a): during ingest a full snapshot fires only
+// after this many accumulated mutations, or after this much wall-time since the
+// last save, rather than on every 15s tick. Shutdown durability is unaffected —
+// StopAndSave always forces a final save. These apply to both the memory and
+// disk backends (diskindex mirrors them).
+const (
+	DefaultAutosaveThreshold   = 50000
+	DefaultAutosaveMaxInterval = 5 * time.Minute
 )
 
 // LegacyIndexFileNames are the pre-#247 bare-map snapshot basenames. reindex
@@ -54,6 +67,19 @@ type HNSWIndex struct {
 	// and never drops a concurrent write that landed mid-save.
 	version      uint64
 	savedVersion uint64
+
+	// autosaveThreshold / autosaveMaxInterval throttle the *periodic* autosave
+	// (AutosaveTick) so a long ingest doesn't rewrite the whole snapshot on every
+	// 15s tick (issue #429 F7 / C-a). A tick persists only when the accumulated
+	// mutation delta (version-savedVersion) reaches the threshold OR the max
+	// interval has elapsed since the last durable save; the force path (Save, used
+	// by StopAndSave at shutdown) always persists when dirty. A zero threshold
+	// disables delta-gating (every dirty tick saves — the pre-C-a behavior).
+	// lastSaveTime is the wall-clock of the last successful Save. All three are
+	// guarded by mu.
+	autosaveThreshold   uint64
+	autosaveMaxInterval time.Duration
+	lastSaveTime        time.Time
 
 	// Logger is optional; if non-nil its Printf method will be used for
 	// informational messages. When nil the standard library's log package
@@ -96,10 +122,25 @@ type hnswSnapshot struct {
 // persist to the given file.
 func NewHNSWIndex(path string) *HNSWIndex {
 	return &HNSWIndex{
-		path:     path,
-		vectors:  make(map[uint64][]float32),
-		payloads: make(map[uint64]model.IndexPayload),
+		path:                path,
+		vectors:             make(map[uint64][]float32),
+		payloads:            make(map[uint64]model.IndexPayload),
+		autosaveThreshold:   DefaultAutosaveThreshold,
+		autosaveMaxInterval: DefaultAutosaveMaxInterval,
+		lastSaveTime:        time.Now(),
 	}
+}
+
+// SetAutosavePolicy overrides the periodic-autosave throttle (issue #429 C-a).
+// A tick persists only once threshold mutations have accumulated or maxInterval
+// has elapsed since the last save. threshold==0 disables delta-gating so every
+// dirty tick saves; maxInterval<=0 disables the time-based fallback. The force
+// path (Save/StopAndSave) is unaffected and always persists when dirty.
+func (i *HNSWIndex) SetAutosavePolicy(threshold uint64, maxInterval time.Duration) {
+	i.mu.Lock()
+	i.autosaveThreshold = threshold
+	i.autosaveMaxInterval = maxInterval
+	i.mu.Unlock()
 }
 
 // Upsert stores (or replaces) the vector and its payload, keyed by
@@ -173,30 +214,6 @@ func (i *HNSWIndex) Delete(ctx context.Context, chunkIDs []uint64) error {
 	return nil
 }
 
-// scoreEps is the score-equality tolerance for the ranking tiebreak: two scores
-// within eps are treated as equal and ordered by ascending chunk_id, giving a
-// deterministic total order over realistic (well-separated) embedding scores.
-const scoreEps = 1e-6
-
-// scoredCandidate pairs a chunk_id with its cosine score during search.
-type scoredCandidate struct {
-	chunkID uint64
-	score   float32
-	payload model.IndexPayload
-}
-
-// candidateBefore reports whether candidate a ranks strictly before b: higher
-// score first, with an eps-tolerant ascending chunk_id tiebreak. It is the sole
-// ranking comparator, shared by the top-k heap's eviction decision and the final
-// ordering of the retained hits, so the heap selects exactly the same k
-// candidates the previous full O(N log N) sort would have kept (issue #429 F1).
-func candidateBefore(aScore, bScore float32, aID, bID uint64) bool {
-	if math.Abs(float64(aScore)-float64(bScore)) <= scoreEps {
-		return aID < bID
-	}
-	return aScore > bScore
-}
-
 // Search returns the k best matches for vector, filtered by filter. The filter
 // is applied inline (CanFilter is always true for the pure-Go HNSW), so callers
 // may push it down rather than overfetch-then-filter.
@@ -224,12 +241,12 @@ func (i *HNSWIndex) Search(ctx context.Context, vector []float32, k int, filter 
 	}
 
 	sort.Slice(scored, func(a, b int) bool {
-		return candidateBefore(scored[a].score, scored[b].score, scored[a].chunkID, scored[b].chunkID)
+		return topk.Before(scored[a].Score, scored[b].Score, scored[a].ChunkID, scored[b].ChunkID)
 	})
 
 	hits := make([]model.IndexHit, len(scored))
 	for idx, s := range scored {
-		hits[idx] = model.IndexHit{ChunkID: s.chunkID, Score: s.score, Payload: s.payload}
+		hits[idx] = model.IndexHit{ChunkID: s.ChunkID, Score: s.Score, Payload: s.Payload}
 	}
 	return hits, nil
 }
@@ -246,10 +263,10 @@ type dimMismatch struct {
 // k candidates, it never allocates a per-query copy of the whole candidate set
 // nor of any candidate vector; a payload is copied out of the map only when the
 // candidate actually enters the heap.
-func (i *HNSWIndex) scoreTopK(vector []float32, k int, filter model.Filter) ([]scoredCandidate, []dimMismatch) {
+func (i *HNSWIndex) scoreTopK(vector []float32, k int, filter model.Filter) ([]topk.Candidate, []dimMismatch) {
 	var mismatches []dimMismatch
 	applyFilter := !filter.IsZero()
-	h := topKHeap{k: k, items: make([]scoredCandidate, 0, k)}
+	h := topk.New(k)
 
 	i.mu.RLock()
 	for id, cand := range i.vectors {
@@ -272,82 +289,16 @@ func (i *HNSWIndex) scoreTopK(vector []float32, k int, filter model.Filter) ([]s
 		score := cosineSimilarity(vector, cand)
 		// Skip the payload copy + heap push for candidates that cannot displace
 		// the current worst of a full heap.
-		if h.full() && !h.better(score, id) {
+		if h.Full() && !h.Better(score, id) {
 			continue
 		}
 		if !havePayload {
 			payload = i.payloads[id]
 		}
-		h.push(scoredCandidate{chunkID: id, score: score, payload: payload})
+		h.Push(topk.Candidate{ChunkID: id, Score: score, Payload: payload})
 	}
 	i.mu.RUnlock()
-	return h.items, mismatches
-}
-
-// topKHeap is a bounded min-heap that retains the best k candidates seen so far,
-// ordered by candidateBefore. The root is the *worst* retained candidate, so a
-// newly scored candidate that ranks before the root evicts it in O(log k).
-type topKHeap struct {
-	items []scoredCandidate
-	k     int
-}
-
-func (h *topKHeap) full() bool { return len(h.items) >= h.k }
-
-// better reports whether a candidate with (score, id) ranks before the current
-// worst retained candidate (the root). Only meaningful when the heap is full.
-func (h *topKHeap) better(score float32, id uint64) bool {
-	root := h.items[0]
-	return candidateBefore(score, root.score, id, root.chunkID)
-}
-
-// worse reports whether item a ranks after item b (a is the poorer match).
-func (h *topKHeap) worse(a, b int) bool {
-	x, y := h.items[a], h.items[b]
-	return candidateBefore(y.score, x.score, y.chunkID, x.chunkID)
-}
-
-// push adds c when the heap is under capacity, otherwise replaces the worst
-// retained candidate. Callers must only push a candidate that is under capacity
-// or better than the root (see scoreTopK).
-func (h *topKHeap) push(c scoredCandidate) {
-	if len(h.items) < h.k {
-		h.items = append(h.items, c)
-		h.siftUp(len(h.items) - 1)
-		return
-	}
-	h.items[0] = c
-	h.siftDown(0)
-}
-
-func (h *topKHeap) siftUp(n int) {
-	for n > 0 {
-		parent := (n - 1) / 2
-		if !h.worse(n, parent) {
-			break
-		}
-		h.items[n], h.items[parent] = h.items[parent], h.items[n]
-		n = parent
-	}
-}
-
-func (h *topKHeap) siftDown(n int) {
-	size := len(h.items)
-	for {
-		left := 2*n + 1
-		if left >= size {
-			return
-		}
-		worst := left
-		if right := left + 1; right < size && h.worse(right, left) {
-			worst = right
-		}
-		if !h.worse(worst, n) {
-			return
-		}
-		h.items[n], h.items[worst] = h.items[worst], h.items[n]
-		n = worst
-	}
+	return h.Items(), mismatches
 }
 
 // CanFilter reports whether the backend can evaluate the filter itself. The
@@ -496,7 +447,28 @@ func (i *HNSWIndex) markSaved(version uint64) {
 	if version > i.savedVersion {
 		i.savedVersion = version
 	}
+	i.lastSaveTime = time.Now()
 	i.mu.Unlock()
+}
+
+// AutosaveTick is the periodic-save entrypoint (issue #429 C-a): it delegates to
+// Save only when the index is dirty AND either the accumulated mutation delta has
+// reached autosaveThreshold or autosaveMaxInterval has elapsed since the last
+// save. Otherwise it is a no-op, so a long ingest no longer rewrites the whole
+// snapshot on every 15s tick. The force path (Save) still persists any dirty
+// state, so StopAndSave at shutdown never drops the throttled tail.
+func (i *HNSWIndex) AutosaveTick(ctx context.Context, path string) error {
+	i.mu.RLock()
+	delta := i.version - i.savedVersion
+	threshold := i.autosaveThreshold
+	maxInterval := i.autosaveMaxInterval
+	sinceSave := time.Since(i.lastSaveTime)
+	i.mu.RUnlock()
+
+	if !shouldAutosave(delta, threshold, maxInterval, sinceSave) {
+		return nil
+	}
+	return i.Save(ctx, path)
 }
 
 // Load restores the index from a v2 snapshot file. A missing file is treated as
@@ -548,6 +520,22 @@ func (i *HNSWIndex) Load(ctx context.Context, path string) error {
 
 func (i *HNSWIndex) Close() error {
 	return nil
+}
+
+// shouldAutosave decides whether a periodic autosave tick should persist now
+// (issue #429 C-a). It never saves a clean index (delta==0). When delta reaches
+// the threshold it saves immediately; below the threshold it saves only once the
+// max interval has elapsed since the last save. A zero threshold means "save on
+// any dirty tick" (delta-gating disabled); a non-positive maxInterval disables
+// the time-based fallback. Pure and shared with the disk backend's copy.
+func shouldAutosave(delta, threshold uint64, maxInterval, sinceSave time.Duration) bool {
+	if delta == 0 {
+		return false
+	}
+	if threshold == 0 || delta >= threshold {
+		return true
+	}
+	return maxInterval > 0 && sinceSave >= maxInterval
 }
 
 func cosineSimilarity(a, b []float32) float32 {
