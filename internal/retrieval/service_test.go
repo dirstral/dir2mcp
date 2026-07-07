@@ -549,6 +549,10 @@ func TestLooksLikeCodeQuery(t *testing.T) {
 		{"func handler() { return nil }", true},    // call form + braces
 		{"x := foo() -> bar", true},                // operator + call form
 		{"edit config.json and add a `key`", true}, // file ext + backtick
+		// #444 review: a SPACED C-style block header ") {" is code even without a
+		// glued keyword or a 3+ punctuation run.
+		{"if (x > 0) { return 1; }", true},
+		{"while (ok) { process(); }", true},
 	}
 
 	for _, c := range cases {
@@ -556,6 +560,20 @@ func TestLooksLikeCodeQuery(t *testing.T) {
 		if got != c.expect {
 			t.Errorf("looksLikeCodeQuery(%q) = %v; want %v", c.query, got, c.expect)
 		}
+	}
+}
+
+// TestExpansionCache_NilMapSafe pins that a struct-literal expansionCache (nil
+// maps) does not panic on put — the put methods lazy-init the map.
+func TestExpansionCache_NilMapSafe(t *testing.T) {
+	c := &expansionCache{}
+	c.putHyDE("m", "q", "a")
+	if v, ok := c.getHyDE("m", "q"); !ok || v != "a" {
+		t.Fatalf("getHyDE after put on nil-map cache = (%q,%v), want (a,true)", v, ok)
+	}
+	c.putVariants("m", "q", []string{"en"}, []string{"hola"})
+	if v, ok := c.getVariants("m", "q", []string{"en"}); !ok || len(v) != 1 {
+		t.Fatalf("getVariants after put on nil-map cache = (%v,%v), want (1 item,true)", v, ok)
 	}
 }
 

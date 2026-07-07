@@ -101,6 +101,7 @@ func (s *Service) crossLingualQueryVariants(ctx context.Context, queryStr string
 	translator := s.crossLingualTranslator
 	configured := append([]string(nil), s.crossLingualTargetLangs...)
 	corpusFn := s.crossLingualCorpusLangsFn
+	genModel := s.genModel // captured under metaMu; SetGenerationModel writes it locked
 	s.metaMu.RUnlock()
 
 	q := strings.TrimSpace(queryStr)
@@ -117,7 +118,7 @@ func (s *Service) crossLingualQueryVariants(ctx context.Context, queryStr string
 	// variants instead of re-issuing up to crossLingualMaxVariants translation
 	// generations (#444, F4). Keyed on (model, targets, query) so a model or
 	// target-set change is never served stale.
-	if cached, ok := s.expansionCache.getVariants(s.genModel, q, targets); ok {
+	if cached, ok := s.expansionCache.getVariants(genModel, q, targets); ok {
 		return cached
 	}
 
@@ -161,7 +162,7 @@ func (s *Service) crossLingualQueryVariants(ctx context.Context, queryStr string
 		seenVariants[key] = struct{}{}
 		variants = append(variants, t)
 	}
-	s.expansionCache.putVariants(s.genModel, q, targets, variants)
+	s.expansionCache.putVariants(genModel, q, targets, variants)
 	return variants
 }
 

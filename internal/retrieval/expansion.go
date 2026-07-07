@@ -77,7 +77,9 @@ func (c *expansionCache) putHyDE(genModel, query, answer string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.hyde) >= expansionCacheMaxEntries {
+	// Lazy-init (nil when the cache was built as a struct literal instead of via
+	// newExpansionCache) and reset once over the entry cap.
+	if c.hyde == nil || len(c.hyde) >= expansionCacheMaxEntries {
 		c.hyde = make(map[string]string)
 	}
 	c.hyde[hydeKey(genModel, query)] = answer
@@ -104,7 +106,9 @@ func (c *expansionCache) putVariants(model, query string, targets, variants []st
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.xling) >= expansionCacheMaxEntries {
+	// Lazy-init (nil when the cache was built as a struct literal instead of via
+	// newExpansionCache) and reset once over the entry cap.
+	if c.xling == nil || len(c.xling) >= expansionCacheMaxEntries {
 		c.xling = make(map[string][]string)
 	}
 	c.xling[xlingKey(model, query, targets)] = append([]string(nil), variants...)

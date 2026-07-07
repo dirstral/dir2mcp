@@ -39,12 +39,17 @@ var (
 	//     excludes it.
 	//   - codePunctRunRe: a run of 3+ code-punctuation chars (e.g. "([])",
 	//     "){}"), which is code syntax and vanishingly rare in prose.
+	//   - codeBlockOpenRe: a ")" followed by "{" (optionally spaced), i.e. the
+	//     C-style block header "if (x > 0) {" / "for (…) {" / "func (…) {". Spacing
+	//     defeats codePunctRunRe/codeKeywordGluedRe, but ") {" itself is code
+	//     syntax essentially never seen in a natural-language question.
 	//   - codeCallRe: an identifier glued to "(" ("main(", "foo("), i.e. a
 	//     call/def form; prose writes "word (parenthetical)" with a space.
 	//   - codeBraceRe / codeOperatorRe: weaker per-token signals that only
 	//     count toward the multi-indicator threshold, never on their own.
 	codeKeywordGluedRe = regexp.MustCompile(`\b(func|class|package|import|return|if|for|while|switch|case|def|const|var|type|struct|interface|else)[({\[;]`)
 	codePunctRunRe     = regexp.MustCompile(`[(){}\[\];]{3,}`)
+	codeBlockOpenRe    = regexp.MustCompile(`\)\s*\{`)
 	codeCallRe         = regexp.MustCompile(`\b\w+\(`)
 	codeBraceRe        = regexp.MustCompile(`[{}]`)
 	codeOperatorRe     = regexp.MustCompile(`:=|=>|->|::`)
@@ -1346,9 +1351,12 @@ func (s *Service) generateHyDEDocument(ctx context.Context, gen model.Generator,
 	if queryText == "" {
 		return ""
 	}
+	s.metaMu.RLock()
+	genModel := s.genModel // captured under metaMu; SetGenerationModel writes it locked
+	s.metaMu.RUnlock()
 	// A repeated query (common in interactive MCP and the smoke gate) reuses the
 	// cached hypothesis instead of re-paying the generation (#444).
-	if cached, ok := s.expansionCache.getHyDE(s.genModel, queryText); ok {
+	if cached, ok := s.expansionCache.getHyDE(genModel, queryText); ok {
 		return cached
 	}
 	prompt := buildHyDEPrompt(queryText)
@@ -1358,7 +1366,7 @@ func (s *Service) generateHyDEDocument(ctx context.Context, gen model.Generator,
 		return ""
 	}
 	answer := truncateHyDEAnswer(generated)
-	s.expansionCache.putHyDE(s.genModel, queryText, answer)
+	s.expansionCache.putHyDE(genModel, queryText, answer)
 	return answer
 }
 
@@ -3082,6 +3090,8 @@ func LooksLikeCodeQuery(query string) bool {
 	case codeKeywordGluedRe.MatchString(q): // e.g. "if(", "for(", "return;"
 		return true
 	case codePunctRunRe.MatchString(q): // e.g. "([])", "){}"
+		return true
+	case codeBlockOpenRe.MatchString(q): // C-style block header "…) {" (spaced)
 		return true
 	}
 
