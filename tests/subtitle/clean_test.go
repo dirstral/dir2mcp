@@ -1,0 +1,260 @@
+package tests
+
+import (
+	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/subtitle"
+)
+
+// TestGlossaryReplacesWholeWordCaseInsensitive pins that a glossary rule rewrites
+// matching whole words case-insensitively, absorbs regex spelling variants, and
+// leaves non-matching substrings alone.
+func TestGlossaryReplacesWholeWordCaseInsensitive(t *testing.T) {
+	g, err := subtitle.NewGlossary([]string{"Aju?bei=>Adzhubei", "Khruschev=>Khrushchev"})
+	if err != nil {
+		t.Fatalf("NewGlossary: %v", err)
+	}
+	cases := map[string]string{
+		"signed by Ajubei today":  "signed by Adzhubei today", // variant with 'u'
+		"signed by Ajbei today":   "signed by Adzhubei today", // variant without 'u'
+		"AJUBEI spoke":            "Adzhubei spoke",           // case-insensitive
+		"met Khruschev in Moscow": "met Khrushchev in Moscow",
+		"Ajubeivich is untouched": "Ajubeivich is untouched", // word-bounded: no partial rewrite
+	}
+	for in, want := range cases {
+		if got := g.Apply(in); got != want {
+			t.Errorf("Apply(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestGlossaryAlternationStaysWordBounded pins that a top-level alternation in a
+// glossary pattern keeps BOTH word boundaries anchoring the whole pattern (the
+// pattern is wrapped in a non-capturing group), so it never rewrites partial
+// words like "Ajubeyond" or "xAdju".
+func TestGlossaryAlternationStaysWordBounded(t *testing.T) {
+	g, err := subtitle.NewGlossary([]string{"Aju|Adju=>Adzhubei"})
+	if err != nil {
+		t.Fatalf("NewGlossary: %v", err)
+	}
+	cases := map[string]string{
+		"met Aju today":       "met Adzhubei today",  // left alternative, whole word
+		"met Adju today":      "met Adzhubei today",  // right alternative, whole word
+		"Ajubeyond the fold":  "Ajubeyond the fold",  // left alt must not match a prefix
+		"saw xAdju in a note": "saw xAdju in a note", // right alt must not match a suffix
+	}
+	for in, want := range cases {
+		if got := g.Apply(in); got != want {
+			t.Errorf("Apply(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestGlossaryInactiveAndErrors pins that an empty glossary is a no-op and that
+// malformed entries are rejected at construction (so config can fail fast).
+func TestGlossaryInactiveAndErrors(t *testing.T) {
+	empty, err := subtitle.NewGlossary(nil)
+	if err != nil {
+		t.Fatalf("NewGlossary(nil): %v", err)
+	}
+	if empty.Active() {
+		t.Fatalf("nil glossary should be inactive")
+	}
+	if got := empty.Apply("unchanged"); got != "unchanged" {
+		t.Fatalf("inactive Apply changed text: %q", got)
+	}
+
+	if _, err := subtitle.NewGlossary([]string{"no-arrow-here"}); err == nil {
+		t.Fatalf("entry without separator should error")
+	}
+	if _, err := subtitle.NewGlossary([]string{"=>only-replacement"}); err == nil {
+		t.Fatalf("entry with empty pattern should error")
+	}
+	if _, err := subtitle.NewGlossary([]string{"a(b=>c"}); err == nil {
+		t.Fatalf("entry with invalid regexp should error")
+	}
+}
+
+// TestCleanCuesInactiveIsIdentity pins that a zero CleanOptions returns cues
+// unchanged (same order, same content), so the empty-config path is a no-op.
+func TestCleanCuesInactiveIsIdentity(t *testing.T) {
+	cues := []subtitle.Cue{
+		{Index: 1, StartMS: 0, EndMS: 1000, Text: "one"},
+		{Index: 2, StartMS: 1000, EndMS: 2000, Text: "two"},
+	}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{})
+	if len(got) != 2 || got[0].Text != "one" || got[1].Text != "two" {
+		t.Fatalf("inactive CleanCues altered cues: %+v", got)
+	}
+}
+
+// TestCleanCuesDropsURLs pins that URL/domain/credit cues are dropped when
+// enabled, while ordinary speech survives.
+func TestCleanCuesDropsURLs(t *testing.T) {
+	cues := []subtitle.Cue{
+		{Index: 1, StartMS: 0, EndMS: 1000, Text: "Real speech here"},
+		{Index: 2, StartMS: 1000, EndMS: 2000, Text: "Subtitles by www.example.com"},
+		{Index: 3, StartMS: 2000, EndMS: 3000, Text: "visit https://foo.bar"},
+		{Index: 4, StartMS: 3000, EndMS: 4000, Text: "see amara.org for more"},
+		{Index: 5, StartMS: 4000, EndMS: 5000, Text: "More real speech"},
+	}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{DropURLs: true})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 surviving cues, got %d: %+v", len(got), got)
+	}
+	if got[0].Text != "Real speech here" || got[1].Text != "More real speech" {
+		t.Fatalf("wrong cues survived: %+v", got)
+	}
+	for i := range got {
+		if got[i].Index != i+1 {
+			t.Errorf("survivor %d has Index %d, want %d", i, got[i].Index, i+1)
+		}
+	}
+}
+
+// TestCleanCuesCollapseRepeats pins the repetition-collapse: a long identical run
+// keeps the first (threshold-1) cues and drops the rest, while a short repeat and
+// a distinct cue are preserved.
+func TestCleanCuesCollapseRepeats(t *testing.T) {
+	mk := func(texts ...string) []subtitle.Cue {
+		out := make([]subtitle.Cue, 0, len(texts))
+		for i, tx := range texts {
+			out = append(out, subtitle.Cue{Index: i + 1, StartMS: i * 1000, EndMS: (i + 1) * 1000, Text: tx})
+		}
+		return out
+	}
+	// Five identical "No." in a row, then a distinct cue, then two identical.
+	cues := mk("No.", "No.", "No.", "No.", "No.", "Yes.", "Ok.", "Ok.")
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{CollapseRepeats: 3})
+	var texts []string
+	for _, c := range got {
+		texts = append(texts, c.Text)
+	}
+	// Run of 5 "No." -> keep first 2; "Yes." kept; run of 2 "Ok." (< 3) both kept.
+	want := []string{"No.", "No.", "Yes.", "Ok.", "Ok."}
+	if len(texts) != len(want) {
+		t.Fatalf("collapse got %v, want %v", texts, want)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Fatalf("collapse got %v, want %v", texts, want)
+		}
+	}
+}
+
+// TestCleanCuesGlossaryRewrites pins that glossary rewrites are applied to
+// surviving cues after the drop/collapse passes.
+func TestCleanCuesGlossaryRewrites(t *testing.T) {
+	g, err := subtitle.NewGlossary([]string{"Ajubei=>Adzhubei"})
+	if err != nil {
+		t.Fatalf("NewGlossary: %v", err)
+	}
+	cues := []subtitle.Cue{{Index: 1, StartMS: 0, EndMS: 1000, Text: "letter from Ajubei"}}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{Glossary: g})
+	if len(got) != 1 || got[0].Text != "letter from Adzhubei" {
+		t.Fatalf("glossary not applied in CleanCues: %+v", got)
+	}
+}
+
+// TestCleanCuesCollapseRepeatsNonASCII pins that repetition-collapse (an
+// exact-match pass) works over real Cyrillic AND CJK cue text, not just ASCII —
+// proving the pass is script-agnostic (the existing "No." case is Latin).
+func TestCleanCuesCollapseRepeatsNonASCII(t *testing.T) {
+	mk := func(texts ...string) []subtitle.Cue {
+		out := make([]subtitle.Cue, 0, len(texts))
+		for i, tx := range texts {
+			out = append(out, subtitle.Cue{Index: i + 1, StartMS: i * 1000, EndMS: (i + 1) * 1000, Text: tx})
+		}
+		return out
+	}
+	// Cyrillic "Да." repeated, a distinct Cyrillic cue, then CJK "はい。" repeated.
+	cues := mk("Да.", "Да.", "Да.", "Да.", "Нет.", "はい。", "はい。", "はい。")
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{CollapseRepeats: 2})
+	var texts []string
+	for _, c := range got {
+		texts = append(texts, c.Text)
+	}
+	// threshold 2: run of 4 "Да." -> keep 1; "Нет." kept; run of 3 "はい。" -> keep 1.
+	want := []string{"Да.", "Нет.", "はい。"}
+	if len(texts) != len(want) {
+		t.Fatalf("non-ASCII collapse got %v, want %v", texts, want)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Fatalf("non-ASCII collapse got %v, want %v", texts, want)
+		}
+	}
+	for i := range got {
+		if got[i].Index != i+1 {
+			t.Errorf("survivor %d has Index %d, want %d", i, got[i].Index, i+1)
+		}
+	}
+}
+
+// TestCleanCuesDropURLsNonASCIINoFalsePositive pins the locale-agnostic URL rule:
+// Cyrillic and CJK cues that merely contain a sentence period are NOT dropped (no
+// false positive), while a real URL embedded in a Cyrillic-context cue IS dropped.
+func TestCleanCuesDropURLsNonASCIINoFalsePositive(t *testing.T) {
+	cues := []subtitle.Cue{
+		{Index: 1, StartMS: 0, EndMS: 1000, Text: "Привет. Как дела"},               // Cyrillic w/ period -> keep
+		{Index: 2, StartMS: 1000, EndMS: 2000, Text: "こんにちは。元気ですか"},                 // CJK w/ period -> keep
+		{Index: 3, StartMS: 2000, EndMS: 3000, Text: "Смотрите на www.example.com"}, // real URL -> drop
+		{Index: 4, StartMS: 3000, EndMS: 4000, Text: "Подписи на site.tv"},          // bare domain -> drop
+		{Index: 5, StartMS: 4000, EndMS: 5000, Text: "Обычная речь"},                // plain Cyrillic -> keep
+	}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{DropURLs: true})
+	var texts []string
+	for _, c := range got {
+		texts = append(texts, c.Text)
+	}
+	want := []string{"Привет. Как дела", "こんにちは。元気ですか", "Обычная речь"}
+	if len(texts) != len(want) {
+		t.Fatalf("non-ASCII URL drop got %v, want %v", texts, want)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Fatalf("non-ASCII URL drop got %v, want %v", texts, want)
+		}
+	}
+}
+
+// TestCleanCuesGlossaryNonASCII pins that a glossary rewrite works over non-ASCII
+// (Cyrillic) cue text, not just Latin transliterations.
+func TestCleanCuesGlossaryNonASCII(t *testing.T) {
+	g, err := subtitle.NewGlossary([]string{"Аджубей=>Аджубей (зять Хрущёва)"})
+	if err != nil {
+		t.Fatalf("NewGlossary: %v", err)
+	}
+	cues := []subtitle.Cue{{Index: 1, StartMS: 0, EndMS: 1000, Text: "письмо от Аджубей сегодня"}}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{Glossary: g})
+	if len(got) != 1 || got[0].Text != "письмо от Аджубей (зять Хрущёва) сегодня" {
+		t.Fatalf("non-ASCII glossary not applied: %+v", got)
+	}
+}
+
+// TestCleanCuesGlossaryEmptiesCueDropped pins FIX 2: a glossary rule with an empty
+// replacement ("foo=>") that rewrites a cue entirely to empty/whitespace drops the
+// cue rather than exporting a blank one, and survivors stay re-indexed gap-free.
+func TestCleanCuesGlossaryEmptiesCueDropped(t *testing.T) {
+	g, err := subtitle.NewGlossary([]string{"noise=>"})
+	if err != nil {
+		t.Fatalf("NewGlossary: %v", err)
+	}
+	cues := []subtitle.Cue{
+		{Index: 1, StartMS: 0, EndMS: 1000, Text: "keep me"},
+		{Index: 2, StartMS: 1000, EndMS: 2000, Text: "noise"}, // -> "" after glossary -> dropped
+		{Index: 3, StartMS: 2000, EndMS: 3000, Text: "keep me too"},
+	}
+	got := subtitle.CleanCues(cues, subtitle.CleanOptions{Glossary: g})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 surviving cues, got %d: %+v", len(got), got)
+	}
+	if got[0].Text != "keep me" || got[1].Text != "keep me too" {
+		t.Fatalf("wrong cues survived: %+v", got)
+	}
+	for i := range got {
+		if got[i].Index != i+1 {
+			t.Errorf("survivor %d has Index %d, want %d", i, got[i].Index, i+1)
+		}
+	}
+}
