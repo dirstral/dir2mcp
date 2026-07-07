@@ -2568,10 +2568,7 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if len(cand) > pool {
 		cand = cand[:pool]
 	}
-	docs := make([]string, len(cand))
-	for i, h := range cand {
-		docs[i] = h.Snippet
-	}
+	docs := s.rerankDocs(ctx, cand)
 	var results []model.Reranked
 	err := usage.TimeStage(ctx, usage.StageRerank, func() error {
 		var rerr error
@@ -2606,6 +2603,42 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		out = append(out, fused[len(cand):]...)
 	}
 	return s.diversifyAndTruncate(out, k)
+}
+
+// chunkTextFetcher is an optional store capability that resolves a chunk's full
+// text by id. The shipped *store.SQLiteStore satisfies it via ChunkTaskByID
+// (same method the liveness pass uses). Reranking type-asserts against it to
+// score the whole chunk rather than a truncated snippet (issue #399 item 5).
+type chunkTextFetcher interface {
+	ChunkTaskByID(ctx context.Context, chunkID uint64) (model.ChunkTask, string, error)
+}
+
+// rerankDocs returns the text sent to the reranker for each candidate. The
+// cross-encoder should score the FULL chunk text, but the BM25 path only carries
+// a ~240-char snippet (sqlite_bm25.go) — so scoring hit.Snippet silently
+// degrades rerank precision (issue #399 item 5). When the store exposes the
+// chunkTextFetcher capability this fetches each candidate's full text; it falls
+// back to the hit's Snippet when the store lacks the capability, the chunk id is
+// zero, the lookup errors, or the chunk carries no text (media chunks). The
+// per-candidate lookups only run when rerank is enabled, so the common
+// no-reranker path is untouched.
+func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) []string {
+	docs := make([]string, len(cand))
+	fetcher, _ := s.store.(chunkTextFetcher)
+	for i, h := range cand {
+		docs[i] = h.Snippet
+		if fetcher == nil || h.ChunkID == 0 {
+			continue
+		}
+		task, _, err := fetcher.ChunkTaskByID(ctx, h.ChunkID)
+		if err != nil {
+			continue
+		}
+		if full := strings.TrimSpace(task.Text); full != "" {
+			docs[i] = full
+		}
+	}
+	return docs
 }
 
 // diversifyAndTruncate applies the optional MMR diversity re-ordering (issue
