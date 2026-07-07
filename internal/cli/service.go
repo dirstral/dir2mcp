@@ -445,7 +445,16 @@ func renderLaunchdPlist(spec serviceSpec) string {
 	writePlistString(&b, "StandardOutPath", spec.LogPath)
 	writePlistString(&b, "StandardErrorPath", spec.LogPath)
 	b.WriteString("  <key>RunAtLoad</key>\n  <true/>\n")
-	b.WriteString("  <key>KeepAlive</key>\n  <true/>\n")
+	// KeepAlive as a dict with SuccessfulExit=false: launchd respawns the
+	// daemon only after a NON-ZERO (crash) exit, never after a graceful stop
+	// (exit 0). This makes `dir2mcp down` (which SIGTERMs the daemon into a
+	// clean exit 0) durably stop a service-managed daemon, and stops the boot
+	// crash-loop when a misconfigured daemon is stopped gracefully (#434).
+	b.WriteString("  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n")
+	// Widen launchd's default 10s respawn throttle so a daemon that crashes
+	// deterministically at boot (e.g. a missing credential) backs off instead
+	// of hot-looping.
+	b.WriteString("  <key>ThrottleInterval</key>\n  <integer>30</integer>\n")
 	writePlistString(&b, "ProcessType", "Background")
 	b.WriteString("</dict>\n</plist>\n")
 	return b.String()
@@ -465,4 +474,81 @@ func writePlistString(b *strings.Builder, key, value string) {
 // paths (& < >) cannot corrupt the plist document.
 func xmlEscape(b *strings.Builder, s string) {
 	_ = xml.EscapeText(b, []byte(s))
+}
+
+// renderSystemdUnit builds a systemd user-service unit (INI) for spec.
+// Like renderLaunchdPlist it lives in the shared (untagged) file so its
+// output is unit-tested on every platform; only the systemctl invocation
+// is linux-gated.
+//
+// The crash-loop-safe supervision block is the systemd analog of the
+// launchd KeepAlive{SuccessfulExit=false}+ThrottleInterval pair: Restart
+// only on a non-zero/crash exit (a graceful `down` exits 0), backed off by
+// RestartSec and bounded by StartLimit* so a deterministically-failing
+// config eventually gives up instead of hot-looping. EnvironmentFile points
+// at the corpus .env.local (leading `-` = optional) so the booted daemon
+// resolves provider credentials the same way the launchd service does.
+func renderSystemdUnit(spec serviceSpec) string {
+	envFile := filepath.Join(spec.WorkingDir, ".env.local")
+
+	var b strings.Builder
+	b.WriteString("[Unit]\n")
+	b.WriteString("Description=" + iniEscape("dir2mcp knowledge server ("+spec.Label+")") + "\n\n")
+
+	b.WriteString("[Service]\n")
+	b.WriteString("Type=simple\n")
+	b.WriteString("WorkingDirectory=" + iniEscape(spec.WorkingDir) + "\n")
+	b.WriteString("ExecStart=" + renderSystemdExecStart(spec) + "\n")
+	// Leading `-` marks the file optional: the unit still starts when the
+	// operator configured credentials via .dir2mcp.yaml instead.
+	b.WriteString("EnvironmentFile=-" + iniEscape(envFile) + "\n")
+	b.WriteString("StandardOutput=append:" + iniEscape(spec.LogPath) + "\n")
+	b.WriteString("StandardError=append:" + iniEscape(spec.LogPath) + "\n")
+	b.WriteString("Restart=on-failure\n")
+	b.WriteString("RestartSec=30\n")
+	b.WriteString("StartLimitIntervalSec=300\n")
+	b.WriteString("StartLimitBurst=5\n\n")
+
+	b.WriteString("[Install]\n")
+	b.WriteString("WantedBy=default.target\n")
+	return b.String()
+}
+
+// renderSystemdExecStart joins the binary and its args into an ExecStart
+// value, quoting any token containing whitespace so systemd parses it as a
+// single argument. Each token is INI-escaped first.
+func renderSystemdExecStart(spec serviceSpec) string {
+	tokens := append([]string{spec.BinaryPath}, spec.Args...)
+	quoted := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		esc := iniEscape(tok)
+		if strings.ContainsAny(esc, " \t") {
+			esc = "\"" + esc + "\""
+		}
+		quoted = append(quoted, esc)
+	}
+	return strings.Join(quoted, " ")
+}
+
+// iniEscape makes s safe to embed in a systemd unit value. systemd treats a
+// literal `%` as the start of a specifier, so it must be doubled. This is the
+// INI analog of the plist's XML escaping (xmlEscape does NOT apply here). A
+// value containing a carriage return or newline would break the single-line
+// key=value format and is rejected upstream (rejectMultilineSpec); iniEscape
+// assumes that guard has already run.
+func iniEscape(s string) string {
+	return strings.ReplaceAll(s, "%", "%%")
+}
+
+// rejectMultilineSpec fails when any spec field that becomes a systemd unit
+// value contains a carriage return or newline, which would break the INI
+// key=value line format (the same guard persistCredentialsFromEnv applies to
+// dotenv values). Returns nil when every value is single-line.
+func rejectMultilineSpec(spec serviceSpec) error {
+	for _, v := range append([]string{spec.Label, spec.BinaryPath, spec.WorkingDir, spec.LogPath}, spec.Args...) {
+		if strings.ContainsAny(v, "\r\n") {
+			return fmt.Errorf("service value %q contains a newline, which is not allowed in a systemd unit", v)
+		}
+	}
+	return nil
 }

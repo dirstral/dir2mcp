@@ -91,6 +91,13 @@ type App struct {
 	newRetriever func(config.Config, model.Store) model.Retriever
 
 	cachedStyles map[bool]*styles
+
+	// serverGracefulStop is set once the long-running server (up
+	// --foreground / a supervised service) has begun serving, so a
+	// subsequent signal-triggered shutdown is recognized as a normal,
+	// successful termination rather than an interrupted command. See
+	// resolveProcessExitCode (#434).
+	serverGracefulStop bool
 }
 
 type indexingStateAware interface {
@@ -398,7 +405,19 @@ func (a *App) Run(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	code := a.RunWithContext(ctx, args)
-	if errors.Is(ctx.Err(), context.Canceled) && code == exitSuccess {
+	return resolveProcessExitCode(ctx.Err(), code, a.serverGracefulStop)
+}
+
+// resolveProcessExitCode maps a clean (exitSuccess) return that coincided
+// with a context cancellation to the interrupt exit code — EXCEPT when the
+// cancellation gracefully stopped the long-running server (up --foreground
+// or a supervised launchd/systemd service). A signal-triggered stop of the
+// server is a normal, successful termination and must exit 0, so launchd
+// (KeepAlive SuccessfulExit=false) and systemd (Restart=on-failure) do not
+// mistake a user- or supervisor-requested `down` for a crash and respawn it
+// (#434). A crash still returns its non-zero code untouched.
+func resolveProcessExitCode(ctxErr error, code int, serverGracefulStop bool) int {
+	if errors.Is(ctxErr, context.Canceled) && code == exitSuccess && !serverGracefulStop {
 		return exitSignalInterrupt
 	}
 	return code
