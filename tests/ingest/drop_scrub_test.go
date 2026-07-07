@@ -145,6 +145,31 @@ func TestScrubFiltersWordTimings(t *testing.T) {
 	}
 }
 
+// TestScrubLeavesUnchangedSegmentWordsVerbatim pins that a segment the scrub
+// does NOT alter keeps its Span.Words exactly — the approximate word-timing
+// filter must run only on segments actually scrubbed, never on unmatched ones
+// (where a tokenization mismatch on numerals/punctuation could silently drop a
+// timing corpus-wide when scrub_phrases is set).
+func TestScrubLeavesUnchangedSegmentWordsVerbatim(t *testing.T) {
+	// Tricky tokens (a numeral, a contraction) that approximate matching could
+	// mishandle — but this line contains no scrub phrase, so it must be untouched.
+	words := []model.TimedWord{
+		{Word: "we've", StartMS: 0, EndMS: 300},
+		{Word: "got", StartMS: 300, EndMS: 600},
+		{Word: "1,200", StartMS: 600, EndMS: 900},
+		{Word: "cases", StartMS: 900, EndMS: 1200},
+	}
+	base := ingest.ChunkTranscriptByTimeWithWords("[00:00] we've got 1,200 cases", words)
+	got := ingest.ApplyDropScrubToSegments(base, mustDropSet(t, nil), mustDropSet(t, []string{"breaking news"}))
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(got))
+	}
+	if len(got[0].Span.Words) != 4 {
+		t.Fatalf("unscrubbed segment must keep all 4 word timings verbatim, got %d: %+v", len(got[0].Span.Words), got[0].Span.Words)
+	}
+}
+
 // TestDropScrubConsistentIngestAndExport pins that the same DropSet, applied to
 // the same source, strips the same phrase at ingest (chunk segments) and at
 // export (CleanCues) — the index and the exported sidecar agree cue-for-cue.

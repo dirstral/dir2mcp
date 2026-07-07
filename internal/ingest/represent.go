@@ -1009,12 +1009,20 @@ func applyDropScrubToSegments(segs []chunkSegment, drop, scrub *subtitle.DropSet
 			if strings.TrimSpace(scrubbed) == "" {
 				continue
 			}
-			seg.Text = scrubbed
-			// Excise the scrubbed words from the per-word timings too: Span.Words is
-			// later rebuilt into broadcast cues / other word-level consumers, so
-			// leaving the removed phrase's words here would re-introduce the spam the
-			// scrub just removed from Text.
-			seg.Span.Words = filterWordSpansToText(seg.Span.Words, scrubbed)
+			// Only touch a segment the scrub actually changed. filterWordSpansToText
+			// is an approximate multiset token match, so re-running it on an
+			// UNCHANGED segment risks silently dropping a word timing on any
+			// tokenization/punctuation mismatch (numerals, contractions) — for every
+			// segment when scrub_phrases is set, not just scrubbed ones. An unchanged
+			// segment keeps its Text and Span.Words verbatim.
+			if scrubbed != seg.Text {
+				seg.Text = scrubbed
+				// Excise the scrubbed words from the per-word timings too: Span.Words is
+				// later rebuilt into broadcast cues / other word-level consumers, so
+				// leaving the removed phrase's words here would re-introduce the spam the
+				// scrub just removed from Text.
+				seg.Span.Words = filterWordSpansToText(seg.Span.Words, scrubbed)
+			}
 		}
 		out = append(out, seg)
 	}
