@@ -3296,6 +3296,7 @@ func stripHallucinatedCitations(answer string, citations []model.Citation) strin
 		allowed[rel] = struct{}{}
 		allowed[path.Base(rel)] = struct{}{}
 	}
+	removed := false
 	out := inlineCitationRe.ReplaceAllStringFunc(answer, func(match string) string {
 		trimmed := strings.TrimSpace(match)
 		inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
@@ -3311,10 +3312,17 @@ func stripHallucinatedCitations(answer string, citations []model.Citation) strin
 			return match
 		}
 		// Hallucinated citation: path not among the chunks sent to the model.
+		removed = true
 		return ""
 	})
-	// Collapse whitespace runs left by removed tags without disturbing newlines.
-	out = strings.ReplaceAll(out, "  ", " ")
+	// A clean answer is returned byte-for-byte — no reflow. inlineCitationRe's
+	// leading \s? already absorbs the space before a removed tag, so no interior
+	// whitespace collapse is needed (that would corrupt intentional formatting
+	// like code indents / aligned markdown); only trim a space a removed edge tag
+	// may have left at the very start or end.
+	if !removed {
+		return answer
+	}
 	return strings.TrimSpace(out)
 }
 

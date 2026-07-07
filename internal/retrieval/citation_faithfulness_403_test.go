@@ -104,6 +104,11 @@ func TestStripHallucinatedCitations_Unit(t *testing.T) {
 		{"drops unknown file", "See [ghost.pdf] here.", "See here."},
 		{"keeps footnote", "Result [1] holds.", "Result [1] holds."},
 		{"keeps prose bracket", "Note [see appendix] please.", "Note [see appendix] please."},
+		// Interior formatting (code indent, aligned double-spaces) must survive a
+		// strip — no global whitespace collapse.
+		{"preserves indent while stripping", "code:\n    x = 1  # [ghost.pdf]", "code:\n    x = 1  #"},
+		// A clean answer with intentional double-spacing is returned byte-for-byte.
+		{"clean answer unchanged", "col1    col2    col3", "col1    col2    col3"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
