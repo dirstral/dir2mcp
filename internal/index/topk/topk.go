@@ -67,8 +67,13 @@ func (h *Heap) Items() []Candidate { return h.items }
 func (h *Heap) Full() bool { return len(h.items) >= h.k }
 
 // Better reports whether a candidate with (score, id) ranks before the current
-// worst retained candidate (the root). Only meaningful when the heap is full.
+// worst retained candidate (the root). An empty heap (including a k=0 heap, for
+// which Full() is trivially true) has no worst element, so nothing is better than
+// it — return false rather than indexing items[0].
 func (h *Heap) Better(score float32, id uint64) bool {
+	if len(h.items) == 0 {
+		return false
+	}
 	root := h.items[0]
 	return Before(score, root.Score, id, root.ChunkID)
 }
