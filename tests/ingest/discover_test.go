@@ -45,6 +45,73 @@ func TestDiscoverFiles_SkipsDefaultExcludedDirsSymlinksAndLargeFiles(t *testing.
 	}
 }
 
+// TestDiscoverFilesWithOptions_OnOversize_SurfacesSizeCapDrops asserts that a
+// file excluded solely because it exceeds MaxSizeBytes is reported via the
+// OnOversize hook (issue #497) instead of vanishing silently — the operator must
+// have a signal that files were dropped, not just an unexplained skipped=0.
+func TestDiscoverFilesWithOptions_OnOversize_SurfacesSizeCapDrops(t *testing.T) {
+	root := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("hi"))
+	// 32 bytes, well over the 16-byte (rounded-down) cap below.
+	big := []byte("0123456789ABCDEF0123456789ABCDEF")
+	mustWriteFile(t, filepath.Join(root, "media", "big.mp4"), big)
+
+	type drop struct {
+		relPath string
+		size    int64
+	}
+	var drops []drop
+
+	files, err := ingest.DiscoverFilesWithOptions(context.Background(), root, ingest.DiscoverOptions{
+		MaxSizeBytes: 16,
+		OnOversize: func(relPath string, size int64) {
+			drops = append(drops, drop{relPath: relPath, size: size})
+		},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithOptions failed: %v", err)
+	}
+
+	got := make([]string, 0, len(files))
+	for _, f := range files {
+		got = append(got, f.RelPath)
+	}
+	if !slices.Equal(got, []string{"keep.txt"}) {
+		t.Fatalf("expected only the small file discovered, got %v", got)
+	}
+
+	if len(drops) != 1 {
+		t.Fatalf("expected exactly one oversize drop reported, got %d: %+v", len(drops), drops)
+	}
+	if drops[0].relPath != "media/big.mp4" {
+		t.Fatalf("unexpected oversize relPath: %q", drops[0].relPath)
+	}
+	if drops[0].size != int64(len(big)) {
+		t.Fatalf("unexpected oversize size: got %d want %d", drops[0].size, len(big))
+	}
+}
+
+// TestDiscoverFilesWithOptions_OnOversize_NotCalledWhenAllFit guards against a
+// false positive: the hook must fire only for genuine size-cap exclusions, not
+// for every discovered file.
+func TestDiscoverFilesWithOptions_OnOversize_NotCalledWhenAllFit(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("x"))
+	mustWriteFile(t, filepath.Join(root, "b.txt"), []byte("y"))
+
+	called := 0
+	if _, err := ingest.DiscoverFilesWithOptions(context.Background(), root, ingest.DiscoverOptions{
+		MaxSizeBytes: 1024,
+		OnOversize:   func(string, int64) { called++ },
+	}); err != nil {
+		t.Fatalf("DiscoverFilesWithOptions failed: %v", err)
+	}
+	if called != 0 {
+		t.Fatalf("OnOversize should not fire when every file fits the cap, got %d calls", called)
+	}
+}
+
 func TestDiscoverFiles_ContextCancelled(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("x"))

@@ -1073,6 +1073,25 @@ func (s *Service) runScan(ctx context.Context) error {
 		defer func() { _ = cache.Close() }()
 		discoverOpts.ScanCache = cache
 	}
+	// Surface size-cap exclusions (issue #497): a file over the ingest file cap is
+	// dropped at discovery — never scanned, indexed, or (previously) reported — so
+	// an operator had no signal that, say, a 300 MB media file was excluded. Count
+	// each drop as scanned+skipped so live `status` shows a non-zero skipped, and
+	// log a clear line naming ingest.max_file_mb so the cap is discoverable and
+	// actionable rather than a silent no-op (dishonest coverage).
+	capBytes := discoverOpts.MaxSizeBytes
+	if capBytes <= 0 {
+		capBytes = corpusfs.DefaultMaxFileSizeBytes()
+	}
+	capMB := float64(capBytes) / (1024 * 1024)
+	discoverOpts.OnOversize = func(relPath string, size int64) {
+		s.addScanned(1)
+		s.addSkipped(1)
+		s.getLogger().Printf(
+			"discovery: skipping %s (%d bytes) — exceeds ingest.max_file_mb cap (%.0f MB); raise ingest.max_file_mb to include it",
+			relPath, size, capMB,
+		)
+	}
 	discovered, err := s.corpusFS().Walk(ctx, s.cfg.RootDir, discoverOpts.corpusfsOptions())
 	if err != nil {
 		return err

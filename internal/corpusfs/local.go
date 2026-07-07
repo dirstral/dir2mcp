@@ -190,7 +190,20 @@ func (w *discoverWalker) shouldAddFile(lstat os.FileInfo, relPath string, rules 
 	if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, false) {
 		return false
 	}
-	return lstat.Size() <= w.options.MaxSizeBytes
+	if lstat.Size() > w.options.MaxSizeBytes {
+		w.reportOversize(relPath, lstat.Size())
+		return false
+	}
+	return true
+}
+
+// reportOversize surfaces a size-cap exclusion to the caller-provided
+// Options.OnOversize hook (issue #497). It is a no-op when no hook is set, so
+// the default discovery behavior is byte-for-byte unchanged.
+func (w *discoverWalker) reportOversize(relPath string, size int64) {
+	if w.options.OnOversize != nil {
+		w.options.OnOversize(relPath, size)
+	}
 }
 
 // visitDir processes a single directory entry that is known to be a directory.
@@ -522,6 +535,7 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 		return nil
 	}
 	if stat.Size() > w.options.MaxSizeBytes {
+		w.reportOversize(relPath, stat.Size())
 		return nil
 	}
 

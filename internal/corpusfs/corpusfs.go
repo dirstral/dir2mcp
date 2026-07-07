@@ -61,6 +61,14 @@ type Options struct {
 	// added/removed/modified files. nil disables it (a full re-walk every run);
 	// only the local-filesystem backend honors it.
 	ScanCache ScanCache
+	// OnOversize, when non-nil, is invoked once for every regular file excluded
+	// from discovery solely because its size exceeds MaxSizeBytes. It makes the
+	// otherwise-silent size-cap drop observable to callers (issue #497): the file
+	// is still excluded, but the caller can log/count it instead of the exclusion
+	// vanishing without a trace. relPath is the corpus-root-relative slash path
+	// and size is the file's size in bytes. It must not block or panic; the walker
+	// calls it inline during the walk.
+	OnOversize func(relPath string, size int64)
 }
 
 // CachedDirEntry is a directory child's identity recorded in the scan cache: its
