@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -17,8 +18,25 @@ const crossLingualAutoSentinel = "auto"
 // crossLingualMaxVariants caps how many translated query variants a single
 // search may issue, bounding the added embed/retrieval cost (and translator
 // calls) regardless of how many languages the corpus records. The original
-// query is always retrieved in addition to the variants.
+// query is always retrieved in addition to the variants. Together with the
+// single HyDE generation this is the per-query LLM-call budget: at most
+// 1 + crossLingualMaxVariants generations per uncached query, and zero on a
+// cache hit (#444).
 const crossLingualMaxVariants = 8
+
+// crossLingualMaxTokens caps each translation completion's OUTPUT tokens (#444).
+// A translated SEARCH QUERY is short by construction, so a tight cap is ample;
+// it bounds cost/latency and defuses a crafted query that tries to make the
+// translator emit a long completion. Applied only when the translator
+// implements model.BoundedGenerator; otherwise the provider's default applies.
+const crossLingualMaxTokens = 128
+
+// crossLingualConcurrency bounds how many translation generations run at once
+// (#444). The per-language translations are independent, so issuing them
+// concurrently (rather than strictly serially) cuts expansion latency, while
+// the bound keeps a single query from opening crossLingualMaxVariants
+// simultaneous provider connections.
+const crossLingualConcurrency = 4
 
 // searchExpanded runs the HyDE/per-mode retrieval pipeline for the original
 // query and, when cross-lingual query expansion (#325) is active, the per-mode
@@ -95,20 +113,44 @@ func (s *Service) crossLingualQueryVariants(ctx context.Context, queryStr string
 		return nil
 	}
 
+	// A repeated query (interactive MCP, the smoke gate) reuses the cached
+	// variants instead of re-issuing up to crossLingualMaxVariants translation
+	// generations (#444, F4). Keyed on (model, targets, query) so a model or
+	// target-set change is never served stale.
+	if cached, ok := s.expansionCache.getVariants(s.genModel, q, targets); ok {
+		return cached
+	}
+
+	// Translate each target concurrently (bounded), preserving target order in
+	// the results so dedup/RRF fusion stays deterministic (#444, F2). Each
+	// generation is output-token-capped (#444, F3).
+	translations := make([]string, len(targets))
+	sem := make(chan struct{}, crossLingualConcurrency)
+	var wg sync.WaitGroup
+	for i, lang := range targets {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, lang string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			translated, terr := boundedGenerate(ctx, translator, buildCrossLingualPrompt(q, lang), crossLingualMaxTokens)
+			if terr != nil {
+				// A per-language translation failure degrades gracefully (skip it),
+				// never fails the search (#325).
+				s.logf("cross-lingual: translating query into %q failed, skipping: %v", lang, terr)
+				return
+			}
+			translations[i] = strings.TrimSpace(translated)
+		}(i, lang)
+	}
+	wg.Wait()
+
 	variants := make([]string, 0, len(targets))
 	// Dedup translated variants: distinct target languages can yield the same
 	// translation (or one equal to the query), and retrieving/fusing a duplicate
 	// would double-count its evidence and skew the RRF ranking.
 	seenVariants := make(map[string]struct{}, len(targets))
-	for _, lang := range targets {
-		translated, terr := translator.Generate(ctx, buildCrossLingualPrompt(q, lang))
-		if terr != nil {
-			// A per-language translation failure degrades gracefully (skip it),
-			// never fails the search (#325).
-			s.logf("cross-lingual: translating query into %q failed, skipping: %v", lang, terr)
-			continue
-		}
-		t := strings.TrimSpace(translated)
+	for _, t := range translations {
 		if t == "" || strings.EqualFold(t, q) {
 			continue
 		}
@@ -119,6 +161,7 @@ func (s *Service) crossLingualQueryVariants(ctx context.Context, queryStr string
 		seenVariants[key] = struct{}{}
 		variants = append(variants, t)
 	}
+	s.expansionCache.putVariants(s.genModel, q, targets, variants)
 	return variants
 }
 

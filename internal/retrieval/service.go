@@ -27,10 +27,28 @@ import (
 
 var (
 	// compiled regexes used by looksLikeCodeQuery; moved out of the
-	// function to avoid rebuilding on every invocation.
-	codeKeywordRe   = regexp.MustCompile(`\b(func|class|package|import|return|if|for|while|switch|case)\b`)
-	codePunctRe     = regexp.MustCompile(`[(){}\[\];]`)
-	fileExtensionRe = regexp.MustCompile(`\.(js|ts|py|go|java|rb|cpp|c|cs|html|css|json|yaml|yml)\b`)
+	// function to avoid rebuilding on every invocation. The heuristic is
+	// deliberately conservative (#444): a code keyword or a stray bracket that
+	// merely APPEARS somewhere in a natural-language question ("how do I import
+	// data (CSV)?", "the case for X; why?") must NOT route the query to the code
+	// index, so every signal below requires code SYNTAX, not just a shared word.
+	//
+	//   - codeKeywordGluedRe: a code keyword directly glued to an opening
+	//     bracket / semicolon with no separating space (e.g. "if(", "for(",
+	//     "return;"). Prose keeps a space before a parenthetical, so this
+	//     excludes it.
+	//   - codePunctRunRe: a run of 3+ code-punctuation chars (e.g. "([])",
+	//     "){}"), which is code syntax and vanishingly rare in prose.
+	//   - codeCallRe: an identifier glued to "(" ("main(", "foo("), i.e. a
+	//     call/def form; prose writes "word (parenthetical)" with a space.
+	//   - codeBraceRe / codeOperatorRe: weaker per-token signals that only
+	//     count toward the multi-indicator threshold, never on their own.
+	codeKeywordGluedRe = regexp.MustCompile(`\b(func|class|package|import|return|if|for|while|switch|case|def|const|var|type|struct|interface|else)[({\[;]`)
+	codePunctRunRe     = regexp.MustCompile(`[(){}\[\];]{3,}`)
+	codeCallRe         = regexp.MustCompile(`\b\w+\(`)
+	codeBraceRe        = regexp.MustCompile(`[{}]`)
+	codeOperatorRe     = regexp.MustCompile(`:=|=>|->|::`)
+	fileExtensionRe    = regexp.MustCompile(`\.(js|ts|py|go|java|rb|cpp|c|cs|html|css|json|yaml|yml)\b`)
 	// The lead field allows up to 3 digits so single-field MM:SS transcripts
 	// past 99 minutes (e.g. "[100:30]") still parse for open_file time slicing
 	// (#427); with the optional third field present it is the HH of HH:MM:SS.
@@ -278,6 +296,11 @@ type Service struct {
 	// expansion is a no-op), so an explicit list is required to expand on a store
 	// that cannot enumerate languages.
 	crossLingualCorpusLangsFn func() []string
+	// expansionCache memoizes LLM-backed query expansions (HyDE hypotheticals and
+	// cross-lingual translation variants) so a repeated query does not re-pay the
+	// serial per-variant generation cost (#444). Never nil after NewService; a nil
+	// value would still behave as an always-miss no-op.
+	expansionCache *expansionCache
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -322,6 +345,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		hybridEnabled:       true,
 		rerankCandidatePool: defaultRerankCandidatePool,
 		hydeMode:            hydeModeFuse,
+		expansionCache:      newExpansionCache(),
 	}
 }
 
@@ -1322,13 +1346,20 @@ func (s *Service) generateHyDEDocument(ctx context.Context, gen model.Generator,
 	if queryText == "" {
 		return ""
 	}
+	// A repeated query (common in interactive MCP and the smoke gate) reuses the
+	// cached hypothesis instead of re-paying the generation (#444).
+	if cached, ok := s.expansionCache.getHyDE(s.genModel, queryText); ok {
+		return cached
+	}
 	prompt := buildHyDEPrompt(queryText)
-	generated, err := gen.Generate(ctx, prompt)
+	generated, err := boundedGenerate(ctx, gen, prompt, hydeMaxTokens)
 	if err != nil {
 		s.logf("hyde: generation failed, falling back to raw query: %v", err)
 		return ""
 	}
-	return truncateHyDEAnswer(generated)
+	answer := truncateHyDEAnswer(generated)
+	s.expansionCache.putHyDE(s.genModel, queryText, answer)
+	return answer
 }
 
 // recencyDecayCandidatePool is the widened retrieval pool size used when the
@@ -3035,40 +3066,42 @@ func looksLikeCodeQuery(query string) bool {
 	return LooksLikeCodeQuery(query)
 }
 
-// LooksLikeCodeQuery reports whether the query appears code-oriented.
+// LooksLikeCodeQuery reports whether the query appears code-oriented and should
+// therefore route (under index=auto) to the code index. It is deliberately
+// conservative (#444): a plain-English question that merely contains a word like
+// "import"/"case"/"class" or a lone parenthesis/semicolon is NOT code — routing
+// it to the code index hurts recall on a text corpus. When in doubt it returns
+// false, preferring the text/hybrid path.
 func LooksLikeCodeQuery(query string) bool {
 	q := strings.ToLower(query)
 
-	// keyword pattern with word boundaries to avoid matching substrings.
-	hasKw := codeKeywordRe.MatchString(q)
-	// punctuation tokens commonly found in code
-	hasPunct := codePunctRe.MatchString(q)
-	// fenced code blocks or backticks
-	hasFenced := strings.Contains(q, "```")
-	hasBacktick := strings.Contains(q, "`")
-	// file extension-like indicator – restrict to common code extensions and ensure a word boundary
-	hasFileExt := fileExtensionRe.MatchString(q)
-
-	// a strong signal: keyword + punctuation nearby
-	if hasKw && hasPunct {
+	// Strong, unambiguous code-syntax signals — any ONE routes to code.
+	switch {
+	case strings.Contains(q, "```"): // fenced code block
+		return true
+	case codeKeywordGluedRe.MatchString(q): // e.g. "if(", "for(", "return;"
+		return true
+	case codePunctRunRe.MatchString(q): // e.g. "([])", "){}"
 		return true
 	}
 
-	// otherwise count independent indicators
+	// Weaker per-token signals. A single one can occur in ordinary prose (a
+	// stray backtick, a "the .go file" mention, one "word(paren)"), so require
+	// at least TWO to conclude the query is code.
 	indicators := 0
-	if hasKw {
+	if strings.Contains(q, "`") { // inline backtick(s)
 		indicators++
 	}
-	if hasPunct {
+	if fileExtensionRe.MatchString(q) { // e.g. main.go, app.tsx
 		indicators++
 	}
-	if hasFenced {
+	if codeCallRe.MatchString(q) { // identifier glued to "(" — call/def form
 		indicators++
 	}
-	if hasBacktick {
+	if codeBraceRe.MatchString(q) { // "{" or "}"
 		indicators++
 	}
-	if hasFileExt {
+	if codeOperatorRe.MatchString(q) { // ":=", "=>", "->", "::"
 		indicators++
 	}
 	return indicators >= 2

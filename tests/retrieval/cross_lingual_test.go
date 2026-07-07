@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -69,37 +70,68 @@ func (v *vectorRoutingIndex) Close() error                             { return 
 // the target language embedded in the prompt, simulating the chat translate
 // primitive without credentials. errForLang, when set for a language, makes that
 // translation fail (to exercise graceful degradation). callsByLang records how
-// many times each target language was requested.
+// many times each target language was requested. It is safe for concurrent use
+// because cross-lingual expansion now issues its per-language translations
+// concurrently (#444).
 type fakeTranslator struct {
-	byLang      map[string]string
-	errForLang  map[string]error
+	byLang     map[string]string
+	errForLang map[string]error
+
+	mu          sync.Mutex
 	callsByLang map[string]int
 }
 
-func (f *fakeTranslator) Generate(_ context.Context, prompt string) (string, error) {
-	lang := ""
+func (f *fakeTranslator) langFor(prompt string) string {
 	for l := range f.byLang {
 		if strings.Contains(prompt, " into "+l+".") {
-			lang = l
-			break
+			return l
 		}
 	}
-	if lang == "" {
-		for l := range f.errForLang {
-			if strings.Contains(prompt, " into "+l+".") {
-				lang = l
-				break
-			}
+	for l := range f.errForLang {
+		if strings.Contains(prompt, " into "+l+".") {
+			return l
 		}
 	}
+	return ""
+}
+
+func (f *fakeTranslator) Generate(_ context.Context, prompt string) (string, error) {
+	lang := f.langFor(prompt)
+	f.mu.Lock()
 	if f.callsByLang == nil {
 		f.callsByLang = map[string]int{}
 	}
 	f.callsByLang[lang]++
+	f.mu.Unlock()
 	if err, ok := f.errForLang[lang]; ok {
 		return "", err
 	}
 	return f.byLang[lang], nil
+}
+
+// calls returns the recorded call count for a language under the lock. Reads
+// after a Search has fully returned are already safe (the WaitGroup barrier),
+// but this keeps ad-hoc reads race-free too.
+func (f *fakeTranslator) calls(lang string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.callsByLang[lang]
+}
+
+// boundedFakeTranslator is a fakeTranslator that also implements
+// model.BoundedGenerator, recording the max-tokens cap passed on the bounded
+// path so a test can assert expansion generations are output-bounded (#444).
+type boundedFakeTranslator struct {
+	fakeTranslator
+	mu            sync.Mutex
+	maxTokensSeen []int
+}
+
+func (b *boundedFakeTranslator) GenerateWithMaxTokens(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	b.mu.Lock()
+	b.maxTokensSeen = append(b.maxTokensSeen, maxTokens)
+	b.mu.Unlock()
+	return b.Generate(ctx, prompt)
 }
 
 func searchRelPaths(t *testing.T, svc *retrieval.Service, q model.SearchQuery) []string {
@@ -238,6 +270,53 @@ func TestCrossLingual_SkipsQueryLanguage(t *testing.T) {
 	}
 	if tr.callsByLang["en"] == 0 {
 		t.Fatalf("expected the RU query to be translated into EN, got %v", tr.callsByLang)
+	}
+}
+
+// TestCrossLingual_CachesVariants pins that a repeated identical query reuses
+// the cached translation variants instead of re-issuing a translation
+// generation per target language (#444, F4). Two searches for the same query
+// must call the translator only ONCE per language, not twice.
+func TestCrossLingual_CachesVariants(t *testing.T) {
+	tr := &fakeTranslator{byLang: map[string]string{"ru": "санкции"}}
+	svc := newCrossLingualService(t)
+	svc.SetCrossLingual(true, nil, tr)
+
+	q := model.SearchQuery{Query: "sanctions", K: 10}
+	_ = searchRelPaths(t, svc, q)
+	_ = searchRelPaths(t, svc, q)
+
+	if got := tr.calls("ru"); got != 1 {
+		t.Fatalf("repeated query must hit the expansion cache; want 1 RU translation, got %d", got)
+	}
+}
+
+// TestCrossLingual_BoundsGenerationTokens pins that each translation generation
+// is issued with a positive output-token cap via model.BoundedGenerator (#444,
+// F3), and that the aggregate translation-call count is bounded to the resolved
+// target set (here a single non-query language), never unbounded.
+func TestCrossLingual_BoundsGenerationTokens(t *testing.T) {
+	tr := &boundedFakeTranslator{fakeTranslator: fakeTranslator{byLang: map[string]string{"ru": "санкции"}}}
+	svc := newCrossLingualService(t)
+	svc.SetCrossLingual(true, nil, tr)
+
+	_ = searchRelPaths(t, svc, model.SearchQuery{Query: "sanctions", K: 10})
+
+	tr.mu.Lock()
+	seen := append([]int(nil), tr.maxTokensSeen...)
+	tr.mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatalf("expected the bounded translate path to be used, got no GenerateWithMaxTokens calls")
+	}
+	// The corpus has two languages {en, ru}; the aggregate translation-call
+	// count must stay bounded by the resolved target set (never unbounded).
+	if len(seen) > 2 {
+		t.Fatalf("translation calls must be bounded by the target set (<=2 here), got %d", len(seen))
+	}
+	for _, mt := range seen {
+		if mt <= 0 {
+			t.Fatalf("translation generation must pass a positive max_tokens cap, got %d", mt)
+		}
 	}
 }
 

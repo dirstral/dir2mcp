@@ -533,6 +533,22 @@ func TestLooksLikeCodeQuery(t *testing.T) {
 		{"some `inline code`", false},
 		{"python code", false},
 		{"fix bug in java { }", false},
+
+		// #444: plain-English questions that merely CONTAIN a code keyword or a
+		// lone bracket/semicolon must NOT route to the code index.
+		{"How do I import data (CSV) into the system?", false},
+		{"What is the case for using X; and why?", false},
+		{"Which class did she attend (and when)?", false},
+		{"What does the return policy cover?", false},
+		{"Is there a package that arrives on Friday?", false},
+		{"Should I switch to a new provider?", false},
+
+		// #444: genuine code queries still classify as code via real syntax.
+		{"if(x > 0) { return; }", true},            // keyword glued to "("
+		{"for(i := 0; i < n; i++) loop", true},     // keyword glued to "("
+		{"func handler() { return nil }", true},    // call form + braces
+		{"x := foo() -> bar", true},                // operator + call form
+		{"edit config.json and add a `key`", true}, // file ext + backtick
 	}
 
 	for _, c := range cases {

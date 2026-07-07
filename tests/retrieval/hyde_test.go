@@ -176,6 +176,52 @@ func TestSearch_HyDE_EmptyGeneration_FallsBackToRawQuery(t *testing.T) {
 	}
 }
 
+// boundedRecordingGenerator is a recordingGenerator that also implements
+// model.BoundedGenerator, recording the max-tokens caps it is asked to honor so
+// a test can assert the HyDE generation is output-bounded (#444, F3).
+type boundedRecordingGenerator struct {
+	recordingGenerator
+	maxTokensSeen []int
+}
+
+func (g *boundedRecordingGenerator) GenerateWithMaxTokens(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	g.maxTokensSeen = append(g.maxTokensSeen, maxTokens)
+	return g.Generate(ctx, prompt)
+}
+
+// TestSearch_HyDE_CachesHypothesis pins that a repeated identical query reuses
+// the cached HyDE hypothesis instead of re-generating it (#444, F4): two
+// searches for the same query call the generator only once.
+func TestSearch_HyDE_CachesHypothesis(t *testing.T) {
+	gen := &recordingGenerator{out: "this is a hyde-doc hypothetical passage"}
+	svc := newHyDEService(t, gen)
+	svc.SetHyDE(true, "fuse")
+
+	_ = hydeSearchIDs(t, svc)
+	_ = hydeSearchIDs(t, svc)
+
+	if gen.calls != 1 {
+		t.Fatalf("repeated query must hit the HyDE cache; want 1 generation, got %d", gen.calls)
+	}
+}
+
+// TestSearch_HyDE_BoundsGenerationTokens pins that the HyDE generation is issued
+// with a positive output-token cap via model.BoundedGenerator (#444, F3).
+func TestSearch_HyDE_BoundsGenerationTokens(t *testing.T) {
+	gen := &boundedRecordingGenerator{recordingGenerator: recordingGenerator{out: "hyde-doc bounded passage"}}
+	svc := newHyDEService(t, gen)
+	svc.SetHyDE(true, "fuse")
+
+	_ = hydeSearchIDs(t, svc)
+
+	if len(gen.maxTokensSeen) != 1 {
+		t.Fatalf("HyDE must use the bounded generate path exactly once; got %d bounded calls", len(gen.maxTokensSeen))
+	}
+	if gen.maxTokensSeen[0] <= 0 {
+		t.Fatalf("HyDE generation must pass a positive max_tokens cap, got %d", gen.maxTokensSeen[0])
+	}
+}
+
 // TestSearch_HyDE_NilGenerator_IsRawQueryOnly pins that enabling HyDE without a
 // configured generator is a safe no-op (raw-query ranking), not a panic.
 func TestSearch_HyDE_NilGenerator_IsRawQueryOnly(t *testing.T) {
