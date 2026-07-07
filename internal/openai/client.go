@@ -10,6 +10,14 @@
 // callers can depend on model.Embedder / model.Generator without taking
 // a hard dependency on this package.
 //
+// A custom (non-default) base_url is treated as a self-hosted / local
+// OpenAI-compatible endpoint (Ollama/vLLM/LM Studio, SPEC §8.5) and MAY be
+// credential-less: when no api_key is configured against such a base_url the
+// client does NOT fail with OPENAI_AUTH and sends no Bearer header, mirroring
+// the credential-optional whisper/omniembed/colbert self-hosted clients. A
+// missing key against the public OpenAI cloud endpoint (the default base_url)
+// is still a hard OPENAI_AUTH error.
+//
 // OpenAI embeddings are symmetric, so the model.EmbedRole is accepted
 // and intentionally ignored (SPEC 8.1.5) — observable behavior MUST NOT
 // differ by role for this provider.
@@ -140,6 +148,30 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
+// missingRequiredKey reports whether an empty api_key is a hard error for
+// this client. A missing key is only fatal against the public OpenAI cloud
+// endpoint (the default base_url, or an unset base that falls back to it); a
+// custom base_url points at a self-hosted / local OpenAI-compatible endpoint
+// on a trusted network, which is credential-less by design (SPEC §8.5) and is
+// called with no Bearer header. When this returns false the caller proceeds
+// credential-less rather than returning OPENAI_AUTH.
+func (c *Client) missingRequiredKey() bool {
+	if strings.TrimSpace(c.APIKey) != "" {
+		return false
+	}
+	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	return base == "" || base == defaultBaseURL
+}
+
+// setAuthHeader sets the Bearer Authorization header only when an api_key is
+// configured, so a credential-less local endpoint receives no auth header
+// (mirrors the whisper/omniembed/colbert self-hosted clients).
+func (c *Client) setAuthHeader(req *http.Request) {
+	if key := strings.TrimSpace(c.APIKey); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+}
+
 type embedRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
@@ -158,7 +190,7 @@ type embedResponse struct {
 // in BatchSize-sized batches; each batch is retried with bounded
 // exponential backoff, and vectors are reordered to match input order.
 func (c *Client) Embed(ctx context.Context, modelName string, _ model.EmbedRole, inputs []string) ([][]float32, error) {
-	if strings.TrimSpace(c.APIKey) == "" {
+	if c.missingRequiredKey() {
 		return nil, &model.ProviderError{Code: "OPENAI_AUTH", Message: "missing OpenAI API key", Retryable: false}
 	}
 	modelName = strings.TrimSpace(modelName)
@@ -310,7 +342,7 @@ func (c *Client) GenerateWithMaxTokens(ctx context.Context, prompt string, maxTo
 }
 
 func (c *Client) generate(ctx context.Context, prompt string, maxTokensOverride int) (string, error) {
-	if strings.TrimSpace(c.APIKey) == "" {
+	if c.missingRequiredKey() {
 		return "", &model.ProviderError{Code: "OPENAI_AUTH", Message: "missing OpenAI API key", Retryable: false}
 	}
 	chatModel := strings.TrimSpace(c.DefaultChatModel)
@@ -431,7 +463,7 @@ type transcriptionResponse struct {
 // SPEC 8.1.2 ³: a compatible base lacking audio surfaces a provider
 // error here, never CONFIG_INVALID.
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
-	if strings.TrimSpace(c.APIKey) == "" {
+	if c.missingRequiredKey() {
 		return "", &model.ProviderError{Code: "OPENAI_AUTH", Message: "missing OpenAI API key", Retryable: false}
 	}
 	if len(data) == 0 {
@@ -474,7 +506,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to build transcription request", Retryable: false, Cause: err}
 	}
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	resp, err := clientWithTimeout(c.HTTPClient, timeout).Do(req)
 	if err != nil {
@@ -505,7 +537,7 @@ type speechRequest struct {
 // shape) via {base}/audio/speech, returning raw audio bytes. TTS is
 // fail-open per SPEC 8.3 — callers proceed without audio on error.
 func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
-	if strings.TrimSpace(c.APIKey) == "" {
+	if c.missingRequiredKey() {
 		return nil, &model.ProviderError{Code: "OPENAI_AUTH", Message: "missing OpenAI API key", Retryable: false}
 	}
 	if strings.TrimSpace(text) == "" {
@@ -581,7 +613,7 @@ func (c *Client) doJSON(ctx context.Context, path string, body []byte, timeout t
 	if err != nil {
 		return nil, &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to build request", Retryable: false, Cause: err}
 	}
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 

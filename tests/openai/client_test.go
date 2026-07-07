@@ -105,12 +105,56 @@ func TestEndpointPathJoinPreservesVersion(t *testing.T) {
 	}
 }
 
+// TestEmbed_MissingKeyIsNonRetryableAuth pins the cloud contract: a missing
+// api_key against the DEFAULT (public OpenAI) base_url is a hard OPENAI_AUTH
+// error, before any HTTP call. An empty base_url falls back to the cloud
+// default, so this exercises the credential-required path. The credential-less
+// local path (a custom base_url) is covered by TestCredentialLessLocalEndpoint.
 func TestEmbed_MissingKeyIsNonRetryableAuth(t *testing.T) {
-	c := openai.NewClient("http://127.0.0.1:0", "")
+	c := openai.NewClient("", "") // empty base -> public OpenAI cloud default
 	_, err := c.Embed(context.Background(), "m", model.EmbedQuery, []string{"x"})
 	var pe *model.ProviderError
 	if !asProviderErr(err, &pe) || pe.Code != "OPENAI_AUTH" || pe.Retryable {
 		t.Fatalf("want non-retryable OPENAI_AUTH, got %v", err)
+	}
+}
+
+// TestCredentialLessLocalEndpoint pins issue #498 / SPEC §8.5: a kind:openai
+// profile pointed at a CUSTOM (self-hosted / local) base_url with NO api_key is
+// credential-less — it must NOT fail with OPENAI_AUTH, and it must send NO
+// Authorization header (a trusted-network endpoint requires no key). This
+// mirrors the credential-optional whisper/omniembed/colbert self-hosted clients.
+func TestCredentialLessLocalEndpoint(t *testing.T) {
+	var sawAuth atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			sawAuth.Store(true)
+		}
+		switch r.URL.Path {
+		case "/v1/embeddings":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"index": 0, "embedding": []float64{1, 2}}},
+			})
+		case "/v1/chat/completions":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+			})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	// Custom base_url + empty api_key: the local endpoint is credential-less.
+	c := openai.NewClient(srv.URL+"/v1", "")
+	if _, err := c.Embed(context.Background(), "bge-m3", model.EmbedDocument, []string{"x"}); err != nil {
+		t.Fatalf("credential-less local embed must succeed, got %v", err)
+	}
+	if _, err := c.Generate(context.Background(), "hi"); err != nil {
+		t.Fatalf("credential-less local generate must succeed, got %v", err)
+	}
+	if sawAuth.Load() {
+		t.Fatal("credential-less local endpoint must receive NO Authorization header")
 	}
 }
 
@@ -336,7 +380,10 @@ func TestTranscribeAndSynthesize(t *testing.T) {
 }
 
 func TestAudioMissingKeyAndEmptyInput(t *testing.T) {
-	nokey := openai.NewClient("http://127.0.0.1:0", "")
+	// Missing key against the DEFAULT (public OpenAI) base is a hard OPENAI_AUTH
+	// error before any HTTP call (empty base -> cloud default). A custom base is
+	// credential-less (covered by TestCredentialLessLocalEndpoint).
+	nokey := openai.NewClient("", "")
 	if _, err := nokey.Transcribe(context.Background(), "a.wav", []byte("x")); err == nil {
 		t.Error("Transcribe missing key must error")
 	}
