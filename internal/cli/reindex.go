@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,7 +76,14 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	// (rollback). Closing first prevents a persist-on-close from clobbering a
 	// rolled-back index.
 	if reindexErr == nil && !global.quiet && !global.jsonOutput {
-		printReindexFinalSummary(a.stderr, ctx, st)
+		// Path-excluded drops persist no document row, so they are not in the
+		// store's SkipSummary; pull the ingestor's in-run per-reason counts (if it
+		// exposes them) to merge into the printed breakdown (#414).
+		var inRunSkips map[string]int64
+		if src, ok := ing.(skipReasonCounter); ok {
+			inRunSkips = src.SkipReasonCounts()
+		}
+		printReindexFinalSummary(a.stderr, ctx, st, inRunSkips)
 	}
 	// Resolve the content-hash snapshot while the store (meta.sqlite) is still
 	// open: discard it on a durable rebuild, restore it on any failure so the
@@ -365,13 +373,55 @@ func printReindexProgressLine(out io.Writer, ctx context.Context, st model.Store
 // user knows the run finished and what the final counts are. Same
 // CorpusStats source as the progress poller; silent when stats are
 // unavailable.
-func printReindexFinalSummary(out io.Writer, ctx context.Context, st model.Store) {
+func printReindexFinalSummary(out io.Writer, ctx context.Context, st model.Store, inRunSkips map[string]int64) {
 	stats, ok := corpusStatsForReindex(ctx, st)
 	if !ok {
 		return
 	}
 	_, _ = fmt.Fprintf(out, "[reindex] done: scanned=%d indexed=%d skipped=%d errors=%d chunks=%d embedded=%d\n",
 		stats.Scanned, stats.Indexed, stats.Skipped, stats.Errors, stats.ChunksTotal, stats.EmbeddedOK)
+	if breakdown := formatSkipBreakdown(stats.SkipSummary, inRunSkips); breakdown != "" {
+		// Honest-coverage breakdown of *why* files were skipped (#414): the durable
+		// per-reason counts from the store plus this run's non-persisted
+		// path-excludes. Printed only when something was skipped.
+		_, _ = fmt.Fprintf(out, "[reindex] not indexed: %s\n", breakdown)
+	}
+}
+
+// skipReasonCounter is the optional ingestor capability exposing in-run,
+// non-persisted per-reason skip counts (path-excludes). The reindex summary
+// merges these with the store's durable SkipSummary.
+type skipReasonCounter interface {
+	SkipReasonCounts() map[string]int64
+}
+
+// formatSkipBreakdown renders a stable "reason=N reason=N" line from the
+// store's durable SkipSummary categories merged with this run's non-persisted
+// in-run counts (path-excludes). Returns "" when nothing was skipped. Counts
+// for a reason present in both sources are summed.
+func formatSkipBreakdown(summary *model.SkipSummary, inRun map[string]int64) string {
+	merged := map[string]int64{}
+	if summary != nil {
+		for reason, n := range summary.Categories {
+			merged[reason] += n
+		}
+	}
+	for reason, n := range inRun {
+		merged[reason] += n
+	}
+	if len(merged) == 0 {
+		return ""
+	}
+	reasons := make([]string, 0, len(merged))
+	for reason := range merged {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		parts = append(parts, fmt.Sprintf("%s=%d", reason, merged[reason]))
+	}
+	return strings.Join(parts, " ")
 }
 
 // corpusStatsForReindex pulls CorpusStats from the SQLite-backed

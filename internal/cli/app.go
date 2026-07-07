@@ -306,6 +306,10 @@ type corpusIndexing struct {
 	Errors          int64                 `json:"errors"`
 	Unknown         int64                 `json:"unknown"`
 	FailureSummary  *model.FailureSummary `json:"failure_summary,omitempty"`
+	// SkipSummary groups never-indexed documents by skip_reason (honest
+	// coverage, #414/#395). Travels straight through from CorpusStats; omitted
+	// from JSON when nothing was skipped.
+	SkipSummary *model.SkipSummary `json:"skip_summary,omitempty"`
 }
 
 // NewApp constructs an App wired to os.Stdout and os.Stderr.
@@ -1932,6 +1936,10 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			// when no failures have been recorded (omitempty on the
 			// struct tag).
 			FailureSummary: corpusStats.FailureSummary,
+			// SkipSummary likewise travels through from CorpusStats so
+			// `status` can render an honest not-indexed coverage block
+			// (#414). Omitted from JSON on corpora with nothing skipped.
+			SkipSummary: corpusStats.SkipSummary,
 		},
 		DocCounts: docCounts,
 		TotalDocs: totalDocs,
