@@ -165,6 +165,35 @@ func TestMergeTranslateWindowsMergesMistimedSegments(t *testing.T) {
 	}
 }
 
+// TestMergeTranslateWindowsRecoversSkippedNeighborOverlap pins that a preceding
+// window's real overlap-region segments are NOT dropped when the scheduled next
+// window was skipped. translateStructuredWindowed omits a window whose decode
+// failed (silence/music/transient error), so the surviving `windows` slice can
+// have gaps; without extending the core to the actual next surviving window, the
+// content the previous window decoded past its scheduled core end is lost with no
+// error. This scenario was previously untested.
+func TestMergeTranslateWindowsRecoversSkippedNeighborOverlap(t *testing.T) {
+	// Scheduled starts would be 0, 4000, 8000 (stepMS=4000). The window at 4000
+	// failed and was skipped, so only 0 and 8000 survive. Window 0 decoded a real
+	// segment "bravo" at abs 4000 — past its scheduled core end (0+4000) but inside
+	// its own decoded span; with no window at 4000 to re-decode it, it must be kept.
+	windows := []ingest.TranslateWindow{
+		{StartMS: 0, Res: model.TranscriptResult{
+			Text: "[0:00] alpha\n[0:04] bravo",
+		}},
+		{StartMS: 8000, Res: model.TranscriptResult{
+			Text: "[0:00] charlie",
+		}},
+	}
+	text, _ := ingest.MergeTranslateWindows(windows, 4000)
+	if !strings.Contains(text, "bravo") {
+		t.Errorf("skipped-neighbor overlap content dropped (regression): %q", text)
+	}
+	if !strings.Contains(text, "alpha") || !strings.Contains(text, "charlie") {
+		t.Errorf("expected alpha + charlie retained, got: %q", text)
+	}
+}
+
 // TestTranslateWindowStarts_DropsTooShortFinalWindow pins the fix for the
 // tiny-final-window failure: a trailing window shorter than the overlap is
 // dropped (it would be a sub-second decode that ffmpeg errors on / Whisper

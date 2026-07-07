@@ -57,8 +57,19 @@ func MergeTranslateWindows(windows []TranslateWindow, stepMS int) (string, []mod
 	// timings together lets the overlap de-duplication drop both as a unit.
 	var segs []mergedSegment
 	for i, w := range windows {
-		coreEnd := w.StartMS + stepMS
 		last := i == len(windows)-1
+		// A window's core normally ends where the next scheduled window begins
+		// (startMS+stepMS), so its overlap tail is dropped as the next window's
+		// core re-decodes it. But `windows` holds only the windows that SURVIVED
+		// (translateStructuredWindowed skips a window whose decode failed — silence,
+		// music, a transient error), so the next surviving window may start LATER
+		// than the scheduled one. In that case nothing re-decodes this window's
+		// overlap tail, so extend the core to the actual next surviving window and
+		// keep this window's real segments instead of silently dropping them.
+		coreEnd := w.StartMS + stepMS
+		if !last && windows[i+1].StartMS > coreEnd {
+			coreEnd = windows[i+1].StartMS
+		}
 		for _, s := range windowSegments(w.Res, w.StartMS) {
 			if s.startMS < w.StartMS {
 				s.startMS = w.StartMS
