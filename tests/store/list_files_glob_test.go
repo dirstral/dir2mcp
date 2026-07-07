@@ -3,12 +3,39 @@ package tests
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
+
+// globCase pairs a glob with the paths list_files must return for it (drawn from
+// globTestRelPaths). Shared by the canonical-semantics test and the file_glob
+// agreement test (issue #441).
+type globCase struct {
+	glob string
+	want []string
+}
+
+var globTestRelPaths = []string{
+	"root.pdf",
+	"docs/guide.pdf",
+	"docs/notes.txt",
+	"docs/sub/deep.pdf",
+	"src/main.go",
+}
+
+var globTestCases = []globCase{
+	// `*` is segment-aware: `*.pdf` matches only root-level PDFs.
+	{"*.pdf", []string{"root.pdf"}},
+	// `docs/*` matches direct children of docs/, not nested.
+	{"docs/*", []string{"docs/guide.pdf", "docs/notes.txt"}},
+	// `**` recurses across segments.
+	{"**/*.pdf", []string{"docs/guide.pdf", "docs/sub/deep.pdf", "root.pdf"}},
+	{"docs/**", []string{"docs/guide.pdf", "docs/notes.txt", "docs/sub/deep.pdf"}},
+}
 
 // TestListFiles_GlobCanonicalSemantics pins that the list_files glob now uses the
 // SAME canonical matcher as the search/ask file_glob filter (issue #441): `*` is
@@ -23,14 +50,7 @@ func TestListFiles_GlobCanonicalSemantics(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	relPaths := []string{
-		"root.pdf",
-		"docs/guide.pdf",
-		"docs/notes.txt",
-		"docs/sub/deep.pdf",
-		"src/main.go",
-	}
-	for _, rp := range relPaths {
+	for _, rp := range globTestRelPaths {
 		if err := st.UpsertDocument(ctx, model.Document{RelPath: rp, DocType: "text", Status: "ok"}); err != nil {
 			t.Fatalf("upsert %q: %v", rp, err)
 		}
@@ -52,40 +72,25 @@ func TestListFiles_GlobCanonicalSemantics(t *testing.T) {
 		return got
 	}
 
-	cases := []struct {
-		glob string
-		want []string
-	}{
-		// `*` is segment-aware: `*.pdf` matches only root-level PDFs.
-		{"*.pdf", []string{"root.pdf"}},
-		// `docs/*` matches direct children of docs/, not nested.
-		{"docs/*", []string{"docs/guide.pdf", "docs/notes.txt"}},
-		// `**` recurses across segments.
-		{"**/*.pdf", []string{"docs/guide.pdf", "docs/sub/deep.pdf", "root.pdf"}},
-		{"docs/**", []string{"docs/guide.pdf", "docs/notes.txt", "docs/sub/deep.pdf"}},
-	}
-	for _, c := range cases {
-		got := listGlob(c.glob)
-		sort.Strings(c.want)
-		if len(got) != len(c.want) {
-			t.Errorf("glob %q: got %v want %v", c.glob, got, c.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != c.want[i] {
-				t.Errorf("glob %q: got %v want %v", c.glob, got, c.want)
-				break
-			}
+	for _, c := range globTestCases {
+		want := append([]string(nil), c.want...)
+		sort.Strings(want)
+		if got := listGlob(c.glob); !reflect.DeepEqual(got, want) {
+			t.Errorf("glob %q: got %v want %v", c.glob, got, want)
 		}
 	}
+}
 
-	// Cross-check: list_files and the file_glob matcher agree on every path.
-	for _, c := range cases {
+// TestListFiles_GlobMatchesFileGlob pins that the search/ask file_glob matcher
+// (model.MatchGlob) selects exactly the same paths list_files returns for each
+// canonical glob (issue #441) — the two surfaces must never diverge.
+func TestListFiles_GlobMatchesFileGlob(t *testing.T) {
+	for _, c := range globTestCases {
 		want := map[string]bool{}
 		for _, w := range c.want {
 			want[w] = true
 		}
-		for _, rp := range relPaths {
+		for _, rp := range globTestRelPaths {
 			viaFilter, err := model.MatchGlob(c.glob, rp)
 			if err != nil {
 				t.Fatalf("MatchGlob(%q,%q): %v", c.glob, rp, err)
