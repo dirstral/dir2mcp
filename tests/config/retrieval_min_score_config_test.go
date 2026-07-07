@@ -123,3 +123,28 @@ func TestRetrievalMinScore_ValidateRejectsNegativeProgrammatic(t *testing.T) {
 		t.Fatalf("Validate with negative RetrievalMinScore = nil error, want rejection")
 	}
 }
+
+// TestRetrievalMinScore_RejectsAboveOne pins that a floor > 1 is CONFIG_INVALID:
+// since #411 the floor is compared against MIN-MAX NORMALIZED scores in [0,1], so
+// any value above 1 would silently drop every hit — a misconfiguration.
+func TestRetrievalMinScore_RejectsAboveOne(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, "retrieval_min_score: 1.5\n")
+	if _, err := config.LoadFile(path); err == nil {
+		t.Fatalf("LoadFile with retrieval_min_score > 1 = nil error, want rejection")
+	} else if !strings.Contains(err.Error(), "retrieval.min_score") {
+		t.Fatalf("error must mention retrieval.min_score, got: %v", err)
+	}
+
+	// Programmatic guard too, and the boundary 1.0 stays valid.
+	cfg := config.Default()
+	cfg.RetrievalMinScore = 1.5
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("Validate with RetrievalMinScore=1.5 = nil error, want rejection")
+	}
+	cfg.RetrievalMinScore = 1.0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("RetrievalMinScore=1.0 must be valid (keep only the top hit), got: %v", err)
+	}
+}
