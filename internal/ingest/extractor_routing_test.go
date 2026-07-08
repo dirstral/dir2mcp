@@ -158,3 +158,76 @@ func TestUnsupportedExtractionErr(t *testing.T) {
 
 var _ model.DocumentExtractor = flatRoutingExtractor{}
 var _ model.DocumentExtractor = structuredRoutingExtractor{}
+
+// TestSelectExtractionRoute is the #395 Stage 2 / #556 guard for the
+// capability-aware, per-format selection (SPEC §7.4.B.1 best-available + §7.4.A
+// markup boundary). It pins the fidelity-ordered choice for every combination of
+// policy, active engines, and format that the shipped engines can produce.
+func TestSelectExtractionRoute(t *testing.T) {
+	both := extractionAvailability{structured: true, flatOCR: true}
+	structuredOnly := extractionAvailability{structured: true}
+	flatOnly := extractionAvailability{flatOCR: true}
+	none := extractionAvailability{}
+
+	cases := []struct {
+		name   string
+		policy string
+		avail  extractionAvailability
+		ext    string
+		want   extractionRoute
+	}{
+		// auto: docling (T1) is preferred whenever active, for every format it reads.
+		{"auto both pdf -> structured (T1 wins)", "auto", both, ".pdf", routeStructured},
+		{"auto both docx -> structured", "auto", both, ".docx", routeStructured},
+		{"auto both tiff -> structured (mistral cannot)", "auto", both, ".tiff", routeStructured},
+		// auto: docling absent -> mistral (T3) for its allowlist, degrade otherwise.
+		{"auto flat pdf -> flat OCR", "auto", flatOnly, ".pdf", routeFlatOCR},
+		{"auto flat png -> flat OCR", "auto", flatOnly, ".png", routeFlatOCR},
+		{"auto flat docx -> degrade (mistral cannot read docx)", "auto", flatOnly, ".docx", routeDegrade},
+		{"auto flat tiff -> degrade", "auto", flatOnly, ".tiff", routeDegrade},
+		// auto: nothing active -> degrade (except html, see below).
+		{"auto none pdf -> degrade", "auto", none, ".pdf", routeDegrade},
+		// html markup boundary (#556 / §7.4.A):
+		{"auto structured html -> structured (promoted, #556)", "auto", structuredOnly, ".html", routeStructured},
+		{"auto structured htm -> structured", "auto", structuredOnly, ".htm", routeStructured},
+		{"auto flat html -> raw_text baseline (mistral cannot read html)", "auto", flatOnly, ".html", routeRawText},
+		{"auto none html -> raw_text baseline (never dropped)", "auto", none, ".html", routeRawText},
+		// pinned docling: only structured is eligible.
+		{"pin docling pdf -> structured", "docling", structuredOnly, ".pdf", routeStructured},
+		{"pin docling html -> structured", "docling", structuredOnly, ".html", routeStructured},
+		{"pin docling odt -> degrade (docling cannot import odt)", "docling", structuredOnly, ".odt", routeDegrade},
+		// pinned mistral: no cross-engine fallback; html still keeps its baseline.
+		{"pin mistral pdf -> flat OCR", "mistral", flatOnly, ".pdf", routeFlatOCR},
+		{"pin mistral docx -> degrade (no fallback to docling)", "mistral", both, ".docx", routeDegrade},
+		{"pin mistral html -> raw_text baseline (§7.4.A, never dropped)", "mistral", both, ".html", routeRawText},
+		// docling-serve is a structured transport: behaves like docling for selection.
+		{"pin docling-serve pdf -> structured", "docling-serve", structuredOnly, ".pdf", routeStructured},
+		// off: no extraction engine eligible; html still falls to its baseline.
+		{"off pdf -> degrade", "off", both, ".pdf", routeDegrade},
+		{"off html -> raw_text baseline", "off", both, ".html", routeRawText},
+		// empty policy defaults to auto.
+		{"empty policy defaults to auto", "", both, ".pdf", routeStructured},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := selectExtractionRoute(tc.policy, tc.avail, tc.ext); got != tc.want {
+				t.Errorf("selectExtractionRoute(%q, %+v, %q) = %d, want %d", tc.policy, tc.avail, tc.ext, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestActiveExtractionAvailability confirms availability is derived from the
+// resolved single extractor: a structured extractor reports structured-active, a
+// flat one reports flat-active, and no extractor reports nothing active.
+func TestActiveExtractionAvailability(t *testing.T) {
+	if got := (&Service{extractor: structuredRoutingExtractor{}}).activeExtractionAvailability(); !got.structured || got.flatOCR {
+		t.Errorf("structured extractor availability = %+v, want {structured:true}", got)
+	}
+	if got := (&Service{extractor: flatRoutingExtractor{}}).activeExtractionAvailability(); got.structured || !got.flatOCR {
+		t.Errorf("flat extractor availability = %+v, want {flatOCR:true}", got)
+	}
+	if got := (&Service{}).activeExtractionAvailability(); got.structured || got.flatOCR {
+		t.Errorf("nil extractor availability = %+v, want zero", got)
+	}
+}

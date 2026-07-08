@@ -1,5 +1,7 @@
 package ingest
 
+import "strings"
+
 // This file is the single internal source of truth for which extraction engine
 // can read which file format. It consolidates the three format allowlists that
 // were previously scattered across the codebase (#395 Stage 1):
@@ -118,4 +120,115 @@ func extractorSupportsExt(structured bool, ext string) bool {
 // distinction: true for the docling family, false for the flat OCR path.
 func ExtractorSupportsExt(structured bool, ext string) bool {
 	return extractorSupportsExt(structured, ext)
+}
+
+// --- Capability-aware, per-format selection (#395 Stage 2 / #556) --------------
+//
+// SPEC §7.4.B.1 defines the extraction-engine registry as a fidelity-ordered
+// capability matrix and mandates "best-available per format" routing under
+// `ingest.extractor: auto`: for each classified document, select the ACTIVE
+// engine of lowest fidelity tier whose matrix cell for that format is ✅, falling
+// through the tier order (T1 docling → T2 pandoc[future #393] → T3 mistral OCR →
+// T4 raw_text). A format no active engine supports degrades per §7.4.B.2; html is
+// the one format whose T4 `raw_text` baseline (§7.4.A) is unconditional, so it is
+// never dropped. selectExtractionRoute below is that algorithm; the ingest
+// service consumes it (deriving which engines are active from the resolved
+// extractor) so routing is a single, spec-faithful decision rather than a coarse
+// doc_type switch. pandoc (T2) is declared in the matrix for completeness but is
+// never active until #393 ships, so it is not represented as an eligible engine
+// here.
+
+// markupReadableExt is the markup (html) format class of the §7.4.B.1 matrix. It
+// is the only class with a `raw_text` (T4) ✅ cell, and per §7.4.A that baseline
+// is guaranteed: html is never dropped even when no structured engine is active
+// and even when a single engine is pinned.
+var markupReadableExt = map[string]struct{}{
+	".html":  {},
+	".htm":   {},
+	".xhtml": {},
+}
+
+// isMarkupExt reports whether ext is a markup (html) extension eligible for the
+// unconditional §7.4.A raw_text baseline. ext is expected lowercased with its
+// leading dot.
+func isMarkupExt(ext string) bool {
+	_, ok := markupReadableExt[ext]
+	return ok
+}
+
+// extractionRoute is the pipeline action the per-format selection resolves for a
+// document's format (§7.4.B.1). The ingest service consumes it to decide how — or
+// whether — to produce an extracted_markdown representation.
+type extractionRoute int
+
+const (
+	// routeDegrade: no active engine supports the format (a coverage gap under
+	// `auto`, or a pinned engine that cannot read it). Handled per the §7.4.B.2
+	// strict/lenient degradation contract; never a silent empty representation.
+	routeDegrade extractionRoute = iota
+	// routeStructured: the docling family (T1) — structured extracted_markdown
+	// with region spans (§7.4.B "Structured extraction").
+	routeStructured
+	// routeFlatOCR: the mistral OCR engine (T3) — page-separated extracted_markdown
+	// (§7.4.B "Page-separated extraction").
+	routeFlatOCR
+	// routeRawText: the T4 raw_text baseline (§7.4.A). Applies only to markup
+	// (html) and is the guaranteed fallback so html is never dropped.
+	routeRawText
+)
+
+// extractionAvailability records which extraction engines are ACTIVE for the run
+// (§7.4.B "Extractor availability"). It is derived once from the resolved
+// extractor so the per-format selection can never drift from the engine the
+// service will actually run.
+type extractionAvailability struct {
+	// structured is true when the docling family (local CLI or docling-serve) is
+	// active — it resolved and passed its availability probe.
+	structured bool
+	// flatOCR is true when the mistral OCR engine (the active `ocr` provider) is
+	// available.
+	flatOCR bool
+}
+
+// selectExtractionRoute implements SPEC §7.4.B.1's best-available per-format
+// selection plus the §7.4.A markup boundary (#556). Given the `ingest.extractor`
+// policy, the set of active engines, and a lowercased file extension, it returns
+// the highest-fidelity ACTIVE engine that supports the format, falling through
+// the fidelity order. The selection is deterministic (a pure function of its
+// inputs) and, because availability is resolved once per run, cached for the run.
+//
+//   - `auto`: every engine is eligible (subject to availability).
+//   - `docling` / `docling-serve`: only the structured (docling family) engine is
+//     eligible — a pinned engine gets no cross-engine fallback (§7.4.B.1).
+//   - `mistral`: only the flat OCR engine is eligible.
+//   - `off`: no extraction engine is eligible; html still falls to its raw_text
+//     baseline, and pdf/image/document simply produce no extracted representation.
+//
+// A format no eligible+active engine supports returns routeDegrade, EXCEPT markup
+// (html), whose raw_text baseline (§7.4.A) is unconditional and exempt from the
+// pin restriction so html is never dropped.
+func selectExtractionRoute(policy string, avail extractionAvailability, ext string) extractionRoute {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	if policy == "" {
+		policy = "auto"
+	}
+	structuredAllowed := policy == "auto" || policy == "docling" || policy == "docling-serve"
+	flatAllowed := policy == "auto" || policy == "mistral"
+
+	// T1 docling (structured): reads every extraction format except the
+	// structured-unreadable denylist.
+	if structuredAllowed && avail.structured && engineSupportsExt(engineStructured, ext) {
+		return routeStructured
+	}
+	// T3 mistral OCR (flat): the pdf/png/jpg/jpeg/webp allowlist.
+	if flatAllowed && avail.flatOCR && engineSupportsExt(engineFlatOCR, ext) {
+		return routeFlatOCR
+	}
+	// T4 raw_text baseline: markup (html) only, always available and exempt from
+	// the pin restriction (§7.4.A: "raw_text remains the guaranteed baseline;
+	// HTML is never dropped, and behavior MUST NOT regress when docling is absent").
+	if isMarkupExt(ext) {
+		return routeRawText
+	}
+	return routeDegrade
 }

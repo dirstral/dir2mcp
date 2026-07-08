@@ -366,6 +366,11 @@ type Config struct {
 	IngestAudioMode      string
 	IngestArchivesMode   string
 	IngestExtractor      string
+	// IngestOnUnsupported is the §7.4.B.2 degradation mode for a format no active
+	// extraction engine can read: "lenient" (default) skips with a warning and
+	// names the gap in the honest coverage report, "strict" records a non-fatal
+	// per-document UNSUPPORTED_FORMAT error. Empty defaults to lenient.
+	IngestOnUnsupported string
 
 	// IndexBackend selects the vector index backend (issue #246): "memory"
 	// (default, the in-memory HNSW) or "disk" (the Tier-B pure-Go on-disk
@@ -758,6 +763,7 @@ type fileConfig struct {
 	IngestAudioMode                    *string
 	IngestArchivesMode                 *string
 	IngestExtractor                    *string
+	IngestOnUnsupported                *string
 	IndexBackend                       *string
 	IngestScanCache                    *bool
 	IngestLateChunking                 *bool
@@ -897,6 +903,7 @@ type persistedConfig struct {
 	IngestAudioMode                    string        `yaml:"ingest_audio_mode"`
 	IngestArchivesMode                 string        `yaml:"ingest_archives_mode"`
 	IngestExtractor                    string        `yaml:"ingest_extractor"`
+	IngestOnUnsupported                string        `yaml:"ingest_on_unsupported"`
 	IndexBackend                       string        `yaml:"index_backend"`
 	IngestScanCache                    bool          `yaml:"ingest_scan_cache"`
 	IngestLateChunking                 bool          `yaml:"ingest_late_chunking"`
@@ -1118,6 +1125,7 @@ func Default() Config {
 		IngestAudioMode:           "auto",
 		IngestArchivesMode:        "deep",
 		IngestExtractor:           "auto",
+		IngestOnUnsupported:       "lenient",
 		IndexBackend:              "memory",
 		IngestScanCache:           false,
 		IngestLateChunking:        false,
@@ -1257,6 +1265,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestAudioMode:                    cfg.IngestAudioMode,
 		IngestArchivesMode:                 cfg.IngestArchivesMode,
 		IngestExtractor:                    cfg.IngestExtractor,
+		IngestOnUnsupported:                cfg.IngestOnUnsupported,
 		IndexBackend:                       cfg.IndexBackend,
 		IngestScanCache:                    cfg.IngestScanCache,
 		IngestLateChunking:                 cfg.IngestLateChunking,
@@ -1960,6 +1969,9 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestExtractor != nil {
 		cfg.IngestExtractor = *fc.IngestExtractor
 	}
+	if fc.IngestOnUnsupported != nil {
+		cfg.IngestOnUnsupported = *fc.IngestOnUnsupported
+	}
 	if fc.IndexBackend != nil {
 		cfg.IndexBackend = *fc.IndexBackend
 	}
@@ -2414,6 +2426,8 @@ var configKeyAliases = map[string]string{
 	"archives_mode":                           "ingest.archives.mode",
 	"ingest_extractor":                        "ingest.extractor",
 	"extractor":                               "ingest.extractor",
+	"ingest_on_unsupported":                   "ingest.on_unsupported",
+	"on_unsupported":                          "ingest.on_unsupported",
 	"index_backend":                           "index.backend",
 	"backend":                                 "index.backend",
 	"media_variants_group":                    "media.variants.group",
@@ -2866,6 +2880,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestArchivesMode = strPtr(value)
 	case "ingest.extractor":
 		cfg.IngestExtractor = strPtr(value)
+	case "ingest.on_unsupported":
+		cfg.IngestOnUnsupported = strPtr(value)
 	case "index.backend":
 		cfg.IndexBackend = strPtr(value)
 	case "stt.provider":
@@ -2876,6 +2892,15 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.STTElevenLabsModel = strPtr(value)
 	case "stt.elevenlabs.language_code":
 		cfg.STTElevenLabsLanguageCode = strPtr(value)
+	default:
+		setMediaStringFileScalar(cfg, key, value)
+	}
+}
+
+// setMediaStringFileScalar assigns media.* string keys onto the fileConfig. Split
+// out of setIngestStringFileScalar so each stays within the cyclomatic budget.
+func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
+	switch key {
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
 	case "media.subtitles.segmentation":
@@ -3052,6 +3077,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_audio_mode", cfg.IngestAudioMode)
 	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
 	writeScalar("ingest_extractor", cfg.IngestExtractor)
+	writeScalar("ingest_on_unsupported", cfg.IngestOnUnsupported)
 	writeScalar("index_backend", cfg.IndexBackend)
 	writeBool("ingest_scan_cache", cfg.IngestScanCache)
 	writeBool("ingest_late_chunking", cfg.IngestLateChunking)
@@ -3330,6 +3356,7 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 		{"DIR2MCP_DOCLING_COMMAND", &cfg.DoclingCommand},
 		{"DIR2MCP_DOCLING_SERVE_URL", &cfg.IngestDoclingServeURL},
 		{"DIR2MCP_INGEST_EXTRACTOR", &cfg.IngestExtractor},
+		{"DIR2MCP_INGEST_ON_UNSUPPORTED", &cfg.IngestOnUnsupported},
 		{"DIR2MCP_INDEX_BACKEND", &cfg.IndexBackend},
 	} {
 		if raw, ok := envLookup(o.key, env); ok && strings.TrimSpace(raw) != "" {
@@ -3552,6 +3579,9 @@ func applyX402RouteEnvOverrides(cfg *Config, env map[string]string) {
 // ValidateX402, this method operates on a pointer receiver so that it can
 // modify the receiver in-place.
 func (c *Config) Validate() error {
+	if err := c.validateIngestOnUnsupported(); err != nil {
+		return err
+	}
 	if err := c.validateIngestExtractor(); err != nil {
 		return err
 	}
@@ -3837,6 +3867,23 @@ func (c *Config) validateIngestExtractor() error {
 		return fmt.Errorf("ingest.extractor must be one of auto, docling, docling-serve, mistral, off: %q", c.IngestExtractor)
 	}
 	c.IngestExtractor = extractorMode
+	return nil
+}
+
+// validateIngestOnUnsupported normalizes IngestOnUnsupported (defaulting empty to
+// the lenient default) and rejects any value outside lenient/strict. It is the
+// §7.4.B.2 degradation-mode knob mirroring the tri-state opt-outs used elsewhere.
+func (c *Config) validateIngestOnUnsupported() error {
+	mode := strings.ToLower(strings.TrimSpace(c.IngestOnUnsupported))
+	if mode == "" {
+		mode = Default().IngestOnUnsupported
+	}
+	switch mode {
+	case "lenient", "strict":
+	default:
+		return fmt.Errorf("ingest.on_unsupported must be one of lenient, strict: %q", c.IngestOnUnsupported)
+	}
+	c.IngestOnUnsupported = mode
 	return nil
 }
 

@@ -58,6 +58,13 @@ type Service struct {
 	extractor     model.DocumentExtractor
 	transcriber   model.Transcriber
 
+	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
+	// active extraction engine supports (ingest.on_unsupported): "lenient"
+	// (default) skips with a warning and surfaces the gap in the honest coverage
+	// report, while "strict" records a non-fatal per-document UNSUPPORTED_FORMAT
+	// error. Resolved once in NewService; empty is treated as lenient.
+	onUnsupported string
+
 	// fsys is the corpus filesystem abstraction used for discovery and byte
 	// reads. Nil means "use a local filesystem rooted at cfg.RootDir" — the
 	// default that preserves the historical local-corpus behavior. It is
@@ -391,16 +398,49 @@ var errNoVideoRepresentation = errors.New(
 	"video produced no representation: no subtitle sidecar found, video is not transcribed (STT is audio-only), " +
 		"and multimodal keyframe embedding is off — enable embed_multimodal or provide a .vtt/.srt sidecar to make it searchable")
 
+// activeExtractionAvailability derives which extraction engines are active for
+// this run (§7.4.B "Extractor availability") from the single resolved extractor.
+// The resolved extractor is already the best-available engine chosen by the
+// docling → docling-serve → mistral cascade (DescribeDocumentExtractor), so it is
+// either the structured docling family or the flat OCR path; deriving
+// availability from it keeps the per-format selection in lockstep with the engine
+// the service will actually run, with no second probe to drift from it.
+func (s *Service) activeExtractionAvailability() extractionAvailability {
+	if s.extractor == nil {
+		return extractionAvailability{}
+	}
+	if _, structured := s.extractor.(structuredExtractor); structured {
+		return extractionAvailability{structured: true}
+	}
+	return extractionAvailability{flatOCR: true}
+}
+
+// routeExtractionExt resolves the capability-aware, per-format extraction route
+// (§7.4.B.1 / §7.4.A) for a lowercased extension under the active
+// `ingest.extractor` policy and the currently-active engines. It is the single
+// routing decision both the extracted-markdown path and the html markup-boundary
+// (#556) consult.
+func (s *Service) routeExtractionExt(ext string) extractionRoute {
+	return selectExtractionRoute(s.cfg.IngestExtractor, s.activeExtractionAvailability(), ext)
+}
+
 // extractorCanReadExt reports whether the currently-selected extractor can read
-// the asset's format. Docling-family extractors implement structuredExtractor;
-// the flat Mistral-OCR path does not.
+// the asset's format for the extracted-markdown path (pdf/image/document),
+// consulting the per-format selection (§7.4.B.1) rather than a coarse
+// structured/flat switch. It is true only when the active engine is routed to
+// extract the format (structured or flat OCR); a format that must degrade — or
+// that routes to the raw_text baseline (html) — is not "readable" on this path.
 func (s *Service) extractorCanReadExt(relPath string) bool {
 	if s.extractor == nil {
 		return false
 	}
-	_, structured := s.extractor.(structuredExtractor)
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
-	return extractorSupportsExt(structured, ext)
+	switch s.routeExtractionExt(ext) {
+	case routeStructured, routeFlatOCR:
+		return true
+	default:
+		return false
+	}
 }
 
 // extractorLabel is a short human name for the active extractor, used in the
@@ -425,6 +465,63 @@ func unsupportedExtractionErr(relPath, extractor string) error {
 		"unsupported format for extraction: the active extractor (%s) cannot read %s files; "+
 			"install a capable extractor or convert the file to a supported format (tracked in #393)",
 		extractor, ext)
+}
+
+// onUnsupportedStrict/Lenient are the §7.4.B.2 degradation modes.
+const (
+	onUnsupportedLenient = "lenient"
+	onUnsupportedStrict  = "strict"
+)
+
+// normalizeOnUnsupported maps the raw ingest.on_unsupported config value to the
+// resolved §7.4.B.2 mode. Only "strict" selects the strict contract; everything
+// else (including empty and any unrecognized value) is the lenient default, so a
+// service constructed from a bare config.Config degrades leniently — the
+// backward-compatible, not-indexed-but-honest outcome.
+func normalizeOnUnsupported(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), onUnsupportedStrict) {
+		return onUnsupportedStrict
+	}
+	return onUnsupportedLenient
+}
+
+// SetOnUnsupported overrides the resolved §7.4.B.2 degradation mode, primarily
+// for tests that need to exercise strict/lenient without threading a full config.
+// The value is normalized (only "strict" is strict; anything else is lenient).
+func (s *Service) SetOnUnsupported(mode string) {
+	s.onUnsupported = normalizeOnUnsupported(mode)
+}
+
+// degradeUnsupportedExtraction applies the §7.4.B.2 degradation contract to a
+// pdf/image/document asset whose format no active extraction engine can read,
+// and which produced no direct-embedding media chunks either (so it would
+// otherwise be unsearchable). It never hands the asset to an engine that cannot
+// read it and never lets the gap be silent:
+//
+//   - strict: a non-fatal per-document UNSUPPORTED_FORMAT error (§7.7) —
+//     documents.status=error, the error counter is bumped, and the caller is told
+//     (nonFatalErrored) not to also credit the document as indexed (#426).
+//   - lenient (default): skip-with-warning — no extracted_markdown is produced,
+//     the document keeps whatever other representations it has, and the gap is
+//     logged and recorded in the in-run skip counter so `status`/`reindex` and the
+//     honest coverage report (§7.7) name it. The document is still indexed.
+//
+// It returns whether the strict path recorded a non-fatal error (so the caller
+// can propagate the #426 no-double-count signal).
+func (s *Service) degradeUnsupportedExtraction(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp) (nonFatalErrored bool) {
+	cause := unsupportedExtractionErr(doc.RelPath, s.extractorLabel())
+	if s.onUnsupported == onUnsupportedStrict {
+		s.getLogger().Printf("unsupported format (strict) for %s (%s): %v", doc.RelPath, doc.DocType, cause)
+		s.addErrors(1)
+		s.persistNonFatalDocError(ctx, doc, cause, secretPatterns)
+		return true
+	}
+	// lenient: honest skip, not an error. The document remains status="ok" with
+	// whatever other representations it has; the coverage report (§7.7) and the
+	// in-run skip counter name the uncovered format so it is never silent.
+	s.getLogger().Printf("unsupported format (lenient, skipped) for %s (%s): %v", doc.RelPath, doc.DocType, cause)
+	s.addRunSkipReason(model.SkipReasonUnsupportedFormat)
+	return false
 }
 
 type documentDeleteMarker interface {
@@ -455,6 +552,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		store:                           store,
 		logger:                          log.Default(),
 		onDocumentDeletedMaxConcurrency: defaultOnDocumentDeletedMaxConcurrency,
+		onUnsupported:                   normalizeOnUnsupported(cfg.IngestOnUnsupported),
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -2490,18 +2588,13 @@ func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, 
 			}
 			s.addRepresentations(1)
 		} else if !mediaProduced {
-			// #394: the active extractor cannot read this format. Rather than hand
-			// it to an extractor that fails silently (docling → empty) or hard-errors
-			// (Mistral OCR → "unsupported file extension"), record a clear, non-fatal
-			// unsupported-format diagnostic so the unsearchable asset is durably
-			// visible (status="error" / RecentFailures) and the run continues. Skipped
-			// only when direct multimodal embedding is not also making the doc
+			// #394/#395: the active extractor cannot read this format. Rather than
+			// hand it to an engine that fails silently (docling → empty) or hard-errors
+			// (Mistral OCR → "unsupported file extension"), degrade honestly per the
+			// §7.4.B.2 strict/lenient contract — never a silent empty representation.
+			// Skipped only when direct multimodal embedding is not also making the doc
 			// searchable; content support for these formats is #393.
-			cause := unsupportedExtractionErr(doc.RelPath, s.extractorLabel())
-			s.getLogger().Printf("skipping extraction for %s (%s): %v", doc.RelPath, doc.DocType, cause)
-			s.addErrors(1)
-			s.persistNonFatalDocError(ctx, doc, cause, secretPatterns)
-			nonFatalErrored = true
+			nonFatalErrored = s.degradeUnsupportedExtraction(ctx, doc, secretPatterns)
 		}
 	}
 	if mediaProduced {
@@ -2749,6 +2842,17 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return false, nil
 	}
 
+	// #556 / §7.4.A markup boundary: html is a dual-path format. When a structured
+	// extraction engine (the docling family) is active and the per-format selection
+	// routes html to it, produce a structured extracted_markdown representation
+	// (headings/tables/links as region spans) instead of flat raw_text. When no
+	// structured HTML engine is active — extractor off/unavailable, or pinned to a
+	// non-structured engine — html falls back to the raw_text baseline below, so it
+	// is never dropped and does not regress when docling is absent.
+	if doc.DocType == "html" && s.htmlRoutesToStructured(doc.RelPath) {
+		return s.generateHTMLStructured(ctx, doc, content, secretPatterns)
+	}
+
 	if ShouldGenerateRawText(doc.DocType) {
 		// #398: a binary payload that classified into a text-oriented doc type
 		// (e.g. .parquet → "data") must not be run through the raw-text path, where
@@ -2796,6 +2900,61 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	}
 
 	return s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
+}
+
+// htmlRoutesToStructured reports whether an html document should be promoted to
+// the structured extraction path (#556 / §7.4.A) instead of flat raw_text: true
+// only when the active extractor is a structured (docling family) engine AND the
+// per-format selection (§7.4.B.1) routes html to it. Every other case — no
+// extractor, docling unavailable, or a pinned flat engine — keeps the guaranteed
+// raw_text baseline, so html never regresses when docling is absent.
+func (s *Service) htmlRoutesToStructured(relPath string) bool {
+	if s.extractor == nil || s.repGen == nil {
+		return false
+	}
+	if _, structured := s.extractor.(structuredExtractor); !structured {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	return s.routeExtractionExt(ext) == routeStructured
+}
+
+// generateHTMLStructured produces the structured extracted_markdown representation
+// for an html document via the active docling-family extractor (#556 / §7.4.A),
+// preserving heading/table structure as region spans (html carries no page/bbox,
+// so its region spans carry the section breadcrumb + label). It guarantees the
+// §7.4.A baseline: if structured extraction errors or yields no parseable
+// structure, it falls back to flat raw_text so html is never dropped. html has no
+// media/transcript path, so it returns immediately after the text representation;
+// the (nonFatalErrored, err) contract matches generateRepresentations.
+func (s *Service) generateHTMLStructured(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp) (bool, error) {
+	if se, ok := s.extractor.(structuredExtractor); ok {
+		res, err := s.readOrComputeStructured(ctx, doc, content, se)
+		switch {
+		case err == nil && len(res.Blocks) > 0:
+			if perr := s.persistStructuredRepresentation(ctx, doc, res); perr != nil {
+				return false, perr
+			}
+			s.addRepresentations(1)
+			return false, nil
+		case err != nil:
+			s.getLogger().Printf("html structured extraction failed for %s, falling back to raw_text baseline (§7.4.A): %v", doc.RelPath, err)
+		default:
+			s.getLogger().Printf("html structured extraction produced no structure for %s, using raw_text baseline (§7.4.A)", doc.RelPath)
+		}
+	}
+	// Baseline (§7.4.A): flat raw_text so html is never dropped.
+	if err := s.repGen.GenerateRawTextFromContent(ctx, doc, content); err != nil {
+		return false, err
+	}
+	s.addRepresentations(1)
+	const titleScanLimit = 4096
+	titleContent := content
+	if len(titleContent) > titleScanLimit {
+		titleContent = titleContent[:titleScanLimit]
+	}
+	s.persistTitleIfFound(ctx, doc, string(titleContent))
+	return false, nil
 }
 
 // generateTranscriptOrSidecar resolves a media document's transcript. Subtitle
