@@ -74,11 +74,11 @@ func RedactSecretsInMessage(msg string, patterns []*regexp.Regexp) string {
 // `keyword: value` form — so a redaction here never hides the actionable part of
 // an error (SPEC §15.6 recent_failures actionability).
 var highConfidenceCredentialRedactors = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}`),                             // Bearer token
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),                                    // AWS access key (long-term / temporary)
-	regexp.MustCompile(`(?i)\b(?:sk|pk|rk)[-_][A-Za-z0-9_\-]{16,}`),                        // Stripe / OpenAI (sk-proj-…) / Anthropic-style key
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9_]{20,}`),                                    // GitHub PAT / OAuth
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),                                   // Slack
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}`),                              // Bearer token
+	regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),                                     // AWS access key (long-term / temporary)
+	regexp.MustCompile(`(?i)\b(?:sk|pk|rk)[-_][A-Za-z0-9_\-]{16,}`),                         // Stripe / OpenAI (sk-proj-…) / Anthropic-style key
+	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9_]{20,}`),                                     // GitHub PAT / OAuth
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),                                    // Slack
 	regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-.]{10,}\.[A-Za-z0-9_\-]{5,}`), // JWT
 }
 

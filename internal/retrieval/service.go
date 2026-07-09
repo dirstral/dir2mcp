@@ -156,9 +156,9 @@ type Service struct {
 	// label. A chunk_id belongs to exactly one axis (text or code) in production,
 	// so the previous per-index split (chunkByIndex) held a redundant second copy
 	// of every SearchHit; it was collapsed into this one map (issue #429 F4/D1).
-	chunkByLabel map[uint64]model.SearchHit
-	rootDir      string
-	stateDir     string
+	chunkByLabel        map[uint64]model.SearchHit
+	rootDir             string
+	stateDir            string
 	// ocrCacheIdentity / transcriptCacheIdentity are the ACTIVE OCR-extraction and
 	// STT(+diarize) derivation identities (SPEC §8.6.7) of the ingest pipeline,
 	// plumbed in via SetDerivationCacheIdentities so open_file's OCR/transcript
