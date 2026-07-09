@@ -193,6 +193,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"routing_decision.go":                    {},
 		"server_doctor.go":                       {},
 		"server_doctor_coverage_test.go":         {},
+		"server_doctor_egress_test.go":           {},
 		"server_log_tee_internal_test.go":        {},
 		"service.go":                             {},
 		"service_darwin.go":                      {},
