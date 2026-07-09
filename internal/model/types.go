@@ -331,11 +331,16 @@ type Filter struct {
 	ExcludeOrphans bool
 	Speaker        string
 	// Languages restricts candidates to representations whose recorded effective
-	// language (SPEC §5.2/§8.8) matches any requested BCP-47 tag on the
-	// primary-subtag axis, case-insensitively (logical OR, SPEC §9.5). Empty
-	// disables the predicate (no language filtering). A candidate with no
-	// recorded language (unknown) never matches a non-empty Languages filter.
+	// language (SPEC §5.2/§8.8) matches any requested BCP-47 tag (logical OR,
+	// SPEC §9.5). Empty disables the predicate (no language filtering). A
+	// candidate with no recorded language (unknown) never matches a non-empty
+	// Languages filter.
 	Languages []string
+	// LanguageMatch selects the §9.5 matching mode for Languages:
+	// LanguageMatchPrimary ("" default — case-insensitive primary-subtag match)
+	// or LanguageMatchStrict (opt-in RFC 4647 Basic Filtering region/script
+	// narrowing). Inert unless Languages is non-empty.
+	LanguageMatch string
 }
 
 // IsZero reports whether the filter has no active predicate.
@@ -393,12 +398,13 @@ func (f Filter) Match(p IndexPayload) bool {
 		}
 	}
 	// Languages restricts to representations recorded in any of the requested
-	// BCP-47 languages, matched on the primary subtag case-insensitively (SPEC
-	// §9.5). A payload with no recorded language (unknown, §8.8) never matches a
-	// non-empty filter, so a corpus indexed before any language was recorded
+	// BCP-47 languages under the selected match mode (SPEC §9.5): primary-subtag
+	// by default, or opt-in region/script narrowing when LanguageMatch is
+	// "strict". A payload with no recorded language (unknown, §8.8) never matches
+	// a non-empty filter, so a corpus indexed before any language was recorded
 	// returns nothing for a specific language filter. Empty filter is a no-op.
 	if len(f.Languages) > 0 {
-		if !LanguageMatchesAny(p.Language, f.Languages) {
+		if !LanguageMatchesAnyMode(p.Language, f.Languages, f.LanguageMatch) {
 			return false
 		}
 	}
@@ -418,10 +424,14 @@ type SearchQuery struct {
 	// speaker-filtered hits.
 	Speaker string
 	// Languages optionally restricts hits to representations recorded in any of
-	// these BCP-47 languages (SPEC §9.5/§15.2-3): case-insensitive primary-subtag
-	// match, logical OR. Absent/empty disables the filter (unchanged behavior).
-	// An unknown-language representation never matches a non-empty filter.
+	// these BCP-47 languages (SPEC §9.5/§15.2-3), logical OR. Absent/empty
+	// disables the filter (unchanged behavior). An unknown-language
+	// representation never matches a non-empty filter.
 	Languages []string
+	// LanguageMatch selects the §9.5 match mode for Languages: primary-subtag by
+	// default ("" ⇒ LanguageMatchPrimary) or opt-in region/script narrowing
+	// (LanguageMatchStrict). Inert unless Languages is non-empty.
+	LanguageMatch string
 }
 
 type SearchHit struct {
