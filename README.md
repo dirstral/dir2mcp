@@ -315,6 +315,7 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 
 ```yaml
 ingest_extractor: auto
+ingest_on_unsupported: lenient   # lenient (default) | strict
 docling_command: docling --to json --output - {input}
 ```
 
@@ -356,6 +357,10 @@ PDFs and images are converted to text by an **extractor**, selected with `ingest
 | `off` | No extraction (PDFs/images contribute no extracted text). |
 
 Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → disabled**. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document.
+
+**Best-available *per format* (§7.4.B.1).** Selection is capability-aware: for each format, `auto` picks the highest-fidelity *active* engine that can actually read it, so no document is silently handed to an engine that can't (e.g. `.docx`/`.tiff` go to docling but are never routed to Mistral OCR, which can't import them), and a higher-fidelity engine is never bypassed. HTML is a dual-path format: when a structured engine (docling) is active it is routed there to preserve headings/tables/links (`extracted_markdown` with structured spans); otherwise it falls back to flat `raw_text` — so HTML is never dropped and never regresses when docling is absent.
+
+**When no active engine covers a format** (`ingest.on_unsupported`, env `DIR2MCP_INGEST_ON_UNSUPPORTED`): `lenient` (default) skips the document with a warning and names the gap in the coverage report (`dir2mcp doctor`) — the backward-compatible, honest-not-silent outcome; `strict` records it as a non-fatal per-document `UNSUPPORTED_FORMAT` error (for CI / correctness-sensitive corpora). Either way the gap is surfaced, never silent.
 
 An extractor counts as *available* only when it can actually **run**, not merely when it is configured (spec 0.15.0 §7.4). The `docling` CLI is functional-checked (a quick `docling --version` probe, cached for the run); a binary that is present but broken — e.g. a venv with ABI-incompatible dependencies — is treated as **unavailable**, exactly as an unreachable `serve_url` makes `docling-serve` unavailable. Under `auto` a broken docling is skipped and the cascade continues; under explicit `docling` it disables extraction (no silent fallback). `dir2mcp doctor` reports the real state instead of a false "healthy".
 

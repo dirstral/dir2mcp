@@ -359,8 +359,12 @@ func uncoveredExtractableExtensions(extCounts map[string]int64, structured bool)
 // (docling) path, every uncovered format is in that neither-engine set, so
 // installing docling would not help and the hint says so.
 func uncoveredExtractionRemedy(uncovered []string, structured bool) string {
+	// The §7.7 coverage report MUST, for each uncovered class, name the engine to
+	// add AND the ingest.on_unsupported knob that governs whether the gap is a
+	// warning (lenient, the default) or a per-document error (strict).
+	const onUnsupportedHint = " Or set ingest.on_unsupported: strict to fail instead of skip these documents."
 	if structured {
-		return "docling cannot import these formats; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format."
+		return "docling cannot import these formats; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format." + onUnsupportedHint
 	}
 	doclingWouldCover := false
 	for _, ext := range uncovered {
@@ -370,9 +374,9 @@ func uncoveredExtractionRemedy(uncovered []string, structured bool) string {
 		}
 	}
 	if doclingWouldCover {
-		return "Install docling (or set ingest.extractor=docling) to cover the Office/tiff/bmp formats; the remaining OpenDocument/RTF/.doc/gif/svg formats need a future pandoc-style extractor (#393)."
+		return "Install docling (or set ingest.extractor=docling) to cover the Office/tiff/bmp formats; the remaining OpenDocument/RTF/.doc/gif/svg formats need a future pandoc-style extractor (#393)." + onUnsupportedHint
 	}
-	return "These formats are read by no available extractor; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format."
+	return "These formats are read by no available extractor; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format." + onUnsupportedHint
 }
 
 // indexingFailureCheck reads the store-level FailureSummary (set by
