@@ -182,6 +182,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"export_reflow_internal_test.go":         {},
 		"export_ttml.go":                         {},
 		"flag_ordering_test.go":                  {},
+		"ndjson_events_test.go":                  {},
 		"pididentity_darwin.go":                  {},
 		"pididentity_linux.go":                   {},
 		"pididentity_other.go":                   {},
