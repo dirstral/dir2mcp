@@ -2932,6 +2932,13 @@ func (s *Service) generateHTMLStructured(ctx context.Context, doc model.Document
 		res, err := s.readOrComputeStructured(ctx, doc, content, se)
 		switch {
 		case err == nil && len(res.Blocks) > 0:
+			if strings.TrimSpace(res.Markdown) == "" {
+				// Blocks but no markdown: nothing to persist. Fall through to the
+				// raw_text baseline rather than counting a phantom representation
+				// (would inflate coverage; §7.4.A guarantees html is never dropped).
+				s.getLogger().Printf("html structured extraction produced blocks but no markdown for %s, using raw_text baseline (§7.4.A)", doc.RelPath)
+				break
+			}
 			if perr := s.persistStructuredRepresentation(ctx, doc, res); perr != nil {
 				return false, perr
 			}
