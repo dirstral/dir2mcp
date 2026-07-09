@@ -71,6 +71,116 @@ func TestLanguageMatchesAny(t *testing.T) {
 	}
 }
 
+// TestIsValidLanguageMatch pins the §9.5 match-mode validity check: absent/empty
+// and the two recognized modes are valid; anything else is INVALID_FIELD.
+func TestIsValidLanguageMatch(t *testing.T) {
+	for _, m := range []string{"", "  ", "primary", "PRIMARY", "strict", "Strict"} {
+		if !model.IsValidLanguageMatch(m) {
+			t.Errorf("IsValidLanguageMatch(%q) = false, want true", m)
+		}
+	}
+	for _, m := range []string{"loose", "exact", "basic", "und", "prim"} {
+		if model.IsValidLanguageMatch(m) {
+			t.Errorf("IsValidLanguageMatch(%q) = true, want false", m)
+		}
+	}
+}
+
+// TestNormalizeLanguageMatch pins that only "strict" (case-insensitive) selects
+// strict; everything else (incl. "", junk) degrades to the primary default.
+func TestNormalizeLanguageMatch(t *testing.T) {
+	cases := map[string]string{
+		"":          model.LanguageMatchPrimary,
+		"primary":   model.LanguageMatchPrimary,
+		" PRIMARY ": model.LanguageMatchPrimary,
+		"strict":    model.LanguageMatchStrict,
+		" Strict ":  model.LanguageMatchStrict,
+		"nonsense":  model.LanguageMatchPrimary,
+	}
+	for in, want := range cases {
+		if got := model.NormalizeLanguageMatch(in); got != want {
+			t.Errorf("NormalizeLanguageMatch(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestLanguageMatchesAnyMode_Primary confirms the mode-aware entry point matches
+// LanguageMatchesAny under the default/empty/"primary"/junk modes (§9.5 default).
+func TestLanguageMatchesAnyMode_Primary(t *testing.T) {
+	for _, mode := range []string{"", "primary", "PRIMARY", "unknown-mode"} {
+		if !model.LanguageMatchesAnyMode("pt-BR", []string{"pt"}, mode) {
+			t.Errorf("mode %q: pt-BR should match [pt] under primary semantics", mode)
+		}
+		if !model.LanguageMatchesAnyMode("en-US", []string{"EN"}, mode) {
+			t.Errorf("mode %q: en-US should match [EN] under primary semantics", mode)
+		}
+		if model.LanguageMatchesAnyMode("", []string{"en"}, mode) {
+			t.Errorf("mode %q: unknown recorded must never match a specific filter", mode)
+		}
+	}
+}
+
+// TestLanguageMatchesAnyMode_Strict pins the §9.5 opt-in region/script narrowing
+// (RFC 4647 Basic Filtering): a request narrows only to the precision it supplies.
+func TestLanguageMatchesAnyMode_Strict(t *testing.T) {
+	cases := []struct {
+		recorded  string
+		requested []string
+		want      bool
+		why       string
+	}{
+		// Region narrowing: pt-BR narrows away pt and pt-PT.
+		{"pt-BR", []string{"pt-BR"}, true, "exact region match"},
+		{"PT-br", []string{"pt-BR"}, true, "case-insensitive region match"},
+		{"pt-BR-x", []string{"pt-BR"}, true, "recorded extends requested region"},
+		{"pt", []string{"pt-BR"}, false, "bare pt is narrower-excluded by pt-BR request"},
+		{"pt-PT", []string{"pt-BR"}, false, "pt-PT excluded by pt-BR request"},
+		// Script narrowing: zh-Hans vs zh-Hant vs bare zh.
+		{"zh-Hans", []string{"zh-Hans"}, true, "exact script match"},
+		{"zh-Hans-CN", []string{"zh-Hans"}, true, "recorded extends requested script"},
+		{"zh-Hant", []string{"zh-Hans"}, false, "opposite script excluded"},
+		{"zh", []string{"zh-Hans"}, false, "bare zh excluded by zh-Hans request"},
+		// A bare-primary request still matches all region/script extensions.
+		{"pt-BR", []string{"pt"}, true, "bare request matches region extension"},
+		{"pt-PT", []string{"pt"}, true, "bare request matches other region extension"},
+		{"pt", []string{"pt"}, true, "bare request matches bare recorded"},
+		// Prefix must land on a subtag boundary.
+		{"ptx", []string{"pt"}, false, "pt must not match ptx (boundary)"},
+		// Logical OR across the requested set.
+		{"pt-BR", []string{"es", "pt-BR"}, true, "OR across set"},
+		// Unknown recorded never matches.
+		{"", []string{"pt-BR"}, false, "unknown recorded never matches"},
+	}
+	for _, tc := range cases {
+		got := model.LanguageMatchesAnyMode(tc.recorded, tc.requested, model.LanguageMatchStrict)
+		if got != tc.want {
+			t.Errorf("strict LanguageMatchesAnyMode(%q, %v) = %v, want %v (%s)", tc.recorded, tc.requested, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestFilterMatch_LanguageMatchStrict confirms the mode threads through
+// model.Filter.Match (the pushdown/HNSW/disk path): strict narrows pt-BR away
+// from pt-PT, while the same filter under the default mode keeps it.
+func TestFilterMatch_LanguageMatchStrict(t *testing.T) {
+	ptBR := model.IndexPayload{ChunkID: 1, RelPath: "br.txt", DocType: "text", Language: "pt-BR"}
+	ptPT := model.IndexPayload{ChunkID: 2, RelPath: "pt.txt", DocType: "text", Language: "pt-PT"}
+
+	strict := model.Filter{Languages: []string{"pt-BR"}, LanguageMatch: model.LanguageMatchStrict}
+	if !strict.Match(ptBR) {
+		t.Error("strict [pt-BR] must match a pt-BR payload")
+	}
+	if strict.Match(ptPT) {
+		t.Error("strict [pt-BR] must NOT match a pt-PT payload (region narrowing)")
+	}
+
+	// Default mode (empty LanguageMatch) keeps both under primary-subtag matching.
+	def := model.Filter{Languages: []string{"pt-BR"}}
+	if !def.Match(ptBR) || !def.Match(ptPT) {
+		t.Error("default primary mode must match both pt-BR and pt-PT for a [pt-BR] filter")
+	}
+}
+
 // TestFilterMatch_Languages exercises the predicate through model.Filter.Match,
 // the single authoritative path shared by the in-Go re-check and backend
 // pushdown (HNSW/disk), to ensure language filtering composes with the existing

@@ -156,9 +156,9 @@ type Service struct {
 	// label. A chunk_id belongs to exactly one axis (text or code) in production,
 	// so the previous per-index split (chunkByIndex) held a redundant second copy
 	// of every SearchHit; it was collapsed into this one map (issue #429 F4/D1).
-	chunkByLabel        map[uint64]model.SearchHit
-	rootDir             string
-	stateDir            string
+	chunkByLabel map[uint64]model.SearchHit
+	rootDir      string
+	stateDir     string
 	// ocrCacheIdentity / transcriptCacheIdentity are the ACTIVE OCR-extraction and
 	// STT(+diarize) derivation identities (SPEC §8.6.7) of the ingest pipeline,
 	// plumbed in via SetDerivationCacheIdentities so open_file's OCR/transcript
@@ -2839,11 +2839,12 @@ func truncateSearchHits(hits []model.SearchHit, k int) []model.SearchHit {
 // always carries a rel_path).
 func filterFromQuery(q model.SearchQuery) model.Filter {
 	return model.Filter{
-		PathPrefix: q.PathPrefix,
-		PathGlob:   q.FileGlob,
-		DocTypes:   q.DocTypes,
-		Speaker:    q.Speaker,
-		Languages:  q.Languages,
+		PathPrefix:    q.PathPrefix,
+		PathGlob:      q.FileGlob,
+		DocTypes:      q.DocTypes,
+		Speaker:       q.Speaker,
+		Languages:     q.Languages,
+		LanguageMatch: q.LanguageMatch,
 	}
 }
 
@@ -3577,14 +3578,15 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	}
 
 	// Optional per-language filter (SPEC §9.5/§15.2-3): restrict to candidates
-	// whose source representation recorded any of the requested BCP-47 languages,
-	// matched on the primary subtag case-insensitively (logical OR). Applied here
+	// whose source representation recorded any of the requested BCP-47 languages
+	// (logical OR), under the selected match mode — primary-subtag by default, or
+	// opt-in region/script narrowing when language_match is "strict". Applied here
 	// at candidate selection — before cross-file de-dup, reranking, and truncation
 	// to k — so it only removes non-matching candidates and never reorders or
 	// changes the result/citation structure. A hit with no recorded language
 	// (unknown, §8.8) never matches a non-empty filter; an empty filter is a no-op.
 	if len(query.Languages) > 0 {
-		if !model.LanguageMatchesAny(hit.Language, query.Languages) {
+		if !model.LanguageMatchesAnyMode(hit.Language, query.Languages, query.LanguageMatch) {
 			return false
 		}
 	}

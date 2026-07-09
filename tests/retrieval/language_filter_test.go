@@ -133,6 +133,93 @@ func TestSearch_LanguageFilter_AbsentIsUnchanged(t *testing.T) {
 	}
 }
 
+// TestSearch_LanguageFilter_StrictRegionNarrowing pins §9.5 opt-in narrowing:
+// with language_match="strict" a pt-BR request keeps pt-BR (and pt-BR-…) hits but
+// excludes bare pt and pt-PT, whereas the default primary mode keeps them all.
+func TestSearch_LanguageFilter_StrictRegionNarrowing(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVecLang(t, idx, 1, []float32{1, 0}, "br.txt", "text", "pt-BR")
+	addVecLang(t, idx, 2, []float32{0.97, 0.03}, "pt.txt", "text", "pt-PT")
+	addVecLang(t, idx, 3, []float32{0.94, 0.06}, "bare.txt", "text", "pt")
+	svc := newLangService(t, idx, map[uint64]model.SearchHit{
+		1: {RelPath: "br.txt", DocType: "text", Snippet: "brazilian", Language: "pt-BR", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+		2: {RelPath: "pt.txt", DocType: "text", Snippet: "european", Language: "pt-PT", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+		3: {RelPath: "bare.txt", DocType: "text", Snippet: "generic", Language: "pt", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+	})
+
+	// Strict: only the pt-BR hit survives a pt-BR request.
+	strict := langSearchIDs(t, svc, model.SearchQuery{Query: "x", K: 10, Languages: []string{"pt-BR"}, LanguageMatch: "strict"})
+	if len(strict) != 1 || strict[0] != 1 {
+		t.Fatalf("strict [pt-BR] must yield only the pt-BR hit, got %v", strict)
+	}
+
+	// Default (primary) with the same tag matches all three by primary subtag.
+	primary := langSearchIDs(t, svc, model.SearchQuery{Query: "x", K: 10, Languages: []string{"pt-BR"}})
+	if len(primary) != 3 {
+		t.Fatalf("default primary [pt-BR] must match all pt* hits, got %d: %v", len(primary), primary)
+	}
+}
+
+// TestSearch_LanguageFilter_StrictBarePrimaryStillBroad pins §9.5: under strict,
+// a request that carries only a primary subtag still matches all its region/script
+// extensions — narrowing occurs only to the precision the caller supplies.
+func TestSearch_LanguageFilter_StrictBarePrimaryStillBroad(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVecLang(t, idx, 1, []float32{1, 0}, "br.txt", "text", "pt-BR")
+	addVecLang(t, idx, 2, []float32{0.97, 0.03}, "pt.txt", "text", "pt-PT")
+	addVecLang(t, idx, 3, []float32{0.94, 0.06}, "es.txt", "text", "es")
+	svc := newLangService(t, idx, map[uint64]model.SearchHit{
+		1: {RelPath: "br.txt", DocType: "text", Snippet: "a", Language: "pt-BR", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+		2: {RelPath: "pt.txt", DocType: "text", Snippet: "b", Language: "pt-PT", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+		3: {RelPath: "es.txt", DocType: "text", Snippet: "c", Language: "es", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+	})
+
+	got := langSearchIDs(t, svc, model.SearchQuery{Query: "x", K: 10, Languages: []string{"pt"}, LanguageMatch: "strict"})
+	if len(got) != 2 {
+		t.Fatalf("strict bare [pt] must match both pt-BR and pt-PT (not es), got %d: %v", len(got), got)
+	}
+	for _, id := range got {
+		if id == 3 {
+			t.Fatalf("es hit must be excluded by a strict [pt] filter, got %v", got)
+		}
+	}
+}
+
+// TestSearch_LanguageFilter_StrictUnknownExcluded confirms strict mode also never
+// matches an unknown-language representation (§8.8/§9.5).
+func TestSearch_LanguageFilter_StrictUnknownExcluded(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVecLang(t, idx, 1, []float32{1, 0}, "br.txt", "text", "pt-BR")
+	addVecLang(t, idx, 2, []float32{0.96, 0.04}, "unknown.txt", "text", "")
+	svc := newLangService(t, idx, map[uint64]model.SearchHit{
+		1: {RelPath: "br.txt", DocType: "text", Snippet: "a", Language: "pt-BR", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+		2: {RelPath: "unknown.txt", DocType: "text", Snippet: "b", Language: "", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+	})
+
+	got := langSearchIDs(t, svc, model.SearchQuery{Query: "x", K: 10, Languages: []string{"pt-BR"}, LanguageMatch: "strict"})
+	if len(got) != 1 || got[0] != 1 {
+		t.Fatalf("strict filter must exclude the unknown-language hit, got %v", got)
+	}
+}
+
+// TestSearch_LanguageMatch_UnsetIsPrimary confirms leaving LanguageMatch unset is
+// identical to explicit "primary" — no regression when the option is not supplied.
+func TestSearch_LanguageMatch_UnsetIsPrimary(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVecLang(t, idx, 1, []float32{1, 0}, "br.txt", "text", "pt-BR")
+	addVecLang(t, idx, 2, []float32{0.96, 0.04}, "pt.txt", "text", "pt-PT")
+	svc := newLangService(t, idx, map[uint64]model.SearchHit{
+		1: {RelPath: "br.txt", DocType: "text", Snippet: "a", Language: "pt-BR", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+		2: {RelPath: "pt.txt", DocType: "text", Snippet: "b", Language: "pt-PT", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+	})
+
+	unset := langSearchIDs(t, svc, model.SearchQuery{Query: "x", K: 10, Languages: []string{"pt"}})
+	primary := langSearchIDs(t, svc, model.SearchQuery{Query: "x", K: 10, Languages: []string{"pt"}, LanguageMatch: "primary"})
+	if len(unset) != 2 || len(primary) != 2 {
+		t.Fatalf("unset and explicit primary must both match both pt* hits; unset=%v primary=%v", unset, primary)
+	}
+}
+
 // TestSearch_LanguageFilter_NoMatchIsEmptyNotError pins §9.5: a syntactically
 // valid tag that matches nothing in the corpus returns an empty hit list, not an
 // error.

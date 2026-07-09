@@ -749,7 +749,7 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {},
+		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -780,11 +780,15 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	languageMatch, toolErr := parseLanguageMatchArg(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	sq := model.SearchQuery{
-		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages,
+		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch,
 	}
 	// index_used MUST be the index the query was actually routed to (SPEC §15.2),
 	// not the requested name. Prefer AxisSearcher so the reported axis is read back
@@ -851,7 +855,7 @@ func normalizeIndexAxis(axis string) string {
 
 func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {},
+		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -882,10 +886,14 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	languageMatch, toolErr := parseLanguageMatchArg(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages}
+	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch}
 	if mode == "search_only" {
 		return s.runSearchOnlyMode(ctx, question, sq)
 	}
@@ -1818,6 +1826,32 @@ func parseLanguagesArg(args map[string]interface{}) ([]string, *toolExecutionErr
 		}
 	}
 	return languages, nil
+}
+
+// parseLanguageMatchArg parses the optional per-language match-mode selector
+// (SPEC §9.5): "primary" (the default primary-subtag matching) or "strict"
+// (opt-in RFC 4647 region/script narrowing). Absent or empty ⇒ "" (the primary
+// default, behaviour unchanged; downstream normalizes it). An unrecognized value
+// is INVALID_FIELD (§9.5/§14). The mode is inert unless `languages` is non-empty,
+// but it is validated regardless so a malformed request is rejected up front. The
+// parsed value is returned verbatim (trimmed); the retrieval filter normalizes it.
+func parseLanguageMatchArg(args map[string]interface{}) (string, *toolExecutionError) {
+	mode, err := parseOptionalString(args, "language_match")
+	if err != nil {
+		return "", &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return "", nil
+	}
+	if !model.IsValidLanguageMatch(mode) {
+		return "", &toolExecutionError{
+			Code:      "INVALID_FIELD",
+			Message:   fmt.Sprintf("language_match must be one of primary,strict, got %q", mode),
+			Retryable: false,
+		}
+	}
+	return mode, nil
 }
 
 // mapSearchError converts a search/ask error into a toolExecutionError.
@@ -2987,7 +3021,13 @@ func searchInputSchema() map[string]interface{} {
 			"languages": map[string]interface{}{
 				"type":        "array",
 				"items":       map[string]interface{}{"type": "string"},
-				"description": "Optional (SPEC §9.5): restrict hits to representations recorded in any of these BCP-47 languages (case-insensitive primary-subtag match). Absent/empty = no filtering; unknown-language representations never match a specific filter.",
+				"description": "Optional (SPEC §9.5): restrict hits to representations recorded in any of these BCP-47 languages. Absent/empty = no filtering; unknown-language representations never match a specific filter.",
+			},
+			"language_match": map[string]interface{}{
+				"type":        "string",
+				"enum":        []string{"primary", "strict"},
+				"default":     "primary",
+				"description": "Optional (SPEC §9.5): matching mode for languages. 'primary' (default) matches on the BCP-47 primary subtag (pt-BR matches pt); 'strict' opts into RFC 4647 region/script narrowing (pt-BR matches pt-BR/pt-BR-… but not bare pt or pt-PT).",
 			},
 		},
 		"required": []string{"query"},
@@ -3025,7 +3065,13 @@ func askInputSchema() map[string]interface{} {
 			"languages": map[string]interface{}{
 				"type":        "array",
 				"items":       map[string]interface{}{"type": "string"},
-				"description": "Optional (SPEC §9.5): restrict retrieved contexts to representations recorded in any of these BCP-47 languages (case-insensitive primary-subtag match). Absent/empty = no filtering; unknown-language representations never match a specific filter.",
+				"description": "Optional (SPEC §9.5): restrict retrieved contexts to representations recorded in any of these BCP-47 languages. Absent/empty = no filtering; unknown-language representations never match a specific filter.",
+			},
+			"language_match": map[string]interface{}{
+				"type":        "string",
+				"enum":        []string{"primary", "strict"},
+				"default":     "primary",
+				"description": "Optional (SPEC §9.5): matching mode for languages. 'primary' (default) matches on the BCP-47 primary subtag (pt-BR matches pt); 'strict' opts into RFC 4647 region/script narrowing (pt-BR matches pt-BR/pt-BR-… but not bare pt or pt-PT).",
 			},
 		},
 		"required": []string{"question"},
