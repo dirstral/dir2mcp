@@ -37,8 +37,12 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
 Install `dir2mcp` via Homebrew tap:
 
 ```bash
+brew tap dirstral/tap
+brew trust dirstral/tap      # required on Homebrew 6.x: third-party taps are untrusted by default
 brew install dirstral/tap/dir2mcp
 ```
+
+On Homebrew 6.x a freshly tapped third-party formula is refused until the tap is trusted, so `brew install dirstral/tap/dir2mcp` on a clean machine fails without the `brew trust` step above. (On older Homebrew the trust step is a harmless no-op.)
 
 Then verify:
 
@@ -50,12 +54,21 @@ dir2mcp version
 
 dir2mcp ships in two Homebrew formulas that install the **same binary** but differ in whether the [docling](https://github.com/docling-project/docling) structured-extraction runtime is bundled:
 
-| Track | Install | docling | Pick when |
-|---|---|---|---|
-| **Lean** (default) | `brew install dirstral/tap/dir2mcp` | **Not bundled** — bring your own | You already have `docling`, run a `docling-serve` container, extract via Mistral OCR, or index docling-free corpora |
-| **Full** | `brew install dirstral/tap/dir2mcp-full` | **Bundled** (docling runtime included) | You want local structured PDF/image extraction with zero extra setup |
+| Track | Install | docling | Footprint | Pick when |
+|---|---|---|---|---|
+| **Lean** (default) | `brew install dirstral/tap/dir2mcp` | **Not bundled** — bring your own | installs in ~seconds (only `libcap` + `bubblewrap`) | You already have `docling`, run a `docling-serve` container, extract via Mistral OCR, or index docling-free corpora |
+| **Full** | `brew install dirstral/tap/dir2mcp-full` | **Bundled** (docling runtime included) | ≈ 6.3 GB installed / ~3 min build | You want local structured PDF/image extraction with zero extra setup |
 
-The two formulas are mutually exclusive (Homebrew refuses to install both at once). Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)). To move from lean to full (or to a shared docling-serve) in stages without a re-index flag day, see [Migration & rollout](#migration--rollout-adopting-docling-in-stages).
+The two formulas install the **same binary**, so they are mutually exclusive — both provide a `dir2mcp` runtime and Homebrew refuses to have both linked at once. To **switch tracks**, first unlink (or uninstall) the currently-installed one:
+
+```bash
+brew unlink dir2mcp        # or: brew uninstall dir2mcp
+brew install dirstral/tap/dir2mcp-full
+```
+
+**Full footprint:** the full formula bundles a Python 3.12 venv with docling, torch/torchvision, scipy, and shapely, pulling a large dependency chain (llvm, rust, python, openssl, …). Measured at ≈ 6.3 GB installed (~39k files) and ~3 min to build on Linux x86_64 (Homebrew 6.0.6); macOS and prebuilt-bottle installs will differ. The lean formula, by contrast, installs in seconds with only `libcap` + `bubblewrap`.
+
+Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](#document-extraction-modes--fallback)). To move from lean to full (or to a shared docling-serve) in stages without a re-index flag day, see [Migration & rollout](#migration--rollout-adopting-docling-in-stages).
 
 ### Nix (macOS + Linux)
 
@@ -194,17 +207,19 @@ What it verifies:
 
 ### Tunnel setup (copy/paste)
 
+> **Port note:** `dir2mcp up` binds a **random** loopback port by default (`127.0.0.1:0`) and prints its actual MCP URL on startup — it is not `:8087`. Either substitute the printed port in the commands below, or pin a fixed port first with `dir2mcp up --listen 127.0.0.1:8087` (or `listen_addr: 127.0.0.1:8087` in `.dir2mcp.yaml`). The `:8087` below is a placeholder for whichever local port your server is actually listening on.
+
 Cloudflare quick tunnel (no account-required quick mode):
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:8087 --no-autoupdate
+cloudflared tunnel --url http://127.0.0.1:<PORT> --no-autoupdate
 ```
 
 ngrok (requires verified account + authtoken):
 
 ```bash
 ngrok config add-authtoken <YOUR_NGROK_TOKEN>
-ngrok http http://127.0.0.1:8087
+ngrok http http://127.0.0.1:<PORT>
 ```
 
 Get ngrok public URL from local API:
@@ -228,13 +243,18 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 
 | Command | Description |
 |---|---|
-| `up` | Start the MCP server and begin indexing |
+| `up` | Start the MCP server and begin indexing (daemonizes by default) |
+| `down` | Stop the dir2mcp server running in this directory |
 | `status` | Show corpus and indexing state |
 | `ask "<question>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `search "<query>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `reindex` | Force full re-ingestion |
+| `embed-worker` | Run a standalone distributed embed worker (no MCP serving; requires a Tier-C store + broker) |
+| `export` | Render a transcript as VTT/SRT/TTML subtitles (`export --format vtt\|srt\|ttml <path>`) |
+| `bridge` | Run helper adapters (for example the ElevenLabs webhook bridge) |
+| `support-bundle` | Collect logs + config + status into a shareable `tar.gz` |
 | `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys, where to store them (`.env.local` or the OS keychain), and a corpus profile, then writes/updates `.dir2mcp.yaml`. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
 | `config print` | Print effective config |
 | `config set-secret <ENV_VAR>` | Store a provider credential in the OS keychain (encrypted at rest) instead of a plaintext `.env.local` |
@@ -242,7 +262,7 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `config secrets` | Show which provider credentials are present in the keychain / environment (never prints values) |
 | `install <client>` | Install dir2mcp into a supported MCP client (e.g. `dir2mcp install claude`) |
 | `uninstall <client>` | Remove dir2mcp from a supported MCP client |
-| `doctor <client>` | Run client-integration diagnostics |
+| `doctor [<client>]` | With a client name, run client-integration diagnostics. With no argument, run a server-side preflight (config, provider resolution, an **egress** check reporting whether any resolved provider is a public/third-party host, extractor availability, indexing failures); add `--deep` to actively probe the embedding credential |
 | `print-config <client>` | Print the MCP-server JSON snippet a client expects |
 | `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
 | `version` | Print version |
@@ -295,7 +315,7 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
 | `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
 | `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
-| `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
+| _(Mistral endpoint)_ | — | The Mistral base URL is **not** configurable via an environment variable. To proxy Mistral or point at a private/custom endpoint, add a `providers:` entry with a `base_url` (see [Self-hosted / GPU-VPS provider endpoints](#self-hosted--gpu-vps-provider-endpoints-embed--ocr--stt)) |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
 | `DIR2MCP_SERVER_NAME` | No | Override the MCP server name (and suggested `claude mcp add` alias). Defaults to a unique `dir2mcp-<slug>-<6-hex>` derived from the indexed directory |
 | `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` | No | Session inactivity timeout (default: `24h`) |
@@ -463,6 +483,41 @@ vs. flat `page` spans). Suggested phases:
 
 For a multi-host / GPU-VPS topology (self-hosted extractor + remote corpus), see
 [docs/dual-machine-deployment.md](docs/dual-machine-deployment.md).
+
+### Fully local / no-egress setup
+
+The default quickstart (and `.env.example`) configures **cloud** providers, so a corpus is processed by third-party APIs (Mistral for embeddings/OCR/STT/generation, ElevenLabs for voice). If your data must **not leave the host** (data-residency / compliance / on-prem archives), configure every capability against endpoints you run — dir2mcp treats a self-hosted provider as first-class (SPEC §8.5) and needs no cloud key.
+
+Provide **no** cloud credentials (do not set `MISTRAL_API_KEY`, `ELEVENLABS_API_KEY`, etc. — with none present, auto-selection has nothing cloud to pick) and bind each capability explicitly in `.dir2mcp.yaml`:
+
+```yaml
+# .dir2mcp.yaml — fully local, no egress
+providers:
+  local-llm:                              # OpenAI-compatible server you run
+    kind: openai                          #   (Ollama, vLLM, llama.cpp, LM Studio, TEI, …)
+    base_url: http://127.0.0.1:11434/v1   # e.g. Ollama's OpenAI-compatible endpoint
+    embed_text_model: nomic-embed-text
+    embed_code_model: nomic-embed-text
+    chat_model: llama3.1                  # answers + translation stay local
+  local-stt:                              # self-hosted Whisper/WhisperX
+    kind: whisper                         # base_url is the host ROOT (/v1/audio/transcriptions is appended)
+    base_url: http://127.0.0.1:9001
+    stt_model: large-v3
+model:
+  embed:
+    provider: local-llm                   # reindex-bound (the embed identity includes it)
+  chat:
+    provider: local-llm
+stt_provider: local-stt                   # STT uses the legacy selector
+ingest:
+  extractor: docling                      # local structured extraction; do NOT fall back to cloud OCR
+```
+
+Notes:
+- **Document extraction:** use local `docling` (the `dir2mcp-full` track bundles it) or a self-hosted [docling-serve](#docling-extraction-over-http-docling-serve). Avoid `extractor: auto`, whose last fallback is cloud Mistral OCR — pin `extractor: docling` (or `docling-serve`, or `off`) so no page image is ever uploaded. For a self-hosted OCR endpoint instead, bind `model.ocr.provider` to a `kind: mistral` `/v1/ocr` profile (see below).
+- **Verify, don't infer:** run `dir2mcp doctor` — its **egress** row must report `no third-party egress: all resolved providers target local/loopback or private/LAN endpoints`. If it names any public host, that capability is still leaving the machine.
+- A trusted-LAN endpoint may be **credential-less** (omit `api_key`); loopback, private-range, `.local`/`.internal`, and single-label LAN hosts all count as no-egress.
+- For a multi-machine topology (corpus over NFS/S3, a GPU box on the LAN, systemd units), see [docs/dual-machine-deployment.md](docs/dual-machine-deployment.md) and the self-hosted provider contract below.
 
 ### Self-hosted / GPU-VPS provider endpoints (embed / OCR / STT)
 

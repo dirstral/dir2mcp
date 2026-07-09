@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,6 +70,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		stateDirCheck(cfg.StateDir),
 		providerCheck(ctx, cfg, "embed", provider.CapEmbed, true, deep),
 		providerCheck(ctx, cfg, "chat", provider.CapChat, false, false),
+		egressCheck(cfg),
 		extractorCheck(cfg),
 		extractionCoverageCheck(ctx, a, cfg),
 		indexingFailureCheck(ctx, a, cfg),
@@ -552,6 +555,148 @@ func stuckPendingCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 	}
 	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
 		"%d chunk(s) stuck pending embedding and no daemon is running to drain them; start it with `dir2mcp up` (or run `dir2mcp reindex`)", stats.EmbeddedPending)}
+}
+
+// egressCheck reports, per content-carrying capability (embed, chat, ocr,
+// stt), whether the resolved provider's effective endpoint is a public /
+// third-party host — meaning corpus content leaves this machine — or a
+// local/loopback/LAN endpoint (no egress). It exists so an operator with a
+// data-residency / on-prem requirement can VERIFY "nothing leaves the host"
+// from the resolved configuration instead of inferring it from the absence of
+// cloud base_urls (#493).
+//
+// The check is purely informational and never fails or warns: sending corpus
+// content to a cloud provider is the intended default for most users, not a
+// misconfiguration, so it stays at "ok" and puts the verdict in Detail. All
+// work is local config resolution and host classification — no network is
+// touched, so the row is cheap and always safe to run.
+//
+// A capability that does not resolve (not configured) is skipped: an
+// unconfigured provider sends nothing. When a resolved profile has no explicit
+// base_url, the effective host is the provider kind's built-in default (e.g.
+// kind: mistral -> api.mistral.ai), so a happy-path cloud setup is correctly
+// reported as egress even though its base_url is blank.
+func egressCheck(cfg config.Config) doctorCheck {
+	const name = "egress"
+	res := cfg.Providers()
+	// Ordered so the detail reads embed, chat, ocr, stt regardless of map
+	// iteration; each pair is a corpus-content-carrying capability.
+	caps := []struct {
+		label string
+		cap   provider.Capability
+	}{
+		{"embed", provider.CapEmbed},
+		{"chat", provider.CapChat},
+		{"ocr", provider.CapOCR},
+		{"stt", provider.CapSTT},
+	}
+
+	// Group public destinations by host so the same provider serving several
+	// capabilities renders once (e.g. "api.mistral.ai (embed, chat, ocr)").
+	byHost := map[string][]string{}
+	hostOrder := []string{}
+	resolvedAny := false
+	for _, c := range caps {
+		prof, err := res.Resolve(c.cap)
+		if err != nil {
+			continue // capability not configured -> nothing egresses for it
+		}
+		resolvedAny = true
+		host := effectiveProviderHost(prof)
+		if host == "" || hostIsLocal(host) {
+			continue // loopback / LAN / self-hosted, or no known endpoint
+		}
+		if _, seen := byHost[host]; !seen {
+			hostOrder = append(hostOrder, host)
+		}
+		byHost[host] = append(byHost[host], c.label)
+	}
+
+	if !resolvedAny {
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no content providers resolved"}
+	}
+	if len(hostOrder) == 0 {
+		return doctorCheck{Name: name, Status: doctorStatusOK,
+			Detail: "no third-party egress: all resolved providers target local/loopback or private/LAN endpoints"}
+	}
+	sort.Strings(hostOrder)
+	parts := make([]string, 0, len(hostOrder))
+	for _, h := range hostOrder {
+		parts = append(parts, fmt.Sprintf("%s (%s)", h, strings.Join(byHost[h], ", ")))
+	}
+	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
+		"corpus content egresses to third-party host(s): %s. For an on-prem/no-egress setup, see the README 'Fully local / no-egress' recipe.",
+		strings.Join(parts, "; "))}
+}
+
+// kindDefaultHost maps a provider kind to the cloud host its client contacts
+// when a profile sets no explicit base_url. It mirrors the defaultBaseURL
+// constants in the per-provider clients (internal/{mistral,openai,anthropic,
+// gemini,cohere,elevenlabs}). Self-hosted-only kinds (whisper/omniembed/colbert
+// and the credential-less `local` openai profile) have no cloud default and are
+// intentionally absent, so a blank base_url on those resolves to no host.
+var kindDefaultHost = map[provider.Kind]string{
+	provider.KindMistral:    "api.mistral.ai",
+	provider.KindOpenAI:     "api.openai.com",
+	provider.KindAnthropic:  "api.anthropic.com",
+	provider.KindGemini:     "generativelanguage.googleapis.com",
+	provider.KindCohere:     "api.cohere.com",
+	provider.KindElevenLabs: "api.elevenlabs.io",
+}
+
+// effectiveProviderHost returns the hostname the resolved profile will actually
+// contact: the host of its explicit base_url when set, else the kind's built-in
+// cloud default. Returns "" when neither is known (a self-hosted kind whose
+// base_url was left unset — misconfigured, surfaced by other checks, not egress
+// to a known third party).
+func effectiveProviderHost(prof provider.Profile) string {
+	if raw := strings.TrimSpace(prof.BaseURL); raw != "" {
+		if h := hostFromBaseURL(raw); h != "" {
+			return h
+		}
+		return ""
+	}
+	return kindDefaultHost[prof.Kind]
+}
+
+// hostFromBaseURL extracts the lowercased hostname (no port) from a provider
+// base_url. It tolerates a scheme-less value (e.g. "gpu-vps:9001") by parsing
+// it as an authority.
+func hostFromBaseURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err == nil && u.Host != "" {
+		return strings.ToLower(u.Hostname())
+	}
+	// Scheme-less: reparse with a scheme so host/port split correctly.
+	if u2, err2 := url.Parse("http://" + raw); err2 == nil && u2.Host != "" {
+		return strings.ToLower(u2.Hostname())
+	}
+	return ""
+}
+
+// hostIsLocal reports whether host denotes a loopback, private/LAN, or
+// otherwise non-public endpoint — i.e. one that does not send corpus content
+// off the machine/network. A bare single-label hostname (no dot, e.g.
+// "gpu-vps") is treated as LAN. Public FQDNs and public IPs return false.
+func hostIsLocal(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return true
+	}
+	switch host {
+	case "localhost", "ip6-localhost", "ip6-loopback":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	}
+	for _, suffix := range []string{".local", ".localhost", ".internal", ".lan", ".intranet"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	// A single-label hostname (no dot) is not a public FQDN; treat as LAN.
+	return !strings.Contains(host, ".")
 }
 
 // renderDoctorReport emits checks as either JSON (one object with an
