@@ -108,6 +108,10 @@ type documentDeleteNotifier interface {
 	SetOnDocumentsDeleted(fn func(relPaths []string))
 }
 
+type documentErrorNotifier interface {
+	SetOnDocumentError(fn func(relPath, docType, message string))
+}
+
 type contentHashResetter interface {
 	ClearDocumentContentHashes(ctx context.Context) error
 }
@@ -1896,6 +1900,7 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	if err != nil {
 		return err
 	}
+	emitProgressEvents(emitter, snapshot.Indexing)
 
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -1908,6 +1913,32 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 		return fmt.Errorf("write corpus snapshot: %w", err)
 	}
 	return nil
+}
+
+// emitProgressEvents emits the spec-required `scan_progress` and
+// `embed_progress` NDJSON events (SPEC §3.2) from a freshly built snapshot.
+// It is called on every corpus-writer tick, which is what makes the events
+// *periodic* — before #414 they were emitted exactly once at startup with
+// hardcoded zeros, so an operator tailing `--json` never saw indexing advance.
+//
+// Representations, ChunksTotal and EmbeddedOK carry the -1 "not derivable"
+// sentinel on the ListFiles-only fallback path; it is passed through verbatim
+// because the spec defines -1 as "unavailable", not as an error.
+func emitProgressEvents(emitter *ndjsonEmitter, idx corpusIndexing) {
+	emitter.Emit("info", "scan_progress", map[string]interface{}{
+		"scanned": idx.Scanned,
+		"indexed": idx.Indexed,
+		"skipped": idx.Skipped,
+		"deleted": idx.Deleted,
+		"reps":    idx.Representations,
+		"chunks":  idx.ChunksTotal,
+		"errors":  idx.Errors,
+	})
+	emitter.Emit("info", "embed_progress", map[string]interface{}{
+		"embedded": idx.EmbeddedOK,
+		"chunks":   idx.ChunksTotal,
+		"errors":   idx.Errors,
+	})
 }
 
 // buildCorpusSnapshot collects corpus stats and assembles a corpusSnapshot,
@@ -2165,7 +2196,7 @@ func reportUnexpectedDocStatuses(statusCounts map[string]int64, examples map[str
 // Emit writes a single timestamped NDJSON event line when the emitter is
 // enabled; encoding failures are silently dropped.
 func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
-	if !e.enabled {
+	if e == nil || !e.enabled {
 		return
 	}
 	entry := ndjsonEvent{

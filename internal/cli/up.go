@@ -124,7 +124,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
 		return exitConfigInvalid
 	}
-	wireIngestorHooks(ing, indexingState, ret.EvictDocuments)
+	wireIngestorHooks(ing, indexingState, ret.EvictDocuments, newFileErrorEmitter(emitter))
 	wireDerivationCacheIdentities(ret, ing)
 
 	corpusFS, err := buildCorpusFS(ctx, cfg)
@@ -1206,14 +1206,37 @@ func buildCorpusFS(ctx context.Context, cfg config.Config) (corpusfs.CorpusFS, e
 	})
 }
 
-// wireIngestorHooks connects the optional indexing-state and document-delete
-// notification interfaces on ing, if the concrete type supports them.
-func wireIngestorHooks(ing model.Ingestor, indexingState *appstate.IndexingState, evict func([]string)) {
+// wireIngestorHooks connects the optional indexing-state, document-delete and
+// document-error notification interfaces on ing, if the concrete type supports
+// them. onDocError may be nil, in which case no per-document error callback is
+// registered.
+func wireIngestorHooks(ing model.Ingestor, indexingState *appstate.IndexingState, evict func([]string), onDocError func(relPath, docType, message string)) {
 	if stateAware, ok := ing.(indexingStateAware); ok {
 		stateAware.SetIndexingState(indexingState)
 	}
 	if notifier, ok := ing.(documentDeleteNotifier); ok {
 		notifier.SetOnDocumentsDeleted(evict)
+	}
+	if onDocError == nil {
+		return
+	}
+	if notifier, ok := ing.(documentErrorNotifier); ok {
+		notifier.SetOnDocumentError(onDocError)
+	}
+}
+
+// newFileErrorEmitter returns the per-document error callback handed to the
+// ingestor. It emits the spec-required non-fatal `file_error` event (SPEC §3.2)
+// carrying the document identity, so an operator tailing `--json` can see which
+// document failed and why. The message arrives already secret-redacted by
+// ingest.persistNonFatalDocError; it is passed through untouched.
+func newFileErrorEmitter(emitter *ndjsonEmitter) func(relPath, docType, message string) {
+	return func(relPath, docType, message string) {
+		emitter.Emit("error", "file_error", map[string]interface{}{
+			"rel_path": relPath,
+			"doc_type": docType,
+			"message":  message,
+		})
 	}
 }
 

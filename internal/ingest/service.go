@@ -209,6 +209,13 @@ type Service struct {
 	// service's in-memory maps so deleted files are no longer searchable.
 	onDocumentsDeleted   func(relPaths []string)
 	onDocumentsDeletedMu sync.RWMutex
+
+	// optional callback invoked for every non-fatal per-document failure, after
+	// the message has been secret-redacted. The CLI uses it to emit the
+	// spec-required per-document `file_error` NDJSON event (SPEC §3.2, #414);
+	// without it a failed document is only observable by polling the store.
+	onDocumentError   func(relPath, docType, message string)
+	onDocumentErrorMu sync.RWMutex
 	// bounds the compatibility wrapper used by SetOnDocumentDeleted so large
 	// deletion batches do not spawn an unbounded number of goroutines.
 	onDocumentDeletedMaxConcurrency int
@@ -710,6 +717,16 @@ func (s *Service) SetOnDocumentsDeleted(fn func(relPaths []string)) {
 	s.onDocumentsDeletedMu.Lock()
 	defer s.onDocumentsDeletedMu.Unlock()
 	s.onDocumentsDeleted = fn
+}
+
+// SetOnDocumentError registers a callback invoked once per non-fatal
+// per-document failure. The message passed to fn has already been
+// secret-redacted by persistNonFatalDocError; callers MUST NOT re-derive it
+// from the underlying error. Passing nil clears the callback.
+func (s *Service) SetOnDocumentError(fn func(relPath, docType, message string)) {
+	s.onDocumentErrorMu.Lock()
+	defer s.onDocumentErrorMu.Unlock()
+	s.onDocumentError = fn
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
@@ -3079,6 +3096,27 @@ func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Documen
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		s.getLogger().Printf("persist error status for %s: %v", doc.RelPath, err)
 	}
+	s.notifyDocumentError(doc)
+}
+
+// notifyDocumentError invokes the registered per-document error callback with
+// the already-redacted message. It fires even when the upsert above failed: the
+// document did fail, and the stream event is the only signal an operator tailing
+// `--json` will ever see for it. A panicking callback is contained so a buggy
+// consumer cannot abort the ingest run.
+func (s *Service) notifyDocumentError(doc model.Document) {
+	s.onDocumentErrorMu.RLock()
+	fn := s.onDocumentError
+	s.onDocumentErrorMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.getLogger().Printf("onDocumentError panic for %s (%s)", doc.RelPath, safePanicValue(r))
+		}
+	}()
+	fn(doc.RelPath, doc.DocType, doc.ErrorMessage)
 }
 
 // persistTitleIfFound runs the title heuristic on the supplied text body and,
