@@ -1,4 +1,4 @@
-# Build binaries. Requires Go 1.24+.
+# Build binaries. Requires Go 1.25+ (matches the `go` directive in go.mod).
 .PHONY: build build-dir2mcp build-elevenlabs-bridge
 build: build-dir2mcp
 
@@ -65,7 +65,7 @@ cyclo:
 	"$(GOCYCLO_BIN)" -over 15 cmd internal tests
 
 ineffassign:
-	@test -x "$(INEFFASSIGN_BIN)" || (echo "ineffassign is required. Install: go install github.com/gordonklaus/ineffassign@latest" && exit 1)
+	@test -x "$(INEFFASSIGN_BIN)" || (echo "ineffassign is required. Install: go install github.com/gordonklaus/ineffassign@v0.2.0" && exit 1)
 	"$(INEFFASSIGN_BIN)" ./...
 
 misspell:
