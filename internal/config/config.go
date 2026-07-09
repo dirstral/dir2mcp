@@ -2705,7 +2705,6 @@ var nonNegativeIntKeys = map[string]bool{
 	"media.clip.max_bytes":                    true,
 	"media.stt.max_payload_mb":                true,
 	"media.stt.request_timeout_sec":           true,
-	"media.stt.language_strict":               true,
 	"media.subtitles.ttml.align_tolerance_ms": true,
 	"media.subtitles.collapse_repeats":        true,
 }
