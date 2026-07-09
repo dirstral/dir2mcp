@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log"
 	"sort"
 	"strings"
@@ -391,14 +393,17 @@ func (s *Server) persistNonceWithRetry(rec storepkg.MCPNonceLedgerRecord, attemp
 	return err
 }
 
-// redactNonce returns a short, non-reversible tag for a nonce so ledger errors
-// can reference an entry without logging the full single-use secret.
+// redactNonce returns a short, deterministic, non-reversible tag for a nonce so
+// ledger errors can correlate an entry across log lines without exposing any
+// part of the single-use secret. It hashes the nonce rather than logging raw
+// fragments.
 func redactNonce(nonce string) string {
 	nonce = strings.TrimSpace(nonce)
-	if len(nonce) <= 8 {
+	if nonce == "" {
 		return "…"
 	}
-	return nonce[:4] + "…" + nonce[len(nonce)-4:]
+	sum := sha256.Sum256([]byte(nonce))
+	return "sha256:" + hex.EncodeToString(sum[:8])
 }
 
 func (s *Server) deletePersistedNonce(nonce string) {

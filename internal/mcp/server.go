@@ -903,6 +903,14 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) []string {
 	}
 	entries := make([]entry, 0, len(s.paymentOutcomes))
 	for key, outcome := range s.paymentOutcomes {
+		// An outcome whose ExpiresAt is still in the future is bound to a live
+		// nonce ledger entry and must be re-surfaceable for an idempotent retry;
+		// exclude it from cap eviction so a legitimate same-nonce retry never
+		// loses its stored outcome. (Time-based pruning above still reclaims it
+		// once its nonce expires.)
+		if !outcome.ExpiresAt.IsZero() && outcome.ExpiresAt.After(now) {
+			continue
+		}
 		entries = append(entries, entry{key: key, ts: outcome.UpdatedAt})
 	}
 	// ensure deterministic eviction order when timestamps are equal by

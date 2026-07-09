@@ -32,10 +32,10 @@ func TestX402Transport_UserinfoCountsAsCredential(t *testing.T) {
 			c.X402.FacilitatorToken = tc.token
 			err := c.X402FacilitatorTransportError()
 			if tc.wantErr && err == nil {
-				t.Fatalf("expected transport error for %q, got nil", tc.url)
+				t.Fatalf("expected transport error for case %q, got nil", tc.name)
 			}
 			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected transport error for %q: %v", tc.url, err)
+				t.Fatalf("unexpected transport error for case %q: %v", tc.name, err)
 			}
 			if err != nil {
 				// The error must never leak embedded userinfo credentials.
