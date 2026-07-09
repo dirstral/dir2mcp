@@ -872,6 +872,17 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) []string {
 
 	cutoff := now.Add(-ttl)
 	for key, outcome := range s.paymentOutcomes {
+		// Keep an outcome until its explicit ExpiresAt (aligned to the nonce
+		// ledger entry) when set, so a consumed nonce always has its outcome
+		// available to re-surface; otherwise fall back to the UpdatedAt+TTL rule.
+		if !outcome.ExpiresAt.IsZero() {
+			if outcome.ExpiresAt.After(now) {
+				continue
+			}
+			delete(s.paymentOutcomes, key)
+			keysToDelete = append(keysToDelete, key)
+			continue
+		}
 		if outcome.UpdatedAt.IsZero() || outcome.UpdatedAt.Before(cutoff) {
 			delete(s.paymentOutcomes, key)
 			keysToDelete = append(keysToDelete, key)

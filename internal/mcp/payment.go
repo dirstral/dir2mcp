@@ -24,6 +24,12 @@ type paymentExecutionOutcome struct {
 	Settled         bool
 	PaymentResponse string
 	UpdatedAt       time.Time
+	// ExpiresAt aligns the cached outcome's lifetime with its nonce ledger entry
+	// so an idempotent retry can re-surface the recorded outcome for as long as
+	// the nonce stays consumed. Without this the outcome could be pruned (fixed
+	// 10-min TTL) while the nonce remains consumed (validity-window TTL), causing
+	// a legitimate retry to be rejected as "nonce already used".
+	ExpiresAt time.Time
 }
 
 type keyMutex struct {
@@ -197,6 +203,18 @@ func (s *Server) handleNonceDecision(w http.ResponseWriter, id interface{}, dec 
 		}
 		s.rejectReplayedNonce(w, id)
 		return true
+	case nonceError:
+		// The durable single-use ledger could not be consulted or written, so we
+		// cannot prove this nonce is unused. Fail closed with a retryable error
+		// rather than risk admitting a replay.
+		s.emitPaymentEvent("warning", "payment_replay_ledger_unavailable", map[string]interface{}{
+			"reason": "nonce_ledger_unavailable",
+		})
+		s.appendPaymentLog("payment_replay_ledger_unavailable", map[string]interface{}{
+			"reason": "nonce_ledger_unavailable",
+		})
+		s.writePaymentChallenge(w, id, x402.CodePaymentInvalid, "payment temporarily unavailable: single-use ledger unreachable, retry", true)
+		return true
 	default:
 		return false
 	}
@@ -211,6 +229,7 @@ func (s *Server) executeAndSettlePaidToolCall(ctx context.Context, w http.Respon
 	outcome := paymentExecutionOutcome{
 		StatusCode: statusCode,
 		UpdatedAt:  time.Now().UTC(),
+		ExpiresAt:  pc.expiresAt,
 	}
 	if rpcErr != nil {
 		outcome.RPCError = cloneRPCError(rpcErr)

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/netutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
@@ -4334,10 +4335,10 @@ func normalizeX402URL(rawURL, label string) (string, error) {
 	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid x402 %s URL %q: %w", label, rawURL, err)
+		return "", fmt.Errorf("invalid x402 %s URL: %w", label, err)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid x402 %s URL: %q", label, rawURL)
+		return "", fmt.Errorf("invalid x402 %s URL: %s", label, redactURLForError(parsed, rawURL))
 	}
 	if parsed.Path == "/" {
 		parsed.Path = ""
@@ -4377,7 +4378,14 @@ func (c *Config) X402FacilitatorTransportError() error {
 func validateX402TransportSecurity(rawURL string, hasCredential bool) error {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return fmt.Errorf("invalid x402 facilitator URL %q: %w", rawURL, err)
+		return fmt.Errorf("invalid x402 facilitator URL: %w", err)
+	}
+	safe := redactURLForError(parsed, rawURL)
+	// URL userinfo (http://user:pass@host) is itself a credential that must never
+	// traverse plaintext http, so it counts toward hasCredential regardless of a
+	// separately-configured facilitator token.
+	if parsed.User != nil {
+		hasCredential = true
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	switch scheme {
@@ -4385,31 +4393,31 @@ func validateX402TransportSecurity(rawURL string, hasCredential bool) error {
 		return nil
 	case "http":
 		if hasCredential {
-			return fmt.Errorf("x402 facilitator URL must use https when a facilitator token is configured (plaintext http would leak the credential): %q", rawURL)
+			return fmt.Errorf("x402 facilitator URL must use https when a credential is attached (plaintext http would leak it): %s", safe)
 		}
-		if !isLoopbackHost(parsed.Hostname()) {
-			return fmt.Errorf("x402 facilitator URL must use https for a non-loopback host: %q", rawURL)
+		if !netutil.IsLoopbackHost(parsed.Hostname()) {
+			return fmt.Errorf("x402 facilitator URL must use https for a non-loopback host: %s", safe)
 		}
 		return nil
 	default:
-		return fmt.Errorf("x402 facilitator URL must use https (or http for a credential-less loopback host): %q", rawURL)
+		return fmt.Errorf("x402 facilitator URL must use https (or http for a credential-less loopback host): %s", safe)
 	}
 }
 
-// isLoopbackHost reports whether host refers to the local machine: an IP in the
-// IPv4 127.0.0.0/8 block, the IPv6 ::1 address, or the "localhost" name.
-func isLoopbackHost(host string) bool {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return false
+// redactURLForError returns a log-safe rendering of a facilitator URL: scheme +
+// host only, dropping userinfo, path, and query so embedded credentials or
+// token-like query params never reach an error string or log line. When the URL
+// could not be parsed into a host, it returns a fixed placeholder rather than
+// echoing the raw input.
+func redactURLForError(parsed *url.URL, rawURL string) string {
+	if parsed == nil || parsed.Host == "" {
+		return "<redacted>"
 	}
-	if strings.EqualFold(host, "localhost") {
-		return true
+	scheme := parsed.Scheme
+	if scheme == "" {
+		scheme = "?"
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
+	return scheme + "://" + parsed.Host
 }
 
 // isCAIP2Network reports whether value is a CAIP-2 "namespace:reference"

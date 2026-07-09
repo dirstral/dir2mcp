@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/netutil"
 	sdkhttp "github.com/x402-foundation/x402/go/http"
 )
 
@@ -112,26 +113,10 @@ func isTransportSecure(parsed *url.URL, hasCredential bool) bool {
 		if hasCredential {
 			return false
 		}
-		return isLoopbackHost(parsed.Hostname())
+		return netutil.IsLoopbackHost(parsed.Hostname())
 	default:
 		return false
 	}
-}
-
-// isLoopbackHost reports whether host refers to the local machine: an IP in the
-// IPv4 127.0.0.0/8 block, the IPv6 ::1 address, or the "localhost" name.
-func isLoopbackHost(host string) bool {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
 }
 
 func (c *sdkAdapterClient) Verify(ctx context.Context, paymentSignature string, req Requirement) (json.RawMessage, error) {

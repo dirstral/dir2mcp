@@ -2774,10 +2774,14 @@ func (s *SQLiteStore) UpsertMCPNonceLedger(ctx context.Context, rec MCPNonceLedg
 			nonce, request_key, execution_key, consumed, expires_unix, updated_unix
 		) VALUES(?, ?, ?, ?, ?, ?)
 		ON CONFLICT(nonce) DO UPDATE SET
-			request_key=excluded.request_key,
-			execution_key=excluded.execution_key,
-			consumed=excluded.consumed,
-			expires_unix=excluded.expires_unix,
+			-- Consumption is monotonic: a durably-consumed record (consumed=1)
+			-- is never downgraded to a reservation by a later write for the same
+			-- nonce, and its request/execution binding + expiry are preserved so a
+			-- replay cannot clobber the single-use record.
+			request_key=CASE WHEN mcp_nonce_ledger.consumed=1 THEN mcp_nonce_ledger.request_key ELSE excluded.request_key END,
+			execution_key=CASE WHEN mcp_nonce_ledger.consumed=1 THEN mcp_nonce_ledger.execution_key ELSE excluded.execution_key END,
+			consumed=MAX(mcp_nonce_ledger.consumed, excluded.consumed),
+			expires_unix=CASE WHEN mcp_nonce_ledger.consumed=1 THEN MAX(mcp_nonce_ledger.expires_unix, excluded.expires_unix) ELSE excluded.expires_unix END,
 			updated_unix=excluded.updated_unix`,
 		rec.Nonce,
 		strings.TrimSpace(rec.RequestKey),
@@ -2803,6 +2807,60 @@ func (s *SQLiteStore) DeleteMCPNonceLedger(ctx context.Context, nonce string) er
 	defer s.ReleaseDB()
 
 	_, err = db.ExecContext(ctx, `DELETE FROM mcp_nonce_ledger WHERE nonce = ?`, nonce)
+	return err
+}
+
+// GetMCPNonceLedger returns the durable ledger record for a single nonce. The
+// second return is false when no row exists. It lets the enforcement layer treat
+// the persisted ledger as the source of truth on an in-memory cache miss (e.g.
+// after a cap eviction), so a consumed nonce evicted from memory cannot be
+// replayed within its validity window.
+func (s *SQLiteStore) GetMCPNonceLedger(ctx context.Context, nonce string) (MCPNonceLedgerRecord, bool, error) {
+	nonce = strings.TrimSpace(nonce)
+	if nonce == "" {
+		return MCPNonceLedgerRecord{}, false, nil
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return MCPNonceLedgerRecord{}, false, err
+	}
+	defer s.ReleaseDB()
+
+	var (
+		rec                      MCPNonceLedgerRecord
+		consumed                 int
+		expiresUnix, updatedUnix int64
+	)
+	err = db.QueryRowContext(
+		ctx,
+		`SELECT nonce, request_key, execution_key, consumed, expires_unix, updated_unix
+		 FROM mcp_nonce_ledger WHERE nonce = ?`,
+		nonce,
+	).Scan(&rec.Nonce, &rec.RequestKey, &rec.ExecutionKey, &consumed, &expiresUnix, &updatedUnix)
+	if errors.Is(err, sql.ErrNoRows) {
+		return MCPNonceLedgerRecord{}, false, nil
+	}
+	if err != nil {
+		return MCPNonceLedgerRecord{}, false, err
+	}
+	rec.Consumed = consumed == 1
+	rec.ExpiresAt = time.Unix(expiresUnix, 0).UTC()
+	rec.UpdatedAt = time.Unix(updatedUnix, 0).UTC()
+	return rec, true, nil
+}
+
+// DeleteExpiredMCPNonceLedger removes every ledger row whose expiry is at or
+// before nowUnix, directly in the database. In-memory cap eviction can drop a
+// persisted row from the cache without deleting it; this reclaims those rows at
+// TTL rather than leaving them until the next process restart.
+func (s *SQLiteStore) DeleteExpiredMCPNonceLedger(ctx context.Context, nowUnix int64) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(ctx, `DELETE FROM mcp_nonce_ledger WHERE expires_unix <= ?`, nowUnix)
 	return err
 }
 
