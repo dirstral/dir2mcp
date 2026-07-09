@@ -237,8 +237,12 @@ func (s *Server) executeAndSettlePaidToolCall(ctx context.Context, w http.Respon
 		outcome.Settled = true
 		s.setPaymentExecutionOutcome(pc.executionKey, outcome)
 		// The gated tool failed transport-side; no payment is captured, so the
-		// reservation is rolled back and the nonce may be retried.
-		s.rollbackNonce(pc.nonce)
+		// nonce is NOT consumed and the SAME (nonce, request) may be retried
+		// (re-surfacing this cached outcome, or re-executing after it expires).
+		// The reservation binding is intentionally retained until expiry so the
+		// single-use nonce cannot be reused for a DIFFERENT request — that would
+		// be a cross-request replay.
+		s.releaseNonceReservation(pc.nonce)
 		writeResponse(w, statusCode, rpcResponse{
 			JSONRPC: "2.0",
 			ID:      id,
@@ -251,9 +255,11 @@ func (s *Server) executeAndSettlePaidToolCall(ctx context.Context, w http.Respon
 	outcome.Settled = result.IsError
 	s.setPaymentExecutionOutcome(pc.executionKey, outcome)
 	if result.IsError {
-		// Tool-level error result: we do not settle, so no charge is captured;
-		// release the reservation so the nonce is not permanently burned.
-		s.rollbackNonce(pc.nonce)
+		// Tool-level error result: we do not settle, so no charge is captured and
+		// the nonce is not consumed. As above, the (nonce, request) binding is
+		// retained until expiry so the same request may retry but a different
+		// request cannot reuse the nonce.
+		s.releaseNonceReservation(pc.nonce)
 		writeResult(w, statusCode, id, result)
 		return
 	}

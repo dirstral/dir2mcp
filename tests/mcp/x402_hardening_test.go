@@ -140,7 +140,7 @@ func TestX402Nonce_IdempotentRetrySameRequestReplaysOutcome(t *testing.T) {
 // TestX402Nonce_ToolErrorRollsBackReservation verifies the reserve->rollback rule:
 // a gated call whose tool errors captures no payment, so the nonce is released
 // and may be reused for a subsequent (different) request rather than being burned.
-func TestX402Nonce_ToolErrorRollsBackReservation(t *testing.T) {
+func TestX402Nonce_ToolErrorRetainsBindingRejectsDifferentRequest(t *testing.T) {
 	t.Parallel()
 	fac := newFacilitatorStub(t)
 	facServer := httptest.NewServer(fac)
@@ -157,7 +157,9 @@ func TestX402Nonce_ToolErrorRollsBackReservation(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	sig := noncePaymentSignature(t, "0x3333333333333333333333333333333333333333333333333333333333333333")
 
-	// First: an unknown tool -> tool error -> no settle -> reservation rolled back.
+	// First: an unknown tool -> tool error -> no settle. The nonce is not
+	// consumed (no charge), but its (nonce, requestKey) reservation binding is
+	// retained until expiry.
 	first := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":721,"method":"tools/call","params":{"name":"dir2mcp_unknown","arguments":{}}}`, map[string]string{
 		"PAYMENT-SIGNATURE": sig,
 	})
@@ -167,22 +169,20 @@ func TestX402Nonce_ToolErrorRollsBackReservation(t *testing.T) {
 		t.Fatalf("settle calls after tool error=%d want=0", fac.settleCalls.Load())
 	}
 
-	// Second: same nonce, a valid tool. Because the reservation was rolled back
-	// (not consumed), this is admitted and settles rather than being treated as a
-	// replay of a burned nonce.
+	// Second: SAME nonce, a DIFFERENT request. The single-use nonce was already
+	// presented for a different request key, so reusing it here is a cross-request
+	// replay and MUST be rejected — it must not reach tool execution or settle,
+	// even though the first call captured no payment.
 	second := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, searchCallBody(722, "foo"), map[string]string{
 		"PAYMENT-SIGNATURE": sig,
 	})
 	defer func() { _ = second.Body.Close() }()
-	if second.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(second.Body)
-		t.Fatalf("second call status=%d want=200 body=%s", second.StatusCode, string(payload))
+	assertRPCErrorCodeAndRetryable(t, second, http.StatusPaymentRequired, "PAYMENT_INVALID", false)
+	if retriever.searchCalls.Load() != 0 {
+		t.Fatalf("search calls=%d want=0 (different-request reuse of a presented nonce must be rejected)", retriever.searchCalls.Load())
 	}
-	if retriever.searchCalls.Load() != 1 {
-		t.Fatalf("search calls=%d want=1", retriever.searchCalls.Load())
-	}
-	if fac.settleCalls.Load() != 1 {
-		t.Fatalf("settle calls=%d want=1 (released nonce should settle the valid retry)", fac.settleCalls.Load())
+	if fac.settleCalls.Load() != 0 {
+		t.Fatalf("settle calls=%d want=0 (cross-request replay must not settle)", fac.settleCalls.Load())
 	}
 }
 

@@ -271,23 +271,24 @@ func (s *Server) commitNonce(nonce, requestKey, executionKey string, expiresAt t
 	}
 }
 
-// rollbackNonce releases a reservation that never durably settled (e.g. the
-// gated tool returned an error, so no payment was captured). A consumed nonce is
-// never rolled back.
-func (s *Server) rollbackNonce(nonce string) {
+// releaseNonceReservation marks a reservation as no-longer-in-flight after a
+// non-settled outcome (the gated tool errored, so no payment was captured). It
+// does NOT delete the entry: the (nonce, requestKey) binding is retained until
+// expiry so the single-use nonce cannot be reused for a DIFFERENT request (a
+// cross-request replay), while the SAME (nonce, request) may still be retried
+// against the surviving reservation. A consumed nonce is never touched.
+//
+// Deleting the entry here would drop the binding and let a later request present
+// the same nonce with a different request key and pass classifyNonce as fresh.
+func (s *Server) releaseNonceReservation(nonce string) {
 	nonce = strings.TrimSpace(nonce)
 	if nonce == "" {
 		return
 	}
-	s.nonceMu.Lock()
-	e, ok := s.nonceLedger[nonce]
-	if !ok || e.Consumed {
-		s.nonceMu.Unlock()
-		return
-	}
-	delete(s.nonceLedger, nonce)
-	s.nonceMu.Unlock()
-	s.deletePersistedNonce(nonce)
+	// No state change is required — the reservation created by reserveNonce
+	// already blocks different-request replays and admits same-request retries.
+	// This is a named no-op so the call sites document the retain-until-expiry
+	// contract rather than silently omitting a rollback.
 }
 
 // nonceCap is the in-memory ledger entry cap.
