@@ -78,12 +78,33 @@ class BumpFormulaTests(unittest.TestCase):
 
     def test_preserves_unrelated_lines(self) -> None:
         out = bump_formula(_OLD_FORMULA, "0.5.0", _NEW_CHECKSUMS)
-        # Hand-written install logic, license, revision, homepage all survive.
-        self.assertIn("revision 1", out)
+        # Hand-written install logic, license, homepage all survive.
         self.assertIn('license "MIT"', out)
         self.assertIn('homepage "https://github.com/dirstral/dir2mcp"', out)
         self.assertIn("def install_docling_runtime", out)
         self.assertIn('ENV["FOO"] = "bar"', out)
+
+    def test_drops_revision_on_version_bump(self) -> None:
+        # A stale `revision N` from a prior same-version rebuild must not carry
+        # into a new version — it would install as X.Y.Z_N, mismatching the
+        # lean formula GoReleaser regenerates clean.
+        out = bump_formula(_OLD_FORMULA, "0.5.0", _NEW_CHECKSUMS)
+        self.assertNotIn("revision 1", out)
+        self.assertNotIn("revision", out)
+        # Dropping the line must not disturb the surrounding structure.
+        self.assertIn('license "MIT"', out)
+
+    def test_preserves_revision_on_same_version_rerun(self) -> None:
+        # When --version equals the declared version (idempotent re-run, e.g. a
+        # deliberate same-version rebuild) the revision counter is left intact.
+        same_version_checksums = {
+            "dir2mcp_0.4.4_darwin_amd64.tar.gz": "1" * 64,
+            "dir2mcp_0.4.4_darwin_arm64.tar.gz": "2" * 64,
+            "dir2mcp_0.4.4_linux_amd64.tar.gz":  "3" * 64,
+            "dir2mcp_0.4.4_linux_arm64.tar.gz":  "4" * 64,
+        }
+        out = bump_formula(_OLD_FORMULA, "0.4.4", same_version_checksums)
+        self.assertIn("revision 1", out)
 
     def test_idempotent(self) -> None:
         once = bump_formula(_OLD_FORMULA, "0.5.0", _NEW_CHECKSUMS)

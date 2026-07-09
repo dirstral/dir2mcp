@@ -9,8 +9,19 @@ but ``dir2mcp-full.rb`` carries hand-written docling install logic
 template. Without an automated bump path the full formula drifts every
 release; this script keeps it in lockstep by rewriting only the version,
 release-tarball URLs, and SHA256 lines, leaving every other line
-untouched (including ``revision``, ``depends_on``, custom install
-methods, etc).
+untouched (``depends_on``, custom install methods, etc).
+
+Homebrew ``revision``
+---------------------
+On a **real version bump** (the formula's declared version differs from
+``--version``) any ``revision N`` line is dropped. ``revision`` is a
+Homebrew rebuild counter scoped to a single version; a stale hand-added
+``revision`` carried across a version bump yields an installed version
+``X.Y.Z_N`` that mismatches the lean ``dir2mcp.rb`` (which GoReleaser
+regenerates clean, without a revision). Dropping it keeps the two
+formulas in lockstep. When ``--version`` equals the current version (an
+idempotent re-run, e.g. a same-version rebuild), any ``revision`` is left
+untouched so a deliberate rebuild counter survives.
 
 Usage
 -----
@@ -43,6 +54,17 @@ TARBALL_RE = re.compile(
 URL_LINE_RE = re.compile(r'^(\s*url\s+)"(?P<url>[^"]+)"\s*$')
 SHA256_LINE_RE = re.compile(r'^(\s*sha256\s+)"(?P<hex>[0-9a-fA-F]{64})"\s*$')
 VERSION_LINE_RE = re.compile(r'^(\s*version\s+)"(?P<version>[^"]+)"\s*$')
+# Homebrew rebuild counter, e.g. ``  revision 1``.
+REVISION_LINE_RE = re.compile(r"^\s*revision\s+\d+\s*$")
+
+
+def _find_declared_version(formula_text: str) -> str | None:
+    """Return the formula's current top-level ``version`` string, if any."""
+    for line in formula_text.splitlines():
+        m = VERSION_LINE_RE.match(line)
+        if m:
+            return m.group("version")
+    return None
 
 
 def parse_checksums(checksums_path: Path) -> dict[str, str]:
@@ -85,12 +107,22 @@ def bump_formula(formula_text: str, new_version: str, checksums: dict[str, str])
     seen_keys: set[str] = set()
     version_line_seen = False
 
+    # A "real version bump" is when the formula's declared version differs from
+    # the target. On such a bump we drop any stale `revision N` line (see the
+    # module docstring); on an idempotent same-version re-run we leave it alone.
+    old_version = _find_declared_version(formula_text)
+    is_version_bump = old_version is not None and old_version != new_version
+
     for line in formula_text.splitlines(keepends=False):
         # Top-level version field — there is exactly one in the formula.
         m_version = VERSION_LINE_RE.match(line)
         if m_version:
             out_lines.append(f'{m_version.group(1)}"{new_version}"')
             version_line_seen = True
+            continue
+
+        # Drop a stale rebuild counter when the version actually changes.
+        if is_version_bump and REVISION_LINE_RE.match(line):
             continue
 
         m_url = URL_LINE_RE.match(line)

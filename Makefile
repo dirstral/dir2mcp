@@ -1,4 +1,4 @@
-# Build binaries. Requires Go 1.24+.
+# Build binaries. Requires Go 1.25+ (matches the `go` directive in go.mod).
 .PHONY: build build-dir2mcp build-elevenlabs-bridge
 build: build-dir2mcp
 

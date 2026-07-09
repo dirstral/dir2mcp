@@ -102,7 +102,7 @@ require (
 	modernc.org/token v1.1.0 // indirect
 )
 
-// audit: govulncheck scan (2026-06-27) reports no vulnerabilities affecting
-// our code. golang.org/x/image was bumped to v0.43.0 to fix GO-2026-5061
-// (a webp decoder panic reachable via internal/pdfutil). We keep the indirect
-// modules here to match the modernc.org/sqlite dependency surface.
+// golang.org/x/image is held at >= v0.43.0 to fix GO-2026-5061 (a webp decoder
+// panic reachable via internal/pdfutil). Vulnerability scanning is not asserted
+// by this comment: the `govulncheck` CI gate (.github/workflows/go.yml) is the
+// live control and runs govulncheck ./... on every push/PR.
