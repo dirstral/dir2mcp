@@ -112,6 +112,10 @@ type documentErrorNotifier interface {
 	SetOnDocumentError(fn func(relPath, docType, message string))
 }
 
+type documentSkipNotifier interface {
+	SetOnDocumentSkip(fn func(relPath, docType, reason string))
+}
+
 type contentHashResetter interface {
 	ClearDocumentContentHashes(ctx context.Context) error
 }

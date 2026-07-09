@@ -149,34 +149,71 @@ func TestNewFileErrorEmitter_EmitsPerDocumentIdentity(t *testing.T) {
 	}
 }
 
-// errorNotifierStub records what wireIngestorHooks registers on it.
-type errorNotifierStub struct {
+// TestNewFileSkipEmitter_EmitsReasonAtWarnLevel covers the `file_skip` half of
+// the never-indexed partition: the event must name the file and carry a
+// `skip_reasons` enum value, at level=warn per SPEC §3.2.
+func TestNewFileSkipEmitter_EmitsReasonAtWarnLevel(t *testing.T) {
+	var buf bytes.Buffer
+	emitter := newNDJSONEmitter(&buf, true)
+
+	newFileSkipEmitter(emitter)("notes/report.odt", "document", model.SkipReasonUnsupportedFormat)
+
+	events := decodeNDJSON(t, buf.String())
+	fs, ok := events["file_skip"]
+	if !ok {
+		t.Fatalf("no file_skip event emitted; got %q", buf.String())
+	}
+	if got := fs["rel_path"]; got != "notes/report.odt" {
+		t.Errorf("rel_path = %v, want notes/report.odt", got)
+	}
+	if got := fs["doc_type"]; got != "document" {
+		t.Errorf("doc_type = %v, want document", got)
+	}
+	if got := fs["reason"]; got != model.SkipReasonUnsupportedFormat {
+		t.Errorf("reason = %v, want %v", got, model.SkipReasonUnsupportedFormat)
+	}
+	if got := fs["__level"]; got != "warn" {
+		t.Errorf("level = %v, want warn (SPEC §3.2 enum is info|warn|error)", got)
+	}
+}
+
+// notifierStub records what wireIngestorHooks registers on it.
+type notifierStub struct {
 	model.Ingestor
-	fn func(relPath, docType, message string)
+	errFn  func(relPath, docType, message string)
+	skipFn func(relPath, docType, reason string)
 }
 
-func (s *errorNotifierStub) SetOnDocumentError(fn func(relPath, docType, message string)) {
-	s.fn = fn
+func (s *notifierStub) SetOnDocumentError(fn func(relPath, docType, message string)) {
+	s.errFn = fn
 }
 
-func TestWireIngestorHooks_RegistersDocumentErrorCallback(t *testing.T) {
-	stub := &errorNotifierStub{}
-	called := false
-	wireIngestorHooks(stub, nil, nil, func(string, string, string) { called = true })
+func (s *notifierStub) SetOnDocumentSkip(fn func(relPath, docType, reason string)) {
+	s.skipFn = fn
+}
 
-	if stub.fn == nil {
-		t.Fatal("wireIngestorHooks did not register the document-error callback")
+func TestWireIngestorHooks_RegistersDocumentCallbacks(t *testing.T) {
+	stub := &notifierStub{}
+	errCalled, skipCalled := false, false
+	wireIngestorHooks(stub, ingestorHooks{
+		onDocError: func(string, string, string) { errCalled = true },
+		onDocSkip:  func(string, string, string) { skipCalled = true },
+	})
+
+	if stub.errFn == nil || stub.skipFn == nil {
+		t.Fatal("wireIngestorHooks did not register both document callbacks")
 	}
-	stub.fn("a.pdf", "pdf", "boom")
-	if !called {
-		t.Fatal("registered callback was not the one passed in")
+	stub.errFn("a.pdf", "pdf", "boom")
+	stub.skipFn("b.odt", "document", model.SkipReasonUnsupportedFormat)
+	if !errCalled || !skipCalled {
+		t.Fatalf("registered callbacks were not the ones passed in (err=%v skip=%v)", errCalled, skipCalled)
 	}
 }
 
-func TestWireIngestorHooks_NilCallbackIsNotRegistered(t *testing.T) {
-	stub := &errorNotifierStub{}
-	wireIngestorHooks(stub, nil, nil, nil)
-	if stub.fn != nil {
+func TestWireIngestorHooks_NilCallbacksAreNotRegistered(t *testing.T) {
+	stub := &notifierStub{}
+	wireIngestorHooks(stub, ingestorHooks{})
+	if stub.errFn != nil || stub.skipFn != nil {
 		t.Fatal("wireIngestorHooks registered a nil callback")
 	}
 }
