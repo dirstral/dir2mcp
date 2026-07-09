@@ -23,12 +23,12 @@ func TestExtractableExtensionCounts(t *testing.T) {
 	}
 
 	docs := []model.Document{
-		{RelPath: "a.PDF", DocType: "pdf", Status: "ok", ContentHash: "h1"}, // uppercase ext → normalized
-		{RelPath: "b.pdf", DocType: "pdf", Status: "ok", ContentHash: "h2"}, // second .pdf
+		{RelPath: "a.PDF", DocType: "pdf", Status: "ok", ContentHash: "h1"},   // uppercase ext → normalized
+		{RelPath: "b.pdf", DocType: "pdf", Status: "ok", ContentHash: "h2"},   // second .pdf
 		{RelPath: "scan.tiff", DocType: "image", Status: "ok", ContentHash: "h3"},
 		{RelPath: "notes.odt", DocType: "document", Status: "ok", ContentHash: "h4"},
-		{RelPath: "main.go", DocType: "code", Status: "ok", ContentHash: "h5"},                // not extractable
-		{RelPath: "bad.docx", DocType: "document", Status: "error", ContentHash: "h6"},        // wrong status
+		{RelPath: "main.go", DocType: "code", Status: "ok", ContentHash: "h5"},        // not extractable
+		{RelPath: "bad.docx", DocType: "document", Status: "error", ContentHash: "h6"}, // wrong status
 		{RelPath: "gone.pdf", DocType: "pdf", Status: "ok", Deleted: true, ContentHash: "h7"}, // deleted
 	}
 	for _, d := range docs {
