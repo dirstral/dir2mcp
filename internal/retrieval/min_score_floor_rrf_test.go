@@ -87,11 +87,11 @@ func TestApplyMinScoreFloor_Normalized(t *testing.T) {
 		floor float64
 		want  []uint64
 	}{
-		{0, []uint64{1, 2, 3}},       // disabled: pass-through
-		{0.4, []uint64{1, 2}},        // keeps top two (norm 1.0, 0.5), drops norm 0.0
-		{0.5, []uint64{1, 2}},        // boundary: norm == floor is KEPT (strict <)
-		{0.6, []uint64{1}},           // only the top survives
-		{1.5, []uint64{}},            // above every normalized score → empty
+		{0, []uint64{1, 2, 3}}, // disabled: pass-through
+		{0.4, []uint64{1, 2}},  // keeps top two (norm 1.0, 0.5), drops norm 0.0
+		{0.5, []uint64{1, 2}},  // boundary: norm == floor is KEPT (strict <)
+		{0.6, []uint64{1}},     // only the top survives
+		{1.5, []uint64{}},      // above every normalized score → empty
 	}
 	for _, tc := range cases {
 		got := floorSurvivors(tc.floor, hits)

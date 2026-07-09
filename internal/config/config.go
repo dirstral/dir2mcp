@@ -4255,6 +4255,17 @@ func (c *Config) ValidateX402(strict bool) error {
 		c.X402.ResourceBaseURL = normalized
 	}
 
+	// Transport security (bs-010 / x402 adapter spec): the adapter->facilitator
+	// transport MUST be https whenever it is credentialed OR the facilitator
+	// host is non-loopback. Plaintext http is permitted ONLY for a loopback host
+	// with no credential attached. This is a hard configuration error in ALL
+	// enabled modes (including "on" fail-open) — an insecure credentialed or
+	// non-loopback facilitator URL is not a degradable condition, so it is
+	// enforced here regardless of the strict flag.
+	if err := c.validateX402FacilitatorTransport(); err != nil {
+		return err
+	}
+
 	// network is validated later when strict mode is enabled; no need to duplicate
 
 	if !strict {
@@ -4334,6 +4345,71 @@ func normalizeX402URL(rawURL, label string) (string, error) {
 		parsed.Path = strings.TrimRight(parsed.Path, "/")
 	}
 	return parsed.String(), nil
+}
+
+// validateX402FacilitatorTransport enforces the adapter->facilitator transport
+// security requirement (bs-010 / x402 adapter spec): https is mandatory whenever
+// a credential (facilitator token) is attached OR the facilitator host is
+// non-loopback. Plaintext http is permitted only for a loopback host with no
+// credential (local development). An empty facilitator URL is left to the
+// strict-mode required-field checks and is not treated as a transport error.
+func (c *Config) validateX402FacilitatorTransport() error {
+	raw := strings.TrimSpace(c.X402.FacilitatorURL)
+	if raw == "" {
+		return nil
+	}
+	hasCredential := strings.TrimSpace(c.X402.FacilitatorToken) != ""
+	return validateX402TransportSecurity(raw, hasCredential)
+}
+
+// X402FacilitatorTransportError returns a non-nil error when the configured
+// facilitator URL would carry a credential or reach a non-loopback host over
+// plaintext http. It is exposed so the MCP server can fail closed (refuse to
+// enable gating) independently of the full x402 validation flow — transport
+// insecurity is a hard, non-degradable condition in every mode.
+func (c *Config) X402FacilitatorTransportError() error {
+	return c.validateX402FacilitatorTransport()
+}
+
+// validateX402TransportSecurity is the shared transport-security predicate used
+// by config validation. It returns a descriptive configuration error when the
+// URL would carry a credential or reach a non-loopback host over plaintext http.
+func validateX402TransportSecurity(rawURL string, hasCredential bool) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("invalid x402 facilitator URL %q: %w", rawURL, err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	switch scheme {
+	case "https":
+		return nil
+	case "http":
+		if hasCredential {
+			return fmt.Errorf("x402 facilitator URL must use https when a facilitator token is configured (plaintext http would leak the credential): %q", rawURL)
+		}
+		if !isLoopbackHost(parsed.Hostname()) {
+			return fmt.Errorf("x402 facilitator URL must use https for a non-loopback host: %q", rawURL)
+		}
+		return nil
+	default:
+		return fmt.Errorf("x402 facilitator URL must use https (or http for a credential-less loopback host): %q", rawURL)
+	}
+}
+
+// isLoopbackHost reports whether host refers to the local machine: an IP in the
+// IPv4 127.0.0.0/8 block, the IPv6 ::1 address, or the "localhost" name.
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // isCAIP2Network reports whether value is a CAIP-2 "namespace:reference"

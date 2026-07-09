@@ -29,6 +29,13 @@ const (
 	// compatible way, and having it as a constant makes updates
 	// straightforward.
 	X402Version = 2
+
+	// DefaultMaxTimeoutSeconds is the fallback validity window advertised in the
+	// PAYMENT-REQUIRED challenge (and enforced adapter-side as the maximum age of
+	// a payment authorization) when no explicit value is configured. Per the
+	// x402 adapter spec it is emitted as a first-class PaymentRequirements field,
+	// never only inside `extra`.
+	DefaultMaxTimeoutSeconds = 300
 )
 
 type Requirement struct {
@@ -39,6 +46,11 @@ type Requirement struct {
 	Asset             string
 	PayTo             string
 	Resource          string
+	// MaxTimeoutSeconds is the maximum age (in seconds) permitted between the
+	// challenge and the client's PAYMENT-SIGNATURE. Emitted first-class in the
+	// challenge and enforced adapter-side against the authorization validity
+	// window. A non-positive value is normalized to DefaultMaxTimeoutSeconds.
+	MaxTimeoutSeconds int
 }
 
 // X402Payload represents the JSON object returned in the PAYMENT-REQUIRED header.
@@ -61,6 +73,7 @@ type AcceptEntry struct {
 	Asset             string `json:"asset"`
 	PayTo             string `json:"payTo"`
 	Resource          string `json:"resource"`
+	MaxTimeoutSeconds int    `json:"maxTimeoutSeconds"`
 }
 
 const allowedSchemesText = "exact, upto"
@@ -73,6 +86,9 @@ func (r Requirement) Normalize() Requirement {
 	r.Asset = strings.TrimSpace(r.Asset)
 	r.PayTo = strings.TrimSpace(r.PayTo)
 	r.Resource = strings.TrimSpace(r.Resource)
+	if r.MaxTimeoutSeconds <= 0 {
+		r.MaxTimeoutSeconds = DefaultMaxTimeoutSeconds
+	}
 	return r
 }
 
@@ -142,6 +158,7 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 				Asset:             req.Asset,
 				PayTo:             req.PayTo,
 				Resource:          req.Resource,
+				MaxTimeoutSeconds: req.MaxTimeoutSeconds,
 			},
 		},
 	}

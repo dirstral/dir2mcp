@@ -107,6 +107,15 @@ type Server struct {
 	paymentTTL      time.Duration
 	paymentMaxItems int
 
+	// nonceLedger is the single-use replay ledger keyed by the client's x402
+	// authorization nonce (or a signature-derived fallback for opaque proofs).
+	// It enforces exactly-once consumption on the verified->settled transition
+	// and blocks cross-request replays. Guarded by nonceMu; persisted via the
+	// store so a consumed nonce survives process restart for its validity window.
+	nonceMu       sync.Mutex
+	nonceLedger   map[string]nonceLedgerEntry
+	nonceMaxItems int
+
 	// cached writer used by appendPaymentLog. protected by paymentLogMu.
 	paymentLogMu     sync.Mutex
 	paymentLogFile   *os.File
@@ -222,6 +231,16 @@ func WithExtractSegment(fn func(ctx context.Context, path string, startMS, endMS
 	}
 }
 
+// WithX402Client overrides the x402 facilitator client. Production leaves it
+// unset so initPaymentConfig builds one from config; tests inject a client that
+// points at a stub facilitator (e.g. one served over TLS so credentialed
+// transport-security checks can be exercised without a real endpoint).
+func WithX402Client(client x402.FacilitatorClient) ServerOption {
+	return func(s *Server) {
+		s.x402Client = client
+	}
+}
+
 func WithEventEmitter(fn func(level, event string, data interface{})) ServerOption {
 	return func(s *Server) {
 		s.eventEmitter = fn
@@ -248,6 +267,8 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
 		paymentTTL:      paymentOutcomeTTL,
 		paymentMaxItems: paymentOutcomeMaxEntries,
+		nonceLedger:     make(map[string]nonceLedgerEntry),
+		nonceMaxItems:   nonceLedgerMaxEntries,
 		execKeyMu:       make(map[string]*keyMutex),
 	}
 	// cond must be set after the zero-value mutex has been created above
@@ -721,6 +742,7 @@ func (s *Server) cleanupExpiredSessions(now time.Time) {
 func (s *Server) restoreRuntimeState(ctx context.Context) {
 	s.restoreSessions(ctx)
 	s.restorePaymentOutcomes(ctx)
+	s.loadPersistedNonceLedger()
 }
 
 func (s *Server) restoreSessions(ctx context.Context) {
@@ -835,6 +857,9 @@ func (s *Server) cleanupPaymentOutcomes(now time.Time) {
 	for _, key := range keysToDelete {
 		s.deletePersistedPaymentOutcome(key)
 	}
+
+	// Evict expired single-use replay ledger entries on the same cadence.
+	s.sweepExpiredNonces(now)
 }
 
 func (s *Server) prunePaymentOutcomesLocked(now time.Time) []string {
