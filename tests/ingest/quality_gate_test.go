@@ -109,6 +109,82 @@ func TestQualityGate_DisabledViaSetter(t *testing.T) {
 	}
 }
 
+// englishClipTranscript is a clean, legitimate English transcript (Latin
+// script) used by the pinned-language tests. It trips no degeneracy detector on
+// its own; the only quarantine signal it can raise is a language/script mismatch
+// against a pinned non-Latin STT language.
+const englishClipTranscript = "[00:00] welcome to the interview today\n" +
+	"[00:02] we discuss several distinct topics in depth\n" +
+	"[00:05] including history geography and science across many regions"
+
+// TestQualityGate_PinnedLanguageDoesNotQuarantineOtherLanguage pins dir2mcp#439
+// F3: a corpus pinned to a non-Latin STT language (`ru`) must NOT quarantine a
+// legitimate English clip by default. media.stt.language_strict defaults false,
+// so the pinned language is treated as a provider hint (not per-file ground
+// truth) and the quality gate's language detector self-skips — the English clip
+// is embedded normally instead of being discarded as ~100% off-script.
+func TestQualityGate_PinnedLanguageDoesNotQuarantineOtherLanguage(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	// MediaSTTLanguageStrict defaults to false (unset here).
+	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
+	svc.SetTranscriptLanguage("ru") // operator pinned Russian
+	svc.SetTranscriber(&fakeTranscriber{text: englishClipTranscript})
+
+	doc := model.Document{DocID: 105, RelPath: "audio/english_clip.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio-bytes")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation failed: %v", err)
+	}
+
+	if len(st.chunks) == 0 {
+		t.Fatal("expected transcript chunks to be persisted, got none")
+	}
+	for i, c := range st.chunks {
+		if c.EmbeddingStatus != "pending" {
+			t.Fatalf("chunk %d: pinned-language footgun — legit English clip quarantined (status=%q); "+
+				"a pinned STT language must not drive quarantine by default", i, c.EmbeddingStatus)
+		}
+		if c.ErrorCategory != "" {
+			t.Fatalf("chunk %d: expected no error_category, got %q", i, c.ErrorCategory)
+		}
+	}
+}
+
+// TestQualityGate_PinnedLanguageStrictQuarantinesOffScript is the opt-in
+// companion: with media.stt.language_strict:true an operator asserts a genuinely
+// single-language corpus, so the pinned language IS enforced and an off-script
+// (English) transcript is quarantined as a language mismatch.
+func TestQualityGate_PinnedLanguageStrictQuarantinesOffScript(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{
+		StateDir:               stateDir,
+		QualityGatesEnabled:    true,
+		MediaSTTLanguageStrict: true,
+	}, st)
+	svc.SetTranscriptLanguage("ru")
+	svc.SetTranscriber(&fakeTranscriber{text: englishClipTranscript})
+
+	doc := model.Document{DocID: 106, RelPath: "audio/english_strict.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio-bytes")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation failed: %v", err)
+	}
+
+	if len(st.chunks) == 0 {
+		t.Fatal("expected transcript chunks to be persisted (quarantined), got none")
+	}
+	for i, c := range st.chunks {
+		if c.EmbeddingStatus != "error" {
+			t.Fatalf("chunk %d: strict mode should quarantine off-script transcript, got status=%q", i, c.EmbeddingStatus)
+		}
+		if c.ErrorCategory != string(store.ErrorCategoryQualityGate) {
+			t.Fatalf("chunk %d: expected error_category=%q, got %q", i, store.ErrorCategoryQualityGate, c.ErrorCategory)
+		}
+	}
+}
+
 // TestQualityGate_QuarantinesDegenerateOCR exercises the OCR flat path: a
 // degenerate OCR result is quarantined identically to the transcript path.
 func TestQualityGate_QuarantinesDegenerateOCR(t *testing.T) {

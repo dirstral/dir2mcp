@@ -3463,13 +3463,27 @@ func (s *Service) recordQualityGateDocError(ctx context.Context, doc model.Docum
 	s.persistNonFatalDocError(ctx, doc, errors.New(msg), nil)
 }
 
-// transcriptExpectedLanguage returns the active STT provider profile's language
-// tag used to drive the quality gate's language detector, or "" when none is
-// configured (in which case the language gate self-skips). The value is
-// resolved from the same provider profile the transcriber uses (SPEC 8.1.3),
-// not the legacy ElevenLabs-only field, so provider-profile setups (e.g.
-// Mistral) supply the correct expected language.
+// transcriptExpectedLanguage returns the language tag the quality gate's
+// language/script-mismatch detector should treat as expected for a transcript,
+// or "" when the detector should self-skip.
+//
+// A corpus-pinned STT language (s.transcriptLanguage, resolved from the active
+// provider profile per SPEC 8.1.3) is a provider HINT that biases
+// transcription; it is NOT a per-file guarantee about content. Feeding it to
+// the gate as ground truth quarantines legitimate other-language clips — e.g.
+// an English interview in a corpus pinned to `ru` transcribes to ~100%
+// off-script and is discarded (dir2mcp#439 F3), contradicting the
+// general-purpose auto-detect mandate. So by default (MediaSTTLanguageStrict
+// false) a pinned language does NOT drive quarantine and this returns "": the
+// language detector self-skips while the repetition/gibberish/density detectors
+// still catch degenerate output. Operators who have verified a genuinely
+// single-language corpus can set media.stt.language_strict:true to restore
+// strict enforcement. When STT language is auto (unpinned) s.transcriptLanguage
+// is already "", so the flag is a no-op and behaviour is unchanged.
 func (s *Service) transcriptExpectedLanguage() string {
+	if !s.cfg.MediaSTTLanguageStrict {
+		return ""
+	}
 	return s.transcriptLanguage
 }
 

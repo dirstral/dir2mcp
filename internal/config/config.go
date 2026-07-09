@@ -635,6 +635,24 @@ type Config struct {
 	MediaSTTMaxPayloadMB      int
 	MediaSTTRequestTimeoutSec int
 
+	// MediaSTTLanguageStrict controls whether a corpus-pinned STT language
+	// (config `media.stt.language` / a provider profile's language) is treated
+	// by the output quality gate as ground truth about content, and therefore
+	// enforced by its language/script-mismatch detector (config
+	// `media.stt.language_strict`, dir2mcp#439 F3).
+	//
+	// A pinned STT language is a provider HINT that biases transcription; it is
+	// NOT a per-file guarantee about content. Feeding it to the quality gate as
+	// the expected language quarantines legitimate other-language clips (e.g. an
+	// English interview in a corpus pinned to `ru` transcribes to ~100%
+	// off-script and is discarded). That contradicts the general-purpose,
+	// auto-detect mandate, so the default is false: a pinned language never
+	// drives quarantine, and the language detector self-skips for transcripts
+	// (degenerate output is still caught by the repetition/gibberish/density
+	// detectors). Operators who have verified a genuinely single-language corpus
+	// can set this true to restore strict script-mismatch enforcement.
+	MediaSTTLanguageStrict bool
+
 	// MediaBatchTwoPhase / MediaBatchProgress / MediaBatchManifest configure the
 	// optional batch-ergonomics surface for large-archive media ingests (SPEC
 	// §8.6.11; config block `media.batch`). All default OFF/empty so behavior is
@@ -803,6 +821,7 @@ type fileConfig struct {
 	MediaClipMaxBytes                  *int
 	MediaSTTMaxPayloadMB               *int
 	MediaSTTRequestTimeoutSec          *int
+	MediaSTTLanguageStrict             *bool
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
 	ServerTLSKeyFile                   *string
@@ -942,6 +961,7 @@ type persistedConfig struct {
 	MediaClipMaxBytes                  int           `yaml:"media_clip_max_bytes"`
 	MediaSTTMaxPayloadMB               int           `yaml:"media_stt_max_payload_mb"`
 	MediaSTTRequestTimeoutSec          int           `yaml:"media_stt_request_timeout_sec"`
+	MediaSTTLanguageStrict             bool          `yaml:"media_stt_language_strict"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
 	MediaBatchManifest                 string        `yaml:"media_batch_manifest"`
@@ -1143,6 +1163,9 @@ func Default() Config {
 		// 0 = use the whisper client's built-in caps (#510, #511).
 		MediaSTTMaxPayloadMB:      0,
 		MediaSTTRequestTimeoutSec: 0,
+		// A pinned STT language is a provider hint, not per-file ground truth, so
+		// it does not drive quality-gate quarantine by default (dir2mcp#439 F3).
+		MediaSTTLanguageStrict:    false,
 		MediaVariantsGroup:        false,
 		MediaVariantsSelect:       "best",
 		MediaTranslateEnabled:     false,
@@ -1305,6 +1328,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaClipMaxBytes:                  cfg.MediaClipMaxBytes,
 		MediaSTTMaxPayloadMB:               cfg.MediaSTTMaxPayloadMB,
 		MediaSTTRequestTimeoutSec:          cfg.MediaSTTRequestTimeoutSec,
+		MediaSTTLanguageStrict:             cfg.MediaSTTLanguageStrict,
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
 		X402Mode:                           cfg.X402.Mode,
@@ -2105,6 +2129,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTRequestTimeoutSec != nil {
 		cfg.MediaSTTRequestTimeoutSec = *fc.MediaSTTRequestTimeoutSec
 	}
+	if fc.MediaSTTLanguageStrict != nil {
+		cfg.MediaSTTLanguageStrict = *fc.MediaSTTLanguageStrict
+	}
 }
 
 // applyMediaSubtitlesFileParsed copies the set media.subtitles.* file fields
@@ -2458,6 +2485,7 @@ var configKeyAliases = map[string]string{
 	"media_clip_max_bytes":                    "media.clip.max_bytes",
 	"media_stt_max_payload_mb":                "media.stt.max_payload_mb",
 	"media_stt_request_timeout_sec":           "media.stt.request_timeout_sec",
+	"media_stt_language_strict":               "media.stt.language_strict",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
 	"stt_elevenlabs_model":                    "stt.elevenlabs.model",
@@ -2577,6 +2605,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"media_sidecars_disabled":    func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
 	"media.variants.group":       func(c *fileConfig) **bool { return &c.MediaVariantsGroup },
 	"media.translate.enabled":    func(c *fileConfig) **bool { return &c.MediaTranslateEnabled },
+	"media.stt.language_strict":  func(c *fileConfig) **bool { return &c.MediaSTTLanguageStrict },
 	"media.subtitles.ttml.enabled": func(c *fileConfig) **bool {
 		return &c.MediaSubtitlesTTMLEnabled
 	},
@@ -3122,6 +3151,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_clip_max_bytes", cfg.MediaClipMaxBytes)
 	writeInt("media_stt_max_payload_mb", cfg.MediaSTTMaxPayloadMB)
 	writeInt("media_stt_request_timeout_sec", cfg.MediaSTTRequestTimeoutSec)
+	writeBool("media_stt_language_strict", cfg.MediaSTTLanguageStrict)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
 	writeScalar("media_batch_manifest", cfg.MediaBatchManifest)

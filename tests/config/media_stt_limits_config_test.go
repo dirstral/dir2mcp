@@ -78,6 +78,65 @@ func TestMediaSTTLimits_ParsesFlatAndNestedYAML(t *testing.T) {
 	}
 }
 
+// TestMediaSTTLanguageStrict_DefaultsFalse confirms the pinned-STT-language
+// quality-gate enforcement toggle defaults to false, so a corpus-pinned STT
+// language never drives quarantine out of the box (dir2mcp#439 F3).
+func TestMediaSTTLanguageStrict_DefaultsFalse(t *testing.T) {
+	cfg := config.Default()
+	if cfg.MediaSTTLanguageStrict {
+		t.Errorf("media.stt.language_strict default = true, want false")
+	}
+}
+
+// TestMediaSTTLanguageStrict_RoundTripsThroughSaveLoad exercises the bool
+// plumbing (setBoolFileScalar, writeBool) for the toggle.
+func TestMediaSTTLanguageStrict_RoundTripsThroughSaveLoad(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+
+	cfg := config.Default()
+	cfg.RootDir = "/tmp/repo"
+	cfg.StateDir = "/tmp/repo/.dir2mcp"
+	cfg.MediaSTTLanguageStrict = true
+	if err := config.SaveFile(path, cfg); err != nil {
+		t.Fatalf("SaveFile: %v", err)
+	}
+	loaded, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if !loaded.MediaSTTLanguageStrict {
+		t.Errorf("media.stt.language_strict did not round-trip: got false, want true")
+	}
+}
+
+// TestMediaSTTLanguageStrict_ParsesFlatAndNestedYAML confirms both the flat key
+// (media_stt_language_strict) and the nested block (media: stt: language_strict)
+// apply through the loader.
+func TestMediaSTTLanguageStrict_ParsesFlatAndNestedYAML(t *testing.T) {
+	base := []string{
+		"root_dir: /tmp/repo",
+		"state_dir: /tmp/repo/.dir2mcp",
+	}
+	flat := append(append([]string(nil), base...), "media_stt_language_strict: true")
+	nested := append(append([]string(nil), base...),
+		"media:", "  stt:", "    language_strict: true")
+
+	for name, lines := range map[string][]string{"flat": flat, "nested": nested} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+			writeFile(t, path, strings.Join(lines, "\n")+"\n")
+			cfg, err := config.LoadFile(path)
+			if err != nil {
+				t.Fatalf("LoadFile(%s media.stt.language_strict): %v", name, err)
+			}
+			if !cfg.MediaSTTLanguageStrict {
+				t.Errorf("%s media.stt.language_strict = false, want true", name)
+			}
+		})
+	}
+}
+
 // TestMediaSTTLimits_NegativeRejected confirms negative values are CONFIG_INVALID.
 func TestMediaSTTLimits_NegativeRejected(t *testing.T) {
 	for _, tc := range []struct {
