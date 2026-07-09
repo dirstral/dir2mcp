@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/netutil"
 	sdkhttp "github.com/x402-foundation/x402/go/http"
 )
 
@@ -54,7 +55,8 @@ func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Clien
 		}
 	}
 
-	sdkURL, ok := normalizeSDKFacilitatorURL(baseURL)
+	hasCredential := strings.TrimSpace(bearerToken) != ""
+	sdkURL, ok := normalizeSDKFacilitatorURL(baseURL, hasCredential)
 	if !ok {
 		return &sdkAdapterClient{baseURL: ""}
 	}
@@ -73,9 +75,19 @@ func newSDKFacilitatorClient(baseURL, bearerToken string, httpClient *http.Clien
 	}
 }
 
-func normalizeSDKFacilitatorURL(baseURL string) (string, bool) {
+func normalizeSDKFacilitatorURL(baseURL string, hasCredential bool) (string, bool) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", false
+	}
+	// Transport security (bs-010 / x402 adapter spec): refuse to build a
+	// facilitator client that would send a bearer token or payment payload over
+	// plaintext http to a credentialed or non-loopback endpoint. https is
+	// required whenever the connection is credentialed OR the host is
+	// non-loopback; plaintext http is accepted only for a credential-less
+	// loopback host. Returning ok=false yields a client whose calls fail closed
+	// with PAYMENT_CONFIG_INVALID rather than leaking the credential.
+	if !isTransportSecure(parsed, hasCredential) {
 		return "", false
 	}
 	trimmedPath := strings.TrimSuffix(parsed.Path, "/")
@@ -87,6 +99,24 @@ func normalizeSDKFacilitatorURL(baseURL string) (string, bool) {
 		parsed.Path = joined
 	}
 	return strings.TrimRight(parsed.String(), "/"), true
+}
+
+// isTransportSecure reports whether the parsed facilitator URL is acceptable for
+// the adapter->facilitator transport given whether a credential is attached.
+// https is always acceptable; plaintext http is acceptable only for a
+// credential-less loopback host.
+func isTransportSecure(parsed *url.URL, hasCredential bool) bool {
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return true
+	case "http":
+		if hasCredential {
+			return false
+		}
+		return netutil.IsLoopbackHost(parsed.Hostname())
+	default:
+		return false
+	}
 }
 
 func (c *sdkAdapterClient) Verify(ctx context.Context, paymentSignature string, req Requirement) (json.RawMessage, error) {
@@ -181,12 +211,14 @@ type sdkPaymentPayload struct {
 }
 
 type sdkPaymentRequirements struct {
-	Scheme  string                 `json:"scheme"`
-	Network string                 `json:"network"`
-	Amount  string                 `json:"amount"`
-	Asset   string                 `json:"asset"`
-	PayTo   string                 `json:"payTo"`
-	Extra   map[string]interface{} `json:"extra,omitempty"`
+	Scheme            string                 `json:"scheme"`
+	Network           string                 `json:"network"`
+	Amount            string                 `json:"amount"`
+	Asset             string                 `json:"asset"`
+	PayTo             string                 `json:"payTo"`
+	Resource          string                 `json:"resource,omitempty"`
+	MaxTimeoutSeconds int                    `json:"maxTimeoutSeconds,omitempty"`
+	Extra             map[string]interface{} `json:"extra,omitempty"`
 }
 
 func buildSDKPaymentPayloadBytes(paymentSignature string, req Requirement) ([]byte, error) {
@@ -213,10 +245,8 @@ func buildSDKPaymentPayloadBytes(paymentSignature string, req Requirement) ([]by
 }
 
 func buildSDKPaymentRequirementsBytes(req Requirement) ([]byte, error) {
+	req = req.Normalize()
 	extra := make(map[string]interface{})
-	if trimmed := strings.TrimSpace(req.Resource); trimmed != "" {
-		extra["resource"] = trimmed
-	}
 	if trimmed := strings.TrimSpace(req.MaxAmountRequired); trimmed != "" {
 		extra["maxAmountRequired"] = trimmed
 	}
@@ -224,13 +254,19 @@ func buildSDKPaymentRequirementsBytes(req Requirement) ([]byte, error) {
 		extra = nil
 	}
 
+	// Bind the proof to the full PaymentRequirements: emit resource and
+	// maxTimeoutSeconds as first-class fields (never only inside extra) so the
+	// facilitator's Parameter-Matching verification covers the entire object and
+	// a proof for one resource/price cannot verify against another (bs-010).
 	payload := sdkPaymentRequirements{
-		Scheme:  strings.ToLower(strings.TrimSpace(req.Scheme)),
-		Network: strings.TrimSpace(req.Network),
-		Amount:  strings.TrimSpace(req.Amount),
-		Asset:   strings.TrimSpace(req.Asset),
-		PayTo:   strings.TrimSpace(req.PayTo),
-		Extra:   extra,
+		Scheme:            req.Scheme,
+		Network:           req.Network,
+		Amount:            req.Amount,
+		Asset:             req.Asset,
+		PayTo:             req.PayTo,
+		Resource:          req.Resource,
+		MaxTimeoutSeconds: req.MaxTimeoutSeconds,
+		Extra:             extra,
 	}
 	return json.Marshal(payload)
 }

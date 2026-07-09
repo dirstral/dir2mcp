@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/netutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
@@ -4302,6 +4303,17 @@ func (c *Config) ValidateX402(strict bool) error {
 		c.X402.ResourceBaseURL = normalized
 	}
 
+	// Transport security (bs-010 / x402 adapter spec): the adapter->facilitator
+	// transport MUST be https whenever it is credentialed OR the facilitator
+	// host is non-loopback. Plaintext http is permitted ONLY for a loopback host
+	// with no credential attached. This is a hard configuration error in ALL
+	// enabled modes (including "on" fail-open) — an insecure credentialed or
+	// non-loopback facilitator URL is not a degradable condition, so it is
+	// enforced here regardless of the strict flag.
+	if err := c.validateX402FacilitatorTransport(); err != nil {
+		return err
+	}
+
 	// network is validated later when strict mode is enabled; no need to duplicate
 
 	if !strict {
@@ -4370,10 +4382,10 @@ func normalizeX402URL(rawURL, label string) (string, error) {
 	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid x402 %s URL %q: %w", label, rawURL, err)
+		return "", fmt.Errorf("invalid x402 %s URL: %w", label, err)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid x402 %s URL: %q", label, rawURL)
+		return "", fmt.Errorf("invalid x402 %s URL: %s", label, redactURLForError(parsed, rawURL))
 	}
 	if parsed.Path == "/" {
 		parsed.Path = ""
@@ -4381,6 +4393,78 @@ func normalizeX402URL(rawURL, label string) (string, error) {
 		parsed.Path = strings.TrimRight(parsed.Path, "/")
 	}
 	return parsed.String(), nil
+}
+
+// validateX402FacilitatorTransport enforces the adapter->facilitator transport
+// security requirement (bs-010 / x402 adapter spec): https is mandatory whenever
+// a credential (facilitator token) is attached OR the facilitator host is
+// non-loopback. Plaintext http is permitted only for a loopback host with no
+// credential (local development). An empty facilitator URL is left to the
+// strict-mode required-field checks and is not treated as a transport error.
+func (c *Config) validateX402FacilitatorTransport() error {
+	raw := strings.TrimSpace(c.X402.FacilitatorURL)
+	if raw == "" {
+		return nil
+	}
+	hasCredential := strings.TrimSpace(c.X402.FacilitatorToken) != ""
+	return validateX402TransportSecurity(raw, hasCredential)
+}
+
+// X402FacilitatorTransportError returns a non-nil error when the configured
+// facilitator URL would carry a credential or reach a non-loopback host over
+// plaintext http. It is exposed so the MCP server can fail closed (refuse to
+// enable gating) independently of the full x402 validation flow — transport
+// insecurity is a hard, non-degradable condition in every mode.
+func (c *Config) X402FacilitatorTransportError() error {
+	return c.validateX402FacilitatorTransport()
+}
+
+// validateX402TransportSecurity is the shared transport-security predicate used
+// by config validation. It returns a descriptive configuration error when the
+// URL would carry a credential or reach a non-loopback host over plaintext http.
+func validateX402TransportSecurity(rawURL string, hasCredential bool) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("invalid x402 facilitator URL: %w", err)
+	}
+	safe := redactURLForError(parsed, rawURL)
+	// URL userinfo (http://user:pass@host) is itself a credential that must never
+	// traverse plaintext http, so it counts toward hasCredential regardless of a
+	// separately-configured facilitator token.
+	if parsed.User != nil {
+		hasCredential = true
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	switch scheme {
+	case "https":
+		return nil
+	case "http":
+		if hasCredential {
+			return fmt.Errorf("x402 facilitator URL must use https when a credential is attached (plaintext http would leak it): %s", safe)
+		}
+		if !netutil.IsLoopbackHost(parsed.Hostname()) {
+			return fmt.Errorf("x402 facilitator URL must use https for a non-loopback host: %s", safe)
+		}
+		return nil
+	default:
+		return fmt.Errorf("x402 facilitator URL must use https (or http for a credential-less loopback host): %s", safe)
+	}
+}
+
+// redactURLForError returns a log-safe rendering of a facilitator URL: scheme +
+// host only, dropping userinfo, path, and query so embedded credentials or
+// token-like query params never reach an error string or log line. When the URL
+// could not be parsed into a host, it returns a fixed placeholder rather than
+// echoing the raw input.
+func redactURLForError(parsed *url.URL, rawURL string) string {
+	if parsed == nil || parsed.Host == "" {
+		return "<redacted>"
+	}
+	scheme := parsed.Scheme
+	if scheme == "" {
+		scheme = "?"
+	}
+	return scheme + "://" + parsed.Host
 }
 
 // isCAIP2Network reports whether value is a CAIP-2 "namespace:reference"

@@ -3,8 +3,6 @@ package mcp
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -26,6 +24,12 @@ type paymentExecutionOutcome struct {
 	Settled         bool
 	PaymentResponse string
 	UpdatedAt       time.Time
+	// ExpiresAt aligns the cached outcome's lifetime with its nonce ledger entry
+	// so an idempotent retry can re-surface the recorded outcome for as long as
+	// the nonce stays consumed. Without this the outcome could be pruned (fixed
+	// 10-min TTL) while the nonce remains consumed (validity-window TTL), causing
+	// a legitimate retry to be rejected as "nonce already used".
+	ExpiresAt time.Time
 }
 
 type keyMutex struct {
@@ -53,6 +57,19 @@ func (s *Server) initPaymentConfig() {
 		}
 	}
 
+	// Transport security is a hard, non-degradable condition (bs-010 / adapter
+	// spec): even in fail-open "on" mode we refuse to enable gating over a
+	// credentialed or non-loopback plaintext-http facilitator URL, because that
+	// would leak the bearer token / payment payload. Emit a loud error and leave
+	// the gate off rather than silently degrade. (The CLI `up` path enforces the
+	// same via ValidateX402 and hard-fails startup before we get here.)
+	if err := s.cfg.X402FacilitatorTransportError(); err != nil {
+		s.emitPaymentEvent("error", "x402_transport_insecure", map[string]interface{}{
+			"err": err.Error(),
+		})
+		return
+	}
+
 	s.x402Requirement = x402.Requirement{
 		Scheme:  strings.TrimSpace(s.cfg.X402.Scheme),
 		Network: strings.TrimSpace(s.cfg.X402.Network),
@@ -64,8 +81,13 @@ func (s *Server) initPaymentConfig() {
 		Asset:             strings.TrimSpace(s.cfg.X402.Asset),
 		PayTo:             strings.TrimSpace(s.cfg.X402.PayTo),
 		Resource:          strings.TrimSpace(buildPaymentResourceURL(s.cfg.X402.ResourceBaseURL, s.cfg.MCPPath)),
+		MaxTimeoutSeconds: x402.DefaultMaxTimeoutSeconds,
 	}
-	s.x402Client = x402.NewFacilitatorClient(s.cfg.X402.FacilitatorURL, s.cfg.X402.FacilitatorToken, nil)
+	// Allow a test/embedding seam to inject the facilitator client
+	// (WithX402Client); otherwise build one from config.
+	if s.x402Client == nil {
+		s.x402Client = x402.NewFacilitatorClient(s.cfg.X402.FacilitatorURL, s.cfg.X402.FacilitatorToken, nil)
+	}
 	s.x402Enabled = true
 	s.paymentLogPath = filepath.Join(s.cfg.StateDir, "payments", "settlement.log")
 }
@@ -95,14 +117,49 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		s.writePaymentChallenge(w, id, x402.CodePaymentRequired, "payment required", false)
 		return
 	}
-	executionKey := paymentExecutionKey(paymentSignature, rawParams)
+
+	now := time.Now().UTC()
+	parsed := parsePaymentPayload(paymentSignature)
+
+	// Validity window (bs-010): reject a proof whose validAfter/validBefore
+	// window does not cover now, or whose age exceeds maxTimeoutSeconds. This is
+	// enforced adapter-side and does not rely on the facilitator alone.
+	if reason := validityWindowError(parsed, s.x402Requirement.MaxTimeoutSeconds, now); reason != "" {
+		s.rejectPaymentWindow(w, id, reason)
+		return
+	}
+
+	// The idempotency/replay key binds to the client's single-use authorization
+	// nonce (not the raw request bytes) and to the canonicalized request +
+	// entire PaymentRequirements (not scheme+network alone).
+	nonce := replayNonce(paymentSignature, parsed)
+	requestKey := canonicalPaymentRequestKey(rawParams, s.x402Requirement)
+	executionKey := nonce + ":" + requestKey
+	expiresAt := now.Add(nonceLedgerTTL(parsed, s.x402Requirement.MaxTimeoutSeconds, now))
+
+	pc := paymentContext{
+		signature:    paymentSignature,
+		nonce:        nonce,
+		requestKey:   requestKey,
+		executionKey: executionKey,
+		expiresAt:    expiresAt,
+	}
 
 	// hold a per-key lock to serialize check/execute/set actions and avoid
-	// races when the same signature+params are processed concurrently.
+	// races when the same (nonce, request) is processed concurrently.
 	unlock := s.lockForExecutionKey(executionKey)
 	defer unlock()
 
-	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, paymentSignature, executionKey) {
+	// Exact idempotent retry of the same (nonce, request): re-surface the
+	// recorded outcome (driving a pending settle to completion). Never a second
+	// execution or re-charge.
+	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, pc) {
+		return
+	}
+
+	// Cross-request replay / already-consumed classification (read-only,
+	// pre-verify so an invalid or transient verify never burns a nonce).
+	if s.handleNonceDecision(w, id, s.classifyNonce(nonce, requestKey)) {
 		return
 	}
 
@@ -121,16 +178,71 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 	s.emitPaymentEvent("info", "payment_verified", safePaymentResponseFields(verifyResponse))
 	s.appendPaymentLog("payment_verified", safePaymentResponseFields(verifyResponse))
 
+	// Reserve the nonce now (atomic). A concurrent request presenting the same
+	// nonce with a different logical request loses this race and is rejected as a
+	// replay, so it cannot reach tool execution.
+	if s.handleNonceDecision(w, id, s.reserveNonce(nonce, requestKey, executionKey, expiresAt)) {
+		return
+	}
+
+	s.executeAndSettlePaidToolCall(ctx, w, id, rawParams, pc)
+}
+
+// handleNonceDecision writes the appropriate response for a non-proceed nonce
+// ledger decision and reports whether the request was fully handled. A
+// nonceProceed decision writes nothing and returns false so the caller
+// continues the flow.
+func (s *Server) handleNonceDecision(w http.ResponseWriter, id interface{}, dec nonceDecision) bool {
+	switch dec.kind {
+	case nonceReplay:
+		s.rejectReplayedNonce(w, id)
+		return true
+	case nonceConsumed:
+		if s.resurfaceConsumedOutcome(w, id, dec.executionKey) {
+			return true
+		}
+		s.rejectReplayedNonce(w, id)
+		return true
+	case nonceError:
+		// The durable single-use ledger could not be consulted or written, so we
+		// cannot prove this nonce is unused. Fail closed with a retryable error
+		// rather than risk admitting a replay.
+		s.emitPaymentEvent("warning", "payment_replay_ledger_unavailable", map[string]interface{}{
+			"reason": "nonce_ledger_unavailable",
+		})
+		s.appendPaymentLog("payment_replay_ledger_unavailable", map[string]interface{}{
+			"reason": "nonce_ledger_unavailable",
+		})
+		s.writePaymentChallenge(w, id, x402.CodePaymentInvalid, "payment temporarily unavailable: single-use ledger unreachable, retry", true)
+		return true
+	default:
+		return false
+	}
+}
+
+// executeAndSettlePaidToolCall runs the gated tool for a verified+reserved
+// payment, then settles. It owns the reserve->commit/rollback transitions: a
+// tool error rolls the reservation back (no charge), a transient settle failure
+// keeps it held for retry, and settlement success durably consumes the nonce.
+func (s *Server) executeAndSettlePaidToolCall(ctx context.Context, w http.ResponseWriter, id interface{}, rawParams json.RawMessage, pc paymentContext) {
 	result, statusCode, rpcErr := s.processToolsCall(ctx, rawParams)
 	outcome := paymentExecutionOutcome{
 		StatusCode: statusCode,
 		UpdatedAt:  time.Now().UTC(),
+		ExpiresAt:  pc.expiresAt,
 	}
 	if rpcErr != nil {
 		outcome.RPCError = cloneRPCError(rpcErr)
 		outcome.RequiresSettle = false
 		outcome.Settled = true
-		s.setPaymentExecutionOutcome(executionKey, outcome)
+		s.setPaymentExecutionOutcome(pc.executionKey, outcome)
+		// The gated tool failed transport-side; no payment is captured, so the
+		// nonce is NOT consumed and the SAME (nonce, request) may be retried
+		// (re-surfacing this cached outcome, or re-executing after it expires).
+		// The reservation binding is intentionally retained until expiry so the
+		// single-use nonce cannot be reused for a DIFFERENT request — that would
+		// be a cross-request replay.
+		s.releaseNonceReservation(pc.nonce)
 		writeResponse(w, statusCode, rpcResponse{
 			JSONRPC: "2.0",
 			ID:      id,
@@ -141,41 +253,109 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 	outcome.Result = &result
 	outcome.RequiresSettle = !result.IsError
 	outcome.Settled = result.IsError
-	s.setPaymentExecutionOutcome(executionKey, outcome)
+	s.setPaymentExecutionOutcome(pc.executionKey, outcome)
 	if result.IsError {
+		// Tool-level error result: we do not settle, so no charge is captured and
+		// the nonce is not consumed. As above, the (nonce, request) binding is
+		// retained until expiry so the same request may retry but a different
+		// request cannot reuse the nonce.
+		s.releaseNonceReservation(pc.nonce)
 		writeResult(w, statusCode, id, result)
 		return
 	}
 
-	settleResponse, err := s.x402Client.Settle(ctx, paymentSignature, s.x402Requirement)
+	settleResponse, err := s.x402Client.Settle(ctx, pc.signature, s.x402Requirement)
 	if err != nil {
-		s.handlePaymentFailure(w, id, "settle", err, executionKey)
+		// Transient/other settle failure: the executed outcome stays cached and
+		// the reservation stays held so a retry of the same (nonce, request)
+		// re-drives settlement (and a cross-request replay stays blocked). The
+		// nonce is NOT consumed until settlement succeeds.
+		s.handlePaymentFailure(w, id, "settle", err, pc.executionKey)
 		return
 	}
 	// As with verify, the facilitator returns HTTP 200 with {"success":false}
 	// for a failed settlement (nil Go error). Do not mark the outcome settled
 	// or emit a PAYMENT-RESPONSE for an unsettled payment.
 	if !paymentVerdictTrue(settleResponse, "success") {
-		s.rejectFailedSettlement(w, id, settleResponse, executionKey)
+		s.rejectFailedSettlement(w, id, settleResponse, pc.executionKey)
 		return
 	}
 
+	// Settlement succeeded: durably consume the nonce before finalizing.
+	s.commitNonce(pc.nonce, pc.requestKey, pc.executionKey, pc.expiresAt)
+
 	// update the cached outcome; if the entry was pruned we need to
 	// reconstruct and persist the successful state before replaying it.
-	updated, found := s.markPaymentExecutionSettled(executionKey, string(settleResponse))
+	updated, found := s.markPaymentExecutionSettled(pc.executionKey, string(settleResponse))
 	if !found {
 		// use the local copy of outcome that still holds the original
 		// execution result, then mark it settled and persist it.
 		outcome.Settled = true
 		outcome.PaymentResponse = strings.TrimSpace(string(settleResponse))
 		outcome.UpdatedAt = time.Now().UTC()
-		s.setPaymentExecutionOutcome(executionKey, outcome)
+		s.setPaymentExecutionOutcome(pc.executionKey, outcome)
 		updated = outcome
 	}
 	s.replayPaymentExecutionOutcome(w, id, updated)
 
 	s.emitPaymentEvent("info", "payment_settled", safePaymentResponseFields(settleResponse))
 	s.appendPaymentLog("payment_settled", safePaymentResponseFields(settleResponse))
+}
+
+// paymentContext bundles the derived per-request payment identifiers so they can
+// be threaded through the verify/execute/settle flow without repeated
+// recomputation.
+type paymentContext struct {
+	signature    string
+	nonce        string
+	requestKey   string
+	executionKey string
+	expiresAt    time.Time
+}
+
+// rejectReplayedNonce responds to a replay/misuse attempt (a nonce already
+// recorded for a different logical request, or an already-consumed nonce whose
+// outcome is no longer available). It maps to the spec's `rejected` failure
+// branch and never drives a second tool execution or settlement.
+func (s *Server) rejectReplayedNonce(w http.ResponseWriter, id interface{}) {
+	s.emitPaymentEvent("warning", "payment_replay_rejected", map[string]interface{}{
+		"reason": "nonce_already_used",
+	})
+	s.appendPaymentLog("payment_replay_rejected", map[string]interface{}{
+		"reason": "nonce_already_used",
+	})
+	s.writePaymentChallenge(w, id, x402.CodePaymentInvalid, "payment rejected: authorization nonce already used", false)
+}
+
+// rejectPaymentWindow responds to a proof whose validity window does not cover
+// the current time (or exceeds maxTimeoutSeconds). It re-emits the challenge so
+// the client can obtain a fresh, in-window authorization.
+func (s *Server) rejectPaymentWindow(w http.ResponseWriter, id interface{}, reason string) {
+	s.emitPaymentEvent("info", "payment_window_rejected", map[string]interface{}{
+		"reason": reason,
+	})
+	s.appendPaymentLog("payment_window_rejected", map[string]interface{}{
+		"reason": reason,
+	})
+	s.writePaymentChallenge(w, id, x402.CodePaymentInvalid, "payment rejected: "+reason, false)
+}
+
+// resurfaceConsumedOutcome replays a previously recorded settled outcome for an
+// idempotent retry when the exact-key cache missed but the nonce ledger recorded
+// consumption. It returns false when no outcome is available to re-surface.
+func (s *Server) resurfaceConsumedOutcome(w http.ResponseWriter, id interface{}, executionKey string) bool {
+	if strings.TrimSpace(executionKey) == "" {
+		return false
+	}
+	outcome, ok := s.getPaymentExecutionOutcome(executionKey)
+	if !ok {
+		return false
+	}
+	s.emitPaymentEvent("info", "payment_idempotent_replay", map[string]interface{}{
+		"reason": "nonce_already_consumed",
+	})
+	s.replayPaymentExecutionOutcome(w, id, outcome)
+	return true
 }
 
 // paymentVerdictTrue reports whether the facilitator response body carries the
@@ -324,12 +504,8 @@ func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, ope
 	writeError(w, statusCode, id, -32000, facErr.Message, facErr.Code, facErr.Retryable)
 }
 
-func paymentExecutionKey(paymentSignature string, rawParams json.RawMessage) string {
-	sum := sha256.Sum256(rawParams)
-	return paymentSignature + ":" + hex.EncodeToString(sum[:])
-}
-
-func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.ResponseWriter, id interface{}, paymentSignature, executionKey string) bool {
+func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.ResponseWriter, id interface{}, pc paymentContext) bool {
+	executionKey := pc.executionKey
 	outcome, ok := s.getPaymentExecutionOutcome(executionKey)
 	if !ok {
 		return false
@@ -339,7 +515,7 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 		return true
 	}
 
-	settleResponse, settleErr := s.x402Client.Settle(ctx, paymentSignature, s.x402Requirement)
+	settleResponse, settleErr := s.x402Client.Settle(ctx, pc.signature, s.x402Requirement)
 	if settleErr != nil {
 		s.handlePaymentFailure(w, id, "settle", settleErr, executionKey)
 		return true
@@ -348,6 +524,10 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 		s.rejectFailedSettlement(w, id, settleResponse, executionKey)
 		return true
 	}
+	// Settlement of the previously-executed request succeeded on retry: durably
+	// consume the nonce (the first attempt held a reservation that never
+	// committed, or was rolled back and is re-consumed here).
+	s.commitNonce(pc.nonce, pc.requestKey, executionKey, pc.expiresAt)
 	// original outcome loaded above; keep a copy in case the cache entry
 	// is gone by the time we call markPaymentExecutionSettled.
 	orig := outcome

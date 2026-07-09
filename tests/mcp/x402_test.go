@@ -18,6 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/x402"
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
@@ -323,7 +324,10 @@ func TestX402ToolsCall_FacilitatorBearerTokenForwarded(t *testing.T) {
 	fac.verifyStatus = http.StatusOK
 	fac.settleStatus = http.StatusOK
 	fac.expectedAuthorization = "Bearer facilitator-token"
-	facServer := httptest.NewServer(fac)
+	// A facilitator token is configured, so the adapter requires https transport
+	// (bs-010 / x402 adapter spec). Serve the stub over TLS and inject a client
+	// that trusts the test cert so the bearer token is actually forwarded.
+	facServer := httptest.NewTLSServer(fac)
 	defer facServer.Close()
 
 	cfg := x402EnabledTestConfig("https://resource.example.com")
@@ -331,7 +335,8 @@ func TestX402ToolsCall_FacilitatorBearerTokenForwarded(t *testing.T) {
 	cfg.X402.FacilitatorURL = facServer.URL
 	cfg.X402.FacilitatorToken = "facilitator-token"
 
-	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	client := x402.NewFacilitatorClient(facServer.URL, cfg.X402.FacilitatorToken, facServer.Client())
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithX402Client(client)).Handler())
 	defer server.Close()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)

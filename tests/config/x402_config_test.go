@@ -263,3 +263,57 @@ func TestValidateX402_InvalidScheme(t *testing.T) {
 		t.Fatalf("expected spaced/upper upto to be accepted, got %v", err)
 	}
 }
+
+// baseTransportCfg returns a minimal mode=on x402 config with the facilitator
+// URL and token left to the caller, for transport-security tests.
+func baseTransportCfg(facilitatorURL, token string) config.Config {
+	cfg := config.Default()
+	cfg.X402.Mode = "on"
+	cfg.X402.ToolsCallEnabled = true
+	cfg.X402.FacilitatorURL = facilitatorURL
+	cfg.X402.ResourceBaseURL = "https://resource.example.com"
+	cfg.X402.FacilitatorToken = token
+	cfg.X402.PriceAtomic = "1000"
+	cfg.X402.Scheme = "exact"
+	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+	cfg.X402.Asset = "asset"
+	cfg.X402.PayTo = "payto"
+	return cfg
+}
+
+// TestValidateX402_TransportSecurity covers the bs-010 transport rule: https is
+// required for a credentialed OR non-loopback facilitator, in all enabled modes
+// (here mode=on, non-strict). Plaintext http is accepted only for a
+// credential-less loopback host.
+func TestValidateX402_TransportSecurity(t *testing.T) {
+	cases := []struct {
+		name    string
+		url     string
+		token   string
+		wantErr bool
+	}{
+		{name: "https no token", url: "https://facilitator.example.com", token: "", wantErr: false},
+		{name: "https with token", url: "https://facilitator.example.com", token: "tok", wantErr: false},
+		{name: "http loopback no token", url: "http://127.0.0.1:8080", token: "", wantErr: false},
+		{name: "http localhost no token", url: "http://localhost:8080", token: "", wantErr: false},
+		{name: "http loopback with token", url: "http://127.0.0.1:8080", token: "tok", wantErr: true},
+		{name: "http non-loopback no token", url: "http://facilitator.example.com", token: "", wantErr: true},
+		{name: "http non-loopback with token", url: "http://facilitator.example.com", token: "tok", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseTransportCfg(tc.url, tc.token)
+			// mode=on -> non-strict validation; transport is still enforced.
+			err := cfg.ValidateX402(false)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected transport-security error for %q (token=%q)", tc.url, tc.token)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %q (token=%q): %v", tc.url, tc.token, err)
+			}
+			if tc.wantErr && err != nil && !strings.Contains(err.Error(), "https") {
+				t.Fatalf("expected an https-related error, got: %v", err)
+			}
+		})
+	}
+}
