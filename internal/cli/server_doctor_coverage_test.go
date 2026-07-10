@@ -100,19 +100,31 @@ func TestExtractorIsStructured(t *testing.T) {
 }
 
 // TestUncoveredExtractionRemedy_TailoredToEngine checks the remediation hint
-// points a flat-OCR user at docling for the docling-coverable formats, and tells
-// a docling user that docling cannot help with the neither-engine formats.
+// names only the engines that would actually help — docling for its OOXML/raster
+// formats, pandoc (#393) for the born-digital family — never an already-active
+// engine, and falls back to pre-conversion when no installable engine reads them.
 func TestUncoveredExtractionRemedy_TailoredToEngine(t *testing.T) {
-	// Flat path with a docling-coverable format present → name docling.
-	if got := uncoveredExtractionRemedy([]string{".docx", ".odt"}, false); !strings.Contains(got, "docling") {
-		t.Errorf("flat remedy %q should recommend installing docling", got)
+	// Flat path (no docling, no pandoc): .docx is docling-coverable and .odt is
+	// pandoc-coverable → recommend both, never the stale "future extractor" wording.
+	got := uncoveredExtractionRemedy([]string{".docx", ".odt"}, false, false)
+	if !strings.Contains(got, "docling") || !strings.Contains(got, "pandoc") {
+		t.Errorf("flat remedy %q should recommend installing docling and pandoc", got)
 	}
-	// Flat path where docling would not help either (neither-engine formats).
-	if got := uncoveredExtractionRemedy([]string{".gif", ".svg"}, false); strings.Contains(got, "Install docling") {
-		t.Errorf("flat remedy for neither-engine formats %q should not recommend docling", got)
+	if strings.Contains(got, "future") {
+		t.Errorf("remedy must not call pandoc a 'future' extractor now that #393 ships: %q", got)
 	}
-	// Structured path: docling is already active and cannot import these.
-	if got := uncoveredExtractionRemedy([]string{".odt"}, true); !strings.Contains(got, "cannot import") {
-		t.Errorf("structured remedy %q should say docling cannot import them", got)
+	// Neither-engine formats (no installable extractor reads them) → pre-convert,
+	// no docling/pandoc suggestion.
+	if got := uncoveredExtractionRemedy([]string{".gif", ".svg"}, false, false); strings.Contains(got, "docling") || strings.Contains(got, "pandoc") {
+		t.Errorf("neither-engine remedy %q should not recommend an extractor", got)
+	}
+	// docling active, pandoc not: an uncovered .odt is pandoc-coverable → suggest
+	// pandoc, and do NOT re-suggest the already-active docling.
+	if got := uncoveredExtractionRemedy([]string{".odt"}, true, false); !strings.Contains(got, "pandoc") || strings.Contains(got, "install docling") {
+		t.Errorf("docling-active remedy %q should recommend pandoc and not re-suggest docling", got)
+	}
+	// Both engines active: nothing installable helps → pre-convert only.
+	if got := uncoveredExtractionRemedy([]string{".odp", ".gif"}, true, true); strings.Contains(got, "install") {
+		t.Errorf("both-active remedy %q should only advise pre-conversion", got)
 	}
 }

@@ -90,7 +90,14 @@ func pandocFunctionalCheck(ctx context.Context, bin string) error {
 	// At most one probe per binary; concurrent callers for the same bin wait,
 	// callers for other bins proceed independently.
 	entry.once.Do(func() {
-		entry.err = runPandocVersionProbe(ctx, bin)
+		// Detach from the caller's context: this result is memoized process-wide, so
+		// a cancelled or expired REQUEST context must not permanently cache a healthy
+		// pandoc as unavailable for the rest of the process (CodeRabbit #586). The
+		// fixed pandocProbeTimeout is the only deadline; a genuinely hung binary is
+		// still bounded. ctx is retained on the signature for caller symmetry with
+		// doclingFunctionalCheck and to document the cancellable intent of the call.
+		_ = ctx
+		entry.err = runPandocVersionProbe(context.Background(), bin)
 	})
 	return entry.err
 }

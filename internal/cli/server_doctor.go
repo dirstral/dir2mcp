@@ -319,7 +319,7 @@ func extractionAvailabilityCheck(ctx context.Context, sqliteStore *store.SQLiteS
 		"%d document(s) in %d format(s) are uncovered by the active extractor (%s): %s. "+
 			"They produce no searchable text (skipped with an unsupported-format error). %s",
 		docs, len(uncovered), decision.Name, strings.Join(uncovered, ", "),
-		uncoveredExtractionRemedy(uncovered, structured))}, true
+		uncoveredExtractionRemedy(uncovered, structured, pandocActive))}, true
 }
 
 // extractorIsStructured maps a resolved extractor name (ExtractorDecision.Name)
@@ -362,31 +362,42 @@ func uncoveredExtractableExtensions(extCounts map[string]int64, policy string, s
 	return exts, docs
 }
 
-// uncoveredExtractionRemedy tailors the remediation hint to the active engine.
-// On the flat OCR path, the OpenXML Office + tiff/bmp formats become readable by
-// installing docling, so it is named; the OpenDocument/RTF/.doc/gif/svg family is
-// read by neither engine today (content support is #393). On the structured
-// (docling) path, every uncovered format is in that neither-engine set, so
-// installing docling would not help and the hint says so.
-func uncoveredExtractionRemedy(uncovered []string, structured bool) string {
+// uncoveredExtractionRemedy tailors the remediation hint to the engines NOT yet
+// active. It names only engines that would actually help: docling for the
+// OpenXML-Office/tiff/bmp formats and pandoc (T2, #393) for the born-digital
+// OpenDocument/RTF/EPUB family. Formats no installable engine can read (e.g.
+// .gif/.svg/.odp/.ods/legacy .doc) get a pre-conversion hint. `structured`/`pandoc`
+// report which of those engines is already active, so an already-active engine is
+// never suggested.
+func uncoveredExtractionRemedy(uncovered []string, structured, pandoc bool) string {
 	// The §7.7 coverage report MUST, for each uncovered class, name the engine to
 	// add AND the ingest.on_unsupported knob that governs whether the gap is a
 	// warning (lenient, the default) or a per-document error (strict).
 	const onUnsupportedHint = " Or set ingest.on_unsupported: strict to fail instead of skip these documents."
-	if structured {
-		return "docling cannot import these formats; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format." + onUnsupportedHint
-	}
-	doclingWouldCover := false
+
+	doclingWouldCover, pandocWouldCover := false, false
 	for _, ext := range uncovered {
-		if ingest.ExtractorSupportsExt(true, ext) {
+		if !structured && ingest.ExtractorSupportsExt(true, ext) {
 			doclingWouldCover = true
-			break
+		}
+		if !pandoc && ingest.PandocSupportsExt(ext) {
+			pandocWouldCover = true
 		}
 	}
+
+	var fixes []string
 	if doclingWouldCover {
-		return "Install docling (or set ingest.extractor=docling) to cover the Office/tiff/bmp formats; the remaining OpenDocument/RTF/.doc/gif/svg formats need a future pandoc-style extractor (#393)." + onUnsupportedHint
+		fixes = append(fixes, "install docling (or set ingest.extractor=docling) for the Office/tiff/bmp formats")
 	}
-	return "These formats are read by no available extractor; they need a future pandoc-style extractor (#393) or pre-conversion to a supported format." + onUnsupportedHint
+	if pandocWouldCover {
+		fixes = append(fixes, "install pandoc (#393) for the born-digital OpenDocument/RTF/EPUB formats")
+	}
+	if len(fixes) == 0 {
+		// Every engine that could help is already active (or none reads these):
+		// no installable extractor covers them.
+		return "These formats are read by no available extractor; pre-convert them to a supported format." + onUnsupportedHint
+	}
+	return "To cover them: " + strings.Join(fixes, "; ") + "; or pre-convert to a supported format." + onUnsupportedHint
 }
 
 // indexingFailureCheck reads the store-level FailureSummary (set by
