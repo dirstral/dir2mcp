@@ -346,6 +346,11 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 			if extractor := ingest.DocumentExtractorFromConfig(cfg); extractor != nil {
 				svc.SetDocumentExtractor(extractor)
 			}
+			// #393: activate the capability-activated pandoc engine (T2) after the
+			// primary extractor is wired. Under `auto` it runs alongside the primary;
+			// under the `pandoc` pin it reuses the primary instance. Kept out of
+			// NewService so it stays free of ambient-PATH probing.
+			svc.ActivatePandocEngine(cfg)
 			return svc, nil
 		},
 		// default store constructor uses sqlite in the configured state

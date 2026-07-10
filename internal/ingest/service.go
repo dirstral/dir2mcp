@@ -56,7 +56,13 @@ type Service struct {
 	indexingState *appstate.IndexingState
 	repGen        *RepresentationGenerator
 	extractor     model.DocumentExtractor
-	transcriber   model.Transcriber
+	// pandocExtractor is the capability-activated pandoc engine (T2, #393). Under
+	// `ingest.extractor: auto` it runs as a SECOND active engine alongside the
+	// primary s.extractor (e.g. docling handles .docx, pandoc handles .odt); under
+	// the `pandoc` pin it is also the primary. It is nil under any non-pandoc pin
+	// (docling/docling-serve/mistral/off) or when no functional pandoc resolves.
+	pandocExtractor *pandocExtractor
+	transcriber     model.Transcriber
 
 	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
 	// active extraction engine supports (ingest.on_unsupported): "lenient"
@@ -413,20 +419,53 @@ var errNoVideoRepresentation = errors.New(
 		"and multimodal keyframe embedding is off — enable embed_multimodal or provide a .vtt/.srt sidecar to make it searchable")
 
 // activeExtractionAvailability derives which extraction engines are active for
-// this run (§7.4.B "Extractor availability") from the single resolved extractor.
-// The resolved extractor is already the best-available engine chosen by the
-// docling → docling-serve → mistral cascade (DescribeDocumentExtractor), so it is
-// either the structured docling family or the flat OCR path; deriving
-// availability from it keeps the per-format selection in lockstep with the engine
-// the service will actually run, with no second probe to drift from it.
+// this run (§7.4.B "Extractor availability") from the resolved extractors. The
+// primary s.extractor is the best-available engine chosen by the docling →
+// docling-serve → mistral cascade (DescribeDocumentExtractor) — structured
+// (docling family), flat OCR, or pandoc when it is the only engine. pandoc (T2,
+// #393) may additionally be active as a SECOND engine (s.pandocExtractor) under
+// `auto`. Deriving availability from the wired extractors keeps the per-format
+// selection in lockstep with the engines the service will actually run.
 func (s *Service) activeExtractionAvailability() extractionAvailability {
-	if s.extractor == nil {
-		return extractionAvailability{}
+	avail := extractionAvailability{}
+	switch s.extractor.(type) {
+	case nil:
+		// No primary extractor; only pandoc (if wired) may be active.
+	case *pandocExtractor:
+		// Primary is pandoc (the `pandoc` pin or the auto-only-pandoc case);
+		// avail.pandoc is set below from s.pandocExtractor.
+	default:
+		if _, structured := s.extractor.(structuredExtractor); structured {
+			avail.structured = true
+		} else {
+			avail.flatOCR = true
+		}
 	}
-	if _, structured := s.extractor.(structuredExtractor); structured {
-		return extractionAvailability{structured: true}
+	if s.pandocExtractor != nil {
+		avail.pandoc = true
 	}
-	return extractionAvailability{flatOCR: true}
+	return avail
+}
+
+// ActivatePandocEngine wires the capability-activated pandoc engine (T2, #393) as
+// an active extraction engine when cfg permits it (ingest.extractor auto or the
+// pandoc pin) AND a functional pandoc resolves. Under `auto` it runs as a second
+// engine alongside the primary s.extractor (e.g. docling handles .docx, pandoc
+// handles .odt); under the `pandoc` pin the primary IS pandoc, so this reuses that
+// same instance rather than building a second one. It is called by the CLI
+// ingestor wiring right after the primary extractor is set; NewService itself
+// stays free of any ambient-PATH probe so unit tests that inject a single
+// extractor are unaffected by whether a pandoc binary happens to be installed.
+func (s *Service) ActivatePandocEngine(cfg config.Config) {
+	if !pandocEngineActive(cfg) {
+		s.pandocExtractor = nil
+		return
+	}
+	if pe, ok := s.extractor.(*pandocExtractor); ok {
+		s.pandocExtractor = pe
+		return
+	}
+	s.pandocExtractor = NewPandocExtractor(cfg.IngestPandocCommand)
 }
 
 // routeExtractionExt resolves the capability-aware, per-format extraction route
@@ -450,7 +489,7 @@ func (s *Service) extractorCanReadExt(relPath string) bool {
 	}
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
 	switch s.routeExtractionExt(ext) {
-	case routeStructured, routeFlatOCR:
+	case routeStructured, routePandoc, routeFlatOCR:
 		return true
 	default:
 		return false
@@ -461,8 +500,14 @@ func (s *Service) extractorCanReadExt(relPath string) bool {
 // #394 unsupported-format diagnostic. It reflects the same structured/flat split
 // extractorCanReadExt uses, not the concrete provider profile name.
 func (s *Service) extractorLabel() string {
+	if _, ok := s.extractor.(*pandocExtractor); ok {
+		return "pandoc"
+	}
 	if _, structured := s.extractor.(structuredExtractor); structured {
 		return "docling"
+	}
+	if s.extractor == nil && s.pandocExtractor != nil {
+		return "pandoc"
 	}
 	return "the OCR provider"
 }
@@ -812,6 +857,8 @@ func DocumentExtractorFromConfigContext(ctx context.Context, cfg config.Config) 
 		return NewDoclingExtractor(tpl)
 	case "docling-serve":
 		return NewDoclingServeExtractor(cfg.IngestDoclingServeURL)
+	case "pandoc":
+		return NewPandocExtractor(strings.TrimSpace(cfg.IngestPandocCommand))
 	case "mistral-ocr":
 		return mistralExtractor(cfg)
 	default:
@@ -3248,7 +3295,21 @@ func isNotFoundError(err error) bool {
 }
 
 func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
-	if s.repGen == nil || s.extractor == nil {
+	if s.repGen == nil {
+		return nil
+	}
+
+	// #393: pandoc (T2) is a capability-activated engine for born-digital
+	// office/markup/ebook formats. Route the doc's format first; a pandoc route is
+	// served by the flat extracted_markdown path (no page/bbox provenance). This is
+	// checked before the s.extractor nil-guard so pandoc works when it is the only
+	// active engine (auto with no docling/OCR, or the pandoc pin).
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
+	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
+		return s.generatePandocMarkdownRepresentation(ctx, doc, content)
+	}
+
+	if s.extractor == nil {
 		return nil
 	}
 
@@ -3401,6 +3462,9 @@ func (s *Service) extractionMetaJSON(text string) string {
 	switch ex := s.extractor.(type) {
 	case *doclingExtractor:
 		meta["command"] = strings.TrimSpace(ex.commandTemplate)
+	case *pandocExtractor:
+		// provider "pandoc" already set from extractorProviderModel; no user command
+		// is embedded (kept secret-free, unlike docling's command field).
 	case *doclingServeExtractor:
 		// Sanitized (scheme/host/path only): this is persisted per-document, so
 		// any userinfo/query in the URL must not become durable metadata.
@@ -3445,6 +3509,8 @@ func (s *Service) extractorProviderModel() (providerName string, modelName strin
 		return "docling", ""
 	case *doclingServeExtractor:
 		return "docling-serve", ""
+	case *pandocExtractor:
+		return "pandoc", ""
 	case *mistral.Client:
 		return "mistral", strings.TrimSpace(ex.DefaultOCRModel)
 	default:
@@ -3455,6 +3521,103 @@ func (s *Service) extractorProviderModel() (providerName string, modelName strin
 // GenerateOCRMarkdownRepresentation exposes OCR representation generation for tests.
 func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
 	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
+}
+
+// generatePandocMarkdownRepresentation produces the extracted_markdown
+// representation for a born-digital document via the pandoc engine (T2, #393). It
+// mirrors the flat branch of generateOCRMarkdownRepresentation but records
+// provider "pandoc" and, because pandoc emits no pages, chunks the Markdown by
+// lines WITHOUT fabricating page/bbox provenance.
+//
+// #393 follow-up: section-breadcrumb spans (a SHOULD progressive enhancement per
+// §7.4.B.1) are deferred — deriving them would require new Markdown-heading parsing
+// machinery, so this ships the flat extracted_markdown without breadcrumb spans.
+func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	if s.repGen == nil || s.pandocExtractor == nil {
+		return nil
+	}
+	md, err := s.readOrComputePandoc(ctx, doc, content)
+	if err != nil {
+		return err
+	}
+	md = strings.TrimSpace(md)
+	if md == "" {
+		return nil
+	}
+
+	s.persistTitleIfFound(ctx, doc, md)
+
+	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, md, quality.Context{
+		Modality: quality.ModalityOCR,
+	})
+
+	rep := model.Representation{
+		DocID:       doc.DocID,
+		RepType:     RepTypeExtractedMarkdown,
+		RepHash:     computeRepHash([]byte(md)),
+		MetaJSON:    s.pandocExtractionMetaJSON(md),
+		CreatedUnix: time.Now().Unix(),
+		Deleted:     false,
+	}
+	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
+	if err != nil {
+		return fmt.Errorf("upsert pandoc representation: %w", err)
+	}
+
+	segments := chunkRawTextByDocType(doc.DocType, md)
+	if len(segments) == 0 {
+		return nil
+	}
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
+		return fmt.Errorf("persist pandoc chunks: %w", err)
+	}
+	return nil
+}
+
+// readOrComputePandoc returns the pandoc-converted Markdown for content, caching
+// it under <state>/cache/pandoc keyed by content hash so re-indexing does not
+// re-run pandoc. pandoc is a single deterministic engine with no model concept, so
+// the bytes-only key is sufficient (its own cache dir isolates it from the OCR
+// cache). A pandoc failure is wrapped as ErrOCRProviderFailure so it classifies as
+// a retryable per-document OCR_FAILED in the run manifest (§14.4), mirroring
+// readOrComputeOCR.
+func (s *Service) readOrComputePandoc(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "pandoc")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("create pandoc cache dir: %w", err)
+	}
+	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		return string(cached), nil
+	}
+	md, err := s.pandocExtractor.Extract(ctx, doc.RelPath, content)
+	if err != nil {
+		return "", fmt.Errorf("%w: pandoc extract %s: %w", ErrOCRProviderFailure, doc.RelPath, err)
+	}
+	mdBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(md, "\r\n", "\n"), "\r", "\n"))
+	if err := os.WriteFile(cachePath, mdBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write pandoc cache: %w", err)
+	}
+	return string(mdBytes), nil
+}
+
+// pandocExtractionMetaJSON builds the per-document extracted_markdown meta_json for
+// a pandoc extraction: provider "pandoc" (no model concept) plus a best-effort
+// detected language (§8.8). It is separate from extractionMetaJSON because that
+// switches on the PRIMARY s.extractor, which under `auto` is docling — so a pandoc
+// extraction must not be mislabeled with the primary's provider. No user-supplied
+// command is embedded, keeping diagnostics secret-free.
+func (s *Service) pandocExtractionMetaJSON(text string) string {
+	meta := map[string]string{"provider": "pandoc"}
+	if tag, _, ok := s.detectLanguage(text); ok {
+		meta["language"] = tag
+		meta["language_source"] = langSourceDetected
+	}
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 // quarantineDecision carries the result of screening generated output through

@@ -34,7 +34,7 @@ func classifyByExtension(ext string) string {
 		return "html"
 	case ".pdf":
 		return "pdf"
-	case ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".odp", ".ods", ".rtf":
+	case ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".odp", ".ods", ".rtf", ".epub":
 		return "document"
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg":
 		return "image"

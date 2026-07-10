@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -224,6 +225,32 @@ func (s *Service) activeOCRIdentity() string {
 	return derivationIdentity(string(provider.CapOCR), prov, modelName, "", "")
 }
 
+// activeOCRIdentityForPath is activeOCRIdentity resolved for a SPECIFIC document's
+// format. Under `ingest.extractor: auto` two extraction engines can be active at
+// once (docling + the capability-activated pandoc, #393), and a born-digital
+// document extracted by pandoc records provider "pandoc" in its meta_json — not
+// the primary engine's provider. So the staleness comparison must be against the
+// identity of the engine that WOULD extract THIS format (its per-format route),
+// not the global primary; otherwise every pandoc-extracted doc looks perpetually
+// stale under auto (recorded "pandoc" vs a primary "docling") and re-extracts on
+// every run. A format that routes to no extraction engine (degrade/raw_text) has
+// no active OCR identity, so the check self-skips (fail-open).
+func (s *Service) activeOCRIdentityForPath(relPath string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	switch s.routeExtractionExt(ext) {
+	case routePandoc:
+		// pandoc has no model concept; mirror pandocExtractionMetaJSON (provider
+		// "pandoc", no model/version) so recorded == active for an unchanged doc.
+		return derivationIdentity(string(provider.CapOCR), "pandoc", "", "", "")
+	case routeStructured, routeFlatOCR:
+		// The primary extractor is the structured/flat engine for these routes, so
+		// its identity is the right one.
+		return s.activeOCRIdentity()
+	default:
+		return ""
+	}
+}
+
 // derivationIdentityStale reports whether a document whose content is unchanged
 // must nonetheless be reprocessed because a derived representation's recorded
 // derivation identity no longer matches the active model's identity (spec
@@ -280,10 +307,12 @@ func (s *Service) transcriptStale(ctx context.Context, reader representationMeta
 // by a different OCR/extraction model than the active one (§8.6.7). It self-skips
 // when no extractor is configured.
 func (s *Service) ocrStale(ctx context.Context, reader representationMetaReader, relPath string) bool {
-	if s.extractor == nil {
+	if s.extractor == nil && s.pandocExtractor == nil {
 		return false
 	}
-	active := s.activeOCRIdentity()
+	// Route-aware: under `auto`, a pandoc-extracted born-digital doc (#393) must be
+	// compared against the pandoc identity, not the primary engine's.
+	active := s.activeOCRIdentityForPath(relPath)
 	if active == "" {
 		return false
 	}

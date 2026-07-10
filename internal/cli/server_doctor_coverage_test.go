@@ -26,7 +26,7 @@ func TestUncoveredExtractableExtensions_NamesSpecificFormats(t *testing.T) {
 	}
 
 	// Flat OCR (mistral-ocr): reads only pdf/png here; docx/tiff/odt uncovered.
-	flatExts, flatDocs := uncoveredExtractableExtensions(corpus, false)
+	flatExts, flatDocs := uncoveredExtractableExtensions(corpus, "auto", false, true, false)
 	if want := []string{".docx", ".odt", ".tiff"}; !reflect.DeepEqual(flatExts, want) {
 		t.Errorf("flat uncovered exts = %v, want %v (sorted, distinct, no empty ext)", flatExts, want)
 	}
@@ -36,7 +36,7 @@ func TestUncoveredExtractableExtensions_NamesSpecificFormats(t *testing.T) {
 
 	// Structured (docling): reads docx/tiff too; only the OpenDocument .odt
 	// remains uncovered.
-	structExts, structDocs := uncoveredExtractableExtensions(corpus, true)
+	structExts, structDocs := uncoveredExtractableExtensions(corpus, "auto", true, false, false)
 	if want := []string{".odt"}; !reflect.DeepEqual(structExts, want) {
 		t.Errorf("structured uncovered exts = %v, want %v", structExts, want)
 	}
@@ -49,8 +49,37 @@ func TestUncoveredExtractableExtensions_NamesSpecificFormats(t *testing.T) {
 // every extractable format is readable by the active engine.
 func TestUncoveredExtractableExtensions_FullCoverage(t *testing.T) {
 	corpus := map[string]int64{".pdf": 3, ".png": 1, ".jpg": 2}
-	if exts, docs := uncoveredExtractableExtensions(corpus, false); len(exts) != 0 || docs != 0 {
+	if exts, docs := uncoveredExtractableExtensions(corpus, "auto", false, true, false); len(exts) != 0 || docs != 0 {
 		t.Errorf("fully-covered corpus reported uncovered exts=%v docs=%d, want none", exts, docs)
+	}
+}
+
+// TestUncoveredExtractableExtensions_PandocEngine confirms the engine-aware
+// coverage verdict folds in the pandoc (T2, #393) tier: under `auto` with docling
+// AND pandoc active, the born-digital .odt/.rtf docling cannot read are COVERED by
+// pandoc, while a pandoc-only corpus still reports .pdf uncovered (pandoc reads no
+// PDF/raster).
+func TestUncoveredExtractableExtensions_PandocEngine(t *testing.T) {
+	corpus := map[string]int64{".pdf": 2, ".docx": 1, ".odt": 3, ".rtf": 1, ".doc": 1}
+
+	// docling + pandoc active: pdf/docx via docling, odt/rtf via pandoc; only the
+	// legacy binary .doc (neither engine reads) remains uncovered.
+	exts, docs := uncoveredExtractableExtensions(corpus, "auto", true /*structured*/, false, true /*pandoc*/)
+	if want := []string{".doc"}; !reflect.DeepEqual(exts, want) {
+		t.Errorf("docling+pandoc uncovered = %v, want %v", exts, want)
+	}
+	if docs != 1 {
+		t.Errorf("docling+pandoc uncovered docs = %d, want 1", docs)
+	}
+
+	// pandoc-only (no docling/OCR): odt/rtf/docx covered by pandoc; pdf and legacy
+	// .doc are uncovered (pandoc reads neither).
+	exts2, docs2 := uncoveredExtractableExtensions(corpus, "auto", false, false, true /*pandoc*/)
+	if want := []string{".doc", ".pdf"}; !reflect.DeepEqual(exts2, want) {
+		t.Errorf("pandoc-only uncovered = %v, want %v", exts2, want)
+	}
+	if docs2 != 3 { // 2 pdf + 1 doc
+		t.Errorf("pandoc-only uncovered docs = %d, want 3", docs2)
 	}
 }
 

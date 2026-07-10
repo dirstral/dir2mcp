@@ -22,6 +22,8 @@ func TestClassifyDocType_Smoke(t *testing.T) {
 		{path: "slides.pptx", want: "document"},
 		{path: "sheet.xlsx", want: "document"},
 		{path: "report.docx", want: "document"},
+		{path: "book.epub", want: "document"},
+		{path: "notes.odt", want: "document"},
 		{path: "image.png", want: "image"},
 		{path: "audio.mp3", want: "audio"},
 		{path: "clip.mp4", want: "video"},

@@ -51,8 +51,12 @@ var extractorRoutingCases = []struct {
 	{".tif", false, true},
 	{".tiff", false, true},
 	{".bmp", false, true},
-	// Read by neither engine (#394 defects 2 & 3; content support in #393).
+	// Read by neither the flat OCR nor the docling engine. Some are now covered by
+	// pandoc (T2, #393) — see TestSelectExtractionRoute_Pandoc — but the flat/
+	// structured verdicts here are unchanged. .epub is docling-unreadable (#393
+	// routes it to pandoc).
 	{".odt", false, false},
+	{".epub", false, false},
 	{".odp", false, false},
 	{".ods", false, false},
 	{".rtf", false, false},
@@ -217,6 +221,60 @@ func TestSelectExtractionRoute(t *testing.T) {
 	}
 }
 
+// TestSelectExtractionRoute_Pandoc is the #393 guard for the T2 pandoc tier: it
+// pins the fidelity-ordered choice for pandoc-readable born-digital formats across
+// the auto policy, the pandoc pin, and the docling pin (which must NOT borrow
+// pandoc).
+func TestSelectExtractionRoute_Pandoc(t *testing.T) {
+	doclingAndPandoc := extractionAvailability{structured: true, pandoc: true}
+	pandocOnly := extractionAvailability{pandoc: true}
+	doclingOnly := extractionAvailability{structured: true}
+
+	cases := []struct {
+		name   string
+		policy string
+		avail  extractionAvailability
+		ext    string
+		want   extractionRoute
+	}{
+		// auto, docling + pandoc both active: docling (T1) wins for what it reads;
+		// pandoc (T2) covers the docling-unreadable born-digital family.
+		{"auto docling+pandoc docx -> structured (T1 wins)", "auto", doclingAndPandoc, ".docx", routeStructured},
+		{"auto docling+pandoc odt -> pandoc (docling cannot import)", "auto", doclingAndPandoc, ".odt", routePandoc},
+		{"auto docling+pandoc rtf -> pandoc", "auto", doclingAndPandoc, ".rtf", routePandoc},
+		{"auto docling+pandoc epub -> pandoc (docling has no epub reader)", "auto", doclingAndPandoc, ".epub", routePandoc},
+		{"auto docling+pandoc pdf -> structured (pandoc reads no pdf)", "auto", doclingAndPandoc, ".pdf", routeStructured},
+		// auto, pandoc the only active engine: it reads the OOXML/born-digital it can.
+		{"auto pandoc-only docx -> pandoc", "auto", pandocOnly, ".docx", routePandoc},
+		{"auto pandoc-only odt -> pandoc", "auto", pandocOnly, ".odt", routePandoc},
+		{"auto pandoc-only pdf -> degrade (pandoc reads no pdf)", "auto", pandocOnly, ".pdf", routeDegrade},
+		{"auto pandoc-only pptx -> degrade (pandoc has no pptx reader)", "auto", pandocOnly, ".pptx", routeDegrade},
+		{"auto pandoc-only xlsx -> degrade (pandoc has no xlsx reader)", "auto", pandocOnly, ".xlsx", routeDegrade},
+		{"auto pandoc-only doc -> degrade (pandoc reads docx not legacy doc)", "auto", pandocOnly, ".doc", routeDegrade},
+		// pandoc pin: only pandoc eligible; pptx/xlsx/pdf/doc degrade.
+		{"pin pandoc odt -> pandoc", "pandoc", pandocOnly, ".odt", routePandoc},
+		{"pin pandoc docx -> pandoc", "pandoc", pandocOnly, ".docx", routePandoc},
+		{"pin pandoc pptx -> degrade", "pandoc", pandocOnly, ".pptx", routeDegrade},
+		{"pin pandoc pdf -> degrade", "pandoc", pandocOnly, ".pdf", routeDegrade},
+		// pandoc pin must not borrow docling even when docling is available.
+		{"pin pandoc + docling avail docx -> pandoc (no docling borrow)", "pandoc", doclingAndPandoc, ".docx", routePandoc},
+		{"pin pandoc + docling avail pdf -> degrade (pandoc reads no pdf, no docling borrow)", "pandoc", doclingAndPandoc, ".pdf", routeDegrade},
+		// docling pin must NOT route pandoc formats to pandoc.
+		{"pin docling odt -> degrade (no pandoc borrow)", "docling", doclingAndPandoc, ".odt", routeDegrade},
+		{"pin docling pptx -> structured (docling reads pptx)", "docling", doclingOnly, ".pptx", routeStructured},
+		// html markup boundary with pandoc: pandoc reads html when structured absent.
+		{"auto pandoc-only html -> pandoc", "auto", pandocOnly, ".html", routePandoc},
+		{"auto pandoc-only+nothing html still never dropped elsewhere", "auto", pandocOnly, ".htm", routePandoc},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := selectExtractionRoute(tc.policy, tc.avail, tc.ext); got != tc.want {
+				t.Errorf("selectExtractionRoute(%q, %+v, %q) = %d, want %d", tc.policy, tc.avail, tc.ext, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestActiveExtractionAvailability confirms availability is derived from the
 // resolved single extractor: a structured extractor reports structured-active, a
 // flat one reports flat-active, and no extractor reports nothing active.
@@ -229,5 +287,14 @@ func TestActiveExtractionAvailability(t *testing.T) {
 	}
 	if got := (&Service{}).activeExtractionAvailability(); got.structured || got.flatOCR {
 		t.Errorf("nil extractor availability = %+v, want zero", got)
+	}
+	// #393: pandoc as a SECOND engine alongside a structured primary.
+	if got := (&Service{extractor: structuredRoutingExtractor{}, pandocExtractor: NewPandocExtractor("")}).activeExtractionAvailability(); !got.structured || !got.pandoc || got.flatOCR {
+		t.Errorf("structured+pandoc availability = %+v, want {structured,pandoc}", got)
+	}
+	// pandoc as the PRIMARY (pin / auto-only-pandoc): not mislabeled flat/structured.
+	pe := NewPandocExtractor("")
+	if got := (&Service{extractor: pe, pandocExtractor: pe}).activeExtractionAvailability(); got.structured || got.flatOCR || !got.pandoc {
+		t.Errorf("pandoc-primary availability = %+v, want {pandoc} only", got)
 	}
 }

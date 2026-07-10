@@ -16,7 +16,7 @@ import (
 // the construction cost.
 type ExtractorDecision struct {
 	// Name is the selected extractor identifier: "docling",
-	// "docling-serve", "mistral-ocr", or "" when no extractor is available.
+	// "docling-serve", "pandoc", "mistral-ocr", or "" when no extractor is available.
 	Name string
 	// Source describes how the choice was made: "explicit" (user
 	// pinned via ingest.extractor), "auto" (auto-detected as the
@@ -63,13 +63,24 @@ func describeDocumentExtractor(ctx context.Context, cfg config.Config) Extractor
 		return describeExplicitDocling(ctx, cfg)
 	case "docling-serve":
 		return describeExplicitDoclingServe(ctx, cfg)
+	case "pandoc":
+		return describeExplicitPandoc(ctx, cfg)
 	case "mistral":
 		if mistralOCRAvailable(cfg) {
 			return ExtractorDecision{Name: "mistral-ocr", Source: "explicit"}
 		}
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=mistral but the mistral-ocr provider has no credential"}
 	default: // auto
-		return describeAutoDocumentExtractor(ctx, cfg)
+		decision := describeAutoDocumentExtractor(ctx, cfg)
+		// pandoc (T2) is additive under auto, not the primary of the docling →
+		// docling-serve → mistral cascade. But when that cascade resolves to
+		// "disabled" (no docling/OCR) yet a functional pandoc IS available, pandoc
+		// is the only active engine, so it becomes the primary the banner and
+		// DocumentExtractorFromConfig build (born-digital formats stay covered).
+		if decision.Source == "disabled" && pandocAvailableContext(ctx, cfg) {
+			return ExtractorDecision{Name: "pandoc", Source: "auto", Reason: "no docling/OCR; pandoc covers born-digital formats"}
+		}
+		return decision
 	}
 }
 
@@ -99,6 +110,21 @@ func describeExplicitDocling(ctx context.Context, cfg config.Config) ExtractorDe
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=docling but the docling command is present yet failed its functional check"}
 	}
 	return ExtractorDecision{Name: "docling", Source: "explicit", Reason: doclingResolvedReason(source)}
+}
+
+// describeExplicitPandoc resolves the pandoc CLI for ingest.extractor=pandoc.
+// Per spec §7.4 a capability-activated extractor is available only when it both
+// resolves AND passes a functional check; a present-but-broken pandoc disables
+// extraction (no silent fallback to another engine), mirroring explicit docling.
+func describeExplicitPandoc(ctx context.Context, cfg config.Config) ExtractorDecision {
+	bin, source, ok := resolvePandocBinary(cfg)
+	if !ok {
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=pandoc but pandoc is unavailable"}
+	}
+	if err := pandocFunctionalCheck(ctx, bin); err != nil {
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=pandoc but the pandoc command is present yet failed its functional check"}
+	}
+	return ExtractorDecision{Name: "pandoc", Source: "explicit", Reason: pandocResolvedReason(source)}
 }
 
 func describeAutoDocumentExtractor(ctx context.Context, cfg config.Config) ExtractorDecision {
