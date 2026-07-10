@@ -129,6 +129,53 @@ func TestRenderStatus_HealthyCorpusOmitsBlocks(t *testing.T) {
 
 // TestFormatSkipBreakdown merges the store's durable SkipSummary with the
 // in-run (non-persisted) path-exclude counts into one stable, sorted line.
+// TestRenderCoverageBlock_RemediationHints pins the "here's what to install or
+// configure" half of the honest-coverage report (#414): actionable reasons get
+// a hint, working-as-intended ones (archive) stay bare so the block does not
+// train operators to ignore it.
+func TestRenderCoverageBlock_RemediationHints(t *testing.T) {
+	snapshot := corpusSnapshot{
+		Timestamp: "2026-07-09T00:00:00Z",
+		Indexing: corpusIndexing{
+			Mode:    "incremental",
+			Skipped: 4,
+			SkipSummary: &model.SkipSummary{
+				Categories: map[string]int64{
+					model.SkipReasonUnsupportedFormat: 3,
+					model.SkipReasonArchive:           1,
+				},
+			},
+		},
+		DocCounts: map[string]int64{"text": 1},
+		TotalDocs: 1,
+	}
+
+	var out bytes.Buffer
+	app := &App{stdout: &out, stderr: &bytes.Buffer{}}
+	app.renderCoverageBlock(newStyles(&out, false), snapshot)
+
+	got := out.String()
+	if !strings.Contains(got, "ingest.extractor") {
+		t.Errorf("unsupported_format is actionable but printed no remediation hint:\n%s", got)
+	}
+	if strings.Contains(got, "archive —") {
+		t.Errorf("archive is working-as-intended and must print no hint:\n%s", got)
+	}
+}
+
+func TestSkipReasonHint_UnknownReasonYieldsNoGuess(t *testing.T) {
+	// The skip_reasons enum is additive: a newer server may report a reason this
+	// binary has never heard of. Render it bare rather than inventing advice.
+	if hint := skipReasonHint("some_future_reason"); hint != "" {
+		t.Fatalf("unknown reason produced a hint: %q", hint)
+	}
+	for _, benign := range []string{model.SkipReasonArchive, model.SkipReasonBinaryIgnored, model.SkipReasonIgnoreRule} {
+		if hint := skipReasonHint(benign); hint != "" {
+			t.Errorf("%s is working-as-intended but produced a hint: %q", benign, hint)
+		}
+	}
+}
+
 func TestFormatSkipBreakdown(t *testing.T) {
 	if got := formatSkipBreakdown(nil, nil); got != "" {
 		t.Errorf("empty breakdown = %q, want empty", got)

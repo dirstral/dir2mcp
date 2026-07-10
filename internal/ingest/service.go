@@ -216,6 +216,13 @@ type Service struct {
 	// without it a failed document is only observable by polling the store.
 	onDocumentError   func(relPath, docType, message string)
 	onDocumentErrorMu sync.RWMutex
+
+	// optional callback invoked for every document this run leaves never-indexed
+	// (status "skipped"/"secret_excluded"). The CLI uses it to emit the
+	// spec-required per-document `file_skip` NDJSON event (SPEC §3.2, #414). It
+	// is the streaming counterpart of the durable skip_reasons aggregate.
+	onDocumentSkip   func(relPath, docType, reason string)
+	onDocumentSkipMu sync.RWMutex
 	// bounds the compatibility wrapper used by SetOnDocumentDeleted so large
 	// deletion batches do not spawn an unbounded number of goroutines.
 	onDocumentDeletedMaxConcurrency int
@@ -727,6 +734,18 @@ func (s *Service) SetOnDocumentError(fn func(relPath, docType, message string)) 
 	s.onDocumentErrorMu.Lock()
 	defer s.onDocumentErrorMu.Unlock()
 	s.onDocumentError = fn
+}
+
+// SetOnDocumentSkip registers a callback invoked once per document this run
+// leaves never-indexed. `reason` is a model.SkipReason* value. Passing nil
+// clears the callback.
+//
+// A document raises either this callback or SetOnDocumentError, never both:
+// the two partition the never-indexed set (SPEC §3.2).
+func (s *Service) SetOnDocumentSkip(fn func(relPath, docType, reason string)) {
+	s.onDocumentSkipMu.Lock()
+	defer s.onDocumentSkipMu.Unlock()
+	s.onDocumentSkip = fn
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
@@ -1442,6 +1461,14 @@ func (s *Service) scanPass(ctx context.Context, pass processPass, discovered []D
 			if countCorpus {
 				s.addSkipped(1)
 				s.addRunSkipReason(model.SkipReasonPathExcluded)
+				// Path-excluded files are never persisted, so the stream event is
+				// the only per-document record of them anywhere.
+				s.notifyDocumentSkip(model.Document{
+					RelPath:    f.RelPath,
+					DocType:    ClassifyDocType(f.RelPath),
+					Status:     "skipped",
+					SkipReason: model.SkipReasonPathExcluded,
+				})
 			}
 			if outcome != nil {
 				outcome.markSkipped()
@@ -1599,6 +1626,7 @@ func (s *Service) skipUnchangedRemoteDocument(ctx context.Context, f DiscoveredF
 		s.addIndexed(1)
 	case "skipped", "secret_excluded":
 		s.addSkipped(1)
+		s.notifyDocumentSkip(existing)
 	}
 	// An unchanged archive still owns its previously-extracted members; retain
 	// them so they are not treated as deletions this run.
@@ -1741,7 +1769,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// The archive document itself remains "skipped" (no direct text content).
 	if doc.DocType == "archive" {
 		s.creditIndexed(indexedPending)
-		return s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing, finalContentHash)
+		return s.handleArchiveDocumentAndNotify(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing, finalContentHash)
 	}
 
 	if !needsProcessing || doc.Status != "ok" {
@@ -1906,6 +1934,12 @@ func (s *Service) creditInitialStatus(doc model.Document) (indexedPending, termi
 			s.activeOutcome.markSkippedWithCode(manifestErrBinarySkipped)
 		} else {
 			s.markActiveSkipped()
+		}
+		// An archive container is credited as skipped here but is NOT terminal: it
+		// reverts to an error (and addSkipped(-1)) if member extraction fails, so
+		// its file_skip is deferred until handleArchiveDocument succeeds.
+		if doc.DocType != "archive" {
+			s.notifyDocumentSkip(doc)
 		}
 		return false, false
 	case "error":
@@ -2408,6 +2442,10 @@ func (s *Service) persistOversizeSkips(ctx context.Context, oversize map[string]
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
 			s.getLogger().Printf("discovery: persist size-cap skip row for %s: %v", relPath, err)
 		}
+		// Emitted here rather than at the OnOversize counter bump so the event and
+		// the persisted row stay one-to-one; the oversize map is keyed by relPath,
+		// so no document raises it twice.
+		s.notifyDocumentSkip(doc)
 	}
 }
 
@@ -3117,6 +3155,52 @@ func (s *Service) notifyDocumentError(doc model.Document) {
 		}
 	}()
 	fn(doc.RelPath, doc.DocType, doc.ErrorMessage)
+}
+
+// handleArchiveDocumentAndNotify extracts an archive container's members and,
+// only if that fully succeeded, raises the container's deferred `file_skip`.
+// On failure the container was re-persisted as an error and its skipped credit
+// withdrawn (addSkipped(-1)), so it must raise a `file_error` instead — the two
+// events partition the never-indexed set (SPEC §3.2).
+func (s *Service) handleArchiveDocumentAndNotify(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool, finalContentHash string) error {
+	if err := s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing, finalContentHash); err != nil {
+		return err
+	}
+	s.notifyDocumentSkip(doc)
+	return nil
+}
+
+// notifyDocumentSkip invokes the registered per-document skip callback. It is
+// called only where the document's never-indexed status is final for this run,
+// never merely where the `skipped` counter is incremented: an archive container
+// is credited as skipped up front but reverts to an error if member extraction
+// fails (addSkipped(-1)), and the spec forbids one document raising both a
+// `file_skip` and a `file_error`.
+//
+// A blank SkipReason falls back to the doc_type mapping so pre-#570 rows, which
+// were persisted before the skip_reason column existed, still report a reason
+// rather than an empty string.
+func (s *Service) notifyDocumentSkip(doc model.Document) {
+	s.onDocumentSkipMu.RLock()
+	fn := s.onDocumentSkip
+	s.onDocumentSkipMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	reason := doc.SkipReason
+	if strings.TrimSpace(reason) == "" {
+		if doc.Status == "secret_excluded" {
+			reason = model.SkipReasonSecretExcluded
+		} else {
+			reason = skipReasonForDocType(doc.DocType)
+		}
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.getLogger().Printf("onDocumentSkip panic for %s (%s)", doc.RelPath, safePanicValue(r))
+		}
+	}()
+	fn(doc.RelPath, doc.DocType, reason)
 }
 
 // persistTitleIfFound runs the title heuristic on the supplied text body and,

@@ -233,8 +233,34 @@ func (a *App) renderCoverageBlock(s styles, snapshot corpusSnapshot) {
 	)
 	for _, reason := range reasons {
 		writef(a.stdout, "    %s\n", s.stat(reason, summary.Categories[reason]))
+		if hint := skipReasonHint(reason); hint != "" {
+			writef(a.stdout, "      %s\n", s.dim(hint))
+		}
 	}
 	writeln(a.stdout)
+}
+
+// skipReasonHint returns the remediation guidance for a skip reason — the
+// "here's what to install or configure" half of the honest-coverage report
+// (#414). It is empty for reasons that are working as intended (an archive
+// container, an ignored binary, an ignore-rule match): printing an action for
+// those would train operators to ignore the block.
+//
+// An unrecognized reason (a newer server, per the additive skip_reasons enum)
+// also returns empty rather than guessing.
+func skipReasonHint(reason string) string {
+	switch reason {
+	case model.SkipReasonUnsupportedFormat:
+		return "no active extraction engine reads these formats — install a richer extractor (e.g. the docling-enabled build) or set ingest.extractor"
+	case model.SkipReasonSizeCap:
+		return "larger than ingest.max_file_mb — raise the cap to include them"
+	case model.SkipReasonPathExcluded:
+		return "matched ingest.path_excludes — drop the pattern to include them"
+	case model.SkipReasonSecretExcluded:
+		return "matched a secret pattern and was withheld on purpose — review ingest.secret_patterns if this was unintended"
+	default:
+		return ""
+	}
 }
 
 // renderRecentFailuresBlock prints up to statusRecentFailuresLimit recent

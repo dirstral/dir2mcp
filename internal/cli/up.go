@@ -124,7 +124,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
 		return exitConfigInvalid
 	}
-	wireIngestorHooks(ing, indexingState, ret.EvictDocuments, newFileErrorEmitter(emitter))
+	wireIngestorHooks(ing, ingestorHooks{
+		indexingState: indexingState,
+		evict:         ret.EvictDocuments,
+		onDocError:    newFileErrorEmitter(emitter),
+		onDocSkip:     newFileSkipEmitter(emitter),
+	})
 	wireDerivationCacheIdentities(ret, ing)
 
 	corpusFS, err := buildCorpusFS(ctx, cfg)
@@ -1206,22 +1211,30 @@ func buildCorpusFS(ctx context.Context, cfg config.Config) (corpusfs.CorpusFS, e
 	})
 }
 
-// wireIngestorHooks connects the optional indexing-state, document-delete and
-// document-error notification interfaces on ing, if the concrete type supports
-// them. onDocError may be nil, in which case no per-document error callback is
-// registered.
-func wireIngestorHooks(ing model.Ingestor, indexingState *appstate.IndexingState, evict func([]string), onDocError func(relPath, docType, message string)) {
+// ingestorHooks carries the optional callbacks wireIngestorHooks registers on
+// an ingestor. Any field may be nil, in which case that hook is not registered.
+type ingestorHooks struct {
+	indexingState *appstate.IndexingState
+	evict         func([]string)
+	onDocError    func(relPath, docType, message string)
+	onDocSkip     func(relPath, docType, reason string)
+}
+
+// wireIngestorHooks connects the optional indexing-state, document-delete,
+// document-error and document-skip notification interfaces on ing, if the
+// concrete type supports them.
+func wireIngestorHooks(ing model.Ingestor, hooks ingestorHooks) {
 	if stateAware, ok := ing.(indexingStateAware); ok {
-		stateAware.SetIndexingState(indexingState)
+		stateAware.SetIndexingState(hooks.indexingState)
 	}
 	if notifier, ok := ing.(documentDeleteNotifier); ok {
-		notifier.SetOnDocumentsDeleted(evict)
+		notifier.SetOnDocumentsDeleted(hooks.evict)
 	}
-	if onDocError == nil {
-		return
+	if notifier, ok := ing.(documentErrorNotifier); ok && hooks.onDocError != nil {
+		notifier.SetOnDocumentError(hooks.onDocError)
 	}
-	if notifier, ok := ing.(documentErrorNotifier); ok {
-		notifier.SetOnDocumentError(onDocError)
+	if notifier, ok := ing.(documentSkipNotifier); ok && hooks.onDocSkip != nil {
+		notifier.SetOnDocumentSkip(hooks.onDocSkip)
 	}
 }
 
@@ -1236,6 +1249,21 @@ func newFileErrorEmitter(emitter *ndjsonEmitter) func(relPath, docType, message 
 			"rel_path": relPath,
 			"doc_type": docType,
 			"message":  message,
+		})
+	}
+}
+
+// newFileSkipEmitter returns the per-document skip callback handed to the
+// ingestor. It emits the spec-required `file_skip` event (SPEC §3.2) at
+// level=warn — the streaming counterpart of the durable `skip_reasons`
+// aggregate: the aggregate says what was not indexed in total, the event says
+// which file, as it happens. `reason` is a value of the `skip_reasons` enum.
+func newFileSkipEmitter(emitter *ndjsonEmitter) func(relPath, docType, reason string) {
+	return func(relPath, docType, reason string) {
+		emitter.Emit("warn", "file_skip", map[string]interface{}{
+			"rel_path": relPath,
+			"doc_type": docType,
+			"reason":   reason,
 		})
 	}
 }

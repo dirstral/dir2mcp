@@ -132,3 +132,93 @@ func TestNotifyDocumentError_NilCallbackIsNoop(t *testing.T) {
 	svc.SetOnDocumentError(nil)
 	svc.notifyDocumentError(model.Document{RelPath: "a.pdf"})
 }
+
+// --- file_skip (#414) ---
+
+// captureSkips registers a skip callback and returns the slice it appends to.
+func captureSkips(svc *Service) *[]string {
+	var got []string
+	svc.SetOnDocumentSkip(func(relPath, docType, reason string) {
+		got = append(got, relPath+"|"+docType+"|"+reason)
+	})
+	return &got
+}
+
+func TestNotifyDocumentSkip_CarriesReason(t *testing.T) {
+	svc := newDocErrorService(&docErrorStubStore{})
+	got := captureSkips(svc)
+
+	svc.notifyDocumentSkip(model.Document{
+		RelPath:    "notes/report.odt",
+		DocType:    "document",
+		Status:     "skipped",
+		SkipReason: model.SkipReasonUnsupportedFormat,
+	})
+
+	want := "notes/report.odt|document|" + model.SkipReasonUnsupportedFormat
+	if len(*got) != 1 || (*got)[0] != want {
+		t.Fatalf("skip events = %v, want [%s]", *got, want)
+	}
+}
+
+// A pre-#570 row has no skip_reason column value. The event must still name a
+// reason rather than emit an empty string, which would break the closed enum.
+func TestNotifyDocumentSkip_BlankReasonFallsBackToDocType(t *testing.T) {
+	svc := newDocErrorService(&docErrorStubStore{})
+	got := captureSkips(svc)
+
+	svc.notifyDocumentSkip(model.Document{RelPath: "a.zip", DocType: "archive", Status: "skipped"})
+	svc.notifyDocumentSkip(model.Document{RelPath: "a.bin", DocType: "binary_ignored", Status: "skipped"})
+	svc.notifyDocumentSkip(model.Document{RelPath: ".env", DocType: "ignore", Status: "skipped"})
+	svc.notifyDocumentSkip(model.Document{RelPath: "k.pem", DocType: "text", Status: "secret_excluded"})
+
+	want := []string{
+		"a.zip|archive|" + model.SkipReasonArchive,
+		"a.bin|binary_ignored|" + model.SkipReasonBinaryIgnored,
+		".env|ignore|" + model.SkipReasonIgnoreRule,
+		"k.pem|text|" + model.SkipReasonSecretExcluded,
+	}
+	if len(*got) != len(want) {
+		t.Fatalf("skip events = %v, want %v", *got, want)
+	}
+	for i := range want {
+		if (*got)[i] != want[i] {
+			t.Errorf("event[%d] = %q, want %q", i, (*got)[i], want[i])
+		}
+	}
+}
+
+// creditInitialStatus must NOT raise a file_skip for an archive container: the
+// container is credited as skipped up front but reverts to an error if member
+// extraction fails, and SPEC §3.2 forbids one document raising both events.
+// Its file_skip is deferred to handleArchiveDocumentAndNotify.
+func TestCreditInitialStatus_DefersArchiveSkipEvent(t *testing.T) {
+	svc := newDocErrorService(&docErrorStubStore{})
+	got := captureSkips(svc)
+
+	svc.creditInitialStatus(model.Document{RelPath: "bundle.zip", DocType: "archive", Status: "skipped", SkipReason: model.SkipReasonArchive})
+	if len(*got) != 0 {
+		t.Fatalf("archive container raised a premature file_skip: %v", *got)
+	}
+
+	svc.creditInitialStatus(model.Document{RelPath: "a.bin", DocType: "binary_ignored", Status: "skipped", SkipReason: model.SkipReasonBinaryIgnored})
+	if len(*got) != 1 {
+		t.Fatalf("non-archive skip did not raise file_skip: %v", *got)
+	}
+}
+
+func TestNotifyDocumentSkip_ContainsCallbackPanic(t *testing.T) {
+	svc := newDocErrorService(&docErrorStubStore{})
+	svc.SetOnDocumentSkip(func(string, string, string) { panic("consumer blew up") })
+
+	svc.notifyDocumentSkip(model.Document{RelPath: "a.zip", DocType: "archive", Status: "skipped"})
+}
+
+func TestNotifyDocumentSkip_NilCallbackIsNoop(t *testing.T) {
+	svc := newDocErrorService(&docErrorStubStore{})
+	svc.notifyDocumentSkip(model.Document{RelPath: "a.zip"})
+
+	svc.SetOnDocumentSkip(func(string, string, string) { t.Fatal("cleared callback was invoked") })
+	svc.SetOnDocumentSkip(nil)
+	svc.notifyDocumentSkip(model.Document{RelPath: "a.zip"})
+}
