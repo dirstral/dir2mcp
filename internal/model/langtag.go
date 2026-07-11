@@ -31,41 +31,73 @@ func LanguagePrimarySubtag(tag string) string {
 // IsValidLanguageTag reports whether tag is a syntactically valid BCP-47
 // language tag for the purpose of the per-language retrieval filter (§9.5). The
 // check is deliberately lenient — it accepts the common forms an operator or
-// client sends (`en`, `EN`, `pt-BR`, `zh-Hant`, `und`) and rejects only clearly
-// malformed values — because §9.5 requires that an *unrecognized or malformed*
-// tag be reported as INVALID_FIELD, while a syntactically valid tag that simply
-// matches nothing is NOT an error.
+// client sends (`en`, `EN`, `pt-BR`, `zh-Hant`, `und`, and the locale form
+// `en_US`) and rejects only clearly malformed values — because §9.5 requires
+// that an *unrecognized or malformed* tag be reported as INVALID_FIELD, while a
+// syntactically valid tag that simply matches nothing is NOT an error.
 //
-// Validity rule: the tag is one or more '-'-separated subtags, each composed
-// solely of ASCII letters/digits, each 1..8 chars, with a non-empty primary
-// subtag of letters only (1..8). A trailing/leading/double hyphen, an empty
-// subtag, or any non-alphanumeric/non-hyphen rune is invalid. An empty/blank tag
-// is invalid (callers strip empties before validating; an explicit empty string
-// in the array is a client error).
+// Validity rule: the tag is one or more subtags separated by `-` OR `_` (the
+// `_` locale form is accepted as an alias for `-`, so `en_US` and `en-US` are
+// equivalent — this keeps validation consistent with LanguagePrimarySubtag,
+// which already treats `_` as a separator when honoring a stored representation
+// tag, issue #441 item 2.2). Each subtag is composed solely of ASCII
+// letters/digits and is 1..8 chars. The primary subtag (first) must be letters
+// only and at least 2 chars — a real language code is never numeric and never a
+// single letter (a lone `x`/`a` is a BCP-47 singleton/grandfathered prefix, not
+// a filterable language, issue #441 item 2.3). A trailing/leading/double
+// separator, an empty subtag, or any non-alphanumeric/non-separator rune is
+// invalid. An empty/blank tag is invalid (callers strip empties before
+// validating; an explicit empty string in the array is a client error).
 func IsValidLanguageTag(tag string) bool {
-	t := strings.TrimSpace(tag)
+	t := canonicalizeLanguageSeparators(strings.TrimSpace(tag))
 	if t == "" {
 		return false
 	}
-	subtags := strings.Split(t, "-")
-	for idx, sub := range subtags {
-		if len(sub) < 1 || len(sub) > 8 {
+	for idx, sub := range strings.Split(t, "-") {
+		if !isValidLanguageSubtag(sub, idx == 0) {
 			return false
-		}
-		for _, r := range sub {
-			isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-			isDigit := r >= '0' && r <= '9'
-			if !isLetter && !isDigit {
-				return false
-			}
-			// The primary subtag (first) must be letters only — a language code is
-			// never numeric (e.g. "1" or "123" is not a language).
-			if idx == 0 && isDigit {
-				return false
-			}
 		}
 	}
 	return true
+}
+
+// isValidLanguageSubtag validates a single BCP-47 subtag under the lenient §9.5
+// rule (see IsValidLanguageTag). primary marks the first subtag, which carries
+// the stricter constraints: letters only and at least 2 chars (a real language
+// code is never numeric and never a single letter).
+func isValidLanguageSubtag(sub string, primary bool) bool {
+	if len(sub) < 1 || len(sub) > 8 {
+		return false
+	}
+	if primary && len(sub) < 2 {
+		return false
+	}
+	for _, r := range sub {
+		isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		isDigit := r >= '0' && r <= '9'
+		if !isLetter && !isDigit {
+			return false
+		}
+		// The primary subtag must be letters only — a language code is never
+		// numeric (e.g. "1" or "123" is not a language).
+		if primary && isDigit {
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalizeLanguageSeparators maps the `_` locale separator to the BCP-47 `-`
+// separator so the underscore form (`en_US`) and the hyphen form (`en-US`) are
+// treated identically across validation (IsValidLanguageTag) and strict matching
+// (languageTagMatchesStrict). LanguagePrimarySubtag already collapses `_`/`-`
+// when extracting the primary subtag, so this keeps the filter side consistent
+// with the stored-representation side (issue #441 item 2.2).
+func canonicalizeLanguageSeparators(s string) string {
+	if strings.IndexByte(s, '_') < 0 {
+		return s
+	}
+	return strings.ReplaceAll(s, "_", "-")
 }
 
 // LanguageMatch selects the §9.5 matching mode for the per-language retrieval
@@ -175,14 +207,18 @@ func LanguageMatchesAnyMode(recordedTag string, requested []string, mode string)
 // suffix, compared case-insensitively. recorded is assumed already lower-cased
 // and trimmed by the caller; requested is canonicalized here.
 func languageTagMatchesStrict(requested, recorded string) bool {
-	req := strings.ToLower(strings.TrimSpace(requested))
-	if req == "" || recorded == "" {
+	// Canonicalize the `_` locale separator to `-` on both sides so `en_US`
+	// filters like `en-US` under strict matching (issue #441 item 2.2). recorded
+	// is already lower-cased/trimmed by the caller but may still carry `_`.
+	req := canonicalizeLanguageSeparators(strings.ToLower(strings.TrimSpace(requested)))
+	rec := canonicalizeLanguageSeparators(recorded)
+	if req == "" || rec == "" {
 		return false
 	}
-	if recorded == req {
+	if rec == req {
 		return true
 	}
 	// Recorded extends the request with additional subtags: the boundary after
 	// the request MUST be a subtag separator so `pt-br` never matches `pt-brz`.
-	return strings.HasPrefix(recorded, req+"-")
+	return strings.HasPrefix(rec, req+"-")
 }

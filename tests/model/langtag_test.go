@@ -32,16 +32,66 @@ func TestLanguagePrimarySubtag(t *testing.T) {
 // INVALID_FIELD (§9.5/§14): common tags are valid; clearly malformed values are
 // rejected.
 func TestIsValidLanguageTag(t *testing.T) {
-	valid := []string{"en", "EN", "pt-BR", "zh-Hant", "und", "es", "de-DE-1996"}
+	valid := []string{
+		"en", "EN", "pt-BR", "zh-Hant", "und", "es", "de-DE-1996",
+		// The `_` locale form is accepted as an alias for `-` (issue #441 item
+		// 2.2): a filter is no longer rejected for a form that stored content is
+		// honored under (LanguagePrimarySubtag already collapses `_`).
+		"en_US", "pt_BR",
+	}
 	for _, tag := range valid {
 		if !model.IsValidLanguageTag(tag) {
 			t.Errorf("IsValidLanguageTag(%q) = false, want true", tag)
 		}
 	}
-	invalid := []string{"", "   ", "not a tag!", "@@@", "en-", "-en", "en--US", "123", "en-US-"}
+	invalid := []string{
+		"", "   ", "not a tag!", "@@@", "en-", "-en", "en--US", "123", "en-US-",
+		// A single-letter primary subtag is a BCP-47 singleton/grandfathered
+		// prefix, not a filterable language (issue #441 item 2.3).
+		"x", "a", "x-klingon", "en_", "_en",
+	}
 	for _, tag := range invalid {
 		if model.IsValidLanguageTag(tag) {
 			t.Errorf("IsValidLanguageTag(%q) = true, want false", tag)
+		}
+	}
+}
+
+// TestLanguageTagValidationConsistency pins the #441 item 2.2 fix: a filter tag
+// is accepted by IsValidLanguageTag exactly when stored content in the same form
+// is honored by LanguagePrimarySubtag. Before the fix, `en_US` yielded a stored
+// primary subtag ("en") yet was rejected as a client filter — an asymmetry that
+// silently dropped a legitimate filter.
+func TestLanguageTagValidationConsistency(t *testing.T) {
+	for _, tag := range []string{"en_US", "en-US", "pt_BR", "zh_Hant"} {
+		primary := model.LanguagePrimarySubtag(tag)
+		if primary == "" {
+			t.Fatalf("LanguagePrimarySubtag(%q) unexpectedly empty", tag)
+		}
+		if !model.IsValidLanguageTag(tag) {
+			t.Errorf("stored form %q yields primary %q but IsValidLanguageTag rejects the same filter (asymmetry, #441 2.2)", tag, primary)
+		}
+	}
+}
+
+// TestLanguageMatchesAnyMode_StrictUnderscore confirms the `_` locale form
+// filters identically to the `-` form under strict matching (issue #441 item
+// 2.2): `en_US` narrows exactly like `en-US`.
+func TestLanguageMatchesAnyMode_StrictUnderscore(t *testing.T) {
+	cases := []struct {
+		recorded  string
+		requested string
+		want      bool
+	}{
+		{"en-US", "en_US", true},  // underscore request matches hyphen recorded
+		{"en_US", "en-US", true},  // hyphen request matches underscore recorded
+		{"en-GB", "en_US", false}, // still narrows region
+		{"en", "en_US", false},    // bare en excluded by en_US request
+	}
+	for _, tc := range cases {
+		got := model.LanguageMatchesAnyMode(tc.recorded, []string{tc.requested}, model.LanguageMatchStrict)
+		if got != tc.want {
+			t.Errorf("strict match(recorded=%q, req=%q) = %v, want %v", tc.recorded, tc.requested, got, tc.want)
 		}
 	}
 }
