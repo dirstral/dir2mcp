@@ -29,6 +29,12 @@ import (
 // the text path) from a genuine decode error.
 var ErrToolNotFound = errors.New("avutil: required media tool not found on PATH")
 
+// ErrNoAudioStream indicates the media at the given path carries no audio stream,
+// so there is nothing to transcribe. Callers treat it as a graceful "no
+// transcript" (not a hard failure): a silent film or a screen recording with no
+// audio track simply produces no transcript representation (issue #495).
+var ErrNoAudioStream = errors.New("avutil: media has no audio stream")
+
 // msToSeconds formats a millisecond offset as a fractional-second string with
 // millisecond precision, the form ffmpeg's -ss/-to accept.
 func msToSeconds(ms int) string {
@@ -390,6 +396,70 @@ func ExtractSegmentURL(ctx context.Context, url, srcExt string, startMS, endMS i
 		return nil, fmt.Errorf("avutil: ExtractSegmentURL requires an http(s) URL, got %q", redactInput(url))
 	}
 	return extractSegment(ctx, url, srcExt, startMS, endMS)
+}
+
+// ExtractAudioTrack demuxes the audio stream of the media at a local filesystem
+// path and re-encodes it into a compact mono 16 kHz AAC (.m4a) clip suitable for
+// speech-to-text, returning the container bytes. The video stream is dropped
+// (-vn), so a video container (.mp4/.mov) yields an audio-only clip that STT
+// providers accept — the audio track of a video is transcribed exactly like a
+// standalone audio file (issue #495).
+//
+// Re-encoding (rather than a stream copy) makes the output codec/container
+// deterministic regardless of the source audio codec (aac, opus, ac3, …), and
+// mono 16 kHz mirrors the preprocessing speech models apply internally, keeping
+// the clip small enough for provider upload limits without hurting recognition.
+//
+// It returns ErrToolNotFound when ffprobe/ffmpeg are not installed and
+// ErrNoAudioStream when the media carries no audio track (nothing to transcribe).
+func ExtractAudioTrack(ctx context.Context, path string) ([]byte, error) {
+	// Probe first so a video with no audio track is reported as the distinct
+	// ErrNoAudioStream (a graceful "no transcript") instead of an opaque ffmpeg
+	// "does not contain any stream" failure. A probe error other than a missing
+	// tool is not fatal here: fall through and let ffmpeg surface the real error.
+	if info, err := ProbeMediaInfo(ctx, path); err != nil {
+		if errors.Is(err, ErrToolNotFound) {
+			return nil, ErrToolNotFound
+		}
+	} else if strings.TrimSpace(info.AudioCodec) == "" {
+		return nil, ErrNoAudioStream
+	}
+
+	bin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, ErrToolNotFound
+	}
+
+	tmpDir, err := os.MkdirTemp("", "dir2mcp-avaudio-")
+	if err != nil {
+		return nil, fmt.Errorf("avutil: temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	outPath := filepath.Join(tmpDir, "audio.m4a")
+
+	cmd := exec.CommandContext(ctx, bin,
+		"-nostdin",
+		"-v", "error",
+		"-i", path,
+		"-vn",
+		"-ac", "1",
+		"-ar", "16000",
+		"-c:a", "aac",
+		"-y", outPath,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg extract audio %q: %w: %s", path, err, strings.TrimSpace(stderr.String()))
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("avutil: read extracted audio: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("avutil: ffmpeg produced an empty audio track for %q", path)
+	}
+	return data, nil
 }
 
 // isHTTPURL reports whether s is an http or https URL, the only schemes ffmpeg

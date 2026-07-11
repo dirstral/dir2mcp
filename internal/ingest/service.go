@@ -168,6 +168,12 @@ type Service struct {
 	// (0, err) is treated as "do not trim".
 	DetectLeadingSilenceFunc func(ctx context.Context, path string) (time.Duration, error)
 
+	// ExtractAudioTrackFunc overrides extraction of a video's audio track before it
+	// is transcribed (issue #495). Defaults to avutil.ExtractAudioTrack (ffmpeg)
+	// when nil; tests set it to supply deterministic audio bytes (or
+	// avutil.ErrNoAudioStream) without requiring the ffmpeg binary.
+	ExtractAudioTrackFunc func(ctx context.Context, path string) ([]byte, error)
+
 	// ArchiveMaxMembers and ArchiveMaxTotalBytes bound archive fan-out to contain
 	// decompression bombs (#408): the number of members ingested per archive and
 	// the aggregate uncompressed bytes buffered. A value <= 0 uses the package
@@ -410,13 +416,15 @@ var errBinaryOnRawTextPath = errors.New(
 	"binary content on the raw-text path; not indexed as text (e.g. Parquet or another binary file with a text-classified extension)")
 
 // errNoVideoRepresentation marks a video document that produced zero
-// representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it,
-// video STT is not applied (transcription is audio-only), and multimodal
-// keyframe embedding is off. Such a video is known but unsearchable, so it is
-// surfaced as a durable non-fatal diagnostic instead of a silent no-op (#398).
+// representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it, no
+// transcript was derived (speech-to-text is off/unconfigured, or the video has no
+// audio track to transcribe — issue #495), and multimodal keyframe embedding is
+// off. Such a video is known but unsearchable, so it is surfaced as a durable
+// non-fatal diagnostic instead of a silent no-op (#398).
 var errNoVideoRepresentation = errors.New(
-	"video produced no representation: no subtitle sidecar found, video is not transcribed (STT is audio-only), " +
-		"and multimodal keyframe embedding is off — enable embed_multimodal or provide a .vtt/.srt sidecar to make it searchable")
+	"video produced no representation: no subtitle sidecar found, no transcript was derived " +
+		"(speech-to-text is off/unconfigured or the video has no audio track), and multimodal keyframe embedding is off — " +
+		"configure a speech-to-text provider, enable embed_multimodal, or provide a .vtt/.srt sidecar to make it searchable")
 
 // activeExtractionAvailability derives which extraction engines are active for
 // this run (§7.4.B "Extractor availability") from the resolved extractors. The
@@ -2051,7 +2059,10 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	}
 
 	docType := ClassifyDocType(f.RelPath)
-	if docType != "audio" || s.transcriber == nil {
+	// Audio AND video carry model-derived transcripts (issue #495): a video's
+	// source transcript was produced from its extracted audio track in the
+	// transcription pass, so its translation is derived here exactly like audio.
+	if !isSidecarMediaType(docType) || s.transcriber == nil {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -3090,51 +3101,63 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		return false, err
 	}
 
-	if doc.DocType != "audio" || s.transcriber == nil {
-		// #398: a video with no subtitle sidecar (handled above) and no multimodal
-		// keyframe chunks yields zero representations because transcription is
-		// audio-only. That was a silent no-op; record it as status="error" so the
-		// unsearchable video is durably visible (CorpusStats.Errors / RecentFailures)
-		// and retried once a sidecar is added or embed_multimodal is enabled. The run
-		// still continues (returns nil), mirroring the #413 provider-failure path.
-		if doc.DocType == "video" && !mediaProduced {
-			s.getLogger().Printf("no representation produced for video %s: %v", doc.RelPath, errNoVideoRepresentation)
-			s.addErrors(1)
-			s.persistNonFatalDocError(ctx, doc, errNoVideoRepresentation, secretPatterns)
-			return true, nil
-		}
-		return false, nil
-	}
-	if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
-		// Provider/transient failures should not fail the entire ingest run.
-		// Persistence/cache failures should still propagate.
-		if errors.Is(err, ErrTranscriptProviderFailure) {
-			s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
-			s.addErrors(1)
-			// #413: a genuine provider failure that left the document with no
-			// representation of its own (no media chunks under multimodal
-			// `augment`) must not stay status="ok" — that hid the unsearchable
-			// audio from CorpusStats.Errors / RecentFailures / FailureSummary and
-			// reported errors=0 after a restart. Persist it as status="error" so
-			// the failure is durably visible and is retried on the next
-			// incremental run, while STILL returning nil so the batch continues. A
-			// document that DID produce media chunks stays "ok": it remains
-			// searchable, so it is not a zero-representation failure. Legitimately
-			// empty media never reaches here — an empty transcript returns nil
-			// without ErrTranscriptProviderFailure.
-			if !mediaProduced {
-				s.persistNonFatalDocError(ctx, doc, err, secretPatterns)
-				// The document is now durably status="error" and already counted
-				// above; signal the caller not to also credit it as indexed
-				// (issue #426). A doc that DID produce media chunks stays "ok"
-				// and searchable, so it is still credited (returns false).
-				return true, nil
+	// Route audio AND video (issue #495) through the same STT transcript path when
+	// speech-to-text is configured. A video's audio track is extracted before it is
+	// handed to the provider (see transcribe); audio is fed directly. When STT is
+	// off (no transcriber) or the media yields no transcript, the no-representation
+	// check below still surfaces an unsearchable video (#398).
+	if isSidecarMediaType(doc.DocType) && s.transcriber != nil {
+		produced, err := s.generateTranscriptRepresentation(ctx, doc, content)
+		if err != nil {
+			// Provider/transient failures should not fail the entire ingest run.
+			// Persistence/cache failures should still propagate.
+			if errors.Is(err, ErrTranscriptProviderFailure) {
+				s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
+				s.addErrors(1)
+				// #413: a genuine provider failure that left the document with no
+				// representation of its own (no media chunks under multimodal
+				// `augment`) must not stay status="ok" — that hid the unsearchable
+				// audio/video from CorpusStats.Errors / RecentFailures /
+				// FailureSummary and reported errors=0 after a restart. Persist it as
+				// status="error" so the failure is durably visible and is retried on
+				// the next incremental run, while STILL returning nil so the batch
+				// continues. A document that DID produce media chunks stays "ok": it
+				// remains searchable, so it is not a zero-representation failure.
+				// Legitimately empty media never reaches here — an empty transcript
+				// returns (false, nil) without ErrTranscriptProviderFailure.
+				if !mediaProduced {
+					s.persistNonFatalDocError(ctx, doc, err, secretPatterns)
+					// The document is now durably status="error" and already counted
+					// above; signal the caller not to also credit it as indexed
+					// (issue #426). A doc that DID produce media chunks stays "ok"
+					// and searchable, so it is still credited (returns false).
+					return true, nil
+				}
+				return false, nil
 			}
+			return false, err
+		}
+		if produced {
+			s.addRepresentations(1)
 			return false, nil
 		}
-		return false, err
+		// produced == false: the transcript was empty (silence) or the video has no
+		// audio track to transcribe. Fall through so an otherwise unsearchable video
+		// is still surfaced by the no-representation check below (#398/#495).
 	}
-	s.addRepresentations(1)
+
+	// #398/#495: a video with no subtitle sidecar (handled above), no derived
+	// transcript, and no multimodal keyframe chunks yields zero representations —
+	// known but unsearchable. Record it as status="error" so it is durably visible
+	// (CorpusStats.Errors / RecentFailures) and retried once a sidecar is added,
+	// STT is configured, or embed_multimodal is enabled. The run still continues
+	// (returns nil), mirroring the #413 provider-failure path.
+	if doc.DocType == "video" && !mediaProduced {
+		s.getLogger().Printf("no representation produced for video %s: %v", doc.RelPath, errNoVideoRepresentation)
+		s.addErrors(1)
+		s.persistNonFatalDocError(ctx, doc, errNoVideoRepresentation, secretPatterns)
+		return true, nil
+	}
 	return false, nil
 }
 
@@ -3772,19 +3795,26 @@ func (s *Service) transcriptExpectedLanguage() string {
 	return s.transcriptLanguage
 }
 
-func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+// generateTranscriptRepresentation transcribes a media document (audio, or a
+// video's extracted audio track — issue #495) and persists the source transcript
+// representation and its chunks. It returns (produced, err): produced is true only
+// when a transcript representation was actually persisted, so the caller can tell a
+// real transcript from a legitimately empty one (silence, or a video with no audio
+// track) and surface an otherwise-unsearchable video (#398). A returned err follows
+// the same contract as generateRepresentations.
+func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) (bool, error) {
 	if s.repGen == nil || s.transcriber == nil {
-		return nil
+		return false, nil
 	}
 
 	transcriptText, words, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return nil
+		return false, nil
 	}
 
 	var duration time.Duration
@@ -3804,7 +3834,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	dropSet, scrubSet := s.captionDropScrub()
 	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
 	if len(segments) == 0 {
-		return nil
+		return false, nil
 	}
 	// Optional model-driven speaker diarization (SPEC §8.6.8): when active and a
 	// diarizer is injected, attribute each segment to a speaker. This is metadata
@@ -3817,7 +3847,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 
 	metaJSON, err := s.sttTranscriptMetaJSON(distinctSpeakers(segments), transcriptText, segmentsHaveWordTiming(segments))
 	if err != nil {
-		return fmt.Errorf("marshal transcript meta: %w", err)
+		return false, fmt.Errorf("marshal transcript meta: %w", err)
 	}
 	rep := model.Representation{
 		DocID:       doc.DocID,
@@ -3829,7 +3859,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	}
 	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
 	if err != nil {
-		return fmt.Errorf("upsert transcript representation: %w", err)
+		return false, fmt.Errorf("upsert transcript representation: %w", err)
 	}
 
 	// Optional leading-silence trim (dir2mcp#258): when enabled, subtract the
@@ -3846,7 +3876,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		}
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
-		return fmt.Errorf("persist transcript chunks: %w", err)
+		return false, fmt.Errorf("persist transcript chunks: %w", err)
 	}
 
 	// Optional translation step (SPEC §8.6.2): after the source transcript
@@ -3866,7 +3896,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// final set of representations is identical either way — only the ordering
 	// differs. In single-pass mode (the default) it runs inline as before.
 	if s.activePass == passTranscription {
-		return nil
+		return true, nil
 	}
 	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
@@ -3880,7 +3910,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		code := manifestErrorCode(err)
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
-	return nil
+	return true, nil
 }
 
 // applyDiarization stamps speaker attribution onto the transcript segments via
@@ -4090,7 +4120,8 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 
 // GenerateTranscriptRepresentation exposes transcript generation for tests.
 func (s *Service) GenerateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
-	return s.generateTranscriptRepresentation(ctx, doc, content)
+	_, err := s.generateTranscriptRepresentation(ctx, doc, content)
+	return err
 }
 
 // StoreAnnotationRepresentations persists a structured annotation JSON payload
@@ -4551,8 +4582,61 @@ func (s *Service) translateStructured(ctx context.Context, doc model.Document, c
 // (word-timing) capability when available. Providers that do not implement
 // model.StructuredTranscriber return no words, leaving downstream behaviour
 // unchanged.
+//
+// A video document (issue #495) has no audio-only container that STT providers
+// accept directly, so its audio track is demuxed/re-encoded to a compact clip via
+// ffmpeg first and handed to the provider under an audio filename; audio documents
+// are passed through unchanged. A video with no audio track degrades to an empty
+// transcript (no error) so the caller records "no transcript" rather than failing.
 func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
-	return s.transcribeWith(ctx, s.transcriber, doc.RelPath, content)
+	relPath := doc.RelPath
+	if doc.DocType == "video" {
+		audio, err := s.extractVideoAudioTrack(ctx, doc, content)
+		if err != nil {
+			if errors.Is(err, avutil.ErrNoAudioStream) {
+				s.getLogger().Printf("no audio track to transcribe in video %s; skipping STT", doc.RelPath)
+				return "", nil, nil
+			}
+			return "", nil, err
+		}
+		content = audio
+		relPath = videoAudioRelPath(doc.RelPath)
+	}
+	return s.transcribeWith(ctx, s.transcriber, relPath, content)
+}
+
+// extractVideoAudioTrack demuxes a video's audio track to a compact STT-ready
+// clip (issue #495). avutil slices by file path, so the in-memory bytes are staged
+// to a temp file (mirroring the windowed-translate path) before extraction. It
+// propagates avutil.ErrNoAudioStream so the caller can degrade a soundless video
+// gracefully, and avutil.ErrToolNotFound when ffmpeg is absent.
+func (s *Service) extractVideoAudioTrack(ctx context.Context, doc model.Document, content []byte) ([]byte, error) {
+	tmp, err := os.CreateTemp("", "dir2mcp-vaudio-*"+filepath.Ext(doc.RelPath))
+	if err != nil {
+		return nil, fmt.Errorf("stage video for audio extraction: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("write staged video: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("flush staged video: %w", err)
+	}
+	extract := s.ExtractAudioTrackFunc
+	if extract == nil {
+		extract = avutil.ExtractAudioTrack
+	}
+	return extract(ctx, tmpPath)
+}
+
+// videoAudioRelPath rewrites a video's path to the extracted audio clip's filename
+// so the STT provider infers an audio MIME type from the extension rather than a
+// video container it would reject (issue #495). ExtractAudioTrack emits an m4a
+// (AAC) clip, so the suffix matches the actual bytes handed to the provider.
+func videoAudioRelPath(relPath string) string {
+	return strings.TrimSuffix(relPath, filepath.Ext(relPath)) + ".m4a"
 }
 
 // readCachedWords loads per-word timing from the sidecar cache file, returning
