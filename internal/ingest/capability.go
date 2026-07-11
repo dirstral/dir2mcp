@@ -29,8 +29,8 @@ import "strings"
 // It matches the ONLY distinction extractorCanReadExt makes today: the flat
 // Mistral-OCR path vs the structured docling family (docling CLI / docling-serve,
 // the engines that emit a DoclingDocument). Bespoke/self-hosted OCR profiles ride
-// the flat path; a future pandoc extractor (#393) would be added as a new engine
-// here rather than as another scattered allowlist.
+// the flat path; the pandoc extractor (#393) is modeled as a distinct engine
+// here (enginePandoc, below) rather than as another scattered allowlist.
 type extractionEngine int
 
 const (

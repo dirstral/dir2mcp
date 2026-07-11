@@ -3601,6 +3601,24 @@ func (s *Service) readOrComputePandoc(ctx context.Context, doc model.Document, c
 	return string(mdBytes), nil
 }
 
+// pandocCachePath returns the cache file readOrComputePandoc writes for content.
+// The pandoc cache is keyed by content hash alone (pandoc is a single
+// deterministic engine with no model concept), so no active-extractor key is
+// mixed in as PurgeOCRCache does.
+func (s *Service) pandocCachePath(content []byte) string {
+	return filepath.Join(s.cfg.StateDir, "cache", "pandoc", computeContentHash(content)+".md")
+}
+
+// PurgePandocCache removes the pandoc cache entry for content, mirroring
+// PurgeOCRCache for the pandoc engine (#393). Callers that gate the returned
+// Markdown (e.g. the MCP secret-pattern gate, #407) use it so a refused result is
+// never left persisted in {StateDir}/cache/pandoc. Missing files are ignored.
+func (s *Service) PurgePandocCache(content []byte) {
+	if err := os.Remove(s.pandocCachePath(content)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.getLogger().Printf("purge pandoc cache: %v", err)
+	}
+}
+
 // pandocExtractionMetaJSON builds the per-document extracted_markdown meta_json for
 // a pandoc extraction: provider "pandoc" (no model concept) plus a best-effort
 // detected language (§8.8). It is separate from extractionMetaJSON because that
@@ -4349,6 +4367,56 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 // ReadOrComputeOCR exposes OCR cache lookup/computation for tests.
 func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	return s.readOrComputeOCR(ctx, doc, content)
+}
+
+// CanExtractSourceText reports whether an active extraction engine produces
+// source text for doc's format on the on-demand annotation path — i.e. the
+// per-format route (§7.4.B.1) is a real engine (structured, pandoc, or flat OCR)
+// and the engine that route needs is wired. It is the single routing-aware guard
+// the MCP layer consults so it does not re-implement selectExtractionRoute. A
+// pandoc-routed born-digital format is covered when pandoc is active even if the
+// primary extractor is nil.
+func (s *Service) CanExtractSourceText(doc model.Document) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
+	switch s.routeExtractionExt(ext) {
+	case routePandoc:
+		return s.pandocExtractor != nil
+	case routeStructured, routeFlatOCR:
+		return s.extractor != nil
+	default:
+		return false
+	}
+}
+
+// ExtractSourceText returns the plain extracted Markdown for doc's content,
+// routing born-digital office/markup/ebook formats through the pandoc engine
+// (T2, #393) and every other format through the primary OCR/extractor. It is the
+// on-demand annotation source path's single entry point, mirroring how
+// generateOCRMarkdownRepresentation routes at index time, so the MCP layer does
+// not duplicate the routing decision. Callers must have set the primary
+// extractor (SetDocumentExtractor) and activated pandoc (ActivatePandocEngine),
+// and should guard with CanExtractSourceText first. The computed text is written
+// to the corresponding cache (OCR or pandoc); PurgeExtractionCache removes it.
+func (s *Service) ExtractSourceText(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
+	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
+		return s.readOrComputePandoc(ctx, doc, content)
+	}
+	return s.readOrComputeOCR(ctx, doc, content)
+}
+
+// PurgeExtractionCache removes the cache entry ExtractSourceText wrote for doc's
+// content, routing to the pandoc cache for pandoc-routed born-digital formats and
+// the OCR cache otherwise. The MCP secret-pattern gate (#407) uses it so a refused
+// extraction is never left persisted on disk, regardless of which engine produced
+// it.
+func (s *Service) PurgeExtractionCache(doc model.Document, content []byte) {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
+	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
+		s.PurgePandocCache(content)
+		return
+	}
+	s.PurgeOCRCache(content)
 }
 
 // PurgeOCRCache removes the OCR cache entry for the given content, using the
