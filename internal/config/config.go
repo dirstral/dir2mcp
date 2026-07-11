@@ -191,9 +191,13 @@ type Config struct {
 	// ingest.extractor=docling-serve; under extractor=auto an empty value
 	// simply means the HTTP transport is not used (spec 0.10.0 §7.4.B).
 	IngestDoclingServeURL string
-	ElevenLabsAPIKey      string
-	ElevenLabsBaseURL     string
-	ElevenLabsTTSVoiceID  string
+	// IngestPandocCommand optionally configures a local pandoc CLI command
+	// (its first field is the binary) used for the capability-activated pandoc
+	// document extractor (#393). Empty resolves `pandoc` from PATH.
+	IngestPandocCommand  string
+	ElevenLabsAPIKey     string
+	ElevenLabsBaseURL    string
+	ElevenLabsTTSVoiceID string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -742,6 +746,7 @@ type fileConfig struct {
 	DoclingCommand  *string
 
 	IngestDoclingServeURL              *string
+	IngestPandocCommand                *string
 	ElevenLabsBaseURL                  *string
 	ElevenLabsTTSVoiceID               *string
 	AllowedOrigins                     []string
@@ -879,6 +884,7 @@ type persistedConfig struct {
 	SecretPatterns  []string `yaml:"secret_patterns"`
 	DoclingCommand  string   `yaml:"docling_command"`
 	DoclingServeURL string   `yaml:"docling_serve_url"`
+	PandocCommand   string   `yaml:"pandoc_command"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -1247,6 +1253,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		SecretPatterns:                     append([]string(nil), cfg.SecretPatterns...),
 		DoclingCommand:                     cfg.DoclingCommand,
 		DoclingServeURL:                    cfg.IngestDoclingServeURL,
+		PandocCommand:                      cfg.IngestPandocCommand,
 		SessionInactivityTimeout:           cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:                 cfg.SessionMaxLifetime,
 		HealthCheckInterval:                cfg.HealthCheckInterval,
@@ -1850,6 +1857,9 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestDoclingServeURL != nil {
 		cfg.IngestDoclingServeURL = *fc.IngestDoclingServeURL
 	}
+	if fc.IngestPandocCommand != nil {
+		cfg.IngestPandocCommand = *fc.IngestPandocCommand
+	}
 	if fc.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fc.ElevenLabsBaseURL
 	}
@@ -2382,6 +2392,8 @@ var configKeyAliases = map[string]string{
 	"ingest.docling.command":                  "docling_command",
 	"docling.serve_url":                       "docling_serve_url",
 	"ingest.docling.serve_url":                "docling_serve_url",
+	"pandoc.command":                          "pandoc_command",
+	"ingest.pandoc.command":                   "pandoc_command",
 	"stt.elevenlabs.api_key":                  "elevenlabs_api_key",
 	"secrets.elevenlabs_api_key":              "elevenlabs_api_key",
 	"secrets.x402_facilitator_url":            "x402_facilitator_url",
@@ -2544,7 +2556,7 @@ func canonicalizeConfigKey(key string) string {
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
 	switch key {
-	case "rag", "ingest", "ingest.docling", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.cross_lingual", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.cross_lingual", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -2887,6 +2899,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.DoclingCommand = strPtr(value)
 	case "docling_serve_url":
 		cfg.IngestDoclingServeURL = strPtr(value)
+	case "pandoc_command":
+		cfg.IngestPandocCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "chunking.strategy":
@@ -3065,6 +3079,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("docling_command", cfg.DoclingCommand)
 	writeScalar("docling_serve_url", cfg.DoclingServeURL)
+	writeScalar("pandoc_command", cfg.PandocCommand)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
@@ -3386,6 +3401,7 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	}{
 		{"DIR2MCP_DOCLING_COMMAND", &cfg.DoclingCommand},
 		{"DIR2MCP_DOCLING_SERVE_URL", &cfg.IngestDoclingServeURL},
+		{"DIR2MCP_PANDOC_COMMAND", &cfg.IngestPandocCommand},
 		{"DIR2MCP_INGEST_EXTRACTOR", &cfg.IngestExtractor},
 		{"DIR2MCP_INGEST_ON_UNSUPPORTED", &cfg.IngestOnUnsupported},
 		{"DIR2MCP_INDEX_BACKEND", &cfg.IndexBackend},
@@ -3893,9 +3909,9 @@ func (c *Config) validateIngestExtractor() error {
 		extractorMode = Default().IngestExtractor
 	}
 	switch extractorMode {
-	case "auto", "docling", "docling-serve", "mistral", "off":
+	case "auto", "docling", "docling-serve", "pandoc", "mistral", "off":
 	default:
-		return fmt.Errorf("ingest.extractor must be one of auto, docling, docling-serve, mistral, off: %q", c.IngestExtractor)
+		return fmt.Errorf("ingest.extractor must be one of auto, docling, docling-serve, pandoc, mistral, off: %q", c.IngestExtractor)
 	}
 	c.IngestExtractor = extractorMode
 	return nil
