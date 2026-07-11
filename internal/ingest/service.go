@@ -484,7 +484,12 @@ func (s *Service) routeExtractionExt(ext string) extractionRoute {
 // extract the format (structured or flat OCR); a format that must degrade — or
 // that routes to the raw_text baseline (html) — is not "readable" on this path.
 func (s *Service) extractorCanReadExt(relPath string) bool {
-	if s.extractor == nil {
+	// Routing-aware, mirroring CanExtractSourceText: pandoc (T2, #393) can be the
+	// only active extraction engine (primary s.extractor nil, s.pandocExtractor
+	// set), so gate on whether ANY engine is active rather than on the primary
+	// alone — otherwise a pandoc-routed born-digital format would be wrongly
+	// treated as unreadable at index time.
+	if s.extractor == nil && s.pandocExtractor == nil {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
@@ -2683,7 +2688,7 @@ func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, 
 	mediaProduced = len(spans) > 0
 	skipOCR := s.embedMultimodal == "replace" && mediaProduced
 
-	if ShouldGenerateExtractedMarkdown(doc.DocType) && s.extractor != nil && !skipOCR {
+	if ShouldGenerateExtractedMarkdown(doc.DocType) && (s.extractor != nil || s.pandocExtractor != nil) && !skipOCR {
 		if s.extractorCanReadExt(doc.RelPath) {
 			if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
 				return false, false, err
