@@ -432,6 +432,14 @@ type SearchQuery struct {
 	// default ("" ⇒ LanguageMatchPrimary) or opt-in region/script narrowing
 	// (LanguageMatchStrict). Inert unless Languages is non-empty.
 	LanguageMatch string
+	// DateFrom / DateTo optionally restrict hits to a document-date window (SPEC
+	// §9.6), compared against each candidate's source-document calendar anchor
+	// (mtime_unix). Both are Unix seconds and both bounds are inclusive; 0 means
+	// open on that side (absent bound). A candidate with an unknown mtime (0)
+	// never matches a window that sets either bound. Both-zero disables the
+	// filter (unchanged behavior). Callers validate DateFrom <= DateTo upstream.
+	DateFrom int64
+	DateTo   int64
 }
 
 type SearchHit struct {
@@ -455,6 +463,12 @@ type SearchHit struct {
 	// is NOT serialized into the tool result (the §9.2 hit structure is
 	// unchanged); empty means unknown.
 	Language string
+	// MTimeUnix is the source document's calendar anchor (its modification time,
+	// Unix seconds), denormalized onto the hit so the date/time-range retrieval
+	// filter (SPEC §9.6) can predicate on candidates without a store lookup —
+	// mirroring Language above. It is internal to retrieval and is NOT serialized
+	// into the tool result (the §9.2 hit structure is unchanged); 0 means unknown.
+	MTimeUnix int64
 }
 
 type ChunkMetadata struct {
@@ -471,6 +485,10 @@ type ChunkMetadata struct {
 	// representation (SPEC §5.2/§8.8), denormalized from representation meta_json
 	// at chunk insert so retrieval can apply the per-language filter (§9.5).
 	Language string
+	// MTimeUnix is the source document's calendar anchor (its modification time,
+	// Unix seconds), carried alongside the chunk so ToSearchHit can surface it to
+	// the date/time-range retrieval filter (SPEC §9.6). 0 means unknown.
+	MTimeUnix int64
 }
 
 // ToSearchHit converts the lightweight chunk metadata back into a full
@@ -478,16 +496,17 @@ type ChunkMetadata struct {
 // SearchHit values but chunk tasks only need a subset of fields.
 func (m ChunkMetadata) ToSearchHit() SearchHit {
 	return SearchHit{
-		ChunkID:  m.ChunkID,
-		RelPath:  m.RelPath,
-		Title:    m.Title,
-		DocType:  m.DocType,
-		RepType:  m.RepType,
-		Snippet:  m.Snippet,
-		Span:     m.Span,
-		Modality: m.Modality,
-		MediaRef: m.MediaRef,
-		Language: m.Language,
+		ChunkID:   m.ChunkID,
+		RelPath:   m.RelPath,
+		Title:     m.Title,
+		DocType:   m.DocType,
+		RepType:   m.RepType,
+		Snippet:   m.Snippet,
+		Span:      m.Span,
+		Modality:  m.Modality,
+		MediaRef:  m.MediaRef,
+		Language:  m.Language,
+		MTimeUnix: m.MTimeUnix,
 	}
 }
 

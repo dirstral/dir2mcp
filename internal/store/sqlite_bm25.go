@@ -54,7 +54,7 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 
 	args := []any{matchExpr}
 	stmt := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.language,
-	                COALESCE(d.title, ''),
+	                COALESCE(d.title, ''), COALESCE(d.mtime_unix, 0),
 	                bm25(chunks_fts) AS score
 	         FROM chunks_fts
 	         JOIN chunks c ON c.chunk_id = chunks_fts.rowid
@@ -81,16 +81,17 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 	hits := make([]model.SearchHit, 0, k)
 	for rows.Next() {
 		var (
-			chunkID  int64
-			relPath  string
-			docType  string
-			repType  string
-			text     string
-			language string
-			title    string
-			score    sql.NullFloat64
+			chunkID   int64
+			relPath   string
+			docType   string
+			repType   string
+			text      string
+			language  string
+			title     string
+			mtimeUnix int64
+			score     sql.NullFloat64
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &language, &title, &score); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &language, &title, &mtimeUnix, &score); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -104,15 +105,16 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 			hitScore = -score.Float64
 		}
 		hits = append(hits, model.SearchHit{
-			ChunkID:  uint64(chunkID),
-			RelPath:  relPath,
-			Title:    title,
-			DocType:  docType,
-			RepType:  repType,
-			Score:    hitScore,
-			Snippet:  snippet(text, 240),
-			Span:     model.Span{Kind: "lines"},
-			Language: language,
+			ChunkID:   uint64(chunkID),
+			RelPath:   relPath,
+			Title:     title,
+			DocType:   docType,
+			RepType:   repType,
+			Score:     hitScore,
+			Snippet:   snippet(text, 240),
+			Span:      model.Span{Kind: "lines"},
+			Language:  language,
+			MTimeUnix: mtimeUnix,
 		})
 	}
 	if err := rows.Err(); err != nil {
