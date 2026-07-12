@@ -2268,28 +2268,36 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if err != nil {
 			return "", "", annotationReadError(err)
 		}
-		extractor := ingest.DocumentExtractorFromConfigContext(ctx, s.cfg)
-		if extractor == nil {
-			return "", "", &toolExecutionError{
-				Code:      "CONFIG_INVALID",
-				Message:   "document extraction is not configured (install docling, set DIR2MCP_DOCLING_COMMAND, or set MISTRAL_API_KEY)",
-				Retryable: false,
-			}
-		}
 		ing, err := ingest.NewService(s.cfg, s.store)
 		if err != nil {
 			return "", "", &toolExecutionError{Code: "CONFIG_INVALID", Message: err.Error(), Retryable: false}
 		}
-		ing.SetDocumentExtractor(extractor)
-		text, ocrErr := ing.ReadOrComputeOCR(ctx, doc, content)
+		// Wire the primary extractor (docling/mistral) if one is configured, then
+		// activate the capability-gated pandoc engine (T2, #393) so born-digital
+		// office/markup/ebook formats route through it — mirroring how indexing's
+		// generateOCRMarkdownRepresentation routes. The primary extractor may be nil
+		// for a pandoc-only format (e.g. .odt with no docling/OCR), so the config
+		// guard is per-format via CanExtractSourceText rather than a bare nil check.
+		if extractor := ingest.DocumentExtractorFromConfigContext(ctx, s.cfg); extractor != nil {
+			ing.SetDocumentExtractor(extractor)
+		}
+		ing.ActivatePandocEngine(s.cfg)
+		if !ing.CanExtractSourceText(doc) {
+			return "", "", &toolExecutionError{
+				Code:      "CONFIG_INVALID",
+				Message:   "document extraction is not configured (install docling or pandoc, set DIR2MCP_DOCLING_COMMAND, or set MISTRAL_API_KEY)",
+				Retryable: false,
+			}
+		}
+		text, ocrErr := ing.ExtractSourceText(ctx, doc, content)
 		if ocrErr != nil {
 			return "", "", s.mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
 		}
-		// Gate the OCR text (issue #407). ReadOrComputeOCR already wrote it to the
-		// OCR cache, so purge that entry on a match (same extractor key) rather
-		// than leaving the refused secret persisted on disk.
+		// Gate the extracted text (issue #407). ExtractSourceText already wrote it to
+		// the OCR or pandoc cache, so purge the matching entry on a match rather than
+		// leaving the refused secret persisted on disk.
 		if gate := s.refuseIfSecretContent(text); gate != nil {
-			ing.PurgeOCRCache(content)
+			ing.PurgeExtractionCache(doc, content)
 			return "", "", gate
 		}
 		return text, ingest.RepTypeOCRMarkdown, nil

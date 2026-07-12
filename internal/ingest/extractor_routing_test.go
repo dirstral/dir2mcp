@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
@@ -296,5 +297,25 @@ func TestActiveExtractionAvailability(t *testing.T) {
 	pe := NewPandocExtractor("")
 	if got := (&Service{extractor: pe, pandocExtractor: pe}).activeExtractionAvailability(); got.structured || got.flatOCR || !got.pandoc {
 		t.Errorf("pandoc-primary availability = %+v, want {pandoc} only", got)
+	}
+}
+
+// TestExtractorCanReadExt_PandocOnlyPrimaryNil is the regression for the optibot
+// blocker on #585/#587: the index-time readability guard must be routing-aware —
+// when pandoc is the only active engine (primary s.extractor nil, s.pandocExtractor
+// set), a pandoc-routed born-digital format is still readable, and a format no
+// engine covers is not. Mirrors CanExtractSourceText so the index and annotation
+// paths agree.
+func TestExtractorCanReadExt_PandocOnlyPrimaryNil(t *testing.T) {
+	s := &Service{cfg: config.Config{IngestExtractor: "auto"}, pandocExtractor: NewPandocExtractor("")}
+	if !s.extractorCanReadExt("report.odt") {
+		t.Error("pandoc-only (nil primary): .odt must be readable via the pandoc route")
+	}
+	if s.extractorCanReadExt("scan.pdf") {
+		t.Error("pandoc-only (nil primary): .pdf reads by no active engine and must not be readable")
+	}
+	// No engine at all → not readable.
+	if (&Service{cfg: config.Config{IngestExtractor: "auto"}}).extractorCanReadExt("report.odt") {
+		t.Error("no extractor: .odt must not be readable")
 	}
 }
