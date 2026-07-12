@@ -3634,10 +3634,14 @@ func (c *Config) Validate() error {
 		c.validateIngestExtractor,
 		c.validateIndexBackend,
 		c.validateMediaVariants,
+		// Before the media gates: validateMediaTranslate/validateMediaDiarize
+		// resolve the STT profile, so an unrecognized stt.provider must fail here
+		// with its own root-cause CONFIG_INVALID rather than surfacing as a
+		// misleading "requires STT provider to be kind:whisper" (optibot #592).
+		c.validateSTTProvider,
 		c.validateMediaTranslate,
 		c.validateMediaSubtitles,
 		c.validateMediaDiarize,
-		c.validateSTTProvider,
 		c.validateNumericBounds,
 		c.validateSource,
 		c.validateDistributedEmbed,
