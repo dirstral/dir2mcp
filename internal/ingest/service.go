@@ -572,16 +572,19 @@ func (s *Service) SetOnUnsupported(mode string) {
 // read it and never lets the gap be silent:
 //
 //   - strict: a non-fatal per-document UNSUPPORTED_FORMAT error (§7.7) —
-//     documents.status=error, the error counter is bumped, and the caller is told
-//     (nonFatalErrored) not to also credit the document as indexed (#426).
-//   - lenient (default): skip-with-warning — no extracted_markdown is produced,
-//     the document keeps whatever other representations it has, and the gap is
-//     logged and recorded in the in-run skip counter so `status`/`reindex` and the
-//     honest coverage report (§7.7) name it. The document is still indexed.
+//     documents.status=error, the error counter is bumped, a file_error fires.
+//   - lenient (default): a **durable skip** (§7.4.B.2, #584) — documents.status=
+//     skipped with an unsupported-format skip_reason, the skipped counter is bumped,
+//     and a file_skip fires. The document is NOT indexed (it has no searchable
+//     representation), so the coverage report (§7.7) names it durably — after a
+//     restart, not just via an in-run counter — instead of leaving it status="ok"
+//     (an unsearchable document mislabeled as indexed, the gap #584 closed).
 //
-// It returns whether the strict path recorded a non-fatal error (so the caller
-// can propagate the #426 no-double-count signal).
-func (s *Service) degradeUnsupportedExtraction(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp) (nonFatalErrored bool) {
+// In BOTH modes the returned suppressCredit is true: the caller must not also
+// credit the document as indexed (#426), because it is now recorded as either an
+// error or a skip. (The error-vs-skip counting is done here, not by the caller, so
+// returning true never double-counts.)
+func (s *Service) degradeUnsupportedExtraction(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp) (suppressCredit bool) {
 	cause := unsupportedExtractionErr(doc.RelPath, s.extractorLabel())
 	if s.onUnsupported == onUnsupportedStrict {
 		s.getLogger().Printf("unsupported format (strict) for %s (%s): %v", doc.RelPath, doc.DocType, cause)
@@ -589,12 +592,14 @@ func (s *Service) degradeUnsupportedExtraction(ctx context.Context, doc model.Do
 		s.persistNonFatalDocError(ctx, doc, cause, secretPatterns)
 		return true
 	}
-	// lenient: honest skip, not an error. The document remains status="ok" with
-	// whatever other representations it has; the coverage report (§7.7) and the
-	// in-run skip counter name the uncovered format so it is never silent.
-	s.getLogger().Printf("unsupported format (lenient, skipped) for %s (%s): %v", doc.RelPath, doc.DocType, cause)
-	s.addRunSkipReason(model.SkipReasonUnsupportedFormat)
-	return false
+	// lenient: a durable, honest skip — not status="ok". This path is reached only
+	// when no active engine can read the format AND no media chunks were produced,
+	// so the document is genuinely unsearchable; record it as status="skipped" so
+	// the coverage aggregate (§7.7) and a file_skip name it durably (#584).
+	s.getLogger().Printf("unsupported format (lenient, durable skip) for %s (%s): %v", doc.RelPath, doc.DocType, cause)
+	s.addSkipped(1)
+	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonUnsupportedFormat)
+	return true
 }
 
 type documentDeleteMarker interface {
@@ -3000,10 +3005,11 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return false, err
 	}
 	if nonFatalErrored {
-		// #394: the extractor path persisted the document as status="error" (an
-		// unsupported format) and counted it as an error itself. A pdf/image/document
-		// asset has no transcript path, so return the soft-error signal now — the
-		// caller must not also credit it as indexed (issue #426).
+		// #394/#584: the extractor degraded an unsupported format and already
+		// recorded it — as status="error" (strict) or a durable status="skipped"
+		// (lenient) — counting it as an error or a skip itself. A pdf/image/document
+		// asset has no transcript path, so propagate the suppress-credit signal now:
+		// the caller must not also credit it as indexed (issue #426).
 		return true, nil
 	}
 	// In `replace`, direct media embedding stands in for STT→text, so skip the
@@ -3207,6 +3213,27 @@ func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Documen
 		s.getLogger().Printf("persist error status for %s: %v", doc.RelPath, err)
 	}
 	s.notifyDocumentError(doc)
+}
+
+// persistNonFatalDocSkip records a lenient §7.4.B.2 unsupported-format degradation
+// as a DURABLE skip so the coverage gap survives the run that produced it (#584).
+// A document no active extractor can read AND that produced no other searchable
+// representation is recorded as documents.status="skipped" with the given
+// skip_reason, so CorpusStats.SkipSummary — which aggregates status="skipped" rows
+// — names it after a restart, not only via the in-run counter, and a file_skip
+// event fires. Without it the document stayed status="ok": an unsearchable
+// document mislabeled as indexed, invisible to the coverage report once its run
+// ended. The upsert error is logged and swallowed (mirroring persistNonFatalDocError);
+// the live skipped counter is incremented separately by the caller. The skip event
+// still fires even if the upsert failed — the stream event is the only signal a
+// `--json` consumer will see for it.
+func (s *Service) persistNonFatalDocSkip(ctx context.Context, doc model.Document, reason string) {
+	doc.Status = "skipped"
+	doc.SkipReason = reason
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		s.getLogger().Printf("persist skipped status for %s: %v", doc.RelPath, err)
+	}
+	s.notifyDocumentSkip(doc)
 }
 
 // notifyDocumentError invokes the registered per-document error callback with

@@ -64,22 +64,44 @@ func TestUnsupportedImage_StrictSurfacesError(t *testing.T) {
 	}
 }
 
-// TestUnsupportedDocument_LenientSkipsHonestly is the #395 Stage 3 guard for the
-// lenient DEFAULT (ingest.on_unsupported=lenient): an unsupported .odt is NOT a
-// per-document error — the document is indexed with whatever representations it has
-// (none here) and the coverage gap is recorded in the in-run skip counter so
-// status/reindex and the honest coverage report name it (§7.4.B.2 / §7.7). The key
-// property versus the pre-#395 behavior is that it is honest, not silent: the skip
-// reason is counted rather than the format being handed to an engine that can't
-// read it.
+// TestUnsupportedDocument_LenientSkipsHonestly is the #584 guard for the lenient
+// DEFAULT (ingest.on_unsupported=lenient): an unsupported .odt with no searchable
+// representation is NOT a per-document error, and NOT left status="ok" (which
+// mislabeled an unsearchable document as indexed). It is recorded as a DURABLE
+// skip — status="skipped" with an unsupported-format skip_reason — so the coverage
+// gap survives the run that produced it and status/reindex name it after a restart
+// (§7.4.B.2 / §7.7). The document is re-read from the store here, so a persisted
+// skip proves the durability property.
 func TestUnsupportedDocument_LenientSkipsHonestly(t *testing.T) {
-	doc, svc := processWithFlatExtractor(t, "notes.odt", "") // empty = lenient default
-	if doc.Status == "error" {
-		t.Fatalf("unsupported .odt (lenient) status = %q, want a non-error status (lenient skips, not errors)", doc.Status)
+	doc, _ := processWithFlatExtractor(t, "notes.odt", "") // empty = lenient default
+	if doc.Status != "skipped" {
+		t.Fatalf("unsupported .odt (lenient) status = %q, want \"skipped\" (durable skip, not ok/error) (#584)", doc.Status)
 	}
-	counts := svc.SkipReasonCounts()
-	if counts[model.SkipReasonUnsupportedFormat] == 0 {
-		t.Errorf("lenient skip did not record an unsupported_format skip reason; counts=%v", counts)
+	if doc.SkipReason != model.SkipReasonUnsupportedFormat {
+		t.Errorf("skip_reason = %q, want %q so the coverage aggregate names it", doc.SkipReason, model.SkipReasonUnsupportedFormat)
+	}
+}
+
+// TestUnsupportedDocument_LenientFiresFileSkip is the streaming half of #584: a
+// lenient unsupported-format skip must emit a per-document file_skip event (via the
+// SetOnDocumentSkip hook) carrying the unsupported_format reason, so a `--json`
+// consumer learns the document was left uncovered — not only the durable status.
+func TestUnsupportedDocument_LenientFiresFileSkip(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "notes.odt"), "irrelevant bytes")
+	st := newRealStore(t)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st) // lenient default
+	svc.SetDocumentExtractor(&fakeExtractor{text: "should never be extracted"})
+
+	var gotPath, gotReason string
+	svc.SetOnDocumentSkip(func(relPath, _docType, reason string) { gotPath, gotReason = relPath, reason })
+
+	f := ingest.DiscoveredFile{RelPath: "notes.odt", SizeBytes: 16, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	if gotPath != "notes.odt" || gotReason != model.SkipReasonUnsupportedFormat {
+		t.Errorf("file_skip event = (%q, %q), want (\"notes.odt\", %q)", gotPath, gotReason, model.SkipReasonUnsupportedFormat)
 	}
 }
 
