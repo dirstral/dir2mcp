@@ -43,11 +43,12 @@ const (
 
 	defaultOnDocumentDeletedMaxConcurrency = 8
 
-	transcriberProviderAuto       = "auto"
-	transcriberProviderMistral    = "mistral"
-	transcriberProviderElevenLabs = "elevenlabs"
-	transcriberProviderWhisper    = "whisper"
-	transcriberProviderOff        = "off"
+	// transcriberProviderAuto/Off are the two selectors handled directly by the
+	// STT resolvers; every other explicit selector (mistral/elevenlabs/whisper/
+	// openai/gemini) maps to a built-in profile via config.STTSelectorProfile,
+	// the single shared selector->profile table (issue #440 F6).
+	transcriberProviderAuto = "auto"
+	transcriberProviderOff  = "off"
 )
 
 type Service struct {
@@ -916,28 +917,26 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 		}
 		return tr, nil
 	}
-	switch sel {
-	case transcriberProviderMistral:
-		prof, err := r.ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
-		return build(prof, err)
-	case transcriberProviderElevenLabs:
-		prof, err := r.ResolveExplicit(provider.CapSTT, "elevenlabs", true)
-		return build(prof, err)
-	case transcriberProviderWhisper:
-		// Self-hosted OpenAI-compatible STT (dir2mcp#240). The profile is
-		// credential-less, so selection succeeds even without an api_key;
-		// a missing base_url surfaces as a provider error at first use.
-		prof, err := r.ResolveExplicit(provider.CapSTT, "whisper", true)
-		return build(prof, err)
-	case transcriberProviderAuto:
+	if sel == transcriberProviderAuto {
 		prof, err := r.Resolve(provider.CapSTT)
 		if errors.Is(err, provider.ErrNoProvider) {
 			return nil, nil // nothing eligible -> STT off
 		}
 		return build(prof, err)
-	default:
+	}
+	// Shared selector->profile table (issue #440 F6): mistral -> mistral-ocr
+	// (Voxtral), elevenlabs, whisper (self-hosted, credential-less — a missing
+	// base_url surfaces as a provider error at first use), openai, gemini. Every
+	// mapped kind is buildable by providerfactory.Transcriber, so an explicit
+	// selector reaches the same backend the resolver validated. An unmapped
+	// selector is rejected here and, in a normal startup, already at
+	// config.Validate (validateSTTProvider).
+	profileName, known := config.STTSelectorProfile(sel)
+	if !known {
 		return nil, fmt.Errorf("unsupported transcriber provider %q", sel)
 	}
+	prof, err := r.ResolveExplicit(provider.CapSTT, profileName, true)
+	return build(prof, err)
 }
 
 // sttExpectedLanguage resolves the active STT provider profile's language tag
@@ -1004,16 +1003,14 @@ func resolveSTTProfile(cfg config.Config) (provider.Profile, bool) {
 		prof provider.Profile
 		err  error
 	)
-	switch sel {
-	case transcriberProviderMistral:
-		prof, err = r.ResolveExplicit(provider.CapSTT, "mistral-ocr", true)
-	case transcriberProviderElevenLabs:
-		prof, err = r.ResolveExplicit(provider.CapSTT, "elevenlabs", true)
-	case transcriberProviderWhisper:
-		prof, err = r.ResolveExplicit(provider.CapSTT, "whisper", true)
-	case transcriberProviderAuto:
+	if sel == transcriberProviderAuto {
 		prof, err = r.Resolve(provider.CapSTT)
-	default:
+	} else if profileName, known := config.STTSelectorProfile(sel); known {
+		// Shared selector->profile table (issue #440 F6): mistral/elevenlabs/
+		// whisper/openai/gemini all resolve here, matching the factory's support,
+		// instead of silently falling through to STT-off on this path.
+		prof, err = r.ResolveExplicit(provider.CapSTT, profileName, true)
+	} else {
 		return provider.Profile{}, false
 	}
 	if err != nil {
