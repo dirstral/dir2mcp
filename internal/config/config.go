@@ -3626,47 +3626,31 @@ func applyX402RouteEnvOverrides(cfg *Config, env map[string]string) {
 // ValidateX402, this method operates on a pointer receiver so that it can
 // modify the receiver in-place.
 func (c *Config) Validate() error {
-	if err := c.validateIngestOnUnsupported(); err != nil {
-		return err
-	}
-	if err := c.validateIngestExtractor(); err != nil {
-		return err
-	}
-
-	if err := c.validateIndexBackend(); err != nil {
-		return err
-	}
-
-	if err := c.validateMediaVariants(); err != nil {
-		return err
-	}
-
-	if err := c.validateMediaTranslate(); err != nil {
-		return err
-	}
-
-	if err := c.validateMediaSubtitles(); err != nil {
-		return err
-	}
-
-	if err := c.validateMediaDiarize(); err != nil {
-		return err
-	}
-
-	if err := c.validateNumericBounds(); err != nil {
-		return err
-	}
-	if err := c.validateSource(); err != nil {
-		return err
-	}
-	if err := c.validateDistributedEmbed(); err != nil {
-		return err
-	}
-	if err := c.validateMediaBatch(); err != nil {
-		return err
-	}
-	if err := c.validateCrossLingual(); err != nil {
-		return err
+	// Ordered validation gates. Run in sequence; the first failure short-circuits
+	// (a loop rather than a straight-line if-chain so this stays under the
+	// cyclomatic-complexity budget as gates are added).
+	for _, validate := range []func() error{
+		c.validateIngestOnUnsupported,
+		c.validateIngestExtractor,
+		c.validateIndexBackend,
+		c.validateMediaVariants,
+		// Before the media gates: validateMediaTranslate/validateMediaDiarize
+		// resolve the STT profile, so an unrecognized stt.provider must fail here
+		// with its own root-cause CONFIG_INVALID rather than surfacing as a
+		// misleading "requires STT provider to be kind:whisper" (optibot #592).
+		c.validateSTTProvider,
+		c.validateMediaTranslate,
+		c.validateMediaSubtitles,
+		c.validateMediaDiarize,
+		c.validateNumericBounds,
+		c.validateSource,
+		c.validateDistributedEmbed,
+		c.validateMediaBatch,
+		c.validateCrossLingual,
+	} {
+		if err := validate(); err != nil {
+			return err
+		}
 	}
 	c.applyValidationDefaults()
 	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
@@ -3674,6 +3658,27 @@ func (c *Config) Validate() error {
 			c.SessionMaxLifetime, c.SessionInactivityTimeout)
 	}
 	return nil
+}
+
+// validateSTTProvider fails fast (CONFIG_INVALID) when stt.provider names a
+// selector no STT resolver can map (issue #440 F6). Empty/`auto` and the off
+// aliases are valid; every other value must map to a built-in profile via
+// STTSelectorProfile. Without this gate an unknown or unmappable selector (a
+// typo, or a backend the selector table forgot) silently disabled STT on the
+// expected-language, derivation-identity, and diarization-gating paths while
+// erroring only at first transcription — a divergence surfaced far from its
+// cause. Validating here makes the misconfiguration fail at startup, uniformly.
+func (c *Config) validateSTTProvider() error {
+	sel := strings.ToLower(strings.TrimSpace(c.STTProvider))
+	switch sel {
+	case "", "auto", "off", "none", "disabled":
+		return nil
+	}
+	if _, ok := STTSelectorProfile(sel); ok {
+		return nil
+	}
+	return fmt.Errorf("CONFIG_INVALID: stt.provider %q is not a recognized speech-to-text backend; "+
+		"use one of auto, mistral, elevenlabs, whisper, openai, gemini, or off", c.STTProvider)
 }
 
 // validateMediaBatch enforces the media.batch (SPEC §8.6.11) invariants. All

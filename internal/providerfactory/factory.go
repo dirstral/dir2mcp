@@ -175,6 +175,60 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 	}
 }
 
+// EffectiveEmbedModels returns the concrete text/code embed model ids an
+// Embedder built from p (see Embedder) will actually send on the wire,
+// resolving each empty profile field to the same adapter kind default the
+// client applies internally. Built-in profiles like `openai`/`cohere`/`local`/
+// `omniembed` ship WITHOUT an embed_text_model (SPEC 8.1.1), so their profile
+// fields are empty and the adapter substitutes its own default
+// (text-embedding-3-small for OpenAI, embed-v4.0 for Cohere, etc.).
+//
+// This is the single resolution point the CLI uses so the ingest embed worker
+// and the query-side retrieval embedder are handed BYTE-IDENTICAL model ids
+// (issue #440 F2). Previously each side passed the empty profile field and
+// relied on the adapter default independently, while retrieval also carried a
+// hardcoded "mistral-embed"/"codestral-embed" fallback — an ASYMMETRIC default
+// that, if ever reached, embeds the query in a foreign vector space from the
+// corpus and returns garbage hits. Resolving the concrete model here removes
+// the asymmetry by construction and gives per-query metrics a truthful model
+// label instead of an empty string.
+//
+// Note: EmbedIdentity (SPEC 8.1.4) is intentionally derived from the RAW
+// profile field, not this resolved value, so making the effective model
+// explicit here never flips a recorded identity or forces a spurious reindex.
+func EffectiveEmbedModels(p provider.Profile) (text, code string) {
+	def := kindDefaultEmbedModel(p.Kind)
+	text = strings.TrimSpace(p.EmbedTextModel)
+	if text == "" {
+		text = def
+	}
+	code = strings.TrimSpace(p.EmbedCodeModel)
+	if code == "" {
+		code = def
+	}
+	return text, code
+}
+
+// kindDefaultEmbedModel returns the embed model an adapter of kind k substitutes
+// when the profile leaves the model blank, mirroring the per-kind fallbacks in
+// Embedder and each client's Embed. Kinds with no embed capability (or none with
+// a defined default) return "" — the effective model is then just whatever the
+// profile carries.
+func kindDefaultEmbedModel(k provider.Kind) string {
+	switch k {
+	case provider.KindOpenAI:
+		return openai.DefaultEmbedModel
+	case provider.KindCohere:
+		return cohere.DefaultEmbedModel
+	case provider.KindGemini:
+		return gemini.DefaultEmbedModel
+	case provider.KindOmniEmbed:
+		return omniembed.DefaultModel
+	default:
+		return ""
+	}
+}
+
 // Generator builds a model.Generator (kinds: openai, gemini, cohere,
 // anthropic).
 func Generator(p provider.Profile) (model.Generator, error) {

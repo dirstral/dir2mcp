@@ -529,19 +529,14 @@ func resolveSTTProfileForCapability(cfg Config) (provider.Profile, bool) {
 		return provider.Profile{}, false
 	}
 	r := cfg.Providers()
-	explicitBySelector := map[string]string{
-		"mistral":    "mistral-ocr",
-		"elevenlabs": "elevenlabs",
-		"whisper":    "whisper",
-	}
 	var (
 		prof provider.Profile
 		err  error
 	)
 	if sel == "auto" {
 		prof, err = r.Resolve(provider.CapSTT)
-	} else if explicit, ok := explicitBySelector[sel]; ok {
-		prof, err = r.ResolveExplicit(provider.CapSTT, explicit, true)
+	} else if profileName, ok := STTSelectorProfile(sel); ok {
+		prof, err = r.ResolveExplicit(provider.CapSTT, profileName, true)
 	} else {
 		return provider.Profile{}, false
 	}
@@ -549,6 +544,36 @@ func resolveSTTProfileForCapability(cfg Config) (provider.Profile, bool) {
 		return provider.Profile{}, false
 	}
 	return prof, true
+}
+
+// sttSelectorProfile is the SINGLE mapping from a normalized legacy stt.provider
+// selector (SPEC 8.1.3) to the built-in provider profile that serves it. It is
+// shared by every STT resolver — ingest transcription
+// (ingest.TranscriberFromConfigWithLanguage), the expected-language/derivation
+// resolver (ingest.resolveSTTProfile), and config-time diarization/translate
+// validation (resolveSTTProfileForCapability) — so an explicit selector resolves
+// to the SAME backend on every path (issue #440 F6). Before unification, these
+// tables diverged: only mistral/elevenlabs/whisper were mapped, so an explicit
+// `openai`/`gemini` selector errored loudly at first transcription while
+// silently resolving STT-OFF for expected-language, derivation identity, and
+// diarization gating — even though providerfactory.Transcriber builds those
+// kinds. The special `auto` selector and the off aliases are handled by callers,
+// not this table.
+var sttSelectorProfile = map[string]string{
+	"mistral":    "mistral-ocr", // Voxtral STT (kind: mistral)
+	"elevenlabs": "elevenlabs",
+	"whisper":    "whisper",
+	"openai":     "openai",
+	"gemini":     "gemini",
+}
+
+// STTSelectorProfile resolves a normalized (lower-cased, trimmed) legacy
+// stt.provider selector to the built-in profile name that serves it. known is
+// false for an unrecognized selector; `auto` and the off aliases are NOT in the
+// table (callers handle them before consulting it). See sttSelectorProfile.
+func STTSelectorProfile(sel string) (profileName string, known bool) {
+	name, ok := sttSelectorProfile[sel]
+	return name, ok
 }
 
 // diarizeStateForProfile resolves the effective diarization activation for the

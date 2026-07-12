@@ -695,7 +695,12 @@ func (a *App) resolveModelClients(cfg config.Config) (model.Embedder, model.Gene
 	if ep, err := r.Resolve(provider.CapEmbed); err == nil {
 		if e, ferr := providerfactory.Embedder(ep); ferr == nil {
 			embedder = e
-			textModel, codeModel = ep.EmbedTextModel, ep.EmbedCodeModel
+			// Resolve the CONCRETE embed models the adapter will send (kind
+			// default when the profile leaves them blank) so the ingest worker
+			// and the query-side retrieval embedder use byte-identical model ids
+			// instead of each independently relying on the adapter default while
+			// retrieval keeps a stale mistral-embed fallback (issue #440 F2).
+			textModel, codeModel = providerfactory.EffectiveEmbedModels(ep)
 		}
 	}
 	var gen model.Generator
