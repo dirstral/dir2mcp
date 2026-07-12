@@ -2662,6 +2662,16 @@ func (s *Service) addErrors(delta int64) {
 	}
 }
 
+// addWatchOverflow records that the filesystem watcher dropped events to an
+// fsnotify ErrEventOverflow (kernel buffer exceeded during a large burst). It is
+// a watcher-lifetime observability counter, not a per-scan progress counter, so
+// it is deliberately not reset by ResetProgress (issue #409 item 5).
+func (s *Service) addWatchOverflow(delta int64) {
+	if s.indexingState != nil {
+		s.indexingState.AddWatchOverflows(delta)
+	}
+}
+
 func (s *Service) addRepresentations(delta int64) {
 	if s.indexingState != nil {
 		s.indexingState.AddRepresentations(delta)

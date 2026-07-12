@@ -113,6 +113,15 @@ type fsWatchLoop struct {
 
 func (w *fsWatchLoop) run(ctx context.Context) error {
 	rescanReq := make(chan struct{}, 1)
+	// requestRescan queues a coalesced safety rescan: if one is already queued or
+	// running the request is dropped, so a burst of triggers collapses to a
+	// single reconcile.
+	requestRescan := func() {
+		select {
+		case rescanReq <- struct{}{}:
+		default:
+		}
+	}
 	workerDone := make(chan struct{})
 	go w.worker(ctx, rescanReq, workerDone)
 
@@ -125,12 +134,8 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 			<-workerDone
 			return nil
 		case <-rescan.C:
-			// Backstop: reconcile anything the watcher missed. Coalesce — if a
-			// rescan is already queued or running, drop this tick.
-			select {
-			case rescanReq <- struct{}{}:
-			default:
-			}
+			// Backstop: reconcile anything the watcher missed.
+			requestRescan()
 		case ev, ok := <-w.watcher.Events:
 			if !ok {
 				<-workerDone
@@ -142,9 +147,24 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 				<-workerDone
 				return nil
 			}
-			if err != nil {
-				w.svc.getLogger().Printf("watch: %v", err)
+			if err == nil {
+				continue
 			}
+			// fsnotify reports ErrEventOverflow when the kernel dropped events
+			// from its fixed-size buffer during a large burst (mass checkout,
+			// rsync, branch switch). Previously this only logged and relied on
+			// the up-to-10-minute safety rescan, so dropped updates lagged
+			// silently (issue #409 item 5). Surface the drop as a counter and a
+			// distinct log line, and request an immediate coalesced rescan so
+			// the missed changes reconcile promptly rather than waiting for the
+			// next tick.
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				w.svc.addWatchOverflow(1)
+				w.svc.getLogger().Printf("watch: event overflow (kernel event buffer exceeded); some events dropped, requesting immediate rescan")
+				requestRescan()
+				continue
+			}
+			w.svc.getLogger().Printf("watch: %v", err)
 		}
 	}
 }
@@ -263,18 +283,38 @@ func (w *fsWatchLoop) process(ctx context.Context, job watchJob) {
 	}
 
 	info, statErr := os.Lstat(job.absPath)
-	if job.deleted || os.IsNotExist(statErr) {
+	if os.IsNotExist(statErr) {
+		// The path is genuinely gone: tombstone it. Covers both a delete job and
+		// a write job whose file vanished before we processed it.
 		w.svc.processDelete(ctx, rel)
 		return
 	}
 	if statErr != nil {
+		// Transient stat error (e.g. permissions). Honor a delete job as before;
+		// for a write job, skip and let the safety rescan reconcile.
+		if job.deleted {
+			w.svc.processDelete(ctx, rel)
+		}
 		return
 	}
 
 	f, ok := w.indexableFile(job.absPath, rel, info)
 	if !ok {
+		// The path exists but is no longer indexable (became a directory, was
+		// filtered out, exceeds the size cap, is gitignored, or is an unfollowed
+		// symlink). A delete job is honored so a document replaced by a
+		// non-indexable entry is removed; a write job is simply dropped, matching
+		// the prior behavior for an unindexable modify.
+		if job.deleted {
+			w.svc.processDelete(ctx, rel)
+		}
 		return
 	}
+	// The path exists and is indexable. Whether the job was armed as a delete
+	// (a delete→recreate flap from an atomic save: write-temp + rename-over) or a
+	// write, reconcile by (re)indexing rather than tombstoning. processDocument
+	// hash-diffs, so a redundant fire is a cheap no-op, and the document is never
+	// momentarily absent from the index (issue #409 item 4).
 	if err := w.svc.processDocument(ctx, f, w.secrets, false, nil); err != nil && ctx.Err() == nil {
 		w.svc.addErrors(1)
 		w.svc.getLogger().Printf("watch: index %s: %v", rel, err)
