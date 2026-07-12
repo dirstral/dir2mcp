@@ -25,11 +25,6 @@ type IndexingSnapshot struct {
 	EmbeddedOK      int64
 	Errors          int64
 	Unknown         int64
-	// WatchOverflows counts fsnotify ErrEventOverflow events observed by the
-	// filesystem watcher over its lifetime (kernel event buffer exceeded during a
-	// large burst). A non-zero value means some watch events were dropped and the
-	// index was reconciled by a rescan rather than per-event (issue #409 item 5).
-	WatchOverflows int64
 }
 
 type IndexingState struct {
@@ -45,7 +40,6 @@ type IndexingState struct {
 	chunksTotal     atomic.Int64
 	embeddedOK      atomic.Int64
 	errors          atomic.Int64
-	watchOverflows  atomic.Int64
 }
 
 func NewIndexingState(mode string) *IndexingState {
@@ -164,17 +158,6 @@ func (s *IndexingState) AddErrors(delta int64) {
 	s.errors.Add(delta)
 }
 
-// AddWatchOverflows increments the watcher event-overflow counter. Unlike the
-// per-scan progress counters it is NOT zeroed by ResetProgress: it reflects
-// watcher-lifetime observability (like embeddedOK) rather than a single scan
-// (issue #409 item 5).
-func (s *IndexingState) AddWatchOverflows(delta int64) {
-	if s == nil {
-		return
-	}
-	s.watchOverflows.Add(delta)
-}
-
 func (s *IndexingState) Snapshot() IndexingSnapshot {
 	if s == nil {
 		return IndexingSnapshot{
@@ -195,7 +178,6 @@ func (s *IndexingState) Snapshot() IndexingSnapshot {
 		ChunksTotal:     s.chunksTotal.Load(),
 		EmbeddedOK:      s.embeddedOK.Load(),
 		Errors:          s.errors.Load(),
-		WatchOverflows:  s.watchOverflows.Load(),
 	}
 }
 

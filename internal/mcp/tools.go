@@ -405,11 +405,6 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			"chunks_total":    retrievedStats.ChunksTotal,
 			"embedded_ok":     retrievedStats.EmbeddedOK,
 			"errors":          retrievedStats.Errors,
-			// watch_overflows: fsnotify events the kernel dropped over the
-			// watcher's lifetime; non-zero means updates were reconciled by a
-			// rescan rather than per-event (issue #409 item 5). Sourced directly
-			// from the daemon-local snapshot (the retriever does not carry it).
-			"watch_overflows": snapshot.WatchOverflows,
 		},
 		"models": map[string]interface{}{
 			"embed_text":   defaultEmbedTextModel,

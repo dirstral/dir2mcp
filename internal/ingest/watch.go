@@ -154,12 +154,10 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 			// from its fixed-size buffer during a large burst (mass checkout,
 			// rsync, branch switch). Previously this only logged and relied on
 			// the up-to-10-minute safety rescan, so dropped updates lagged
-			// silently (issue #409 item 5). Surface the drop as a counter and a
-			// distinct log line, and request an immediate coalesced rescan so
-			// the missed changes reconcile promptly rather than waiting for the
-			// next tick.
+			// silently (issue #409 item 5). Log a distinct line and request an
+			// immediate coalesced rescan so the missed changes reconcile promptly
+			// rather than waiting for the next tick.
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
-				w.svc.addWatchOverflow(1)
 				w.svc.getLogger().Printf("watch: event overflow (kernel event buffer exceeded); some events dropped, requesting immediate rescan")
 				requestRescan()
 				continue
