@@ -49,6 +49,7 @@ func TestWatchProcess_DeleteRecreateFlapReindexes(t *testing.T) {
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 
 	cfg := config.Default()
 	cfg.RootDir = root
