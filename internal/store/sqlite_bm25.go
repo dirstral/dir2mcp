@@ -68,7 +68,13 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 	         FROM chunks_fts
 	         JOIN chunks c ON c.chunk_id = chunks_fts.rowid
 	         LEFT JOIN documents d ON d.rel_path = c.rel_path
-	         LEFT JOIN spans sp ON sp.chunk_id = c.chunk_id
+	         -- One span row per chunk. The spans table has no UNIQUE(chunk_id) — a
+	         -- chunk MAY carry multiple span rows (InsertChunkWithSpans accepts a
+	         -- slice), so a bare LEFT JOIN would fan out and count a chunk's BM25
+	         -- score N times, consuming the LIMIT with duplicates (optibot #597).
+	         -- GROUP BY collapses to a single (primary) span per chunk.
+	         LEFT JOIN (SELECT chunk_id, span_kind, start, "end", extra_json
+	                    FROM spans GROUP BY chunk_id) sp ON sp.chunk_id = c.chunk_id
 	         WHERE chunks_fts MATCH ? AND c.deleted = 0
 	               AND c.embedding_status != 'error'`
 	if kind := strings.TrimSpace(indexKind); kind != "" {

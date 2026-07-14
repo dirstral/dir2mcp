@@ -2366,7 +2366,12 @@ func (s *Service) searchHitForLabel(indexName string, label uint64) model.Search
 		DocType: "unknown",
 		RepType: "unknown",
 		Snippet: "",
-		Span:    model.Span{Kind: "lines"},
+		// Cache-miss fallback: a ZERO span (empty Kind), not the degenerate
+		// Span{Kind:"lines"} placeholder — the same F6 (#403) fix applied in the
+		// BM25 path. A non-empty Kind here would make hybrid.go's `cached.Span.Kind
+		// != ""` guard treat this miss as a real span and skip overwriting it with a
+		// properly resolved one (optibot #597).
+		Span: model.Span{},
 	}
 }
 
