@@ -188,3 +188,26 @@ func TestEmbedIdentity(t *testing.T) {
 func mustErr(_ provider.Profile, err error) error {
 	return err
 }
+
+// TestIsKnownKind pins issue #440 F7's building block: every kind in the
+// capability matrix is recognized, and a typo is not. An unrecognized kind is
+// what the config layer rejects as CONFIG_INVALID at startup.
+func TestIsKnownKind(t *testing.T) {
+	for _, k := range []provider.Kind{
+		provider.KindOpenAI, provider.KindMistral, provider.KindAnthropic,
+		provider.KindGemini, provider.KindCohere, provider.KindElevenLabs,
+		provider.KindWhisper, provider.KindOmniEmbed, provider.KindColBERT,
+	} {
+		if !provider.IsKnownKind(k) {
+			t.Errorf("IsKnownKind(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []provider.Kind{"", "opnai", "gemni", "OpenAI"} {
+		if provider.IsKnownKind(k) {
+			t.Errorf("IsKnownKind(%q) = true, want false", k)
+		}
+	}
+	if provider.KnownKindsString() == "" {
+		t.Fatal("KnownKindsString must list the recognized kinds for remediation")
+	}
+}

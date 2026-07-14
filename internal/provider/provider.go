@@ -48,6 +48,39 @@ const (
 	KindColBERT Kind = "colbert"
 )
 
+// knownKinds is the set of recognized provider kinds (SPEC 8.1.1), in a
+// stable order for deterministic error messages. A profile whose kind is not
+// in this set has no row in the capability matrix, so it is silently
+// un-selectable for every capability in auto selection and surfaces only as a
+// generic ErrNoProvider far from its cause (issue #440 F7).
+var knownKinds = []Kind{
+	KindOpenAI, KindMistral, KindAnthropic, KindGemini, KindCohere,
+	KindElevenLabs, KindWhisper, KindOmniEmbed, KindColBERT,
+}
+
+// IsKnownKind reports whether k is a recognized provider kind (SPEC 8.1.1).
+// A profile declaring an unrecognized/typo kind is un-selectable for every
+// capability; the config layer rejects it as CONFIG_INVALID at startup rather
+// than letting it surface as a downstream "no provider" error (issue #440 F7).
+func IsKnownKind(k Kind) bool {
+	for _, known := range knownKinds {
+		if k == known {
+			return true
+		}
+	}
+	return false
+}
+
+// KnownKindsString renders the recognized provider kinds as a comma-separated
+// list for actionable CONFIG_INVALID remediation (issue #440 F7).
+func KnownKindsString() string {
+	names := make([]string, len(knownKinds))
+	for i, k := range knownKinds {
+		names[i] = string(k)
+	}
+	return strings.Join(names, ", ")
+}
+
 // Capability is a model capability bound to a provider profile.
 type Capability string
 
