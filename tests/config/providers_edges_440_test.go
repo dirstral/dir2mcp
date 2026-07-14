@@ -58,10 +58,11 @@ func TestProviders_KnownKindsLoadCleanly(t *testing.T) {
 	}
 }
 
-// blankBuiltinEmbedCreds clears every built-in embed-capable credential so a
+// blankBuiltinProviderCreds clears every built-in provider credential (embed + STT)
+// so a
 // user-only profile is the only eligible embed backend and thus wins auto
 // selection — exercising the user-only precedence path.
-func blankBuiltinEmbedCreds(t *testing.T) {
+func blankBuiltinProviderCreds(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
@@ -79,7 +80,7 @@ func blankBuiltinEmbedCreds(t *testing.T) {
 // behavior, a consequence of Go map order being lost on decode — would have
 // picked alpha.
 func TestProviders_UserOnlyPrecedenceIsDeclaredOrder(t *testing.T) {
-	blankBuiltinEmbedCreds(t)
+	blankBuiltinProviderCreds(t)
 	yaml := "providers:\n" +
 		"  zeta:\n    kind: openai\n    base_url: http://zeta.local/v1\n    api_key: zk\n" +
 		"  alpha:\n    kind: openai\n    base_url: http://alpha.local/v1\n    api_key: ak\n"
@@ -98,7 +99,7 @@ func TestProviders_UserOnlyPrecedenceIsDeclaredOrder(t *testing.T) {
 // alpha. Together the two cases prove the winner tracks declaration order
 // rather than a fixed alphabetical sort.
 func TestProviders_UserOnlyPrecedenceReversed(t *testing.T) {
-	blankBuiltinEmbedCreds(t)
+	blankBuiltinProviderCreds(t)
 	yaml := "providers:\n" +
 		"  alpha:\n    kind: openai\n    base_url: http://alpha.local/v1\n    api_key: ak\n" +
 		"  zeta:\n    kind: openai\n    base_url: http://zeta.local/v1\n    api_key: zk\n"

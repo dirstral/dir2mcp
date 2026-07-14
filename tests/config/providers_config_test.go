@@ -86,12 +86,7 @@ func TestProviders_BuiltinAutoSelectByCredential(t *testing.T) {
 func TestProviders_NoCredentialEmbedFails(t *testing.T) {
 	// Deterministic: blank any embed-capable provider key the host/CI
 	// may already export (Resolve reads process env via cfg.Providers).
-	for _, k := range []string{
-		"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-		"GEMINI_API_KEY", "COHERE_API_KEY", "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY",
-	} {
-		t.Setenv(k, "")
-	}
+	blankBuiltinProviderCreds(t)
 	// No creds and no explicit binding: auto-select must NOT silently
 	// fall through to the credential-less `local` (it's excluded from
 	// auto precedence) — embed must fail so preflight surfaces it.
@@ -312,12 +307,7 @@ func TestProviders_OmniEmbedSelfHosted(t *testing.T) {
 // credentials and no explicit binding, embed must fail (preflight surfaces
 // it) rather than silently fall through to omniembed.
 func TestProviders_OmniEmbedNotInAutoPrecedence(t *testing.T) {
-	for _, k := range []string{
-		"MISTRAL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-		"GEMINI_API_KEY", "COHERE_API_KEY", "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY",
-	} {
-		t.Setenv(k, "")
-	}
+	blankBuiltinProviderCreds(t)
 	t.Setenv("OMNIEMBED_BASE_URL", "http://gpu-vps:8000")
 	cfg := loadCfg(t, "version: 1\n")
 	if _, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
