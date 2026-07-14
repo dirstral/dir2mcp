@@ -175,6 +175,13 @@ type Service struct {
 	// avutil.ErrNoAudioStream) without requiring the ffmpeg binary.
 	ExtractAudioTrackFunc func(ctx context.Context, path string) ([]byte, error)
 
+	// ProbeMediaInfoFunc overrides the container/stream probe used to detect
+	// multi-track audio (issue #567). Defaults to avutil.ProbeMediaInfo (ffprobe)
+	// when nil; tests set it to supply a deterministic stream census without the
+	// ffprobe binary. It is best-effort: any error leaves the transcript untouched
+	// and simply suppresses the multi-track diagnostic.
+	ProbeMediaInfoFunc func(ctx context.Context, path string) (avutil.MediaInfo, error)
+
 	// ArchiveMaxMembers and ArchiveMaxTotalBytes bound archive fan-out to contain
 	// decompression bombs (#408): the number of members ingested per archive and
 	// the aggregate uncompressed bytes buffered. A value <= 0 uses the package
@@ -2864,6 +2871,69 @@ func (s *Service) probeDuration(ctx context.Context, doc model.Document) (time.D
 	return probe(ctx, localPath)
 }
 
+// warnMultiTrackAudio surfaces multi-track media so additional audio streams are
+// not silently dropped (issue #567). The transcription path feeds only the first
+// audio stream (ffmpeg's default selection) to STT; when the container carries
+// more than one audio stream — common in broadcast/proxy media that bundles an
+// original mix, per-language dubs, and a music-&-effects track — the other tracks
+// are neither transcribed nor indexed. This emits a single structured, greppable
+// warning naming every track (audio-relative index, codec, channels, declared
+// language/title — all non-sensitive metadata, never the media bytes) so the
+// selection is honest rather than silent.
+//
+// It is best-effort: media is resolved through the CorpusFS (Localize) and probed
+// via ProbeMediaInfoFunc (default avutil.ProbeMediaInfo). Any failure — ffprobe
+// absent, an undecodable input, a localize error — silently yields no diagnostic
+// and never affects the transcript that was already produced. The full per-track
+// transcription this diagnostic points at (transcribing each stream, or selecting
+// by language) is deferred to a data-model/spec change (issue #567).
+func (s *Service) warnMultiTrackAudio(ctx context.Context, doc model.Document) {
+	probe := s.ProbeMediaInfoFunc
+	if probe == nil {
+		probe = avutil.ProbeMediaInfo
+	}
+	localPath, cleanup, err := s.corpusFS().Localize(ctx, doc.RelPath)
+	if err != nil {
+		return
+	}
+	defer cleanup()
+	info, err := probe(ctx, localPath)
+	if err != nil {
+		return
+	}
+	if !info.HasMultipleAudioStreams() {
+		return
+	}
+	streams := info.AudioStreams
+	descs := make([]string, len(streams))
+	for i, a := range streams {
+		descs[i] = describeAudioStream(i, a)
+	}
+	s.getLogger().Printf("multi-track audio: %s carries %d audio streams; only the first (%s) was transcribed — %d additional track(s) are not indexed: %s (issue #567)",
+		doc.RelPath, len(streams), descs[0], len(streams)-1, strings.Join(descs[1:], ", "))
+}
+
+// describeAudioStream renders one audio stream as a compact, non-sensitive
+// descriptor for the multi-track diagnostic (issue #567). pos is the
+// audio-relative index (0 == first audio stream, what `-map 0:a:0` selects).
+// Fields absent in the probe are omitted so the descriptor stays terse.
+func describeAudioStream(pos int, a avutil.AudioStream) string {
+	parts := []string{fmt.Sprintf("a:%d", pos)}
+	if a.CodecName != "" {
+		parts = append(parts, a.CodecName)
+	}
+	if a.Channels > 0 {
+		parts = append(parts, fmt.Sprintf("%dch", a.Channels))
+	}
+	if a.Language != "" {
+		parts = append(parts, "lang="+a.Language)
+	}
+	if a.Title != "" {
+		parts = append(parts, "title="+a.Title)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
 // detectLeadingSilence resolves the leading-silence duration for doc's media
 // using the configured detector (DetectLeadingSilenceFunc, defaulting to
 // avutil.DetectLeadingSilence with the configured threshold). It is graceful by
@@ -3863,6 +3933,13 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	if transcriptText == "" {
 		return false, nil
 	}
+
+	// Multi-track honesty (issue #567): the transcription above fed only the first
+	// audio stream (ffmpeg's default selection) to STT. If the container carries
+	// additional audio streams — per-language dubs, an M&E track — surface them so
+	// the selection is visible rather than silent. Best-effort and non-fatal: it
+	// never affects the transcript that was already produced.
+	s.warnMultiTrackAudio(ctx, doc)
 
 	var duration time.Duration
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
