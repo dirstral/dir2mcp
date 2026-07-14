@@ -53,12 +53,22 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 	defer s.ReleaseDB()
 
 	args := []any{matchExpr}
+	// Resolve each hit's real span from the spans table (LEFT JOIN, 1:1 with a
+	// chunk) so a BM25 hit carries a genuine line/page/time/region span instead
+	// of the degenerate `lines 0-0` placeholder it used to hardcode (issue #403
+	// F6). Doing it here — at the query boundary — makes the span correct
+	// regardless of whether the hybrid metadata cache happens to be warm; the
+	// old code only re-attached a real span on a cache HIT, so a cache miss
+	// (reindex/eviction window) leaked a citation pointing at non-existent line 0.
 	stmt := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.language,
 	                COALESCE(d.title, ''), COALESCE(d.mtime_unix, 0),
+	                COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0),
+	                COALESCE(sp.extra_json, ''),
 	                bm25(chunks_fts) AS score
 	         FROM chunks_fts
 	         JOIN chunks c ON c.chunk_id = chunks_fts.rowid
 	         LEFT JOIN documents d ON d.rel_path = c.rel_path
+	         LEFT JOIN spans sp ON sp.chunk_id = c.chunk_id
 	         WHERE chunks_fts MATCH ? AND c.deleted = 0
 	               AND c.embedding_status != 'error'`
 	if kind := strings.TrimSpace(indexKind); kind != "" {
@@ -89,14 +99,24 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 			language  string
 			title     string
 			mtimeUnix int64
+			spanKind  string
+			spanStart int
+			spanEnd   int
+			spanExtra string
 			score     sql.NullFloat64
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &language, &title, &mtimeUnix, &score); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &language, &title, &mtimeUnix,
+			&spanKind, &spanStart, &spanEnd, &spanExtra, &score); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
 			continue
 		}
+		// Reconstruct the persisted span. A chunk with no span row (or an
+		// unusable one) reduces to an empty span rather than a misleading
+		// `lines 0-0`: bmSpan omits the degenerate lines placeholder so the
+		// downstream citation carries no line range instead of line 0 (#403 F6).
+		span := bmSpan(spanFromRow(spanKind, spanStart, spanEnd, spanExtra))
 		// Negate so higher-is-better matches the vector path. A NULL bm25 score
 		// (no usable term statistics for this row) maps to the worst possible
 		// final score so it ranks last, consistent with the ORDER BY above.
@@ -112,7 +132,7 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 			RepType:   repType,
 			Score:     hitScore,
 			Snippet:   snippet(text, 240),
-			Span:      model.Span{Kind: "lines"},
+			Span:      span,
 			Language:  language,
 			MTimeUnix: mtimeUnix,
 		})
@@ -121,6 +141,23 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 		return nil, err
 	}
 	return hits, nil
+}
+
+// bmSpan drops a degenerate "lines" span — kind "lines" with a non-positive or
+// inverted line range — down to the empty span (issue #403 F6). spanFromRow
+// falls back to `Span{Kind:"lines"}` (start/end 0) whenever a stored span is
+// missing or unusable; surfacing that as a BM25 hit's span produces a citation
+// pointing at line 0, which no client can resolve. Returning the zero Span
+// instead makes the hit carry no line range at all (the honest "unknown
+// location" state), which downstream serializers render as the schema-valid
+// document-level span rather than a phantom `lines 0-0`. Real spans of every
+// kind (valid lines, page, time, region) pass through unchanged.
+func bmSpan(span model.Span) model.Span {
+	if strings.EqualFold(strings.TrimSpace(span.Kind), "lines") &&
+		(span.StartLine <= 0 || span.EndLine < span.StartLine) {
+		return model.Span{}
+	}
+	return span
 }
 
 // sanitizeFTSQuery escapes user input for safe use as the right-hand side of

@@ -3784,7 +3784,16 @@ func (s *Service) sliceFromMetadata(relPath string, requested model.Span) (strin
 				// range, not a plain page span. Without this, open_file page=N on
 				// a docling-extracted PDF found no metadata match and fell through
 				// to reading raw PDF bytes -> DOC_TYPE_UNSUPPORTED (issue #383).
-				matches = append(matches, candidate{page: span.Region.StartPage, text: hit.Snippet})
+				//
+				// The region covers the requested page, so attribute the slice to
+				// the page the caller actually asked about — NOT the region's
+				// primary (start) page. A multi-page region's cited text can sit on
+				// a later page than its primary, and localizing it to the primary
+				// page mis-reports where the text is (issue #403 F7). StartPage is
+				// kept as the secondary sort key so, when several chunks answer one
+				// page, they order by document reading order (and a plain page span,
+				// start 0, leads a region that merely spans into that page).
+				matches = append(matches, candidate{page: requested.Page, start: span.Region.StartPage, text: hit.Snippet})
 			}
 		case "time":
 			if !strings.EqualFold(span.Kind, "time") {
