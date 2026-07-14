@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -52,51 +55,205 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 	return out, nil
 }
 
+// translateCell is one source transcript line decomposed into its verbatim
+// leading timestamp marker and spoken body, plus the translated body once
+// resolved. A cell is translatable when its body has non-whitespace text; empty
+// lines and marker-only lines pass through unchanged so the output keeps exactly
+// one line per source line (the anti-desync invariant chunkTranscriptByTime
+// relies on).
+type translateCell struct {
+	marker       string
+	body         string
+	translated   string
+	translatable bool
+}
+
 // translateTranscriptText translates a segment-formatted transcript into
 // targetLang while keeping it time-aligned to the source (SPEC §8.6.2): each
 // source line's leading [mm:ss] / mm:ss timestamp marker is preserved VERBATIM
 // and only the spoken text is translated, so chunkTranscriptByTime produces the
-// same time spans for the translated transcript as for the source. Lines are
-// translated segment-by-segment via the chat Generator; a line with no timestamp
-// marker is translated as-is (its leading-marker, if any, is empty).
+// same time spans for the translated transcript as for the source.
+//
+// Cues are translated in WINDOWS of translateWindowLines() consecutive cues per
+// chat call, each window carrying a read-only margin of translateContextLines()
+// surrounding cues, so the model sees neighbouring cues and can resolve
+// referents/agreement, keep split sentences coherent, and hold terminology
+// consistent (issue #573). A strict numbered 1:1 request/response contract lets
+// the batch be verified — exactly one output line per input cue, in order. On any
+// count/format mismatch the window safe-degrades to per-line translation, so a
+// malformed model response can never drop/merge/reorder cues and desync subtitle
+// timing. The historical per-line path is used directly when the effective window
+// is <=1 with no margin (an explicit opt-out that also keeps pre-windowing
+// translate caches valid — see translateWindowShape).
 func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targetLang string) (string, error) {
 	lines := strings.Split(sourceText, "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
+	cells := make([]translateCell, len(lines))
+	var order []int // indices into cells that carry translatable text, in order
+	for i, line := range lines {
 		if strings.TrimSpace(line) == "" {
-			out = append(out, "")
-			continue
+			continue // zero-value cell: empty line passes through as ""
 		}
 		marker, body := splitTimestampMarker(line)
-		translatedBody, err := s.translateLine(ctx, body, targetLang)
-		if err != nil {
-			return "", err
-		}
-		// Collapse any internal newlines/whitespace runs the chat provider may
-		// have returned into single spaces, so one source segment stays exactly
-		// one output line — otherwise an extra line would desync the translated
-		// transcript's time spans from the source (chunkTranscriptByTime keys on
-		// per-line [mm:ss] markers).
-		translatedBody = strings.Join(strings.Fields(translatedBody), " ")
-		switch {
-		case marker == "":
-			out = append(out, translatedBody)
-		case translatedBody == "":
-			out = append(out, marker)
-		default:
-			out = append(out, marker+" "+translatedBody)
+		cells[i] = translateCell{marker: marker, body: body}
+		if strings.TrimSpace(body) != "" {
+			cells[i].translatable = true
+			order = append(order, i)
 		}
 	}
+
+	windowN := s.translateWindowLines()
+	marginM := s.translateContextLines()
+	if windowN <= 1 && marginM == 0 {
+		// Explicit opt-out: translate each cue in isolation (historical behaviour).
+		if err := s.translateCellsPerLine(ctx, cells, order, targetLang); err != nil {
+			return "", err
+		}
+	} else {
+		for start := 0; start < len(order); start += windowN {
+			end := min(start+windowN, len(order))
+			if err := s.translateWindow(ctx, cells, order, start, end, marginM, targetLang); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	out := make([]string, len(cells))
+	for i := range cells {
+		if !cells[i].translatable {
+			// Empty line -> "" (zero-value marker); marker-only line -> marker.
+			out[i] = cells[i].marker
+			continue
+		}
+		out[i] = assembleTranslatedLine(cells[i].marker, cells[i].translated)
+	}
 	return strings.Join(out, "\n"), nil
+}
+
+// translateWindowLines resolves the effective chat-translate window size from
+// config: 0 (unset) means the built-in default; <1 is clamped to 1 (per-line).
+func (s *Service) translateWindowLines() int {
+	n := s.cfg.MediaTranslateWindowLines
+	switch {
+	case n == 0:
+		return config.DefaultMediaTranslateWindowLines
+	case n < 1:
+		return 1
+	default:
+		return n
+	}
+}
+
+// translateContextLines resolves the effective read-only context margin (cues on
+// each side of a window) from config; negative is clamped to 0.
+func (s *Service) translateContextLines() int {
+	if m := s.cfg.MediaTranslateContextLines; m > 0 {
+		return m
+	}
+	return 0
+}
+
+// translateWindowShape is the identity token folded into the translate derivation
+// identity (activeTranslateIdentity) so a change to the window/margin — which
+// materially changes the cross-line context the model sees and therefore its
+// output — invalidates cached translations (§8.6.7). The historical per-line path
+// (window<=1, margin==0) folds NOTHING, so pre-windowing caches stay valid for
+// that explicit opt-out. It is chat-engine only: the whisper engine keys its own
+// cache on the STT identity (readOrComputeWhisperTranslation) and never consults
+// this identity, so its cache is untouched.
+func (s *Service) translateWindowShape() string {
+	if s.translateEngine == "whisper" {
+		return ""
+	}
+	w, m := s.translateWindowLines(), s.translateContextLines()
+	if w <= 1 && m == 0 {
+		return ""
+	}
+	return fmt.Sprintf("cw%dc%d", w, m)
+}
+
+// translateWindow translates order[start:end] in a single numbered batch, giving
+// the model up to marginM read-only context cues on each side. It verifies the
+// model returned exactly one line per target in order; on any mismatch it falls
+// back to per-line translation for this window so timing can never desync.
+func (s *Service) translateWindow(ctx context.Context, cells []translateCell, order []int, start, end, marginM int, targetLang string) error {
+	targets := order[start:end]
+	before := order[max(0, start-marginM):start]
+	after := order[end:min(len(order), end+marginM)]
+
+	prompt := buildWindowTranslatePrompt(cells, before, targets, after, targetLang)
+	raw, err := s.generateBounded(ctx, prompt, translateLineMaxTokens*len(targets))
+	if err != nil {
+		// A provider/transport failure is NOT a format mismatch: the provider is
+		// down, so fanning out into per-line retries would just multiply the same
+		// error. Surface it and let translation abort as the per-line path did.
+		return err
+	}
+	parsed, ok := parseNumberedTranslations(raw, len(targets))
+	if !ok {
+		s.getLogger().Printf("transcript translation: windowed batch response did not return %d numbered lines 1:1; "+
+			"falling back to per-line translation for this window (subtitle timing preserved)", len(targets))
+		return s.translateCellsPerLine(ctx, cells, targets, targetLang)
+	}
+	for i, idx := range targets {
+		cells[idx].translated = collapseTranslatedLine(parsed[i])
+	}
+	return nil
+}
+
+// translateCellsPerLine translates each cell named by idxs one at a time (the
+// historical isolated path). It is also the safe-degrade fallback for a window
+// whose batch response was malformed. collapseTranslatedLine keeps one source cue
+// exactly one output line.
+func (s *Service) translateCellsPerLine(ctx context.Context, cells []translateCell, idxs []int, targetLang string) error {
+	for _, idx := range idxs {
+		translatedBody, err := s.translateLine(ctx, cells[idx].body, targetLang)
+		if err != nil {
+			return err
+		}
+		cells[idx].translated = collapseTranslatedLine(translatedBody)
+	}
+	return nil
+}
+
+// assembleTranslatedLine reattaches the verbatim timestamp marker to a translated
+// body, preserving the exact source formatting rules.
+func assembleTranslatedLine(marker, translatedBody string) string {
+	switch {
+	case marker == "":
+		return translatedBody
+	case translatedBody == "":
+		return marker
+	default:
+		return marker + " " + translatedBody
+	}
+}
+
+// collapseTranslatedLine collapses any internal newlines/whitespace runs a chat
+// provider may have returned into single spaces, so one source segment stays
+// exactly one output line — otherwise an extra line would desync the translated
+// transcript's time spans from the source (chunkTranscriptByTime keys on per-line
+// [mm:ss] markers).
+func collapseTranslatedLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // translateLineMaxTokens caps a single translated transcript line. One source
 // segment maps to one short output line, so a tight bound is plenty here; it
 // keeps the #500 runaway path tight on chat backends that respect max_tokens
-// WITHOUT lowering the generous default that ask/annotate rely on. It is applied
-// only when the translator implements model.BoundedGenerator; otherwise the call
-// falls back to Generate (the provider's own default cap still bounds it).
+// WITHOUT lowering the generous default that ask/annotate rely on. For a windowed
+// batch the cap is scaled by the number of target cues. It is applied only when
+// the translator implements model.BoundedGenerator; otherwise the call falls back
+// to Generate (the provider's own default cap still bounds it).
 const translateLineMaxTokens = 512
+
+// generateBounded runs the translator with a per-call max-tokens cap when it
+// implements model.BoundedGenerator, else falls back to the plain Generator.
+func (s *Service) generateBounded(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	if bg, ok := s.translator.(model.BoundedGenerator); ok {
+		return bg.GenerateWithMaxTokens(ctx, prompt, maxTokens)
+	}
+	return s.translator.Generate(ctx, prompt)
+}
 
 // translateLine translates a single line of transcript text into targetLang via
 // the chat Generator. Empty/whitespace input short-circuits to empty so the chat
@@ -107,15 +264,7 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 	if text == "" {
 		return "", nil
 	}
-	prompt := buildTranslatePrompt(text, targetLang)
-	if bg, ok := s.translator.(model.BoundedGenerator); ok {
-		return bg.GenerateWithMaxTokens(ctx, prompt, translateLineMaxTokens)
-	}
-	translated, err := s.translator.Generate(ctx, prompt)
-	if err != nil {
-		return "", err
-	}
-	return translated, nil
+	return s.generateBounded(ctx, buildTranslatePrompt(text, targetLang), translateLineMaxTokens)
 }
 
 // buildTranslatePrompt builds a deterministic, general-purpose translation
@@ -130,6 +279,98 @@ func buildTranslatePrompt(text, targetLang string) string {
 	b.WriteString("with no preamble, quotes, or explanation.\n\n")
 	b.WriteString(text)
 	return b.String()
+}
+
+// buildWindowTranslatePrompt builds the numbered, general-purpose batch prompt
+// for a window of consecutive cues (issue #573). The `targets` cues are numbered
+// 1..N and are the ONLY lines the model translates and returns; the `before` /
+// `after` cues are supplied as read-only context so the model can resolve
+// referents, agreement, split sentences, and terminology WITHOUT re-translating
+// them. The strict "N: <translation>" response contract lets the caller verify a
+// 1:1 mapping and safe-degrade on any mismatch. It is language-agnostic (the
+// target language is pinned; the source is auto-detected).
+func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []int, targetLang string) string {
+	var b strings.Builder
+	b.WriteString("Translate each NUMBERED line below into ")
+	b.WriteString(targetLang)
+	b.WriteString(". These are consecutive subtitle cues from one recording, so use the ")
+	b.WriteString("surrounding context lines only to resolve pronouns, gender/number agreement, ")
+	b.WriteString("sentences split across cues, and to keep terminology and named entities consistent. ")
+	b.WriteString("Preserve meaning faithfully.\n")
+	b.WriteString("Return EXACTLY one translated line per numbered input, in the form \"N: <translation>\", ")
+	b.WriteString("with the SAME count and the SAME numbers in the SAME order. Do NOT add, drop, split, ")
+	b.WriteString("merge, renumber, or reorder lines, and never output the context lines. ")
+	b.WriteString("No preamble, quotes, or explanation.\n")
+
+	writeContext := func(heading string, idxs []int) {
+		if len(idxs) == 0 {
+			return
+		}
+		b.WriteString("\n")
+		b.WriteString(heading)
+		b.WriteString("\n")
+		for _, idx := range idxs {
+			b.WriteString("- ")
+			b.WriteString(cells[idx].body)
+			b.WriteString("\n")
+		}
+	}
+
+	writeContext("Context before (do NOT translate or return):", before)
+	b.WriteString("\nLines to translate:\n")
+	for n, idx := range targets {
+		b.WriteString(strconv.Itoa(n + 1))
+		b.WriteString(": ")
+		b.WriteString(cells[idx].body)
+		b.WriteString("\n")
+	}
+	writeContext("Context after (do NOT translate or return):", after)
+	return b.String()
+}
+
+// numberedTranslationRE matches a "N: <text>" / "N. <text>" / "N) <text>"
+// response line, capturing the 1-based index and the translated text.
+var numberedTranslationRE = regexp.MustCompile(`^\s*(\d+)\s*[:.)]\s?(.*)$`)
+
+// parseNumberedTranslations parses a windowed batch response into exactly n
+// translations, indexed 0..n-1 by the model's 1-based numbering. It enforces the
+// strict 1:1 contract: every number 1..n must appear exactly once (no gaps, no
+// duplicates, no out-of-range numbers), or it returns ok=false so the caller
+// safe-degrades to per-line translation. Continuation lines (a wrapped
+// translation with no leading number) are appended to the current entry so a
+// model that hard-wraps a long line is tolerated without breaking the mapping.
+func parseNumberedTranslations(raw string, n int) ([]string, bool) {
+	if n <= 0 {
+		return nil, false
+	}
+	out := make([]string, n)
+	seen := make([]bool, n)
+	filled := 0
+	cur := -1
+	for _, line := range strings.Split(raw, "\n") {
+		if m := numberedTranslationRE.FindStringSubmatch(line); m != nil {
+			num, err := strconv.Atoi(m[1])
+			if err != nil || num < 1 || num > n {
+				return nil, false
+			}
+			idx := num - 1
+			if seen[idx] {
+				return nil, false // duplicate number: cannot trust the 1:1 mapping
+			}
+			seen[idx] = true
+			out[idx] = m[2]
+			filled++
+			cur = idx
+			continue
+		}
+		if cur >= 0 && strings.TrimSpace(line) != "" {
+			out[cur] += " " + line // continuation of a wrapped translation
+		}
+	}
+	if filled != n {
+		return nil, false
+	}
+	return out, true
 }
 
 // splitTimestampMarker splits a transcript line into its leading timestamp

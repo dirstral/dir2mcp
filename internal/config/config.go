@@ -49,6 +49,18 @@ const (
 // cue is merged into that cue.
 const DefaultMediaSubtitlesAlignToleranceMS = 2500
 
+// DefaultMediaTranslateWindowLines / DefaultMediaTranslateContextLines are the
+// built-in chat translate-engine window sizes (issue #573): translate cues in
+// batches of DefaultMediaTranslateWindowLines, each carrying a read-only margin
+// of DefaultMediaTranslateContextLines cues on either side. The window is large
+// enough to give the model real cross-cue context (referents, split sentences,
+// terminology) while staying a bounded single request; the margin is deliberately
+// small so context stays cheap. Both are language-agnostic (general-purpose).
+const (
+	DefaultMediaTranslateWindowLines  = 16
+	DefaultMediaTranslateContextLines = 3
+)
+
 type SecretSourceMetadata struct {
 	ElevenLabsAPIKey     string
 	CohereAPIKey         string
@@ -488,6 +500,25 @@ type Config struct {
 	// accumulate. 0 (default) preserves the historical single-pass behavior. Only
 	// consulted for MediaTranslateEngine="whisper".
 	MediaTranslateWhisperWindowSec int
+	// MediaTranslateWindowLines sets how many consecutive transcript cues the
+	// chat translate engine sends to the model in ONE request (config
+	// `media.translate.window_lines`, issue #573). Translating cues in a window
+	// lets the model see neighbouring cues, so it can resolve pronouns/agreement,
+	// keep split sentences coherent, and hold terminology consistent — the blind
+	// per-cue path degraded quality, worst on low-resource languages. A strict
+	// numbered 1:1 request/response contract preserves the one-source-cue ↔
+	// one-output-line invariant chunkTranscriptByTime depends on; a malformed
+	// batch response falls back to per-line translation for that window (never a
+	// desync). 0 (unset) means the built-in default; <=1 restores the historical
+	// per-line behaviour (and, with window_lines<=1 and context_lines=0, keeps
+	// pre-windowing translate caches valid). Only consulted for engine="chat".
+	MediaTranslateWindowLines int
+	// MediaTranslateContextLines sets how many surrounding cues on EACH side of a
+	// window are supplied to the chat translate engine as READ-ONLY context —
+	// shown to the model to disambiguate but never re-translated or returned
+	// (config `media.translate.context_lines`, issue #573). 0 means no margin.
+	// Only consulted for engine="chat".
+	MediaTranslateContextLines int
 	// MediaFilterWords is an optional, general-purpose list of boilerplate /
 	// credits / watermark phrases stripped from transcript and subtitle text
 	// (config `media.filter_words`). Matching is case-insensitive substring
@@ -806,6 +837,8 @@ type fileConfig struct {
 	MediaTranslateTargetLangs          []string
 	MediaTranslateEngine               *string
 	MediaTranslateWhisperWindowSec     *int
+	MediaTranslateWindowLines          *int
+	MediaTranslateContextLines         *int
 	MediaFilterWords                   []string
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
@@ -948,6 +981,8 @@ type persistedConfig struct {
 	MediaTranslateTargetLangs          []string      `yaml:"media_translate_target_langs"`
 	MediaTranslateEngine               string        `yaml:"media_translate_engine"`
 	MediaTranslateWhisperWindowSec     int           `yaml:"media_translate_whisper_window_sec"`
+	MediaTranslateWindowLines          int           `yaml:"media_translate_window_lines"`
+	MediaTranslateContextLines         int           `yaml:"media_translate_context_lines"`
 	MediaFilterWords                   []string      `yaml:"media_filter_words"`
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
@@ -1177,6 +1212,12 @@ func Default() Config {
 		MediaTranslateEnabled:     false,
 		MediaTranslateTargetLangs: nil,
 		MediaTranslateEngine:      "chat",
+		// Cross-line context for the chat translate engine (issue #573): translate
+		// cues in windows of this many, each with a small read-only margin, so the
+		// model sees neighbouring cues. On by default (quality fix); the 1:1
+		// numbered contract + per-window fallback keep subtitle timing exact.
+		MediaTranslateWindowLines:  DefaultMediaTranslateWindowLines,
+		MediaTranslateContextLines: DefaultMediaTranslateContextLines,
 		// Bilingual subtitle export (SPEC §8.6.10) is OFF by default; the align
 		// tolerance carries its spec default so an enabled-but-unspecified config
 		// behaves predictably.
@@ -1315,6 +1356,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaTranslateTargetLangs:          append([]string(nil), cfg.MediaTranslateTargetLangs...),
 		MediaTranslateEngine:               cfg.MediaTranslateEngine,
 		MediaTranslateWhisperWindowSec:     cfg.MediaTranslateWhisperWindowSec,
+		MediaTranslateWindowLines:          cfg.MediaTranslateWindowLines,
+		MediaTranslateContextLines:         cfg.MediaTranslateContextLines,
 		MediaFilterWords:                   append([]string(nil), cfg.MediaFilterWords...),
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
@@ -2073,6 +2116,12 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTranslateWhisperWindowSec != nil {
 		cfg.MediaTranslateWhisperWindowSec = *fc.MediaTranslateWhisperWindowSec
 	}
+	if fc.MediaTranslateWindowLines != nil {
+		cfg.MediaTranslateWindowLines = *fc.MediaTranslateWindowLines
+	}
+	if fc.MediaTranslateContextLines != nil {
+		cfg.MediaTranslateContextLines = *fc.MediaTranslateContextLines
+	}
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
@@ -2476,6 +2525,8 @@ var configKeyAliases = map[string]string{
 	"media_translate_target_langs":            "media.translate.target_langs",
 	"media_translate_engine":                  "media.translate.engine",
 	"media_translate_whisper_window_sec":      "media.translate.whisper_window_sec",
+	"media_translate_window_lines":            "media.translate.window_lines",
+	"media_translate_context_lines":           "media.translate.context_lines",
 	"media_filter_words":                      "media.filter_words",
 	"filter_words":                            "media.filter_words",
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
@@ -2684,6 +2735,8 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"rerank.candidate_pool":              func(c *fileConfig) **int { return &c.RerankCandidatePool },
 	"media.audio_window_sec":             func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
 	"media.translate.whisper_window_sec": func(c *fileConfig) **int { return &c.MediaTranslateWhisperWindowSec },
+	"media.translate.window_lines":       func(c *fileConfig) **int { return &c.MediaTranslateWindowLines },
+	"media.translate.context_lines":      func(c *fileConfig) **int { return &c.MediaTranslateContextLines },
 	"media.video_window_sec":             func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
 	"media.clip.max_duration_ms":         func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
 	"media.clip.max_bytes":               func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
@@ -2727,6 +2780,8 @@ var nonNegativeIntKeys = map[string]bool{
 	"retrieval.adaptive.k_max":                true,
 	"media.audio_window_sec":                  true,
 	"media.translate.whisper_window_sec":      true,
+	"media.translate.window_lines":            true,
+	"media.translate.context_lines":           true,
 	"media.video_window_sec":                  true,
 	"media.clip.max_duration_ms":              true,
 	"media.clip.max_bytes":                    true,
@@ -3161,6 +3216,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	}
 	writeInt("media_audio_window_sec", cfg.MediaAudioWindowSec)
 	writeInt("media_translate_whisper_window_sec", cfg.MediaTranslateWhisperWindowSec)
+	writeInt("media_translate_window_lines", cfg.MediaTranslateWindowLines)
+	writeInt("media_translate_context_lines", cfg.MediaTranslateContextLines)
 	writeInt("media_video_window_sec", cfg.MediaVideoWindowSec)
 	writeInt("media_clip_max_duration_ms", cfg.MediaClipMaxDurationMS)
 	writeInt("media_clip_max_bytes", cfg.MediaClipMaxBytes)
