@@ -1437,7 +1437,9 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 		return "", fmt.Errorf("marshal snapshot yaml: %w", err)
 	}
 	raw = appendSnapshotSecretSourceMetadata(raw, sources)
-	raw = appendSnapshotEmbedIdentity(raw, cfg.Providers().EmbedIdentity())
+	providers := cfg.Providers()
+	raw = appendSnapshotEmbedIdentity(raw, providers.EmbedIdentity())
+	raw = appendSnapshotEmbedBaseURL(raw, providers.EmbedBaseURL())
 	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
 		raw = append(raw, '\n')
 	}
@@ -1494,6 +1496,25 @@ func appendSnapshotEmbedIdentity(raw []byte, id string) []byte {
 		raw = append(raw, '\n')
 	}
 	return append(raw, []byte("embed_identity: "+id+"\n")...)
+}
+
+// appendSnapshotEmbedBaseURL records the normalized embed base_url (SPEC 8.1.4
+// / §6.4 `embed_base_url`) alongside the composite embed identity so the
+// endpoint that pins the vector space is legible without parsing the identity.
+// It is the SAME normalized value already folded into embed_identity's 2nd
+// field; a canonical/default/native-surface endpoint normalizes to "" and the
+// line is omitted (nothing to disambiguate). A top-level scalar — ignored by
+// the flat config parser and the providers:/model: yaml subtree decode on
+// reload.
+func appendSnapshotEmbedBaseURL(raw []byte, baseURL string) []byte {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return raw
+	}
+	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+	return append(raw, []byte("embed_base_url: "+baseURL+"\n")...)
 }
 
 // appendSnapshotSecretSourceMetadata appends a `secret_sources:` block

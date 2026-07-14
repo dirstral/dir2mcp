@@ -775,6 +775,19 @@ func (r ProviderResolution) EmbedIdentity() string {
 	return provider.EmbedIdentity(p, r.lateChunking)
 }
 
+// EmbedBaseURL is the normalized embed base_url component of the corpus-lifetime
+// identity (SPEC 8.1.4 / §6.4 `embed_base_url`), or "" if embed cannot be
+// resolved OR the endpoint is a native surface / canonical/default (rule 1/2).
+// It is persisted alongside the recorded identity so operators can read the
+// endpoint that pins the vector space without parsing the composite identity.
+func (r ProviderResolution) EmbedBaseURL() string {
+	p, err := r.Resolve(provider.CapEmbed)
+	if err != nil {
+		return ""
+	}
+	return provider.NormalizeEmbedBaseURL(p)
+}
+
 // Providers returns the provider resolution for cfg using os.Getenv for
 // credential expansion (SPEC §8.1). The CLI wiring (C2-iii) calls
 // Resolve per capability and builds the adapter via providerfactory.

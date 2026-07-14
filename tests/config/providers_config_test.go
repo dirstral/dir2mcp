@@ -161,10 +161,11 @@ func TestProviders_UserOverrideAndCustomProfile(t *testing.T) {
 func TestProviders_EmbedIdentityStable(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "mk")
 	id := loadCfg(t, "version: 1\n").Providers().EmbedIdentity()
-	// provider|text_model|code_model|text_dim|code_dim|multimodal|late_chunking
-	// (SPEC 8.1.4/8.1.6/8.1.7, issue #332/#446); default Mistral: native dims,
-	// multimodal + late_chunking off.
-	if id != "mistral|mistral-embed|codestral-embed|0|0|off|off" {
+	// provider|base_url|text_model|code_model|text_dim|code_dim|multimodal|
+	// late_chunking (SPEC 8.1.4/8.1.6/8.1.7, issue #332/#446/#560); default
+	// Mistral: canonical base_url normalizes to "", native dims, multimodal +
+	// late_chunking off.
+	if id != "mistral||mistral-embed|codestral-embed|0|0|off|off" {
 		t.Fatalf("embed identity = %q", id)
 	}
 }

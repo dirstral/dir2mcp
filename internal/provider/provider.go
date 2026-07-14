@@ -10,6 +10,7 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -298,12 +299,22 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 }
 
 // EmbedIdentity is the corpus-lifetime embed identity (SPEC 8.1.4):
-// provider name + text/code model + requested text/code output dimension
-// (8.1.6) + multimodal mode (8.1.7) + late-chunking mode (issue #332/#446).
-// It is recorded in the config snapshot/index and compared on load. Role
-// (8.1.5) is deliberately excluded — it does not affect vector-space
-// compatibility, but the requested dimension, multimodal mode, and
-// late-chunking mode do.
+// provider name + normalized embed base_url + text/code model + requested
+// text/code output dimension (8.1.6) + multimodal mode (8.1.7) + late-chunking
+// mode (issue #332/#446). It is recorded in the config snapshot/index and
+// compared on load. Role (8.1.5) is deliberately excluded — it does not affect
+// vector-space compatibility, but the base_url, requested dimension, multimodal
+// mode, and late-chunking mode do.
+//
+// The normalized base_url (2nd field, SPEC 8.1.4 order
+// provider|base_url|text_model|…) disambiguates two same-kind/same-model
+// profiles that point at DIFFERENT endpoints (issue #560/#440 F3): without it
+// they collapse to one identity and their vectors silently mix in one index.
+// It enters in NORMALIZED form (normalizeEmbedBaseURL): a not-meaningful kind
+// (native gemini/cohere) or a canonical/default/unset endpoint normalizes to
+// "" so that an existing hosted-default corpus — and any index built before
+// this rule — does NOT spuriously reindex; only an operator-overridden,
+// non-canonical endpoint yields a non-empty component.
 //
 // lateChunking is the resolved value of ingest.late_chunking (config, not a
 // provider attribute). It enters the identity because late chunking, once its
@@ -315,14 +326,123 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 // EmbedIdentity cannot observe), so toggling the flag re-derives even in a build
 // with no token-embedding provider — the safe direction.
 func EmbedIdentity(p Profile, lateChunking bool) string {
-	return fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s",
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%d|%s|%s",
 		strings.TrimSpace(p.Name),
+		normalizeEmbedBaseURL(p),
 		strings.TrimSpace(p.EmbedTextModel),
 		strings.TrimSpace(p.EmbedCodeModel),
 		p.EmbedTextDim,
 		p.EmbedCodeDim,
 		NormalizeEmbedMultimodal(p.EmbedMultimodal),
 		normalizeLateChunking(lateChunking))
+}
+
+// canonicalEmbedBaseURLs maps an embed-capable provider kind to the set of
+// base_urls that ship as a built-in / hosted default for that kind. An
+// effective base_url equal to one of these (after canonicalization) is
+// canonical and normalizes to "" (SPEC 8.1.4 rule 2), so an existing
+// hosted-default corpus is not forced to reindex. Native-surface kinds
+// (gemini, cohere) never consult this table — their base_url is not meaningful
+// (rule 1). Self-hosted kinds (omniembed) ship no canonical default, so any
+// configured endpoint is meaningful.
+//
+// MUST stay in sync with config.builtinProfiles: these are the openai-kind
+// built-ins' shipped base URLs plus the OpenAI wire default (the `openai`
+// built-in ships no base_url; its client defaults to api.openai.com/v1).
+var canonicalEmbedBaseURLs = map[Kind][]string{
+	KindOpenAI: {
+		"https://api.openai.com/v1",    // openai built-in (client default for an empty base_url)
+		"https://api.mistral.ai/v1",    // mistral built-in (the DEFAULT embed provider)
+		"https://openrouter.ai/api/v1", // openrouter built-in
+		"http://localhost:11434/v1",    // local built-in (credential-less)
+	},
+}
+
+// NormalizeEmbedBaseURL renders the profile's embed base_url as the stable
+// component used in the embed identity (SPEC 8.1.4). See normalizeEmbedBaseURL;
+// exported so the config layer can persist the same normalized value alongside
+// the recorded identity (§6.4).
+func NormalizeEmbedBaseURL(p Profile) string { return normalizeEmbedBaseURL(p) }
+
+// normalizeEmbedBaseURL implements the SPEC 8.1.4 base_url normalization:
+//
+//   - Rule 1 (not meaningful): a kind whose embed endpoint is a single
+//     canonical provider surface (native gemini / cohere) → "". base_url does
+//     not participate.
+//   - Rule 2 (canonical/default): an unset base_url, or one equal to the
+//     built-in/hosted default for the kind (canonicalEmbedBaseURLs), → "".
+//     Only an operator-overridden, non-canonical endpoint yields a non-empty
+//     component.
+//   - Rule 3 (canonicalization, non-empty case): canonicalizeEmbedBaseURL.
+//
+// "" is a first-class value (not "unknown"): an index built before this rule
+// recorded no base_url and MUST stay valid against any provider that also
+// normalizes to "" — so no hosted-default corpus spuriously reindexes.
+func normalizeEmbedBaseURL(p Profile) string {
+	switch p.Kind {
+	case KindGemini, KindCohere:
+		return "" // Rule 1: native single-surface embed.
+	}
+	raw := strings.TrimSpace(p.BaseURL)
+	if raw == "" {
+		return "" // Rule 2: unset → canonical/default.
+	}
+	norm := canonicalizeEmbedBaseURL(raw)
+	for _, c := range canonicalEmbedBaseURLs[p.Kind] {
+		if norm == canonicalizeEmbedBaseURL(c) {
+			return "" // Rule 2: equals a built-in/hosted default.
+		}
+	}
+	return norm
+}
+
+// canonicalizeEmbedBaseURL applies SPEC 8.1.4 rule 3 so endpoints that differ
+// only cosmetically compare equal: lowercase scheme+host, drop the default
+// port (80/http, 443/https), drop userinfo/query/fragment, strip trailing and
+// collapse duplicate path slashes while PRESERVING the remaining path (e.g.
+// /v1), and apply canonical percent-encoding. Path case is preserved (only the
+// host is lowercased). Dropping userinfo also keeps credentials out of the
+// recorded identity / any log line. An input that does not parse as an
+// absolute URL (e.g. an unexpanded ${VAR}) is returned trimmed so the
+// comparison stays deterministic.
+func canonicalizeEmbedBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.User = nil    // drop userinfo (never record/log a credential)
+	u.RawQuery = "" // drop query
+	u.Fragment = "" // drop fragment
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		u.Host = host + ":" + port
+	} else {
+		u.Host = host
+	}
+	// Collapse duplicate slashes and strip trailing slashes, preserving the
+	// leading slash and the remaining path segments.
+	if u.Path != "" {
+		for strings.Contains(u.Path, "//") {
+			u.Path = strings.ReplaceAll(u.Path, "//", "/")
+		}
+		if u.Path != "/" {
+			u.Path = strings.TrimRight(u.Path, "/")
+		} else {
+			u.Path = ""
+		}
+	}
+	u.RawPath = "" // force canonical re-encoding of Path in String()
+	u.Opaque = ""
+	return u.String()
 }
 
 // normalizeLateChunking renders the late-chunking mode as the stable token
@@ -369,27 +489,49 @@ func VerifyEmbedIdentity(recorded, current string) error {
 	}
 }
 
-// normalizeEmbedIdentity upgrades a legacy recorded identity to the
-// current 7-field form before comparison, so upgrading an existing corpus
-// that used native dimensions, no multimodal mode, and no late chunking does
-// not force a spurious reindex:
-//   - pre-8.1.6 (3 fields: provider|text|code)        → append "|0|0|off|off"
-//   - pre-8.1.7 (5 fields: …|tdim|cdim)               → append "|off|off"
-//   - pre-late-chunking (6 fields: …|multimodal, #446) → append "|off"
+// normalizeEmbedIdentity upgrades a legacy recorded identity to the current
+// 8-field form (provider|base_url|text|code|tdim|cdim|multimodal|late-chunking)
+// before comparison, so upgrading an existing corpus that used native
+// dimensions, no multimodal mode, no late chunking, and a hosted-default
+// endpoint does not force a spurious reindex.
 //
-// Empty (fresh index) and already-7-field values are returned unchanged.
+// EVERY pre-base_url form gains an EMPTY base_url component inserted at
+// position 2 (issue #560/#440 F3) — an index built before the base_url rule
+// recorded no endpoint, which is identity-equal to any current profile whose
+// base_url normalizes to "" (all built-in/hosted-default deployments):
+//   - pre-8.1.6 (3 fields: provider|text|code)             → insert "" + append "|0|0|off|off"
+//   - pre-8.1.7 (5 fields: …|tdim|cdim)                    → insert "" + append "|off|off"
+//   - pre-late-chunking (6 fields: …|multimodal, #446)     → insert "" + append "|off"
+//   - pre-base_url (7 fields: …|multimodal|late-chunking)  → insert "" only
+//
+// Empty (fresh index) and already-8-field values are returned unchanged. A
+// base_url component never contains "|" (canonicalizeEmbedBaseURL drops query/
+// fragment and percent-encodes the path), so field counting is unambiguous.
 func normalizeEmbedIdentity(id string) string {
 	if id == "" {
 		return ""
 	}
-	switch strings.Count(id, "|") {
-	case 2:
-		return id + "|0|0|off|off"
-	case 4:
-		return id + "|off|off"
-	case 5:
-		return id + "|off"
-	default:
+	parts := strings.Split(id, "|")
+	switch len(parts) {
+	case 3: // pre-8.1.6
+		return insertEmbedBaseURLField(parts) + "|0|0|off|off"
+	case 5: // pre-8.1.7
+		return insertEmbedBaseURLField(parts) + "|off|off"
+	case 6: // pre-late-chunking
+		return insertEmbedBaseURLField(parts) + "|off"
+	case 7: // pre-base_url (had the late-chunking field, no base_url)
+		return insertEmbedBaseURLField(parts)
+	default: // already 8 fields (current), or an unrecognized shape → unchanged
 		return id
 	}
+}
+
+// insertEmbedBaseURLField inserts an empty base_url component immediately after
+// the provider name (position 2), the slot base_url now occupies in the embed
+// identity (SPEC 8.1.4 order provider|base_url|…).
+func insertEmbedBaseURLField(parts []string) string {
+	out := make([]string, 0, len(parts)+1)
+	out = append(out, parts[0], "")
+	out = append(out, parts[1:]...)
+	return strings.Join(out, "|")
 }
