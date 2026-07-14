@@ -3552,17 +3552,8 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 		}
 	}
 
-	if len(query.DocTypes) > 0 {
-		docTypeMatch := false
-		for _, docType := range query.DocTypes {
-			if strings.EqualFold(strings.TrimSpace(docType), strings.TrimSpace(hit.DocType)) {
-				docTypeMatch = true
-				break
-			}
-		}
-		if !docTypeMatch {
-			return false
-		}
+	if !docTypeMatches(query.DocTypes, hit.DocType) {
+		return false
 	}
 
 	// Optional speaker filter (SPEC §8.6.8/§15.2): restrict to time-spanned
@@ -3591,6 +3582,54 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 		}
 	}
 
+	// Optional document-date window (SPEC §9.6): restrict to candidates whose
+	// source document's calendar anchor (mtime_unix) falls within the inclusive
+	// [date_from, date_to] window. Applied here at candidate selection — before
+	// cross-file de-dup, reranking, and truncation to k — so it only removes
+	// out-of-window candidates and never reorders or changes the result/citation
+	// structure, and k still counts only in-window hits.
+	if !withinDateWindow(hit.MTimeUnix, query.DateFrom, query.DateTo) {
+		return false
+	}
+
+	return true
+}
+
+// docTypeMatches reports whether hitDocType is a member of the requested doc-type
+// set (case-insensitive, trimmed). An empty set disables the predicate (a no-op
+// match), mirroring the other additive filters.
+func docTypeMatches(docTypes []string, hitDocType string) bool {
+	if len(docTypes) == 0 {
+		return true
+	}
+	for _, docType := range docTypes {
+		if strings.EqualFold(strings.TrimSpace(docType), strings.TrimSpace(hitDocType)) {
+			return true
+		}
+	}
+	return false
+}
+
+// withinDateWindow reports whether a candidate's document date (mtime, in Unix
+// seconds) falls within the inclusive [from, to] window (SPEC §9.6). Each bound is
+// optional: 0 means open on that side, and a both-open window matches every
+// candidate (the additive, off-by-default no-op). A candidate with an unknown
+// mtime (0) never matches a window that sets either bound — mirroring the
+// unknown-language rule (§8.8/§9.5) that an absent anchor never satisfies a
+// specific filter.
+func withinDateWindow(mtime, from, to int64) bool {
+	if from == 0 && to == 0 {
+		return true
+	}
+	if mtime <= 0 {
+		return false
+	}
+	if from != 0 && mtime < from {
+		return false
+	}
+	if to != 0 && mtime > to {
+		return false
+	}
 	return true
 }
 

@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/avutil"
@@ -749,7 +750,7 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {},
+		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -784,11 +785,15 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	dateFrom, dateTo, toolErr := parseDateWindow(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	sq := model.SearchQuery{
-		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch,
+		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch, DateFrom: dateFrom, DateTo: dateTo,
 	}
 	// index_used MUST be the index the query was actually routed to (SPEC §15.2),
 	// not the requested name. Prefer AxisSearcher so the reported axis is read back
@@ -855,7 +860,7 @@ func normalizeIndexAxis(axis string) string {
 
 func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {},
+		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -890,10 +895,14 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	dateFrom, dateTo, toolErr := parseDateWindow(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch}
+	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch, DateFrom: dateFrom, DateTo: dateTo}
 	if mode == "search_only" {
 		return s.runSearchOnlyMode(ctx, question, sq)
 	}
@@ -1852,6 +1861,69 @@ func parseLanguageMatchArg(args map[string]interface{}) (string, *toolExecutionE
 		}
 	}
 	return mode, nil
+}
+
+// parseDateBound parses an optional document-date window bound (SPEC §9.6). The
+// value may be an RFC 3339 timestamp (2026-04-01T00:00:00Z) or a bare YYYY-MM-DD
+// date interpreted in UTC. An absent or empty value yields (0, nil) — an open
+// bound. A bare date resolves to the start of that UTC day (00:00:00Z), or, when
+// endOfDay is set, to the last whole second of that day (23:59:59Z) so a bare
+// date_to bound is inclusive of the entire named day. A value that parses as
+// neither form is an INVALID_FIELD error (df-008). The returned value is Unix
+// seconds.
+func parseDateBound(args map[string]interface{}, key string, endOfDay bool) (int64, *toolExecutionError) {
+	raw, ok := args[key]
+	if !ok {
+		return 0, nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return 0, &toolExecutionError{Code: "INVALID_FIELD", Message: fmt.Sprintf("%s must be a string", key), Retryable: false}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t.Unix(), nil
+	}
+	if t, err := time.Parse("2006-01-02", value); err == nil {
+		if endOfDay {
+			// Inclusive upper bound: the last whole second of the named UTC day.
+			t = t.Add(24*time.Hour - time.Second)
+		}
+		return t.Unix(), nil
+	}
+	return 0, &toolExecutionError{
+		Code:      "INVALID_FIELD",
+		Message:   fmt.Sprintf("%s must be an RFC 3339 timestamp or a YYYY-MM-DD date, got %q", key, value),
+		Retryable: false,
+	}
+}
+
+// parseDateWindow parses the optional date_from/date_to arguments into an
+// inclusive [from, to] window in Unix seconds (SPEC §9.6). Absent bounds are 0
+// (open on that side). date_from anchors to the start of its day and date_to to
+// the end of its day (see parseDateBound). An inverted window (from after to) is
+// an INVALID_FIELD error (df-008); a window that simply matches nothing is left
+// to retrieval to return as an empty result, not an error.
+func parseDateWindow(args map[string]interface{}) (dateFrom, dateTo int64, toolErr *toolExecutionError) {
+	dateFrom, toolErr = parseDateBound(args, "date_from", false)
+	if toolErr != nil {
+		return 0, 0, toolErr
+	}
+	dateTo, toolErr = parseDateBound(args, "date_to", true)
+	if toolErr != nil {
+		return 0, 0, toolErr
+	}
+	if dateFrom > 0 && dateTo > 0 && dateFrom > dateTo {
+		return 0, 0, &toolExecutionError{
+			Code:      "INVALID_FIELD",
+			Message:   "date_from must not be after date_to",
+			Retryable: false,
+		}
+	}
+	return dateFrom, dateTo, nil
 }
 
 // mapSearchError converts a search/ask error into a toolExecutionError.
@@ -3037,6 +3109,14 @@ func searchInputSchema() map[string]interface{} {
 				"default":     "primary",
 				"description": "Optional (SPEC §9.5): matching mode for languages. 'primary' (default) matches on the BCP-47 primary subtag (pt-BR matches pt); 'strict' opts into RFC 4647 region/script narrowing (pt-BR matches pt-BR/pt-BR-… but not bare pt or pt-PT).",
 			},
+			"date_from": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional (SPEC §9.6): restrict hits to documents whose date (mtime) is on or after this bound (inclusive). Accepts an RFC 3339 timestamp (2026-04-01T00:00:00Z) or a bare YYYY-MM-DD date (start of that UTC day). Absent = open lower bound.",
+			},
+			"date_to": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional (SPEC §9.6): restrict hits to documents whose date (mtime) is on or before this bound (inclusive). Accepts an RFC 3339 timestamp or a bare YYYY-MM-DD date (end of that UTC day, 23:59:59Z). Absent = open upper bound.",
+			},
 		},
 		"required": []string{"query"},
 	}
@@ -3080,6 +3160,14 @@ func askInputSchema() map[string]interface{} {
 				"enum":        []string{"primary", "strict"},
 				"default":     "primary",
 				"description": "Optional (SPEC §9.5): matching mode for languages. 'primary' (default) matches on the BCP-47 primary subtag (pt-BR matches pt); 'strict' opts into RFC 4647 region/script narrowing (pt-BR matches pt-BR/pt-BR-… but not bare pt or pt-PT).",
+			},
+			"date_from": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional (SPEC §9.6): restrict retrieved contexts to documents whose date (mtime) is on or after this bound (inclusive). Accepts an RFC 3339 timestamp (2026-04-01T00:00:00Z) or a bare YYYY-MM-DD date (start of that UTC day). Absent = open lower bound.",
+			},
+			"date_to": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional (SPEC §9.6): restrict retrieved contexts to documents whose date (mtime) is on or before this bound (inclusive). Accepts an RFC 3339 timestamp or a bare YYYY-MM-DD date (end of that UTC day, 23:59:59Z). Absent = open upper bound.",
 			},
 		},
 		"required": []string{"question"},
