@@ -3929,17 +3929,19 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		return false, err
 	}
 
+	// Multi-track honesty (issue #567): the transcription above fed only the first
+	// audio stream (ffmpeg's default selection) to STT. If the container carries
+	// additional audio streams — per-language dubs, an M&E track — surface them so
+	// the selection is visible rather than silent. Fired BEFORE the empty-transcript
+	// early return so a non-dialogue first track (e.g. an M&E track yielding an empty
+	// transcript) still warns about the dropped dialogue tracks (optibot #596).
+	// Best-effort and non-fatal: it never affects the transcript that was produced.
+	s.warnMultiTrackAudio(ctx, doc)
+
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
 		return false, nil
 	}
-
-	// Multi-track honesty (issue #567): the transcription above fed only the first
-	// audio stream (ffmpeg's default selection) to STT. If the container carries
-	// additional audio streams — per-language dubs, an M&E track — surface them so
-	// the selection is visible rather than silent. Best-effort and non-fatal: it
-	// never affects the transcript that was already produced.
-	s.warnMultiTrackAudio(ctx, doc)
 
 	var duration time.Duration
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
