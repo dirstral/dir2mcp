@@ -247,10 +247,16 @@ func collapseTranslatedLine(s string) string {
 const translateLineMaxTokens = 512
 
 // generateBounded runs the translator with a per-call max-tokens cap when it
-// implements model.BoundedGenerator, else falls back to the plain Generator.
+// implements model.BoundedGenerator, else falls back to the plain Generator. A
+// non-positive maxTokens also falls back to Generate — mirroring the
+// model.BoundedGenerator contract ("<= 0 means use default") and keeping this
+// aligned with retrieval.boundedGenerate, so a future zero-cap opt-out behaves
+// identically on both paths rather than silently passing 0 here.
 func (s *Service) generateBounded(ctx context.Context, prompt string, maxTokens int) (string, error) {
-	if bg, ok := s.translator.(model.BoundedGenerator); ok {
-		return bg.GenerateWithMaxTokens(ctx, prompt, maxTokens)
+	if maxTokens > 0 {
+		if bg, ok := s.translator.(model.BoundedGenerator); ok {
+			return bg.GenerateWithMaxTokens(ctx, prompt, maxTokens)
+		}
 	}
 	return s.translator.Generate(ctx, prompt)
 }
