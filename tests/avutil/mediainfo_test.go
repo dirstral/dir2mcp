@@ -73,6 +73,72 @@ func TestParseMediaInfoPartial(t *testing.T) {
 	}
 }
 
+// TestParseMediaInfoMultiTrackAudio pins the issue #567 census: every audio
+// stream is enumerated (in ffprobe order) with its index/codec/channels and
+// declared language/title tags, while AudioCodec stays the first stream's codec
+// for backward compatibility. A single proxy MP4 carrying an original mix, a
+// per-language dub, and a music-&-effects track must report all three so the
+// dropped tracks are not silent.
+func TestParseMediaInfoMultiTrackAudio(t *testing.T) {
+	raw := []byte(`{
+	  "streams": [
+	    {"index":0,"codec_type":"video","codec_name":"h264","width":1280,"height":720},
+	    {"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"eng","title":"Original"}},
+	    {"index":2,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"rus"}},
+	    {"index":3,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"title":"Music & Effects"}}
+	  ],
+	  "format": {"format_name":"mov,mp4,m4a,3gp,3g2,mj2","bit_rate":"2000000"}
+	}`)
+	info, err := avutil.ParseMediaInfo(raw)
+	if err != nil {
+		t.Fatalf("ParseMediaInfo: %v", err)
+	}
+	if info.AudioCodec != "aac" {
+		t.Fatalf("AudioCodec = %q, want first stream's codec aac", info.AudioCodec)
+	}
+	if !info.HasMultipleAudioStreams() {
+		t.Fatalf("HasMultipleAudioStreams() = false, want true for 3 audio streams")
+	}
+	if got := info.AudioStreamCount(); got != 3 {
+		t.Fatalf("AudioStreamCount() = %d, want 3", got)
+	}
+	// Enumerated in ffprobe order with absolute stream index preserved.
+	if info.AudioStreams[0].Index != 1 || info.AudioStreams[0].Language != "eng" ||
+		info.AudioStreams[0].Channels != 2 || info.AudioStreams[0].Title != "Original" {
+		t.Errorf("stream[0] = %+v, want {Index:1 aac 2ch lang=eng title=Original}", info.AudioStreams[0])
+	}
+	if info.AudioStreams[1].Index != 2 || info.AudioStreams[1].Language != "rus" {
+		t.Errorf("stream[1] = %+v, want {Index:2 lang=rus}", info.AudioStreams[1])
+	}
+	if info.AudioStreams[2].Index != 3 || info.AudioStreams[2].Title != "Music & Effects" ||
+		info.AudioStreams[2].Language != "" {
+		t.Errorf("stream[2] = %+v, want {Index:3 title=\"Music & Effects\" no-lang}", info.AudioStreams[2])
+	}
+}
+
+// TestParseMediaInfoSingleTrackAudio pins that ordinary single-track media reports
+// exactly one audio stream and is not flagged as multi-track (issue #567), so the
+// diagnostic never fires for the common case.
+func TestParseMediaInfoSingleTrackAudio(t *testing.T) {
+	raw := []byte(`{
+	  "streams": [
+	    {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+	    {"index":1,"codec_type":"audio","codec_name":"aac","channels":2}
+	  ],
+	  "format": {"format_name":"mov,mp4","bit_rate":"1500000"}
+	}`)
+	info, err := avutil.ParseMediaInfo(raw)
+	if err != nil {
+		t.Fatalf("ParseMediaInfo: %v", err)
+	}
+	if info.HasMultipleAudioStreams() {
+		t.Fatalf("single audio track must not report multi-track")
+	}
+	if info.AudioStreamCount() != 1 || info.AudioStreams[0].CodecName != "aac" {
+		t.Fatalf("audio streams = %+v, want one aac stream", info.AudioStreams)
+	}
+}
+
 // TestProbeMediaInfoToolNotFound pins the fail-open contract: when ffprobe is
 // absent, ProbeMediaInfo returns ErrToolNotFound so callers omit SMIL. Skipped
 // when ffprobe IS installed (then there is no "not found" path to assert).

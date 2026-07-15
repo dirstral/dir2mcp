@@ -93,7 +93,52 @@ type MediaInfo struct {
 	// audio-only media or when not reported.
 	Width  int
 	Height int
+	// AudioStreams enumerates every audio stream in the container in ffprobe
+	// order (issue #567). It is empty for media with no audio. AudioCodec mirrors
+	// the first entry's codec for backward compatibility; consumers that must
+	// account for additional tracks — multi-language dubs / a music-&-effects
+	// track in broadcast/proxy media — read this slice instead of only AudioCodec.
+	AudioStreams []AudioStream
 }
+
+// AudioStream describes a single audio stream discovered in a media container.
+// It is the per-track census used to detect multi-track media (issue #567): the
+// transcription path feeds only the first audio stream to STT, so a container
+// bundling an original mix, per-language dubs, and a music-&-effects track would
+// otherwise be transcribed from track 0 alone with no signal that the rest
+// existed. All fields are best-effort — any may be zero/empty when ffprobe does
+// not report it — and callers MUST fail open rather than treat a missing field
+// as an error.
+type AudioStream struct {
+	// Index is the absolute ffprobe stream index within the container (across all
+	// stream types), as reported by ffprobe. The position within
+	// MediaInfo.AudioStreams gives the audio-relative order instead (0 == the
+	// first audio stream, the one ffmpeg selects by default and the only one
+	// currently transcribed; it is what `-map 0:a:0` selects).
+	Index int
+	// CodecName is the stream's codec_name (e.g. "aac"), empty when unreported.
+	CodecName string
+	// Channels is the channel count (1 mono, 2 stereo, …), 0 when unreported.
+	Channels int
+	// Language is the declared language metadata tag (ffprobe stream tag
+	// `language`, e.g. "eng", "rus", "und"), empty when the container carries no
+	// per-track language tag. It is only the tag the container declares — never
+	// inferred or detected here — so it stays general-purpose (no hardcoded
+	// language assumptions).
+	Language string
+	// Title is the declared stream `title` tag (e.g. "Music & Effects",
+	// "Commentary") when present, empty otherwise. A common broadcast hint about a
+	// track's role.
+	Title string
+}
+
+// AudioStreamCount reports how many audio streams the probed media carries.
+func (m MediaInfo) AudioStreamCount() int { return len(m.AudioStreams) }
+
+// HasMultipleAudioStreams reports whether the media carries more than one audio
+// stream — the multi-track case where transcribing only the first audio stream
+// (the current behavior) silently drops the others (issue #567).
+func (m MediaInfo) HasMultipleAudioStreams() bool { return len(m.AudioStreams) > 1 }
 
 // HasVideo reports whether the probed media carries a video stream with usable
 // dimensions, the precondition for emitting video width/height in SMIL.
@@ -103,10 +148,16 @@ func (m MediaInfo) HasVideo() bool {
 
 // ffprobeStream is the per-stream shape decoded from ffprobe -show_streams JSON.
 type ffprobeStream struct {
+	Index     int    `json:"index"`
 	CodecType string `json:"codec_type"`
 	CodecName string `json:"codec_name"`
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
+	Channels  int    `json:"channels"`
+	Tags      struct {
+		Language string `json:"language"`
+		Title    string `json:"title"`
+	} `json:"tags"`
 }
 
 // ffprobeFormat is the container shape decoded from ffprobe -show_format JSON.
@@ -134,7 +185,7 @@ func ProbeMediaInfo(ctx context.Context, path string) (MediaInfo, error) {
 	}
 	cmd := exec.CommandContext(ctx, bin,
 		"-v", "error",
-		"-show_entries", "format=format_name,bit_rate:stream=codec_type,codec_name,width,height",
+		"-show_entries", "format=format_name,bit_rate:stream=index,codec_type,codec_name,width,height,channels:stream_tags=language,title",
 		"-of", "json",
 		"--", path,
 	)
@@ -150,7 +201,10 @@ func ProbeMediaInfo(ctx context.Context, path string) (MediaInfo, error) {
 // parseMediaInfo decodes ffprobe -of json output into a MediaInfo. It is split
 // out (and exported via ParseMediaInfo) so the JSON mapping can be unit-tested
 // from the tests/ tree against captured ffprobe output without the binary. The
-// first video and first audio stream win; later streams are ignored.
+// first video stream wins for the codec/dimension fields, and AudioCodec mirrors
+// the first audio stream, but every audio stream is enumerated into AudioStreams
+// (in ffprobe order) so multi-track media is no longer silently reduced to track
+// 0 (issue #567).
 func parseMediaInfo(raw []byte) (MediaInfo, error) {
 	var probed ffprobeOutput
 	if err := json.Unmarshal(raw, &probed); err != nil {
@@ -173,8 +227,16 @@ func parseMediaInfo(raw []byte) (MediaInfo, error) {
 				}
 			}
 		case "audio":
+			as := AudioStream{
+				Index:     s.Index,
+				CodecName: strings.TrimSpace(s.CodecName),
+				Channels:  s.Channels,
+				Language:  strings.TrimSpace(s.Tags.Language),
+				Title:     strings.TrimSpace(s.Tags.Title),
+			}
+			info.AudioStreams = append(info.AudioStreams, as)
 			if info.AudioCodec == "" {
-				info.AudioCodec = strings.TrimSpace(s.CodecName)
+				info.AudioCodec = as.CodecName
 			}
 		}
 	}
