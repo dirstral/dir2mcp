@@ -53,6 +53,13 @@ type providersDoc struct {
 		Chat  capBindingYAML `yaml:"chat"`
 		OCR   capBindingYAML `yaml:"ocr"`
 	} `yaml:"model"`
+	// declOrder is the order the profile names appear in the `providers:`
+	// mapping. yaml.v3 decodes the mapping into a Go map, which loses key
+	// order, so declared order is recovered separately (see
+	// providerDeclOrder) and used to order user-only profiles in the
+	// auto-selection precedence (SPEC 8.1.3). Empty when there is no
+	// providers block or order recovery failed.
+	declOrder []string
 }
 
 // builtinProfiles ship per SPEC 8.1.1 so operators usually only supply a
@@ -101,7 +108,10 @@ func builtinProfiles() map[string]providerProfileYAML {
 
 // builtinPrecedence is the deterministic auto-selection order (SPEC
 // 8.1.3): Mistral first (historical default), then the rest. User-only
-// profiles are appended in declared order after these.
+// profiles are appended after these in the order they are declared in the
+// YAML `providers:` mapping (recovered by providerDeclOrder; issue #440 F8) —
+// or, if declared order cannot be recovered, in sorted name order for
+// determinism.
 //
 // `mistral-ocr` (kind: mistral — the Voxtral STT / Mistral-OCR path) precedes
 // `mistral` (kind: openai — the OpenAI-compatible chat/embed path). This
@@ -293,15 +303,53 @@ func parseProvidersDoc(raw []byte) (providersDoc, error) {
 	if err := yaml.Unmarshal(sub, &doc); err != nil {
 		return providersDoc{}, fmt.Errorf("parse providers/model config: %w", err)
 	}
+	doc.declOrder = providerDeclOrder(sub)
 	return doc, nil
+}
+
+// providerDeclOrder recovers the profile names in the order they are declared
+// in the `providers:` mapping (issue #440 F8). yaml.v3 decodes a mapping into a
+// Go map, which loses key order, so the declared order — the SPEC 8.1.3
+// precedence for user-only profiles — is recovered by walking the mapping
+// node's Content (keys sit at even indices). Returns nil when there is no
+// `providers:` block or the subtree cannot be node-decoded, in which case the
+// caller falls back to a deterministic sorted order.
+func providerDeclOrder(sub []byte) []string {
+	var root yaml.Node
+	if err := yaml.Unmarshal(sub, &root); err != nil || len(root.Content) == 0 {
+		return nil
+	}
+	top := root.Content[0]
+	if top.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		if top.Content[i].Value != "providers" {
+			continue
+		}
+		pmap := top.Content[i+1]
+		if pmap.Kind != yaml.MappingNode {
+			return nil
+		}
+		order := make([]string, 0, len(pmap.Content)/2)
+		for j := 0; j+1 < len(pmap.Content); j += 2 {
+			order = append(order, pmap.Content[j].Value)
+		}
+		return order
+	}
+	return nil
 }
 
 // mergeProfiles overlays user-declared profiles per-field over the
 // built-ins and returns the merged set plus the deterministic
-// precedence order (built-ins first, then user-only names in declared
-// order — Go map order is non-deterministic so user-only ordering falls
-// back to sorted names for stability).
-func mergeProfiles(base, user map[string]providerProfileYAML) (map[string]providerProfileYAML, []string) {
+// precedence order: built-ins first (builtinPrecedence), then user-only
+// names in declared order (SPEC 8.1.3). declOrder carries the order the
+// profiles appear in the YAML `providers:` mapping (recovered by
+// providerDeclOrder, since a decoded Go map loses key order); any user-only
+// profile not present in declOrder — the defensive path when order recovery
+// fails — is appended in sorted name order so the result is always
+// deterministic (issue #440 F8).
+func mergeProfiles(base, user map[string]providerProfileYAML, declOrder []string) (map[string]providerProfileYAML, []string) {
 	merged := base
 	for name, up := range user {
 		base, ok := merged[name]
@@ -348,21 +396,42 @@ func mergeProfiles(base, user map[string]providerProfileYAML) (map[string]provid
 		merged[name] = base
 	}
 	order := append([]string(nil), builtinPrecedence...)
+	return merged, append(order, userOnlyOrder(user, declOrder)...)
+}
+
+// userOnlyOrder returns the non-built-in profile names in auto-selection
+// precedence order (SPEC 8.1.3): first the names present in declOrder (the YAML
+// declaration order recovered by providerDeclOrder, de-duplicated), then any
+// user-only profile declOrder did not cover — the defensive path when order
+// recovery fails or is partial — in sorted name order so the result is always
+// deterministic regardless of Go map iteration (issue #440 F8).
+func userOnlyOrder(user map[string]providerProfileYAML, declOrder []string) []string {
+	builtins := builtinProfiles()
+	isUserOnly := func(name string) bool {
+		if _, ok := user[name]; !ok {
+			return false
+		}
+		_, isBuiltin := builtins[name]
+		return !isBuiltin
+	}
 	var extra []string
+	seen := make(map[string]struct{}, len(user))
+	for _, name := range declOrder {
+		if _, dup := seen[name]; dup || !isUserOnly(name) {
+			continue
+		}
+		seen[name] = struct{}{}
+		extra = append(extra, name)
+	}
+	var leftover []string
 	for name := range user {
-		if _, isBuiltin := builtinProfiles()[name]; !isBuiltin {
-			extra = append(extra, name)
+		if _, ok := seen[name]; ok || !isUserOnly(name) {
+			continue
 		}
+		leftover = append(leftover, name)
 	}
-	// stable order for user-only profiles
-	for i := 0; i < len(extra); i++ {
-		for j := i + 1; j < len(extra); j++ {
-			if extra[j] < extra[i] {
-				extra[i], extra[j] = extra[j], extra[i]
-			}
-		}
-	}
-	return merged, append(order, extra...)
+	sort.Strings(leftover)
+	return append(extra, leftover...)
 }
 
 // expandEnv resolves ${VAR} / $VAR references via getenv (SPEC 16.1.1
@@ -421,7 +490,7 @@ type ProviderResolution struct {
 
 // providersResolution builds the resolution from the parsed doc + env.
 func (d providersDoc) resolve(base map[string]providerProfileYAML, getenv func(string) string) ProviderResolution {
-	merged, order := mergeProfiles(base, d.Providers)
+	merged, order := mergeProfiles(base, d.Providers, d.declOrder)
 	byName := toProfiles(merged, getenv)
 	prec := make([]provider.Profile, 0, len(order))
 	for _, n := range order {
@@ -638,6 +707,33 @@ func (c *Config) validateMediaDiarize() error {
 	return nil
 }
 
+// validateProviderKinds fails fast (CONFIG_INVALID) when any resolved provider
+// profile declares an unrecognized `kind:` (issue #440 F7). An unknown/typo
+// kind has no row in the capability matrix (SPEC 8.1.2), so the profile is
+// silently un-selectable in `auto` and surfaces only as a generic
+// "no eligible provider" error far from its cause — a typo the operator cannot
+// act on. Validating here names the offending profile and the bad kind at
+// startup so the misconfiguration is actionable immediately. Profiles are
+// scanned in sorted order so the reported error is stable across runs (Go map
+// iteration is non-deterministic).
+func (c *Config) validateProviderKinds() error {
+	byName := c.Providers().ByName()
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p := byName[name]
+		if !provider.IsKnownKind(p.Kind) {
+			return fmt.Errorf(
+				"CONFIG_INVALID: provider profile %q declares unrecognized kind %q; use one of %s",
+				name, p.Kind, provider.KnownKindsString())
+		}
+	}
+	return nil
+}
+
 // readSnapshotEmbedIdentity returns the embed_identity recorded in the
 // effective snapshot for stateDir, or "" if there is no snapshot / no
 // recorded identity (a fresh index — VerifyEmbedIdentity treats that as
@@ -701,7 +797,7 @@ func (cfg Config) Providers() ProviderResolution {
 func (cfg Config) ProviderEnvVarRefs() []string {
 	base := builtinProfiles()
 	seedLegacy(base, cfg)
-	merged, _ := mergeProfiles(base, cfg.providersDoc.Providers)
+	merged, _ := mergeProfiles(base, cfg.providersDoc.Providers, cfg.providersDoc.declOrder)
 
 	seen := make(map[string]struct{})
 	var refs []string

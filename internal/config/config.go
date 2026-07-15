@@ -3633,6 +3633,11 @@ func (c *Config) Validate() error {
 		c.validateIngestOnUnsupported,
 		c.validateIngestExtractor,
 		c.validateIndexBackend,
+		// Before the provider-resolving gates (STT/media): an unrecognized
+		// provider `kind:` must fail here with its own root-cause CONFIG_INVALID
+		// (naming the profile + bad kind) rather than surfacing downstream as a
+		// generic "no eligible provider" error (issue #440 F7).
+		c.validateProviderKinds,
 		c.validateMediaVariants,
 		// Before the media gates: validateMediaTranslate/validateMediaDiarize
 		// resolve the STT profile, so an unrecognized stt.provider must fail here
