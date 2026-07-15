@@ -10,6 +10,7 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -337,25 +338,28 @@ func EmbedIdentity(p Profile, lateChunking bool) string {
 		normalizeLateChunking(lateChunking))
 }
 
-// canonicalEmbedBaseURLs maps an embed-capable provider kind to the set of
-// base_urls that ship as a built-in / hosted default for that kind. An
-// effective base_url equal to one of these (after canonicalization) is
-// canonical and normalizes to "" (SPEC 8.1.4 rule 2), so an existing
-// hosted-default corpus is not forced to reindex. Native-surface kinds
-// (gemini, cohere) never consult this table — their base_url is not meaningful
-// (rule 1). Self-hosted kinds (omniembed) ship no canonical default, so any
-// configured endpoint is meaningful.
+// canonicalEmbedBaseURLByBuiltin maps a built-in embed profile NAME to the
+// base_url it ships with, so an effective base_url equal to *that profile's own*
+// shipped default canonicalizes to "" (SPEC 8.1.4 rule 2: "equals the built-in
+// profile's shipped canonical base_url **for that provider**"). Matching is
+// per-profile, NOT kind-wide: all four entries are `kind: openai`, but a profile
+// is canonical only at its own endpoint. A `mistral` profile pointed at
+// api.openai.com is therefore a non-canonical override that keeps a distinct,
+// non-empty base_url component — a kind-wide set would instead collapse both to
+// "" and let vectors from two different backends silently share one index (the
+// exact mis-bind 8.1.4 exists to prevent). Native-surface kinds (gemini, cohere)
+// never consult this table (rule 1); self-hosted kinds (omniembed) and any
+// operator-named custom profile ship no canonical default, so any configured
+// endpoint is meaningful.
 //
-// MUST stay in sync with config.builtinProfiles: these are the openai-kind
-// built-ins' shipped base URLs plus the OpenAI wire default (the `openai`
-// built-in ships no base_url; its client defaults to api.openai.com/v1).
-var canonicalEmbedBaseURLs = map[Kind][]string{
-	KindOpenAI: {
-		"https://api.openai.com/v1",    // openai built-in (client default for an empty base_url)
-		"https://api.mistral.ai/v1",    // mistral built-in (the DEFAULT embed provider)
-		"https://openrouter.ai/api/v1", // openrouter built-in
-		"http://localhost:11434/v1",    // local built-in (credential-less)
-	},
+// MUST stay in sync with config.builtinProfiles. The `openai` built-in ships no
+// base_url; its client defaults to the OpenAI wire endpoint, recorded here so an
+// explicit api.openai.com on an `openai` profile also collapses to "".
+var canonicalEmbedBaseURLByBuiltin = map[string]string{
+	"openai":     "https://api.openai.com/v1",    // client default for an empty base_url
+	"mistral":    "https://api.mistral.ai/v1",    // the DEFAULT embed provider
+	"openrouter": "https://openrouter.ai/api/v1", //
+	"local":      "http://localhost:11434/v1",    // credential-less
 }
 
 // NormalizeEmbedBaseURL renders the profile's embed base_url as the stable
@@ -369,15 +373,16 @@ func NormalizeEmbedBaseURL(p Profile) string { return normalizeEmbedBaseURL(p) }
 //   - Rule 1 (not meaningful): a kind whose embed endpoint is a single
 //     canonical provider surface (native gemini / cohere) → "". base_url does
 //     not participate.
-//   - Rule 2 (canonical/default): an unset base_url, or one equal to the
-//     built-in/hosted default for the kind (canonicalEmbedBaseURLs), → "".
-//     Only an operator-overridden, non-canonical endpoint yields a non-empty
-//     component.
+//   - Rule 2 (canonical/default): an unset base_url, or one equal to *this
+//     profile's own* built-in shipped default (canonicalEmbedBaseURLByBuiltin,
+//     matched by profile name), → "". Only an operator-overridden, non-canonical
+//     endpoint — including a built-in profile pointed at a *different* vendor's
+//     host — yields a non-empty component.
 //   - Rule 3 (canonicalization, non-empty case): canonicalizeEmbedBaseURL.
 //
 // "" is a first-class value (not "unknown"): an index built before this rule
 // recorded no base_url and MUST stay valid against any provider that also
-// normalizes to "" — so no hosted-default corpus spuriously reindexes.
+// normalizes to "" — so no default-endpoint corpus spuriously reindexes.
 func normalizeEmbedBaseURL(p Profile) string {
 	switch p.Kind {
 	case KindGemini, KindCohere:
@@ -388,9 +393,12 @@ func normalizeEmbedBaseURL(p Profile) string {
 		return "" // Rule 2: unset → canonical/default.
 	}
 	norm := canonicalizeEmbedBaseURL(raw)
-	for _, c := range canonicalEmbedBaseURLs[p.Kind] {
-		if norm == canonicalizeEmbedBaseURL(c) {
-			return "" // Rule 2: equals a built-in/hosted default.
+	// Rule 2: collapse to "" only when the endpoint equals THIS profile's own
+	// shipped default (per-profile, not kind-wide) — so a built-in pointed at a
+	// foreign host stays distinct and cannot mix vector spaces.
+	if def, ok := canonicalEmbedBaseURLByBuiltin[strings.TrimSpace(p.Name)]; ok {
+		if norm == canonicalizeEmbedBaseURL(def) {
+			return ""
 		}
 	}
 	return norm
@@ -412,7 +420,13 @@ func canonicalizeEmbedBaseURL(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		return raw
+		// Not an absolute URL (e.g. an unexpanded ${VAR}, or a value url.Parse
+		// rejects). Return a sanitized form rather than the raw string: it must
+		// never carry a "|" (the embed-identity field delimiter — a leaked "|"
+		// would corrupt normalizeEmbedIdentity's field count), a control
+		// character, or a userinfo credential (this value flows into the recorded
+		// identity, the config snapshot, and CLI output).
+		return sanitizeOpaqueBaseURL(raw)
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.User = nil    // drop userinfo (never record/log a credential)
@@ -423,26 +437,62 @@ func canonicalizeEmbedBaseURL(raw string) string {
 	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
 		port = ""
 	}
-	if port != "" {
-		u.Host = host + ":" + port
-	} else {
+	// net.JoinHostPort brackets an IPv6 literal ("fe80::1" → "[fe80::1]:443");
+	// a bare host-only IPv6 literal needs the brackets too (u.Hostname() strips
+	// them). Manual host+":"+port would mis-serialize both.
+	switch {
+	case port != "":
+		u.Host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		u.Host = "[" + host + "]"
+	default:
 		u.Host = host
 	}
-	// Collapse duplicate slashes and strip trailing slashes, preserving the
-	// leading slash and the remaining path segments.
-	if u.Path != "" {
-		for strings.Contains(u.Path, "//") {
-			u.Path = strings.ReplaceAll(u.Path, "//", "/")
+	// Collapse duplicate slashes and strip trailing slashes on the ESCAPED path,
+	// so a genuine "/" separator is normalized while a percent-encoded slash
+	// (%2F) — a distinct, non-separator path byte — is preserved rather than
+	// silently folded into a separator (which would let two different endpoints
+	// canonicalize to one identity).
+	if esc := u.EscapedPath(); esc != "" {
+		for strings.Contains(esc, "//") {
+			esc = strings.ReplaceAll(esc, "//", "/")
 		}
-		if u.Path != "/" {
-			u.Path = strings.TrimRight(u.Path, "/")
+		if esc != "/" {
+			esc = strings.TrimRight(esc, "/")
 		} else {
-			u.Path = ""
+			esc = ""
+		}
+		// Set Path (decoded) and RawPath (encoded) consistently so String()
+		// re-emits the preserved encoding.
+		u.RawPath = esc
+		if dec, derr := url.PathUnescape(esc); derr == nil {
+			u.Path = dec
+		} else {
+			u.Path = esc
 		}
 	}
-	u.RawPath = "" // force canonical re-encoding of Path in String()
 	u.Opaque = ""
 	return u.String()
+}
+
+// sanitizeOpaqueBaseURL renders a base_url that does not parse as an absolute URL
+// into a value safe to record as an embed-identity component: it drops a
+// userinfo credential prefix (…@ before the first path slash) and strips the
+// identity delimiter "|" and control characters. It deliberately does not try to
+// "fix" the value — an unexpanded ${VAR} passes through minus those hazards — so
+// the comparison in normalizeEmbedBaseURL stays deterministic.
+func sanitizeOpaqueBaseURL(raw string) string {
+	if at := strings.IndexByte(raw, '@'); at >= 0 {
+		if slash := strings.IndexByte(raw, '/'); slash < 0 || at < slash {
+			raw = raw[at+1:] // drop a leading user[:pass]@ credential
+		}
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '|' || r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, raw)
 }
 
 // normalizeLateChunking renders the late-chunking mode as the stable token

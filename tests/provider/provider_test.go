@@ -212,19 +212,44 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 		return parts[1]
 	}
 
-	// Rule 2 — canonical/default → "": kind:openai at the OpenAI wire default,
-	// the default mistral endpoint, and an unset base_url all normalize to "".
+	// Rule 2 — canonical/default → "": a built-in profile AT ITS OWN shipped
+	// endpoint (matched by profile name), plus an unset base_url, normalize to
+	// "". The name must be the built-in's name: the collapse is per-profile, not
+	// kind-wide (see the foreign-host regression below).
 	for name, base := range map[string]string{
-		"unset":            "",
-		"openai-canonical": "https://api.openai.com/v1",
-		"mistral-default":  "https://api.mistral.ai/v1",
-		"openrouter":       "https://openrouter.ai/api/v1",
+		"openai":     "", // unset → client wire default
+		"openai/v1":  "https://api.openai.com/v1",
+		"mistral":    "https://api.mistral.ai/v1",
+		"openrouter": "https://openrouter.ai/api/v1",
+		"local":      "http://localhost:11434/v1",
 	} {
-		p := provider.Profile{Name: name, Kind: provider.KindOpenAI, BaseURL: base,
+		// map value keys by a display label; derive the built-in name from it.
+		builtin := name
+		if i := strings.IndexByte(name, '/'); i >= 0 {
+			builtin = name[:i]
+		}
+		p := provider.Profile{Name: builtin, Kind: provider.KindOpenAI, BaseURL: base,
 			EmbedTextModel: "text-embedding-3-small"}
 		if got := baseURLOf(p); got != "" {
-			t.Errorf("%s: canonical/default base_url must normalize to \"\", got %q", name, got)
+			t.Errorf("%s: a built-in at its own default must normalize to \"\", got %q", name, got)
 		}
+	}
+
+	// Rule 2 regression (#560 / CodeRabbit): the collapse is PER-PROFILE, not
+	// kind-wide. A built-in `mistral` profile pointed at a *different* listed
+	// vendor's host (api.openai.com) is a non-canonical override — it must NOT
+	// collapse to "" and must produce a DIFFERENT identity from the same-named,
+	// same-model profile at its real default, or vectors from two backends could
+	// silently share one index.
+	mistralReal := provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
+		BaseURL: "https://api.mistral.ai/v1", EmbedTextModel: "text-embedding-3-small"}
+	mistralAtOpenAI := provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
+		BaseURL: "https://api.openai.com/v1", EmbedTextModel: "text-embedding-3-small"}
+	if got := baseURLOf(mistralAtOpenAI); got == "" {
+		t.Errorf("a mistral profile pointed at api.openai.com must NOT collapse to \"\" (kind-wide mixing bug)")
+	}
+	if provider.EmbedIdentity(mistralReal, false) == provider.EmbedIdentity(mistralAtOpenAI, false) {
+		t.Errorf("mistral@mistral and mistral@openai must have distinct identities")
 	}
 
 	// Rule 1 — not meaningful: native gemini/cohere normalize to "" regardless
@@ -284,6 +309,55 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 	legacyHosted := "mistral|mistral-embed|codestral-embed|0|0|off|off" // pre-base_url 7-field
 	if err := provider.VerifyEmbedIdentity(legacyHosted, hostedCurrent); err != nil {
 		t.Errorf("pre-base_url hosted-default identity must not reindex: %v", err)
+	}
+}
+
+// TestEmbedBaseURL_CanonicalizationRobustness pins the CodeRabbit review fixes on
+// canonicalizeEmbedBaseURL: an IPv6 literal stays bracketed, a percent-encoded
+// slash is preserved (not folded into a path separator), and a value that does
+// not parse as an absolute URL can never leak the "|" identity delimiter, a
+// control character, or a userinfo credential into the recorded component.
+func TestEmbedBaseURL_CanonicalizationRobustness(t *testing.T) {
+	// A non-built-in profile name records the canonicalized base_url verbatim
+	// (no Rule-2 collapse), so we observe canonicalizeEmbedBaseURL directly.
+	norm := func(base string) string {
+		return provider.NormalizeEmbedBaseURL(provider.Profile{
+			Name: "custom", Kind: provider.KindOpenAI, CredentialLess: true, BaseURL: base})
+	}
+
+	// IPv6 literal: brackets preserved, default port dropped, non-default kept.
+	if got := norm("https://[2001:db8::1]:443/v1"); got != "https://[2001:db8::1]/v1" {
+		t.Errorf("IPv6 default-port: got %q", got)
+	}
+	if got := norm("https://[2001:db8::1]:8443/v1"); got != "https://[2001:db8::1]:8443/v1" {
+		t.Errorf("IPv6 custom-port: got %q", got)
+	}
+
+	// Percent-encoded slash is a distinct path byte, not a separator: it must
+	// survive canonicalization (else /a%2Fb and /a/b would collapse to one id).
+	if got := norm("https://h.internal/a%2Fb/v1"); !strings.Contains(got, "%2F") && !strings.Contains(got, "%2f") {
+		t.Errorf("encoded slash must be preserved, got %q", got)
+	}
+
+	// Fallback (unparseable/relative): never emit "|" (would corrupt the
+	// 8-field identity), control chars, or a userinfo credential.
+	for _, base := range []string{"${EMBED_URL}|inject", "user:secret@${EMBED_URL}", "raw\x01ctl"} {
+		got := norm(base)
+		if strings.Contains(got, "|") {
+			t.Errorf("fallback must strip the | delimiter: %q → %q", base, got)
+		}
+		if strings.ContainsAny(got, "\x00\x01\x1f\x7f") {
+			t.Errorf("fallback must strip control chars: %q → %q", base, got)
+		}
+	}
+	if got := norm("user:secret@${EMBED_URL}"); strings.Contains(got, "secret") {
+		t.Errorf("fallback must drop a userinfo credential: got %q", got)
+	}
+	// The delimiter guarantee holds end-to-end: the identity keeps exactly 8 fields.
+	id := provider.EmbedIdentity(provider.Profile{Name: "custom", Kind: provider.KindOpenAI,
+		CredentialLess: true, BaseURL: "${EMBED_URL}|x", EmbedTextModel: "m"}, false)
+	if n := strings.Count(id, "|"); n != 7 {
+		t.Errorf("identity must have 8 fields (7 pipes), got %d: %q", n, id)
 	}
 }
 
