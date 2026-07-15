@@ -394,19 +394,28 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		// total_docs will be 0, so consumers must not assume those values
 		// represent an empty corpus without this flag.
 		"doc_counts_available": statsFromRetriever,
-		"indexing": map[string]interface{}{
-			"job_id":          snapshot.JobID,
-			"running":         snapshot.Running,
-			"mode":            snapshot.Mode,
-			"scanned":         retrievedStats.Scanned,
-			"indexed":         retrievedStats.Indexed,
-			"skipped":         retrievedStats.Skipped,
-			"deleted":         retrievedStats.Deleted,
-			"representations": retrievedStats.Representations,
-			"chunks_total":    retrievedStats.ChunksTotal,
-			"embedded_ok":     retrievedStats.EmbeddedOK,
-			"errors":          retrievedStats.Errors,
-		},
+		"indexing": func() map[string]interface{} {
+			idx := map[string]interface{}{
+				"job_id":          snapshot.JobID,
+				"running":         snapshot.Running,
+				"mode":            snapshot.Mode,
+				"scanned":         retrievedStats.Scanned,
+				"indexed":         retrievedStats.Indexed,
+				"skipped":         retrievedStats.Skipped,
+				"deleted":         retrievedStats.Deleted,
+				"representations": retrievedStats.Representations,
+				"chunks_total":    retrievedStats.ChunksTotal,
+				"embedded_ok":     retrievedStats.EmbeddedOK,
+				"errors":          retrievedStats.Errors,
+			}
+			// Optional additive field (#591): only surface watch_overflows when a
+			// watcher is actually running, so absence reads as "not applicable"
+			// (one-shot index) rather than a misleading 0 (spec bs-007 / SPEC §15.6).
+			if snapshot.WatchActive {
+				idx["watch_overflows"] = snapshot.WatchOverflows
+			}
+			return idx
+		}(),
 		"models": map[string]interface{}{
 			"embed_text":   defaultEmbedTextModel,
 			"embed_code":   defaultEmbedCodeModel,
@@ -3535,6 +3544,11 @@ func statsOutputSchema() map[string]interface{} {
 					"chunks_total":    map[string]interface{}{"type": "integer"},
 					"embedded_ok":     map[string]interface{}{"type": "integer"},
 					"errors":          map[string]interface{}{"type": "integer"},
+					// Optional additive (spec 0.33.0 / stats.json, #591): fsnotify
+					// kernel event-buffer overflow count. Declared here so it passes
+					// the additionalProperties:false gate; not required (omitted when
+					// no watcher is running).
+					"watch_overflows": map[string]interface{}{"type": "integer", "minimum": 0},
 				},
 				"required": []string{"job_id", "running", "mode", "scanned", "indexed", "skipped", "deleted", "representations", "chunks_total", "embedded_ok", "errors"},
 			},

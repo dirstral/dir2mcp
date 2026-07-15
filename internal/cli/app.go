@@ -325,6 +325,11 @@ type corpusIndexing struct {
 	// coverage, #414/#395). Travels straight through from CorpusStats; omitted
 	// from JSON when nothing was skipped.
 	SkipSummary *model.SkipSummary `json:"skip_summary,omitempty"`
+	// WatchOverflows is the process-lifetime count of fsnotify kernel
+	// event-buffer overflows (#591). It is a pointer so it is emitted (even as
+	// 0) only when a watcher is running and omitted otherwise — absence means
+	// "not applicable" (one-shot index), not zero (spec 0.33.0 / stats.json).
+	WatchOverflows *int64 `json:"watch_overflows,omitempty"`
 }
 
 // NewApp constructs an App wired to os.Stdout and os.Stderr.
@@ -1955,6 +1960,18 @@ func emitProgressEvents(emitter *ndjsonEmitter, idx corpusIndexing) {
 	})
 }
 
+// watchOverflowsField returns a pointer to the lifetime watch-overflow count
+// when a watcher is running, or nil otherwise so `status --json` omits the
+// optional watch_overflows field entirely (absence = "not applicable", not 0;
+// spec 0.33.0 / stats.json, #591).
+func watchOverflowsField(idx appstate.IndexingSnapshot) *int64 {
+	if !idx.WatchActive {
+		return nil
+	}
+	v := idx.WatchOverflows
+	return &v
+}
+
 // buildCorpusSnapshot collects corpus stats and assembles a corpusSnapshot,
 // preferring live indexing-state counters when available and otherwise
 // deriving them from the store, including the code/total doc ratio.
@@ -2016,6 +2033,10 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			// `status` can render an honest not-indexed coverage block
 			// (#414). Omitted from JSON on corpora with nothing skipped.
 			SkipSummary: corpusStats.SkipSummary,
+			// watch_overflows is surfaced only when a watcher is running
+			// (#591); on the store-derived fallback (indexingState == nil)
+			// WatchActive is false, so it stays omitted.
+			WatchOverflows: watchOverflowsField(idx),
 		},
 		DocCounts: docCounts,
 		TotalDocs: totalDocs,
