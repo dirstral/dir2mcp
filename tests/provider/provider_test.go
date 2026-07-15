@@ -215,41 +215,19 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 	// Rule 2 — canonical/default → "": a built-in profile AT ITS OWN shipped
 	// endpoint (matched by profile name), plus an unset base_url, normalize to
 	// "". The name must be the built-in's name: the collapse is per-profile, not
-	// kind-wide (see the foreign-host regression below).
-	for name, base := range map[string]string{
-		"openai":     "", // unset → client wire default
-		"openai/v1":  "https://api.openai.com/v1",
-		"mistral":    "https://api.mistral.ai/v1",
-		"openrouter": "https://openrouter.ai/api/v1",
-		"local":      "http://localhost:11434/v1",
+	// kind-wide (see TestEmbedIdentity_PerProfileCanonical).
+	for _, tc := range []struct{ name, base string }{
+		{"openai", ""},                          // unset → client wire default
+		{"openai", "https://api.openai.com/v1"}, // explicit wire default
+		{"mistral", "https://api.mistral.ai/v1"},
+		{"openrouter", "https://openrouter.ai/api/v1"},
+		{"local", "http://localhost:11434/v1"},
 	} {
-		// map value keys by a display label; derive the built-in name from it.
-		builtin := name
-		if i := strings.IndexByte(name, '/'); i >= 0 {
-			builtin = name[:i]
-		}
-		p := provider.Profile{Name: builtin, Kind: provider.KindOpenAI, BaseURL: base,
+		p := provider.Profile{Name: tc.name, Kind: provider.KindOpenAI, BaseURL: tc.base,
 			EmbedTextModel: "text-embedding-3-small"}
 		if got := baseURLOf(p); got != "" {
-			t.Errorf("%s: a built-in at its own default must normalize to \"\", got %q", name, got)
+			t.Errorf("%s @ %q: a built-in at its own default must normalize to \"\", got %q", tc.name, tc.base, got)
 		}
-	}
-
-	// Rule 2 regression (#560 / CodeRabbit): the collapse is PER-PROFILE, not
-	// kind-wide. A built-in `mistral` profile pointed at a *different* listed
-	// vendor's host (api.openai.com) is a non-canonical override — it must NOT
-	// collapse to "" and must produce a DIFFERENT identity from the same-named,
-	// same-model profile at its real default, or vectors from two backends could
-	// silently share one index.
-	mistralReal := provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
-		BaseURL: "https://api.mistral.ai/v1", EmbedTextModel: "text-embedding-3-small"}
-	mistralAtOpenAI := provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
-		BaseURL: "https://api.openai.com/v1", EmbedTextModel: "text-embedding-3-small"}
-	if got := baseURLOf(mistralAtOpenAI); got == "" {
-		t.Errorf("a mistral profile pointed at api.openai.com must NOT collapse to \"\" (kind-wide mixing bug)")
-	}
-	if provider.EmbedIdentity(mistralReal, false) == provider.EmbedIdentity(mistralAtOpenAI, false) {
-		t.Errorf("mistral@mistral and mistral@openai must have distinct identities")
 	}
 
 	// Rule 1 — not meaningful: native gemini/cohere normalize to "" regardless
@@ -309,6 +287,28 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 	legacyHosted := "mistral|mistral-embed|codestral-embed|0|0|off|off" // pre-base_url 7-field
 	if err := provider.VerifyEmbedIdentity(legacyHosted, hostedCurrent); err != nil {
 		t.Errorf("pre-base_url hosted-default identity must not reindex: %v", err)
+	}
+}
+
+// TestEmbedIdentity_PerProfileCanonical is the #560 / CodeRabbit regression: the
+// Rule-2 collapse to "" is PER-PROFILE, not kind-wide. A built-in `mistral`
+// profile pointed at a *different* listed vendor's host (api.openai.com) is a
+// non-canonical override — it must NOT collapse to "" and must produce a
+// DIFFERENT identity from the same-named, same-model profile at its real
+// default, or vectors from two backends could silently share one index.
+func TestEmbedIdentity_PerProfileCanonical(t *testing.T) {
+	baseURLOf := func(p provider.Profile) string {
+		return strings.Split(provider.EmbedIdentity(p, false), "|")[1]
+	}
+	mistralReal := provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
+		BaseURL: "https://api.mistral.ai/v1", EmbedTextModel: "text-embedding-3-small"}
+	mistralAtOpenAI := provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
+		BaseURL: "https://api.openai.com/v1", EmbedTextModel: "text-embedding-3-small"}
+	if got := baseURLOf(mistralAtOpenAI); got == "" {
+		t.Errorf("a mistral profile pointed at api.openai.com must NOT collapse to \"\" (kind-wide mixing bug)")
+	}
+	if provider.EmbedIdentity(mistralReal, false) == provider.EmbedIdentity(mistralAtOpenAI, false) {
+		t.Errorf("mistral@mistral and mistral@openai must have distinct identities")
 	}
 }
 
