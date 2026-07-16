@@ -117,9 +117,15 @@ func (s *Service) sttTranscriptMetaJSON(speakers []Speaker, text string, hasWord
 	// non-empty coverage set and the effective transcript language is outside it,
 	// record language_covered=false. Left absent (nil) when coverage is unknown
 	// (no declaration) or covered — absence means "no assertion", never "covered".
-	if declared, covered := provider.STTLanguageCoverageSet(s.sttLanguages, meta.Language); declared && !covered {
-		no := false
-		meta.LanguageCovered = &no
+	// The empty-language guard is redundant (STTLanguageCoverageSet already returns
+	// declared=false for a blank language, so an unknown language never records a
+	// false), but making it explicit keeps this site consistent with the
+	// construction-time check in resolveTranscriptIdentityFields.
+	if meta.Language != "" {
+		if declared, covered := provider.STTLanguageCoverageSet(s.sttLanguages, meta.Language); declared && !covered {
+			no := false
+			meta.LanguageCovered = &no
+		}
 	}
 	if s.diarizeActive {
 		// Record the diarize backend identity whenever diarization is active so a

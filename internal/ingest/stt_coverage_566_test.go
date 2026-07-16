@@ -35,4 +35,9 @@ func TestSTTTranscriptMeta_LanguageCovered_566(t *testing.T) {
 	if m := metaFor("kir", nil); strings.Contains(m, "language_covered") {
 		t.Fatalf("undeclared coverage must OMIT language_covered, got %s", m)
 	}
+	// Unknown language (no pin, no detection) WITH a declared set => absent, not a
+	// misleading false: a blank language is "unknown", not "outside coverage".
+	if m := metaFor("", []string{"ru", "en"}); strings.Contains(m, "language_covered") {
+		t.Fatalf("unknown language must OMIT language_covered even with a declared set, got %s", m)
+	}
 }
