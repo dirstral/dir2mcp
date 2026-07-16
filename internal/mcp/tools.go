@@ -387,8 +387,12 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		"root":             retrievedStats.Root,
 		"state_dir":        retrievedStats.StateDir,
 		"protocol_version": retrievedStats.ProtocolVersion,
-		"doc_counts":       retrievedStats.DocCounts,
-		"total_docs":       retrievedStats.TotalDocs,
+		// format_version is the df-000 cross-version signal (SPEC §1.3/§15.6,
+		// #468): the payload-shape semver, SHOULD-level, independent of both the
+		// pinned protocol_version and the spec document version.
+		"format_version": protocol.FormatVersion,
+		"doc_counts":     retrievedStats.DocCounts,
+		"total_docs":     retrievedStats.TotalDocs,
 		// indicates whether the above counts originate from the underlying
 		// retriever.  when false the map will be zero-valued (not nil) and
 		// total_docs will be 0, so consumers must not assume those values
@@ -3523,6 +3527,9 @@ func statsOutputSchema() map[string]interface{} {
 			"root":             map[string]interface{}{"type": "string"},
 			"state_dir":        map[string]interface{}{"type": "string"},
 			"protocol_version": map[string]interface{}{"type": "string"},
+			// Optional additive (SHOULD, df-000 / stats.json, #468): payload-shape
+			// semver. Declared so it passes additionalProperties:false; not required.
+			"format_version": map[string]interface{}{"type": "string", "pattern": `^[0-9]+\.[0-9]+\.[0-9]+$`},
 			"doc_counts": map[string]interface{}{
 				"type":                 "object",
 				"additionalProperties": map[string]interface{}{"type": "integer"},
