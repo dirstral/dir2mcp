@@ -384,8 +384,14 @@ func (s *Service) activeTranslateIdentity(targetLang string) string {
 	if strings.TrimSpace(s.translateProvider) == "" && strings.TrimSpace(s.translateModel) == "" {
 		return ""
 	}
+	// Fold the chat translate window/margin shape into the identity's version
+	// field (issue #573): the windowed 1:1 batch prompt gives the model cross-cue
+	// context, so its output differs from the isolated per-line prompt and from a
+	// different window shape. A stale cached translation would be mislabeled by the
+	// rep's recorded provider/model, so a shape change MUST miss the cache. The
+	// historical per-line shape folds "" so pre-windowing caches stay valid.
 	return derivationIdentity(string(provider.CapTranslate),
-		s.translateProvider, s.translateModel, "", targetLang)
+		s.translateProvider, s.translateModel, s.translateWindowShape(), targetLang)
 }
 
 // translateCacheKey returns the on-disk translation cache filename stem for the

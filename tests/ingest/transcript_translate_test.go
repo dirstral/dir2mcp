@@ -379,29 +379,63 @@ func (b *boundedFakeTranslator) observed() (calls, lastMaxToken int) {
 }
 
 // TestTranscriptTranslation_UsesTightPerCallCap verifies the translate call site
-// passes a tight per-call max-tokens cap (512) when the translator implements
+// passes a tight per-call max-tokens cap when the translator implements
 // model.BoundedGenerator, keeping the #500 runaway path bounded without lowering
-// the generous default that ask/annotate rely on.
+// the generous default that ask/annotate rely on. The windowed chat engine (#573)
+// sends N cues per batch, so the batch cap scales to 512*N; the explicit per-line
+// opt-out keeps the historical flat 512.
 func TestTranscriptTranslation_UsesTightPerCallCap(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
-	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
-	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
-	tr := &boundedFakeTranslator{}
-	svc.SetTranscriptLanguage("de")
-	svc.SetTranslator(tr, "mistral", "mistral-small-2506", []string{"en"})
 
-	doc := model.Document{DocID: 11, RelPath: "audio/talk.mp3", DocType: "audio"}
-	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
-		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
-	}
+	// Default (windowed): both cues go in ONE batch, so the cap is 512*2 = 1024,
+	// a bound that scales with the number of target cues in the request.
+	t.Run("windowed batch scales the cap", func(t *testing.T) {
+		t.Parallel()
+		st := &fakeIngestStore{}
+		svc := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, st)
+		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
+		tr := &boundedFakeTranslator{}
+		svc.SetTranscriptLanguage("de")
+		svc.SetTranslator(tr, "mistral", "mistral-small-2506", []string{"en"})
 
-	calls, lastMaxToken := tr.observed()
-	if calls == 0 {
-		t.Fatalf("expected the bounded translator to be called")
-	}
-	if lastMaxToken != 512 {
-		t.Fatalf("translate max_tokens cap = %d, want 512", lastMaxToken)
-	}
+		doc := model.Document{DocID: 11, RelPath: "audio/talk.mp3", DocType: "audio"}
+		if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+			t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+		}
+		calls, lastMaxToken := tr.observed()
+		if calls == 0 {
+			t.Fatalf("expected the bounded translator to be called")
+		}
+		if lastMaxToken != 512*2 {
+			t.Fatalf("windowed translate max_tokens cap = %d, want %d (512 per target cue)", lastMaxToken, 512*2)
+		}
+	})
+
+	// Explicit per-line opt-out (window_lines=1, context_lines=0): each cue is a
+	// separate call capped at the flat 512, exactly as before windowing existed.
+	t.Run("per-line opt-out keeps flat 512", func(t *testing.T) {
+		t.Parallel()
+		st := &fakeIngestStore{}
+		svc := mustNewIngestService(t, config.Config{
+			StateDir:                   t.TempDir(),
+			MediaTranslateWindowLines:  1,
+			MediaTranslateContextLines: 0,
+		}, st)
+		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
+		tr := &boundedFakeTranslator{}
+		svc.SetTranscriptLanguage("de")
+		svc.SetTranslator(tr, "mistral", "mistral-small-2506", []string{"en"})
+
+		doc := model.Document{DocID: 12, RelPath: "audio/talk2.mp3", DocType: "audio"}
+		if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+			t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+		}
+		calls, lastMaxToken := tr.observed()
+		if calls == 0 {
+			t.Fatalf("expected the bounded translator to be called")
+		}
+		if lastMaxToken != 512 {
+			t.Fatalf("per-line translate max_tokens cap = %d, want 512", lastMaxToken)
+		}
+	})
 }
