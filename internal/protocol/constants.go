@@ -60,6 +60,15 @@ const (
 	MCPProtocolVersionHeader = "MCP-Protocol-Version"
 
 	ProtocolDefaultVersion = "2025-11-25"
+
+	// FormatVersion is the semver payload-shape signal dir2mcp stamps into the
+	// self-describing payloads it writes at a boundary (SPEC §1.3 / df-000,
+	// #468): connection.json (MUST) and the dir2mcp_stats output (SHOULD). It is
+	// an INDEPENDENT version of the payload shape — deliberately NOT the MCP
+	// protocolVersion (pinned, orthogonal) nor the spec document version — so a
+	// consumer can detect an incompatible payload and adapt or reject. Bump on a
+	// shape change per the df-000 additive/major rules.
+	FormatVersion = "0.1.0"
 )
 
 const (

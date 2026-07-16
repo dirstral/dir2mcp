@@ -254,13 +254,17 @@ type connectionSession struct {
 }
 
 type connectionPayload struct {
-	Transport   string            `json:"transport"`
-	URL         string            `json:"url"`
-	Headers     map[string]string `json:"headers"`
-	Session     connectionSession `json:"session"`
-	Public      bool              `json:"public"`
-	TokenSource string            `json:"token_source"`
-	TokenFile   string            `json:"token_file,omitempty"`
+	// FormatVersion is the df-000 cross-version signal (SPEC §1.3/§4.3, #468); it
+	// MUST be present so a reader can reject an incompatible connection.json shape
+	// before connecting. First field to mirror the spec example.
+	FormatVersion string            `json:"format_version"`
+	Transport     string            `json:"transport"`
+	URL           string            `json:"url"`
+	Headers       map[string]string `json:"headers"`
+	Session       connectionSession `json:"session"`
+	Public        bool              `json:"public"`
+	TokenSource   string            `json:"token_source"`
+	TokenFile     string            `json:"token_file,omitempty"`
 }
 
 type ndjsonEvent struct {
@@ -1782,9 +1786,10 @@ func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) co
 	}
 
 	return connectionPayload{
-		Transport: "mcp_streamable_http",
-		URL:       url,
-		Headers:   headers,
+		FormatVersion: protocol.FormatVersion,
+		Transport:     "mcp_streamable_http",
+		URL:           url,
+		Headers:       headers,
 		Session: connectionSession{
 			UsesMCPSessionID:     true,
 			HeaderName:           protocol.MCPSessionHeader,

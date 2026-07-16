@@ -27,6 +27,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
@@ -59,11 +60,12 @@ func (f *fakeErrorStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKin
 }
 
 type cliConnectionFile struct {
-	Transport string            `json:"transport"`
-	URL       string            `json:"url"`
-	Headers   map[string]string `json:"headers"`
-	Public    bool              `json:"public"`
-	Session   struct {
+	FormatVersion string            `json:"format_version"`
+	Transport     string            `json:"transport"`
+	URL           string            `json:"url"`
+	Headers       map[string]string `json:"headers"`
+	Public        bool              `json:"public"`
+	Session       struct {
 		UsesMCPSessionID     bool   `json:"uses_mcp_session_id"`
 		HeaderName           string `json:"header_name"`
 		AssignedOnInitialize bool   `json:"assigned_on_initialize"`
@@ -129,6 +131,10 @@ func readConnectionFile(t *testing.T, connectionPath string) cliConnectionFile {
 
 func assertConnectionFile(t *testing.T, connection cliConnectionFile) {
 	t.Helper()
+	// connection.json MUST carry the df-000 cross-version signal (#468).
+	if connection.FormatVersion != protocol.FormatVersion {
+		t.Fatalf("connection.json format_version: got %q want %q", connection.FormatVersion, protocol.FormatVersion)
+	}
 	if connection.Transport != "mcp_streamable_http" {
 		t.Fatalf("unexpected transport: %q", connection.Transport)
 	}
