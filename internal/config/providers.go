@@ -224,7 +224,7 @@ func parseMediaTranslateGlossary(raw []byte) (map[string]map[string]string, erro
 	if err := yaml.Unmarshal(sub, &doc); err != nil {
 		return nil, fmt.Errorf("parse media.translate.glossary config: %w", err)
 	}
-	return normalizeTranslateGlossary(doc.Glossary), nil
+	return normalizeTranslateGlossary(doc.Glossary)
 }
 
 // normalizeTranslateGlossary lower-cases each target-language key (matching the
@@ -233,23 +233,38 @@ func parseMediaTranslateGlossary(raw []byte) (map[string]map[string]string, erro
 // rendering CASE is preserved (only the language tag is folded). Returns nil when
 // nothing survives so an empty/whitespace-only glossary is indistinguishable from
 // unset (today's no-guidance behaviour).
-func normalizeTranslateGlossary(in map[string]map[string]string) map[string]map[string]string {
+//
+// Two raw keys that collide after normalization ("es" and " ES " → "es"; " term "
+// and "term" → "term") are a config error, not a silent last-writer-wins overwrite
+// (which would be nondeterministic under Go map iteration): return CONFIG_INVALID
+// so the operator disambiguates.
+func normalizeTranslateGlossary(in map[string]map[string]string) (map[string]map[string]string, error) {
 	if len(in) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]map[string]string, len(in))
+	langSeen := make(map[string]string, len(in)) // normalized lang → first raw key
 	for lang, terms := range in {
 		l := strings.ToLower(strings.TrimSpace(lang))
 		if l == "" || len(terms) == 0 {
 			continue
 		}
+		if prev, dup := langSeen[l]; dup {
+			return nil, fmt.Errorf("CONFIG_INVALID: media.translate.glossary target languages %q and %q both normalize to %q", prev, lang, l)
+		}
+		langSeen[l] = lang
 		m := make(map[string]string, len(terms))
+		srcSeen := make(map[string]string, len(terms)) // trimmed source term → first raw key
 		for src, rendering := range terms {
 			s := strings.TrimSpace(src)
 			r := strings.TrimSpace(rendering)
 			if s == "" || r == "" {
 				continue
 			}
+			if prev, dup := srcSeen[s]; dup {
+				return nil, fmt.Errorf("CONFIG_INVALID: media.translate.glossary[%q] source terms %q and %q both normalize to %q", l, prev, src, s)
+			}
+			srcSeen[s] = src
 			m[s] = r
 		}
 		if len(m) > 0 {
@@ -257,9 +272,9 @@ func normalizeTranslateGlossary(in map[string]map[string]string) map[string]map[
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
 }
 
 // extractMediaTranslateGlossarySubtree returns the `glossary:` block nested under

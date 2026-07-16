@@ -39,13 +39,15 @@ func TestBuildTranslatePrompt_GlossaryInjectedDeterministic(t *testing.T) {
 // injects nothing and reproduces the historical prompt (blank line before the
 // source text) byte-for-byte, so today's behaviour is preserved.
 func TestBuildTranslatePrompt_NoGlossaryUnchanged(t *testing.T) {
+	// The exact pre-#574 prompt: the fixed instruction line, a blank line, then the
+	// source text — with NO glossary block. Compared in full so a change anywhere in
+	// the legacy prompt (not just the tail) fails the compat guarantee.
+	const historical = "Translate the following text into es. Preserve meaning faithfully. " +
+		"Return only the translated text, with no preamble, quotes, or explanation.\n\nhello"
 	for _, g := range []map[string]string{nil, {}} {
 		got := buildTranslatePrompt("hello", "es", g)
-		if strings.Contains(got, glossaryGuidanceMarker) {
-			t.Errorf("guidance injected for empty glossary:\n%s", got)
-		}
-		if !strings.Contains(got, "explanation.\n\nhello") {
-			t.Errorf("empty-glossary prompt diverged from the historical form:\n%s", got)
+		if got != historical {
+			t.Errorf("empty-glossary prompt diverged from the historical form byte-for-byte:\n got=%q\nwant=%q", got, historical)
 		}
 	}
 }
@@ -83,8 +85,8 @@ func TestTranslateGlossaryFor_CurrentTargetOnly(t *testing.T) {
 	if es := svc.translateGlossaryFor("es"); len(es) != 1 || es["Sun"] != "Sol" {
 		t.Fatalf("es glossary wrong: %#v", es)
 	}
-	if svc.translateGlossaryFor("ES") == nil {
-		t.Error("expected case-insensitive language match for \"ES\"")
+	if es := svc.translateGlossaryFor("ES"); es == nil || es["Sun"] != "Sol" {
+		t.Errorf("expected case-insensitive \"ES\" to resolve to the es map (Sun=>Sol), got %#v", es)
 	}
 	if g := svc.translateGlossaryFor("de"); g != nil {
 		t.Errorf("expected nil for a target with no glossary, got %#v", g)

@@ -147,3 +147,39 @@ func TestMediaTranslateGlossary_NotConfusedWithSubtitlesGlossary(t *testing.T) {
 		t.Errorf("translate.glossary (map) not parsed independently: %#v", cfg.MediaTranslateGlossary)
 	}
 }
+
+// TestMediaTranslateGlossary_RejectsNormalizedCollisions locks the CONFIG_INVALID
+// contract (#574 review): two glossary keys that collide only after normalization
+// — target languages that fold to the same lower-cased tag, or source terms that
+// trim to the same string — must be rejected, not silently last-writer-wins
+// (nondeterministic under Go map iteration).
+func TestMediaTranslateGlossary_RejectsNormalizedCollisions(t *testing.T) {
+	cases := map[string][]string{
+		"language collision (es / ' ES ')": {
+			"media:", "  translate:", "    glossary:",
+			"      es:", `        "Sun": "Sol"`,
+			`      " ES ":`, `        "Moon": "Luna"`,
+		},
+		"source-term collision (term / ' term ')": {
+			"media:", "  translate:", "    glossary:",
+			"      es:", `        "term": "A"`, `        " term ": "B"`,
+		},
+	}
+	for name, mediaLines := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, ".dir2mcp.yaml")
+			writeFile(t, path, strings.Join(append([]string{
+				"root_dir: /tmp/repo", "state_dir: /tmp/repo/.dir2mcp",
+			}, mediaLines...), "\n")+"\n")
+
+			_, err := config.LoadFile(path)
+			if err == nil {
+				t.Fatalf("expected a config error for %s, got nil", name)
+			}
+			if !strings.Contains(err.Error(), "CONFIG_INVALID") || !strings.Contains(err.Error(), "glossary") {
+				t.Fatalf("error should name CONFIG_INVALID + glossary, got: %v", err)
+			}
+		})
+	}
+}
