@@ -93,8 +93,17 @@ type transcriptMeta struct {
 	// be re-applied as a filter at query time (§9.5). Omitted unless a detector
 	// produced it; a pointer so a genuine 0.0 is distinguishable from "absent".
 	LanguageConfidence *float64 `json:"language_confidence,omitempty"`
-	Timestamps         bool     `json:"timestamps"`
-	Format             string   `json:"format,omitempty"`
+	// LanguageCovered records honest STT language coverage (SPEC §8.2.1, #566).
+	// It is set ONLY to false, and ONLY when the selected STT model DECLARES a
+	// non-empty coverage set (a profile's stt_languages) and the effective
+	// transcript Language falls outside it — the "transcribed in a language this
+	// model does not declare" signal. It is a pointer with omitempty so it is
+	// absent (coverage unknown / no declaration / covered) rather than a
+	// misleading false: absence MUST be read as "no coverage assertion", never as
+	// "covered". Sidecar transcripts (authored, not model-derived) never set it.
+	LanguageCovered *bool  `json:"language_covered,omitempty"`
+	Timestamps      bool   `json:"timestamps"`
+	Format          string `json:"format,omitempty"`
 
 	// Words records the transcript's finest CAPTURED timing granularity (SPEC
 	// §8.6.9): true iff at least one segment carries a populated extra_json.words

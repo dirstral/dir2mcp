@@ -98,6 +98,13 @@ type Service struct {
 	sttProvider string
 	sttModel    string
 
+	// sttLanguages is the resolved STT profile's DECLARED language coverage
+	// (SPEC §8.2.1, #566): a non-empty set asserts which BCP-47 languages the
+	// model transcribes well. Empty = open/unknown (no assertion). It drives the
+	// honest-coverage warning at construction and the transcript meta's
+	// language_covered flag; it is never part of the derivation identity.
+	sttLanguages []string
+
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
 	// enabled (tri-state) AND the active STT backend advertises CapDiarize.
@@ -731,6 +738,19 @@ func (s *Service) resolveTranscriptIdentityFields() {
 	}
 	s.sttProvider = strings.TrimSpace(prof.Name)
 	s.sttModel = strings.TrimSpace(prof.STTModel)
+	// Honest STT language coverage (SPEC §8.2.1, #566). When the profile declares
+	// a non-empty coverage set and the pinned source language falls outside it,
+	// warn once at construction so an operator sees "this model does not declare
+	// this language" instead of only a downstream quality-gate drop. Fail-open:
+	// transcription still runs; the §8.6.6 quality gate remains the backstop for
+	// degraded output. Unknown coverage (no declaration) makes no assertion.
+	s.sttLanguages = append([]string(nil), prof.STTLanguages...)
+	if lang := strings.TrimSpace(s.transcriptLanguage); lang != "" {
+		if declared, covered := provider.STTLanguageCoverage(prof, lang); declared && !covered {
+			s.getLogger().Printf("stt: language %q is outside %s's declared coverage %v; transcription will proceed but may be degraded (SPEC §8.2.1) — configure an STT provider that covers this language",
+				lang, s.sttProvider, prof.STTLanguages)
+		}
+	}
 	// Resolve the diarization binding (SPEC §8.6.8) from the SAME STT profile:
 	// diarization is active when enabled (tri-state) AND the backend advertises
 	// CapDiarize. The diarize derivation identity (§8.6.7) is the backend's
