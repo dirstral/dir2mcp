@@ -25,6 +25,14 @@ type IndexingSnapshot struct {
 	EmbeddedOK      int64
 	Errors          int64
 	Unknown         int64
+	// WatchActive reports whether a filesystem watcher is running this process.
+	// When false (a one-shot index, or a platform/config without a watcher),
+	// WatchOverflows is meaningless and callers MUST omit the optional
+	// watch_overflows stats field rather than report 0 (spec bs-007 / SPEC §15.6,
+	// #591): absence means "unknown / not applicable", 0 means "watching, none
+	// dropped".
+	WatchActive    bool
+	WatchOverflows int64
 }
 
 type IndexingState struct {
@@ -40,6 +48,12 @@ type IndexingState struct {
 	chunksTotal     atomic.Int64
 	embeddedOK      atomic.Int64
 	errors          atomic.Int64
+
+	// watchActive/watchOverflows are process-lifetime watcher telemetry, not
+	// per-scan progress: ResetProgress leaves them untouched (like embeddedOK)
+	// so the overflow tally survives rescans.
+	watchActive    atomic.Bool
+	watchOverflows atomic.Int64
 }
 
 func NewIndexingState(mode string) *IndexingState {
@@ -158,6 +172,28 @@ func (s *IndexingState) AddErrors(delta int64) {
 	s.errors.Add(delta)
 }
 
+// MarkWatchActive records that a filesystem watcher is running this process, so
+// Snapshot reports watch_overflows (even 0) instead of omitting it. Idempotent;
+// call it once when the watch loop starts.
+func (s *IndexingState) MarkWatchActive() {
+	if s == nil {
+		return
+	}
+	s.watchActive.Store(true)
+}
+
+// AddWatchOverflow increments the process-lifetime count of fsnotify kernel
+// event-buffer overflows (dropped-event bursts reconciled by the safety rescan
+// rather than per-event). It also marks the watcher active: an overflow can only
+// be observed while watching.
+func (s *IndexingState) AddWatchOverflow(delta int64) {
+	if s == nil {
+		return
+	}
+	s.watchActive.Store(true)
+	s.watchOverflows.Add(delta)
+}
+
 func (s *IndexingState) Snapshot() IndexingSnapshot {
 	if s == nil {
 		return IndexingSnapshot{
@@ -178,6 +214,8 @@ func (s *IndexingState) Snapshot() IndexingSnapshot {
 		ChunksTotal:     s.chunksTotal.Load(),
 		EmbeddedOK:      s.embeddedOK.Load(),
 		Errors:          s.errors.Load(),
+		WatchActive:     s.watchActive.Load(),
+		WatchOverflows:  s.watchOverflows.Load(),
 	}
 }
 

@@ -122,6 +122,10 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 		default:
 		}
 	}
+	// A watcher is now running: let the stats surface report watch_overflows
+	// (even 0) rather than omitting it as "not applicable" (#591).
+	w.svc.indexingState.MarkWatchActive()
+
 	workerDone := make(chan struct{})
 	go w.worker(ctx, rescanReq, workerDone)
 
@@ -158,6 +162,7 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 			// immediate coalesced rescan so the missed changes reconcile promptly
 			// rather than waiting for the next tick.
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				w.svc.indexingState.AddWatchOverflow(1)
 				w.svc.getLogger().Printf("watch: event overflow (kernel event buffer exceeded); some events dropped, requesting immediate rescan")
 				requestRescan()
 				continue

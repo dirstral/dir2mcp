@@ -47,6 +47,55 @@ func TestResetProgress_ZeroesRunCountersPreservesEmbedded(t *testing.T) {
 	}
 }
 
+// TestWatchOverflows_ActiveGateAndLifetimePreservation verifies the #591
+// watch_overflows telemetry: a fresh state reports the watcher inactive (so the
+// stats surface omits the field rather than reporting a misleading 0);
+// MarkWatchActive flips WatchActive without inventing an overflow; AddWatchOverflow
+// both marks active and accumulates; and ResetProgress preserves the lifetime
+// overflow tally (like EmbeddedOK) instead of zeroing it with the per-scan
+// counters.
+func TestWatchOverflows_ActiveGateAndLifetimePreservation(t *testing.T) {
+	s := appstate.NewIndexingState(appstate.ModeIncremental)
+
+	if got := s.Snapshot(); got.WatchActive || got.WatchOverflows != 0 {
+		t.Fatalf("fresh state must be watcher-inactive with 0 overflows: %+v", got)
+	}
+
+	s.MarkWatchActive()
+	if got := s.Snapshot(); !got.WatchActive || got.WatchOverflows != 0 {
+		t.Fatalf("after MarkWatchActive want active with 0 overflows: %+v", got)
+	}
+
+	s.AddWatchOverflow(1)
+	s.AddWatchOverflow(2)
+	if got := s.Snapshot(); !got.WatchActive || got.WatchOverflows != 3 {
+		t.Fatalf("after overflows want active with 3: %+v", got)
+	}
+
+	// The overflow tally is process-lifetime telemetry, not per-scan progress:
+	// a rescan's ResetProgress must leave it (and WatchActive) intact.
+	s.AddScanned(5)
+	s.ResetProgress()
+	got := s.Snapshot()
+	if got.Scanned != 0 {
+		t.Fatalf("ResetProgress must zero per-scan Scanned: got %d", got.Scanned)
+	}
+	if !got.WatchActive || got.WatchOverflows != 3 {
+		t.Fatalf("ResetProgress must preserve watcher telemetry: got active=%v overflows=%d want active=true overflows=3", got.WatchActive, got.WatchOverflows)
+	}
+}
+
+// TestAddWatchOverflow_MarksActive verifies an overflow observed before any
+// explicit MarkWatchActive still flips WatchActive — an overflow can only occur
+// while watching, so the field must surface.
+func TestAddWatchOverflow_MarksActive(t *testing.T) {
+	s := appstate.NewIndexingState(appstate.ModeIncremental)
+	s.AddWatchOverflow(1)
+	if got := s.Snapshot(); !got.WatchActive || got.WatchOverflows != 1 {
+		t.Fatalf("AddWatchOverflow must mark active: got %+v", got)
+	}
+}
+
 // TestResetProgress_SnapshotInvariantDuringConcurrentReset guards the counter
 // ordering in ResetProgress: because Snapshot() reads each field independently
 // without a lock, a status scrape can interleave with a reset. Zeroing the
