@@ -31,9 +31,15 @@ type providerProfileYAML struct {
 	OCRModel       string  `yaml:"ocr_model"`
 	STTModel       string  `yaml:"stt_model"`
 	STTLanguage    string  `yaml:"stt_language"`
-	TTSModel       string  `yaml:"tts_model"`
-	TTSVoice       string  `yaml:"tts_voice"`
-	RerankModel    string  `yaml:"rerank_model"`
+	// STTLanguages is the profile's OPTIONAL declared STT language coverage
+	// (SPEC §8.2.1, dir2mcp #566): a non-empty set of BCP-47 tags the model is
+	// known to transcribe well. Unset or empty = open/unknown (no coverage
+	// assertion); a declared, non-empty set drives the honest-coverage warning
+	// when the effective source language falls outside it.
+	STTLanguages []string `yaml:"stt_languages"`
+	TTSModel     string   `yaml:"tts_model"`
+	TTSVoice     string   `yaml:"tts_voice"`
+	RerankModel  string   `yaml:"rerank_model"`
 }
 
 type capBindingYAML struct {
@@ -393,6 +399,12 @@ func mergeProfiles(base, user map[string]providerProfileYAML, declOrder []string
 		if up.EmbedCodeDim != 0 {
 			base.EmbedCodeDim = up.EmbedCodeDim
 		}
+		// STTLanguages (declared STT coverage, #566) is a slice: a non-empty
+		// override replaces the built-in's set wholesale; an omitted/empty one
+		// leaves the base intact (matching the "unset => open/unknown" contract).
+		if len(up.STTLanguages) > 0 {
+			base.STTLanguages = append([]string(nil), up.STTLanguages...)
+		}
 		merged[name] = base
 	}
 	order := append([]string(nil), builtinPrecedence...)
@@ -468,6 +480,7 @@ func toProfiles(merged map[string]providerProfileYAML, getenv func(string) strin
 			OCRModel:       p.OCRModel,
 			STTModel:       p.STTModel,
 			STTLanguage:    p.STTLanguage,
+			STTLanguages:   append([]string(nil), p.STTLanguages...),
 			TTSModel:       p.TTSModel,
 			TTSVoice:       p.TTSVoice,
 			RerankModel:    p.RerankModel,

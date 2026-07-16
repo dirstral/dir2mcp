@@ -216,6 +216,11 @@ type Profile struct {
 	OCRModel        string
 	STTModel        string
 	STTLanguage     string // optional STT language hint (e.g. ElevenLabs)
+	// STTLanguages is the profile's optional DECLARED STT language coverage
+	// (SPEC §8.2.1, #566): BCP-47 tags the model is known to transcribe well.
+	// Empty = open/unknown (no coverage assertion). A non-empty set drives the
+	// honest-coverage warning when the effective source language is outside it.
+	STTLanguages []string
 	// STTVAD requests a provider-side voice-activity-detection filter where
 	// supported (dir2mcp#258, config `media.vad`). For the self-hosted whisper
 	// provider this maps to the OpenAI-compatible `vad_filter` form field;
@@ -504,6 +509,44 @@ func normalizeLateChunking(on bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// STTLanguageCoverage reports whether an STT profile's declared language
+// coverage (SPEC §8.2.1, #566) asserts support for lang. It returns
+// (declared, covered): declared is false when the profile makes NO coverage
+// assertion (empty STTLanguages, or an empty/blank lang to test) — in which case
+// coverage is unknown and callers MUST NOT treat it as non-coverage; covered is
+// true iff a declared tag matches lang. Matching is on the BCP-47 primary
+// subtag, case-insensitive ("ru" covers "ru-RU" and vice versa), so a coverage
+// set of primary tags need not enumerate every region.
+func STTLanguageCoverage(p Profile, lang string) (declared, covered bool) {
+	return STTLanguageCoverageSet(p.STTLanguages, lang)
+}
+
+// STTLanguageCoverageSet is STTLanguageCoverage against a raw declared-coverage
+// slice, for callers that hold the set without the full Profile (e.g. the
+// transcript-meta writer).
+func STTLanguageCoverageSet(coverage []string, lang string) (declared, covered bool) {
+	lang = primarySubtag(lang)
+	if lang == "" || len(coverage) == 0 {
+		return false, false
+	}
+	for _, tag := range coverage {
+		if primarySubtag(tag) == lang {
+			return true, true
+		}
+	}
+	return true, false
+}
+
+// primarySubtag lower-cases a BCP-47 tag and returns its primary language
+// subtag (the part before the first '-'), trimmed. Empty input → "".
+func primarySubtag(tag string) string {
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	if i := strings.IndexByte(tag, '-'); i >= 0 {
+		return tag[:i]
+	}
+	return tag
 }
 
 // NormalizeEmbedMultimodal lower-cases/trims the multimodal mode and maps

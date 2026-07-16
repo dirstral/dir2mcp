@@ -113,6 +113,14 @@ func (s *Service) sttTranscriptMetaJSON(speakers []Speaker, text string, hasWord
 		meta.LanguageSource = langSourceDetected
 		meta.LanguageConfidence = &conf
 	}
+	// Honest STT language coverage (SPEC §8.2.1, #566): when the model declares a
+	// non-empty coverage set and the effective transcript language is outside it,
+	// record language_covered=false. Left absent (nil) when coverage is unknown
+	// (no declaration) or covered — absence means "no assertion", never "covered".
+	if declared, covered := provider.STTLanguageCoverageSet(s.sttLanguages, meta.Language); declared && !covered {
+		no := false
+		meta.LanguageCovered = &no
+	}
 	if s.diarizeActive {
 		// Record the diarize backend identity whenever diarization is active so a
 		// backend/model swap re-derives the transcript (§8.6.7), even before any
