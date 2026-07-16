@@ -843,6 +843,7 @@ func (c Config) RouteSTTProfile(def provider.Profile) (provider.Profile, error) 
 	if !ok {
 		return def, nil
 	}
+	mapped = strings.TrimSpace(mapped) // defensive: values are trimmed at parse, but never route to a blank name
 	routed, err := c.Providers().ResolveExplicit(provider.CapSTT, mapped, true)
 	if err != nil {
 		return provider.Profile{}, err
