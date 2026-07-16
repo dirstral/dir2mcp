@@ -435,6 +435,61 @@ func parseCarbonConfig(raw []byte) (CarbonConfig, error) {
 	return cfg, nil
 }
 
+// mediaSTTLanguageProvidersDoc is the yaml shape of the optional
+// media.stt.language_providers nested map (SPEC §8.2.1, #566):
+//
+//	media:
+//	  stt:
+//	    language_providers:
+//	      ru: whisper-ru
+//	      en: whisper
+//
+// Unknown sibling keys under media/stt are ignored (yaml.v3 default), so this
+// coexists with the flat parser that reads the scalar media.stt.* fields.
+type mediaSTTLanguageProvidersDoc struct {
+	Media struct {
+		STT struct {
+			LanguageProviders map[string]string `yaml:"language_providers"`
+		} `yaml:"stt"`
+	} `yaml:"media"`
+}
+
+// parseMediaSTTLanguageProviders decodes the optional media.stt.language_providers
+// map into a route table keyed by the BCP-47 PRIMARY language subtag (SPEC §8.2.1,
+// #566), so a "ru" route matches a "ru-RU" pin and vice versa — the same matching
+// rule the honest-coverage check uses. Absent block ⇒ nil, no error. Two keys that
+// collapse to the same primary subtag but name DIFFERENT profiles are rejected
+// (ambiguous route), so lookup is deterministic.
+func parseMediaSTTLanguageProviders(raw []byte) (map[string]string, error) {
+	sub := extractTopLevelSubtree(raw, "media")
+	if len(sub) == 0 {
+		return nil, nil
+	}
+	var doc mediaSTTLanguageProvidersDoc
+	if err := yaml.Unmarshal(sub, &doc); err != nil {
+		return nil, fmt.Errorf("parse media.stt.language_providers config: %w", err)
+	}
+	in := doc.Media.STT.LanguageProviders
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(in))
+	for lang, name := range in {
+		key := provider.PrimarySubtag(lang)
+		name = strings.TrimSpace(name)
+		if key == "" {
+			continue
+		}
+		if existing, dup := out[key]; dup && existing != name {
+			return nil, fmt.Errorf(
+				"CONFIG_INVALID: media.stt.language_providers has conflicting routes for language %q (%q vs %q)",
+				key, existing, name)
+		}
+		out[key] = name
+	}
+	return out, nil
+}
+
 func parseProvidersDoc(raw []byte) (providersDoc, error) {
 	var doc providersDoc
 	sub := extractProvidersSubtree(raw)
@@ -763,6 +818,39 @@ func resolveSTTProfileForCapability(cfg Config) (provider.Profile, bool) {
 	return prof, true
 }
 
+// RouteSTTProfile applies media.stt.language_providers language-based routing
+// (SPEC §8.2.1, #566) to an already-resolved DEFAULT STT profile. Routing is
+// PIN-BASED and per-run: langdetect is text-based and cannot know an audio file's
+// language before transcription, so the route keys off the profile's configured
+// source-language pin (def.STTLanguage), resolved once — never per-item
+// auto-detection. When that pin matches a language_providers entry (BCP-47
+// primary-subtag match), the mapped STT-capable profile is re-resolved (required)
+// and REPLACES the default, carrying the source-language pin onto it so the routed
+// backend still transcribes the right language AND the honest-coverage check (§8.2.1
+// Slice A) runs against the ROUTED profile's declared coverage. With no pin, no
+// route table, or no matching route, def is returned unchanged (single-provider
+// behaviour). It is the single routing point shared by the ingest transcriber build
+// and the expected-language / derivation-identity resolver, so the routed profile
+// propagates consistently. A route to an unknown or non-STT-capable profile is
+// rejected as CONFIG_INVALID at startup (validateSTTLanguageProviders), so the only
+// error here is a routed profile whose credential is unset.
+func (c Config) RouteSTTProfile(def provider.Profile) (provider.Profile, error) {
+	pin := strings.TrimSpace(def.STTLanguage)
+	if pin == "" || len(c.MediaSTTLanguageProviders) == 0 {
+		return def, nil
+	}
+	mapped, ok := c.MediaSTTLanguageProviders[provider.PrimarySubtag(pin)]
+	if !ok {
+		return def, nil
+	}
+	routed, err := c.Providers().ResolveExplicit(provider.CapSTT, mapped, true)
+	if err != nil {
+		return provider.Profile{}, err
+	}
+	routed.STTLanguage = pin
+	return routed, nil
+}
+
 // sttSelectorProfile is the SINGLE mapping from a normalized legacy stt.provider
 // selector (SPEC 8.1.3) to the built-in provider profile that serves it. It is
 // shared by every STT resolver — ingest transcription
@@ -877,6 +965,46 @@ func (c *Config) validateProviderKinds() error {
 			return fmt.Errorf(
 				"CONFIG_INVALID: provider profile %q declares unrecognized kind %q; use one of %s",
 				name, p.Kind, provider.KnownKindsString())
+		}
+	}
+	return nil
+}
+
+// validateSTTLanguageProviders fails fast (CONFIG_INVALID) when a
+// media.stt.language_providers route (SPEC §8.2.1, #566) names a profile that
+// does not exist or is not STT-capable (per the capability matrix, SPEC 8.1.2).
+// This is static validation: a route to a missing/incapable backend can never
+// transcribe, so it must be caught at startup naming the offending language and
+// profile rather than surfacing far downstream. Credential eligibility is NOT
+// checked here (a credential-less endpoint is valid; a missing api_key is a
+// runtime/preflight concern), matching how explicit provider bindings are gated.
+// EndpointDependent kinds (e.g. kind:openai audio) are permitted, consistent with
+// the matrix. Routes are scanned in sorted language order so the error is stable.
+func (c *Config) validateSTTLanguageProviders() error {
+	if len(c.MediaSTTLanguageProviders) == 0 {
+		return nil
+	}
+	byName := c.Providers().ByName()
+	langs := make([]string, 0, len(c.MediaSTTLanguageProviders))
+	for lang := range c.MediaSTTLanguageProviders {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	for _, lang := range langs {
+		name := strings.TrimSpace(c.MediaSTTLanguageProviders[lang])
+		if name == "" {
+			return fmt.Errorf(
+				"CONFIG_INVALID: media.stt.language_providers[%q] has no provider profile name", lang)
+		}
+		prof, ok := byName[name]
+		if !ok {
+			return fmt.Errorf(
+				"CONFIG_INVALID: media.stt.language_providers[%q] names unknown provider profile %q", lang, name)
+		}
+		if provider.Can(prof.Kind, provider.CapSTT) == provider.Unsupported {
+			return fmt.Errorf(
+				"CONFIG_INVALID: media.stt.language_providers[%q] provider %q (kind %q) is not speech-to-text capable; route to an STT-capable profile or remove the entry",
+				lang, name, prof.Kind)
 		}
 	}
 	return nil

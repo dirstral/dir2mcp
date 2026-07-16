@@ -539,6 +539,13 @@ func STTLanguageCoverageSet(coverage []string, lang string) (declared, covered b
 	return true, false
 }
 
+// PrimarySubtag lower-cases a BCP-47 tag and returns its primary language
+// subtag (the part before the first '-'), trimmed. Empty input → "". Exported
+// so the config layer normalizes media.stt.language_providers keys with the SAME
+// BCP-47 primary-subtag rule the coverage check uses (SPEC §8.2.1, #566), so a
+// "ru" route matches a "ru-RU" pin and vice versa.
+func PrimarySubtag(tag string) string { return primarySubtag(tag) }
+
 // primarySubtag lower-cases a BCP-47 tag and returns its primary language
 // subtag (the part before the first '-'), trimmed. Empty input → "".
 func primarySubtag(tag string) string {

@@ -700,6 +700,19 @@ type Config struct {
 	// can set this true to restore strict script-mismatch enforcement.
 	MediaSTTLanguageStrict bool
 
+	// MediaSTTLanguageProviders routes transcription by the pinned source
+	// language (config `media.stt.language_providers`, SPEC §8.2.1, #566): a map
+	// from a BCP-47 primary language subtag to the NAME of an STT-capable provider
+	// profile. When the resolved SOURCE-LANGUAGE pin matches a key, that profile
+	// transcribes, OVERRIDING the default STT provider; empty/unset preserves the
+	// single-provider behaviour. Routing is PIN-BASED and per-run: langdetect is
+	// text-based and cannot know an audio file's language before transcription, so
+	// the route keys off the configured language pin (resolved once), never
+	// per-item auto-detection — with no pin there is nothing to route on. Keys are
+	// normalized to the BCP-47 primary subtag (lower-cased) at load; a mapped name
+	// that is absent or not STT-capable is rejected as CONFIG_INVALID at startup.
+	MediaSTTLanguageProviders map[string]string
+
 	// MediaBatchTwoPhase / MediaBatchProgress / MediaBatchManifest configure the
 	// optional batch-ergonomics surface for large-archive media ingests (SPEC
 	// §8.6.11; config block `media.batch`). All default OFF/empty so behavior is
@@ -1763,6 +1776,18 @@ func applyFileOverrides(cfg *Config, path string) error {
 		cfg.MediaTranslateGlossary = glossary
 	}
 
+	// Optional media.stt.language_providers nested map (SPEC §8.2.1, #566). It is
+	// a map of BCP-47 language -> STT provider profile name, so it is decoded from
+	// the media: subtree with yaml.v3 rather than the bespoke flat parser above
+	// (which is scalar/list-only). Absent block ⇒ nil (no routing), no error.
+	langProviders, err := parseMediaSTTLanguageProviders(raw)
+	if err != nil {
+		return fmt.Errorf("config file %s: %w", path, err)
+	}
+	if len(langProviders) > 0 {
+		cfg.MediaSTTLanguageProviders = langProviders
+	}
+
 	return nil
 }
 
@@ -2657,7 +2682,14 @@ func isMapSectionKey(key string) bool {
 	// prefixes their child keys into the glossary namespace (e.g.
 	// media.translate.glossary.<lang>.<term>) instead of leaking a source term like
 	// "engine" up to a real media.translate.<key> and corrupting config (#574).
-	if key == "media.translate.glossary" || strings.HasPrefix(key, "media.translate.glossary.") {
+	//
+	// media.stt.language_providers is likewise a nested lang->profile map decoded
+	// separately (parseMediaSTTLanguageProviders, #566); treat it and its language
+	// sub-entries as a section so children prefix into that namespace
+	// (media.stt.language_providers.<lang>) — a guaranteed no-op — instead of
+	// leaking a language code up to a real media.stt.<key>.
+	if key == "media.translate.glossary" || strings.HasPrefix(key, "media.translate.glossary.") ||
+		key == "media.stt.language_providers" || strings.HasPrefix(key, "media.stt.language_providers.") {
 		return true
 	}
 	switch key {
@@ -3755,6 +3787,10 @@ func (c *Config) Validate() error {
 		// with its own root-cause CONFIG_INVALID rather than surfacing as a
 		// misleading "requires STT provider to be kind:whisper" (optibot #592).
 		c.validateSTTProvider,
+		// After validateSTTProvider (so an unrecognized default selector fails with
+		// its own root cause first): reject a language_providers route that names an
+		// unknown or non-STT-capable profile (SPEC §8.2.1, #566) as CONFIG_INVALID.
+		c.validateSTTLanguageProviders,
 		c.validateMediaTranslate,
 		c.validateMediaSubtitles,
 		c.validateMediaDiarize,

@@ -949,6 +949,18 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 		if langOverride != "" {
 			prof.STTLanguage = langOverride
 		}
+		// Language-based routing (SPEC §8.2.1, #566): if the effective source-language
+		// pin (the profile's configured STTLanguage, or the per-request override folded
+		// in above) maps to a provider profile via media.stt.language_providers, that
+		// profile REPLACES the default so the ACTUAL transcriber matches the backend
+		// resolveSTTProfile reports. Routing is pin-based and per-run — it keys off the
+		// configured pin, never per-item auto-detection — so an empty pin leaves the
+		// default untouched. RouteSTTProfile carries the pin onto the routed profile.
+		routed, rerr := cfg.RouteSTTProfile(prof)
+		if rerr != nil {
+			return nil, fmt.Errorf("stt provider %q: %w", sel, rerr)
+		}
+		prof = routed
 		// media.vad (dir2mcp#258) is a global toggle, applied onto whichever STT
 		// profile resolves; providers without VAD support ignore it.
 		prof.STTVAD = cfg.MediaVAD
@@ -1036,6 +1048,30 @@ func sttExpectedLanguage(cfg config.Config) string {
 // expected-language hint and the STT derivation identity recorded on transcript
 // representations (§8.6.7), so both observe the exact same profile.
 func resolveSTTProfile(cfg config.Config) (provider.Profile, bool) {
+	prof, ok := resolveDefaultSTTProfile(cfg)
+	if !ok {
+		return provider.Profile{}, false
+	}
+	// Language-based routing (SPEC §8.2.1, #566): if the resolved source-language
+	// pin maps to a provider profile via media.stt.language_providers, that profile
+	// REPLACES the default here too, so the expected-language hint, the STT
+	// derivation identity, and the honest-coverage check all observe the SAME
+	// backend that TranscriberFromConfigWithLanguage builds. A routed profile whose
+	// credential is unset resolves as STT-off on this path (ok=false), mirroring the
+	// default-profile eligibility handling above.
+	routed, err := cfg.RouteSTTProfile(prof)
+	if err != nil {
+		return provider.Profile{}, false
+	}
+	return routed, true
+}
+
+// resolveDefaultSTTProfile resolves the DEFAULT (un-routed) STT provider profile
+// from the legacy stt.provider selector (SPEC 8.1.3). It is the pre-routing half
+// of resolveSTTProfile, split out so both the routed resolver and the router
+// (which needs the resolved pin) share one selection path. ok=false when STT is
+// off, when no STT-capable profile resolves, or when the selector is unrecognised.
+func resolveDefaultSTTProfile(cfg config.Config) (provider.Profile, bool) {
 	sel := strings.ToLower(strings.TrimSpace(cfg.STTProvider))
 	if sel == "" {
 		sel = transcriberProviderAuto
