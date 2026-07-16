@@ -519,6 +519,18 @@ type Config struct {
 	// (config `media.translate.context_lines`, issue #573). 0 means no margin.
 	// Only consulted for engine="chat".
 	MediaTranslateContextLines int
+	// MediaTranslateGlossary is OPTIONAL terminology guidance for the CHAT
+	// translate engine (config `media.translate.glossary`, SPEC §8.6.2, issue
+	// #574): a mapping keyed per BCP-47 TARGET language of source term/phrase →
+	// preferred rendering, injected into BOTH the per-line and windowed translate
+	// prompts as GUIDANCE (not a hard constraint) so proper nouns, domain terms,
+	// and preferred spellings render consistently AND inflect correctly (the model
+	// adapts morphology, unlike a find/replace). Only the entries for the CURRENT
+	// target language are injected. Empty/unset = no guidance (historical
+	// behaviour). It is DISTINCT from media.subtitles.glossary (an export-time
+	// regex find/replace on rendered cues). Domain-general: no built-in terms; the
+	// map is entirely operator-provided.
+	MediaTranslateGlossary map[string]map[string]string
 	// MediaFilterWords is an optional, general-purpose list of boilerplate /
 	// credits / watermark phrases stripped from transcript and subtitle text
 	// (config `media.filter_words`). Matching is case-insensitive substring
@@ -1739,6 +1751,18 @@ func applyFileOverrides(cfg *Config, path string) error {
 	}
 	cfg.Carbon = carbon
 
+	// Optional media.translate.glossary nested map (SPEC §8.6.2, issue #574).
+	// It is a per-target-language map-of-maps, so it is decoded from the media:
+	// subtree with yaml.v3 rather than the bespoke flat parser above (which is
+	// scalar/list-only). Absent block ⇒ nil (no guidance), no error.
+	glossary, err := parseMediaTranslateGlossary(raw)
+	if err != nil {
+		return fmt.Errorf("config file %s: %w", path, err)
+	}
+	if len(glossary) > 0 {
+		cfg.MediaTranslateGlossary = glossary
+	}
+
 	return nil
 }
 
@@ -2627,6 +2651,15 @@ func canonicalizeConfigKey(key string) string {
 // isMapSectionKey reports whether key names a nested mapping section
 // (so child keys should be prefixed) rather than a scalar/list key.
 func isMapSectionKey(key string) bool {
+	// media.translate.glossary is a nested per-target-language map-of-maps decoded
+	// separately with yaml.v3 (parseMediaTranslateGlossary); treat the glossary key
+	// AND every language sub-mapping under it as a section so the flat parser
+	// prefixes their child keys into the glossary namespace (e.g.
+	// media.translate.glossary.<lang>.<term>) instead of leaking a source term like
+	// "engine" up to a real media.translate.<key> and corrupting config (#574).
+	if key == "media.translate.glossary" || strings.HasPrefix(key, "media.translate.glossary.") {
+		return true
+	}
 	switch key {
 	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.cross_lingual", "rerank", "rerank.cohere", "index", "dedup":
 		return true

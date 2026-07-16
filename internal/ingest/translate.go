@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -180,7 +181,7 @@ func (s *Service) translateWindow(ctx context.Context, cells []translateCell, or
 	before := order[max(0, start-marginM):start]
 	after := order[end:min(len(order), end+marginM)]
 
-	prompt := buildWindowTranslatePrompt(cells, before, targets, after, targetLang)
+	prompt := buildWindowTranslatePrompt(cells, before, targets, after, targetLang, s.translateGlossaryFor(targetLang))
 	raw, err := s.generateBounded(ctx, prompt, translateLineMaxTokens*len(targets))
 	if err != nil {
 		// A provider/transport failure is NOT a format mismatch: the provider is
@@ -270,19 +271,62 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 	if text == "" {
 		return "", nil
 	}
-	return s.generateBounded(ctx, buildTranslatePrompt(text, targetLang), translateLineMaxTokens)
+	return s.generateBounded(ctx, buildTranslatePrompt(text, targetLang, s.translateGlossaryFor(targetLang)), translateLineMaxTokens)
+}
+
+// translateGlossaryFor returns the terminology-guidance entries (source term →
+// preferred rendering) configured for targetLang, or nil when no glossary applies
+// (SPEC §8.6.2, issue #574). Language tags are matched case-insensitively against
+// the normalized (lower-cased) glossary keys.
+func (s *Service) translateGlossaryFor(targetLang string) map[string]string {
+	if len(s.cfg.MediaTranslateGlossary) == 0 {
+		return nil
+	}
+	return s.cfg.MediaTranslateGlossary[strings.ToLower(strings.TrimSpace(targetLang))]
+}
+
+// writeGlossaryGuidance appends a deterministic terminology-guidance line for the
+// current target language's glossary entries (SPEC §8.6.2, issue #574). It is
+// GUIDANCE, not a hard constraint — the model is asked to PREFER these renderings
+// but adapt them for grammar. Entries are emitted in sorted source-term order so
+// the prompt is byte-for-byte deterministic (Go map iteration order is
+// randomized). No-op when glossary is empty, preserving today's prompt exactly.
+func writeGlossaryGuidance(b *strings.Builder, glossary map[string]string) {
+	if len(glossary) == 0 {
+		return
+	}
+	terms := make([]string, 0, len(glossary))
+	for src := range glossary {
+		terms = append(terms, src)
+	}
+	sort.Strings(terms)
+	b.WriteString("Prefer these renderings for the terms below, adapting only as grammar requires ")
+	b.WriteString("(case, inflection, agreement): ")
+	for i, src := range terms {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(src)
+		b.WriteString(" => ")
+		b.WriteString(glossary[src])
+	}
+	b.WriteString(".\n")
 }
 
 // buildTranslatePrompt builds a deterministic, general-purpose translation
 // prompt. It pins the TARGET language only (the source language is auto-detected
 // by the model, matching SPEC §8.6.2's auto-detection default) and instructs the
-// model to return the translation alone so the output needs no post-parsing.
-func buildTranslatePrompt(text, targetLang string) string {
+// model to return the translation alone so the output needs no post-parsing. When
+// a non-empty glossary is supplied it injects per-target terminology guidance
+// (§8.6.2); an empty glossary reproduces the historical prompt verbatim.
+func buildTranslatePrompt(text, targetLang string, glossary map[string]string) string {
 	var b strings.Builder
 	b.WriteString("Translate the following text into ")
 	b.WriteString(targetLang)
 	b.WriteString(". Preserve meaning faithfully. Return only the translated text, ")
-	b.WriteString("with no preamble, quotes, or explanation.\n\n")
+	b.WriteString("with no preamble, quotes, or explanation.\n")
+	writeGlossaryGuidance(&b, glossary)
+	b.WriteString("\n")
 	b.WriteString(text)
 	return b.String()
 }
@@ -294,8 +338,10 @@ func buildTranslatePrompt(text, targetLang string) string {
 // referents, agreement, split sentences, and terminology WITHOUT re-translating
 // them. The strict "N: <translation>" response contract lets the caller verify a
 // 1:1 mapping and safe-degrade on any mismatch. It is language-agnostic (the
-// target language is pinned; the source is auto-detected).
-func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []int, targetLang string) string {
+// target language is pinned; the source is auto-detected). A non-empty glossary
+// injects the same per-target terminology guidance as the per-line prompt
+// (§8.6.2, issue #574); an empty glossary reproduces the historical prompt.
+func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []int, targetLang string, glossary map[string]string) string {
 	var b strings.Builder
 	b.WriteString("Translate each NUMBERED line below into ")
 	b.WriteString(targetLang)
@@ -307,6 +353,7 @@ func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []
 	b.WriteString("with the SAME count and the SAME numbers in the SAME order. Do NOT add, drop, split, ")
 	b.WriteString("merge, renumber, or reorder lines, and never output the context lines. ")
 	b.WriteString("No preamble, quotes, or explanation.\n")
+	writeGlossaryGuidance(&b, glossary)
 
 	writeContext := func(heading string, idxs []int) {
 		if len(idxs) == 0 {
