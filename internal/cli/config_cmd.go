@@ -122,17 +122,20 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 			return exitSuccess
 		}
 		embedProvider, embedReady := "none", false
+		embedBaseURL := ""
 		if ep, perr := cfg.Providers().Resolve(provider.CapEmbed); perr == nil {
 			embedProvider, embedReady = ep.Name, true
+			embedBaseURL = provider.NormalizeEmbedBaseURL(ep)
 		}
 		writef(
 			a.stdout,
-			"root=%s state_dir=%s listen=%s mcp_path=%s embed_provider=%s embed_ready=%t\n",
+			"root=%s state_dir=%s listen=%s mcp_path=%s embed_provider=%s embed_base_url=%s embed_ready=%t\n",
 			cfg.RootDir,
 			cfg.StateDir,
 			cfg.ListenAddr,
 			cfg.MCPPath,
 			embedProvider,
+			embedBaseURL,
 			embedReady,
 		)
 	default:
