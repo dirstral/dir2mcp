@@ -198,6 +198,141 @@ func extractTopLevelSubtree(raw []byte, want string) []byte {
 	return []byte(strings.Join(out, "\n"))
 }
 
+// parseMediaTranslateGlossary decodes the OPTIONAL, per-target-language
+// `media.translate.glossary` nested map (SPEC §8.6.2, issue #574):
+//
+//	media:
+//	  translate:
+//	    glossary:
+//	      es:
+//	        "United Nations": "Naciones Unidas"
+//
+// It is a map-of-maps, so — unlike the scalar/list `media.*` keys handled by the
+// bespoke flat parser — it is decoded with yaml.v3 from the glossary block
+// extracted in isolation (extractMediaTranslateGlossarySubtree), never exposing
+// unrelated `media:` scalars to a strict YAML decode. Language keys are
+// lower-cased to match the normalized target_langs used at lookup time; blank
+// languages/terms/renderings are dropped. Absent block ⇒ nil (no guidance).
+func parseMediaTranslateGlossary(raw []byte) (map[string]map[string]string, error) {
+	sub := extractMediaTranslateGlossarySubtree(raw)
+	if len(sub) == 0 {
+		return nil, nil
+	}
+	var doc struct {
+		Glossary map[string]map[string]string `yaml:"glossary"`
+	}
+	if err := yaml.Unmarshal(sub, &doc); err != nil {
+		return nil, fmt.Errorf("parse media.translate.glossary config: %w", err)
+	}
+	return normalizeTranslateGlossary(doc.Glossary)
+}
+
+// normalizeTranslateGlossary lower-cases each target-language key (matching the
+// normalized media.translate.target_langs used at lookup), trims each source
+// term and rendering, and drops blank languages/terms/renderings. Source-term and
+// rendering CASE is preserved (only the language tag is folded). Returns nil when
+// nothing survives so an empty/whitespace-only glossary is indistinguishable from
+// unset (today's no-guidance behaviour).
+//
+// Two raw keys that collide after normalization ("es" and " ES " → "es"; " term "
+// and "term" → "term") are a config error, not a silent last-writer-wins overwrite
+// (which would be nondeterministic under Go map iteration): return CONFIG_INVALID
+// so the operator disambiguates.
+func normalizeTranslateGlossary(in map[string]map[string]string) (map[string]map[string]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]map[string]string, len(in))
+	langSeen := make(map[string]string, len(in)) // normalized lang → first raw key
+	for lang, terms := range in {
+		l := strings.ToLower(strings.TrimSpace(lang))
+		if l == "" || len(terms) == 0 {
+			continue
+		}
+		if prev, dup := langSeen[l]; dup {
+			return nil, fmt.Errorf("CONFIG_INVALID: media.translate.glossary target languages %q and %q both normalize to %q", prev, lang, l)
+		}
+		langSeen[l] = lang
+		m := make(map[string]string, len(terms))
+		srcSeen := make(map[string]string, len(terms)) // trimmed source term → first raw key
+		for src, rendering := range terms {
+			s := strings.TrimSpace(src)
+			r := strings.TrimSpace(rendering)
+			if s == "" || r == "" {
+				continue
+			}
+			if prev, dup := srcSeen[s]; dup {
+				return nil, fmt.Errorf("CONFIG_INVALID: media.translate.glossary[%q] source terms %q and %q both normalize to %q", l, prev, src, s)
+			}
+			srcSeen[s] = src
+			m[s] = r
+		}
+		if len(m) > 0 {
+			out[l] = m
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// extractMediaTranslateGlossarySubtree returns the `glossary:` block nested under
+// `media:` → `translate:` (its key line plus indented continuation), dedented to
+// column 0 so yaml.v3 can decode it in isolation, or nil when absent. It tracks
+// the media→translate→glossary nesting by indentation so it does NOT match the
+// unrelated, list-valued `media.subtitles.glossary` (§8.6.3).
+func extractMediaTranslateGlossarySubtree(raw []byte) []byte {
+	lines := strings.Split(string(raw), "\n")
+	start, base := findMediaTranslateGlossaryHeader(lines)
+	if start < 0 {
+		return nil
+	}
+	out := []string{lines[start][base:]} // dedented `glossary:` header
+	for _, line := range lines[start+1:] {
+		trimmed := strings.TrimLeft(line, " ")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, "")
+			continue
+		}
+		if len(line)-len(trimmed) <= base {
+			break // dedented back to/above the header: end of the glossary block
+		}
+		out = append(out, line[base:]) // strip the header indent, keep relative nesting
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
+// findMediaTranslateGlossaryHeader locates the `glossary:` line nested exactly
+// under a top-level `media:` → `translate:` mapping, returning its line index and
+// leading-space indent (or -1 when absent). It walks an indentation stack of
+// (indent, key) frames so it matches only the translate glossary, never
+// media.subtitles.glossary.
+func findMediaTranslateGlossaryHeader(lines []string) (idx, indent int) {
+	type frame struct {
+		indent int
+		key    string
+	}
+	var stack []frame
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " ")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		ind := len(line) - len(trimmed)
+		for len(stack) > 0 && stack[len(stack)-1].indent >= ind {
+			stack = stack[:len(stack)-1]
+		}
+		key := strings.TrimSpace(strings.SplitN(trimmed, ":", 2)[0])
+		stack = append(stack, frame{indent: ind, key: key})
+		if len(stack) == 3 && stack[0].indent == 0 &&
+			stack[0].key == "media" && stack[1].key == "translate" && stack[2].key == "glossary" {
+			return i, ind
+		}
+	}
+	return -1, -1
+}
+
 // costDoc is the yaml shape of the optional top-level `cost:` block:
 //
 //	cost:
