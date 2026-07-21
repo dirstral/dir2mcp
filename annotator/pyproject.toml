@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dirstral-annotator"
+version = "0.1.0"
+description = "External recognition pipeline emitting annotation sidecars (dirstral-spec design 0004) for dir2mcp video corpora"
+requires-python = ">=3.11"
+# Core (play-by-play recognizer, fusion, emitters, eval) is stdlib-only by
+# design: the pilot's ground-truth path must run anywhere. Vision recognizers
+# pull their stacks in via extras.
+dependencies = []
+
+[project.optional-dependencies]
+ocr = ["pytesseract>=0.3", "Pillow>=10"]
+face = ["insightface>=0.7", "opencv-python-headless>=4.9", "onnxruntime>=1.17"]
+jersey = ["ultralytics>=8.2", "pytesseract>=0.3", "Pillow>=10"]
+all = ["dirstral-annotator[ocr,face,jersey]"]
+
+[project.scripts]
+dirstral-annotate = "dirstral_annotator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dirstral_annotator*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
