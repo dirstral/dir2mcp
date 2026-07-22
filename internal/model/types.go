@@ -80,6 +80,11 @@ const (
 	// SkipReasonSizeCap: the file exceeded ingest.max_file_mb and was dropped
 	// at discovery.
 	SkipReasonSizeCap = "size_cap"
+	// SkipReasonLanguageUncovered: media whose resolved source language is outside
+	// the selected STT model's declared stt_languages coverage, skipped under
+	// media.stt.on_uncovered_language=skip (SPEC §8.2.1) instead of transcribed to
+	// degraded output. No transcript representation is produced.
+	SkipReasonLanguageUncovered = "language_uncovered"
 )
 
 type Representation struct {

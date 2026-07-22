@@ -258,6 +258,8 @@ func skipReasonHint(reason string) string {
 		return "matched ingest.path_excludes — drop the pattern to include them"
 	case model.SkipReasonSecretExcluded:
 		return "matched a secret pattern and was withheld on purpose — review ingest.secret_patterns if this was unintended"
+	case model.SkipReasonLanguageUncovered:
+		return "source language is outside the STT model's declared stt_languages coverage — route it via media.stt.language_providers to a model that covers it, or set media.stt.on_uncovered_language=warn to transcribe anyway"
 	default:
 		return ""
 	}
