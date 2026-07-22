@@ -54,6 +54,7 @@ const (
 
 var toolOrder = []string{
 	protocol.ToolNameSearch,
+	protocol.ToolNameRelated,
 	protocol.ToolNameAsk,
 	protocol.ToolNameAskAudio,
 	protocol.ToolNameTranscribe,
@@ -123,6 +124,13 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 			InputSchema:  searchInputSchema(),
 			OutputSchema: searchOutputSchema(),
 			handler:      s.handleSearchTool,
+		},
+		protocol.ToolNameRelated: {
+			Name:         protocol.ToolNameRelated,
+			Description:  "Nearest-neighbour segments for a given chunk or document ('more like this').",
+			InputSchema:  relatedInputSchema(),
+			OutputSchema: relatedOutputSchema(),
+			handler:      s.handleRelatedTool,
 		},
 		protocol.ToolNameAsk: {
 			Name:         protocol.ToolNameAsk,
@@ -868,6 +876,138 @@ func normalizeIndexAxis(axis string) string {
 		return axis
 	default:
 		return "text"
+	}
+}
+
+// handleRelatedTool serves dir2mcp_related (SPEC §15.12): query-by-example
+// nearest-neighbour retrieval. Exactly one of chunk_id / rel_path identifies the
+// seed; the same §9.5/§9.6 filters as dir2mcp_search narrow the neighbours.
+func (s *Server) handleRelatedTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	rq, toolErr := parseRelatedArgs(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
+	}
+	rs, ok := s.retriever.(model.RelatedSearcher)
+	if !ok {
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "related retrieval not available", Retryable: false}
+	}
+	res, relErr := rs.Related(ctx, rq)
+	if relErr != nil {
+		return toolCallResult{}, mapRelatedError(relErr)
+	}
+	structured := map[string]interface{}{
+		"source_rel_path":   res.SourceRelPath,
+		"k":                 res.K,
+		"index_used":        normalizeIndexAxis(res.IndexUsed),
+		"hits":              serializeSearchHits(res.Hits),
+		"indexing_complete": res.IndexingComplete,
+	}
+	if res.HasSourceChunkID {
+		structured["source_chunk_id"] = res.SourceChunkID
+	}
+	return toolCallResult{
+		Content:           []toolContentItem{{Type: "text", Text: renderSearchHitsText(res.Hits, "related segment")}},
+		StructuredContent: structured,
+	}, nil
+}
+
+// parseRelatedArgs validates and projects the dir2mcp_related arguments into a
+// model.RelatedQuery. It enforces the chunk_id/rel_path oneOf and reuses the
+// shared k/index/filter/date parsers so dir2mcp_related and dir2mcp_search stay
+// in lockstep on those semantics.
+func parseRelatedArgs(args map[string]interface{}) (model.RelatedQuery, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, map[string]struct{}{
+		"chunk_id": {}, "rel_path": {}, "k": {}, "index": {}, "exclude_same_document": {},
+		"path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "date_from": {}, "date_to": {},
+	}); err != nil {
+		return model.RelatedQuery{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	chunkID, chunkPresent, err := parseOptionalIntegerWithPresence(args, "chunk_id")
+	if err != nil {
+		return model.RelatedQuery{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	relPath, relPresent, toolErr := parseRelatedRelPath(args)
+	if toolErr != nil {
+		return model.RelatedQuery{}, toolErr
+	}
+	// oneOf: exactly one of chunk_id / rel_path (neither or both is INVALID_FIELD).
+	if chunkPresent == relPresent {
+		return model.RelatedQuery{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "exactly one of chunk_id or rel_path is required", Retryable: false}
+	}
+	if chunkPresent && chunkID < 1 {
+		return model.RelatedQuery{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "chunk_id must be >= 1", Retryable: false}
+	}
+	k, toolErr := parseKArg(args)
+	if toolErr != nil {
+		return model.RelatedQuery{}, toolErr
+	}
+	indexName, toolErr := parseIndexArg(args)
+	if toolErr != nil {
+		return model.RelatedQuery{}, toolErr
+	}
+	excludeSameDoc, err := parseOptionalBool(args, "exclude_same_document", true)
+	if err != nil {
+		return model.RelatedQuery{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	pathPrefix, fileGlob, docTypes, toolErr := parseSearchFilters(args)
+	if toolErr != nil {
+		return model.RelatedQuery{}, toolErr
+	}
+	languages, toolErr := parseLanguagesArg(args)
+	if toolErr != nil {
+		return model.RelatedQuery{}, toolErr
+	}
+	dateFrom, dateTo, toolErr := parseDateWindow(args)
+	if toolErr != nil {
+		return model.RelatedQuery{}, toolErr
+	}
+	rq := model.RelatedQuery{
+		K: k, Index: indexName, ExcludeSameDocument: excludeSameDoc,
+		PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes,
+		Languages: languages, DateFrom: dateFrom, DateTo: dateTo,
+	}
+	if chunkPresent {
+		rq.SourceChunkID = uint64(chunkID)
+	} else {
+		rq.SourceRelPath = relPath
+	}
+	return rq, nil
+}
+
+// parseRelatedRelPath reports the rel_path argument and whether it was supplied.
+// A present-but-non-string or empty rel_path is INVALID_FIELD; an absent key
+// yields ("", false, nil) so the caller can enforce the chunk_id/rel_path oneOf.
+func parseRelatedRelPath(args map[string]interface{}) (string, bool, *toolExecutionError) {
+	raw, ok := args["rel_path"]
+	if !ok {
+		return "", false, nil
+	}
+	str, isStr := raw.(string)
+	if !isStr {
+		return "", true, &toolExecutionError{Code: "INVALID_FIELD", Message: "rel_path must be a string", Retryable: false}
+	}
+	if strings.TrimSpace(str) == "" {
+		return "", true, &toolExecutionError{Code: "INVALID_FIELD", Message: "rel_path must not be empty", Retryable: false}
+	}
+	return str, true, nil
+}
+
+// mapRelatedError converts a Related error into a toolExecutionError. An
+// unresolvable seed is INVALID_FIELD (SPEC §15.12: the source could not be
+// located, not an empty result).
+func mapRelatedError(err error) *toolExecutionError {
+	switch {
+	case errors.Is(err, model.ErrRelatedSourceNotFound):
+		return &toolExecutionError{Code: "INVALID_FIELD", Message: "chunk_id or rel_path does not resolve to an indexed segment", Retryable: false}
+	case errors.Is(err, model.ErrRelatedNotSupported):
+		return &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "related retrieval not available", Retryable: false}
+	case errors.Is(err, model.ErrIndexNotReady) || errors.Is(err, model.ErrIndexNotConfigured):
+		return &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
+	default:
+		return &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 	}
 }
 
@@ -3147,6 +3287,70 @@ func searchOutputSchema() map[string]interface{} {
 			"indexing_complete": map[string]interface{}{"type": "boolean"},
 		},
 		"required":    []string{"query", "k", "index_used", "hits", "indexing_complete"},
+		"definitions": sharedDefinitions(),
+	}
+}
+
+func relatedInputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"description":          "Exactly ONE of chunk_id / rel_path identifies the source segment. Supplying neither or both is INVALID_FIELD.",
+		"oneOf": []interface{}{
+			map[string]interface{}{"required": []string{"chunk_id"}, "not": map[string]interface{}{"required": []string{"rel_path"}}},
+			map[string]interface{}{"required": []string{"rel_path"}, "not": map[string]interface{}{"required": []string{"chunk_id"}}},
+		},
+		"properties": map[string]interface{}{
+			"chunk_id": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "The source segment: neighbours are ranked by similarity to this chunk's embedding vector. The source chunk itself is always excluded from hits.",
+			},
+			"rel_path": map[string]interface{}{
+				"type":        "string",
+				"minLength":   1,
+				"description": "The source document (corpus-relative, normalized '/'): neighbours are ranked against the document's own chunk vectors. Chunks belonging to this document are always excluded from hits.",
+			},
+			"k":     map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"index": map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto", "description": "Which logical vector axis to search (SPEC §6.1). 'auto' matches the source segment's own index_kind."},
+			"exclude_same_document": map[string]interface{}{
+				"type":        "boolean",
+				"default":     true,
+				"description": "For a chunk_id request: when true (default) all chunks of the source chunk's document are excluded ('other documents like this'); when false the source document's OTHER chunks may appear (the source chunk itself is always excluded). No-op for a rel_path request — a document's own chunks are always excluded (a document is never related to itself).",
+			},
+			"path_prefix": map[string]interface{}{"type": "string"},
+			"file_glob":   map[string]interface{}{"type": "string"},
+			"doc_types":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"languages": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (SPEC §9.5): restrict hits to representations recorded in any of these BCP-47 languages (case-insensitive primary-subtag match). Absent/empty = no filtering.",
+			},
+			"date_from": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional (SPEC §9.6): RFC 3339 timestamp or bare YYYY-MM-DD; exclude hits from documents dated before this (inclusive). Absent = open lower bound.",
+			},
+			"date_to": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional (SPEC §9.6): RFC 3339 timestamp or bare YYYY-MM-DD; exclude hits from documents dated after this (inclusive). Absent = open upper bound.",
+			},
+		},
+	}
+}
+
+func relatedOutputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"source_chunk_id":   map[string]interface{}{"type": "integer", "description": "Echo of the resolved source chunk_id when the request supplied chunk_id; omitted for a rel_path request."},
+			"source_rel_path":   map[string]interface{}{"type": "string", "description": "Echo of the resolved source document rel_path (present for both request shapes)."},
+			"k":                 map[string]interface{}{"type": "integer"},
+			"index_used":        map[string]interface{}{"type": "string", "enum": []string{"text", "code", "both"}},
+			"hits":              map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/definitions/Hit"}},
+			"indexing_complete": map[string]interface{}{"type": "boolean"},
+		},
+		"required":    []string{"source_rel_path", "k", "index_used", "hits", "indexing_complete"},
 		"definitions": sharedDefinitions(),
 	}
 }

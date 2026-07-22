@@ -1778,6 +1778,99 @@ LEFT JOIN documents d ON d.rel_path = tc.rel_path`, int64(chunkID))
 	return t, thash, nil
 }
 
+// EmbeddedChunksByPath returns the embedded (status='ok'), non-deleted chunks of
+// one document (corpus-relative rel_path), ordered by chunk_id. It is the store
+// half of dir2mcp_related's (SPEC §15.12) rel_path seed: the tool aggregates the
+// returned chunks' vectors as the query-by-example seed and excludes every one of
+// them from the neighbours (a document is never related to itself). A rel_path
+// that resolves to no embedded chunk returns an empty slice (the tool maps that
+// to INVALID_FIELD — the source could not be located).
+func (s *SQLiteStore) EmbeddedChunksByPath(ctx context.Context, relPath string) ([]model.ChunkTask, error) {
+	normalizedPath, err := normalizeRelPath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(ctx, `
+WITH filtered_chunks AS (
+  SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language
+  FROM chunks c
+  WHERE c.rel_path = ? AND c.embedding_status = 'ok' AND c.deleted = 0
+),
+ranked_spans AS (
+  SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
+         ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
+  FROM spans s
+  JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
+)
+SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
+       COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''),
+       COALESCE(d.title, ''), fc.modality, fc.media_ref, fc.language, COALESCE(d.mtime_unix, 0)
+FROM filtered_chunks fc
+LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1
+LEFT JOIN documents d ON d.rel_path = fc.rel_path
+ORDER BY fc.chunk_id`, normalizedPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []model.ChunkTask
+	for rows.Next() {
+		var (
+			chunkID   int64
+			rp        string
+			docType   string
+			repType   string
+			text      string
+			kind      string
+			spanK     string
+			spanS     int
+			spanE     int
+			spanExtra string
+			title     string
+			modality  string
+			mediaRef  string
+			language  string
+			mtimeUnix int64
+		)
+		if err := rows.Scan(&chunkID, &rp, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE, &spanExtra, &title, &modality, &mediaRef, &language, &mtimeUnix); err != nil {
+			return nil, err
+		}
+		if chunkID <= 0 {
+			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
+		}
+		uid := uint64(chunkID)
+		span := spanFromRow(spanK, spanS, spanE, spanExtra)
+		out = append(out, model.ChunkTask{
+			Label:     uid,
+			Text:      text,
+			IndexKind: kind,
+			Modality:  modality,
+			MediaRef:  mediaRef,
+			Metadata: model.ChunkMetadata{
+				ChunkID:   uid,
+				RelPath:   rp,
+				Title:     title,
+				DocType:   docType,
+				RepType:   repType,
+				Snippet:   snippet(text, 240),
+				Span:      span,
+				Modality:  modality,
+				MediaRef:  mediaRef,
+				Language:  language,
+				MTimeUnix: mtimeUnix,
+			},
+		})
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) error {
 	normalizedPath, err := normalizeRelPath(relPath)
 	if err != nil {

@@ -129,6 +129,18 @@ type AxisSearcher interface {
 	SearchWithAxis(ctx context.Context, query SearchQuery) ([]SearchHit, string, error)
 }
 
+// RelatedSearcher is an optional Retriever capability that performs
+// query-by-example "more like this" retrieval (SPEC §15.12, dir2mcp #324):
+// given a seed chunk or document it returns the nearest-neighbour segments over
+// the SAME vector index, excluding the seed itself. It is additive — the MCP
+// dir2mcp_related tool type-asserts the retriever against this interface,
+// mirroring AxisSearcher; a retriever that does not implement it simply does not
+// expose the tool. Ordering is pure vector similarity (the reranker does NOT
+// apply), so no query text is involved.
+type RelatedSearcher interface {
+	Related(ctx context.Context, query RelatedQuery) (RelatedResult, error)
+}
+
 type Ingestor interface {
 	Run(ctx context.Context) error
 	Reindex(ctx context.Context) error
