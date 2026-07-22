@@ -475,13 +475,47 @@ func ExtractSegmentURL(ctx context.Context, url, srcExt string, startMS, endMS i
 // It returns ErrToolNotFound when ffprobe/ffmpeg are not installed and
 // ErrNoAudioStream when the media carries no audio track (nothing to transcribe).
 func ExtractAudioTrack(ctx context.Context, path string) ([]byte, error) {
-	// Probe first so a video with no audio track is reported as the distinct
-	// ErrNoAudioStream (a graceful "no transcript") instead of an opaque ffmpeg
-	// "does not contain any stream" failure. A probe error other than a missing
-	// tool is not fatal here: fall through and let ffmpeg surface the real error.
+	return extractAudioTrack(ctx, path, -1)
+}
+
+// ExtractAudioTrackIndex demuxes a SPECIFIC audio stream — selected by its
+// 0-based AUDIO-relative index (0 == the first audio stream, the one
+// ExtractAudioTrack picks by default) — into the same compact mono 16 kHz AAC
+// (.m4a) clip ExtractAudioTrack produces, so each audio track of a multi-track
+// container (an original mix plus per-language dubs, a music-&-effects track)
+// can be transcribed independently (SPEC §8.6.12, issue #567).
+//
+// The index maps to ffmpeg's `-map 0:a:<audioIndex>` stream selector, which is
+// audio-relative (matching MediaInfo.AudioStreams ordering), NOT the absolute
+// container stream index. An audioIndex past the container's audio-stream count
+// is reported as ErrNoAudioStream (the track does not exist) rather than an
+// opaque ffmpeg failure, so a caller can degrade that track gracefully. It
+// returns ErrToolNotFound when ffprobe/ffmpeg are not installed.
+func ExtractAudioTrackIndex(ctx context.Context, path string, audioIndex int) ([]byte, error) {
+	if audioIndex < 0 {
+		return nil, fmt.Errorf("avutil: negative audio track index %d for %q", audioIndex, path)
+	}
+	return extractAudioTrack(ctx, path, audioIndex)
+}
+
+// extractAudioTrack is the shared implementation behind ExtractAudioTrack (the
+// default/first audio stream, audioIndex < 0 ⇒ ffmpeg's `-vn` default mapping)
+// and ExtractAudioTrackIndex (a specific audio-relative stream, audioIndex >= 0
+// ⇒ `-map 0:a:<audioIndex>`). Both emit an identical mono 16 kHz AAC clip; the
+// only difference is stream selection.
+func extractAudioTrack(ctx context.Context, path string, audioIndex int) ([]byte, error) {
+	// Probe first so a video with no audio track — or a requested track index past
+	// the audio-stream count — is reported as the distinct ErrNoAudioStream (a
+	// graceful "no transcript") instead of an opaque ffmpeg "does not contain any
+	// stream" failure. A probe error other than a missing tool is not fatal here:
+	// fall through and let ffmpeg surface the real error.
 	if info, err := ProbeMediaInfo(ctx, path); err != nil {
 		if errors.Is(err, ErrToolNotFound) {
 			return nil, ErrToolNotFound
+		}
+	} else if audioIndex >= 0 {
+		if audioIndex >= len(info.AudioStreams) {
+			return nil, ErrNoAudioStream
 		}
 	} else if strings.TrimSpace(info.AudioCodec) == "" {
 		return nil, ErrNoAudioStream
@@ -499,16 +533,28 @@ func ExtractAudioTrack(ctx context.Context, path string) ([]byte, error) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	outPath := filepath.Join(tmpDir, "audio.m4a")
 
-	cmd := exec.CommandContext(ctx, bin,
+	args := []string{
 		"-nostdin",
 		"-v", "error",
 		"-i", path,
-		"-vn",
+	}
+	if audioIndex >= 0 {
+		// Select exactly the requested audio-relative stream (0:a:<N>) and drop
+		// video; without an explicit map ffmpeg would pick its default audio stream.
+		args = append(args, "-map", fmt.Sprintf("0:a:%d", audioIndex))
+	} else {
+		// Default selection: drop video, let ffmpeg choose the default audio stream
+		// (byte-for-byte the historical ExtractAudioTrack behavior).
+		args = append(args, "-vn")
+	}
+	args = append(args,
 		"-ac", "1",
 		"-ar", "16000",
 		"-c:a", "aac",
 		"-y", outPath,
 	)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

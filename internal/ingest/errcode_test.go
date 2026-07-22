@@ -148,7 +148,7 @@ func TestTranslateOneTranscript_ProviderFailureTaggedTranslateFailed(t *testing.
 		translator: failingGenerator{},
 	}
 	doc := model.Document{RelPath: "audio/talk.mp3", DocType: "audio"}
-	err := s.translateOneTranscript(context.Background(), doc, []byte("audio"), "[00:00] hallo", "de", "en", time.Second, 0)
+	err := s.translateOneTranscript(context.Background(), doc, []byte("audio"), "[00:00] hallo", "de", "en", time.Second, 0, 0)
 	if err == nil {
 		t.Fatal("expected a translation provider failure, got nil")
 	}

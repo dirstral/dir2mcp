@@ -147,6 +147,19 @@ type transcriptMeta struct {
 	DiarizeProvider string    `json:"diarize_provider,omitempty"`
 	DiarizeModel    string    `json:"diarize_model,omitempty"`
 	Speakers        []Speaker `json:"speakers,omitempty"`
+
+	// Track / TrackLanguage / TrackLabel record which audio stream a transcript was
+	// produced from in a multi-track container (SPEC §8.6.12). Track is the 0-based
+	// AUDIO-relative stream index and is recorded ONLY for an ADDITIONAL track
+	// (N ≥ 1): track 0 omits it (absence ⇒ track 0), so a legacy single-track
+	// transcript's meta_json is byte-for-byte unchanged. omitempty on a plain int is
+	// safe here because an additional track index is always ≥ 1, so a genuine value
+	// is never suppressed. TrackLanguage (BCP-47) and TrackLabel (e.g. "commentary")
+	// carry the container's declared per-stream language tag / title when present,
+	// and are absent otherwise.
+	Track         int    `json:"track,omitempty"`
+	TrackLanguage string `json:"track_language,omitempty"`
+	TrackLabel    string `json:"track_label,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

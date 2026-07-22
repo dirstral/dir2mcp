@@ -204,6 +204,13 @@ type Service struct {
 	// avutil.ErrNoAudioStream) without requiring the ffmpeg binary.
 	ExtractAudioTrackFunc func(ctx context.Context, path string) ([]byte, error)
 
+	// ExtractAudioTrackIndexFunc overrides extraction of a SPECIFIC audio stream
+	// (0-based audio-relative index) for per-track transcription (SPEC §8.6.12,
+	// issue #567). Defaults to avutil.ExtractAudioTrackIndex (ffmpeg `-map 0:a:<N>`)
+	// when nil; tests set it to supply deterministic per-track audio bytes (or
+	// avutil.ErrNoAudioStream for a track past the count) without the ffmpeg binary.
+	ExtractAudioTrackIndexFunc func(ctx context.Context, path string, audioIndex int) ([]byte, error)
+
 	// ProbeMediaInfoFunc overrides the container/stream probe used to detect
 	// multi-track audio (issue #567). Defaults to avutil.ProbeMediaInfo (ffprobe)
 	// when nil; tests set it to supply a deterministic stream census without the
@@ -331,6 +338,18 @@ type Service struct {
 	// single processDocument entry). A rejected representation is thus counted once
 	// even when a document produces several (transcript + per-language translations).
 	quarantinedThisDoc bool
+
+	// deferGateDocError suppresses the EAGER per-document status=error marking that
+	// the output quality gate normally applies (recordQualityGateDocError), scoping a
+	// gate rejection to the failing TRACK instead of the whole document (SPEC
+	// §8.6.12). It is set only while transcribing a multi-track selection (all/list):
+	// there a rejected track's transcript is dropped and recorded as honest coverage,
+	// and the document is marked error only if EVERY selected track failed — that
+	// final decision is made by the per-track orchestrator, not per gate call. The
+	// chunk-level quarantine encoded in the returned decision is unaffected. It is
+	// per-document/per-pass state (the scan loop is sequential) and is always reset to
+	// false after the multi-track loop.
+	deferGateDocError bool
 
 	// activePass selects which work the representation generators perform for the
 	// asset currently being processed under the optional two-phase pass split
@@ -2295,25 +2314,23 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	return nil
 }
 
-// deriveTranscriptTranslations recomputes the source transcript (a cache hit, so
-// no re-transcription) and translates it, reusing the SAME derivation logic and
-// trim/alignment as the single-pass path so the resulting translated transcript
-// representations and chunks are byte-identical to single-pass (SPEC §8.6.11).
+// deriveTranscriptTranslations recomputes each selected track's source transcript
+// (a cache hit, so no re-transcription) and translates it, reusing the SAME
+// derivation logic and trim/alignment as the single-pass path so the resulting
+// translated transcript representations and chunks are byte-identical to single-pass
+// (SPEC §8.6.11). Under a multi-track selection (§8.6.12) it derives the translations
+// for every selected track under its transcript@t<N>-<lang> keys; the default single
+// track is the degenerate one-track case.
 func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Document, content []byte) error {
-	transcriptText, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
+	sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks)
 	if err != nil {
 		return err
-	}
-	transcriptText = strings.TrimSpace(transcriptText)
-	if transcriptText == "" {
-		return nil
 	}
 
 	var duration time.Duration
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
 		duration = d
 	}
-
 	// Recompute the same leading-silence trim offset the transcription pass applied
 	// to the source transcript so translated time windows stay aligned (dir2mcp#258
 	// / SPEC §8.6.2). Detection is deterministic for an unchanged asset.
@@ -2323,7 +2340,37 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 			trimOffsetMS = int(offset.Milliseconds())
 		}
 	}
-	return s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS)
+
+	if sel.Mode == config.STTTracksFirst {
+		return s.deriveOneTrackTranslations(ctx, doc, content, trackContext{audioIndex: 0}, duration, trimOffsetMS)
+	}
+	indices := resolveTrackIndices(sel, s.probeTrackInfo(ctx, doc))
+	if len(indices) == 0 {
+		return s.deriveOneTrackTranslations(ctx, doc, content, trackContext{audioIndex: 0}, duration, trimOffsetMS)
+	}
+	var firstErr error
+	for _, n := range indices {
+		if derr := s.deriveOneTrackTranslations(ctx, doc, content, trackContext{audioIndex: n}, duration, trimOffsetMS); derr != nil && firstErr == nil {
+			firstErr = derr
+		}
+	}
+	return firstErr
+}
+
+// deriveOneTrackTranslations reads a single track's cached source transcript and
+// produces its per-language translations (SPEC §8.6.2/§8.6.12). A cache miss here
+// means the track produced no source transcript (empty/failed in the transcription
+// pass), which is a legitimate no-op — never a re-transcription.
+func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
+	transcriptText, _, err := s.readTrackTranscript(ctx, doc, content, tc)
+	if err != nil {
+		return err
+	}
+	transcriptText = strings.TrimSpace(transcriptText)
+	if transcriptText == "" {
+		return nil
+	}
+	return s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS, tc.audioIndex)
 }
 
 // readDocumentContent reads an asset's bytes through the corpus filesystem,
@@ -4018,7 +4065,14 @@ func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, k
 	// continues. This is IN ADDITION to the chunk-level quarantine encoded in the
 	// returned decision (embedding_status=error), which keeps the degenerate text
 	// out of the embedding index.
-	s.recordQualityGateDocError(ctx, doc, kind, reason)
+	//
+	// §8.6.12: while transcribing a multi-track selection the doc-error marking is
+	// DEFERRED (deferGateDocError) so a gate rejection fails only that track; the
+	// orchestrator marks the document error only if every selected track failed. The
+	// chunk-level quarantine below is unaffected either way.
+	if !s.deferGateDocError {
+		s.recordQualityGateDocError(ctx, doc, kind, reason)
+	}
 	return quarantineDecision{
 		quarantine: true,
 		embErr:     embErr,
@@ -4100,35 +4154,156 @@ func (s *Service) transcriptExpectedLanguage() string {
 	return s.transcriptLanguage
 }
 
+// trackContext describes ONE audio track selected for transcription (SPEC
+// §8.6.12). audioIndex is the 0-based audio-relative stream index; stream carries
+// the container's declared per-stream metadata (language/title, when known);
+// warnExtras requests the legacy "only the first track was transcribed"
+// diagnostic (emitted only on the default first-track path).
+type trackContext struct {
+	audioIndex int
+	stream     avutil.AudioStream
+	hasStream  bool
+	warnExtras bool
+}
+
 // generateTranscriptRepresentation transcribes a media document (audio, or a
 // video's extracted audio track — issue #495) and persists the source transcript
-// representation and its chunks. It returns (produced, err): produced is true only
-// when a transcript representation was actually persisted, so the caller can tell a
-// real transcript from a legitimately empty one (silence, or a video with no audio
-// track) and surface an otherwise-unsearchable video (#398). A returned err follows
-// the same contract as generateRepresentations.
+// representation(s) and their chunks. It returns (produced, err): produced is true
+// when at least one transcript representation was actually persisted, so the caller
+// can tell a real transcript from a legitimately empty one (silence, or a video with
+// no audio track) and surface an otherwise-unsearchable video (#398). A returned err
+// follows the same contract as generateRepresentations.
+//
+// Which audio tracks are transcribed is governed by media.stt.tracks (SPEC §8.6.12):
+// the default `first` transcribes only track 0 (byte-for-byte today's behavior and
+// cost), while `all` / an explicit index list additionally transcribe each selected
+// track N ≥ 1 under a distinct `transcript@t<N>` rep_type.
 func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) (bool, error) {
 	if s.repGen == nil || s.transcriber == nil {
 		return false, nil
 	}
-
-	transcriptText, words, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
+	sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks)
 	if err != nil {
+		// Should never happen (validated at startup), but fail closed rather than
+		// silently transcribing the wrong track set.
 		return false, err
 	}
+	// Default (and overwhelmingly common) single-track path: transcribe only the
+	// first audio stream, keeping the eager quality-gate semantics and the honest
+	// "additional tracks dropped" diagnostic exactly as before (§8.6.12: track 0 is
+	// byte-for-byte unchanged).
+	if sel.Mode == config.STTTracksFirst {
+		produced, _, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: true})
+		return produced, terr
+	}
+	return s.generateSelectedTrackTranscripts(ctx, doc, content, sel)
+}
 
-	// Multi-track honesty (issue #567): the transcription above fed only the first
-	// audio stream (ffmpeg's default selection) to STT. If the container carries
-	// additional audio streams — per-language dubs, an M&E track — surface them so
+// generateSelectedTrackTranscripts transcribes every audio track selected by an
+// `all` / explicit-index media.stt.tracks selection (SPEC §8.6.12), in container
+// stream order. Track-scoped failure semantics apply: a per-track transcription
+// error or quality-gate rejection fails ONLY that track (its representation is
+// dropped and recorded as honest coverage), and the DOCUMENT is reported as an
+// error only if EVERY selected track failed — otherwise it is ready with whatever
+// tracks succeeded.
+func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc model.Document, content []byte, sel config.STTTrackSelection) (bool, error) {
+	info := s.probeTrackInfo(ctx, doc)
+	indices := resolveTrackIndices(sel, info)
+	if len(indices) == 0 {
+		if len(info.AudioStreams) == 0 {
+			// Unprobeable / no audio census (ffprobe absent, undecodable input): fall
+			// back to the default first-track path so a media file still gets its
+			// track-0 transcript rather than being silently skipped.
+			produced, _, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: false})
+			return produced, terr
+		}
+		// The probe succeeded but an explicit index list matched no existing track in
+		// THIS file (every listed index is past its track count — a per-file
+		// condition, §8.6.12): transcribe nothing rather than falling back to an
+		// unselected track. A video with no other representation is still caught by
+		// the caller's no-representation check (#398).
+		s.getLogger().Printf("media.stt.tracks: none of the selected tracks exist in %s (%d audio stream(s)); no transcript produced (§8.6.12)", doc.RelPath, len(info.AudioStreams))
+		return false, nil
+	}
+
+	// Defer the eager per-document quality-gate error while looping so a rejected
+	// track fails only that track (§8.6.12); the all-failed decision below marks the
+	// document error at most once.
+	s.deferGateDocError = true
+	defer func() { s.deferGateDocError = false }()
+
+	producedAny := false
+	failed := 0
+	var firstFailErr error
+	for _, n := range indices {
+		tc := trackContext{audioIndex: n}
+		if n < len(info.AudioStreams) {
+			tc.stream = info.AudioStreams[n]
+			tc.hasStream = true
+		}
+		produced, rejected, terr := s.transcribeAndPersistTrack(ctx, doc, content, tc)
+		if terr != nil {
+			if isHardTranscriptError(terr) {
+				// A persistence/cache failure is not track-scoped; abort the document.
+				return producedAny, terr
+			}
+			// A provider/transient transcription failure is scoped to this track.
+			failed++
+			if firstFailErr == nil {
+				firstFailErr = terr
+			}
+			s.logTrackDropped(doc, tc, terr.Error())
+			continue
+		}
+		if rejected {
+			failed++
+			continue
+		}
+		if produced {
+			producedAny = true
+		}
+	}
+
+	// §8.6.6/§8.6.7 over the SELECTED track set: the document is an error only when
+	// every selected track failed (the degenerate single-track case is one track, so
+	// its failure is the document's). Surface it through the provider-failure channel
+	// so the caller marks the document status=error and retries it next run, without
+	// double-counting the video-no-representation path.
+	if failed == len(indices) {
+		if firstFailErr != nil {
+			return false, firstFailErr
+		}
+		return false, fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
+	}
+	return producedAny, nil
+}
+
+// transcribeAndPersistTrack transcribes ONE selected audio track and persists its
+// source transcript representation (plus, in single-pass mode, its translations).
+// It returns (produced, gateRejected, err): produced is true when a representation
+// was persisted; gateRejected is true when the quality gate dropped this track's
+// transcript under the deferred multi-track semantics (§8.6.12); err carries a
+// provider/transient transcription failure or a hard persistence error. Track 0
+// keeps the bare `transcript` rep_type and is byte-for-byte identical to the legacy
+// single-track path; each additional track N ≥ 1 is persisted under
+// `transcript@t<N>` with its container-declared track/language/label in meta_json.
+func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, error) {
+	transcriptText, words, err := s.readTrackTranscript(ctx, doc, content, tc)
+	if err != nil {
+		return false, false, err
+	}
+
+	// Multi-track honesty (issue #567/#596): on the default first-track path the STT
+	// above fed only the first audio stream to STT; surface any additional streams so
 	// the selection is visible rather than silent. Fired BEFORE the empty-transcript
-	// early return so a non-dialogue first track (e.g. an M&E track yielding an empty
-	// transcript) still warns about the dropped dialogue tracks (optibot #596).
-	// Best-effort and non-fatal: it never affects the transcript that was produced.
-	s.warnMultiTrackAudio(ctx, doc)
+	// early return so a non-dialogue first track still warns about dropped tracks.
+	if tc.warnExtras {
+		s.warnMultiTrackAudio(ctx, doc)
+	}
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return false, nil
+		return false, false, nil
 	}
 
 	var duration time.Duration
@@ -4140,6 +4315,15 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
 		Duration:         duration,
 	})
+	// §8.6.12: under the deferred (multi-track) gate, a rejected track's transcript
+	// is DROPPED entirely (recorded as honest coverage) rather than persisted with
+	// quarantined chunks, so it never counts toward the document being "ready". On
+	// the eager (default) path deferGateDocError is false and the legacy
+	// persist-with-quarantine behavior below is preserved unchanged.
+	if decision.quarantine && s.deferGateDocError {
+		s.logTrackDropped(doc, tc, "output quality gate rejected the transcript")
+		return false, true, nil
+	}
 
 	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
 	// Strip configured subtitle drop/scrub phrases from the chunk text BEFORE
@@ -4148,7 +4332,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	dropSet, scrubSet := s.captionDropScrub()
 	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
 	if len(segments) == 0 {
-		return false, nil
+		return false, false, nil
 	}
 	// Optional model-driven speaker diarization (SPEC §8.6.8): when active and a
 	// diarizer is injected, attribute each segment to a speaker. This is metadata
@@ -4159,21 +4343,23 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// attribution that is actually present on the segments.
 	s.applyDiarization(ctx, doc, content, segments)
 
-	metaJSON, err := s.sttTranscriptMetaJSON(distinctSpeakers(segments), transcriptText, segmentsHaveWordTiming(segments))
+	meta := s.sttTranscriptMeta(distinctSpeakers(segments), transcriptText, segmentsHaveWordTiming(segments))
+	applyTrackMeta(&meta, tc)
+	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		return false, fmt.Errorf("marshal transcript meta: %w", err)
+		return false, false, fmt.Errorf("marshal transcript meta: %w", err)
 	}
 	rep := model.Representation{
 		DocID:       doc.DocID,
-		RepType:     RepTypeTranscript,
+		RepType:     TranscriptRepTypeForTrack(tc.audioIndex, ""),
 		RepHash:     computeRepHash([]byte(transcriptText)),
-		MetaJSON:    metaJSON,
+		MetaJSON:    string(metaJSON),
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,
 	}
 	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
 	if err != nil {
-		return false, fmt.Errorf("upsert transcript representation: %w", err)
+		return false, false, fmt.Errorf("upsert transcript representation: %w", err)
 	}
 
 	// Optional leading-silence trim (dir2mcp#258): when enabled, subtract the
@@ -4190,7 +4376,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		}
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
-		return false, fmt.Errorf("persist transcript chunks: %w", err)
+		return false, false, fmt.Errorf("persist transcript chunks: %w", err)
 	}
 
 	// Optional translation step (SPEC §8.6.2): after the source transcript
@@ -4210,9 +4396,9 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 	// final set of representations is identical either way — only the ordering
 	// differs. In single-pass mode (the default) it runs inline as before.
 	if s.activePass == passTranscription {
-		return true, nil
+		return true, false, nil
 	}
-	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS); err != nil {
+	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS, tc.audioIndex); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
 		s.addErrors(1)
 		// §8.6.11/§14.4: record the canonical translation-failure code
@@ -4224,7 +4410,162 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 		code := manifestErrorCode(err)
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
-	return true, nil
+	return true, false, nil
+}
+
+// readTrackTranscript resolves the transcript text (and optional per-word timing)
+// for a single selected audio track (SPEC §8.6.12). Track 0 is transcribed via the
+// exact legacy path (the document's bytes, with a video's default audio demuxed
+// inline), so its cache key and result are byte-for-byte unchanged. An additional
+// track N ≥ 1 is first demuxed to a compact per-track audio clip and transcribed as
+// a standalone audio document, keying the transcribe cache on the extracted bytes so
+// each track caches independently.
+func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, error) {
+	if tc.audioIndex <= 0 {
+		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
+	}
+	audio, err := s.extractTrackAudio(ctx, doc, content, tc.audioIndex)
+	if err != nil {
+		if errors.Is(err, avutil.ErrNoAudioStream) {
+			// The requested track does not exist in this file: a track-scoped "no
+			// transcript" (handled by the caller as an empty, non-fatal outcome), not
+			// a provider failure.
+			s.getLogger().Printf("media.stt.tracks: %s has no audio track %d to transcribe; skipping it (§8.6.12)", doc.RelPath, tc.audioIndex)
+			return "", nil, nil
+		}
+		return "", nil, fmt.Errorf("%w: extract audio track %d of %s: %w", ErrTranscriptProviderFailure, tc.audioIndex, doc.RelPath, err)
+	}
+	// Transcribe the extracted clip as a standalone audio document: DocType audio so
+	// transcribe() does not re-demux, and an audio-suffixed rel_path so the provider
+	// infers an audio MIME. The extracted bytes drive the transcribe cache key, so
+	// each track's transcript caches independently of track 0 and its siblings.
+	trackDoc := doc
+	trackDoc.DocType = "audio"
+	trackDoc.RelPath = trackAudioRelPath(doc.RelPath, tc.audioIndex)
+	return s.readOrComputeTranscriptWithWords(ctx, trackDoc, audio, "")
+}
+
+// extractTrackAudio demuxes a specific audio-relative track to a compact STT-ready
+// clip (SPEC §8.6.12), mirroring extractVideoAudioTrack but selecting the track by
+// index via ExtractAudioTrackIndexFunc (default avutil.ExtractAudioTrackIndex). The
+// in-memory bytes are staged to a temp file because avutil slices by path.
+func (s *Service) extractTrackAudio(ctx context.Context, doc model.Document, content []byte, audioIndex int) ([]byte, error) {
+	tmp, err := os.CreateTemp("", "dir2mcp-vaudio-*"+filepath.Ext(doc.RelPath))
+	if err != nil {
+		return nil, fmt.Errorf("stage media for audio track extraction: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("write staged media: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("flush staged media: %w", err)
+	}
+	extract := s.ExtractAudioTrackIndexFunc
+	if extract == nil {
+		extract = avutil.ExtractAudioTrackIndex
+	}
+	return extract(ctx, tmpPath, audioIndex)
+}
+
+// probeTrackInfo probes doc's container/stream census for track selection (SPEC
+// §8.6.12), resolving the media through the CorpusFS. It is best-effort: any error
+// (ffprobe absent, undecodable input, localize failure) yields a zero MediaInfo so
+// the caller degrades to the default first-track behavior.
+func (s *Service) probeTrackInfo(ctx context.Context, doc model.Document) avutil.MediaInfo {
+	probe := s.ProbeMediaInfoFunc
+	if probe == nil {
+		probe = avutil.ProbeMediaInfo
+	}
+	localPath, cleanup, err := s.corpusFS().Localize(ctx, doc.RelPath)
+	if err != nil {
+		return avutil.MediaInfo{}
+	}
+	defer cleanup()
+	info, err := probe(ctx, localPath)
+	if err != nil {
+		return avutil.MediaInfo{}
+	}
+	return info
+}
+
+// resolveTrackIndices resolves a media.stt.tracks selection against a probed track
+// census into the concrete, ordered (ascending, container stream order) set of
+// audio-relative indices to transcribe (SPEC §8.6.12). `all` expands to every probed
+// track; an explicit list keeps only in-range indices (an index past this file's
+// track count is skipped here as a track-scoped no-op — a corpus mixes files with
+// different track counts, so it is a per-file condition, not a global CONFIG_INVALID).
+// With no probed audio streams the result is empty and the caller falls back to the
+// default first-track path.
+func resolveTrackIndices(sel config.STTTrackSelection, info avutil.MediaInfo) []int {
+	n := len(info.AudioStreams)
+	if n == 0 {
+		return nil
+	}
+	switch sel.Mode {
+	case config.STTTracksAll:
+		out := make([]int, n)
+		for i := range out {
+			out[i] = i
+		}
+		return out
+	case config.STTTracksList:
+		out := make([]int, 0, len(sel.Indices))
+		for _, idx := range sel.Indices {
+			if idx >= 0 && idx < n {
+				out = append(out, idx)
+			}
+		}
+		return out
+	default: // STTTracksFirst
+		return []int{0}
+	}
+}
+
+// applyTrackMeta stamps the per-track fields onto a transcript's meta_json (SPEC
+// §8.6.12). Track 0 is left untouched (absence of `track` ⇒ track 0), so a legacy
+// single-track transcript's meta_json is byte-for-byte unchanged. An additional
+// track records its 0-based index plus the container's declared language/label when
+// present.
+func applyTrackMeta(meta *transcriptMeta, tc trackContext) {
+	if tc.audioIndex <= 0 {
+		return
+	}
+	meta.Track = tc.audioIndex
+	if tc.hasStream {
+		// track_language is the container's OWN declared tag, recorded verbatim (only
+		// trimmed): kept general-purpose with no hardcoded language remapping.
+		meta.TrackLanguage = strings.TrimSpace(tc.stream.Language)
+		meta.TrackLabel = strings.TrimSpace(tc.stream.Title)
+	}
+}
+
+// logTrackDropped records a track-scoped failure as honest coverage (SPEC §8.6.12):
+// a single greppable, content-free line naming the dropped track and the reason, so
+// a per-track transcription/quality failure is visible rather than silent while the
+// sibling tracks are retained.
+func (s *Service) logTrackDropped(doc model.Document, tc trackContext, reason string) {
+	desc := describeAudioStream(tc.audioIndex, tc.stream)
+	s.getLogger().Printf("media.stt.tracks: dropped audio track %s of %s: %s (issue #567)", desc, doc.RelPath, reason)
+}
+
+// isHardTranscriptError reports whether a per-track transcription error is a HARD
+// failure (persistence/cache/marshal) that must abort the whole document, as opposed
+// to a provider/transient transcription failure (ErrTranscriptProviderFailure) that
+// is scoped to the failing track under §8.6.12.
+func isHardTranscriptError(err error) bool {
+	return err != nil && !errors.Is(err, ErrTranscriptProviderFailure)
+}
+
+// trackAudioRelPath rewrites a media path to a per-track extracted-audio filename so
+// the STT provider infers an audio MIME from the extension rather than a video
+// container it would reject (mirrors videoAudioRelPath), while keeping the track
+// index in the stem for human-identifiable staging (SPEC §8.6.12).
+func trackAudioRelPath(relPath string, audioIndex int) string {
+	base := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+	return fmt.Sprintf("%s.t%d.m4a", base, audioIndex)
 }
 
 // applyDiarization stamps speaker attribution onto the transcript segments via
@@ -4269,10 +4610,13 @@ func (s *Service) applyDiarization(ctx context.Context, doc model.Document, cont
 // so behaviour with translation off is identical to before. Each translated
 // transcript: is cached per-language via TranscriptLangSuffix so it is not
 // recomputed across re-ingests; carries a distinct rep_type via
-// TranscriptRepType(lang) so it coexists with the source transcript and any
-// sidecar per-language reps; routes through the output quality gate; and records
-// source_language + translate provider/model in meta_json.
-func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration, trimOffsetMS int) error {
+// TranscriptRepTypeForTrack(track, lang) so it coexists with the source transcript,
+// any sidecar per-language reps, and (for a multi-track selection) the other tracks'
+// translations (§8.6.12 keys them transcript@t<N>-<lang>); routes through the output
+// quality gate; and records source_language + translate provider/model in meta_json.
+// track is the 0-based audio-relative index of the transcript being translated (0
+// for the bare/default transcript).
+func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration, trimOffsetMS, track int) error {
 	if !s.translationConfigured() {
 		return nil
 	}
@@ -4284,7 +4628,7 @@ func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc mo
 			// Skip a no-op translation into the source language itself.
 			continue
 		}
-		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceLang, lang, duration, trimOffsetMS); err != nil {
+		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceLang, lang, duration, trimOffsetMS, track); err != nil {
 			// Best-effort per language: a failure on one target must not suppress
 			// the remaining targets. Log here and keep going; the first error is
 			// returned so the caller can log/count it (non-fatally).
@@ -4326,7 +4670,7 @@ func sameLanguage(a, b string) bool {
 // is cached per-language (TranscriptLangSuffix) keyed by the SOURCE content hash
 // so re-ingesting an unchanged document reuses the cached translation instead of
 // re-calling the chat provider.
-func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration, trimOffsetMS int) error {
+func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration, trimOffsetMS, track int) error {
 	// Source the English text either from the chat generator (line-by-line over
 	// the source transcript) or, for engine=whisper, from Whisper's native
 	// translate task (a second pass over the audio that re-segments with its own
@@ -4407,6 +4751,12 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	if strings.TrimSpace(meta.Language) != "" {
 		meta.LanguageSource = langSourceConfigured
 	}
+	// §8.6.12: a translation of an ADDITIONAL track (N ≥ 1) records the same 0-based
+	// track index as its source transcript, so the derivative is attributable to the
+	// track it came from. Track 0 omits it (byte-for-byte unchanged).
+	if track > 0 {
+		meta.Track = track
+	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal translated transcript meta: %w", err)
@@ -4414,7 +4764,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 
 	rep := model.Representation{
 		DocID:       doc.DocID,
-		RepType:     TranscriptRepType(targetLang),
+		RepType:     TranscriptRepTypeForTrack(track, targetLang),
 		RepHash:     computeRepHash([]byte(translated)),
 		MetaJSON:    string(metaJSON),
 		CreatedUnix: time.Now().Unix(),
