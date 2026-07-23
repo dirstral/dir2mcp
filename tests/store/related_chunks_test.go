@@ -1,4 +1,4 @@
-package store
+package tests
 
 import (
 	"context"
@@ -6,10 +6,11 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // insertRelatedChunk inserts one chunk (pending) for the given document.
-func insertRelatedChunk(t *testing.T, st *SQLiteStore, id uint64, relPath, text, indexKind string) {
+func insertRelatedChunk(t *testing.T, st *store.SQLiteStore, id uint64, relPath, text, indexKind string) {
 	t.Helper()
 	task := model.NewChunkTask(id, text, indexKind, model.ChunkMetadata{
 		ChunkID: id,
@@ -27,7 +28,7 @@ func insertRelatedChunk(t *testing.T, st *SQLiteStore, id uint64, relPath, text,
 // dir2mcp_related's rel_path path aggregates (SPEC §15.12).
 func TestEmbeddedChunksByPath(t *testing.T) {
 	ctx := context.Background()
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("init: %v", err)
 	}

@@ -1,4 +1,4 @@
-package retrieval
+package tests
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
 // relatedFakeStore is a minimal model.Store that also satisfies the
@@ -82,7 +83,7 @@ func relatedChunk(id uint64, relPath, text string) model.ChunkTask {
 
 // newRelatedService wires an HNSW index + fake store + text->vector embedder over
 // a fixed 4-chunk corpus and returns the service ready for Related calls.
-func newRelatedService(t *testing.T) *Service {
+func newRelatedService(t *testing.T) *retrieval.Service {
 	t.Helper()
 	chunks := map[uint64]model.ChunkTask{
 		1: relatedChunk(1, "docs/a.txt", "alpha"),
@@ -100,7 +101,7 @@ func newRelatedService(t *testing.T) *Service {
 	for id, task := range chunks {
 		addVecP(t, idx, id, vecByText[task.Text], task.Metadata.RelPath, task.Metadata.DocType)
 	}
-	svc := NewService(&relatedFakeStore{chunks: chunks}, idx, &textVecEmbedder{vecByText: vecByText}, nil)
+	svc := retrieval.NewService(&relatedFakeStore{chunks: chunks}, idx, &textVecEmbedder{vecByText: vecByText}, nil)
 	for id, task := range chunks {
 		svc.SetChunkMetadata(id, task.Metadata.ToSearchHit())
 	}
@@ -113,15 +114,6 @@ func hitIDs(hits []model.SearchHit) []uint64 {
 		ids[i] = h.ChunkID
 	}
 	return ids
-}
-
-func containsID(ids []uint64, want uint64) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
 }
 
 func TestRelated_ChunkID_ExcludesSameDocument(t *testing.T) {
@@ -238,7 +230,7 @@ func TestRelated_UnknownRelPathIsSourceNotFound(t *testing.T) {
 func TestRelated_NotSupportedStore(t *testing.T) {
 	// A store that does not implement relatedChunkStore degrades to not-supported.
 	idx := index.NewHNSWIndex("")
-	svc := NewService(nil, idx, &textVecEmbedder{vecByText: map[string][]float32{}}, nil)
+	svc := retrieval.NewService(nil, idx, &textVecEmbedder{vecByText: map[string][]float32{}}, nil)
 	_, err := svc.Related(context.Background(), model.RelatedQuery{SourceChunkID: 1, K: 5})
 	if err != model.ErrRelatedNotSupported {
 		t.Fatalf("err = %v, want ErrRelatedNotSupported", err)
