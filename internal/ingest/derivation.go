@@ -293,6 +293,14 @@ func (s *Service) activeOCRIdentityForPath(relPath string) string {
 // The caller is responsible for only invoking this on the content-unchanged,
 // status==ok path; under --force/reindex the normal gate already returns true.
 func (s *Service) derivationIdentityStale(ctx context.Context, relPath string) bool {
+	// Contextual-retrieval self-heal (SPEC §8.1.8, issue #330) runs before the
+	// representation-meta gates because it needs no meta reader: a document that
+	// still carries a `fallback` chunk is reprocessed while contextualization
+	// stays on, so a failed generation is RETRIED rather than left as a silent,
+	// permanent hole in coverage.
+	if s.contextFallbackStale(ctx, relPath) {
+		return true
+	}
 	reader, ok := s.store.(representationMetaReader)
 	if !ok {
 		return false
@@ -301,6 +309,39 @@ func (s *Service) derivationIdentityStale(ctx context.Context, relPath string) b
 		return true
 	}
 	return s.ocrStale(ctx, reader, relPath)
+}
+
+// fallbackContextChunkReader is the optional store capability behind the
+// contextual-retrieval retry gate (SPEC §8.1.8): it reports whether a document
+// still has a live chunk whose context generation failed (embedding_mode =
+// fallback). A store that does not implement it simply disables the retry —
+// preserving prior behaviour rather than failing.
+type fallbackContextChunkReader interface {
+	HasFallbackContextChunks(ctx context.Context, relPath string) (bool, error)
+}
+
+// contextFallbackStale reports whether the document has chunks that embedded RAW
+// because their context generation failed, and contextualization is still on —
+// in which case the document is reprocessed so those chunks are retried
+// (self-heal toward full coverage, SPEC §8.1.8). It self-skips when
+// contextualization is off, so a corpus that later disables the feature is not
+// re-derived forever by stale fallback rows.
+func (s *Service) contextFallbackStale(ctx context.Context, relPath string) bool {
+	if !s.contextualActive {
+		return false
+	}
+	reader, ok := s.store.(fallbackContextChunkReader)
+	if !ok {
+		return false
+	}
+	pending, err := reader.HasFallbackContextChunks(ctx, relPath)
+	if err != nil || !pending {
+		return false
+	}
+	s.getLogger().Printf(
+		"contextual retrieval: %s has chunks whose context generation failed; retrying them this scan (SPEC §8.1.8)",
+		relPath)
+	return true
 }
 
 // transcriptStale reports whether the document's stored machine transcript was

@@ -354,6 +354,43 @@ type Config struct {
 	// hypothetical-document embedding alone. Ignored when RetrievalHyDEEnabled is
 	// false. An empty value normalizes to "fuse".
 	RetrievalHyDEMode string
+	// RetrievalContextualEnabled opts IN to contextual retrieval (SPEC §8.1.8,
+	// config `retrieval.contextual.enabled`, issue #330): before a chunk is
+	// embedded, a short LLM-generated, document-aware context string is prepended
+	// to the text sent to the EMBEDDER. The persisted, displayed, and CITED chunk
+	// text stays the raw chunk, byte-for-byte (citation faithfulness, #403).
+	// Off by default. It is capability-driven and fail-open like OCR/STT: with no
+	// chat provider available the corpus embeds raw and records the effective
+	// `…|off` embed identity plus a warning, never a hard error.
+	RetrievalContextualEnabled bool
+	// RetrievalContextualProvider optionally pins the chat provider profile that
+	// generates the context (config `retrieval.contextual.provider`). Empty (the
+	// default) uses the configured chat capability binding (SPEC 8.1.3). The
+	// resolved provider — including its normalized endpoint — is part of the
+	// embed identity's contextual component (§8.1.4).
+	RetrievalContextualProvider string
+	// RetrievalContextualModel optionally overrides the generation model
+	// (config `retrieval.contextual.model`). Empty uses the resolved profile's
+	// chat model. Part of the embed identity's contextual component.
+	RetrievalContextualModel string
+	// RetrievalContextualMaxTokens caps a single generated context (config
+	// `retrieval.contextual.max_tokens`, default 128): the context is meant to be
+	// one or two sentences. A different cap can yield a different context, so it
+	// is part of the embed identity's contextual component (§8.1.4). Values <= 0
+	// are CONFIG_INVALID when contextual retrieval is enabled.
+	RetrievalContextualMaxTokens int
+	// RetrievalContextualPromptVersion names the built-in, domain-general prompt
+	// template (config `retrieval.contextual.prompt_version`, default "v1"). It
+	// and the EFFECTIVE prompt text are both folded into the embed identity's
+	// contextual component, so an edited operator override re-embeds even without
+	// a version bump (§8.1.4). An unknown version is CONFIG_INVALID when
+	// contextual retrieval is enabled and no explicit prompt override is set.
+	RetrievalContextualPromptVersion string
+	// RetrievalContextualPrompt optionally overrides the built-in prompt template
+	// (config `retrieval.contextual.prompt`). It MUST contain the {{DOCUMENT}} and
+	// {{CHUNK}} placeholders. Empty (the default) uses the built-in template named
+	// by RetrievalContextualPromptVersion.
+	RetrievalContextualPrompt string
 	// CrossLingualEnabled enables server-side cross-lingual query expansion
 	// (config `retrieval.cross_lingual.enabled`): when true and a translator is
 	// available, the query is translated into the corpus's other languages, each
@@ -991,6 +1028,12 @@ type fileConfig struct {
 	RetrievalMMRLambda                 *float64
 	RetrievalHyDEEnabled               *bool
 	RetrievalHyDEMode                  *string
+	RetrievalContextualEnabled         *bool
+	RetrievalContextualProvider        *string
+	RetrievalContextualModel           *string
+	RetrievalContextualMaxTokens       *int
+	RetrievalContextualPromptVersion   *string
+	RetrievalContextualPrompt          *string
 	CrossLingualEnabled                *bool
 	CrossLingualTargetLangs            []string
 	RetrievalHierarchicalEnabled       *bool
@@ -1145,6 +1188,12 @@ type persistedConfig struct {
 	RetrievalMMRLambda                 float64       `yaml:"retrieval_mmr_lambda"`
 	RetrievalHyDEEnabled               bool          `yaml:"retrieval_hyde_enabled"`
 	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
+	RetrievalContextualEnabled         bool          `yaml:"retrieval_contextual_enabled"`
+	RetrievalContextualProvider        string        `yaml:"retrieval_contextual_provider"`
+	RetrievalContextualModel           string        `yaml:"retrieval_contextual_model"`
+	RetrievalContextualMaxTokens       int           `yaml:"retrieval_contextual_max_tokens"`
+	RetrievalContextualPromptVersion   string        `yaml:"retrieval_contextual_prompt_version"`
+	RetrievalContextualPrompt          string        `yaml:"retrieval_contextual_prompt"`
 	CrossLingualEnabled                bool          `yaml:"cross_lingual_enabled"`
 	CrossLingualTargetLangs            []string      `yaml:"cross_lingual_target_langs"`
 	RetrievalHierarchicalEnabled       bool          `yaml:"retrieval_hierarchical_enabled"`
@@ -1374,6 +1423,17 @@ func Default() Config {
 		// RetrievalHyDEMode defaults to "fuse": when HyDE is enabled the
 		// hypothetical-document hits are RRF-fused with the raw-query hits.
 		RetrievalHyDEMode: HyDEModeFuse,
+		// Contextual retrieval (SPEC §8.1.8, #330) defaults to OFF: chunks embed
+		// raw and the embed identity's terminal component stays "off", so an
+		// existing corpus is byte-identical to before the feature existed. The
+		// bound and prompt version carry their defaults so an enabled-but-
+		// unspecified config behaves predictably.
+		RetrievalContextualEnabled:       false,
+		RetrievalContextualProvider:      "",
+		RetrievalContextualModel:         "",
+		RetrievalContextualMaxTokens:     DefaultContextualMaxTokens,
+		RetrievalContextualPromptVersion: ContextualPromptVersionV1,
+		RetrievalContextualPrompt:        "",
 		// CrossLingualEnabled defaults to false (disabled): cross-lingual query
 		// expansion is off unless explicitly enabled. The target-langs list is
 		// left empty, which means "auto" (the corpus's detected languages).
@@ -1544,6 +1604,12 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalMMRLambda:                 cfg.RetrievalMMRLambda,
 		RetrievalHyDEEnabled:               cfg.RetrievalHyDEEnabled,
 		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
+		RetrievalContextualEnabled:         cfg.RetrievalContextualEnabled,
+		RetrievalContextualProvider:        cfg.RetrievalContextualProvider,
+		RetrievalContextualModel:           cfg.RetrievalContextualModel,
+		RetrievalContextualMaxTokens:       cfg.RetrievalContextualMaxTokens,
+		RetrievalContextualPromptVersion:   cfg.RetrievalContextualPromptVersion,
+		RetrievalContextualPrompt:          cfg.RetrievalContextualPrompt,
 		CrossLingualEnabled:                cfg.CrossLingualEnabled,
 		CrossLingualTargetLangs:            append([]string(nil), cfg.CrossLingualTargetLangs...),
 		RetrievalHierarchicalEnabled:       cfg.RetrievalHierarchicalEnabled,
@@ -1717,6 +1783,7 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 	providers := cfg.Providers()
 	raw = appendSnapshotEmbedIdentity(raw, providers.EmbedIdentity())
 	raw = appendSnapshotEmbedBaseURL(raw, providers.EmbedBaseURL())
+	raw = appendSnapshotEmbedContextual(raw, providers.EmbedContextual())
 	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
 		raw = append(raw, '\n')
 	}
@@ -1792,6 +1859,26 @@ func appendSnapshotEmbedBaseURL(raw []byte, baseURL string) []byte {
 		raw = append(raw, '\n')
 	}
 	return append(raw, []byte("embed_base_url: "+baseURL+"\n")...)
+}
+
+// appendSnapshotEmbedContextual records the effective contextual-retrieval
+// component of the embed identity (SPEC §5.5 `embed_contextual`, §8.1.4/§8.1.8)
+// alongside the composite identity, so the mode that pins the vector space is
+// legible without parsing the identity. It is the SAME value already folded into
+// embed_identity's terminal field. The line is OMITTED for the `off` default —
+// per §5.5 an absent key is treated as `off`, so a non-contextual corpus's
+// snapshot stays byte-identical to a pre-feature one. A top-level scalar —
+// ignored by the flat config parser and the providers:/model: yaml subtree
+// decode on reload.
+func appendSnapshotEmbedContextual(raw []byte, contextual string) []byte {
+	contextual = strings.TrimSpace(contextual)
+	if contextual == "" || contextual == provider.EmbedContextualOff {
+		return raw
+	}
+	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+	return append(raw, []byte("embed_contextual: "+contextual+"\n")...)
 }
 
 // appendSnapshotSecretSourceMetadata appends a `secret_sources:` block
@@ -2276,6 +2363,7 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 		cfg.CrossLingualTargetLangs = normalizeStringSlice(fc.CrossLingualTargetLangs)
 	}
 	applyHierarchicalFileParsed(cfg, fc)
+	applyRetrievalContextualFileParsed(cfg, fc)
 }
 
 // applyHierarchicalFileParsed overlays the opt-in hierarchical (coarse-to-fine)
@@ -2302,6 +2390,31 @@ func applyHierarchicalFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.RetrievalHierarchicalPrompt != nil {
 		cfg.RetrievalHierarchicalPrompt = *fc.RetrievalHierarchicalPrompt
+	}
+}
+
+// applyRetrievalContextualFileParsed overlays the opt-in contextual-retrieval
+// block (`retrieval.contextual.*`, SPEC §8.1.8/§16.2, issue #330) onto cfg.
+// Split out of applyRetrievalTuningFileParsed so both stay within the gocyclo
+// budget.
+func applyRetrievalContextualFileParsed(cfg *Config, fc fileConfig) {
+	if fc.RetrievalContextualEnabled != nil {
+		cfg.RetrievalContextualEnabled = *fc.RetrievalContextualEnabled
+	}
+	if fc.RetrievalContextualProvider != nil {
+		cfg.RetrievalContextualProvider = *fc.RetrievalContextualProvider
+	}
+	if fc.RetrievalContextualModel != nil {
+		cfg.RetrievalContextualModel = *fc.RetrievalContextualModel
+	}
+	if fc.RetrievalContextualMaxTokens != nil {
+		cfg.RetrievalContextualMaxTokens = *fc.RetrievalContextualMaxTokens
+	}
+	if fc.RetrievalContextualPromptVersion != nil {
+		cfg.RetrievalContextualPromptVersion = *fc.RetrievalContextualPromptVersion
+	}
+	if fc.RetrievalContextualPrompt != nil {
+		cfg.RetrievalContextualPrompt = *fc.RetrievalContextualPrompt
 	}
 }
 
@@ -2807,6 +2920,13 @@ var configKeyAliases = map[string]string{
 	"hyde_enabled":                            "retrieval.hyde.enabled",
 	"retrieval_hyde_mode":                     "retrieval.hyde.mode",
 	"hyde_mode":                               "retrieval.hyde.mode",
+	"retrieval_contextual_enabled":            "retrieval.contextual.enabled",
+	"contextual_enabled":                      "retrieval.contextual.enabled",
+	"retrieval_contextual_provider":           "retrieval.contextual.provider",
+	"retrieval_contextual_model":              "retrieval.contextual.model",
+	"retrieval_contextual_max_tokens":         "retrieval.contextual.max_tokens",
+	"retrieval_contextual_prompt_version":     "retrieval.contextual.prompt_version",
+	"retrieval_contextual_prompt":             "retrieval.contextual.prompt",
 	"cross_lingual_enabled":                   "retrieval.cross_lingual.enabled",
 	"cross_lingual":                           "retrieval.cross_lingual.enabled",
 	"cross_lingual_target_langs":              "retrieval.cross_lingual.target_langs",
@@ -2960,7 +3080,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	}
 	switch key {
-	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.contextual", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -3034,15 +3154,18 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"media.trim_leading_silence": func(c *fileConfig) **bool {
 		return &c.MediaTrimLeadingSilence
 	},
-	"media.vad":                       func(c *fileConfig) **bool { return &c.MediaVAD },
-	"media.diarize.enabled":           func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
-	"media.batch.two_phase":           func(c *fileConfig) **bool { return &c.MediaBatchTwoPhase },
-	"media.batch.progress":            func(c *fileConfig) **bool { return &c.MediaBatchProgress },
-	"x402_tools_call_enabled":         func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
-	"retrieval.hybrid.enabled":        func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
-	"retrieval.adaptive.enabled":      func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
-	"retrieval.mmr.enabled":           func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
-	"retrieval.hyde.enabled":          func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
+	"media.vad":                  func(c *fileConfig) **bool { return &c.MediaVAD },
+	"media.diarize.enabled":      func(c *fileConfig) **bool { return &c.MediaDiarizeEnabled },
+	"media.batch.two_phase":      func(c *fileConfig) **bool { return &c.MediaBatchTwoPhase },
+	"media.batch.progress":       func(c *fileConfig) **bool { return &c.MediaBatchProgress },
+	"x402_tools_call_enabled":    func(c *fileConfig) **bool { return &c.X402ToolsCallEnabled },
+	"retrieval.hybrid.enabled":   func(c *fileConfig) **bool { return &c.RetrievalHybridEnabled },
+	"retrieval.adaptive.enabled": func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
+	"retrieval.mmr.enabled":      func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
+	"retrieval.hyde.enabled":     func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
+	"retrieval.contextual.enabled": func(c *fileConfig) **bool {
+		return &c.RetrievalContextualEnabled
+	},
 	"retrieval.cross_lingual.enabled": func(c *fileConfig) **bool { return &c.CrossLingualEnabled },
 	"retrieval.hierarchical.enabled":  func(c *fileConfig) **bool { return &c.RetrievalHierarchicalEnabled },
 	"dedup.retrieval":                 func(c *fileConfig) **bool { return &c.DedupRetrieval },
@@ -3076,11 +3199,14 @@ func setBoolFileScalar(cfg *fileConfig, key, value string) error {
 // keeps setIntFileScalar a flat dispatch (one new entry per key) rather than an
 // ever-growing switch that trips the cyclomatic-complexity gate.
 var intFileScalarTargets = map[string]func(*fileConfig) **int{
-	"rate_limit_rps":                     func(c *fileConfig) **int { return &c.RateLimitRPS },
-	"rate_limit_burst":                   func(c *fileConfig) **int { return &c.RateLimitBurst },
-	"rag.k_default":                      func(c *fileConfig) **int { return &c.RAGKDefault },
-	"retrieval.adaptive.k_min":           func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMin },
-	"retrieval.adaptive.k_max":           func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMax },
+	"rate_limit_rps":           func(c *fileConfig) **int { return &c.RateLimitRPS },
+	"rate_limit_burst":         func(c *fileConfig) **int { return &c.RateLimitBurst },
+	"rag.k_default":            func(c *fileConfig) **int { return &c.RAGKDefault },
+	"retrieval.adaptive.k_min": func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMin },
+	"retrieval.adaptive.k_max": func(c *fileConfig) **int { return &c.RetrievalAdaptiveKMax },
+	"retrieval.contextual.max_tokens": func(c *fileConfig) **int {
+		return &c.RetrievalContextualMaxTokens
+	},
 	"rag.max_context_chars":              func(c *fileConfig) **int { return &c.RAGMaxContextChars },
 	"rag.oversample_factor":              func(c *fileConfig) **int { return &c.RAGOversampleFactor },
 	"chunking.max_tokens":                func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
@@ -3134,6 +3260,7 @@ func setIntFileScalar(cfg *fileConfig, key, value string) error {
 // deterministic) rather than being silently clamped later.
 var nonNegativeIntKeys = map[string]bool{
 	"retrieval.adaptive.k_min":                true,
+	"retrieval.contextual.max_tokens":         true,
 	"retrieval.adaptive.k_max":                true,
 	"media.audio_window_sec":                  true,
 	"media.translate.whisper_window_sec":      true,
@@ -3301,6 +3428,12 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 	if setRerankStringFileScalar(cfg, key, value) {
 		return
 	}
+	if setRetrievalContextualStringFileScalar(cfg, key, value) {
+		return
+	}
+	if setRetrievalHierarchicalStringFileScalar(cfg, key, value) {
+		return
+	}
 	switch key {
 	case "elevenlabs_base_url":
 		cfg.ElevenLabsBaseURL = strPtr(value)
@@ -3320,6 +3453,15 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.ChunkingStrategy = strPtr(value)
 	case "retrieval.hyde.mode":
 		cfg.RetrievalHyDEMode = strPtr(value)
+	}
+}
+
+// setRetrievalHierarchicalStringFileScalar assigns the retrieval.hierarchical.*
+// string keys (SPEC §9.7/§16.2, #329), returning true when key matched. Split
+// out of setModelStringFileScalar to keep that function within the gocyclo
+// budget alongside the contextual (#330) delegation.
+func setRetrievalHierarchicalStringFileScalar(cfg *fileConfig, key, value string) bool {
+	switch key {
 	case "retrieval.hierarchical.provider":
 		cfg.RetrievalHierarchicalProvider = strPtr(value)
 	case "retrieval.hierarchical.prompt_version":
@@ -3331,7 +3473,30 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		// sentinel and a single `levels: document` both parse as a scalar, so
 		// fold them into the same one-element list the block form produces.
 		setFileListValue(cfg, key, value)
+	default:
+		return false
 	}
+	return true
+}
+
+// setRetrievalContextualStringFileScalar assigns the retrieval.contextual.*
+// string keys (SPEC §8.1.8/§16.2, #330), returning true when key matched. Split
+// out of setModelStringFileScalar so that function stays within the gocyclo
+// budget once #330's cases land on top of #329's hierarchical cases.
+func setRetrievalContextualStringFileScalar(cfg *fileConfig, key, value string) bool {
+	switch key {
+	case "retrieval.contextual.provider":
+		cfg.RetrievalContextualProvider = strPtr(value)
+	case "retrieval.contextual.model":
+		cfg.RetrievalContextualModel = strPtr(value)
+	case "retrieval.contextual.prompt_version":
+		cfg.RetrievalContextualPromptVersion = strPtr(value)
+	case "retrieval.contextual.prompt":
+		cfg.RetrievalContextualPrompt = strPtr(value)
+	default:
+		return false
+	}
+	return true
 }
 
 // setIngestStringFileScalar assigns ingest mode and STT string keys
@@ -3554,6 +3719,12 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("retrieval_mmr_lambda", strconv.FormatFloat(cfg.RetrievalMMRLambda, 'f', -1, 64))
 	writeBool("retrieval_hyde_enabled", cfg.RetrievalHyDEEnabled)
 	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
+	writeBool("retrieval_contextual_enabled", cfg.RetrievalContextualEnabled)
+	writeScalar("retrieval_contextual_provider", cfg.RetrievalContextualProvider)
+	writeScalar("retrieval_contextual_model", cfg.RetrievalContextualModel)
+	writeInt("retrieval_contextual_max_tokens", cfg.RetrievalContextualMaxTokens)
+	writeScalar("retrieval_contextual_prompt_version", cfg.RetrievalContextualPromptVersion)
+	writeScalar("retrieval_contextual_prompt", cfg.RetrievalContextualPrompt)
 	writeBool("cross_lingual_enabled", cfg.CrossLingualEnabled)
 	writeList("cross_lingual_target_langs", cfg.CrossLingualTargetLangs)
 	writeBool("retrieval_hierarchical_enabled", cfg.RetrievalHierarchicalEnabled)
@@ -3882,6 +4053,7 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 		{"DIR2MCP_INGEST_WATCH", &cfg.IngestWatch},
 		{"DIR2MCP_RETRIEVAL_HYBRID_ENABLED", &cfg.RetrievalHybridEnabled},
 		{"DIR2MCP_RETRIEVAL_ADAPTIVE_ENABLED", &cfg.RetrievalAdaptiveEnabled},
+		{"DIR2MCP_RETRIEVAL_CONTEXTUAL_ENABLED", &cfg.RetrievalContextualEnabled},
 	} {
 		applyBoolEnvField(o.field, o.key, env)
 	}
@@ -4633,7 +4805,7 @@ func (c *Config) validateRetrievalNumericBounds() error {
 	if err := c.normalizeHierarchical(); err != nil {
 		return err
 	}
-	return nil
+	return c.validateRetrievalContextual()
 }
 
 // normalizeHierarchical normalizes and validates the retrieval.hierarchical

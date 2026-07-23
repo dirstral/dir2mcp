@@ -307,10 +307,11 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 // EmbedIdentity is the corpus-lifetime embed identity (SPEC 8.1.4):
 // provider name + normalized embed base_url + text/code model + requested
 // text/code output dimension (8.1.6) + multimodal mode (8.1.7) + late-chunking
-// mode (issue #332/#446). It is recorded in the config snapshot/index and
-// compared on load. Role (8.1.5) is deliberately excluded — it does not affect
-// vector-space compatibility, but the base_url, requested dimension, multimodal
-// mode, and late-chunking mode do.
+// mode (issue #332/#446) + contextual-retrieval mode (8.1.8, issue #330). It is
+// recorded in the config snapshot/index and compared on load. Role (8.1.5) is
+// deliberately excluded — it does not affect vector-space compatibility, but the
+// base_url, requested dimension, multimodal mode, late-chunking mode, and
+// contextual mode do.
 //
 // The normalized base_url (2nd field, SPEC 8.1.4 order
 // provider|base_url|text_model|…) disambiguates two same-kind/same-model
@@ -331,8 +332,19 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 // it keys off the config flag, not the runtime TokenEmbedder capability (which
 // EmbedIdentity cannot observe), so toggling the flag re-derives even in a build
 // with no token-embedding provider — the safe direction.
-func EmbedIdentity(p Profile, lateChunking bool) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%d|%d|%s|%s",
+//
+// contextual is the TERMINAL (9th) field: the EFFECTIVE contextual-retrieval
+// mode (8.1.8) — EmbedContextualOff when the feature is disabled OR enabled
+// without an available chat provider (capability fail-open), else the
+// ContextualIdentity token "ctx:<hash>" naming the generator that produced the
+// prepended context. Unlike late_chunking it records the effective mode rather
+// than config intent: recording "on" for a corpus that actually embedded raw
+// would let raw and contextualized vectors silently mix the moment a chat
+// provider is added. Empty normalizes to EmbedContextualOff so a caller that has
+// no contextual notion records the identity a fresh non-contextual build
+// computes.
+func EmbedIdentity(p Profile, lateChunking bool, contextual string) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%d|%s|%s|%s",
 		strings.TrimSpace(p.Name),
 		normalizeEmbedBaseURL(p),
 		strings.TrimSpace(p.EmbedTextModel),
@@ -340,7 +352,8 @@ func EmbedIdentity(p Profile, lateChunking bool) string {
 		p.EmbedTextDim,
 		p.EmbedCodeDim,
 		NormalizeEmbedMultimodal(p.EmbedMultimodal),
-		normalizeLateChunking(lateChunking))
+		normalizeLateChunking(lateChunking),
+		NormalizeEmbedContextual(contextual))
 }
 
 // canonicalEmbedBaseURLByBuiltin maps a built-in embed profile NAME to the
@@ -590,23 +603,32 @@ func VerifyEmbedIdentity(recorded, current string) error {
 }
 
 // normalizeEmbedIdentity upgrades a legacy recorded identity to the current
-// 8-field form (provider|base_url|text|code|tdim|cdim|multimodal|late-chunking)
+// 9-field form
+// (provider|base_url|text|code|tdim|cdim|multimodal|late_chunking|contextual)
 // before comparison, so upgrading an existing corpus that used native
-// dimensions, no multimodal mode, no late chunking, and a hosted-default
-// endpoint does not force a spurious reindex.
+// dimensions, no multimodal mode, no late chunking, a hosted-default endpoint,
+// and no contextual retrieval does not force a spurious reindex.
 //
+// This is the SPEC 8.1.4 migration ladder, keyed on the recorded FIELD COUNT.
 // EVERY pre-base_url form gains an EMPTY base_url component inserted at
 // position 2 (issue #560/#440 F3) — an index built before the base_url rule
 // recorded no endpoint, which is identity-equal to any current profile whose
-// base_url normalizes to "" (all built-in/hosted-default deployments):
-//   - pre-8.1.6 (3 fields: provider|text|code)             → insert "" + append "|0|0|off|off"
-//   - pre-8.1.7 (5 fields: …|tdim|cdim)                    → insert "" + append "|off|off"
-//   - pre-late-chunking (6 fields: …|multimodal, #446)     → insert "" + append "|off"
-//   - pre-base_url (7 fields: …|multimodal|late-chunking)  → insert "" only
+// base_url normalizes to "" (all built-in/hosted-default deployments) — and
+// every pre-contextual form gains a terminal "|off" (issue #330), the token that
+// means "contextual retrieval disabled":
+//   - pre-8.1.6 (3 fields: provider|text|code)                 → insert "" + append "|0|0|off|off|off"
+//   - pre-8.1.7 (5 fields: …|tdim|cdim)                        → insert "" + append "|off|off|off"
+//   - pre-late-chunking (6 fields: …|multimodal, #446)         → insert "" + append "|off|off"
+//   - pre-base_url (7 fields: …|multimodal|late_chunking)      → insert "" + append "|off"
+//   - pre-contextual (8 fields: the form every shipped index
+//     records today)                                           → append "|off"
 //
-// Empty (fresh index) and already-8-field values are returned unchanged. A
-// base_url component never contains "|" (canonicalizeEmbedBaseURL drops query/
-// fragment and percent-encodes the path), so field counting is unambiguous.
+// Empty (fresh index) and already-9-field values are returned unchanged. An
+// UNRECOGNIZED field count is also returned unchanged so it fails the identity
+// comparison LOUDLY rather than being coerced into a false match. No component
+// can contain "|" (canonicalizeEmbedBaseURL drops query/fragment and
+// percent-encodes the path; the contextual component is a single opaque token),
+// so field counting is unambiguous.
 func normalizeEmbedIdentity(id string) string {
 	if id == "" {
 		return ""
@@ -614,14 +636,16 @@ func normalizeEmbedIdentity(id string) string {
 	parts := strings.Split(id, "|")
 	switch len(parts) {
 	case 3: // pre-8.1.6
-		return insertEmbedBaseURLField(parts) + "|0|0|off|off"
+		return insertEmbedBaseURLField(parts) + "|0|0|off|off|off"
 	case 5: // pre-8.1.7
-		return insertEmbedBaseURLField(parts) + "|off|off"
+		return insertEmbedBaseURLField(parts) + "|off|off|off"
 	case 6: // pre-late-chunking
-		return insertEmbedBaseURLField(parts) + "|off"
+		return insertEmbedBaseURLField(parts) + "|off|off"
 	case 7: // pre-base_url (had the late-chunking field, no base_url)
-		return insertEmbedBaseURLField(parts)
-	default: // already 8 fields (current), or an unrecognized shape → unchanged
+		return insertEmbedBaseURLField(parts) + "|off"
+	case 8: // pre-contextual (8.1.8): the form shipped implementations record today
+		return id + "|" + EmbedContextualOff
+	default: // already 9 fields (current), or an unrecognized shape → unchanged
 		return id
 	}
 }

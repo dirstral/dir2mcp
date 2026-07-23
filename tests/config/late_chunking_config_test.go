@@ -89,15 +89,17 @@ func TestLateChunking_EntersEmbedIdentity(t *testing.T) {
 		t.Fatal("precondition: late chunking must be enabled")
 	}
 	onID := on.Providers().EmbedIdentity()
-	if !strings.HasSuffix(onID, "|on") {
+	// late_chunking is the 8th field, contextual (off by default) the 9th.
+	if !strings.HasSuffix(onID, "|on|off") {
 		t.Fatalf("identity %q must end with the on late-chunking token", onID)
 	}
 	if onID == offID {
 		t.Fatalf("toggling late chunking must change the embed identity: %q == %q", onID, offID)
 	}
-	// The mode is the ONLY difference: strip the trailing token and the rest of
-	// the identity must be byte-identical, so nothing else drifted.
-	if strings.TrimSuffix(onID, "|on") != strings.TrimSuffix(offID, "|off") {
+	// The mode is the ONLY difference: strip the late-chunking token (8th field,
+	// followed by the contextual token) and the rest of the identity must be
+	// byte-identical, so nothing else drifted.
+	if strings.TrimSuffix(onID, "|on|off") != strings.TrimSuffix(offID, "|off|off") {
 		t.Fatalf("only the late-chunking token may differ: on=%q off=%q", onID, offID)
 	}
 }

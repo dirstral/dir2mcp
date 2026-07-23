@@ -178,6 +178,14 @@ type Service struct {
 	summaryProvider string
 	summaryModel    string
 
+	// contextualActive reports whether contextual retrieval (SPEC §8.1.8, issue
+	// #330) is EFFECTIVELY on for this service: enabled in config AND a chat
+	// generator was successfully bound. False for both "disabled" and the
+	// capability fail-open, matching the effective mode the embed identity
+	// records. It gates the fallback-chunk retry gate; the contextualizer itself
+	// lives on repGen.
+	contextualActive bool
+
 	// embedMultimodal is the resolved multimodal embedding mode (SPEC
 	// 8.1.7): "off" (default), "augment", or "replace". When augment/
 	// replace, media documents additionally (or exclusively) get a media
@@ -817,7 +825,41 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
 		svc.embedMultimodal = provider.NormalizeEmbedMultimodal(ep.EmbedMultimodal)
 	}
+	svc.resolveContextualBinding(cfg)
 	return svc, nil
+}
+
+// resolveContextualBinding resolves the optional contextual-retrieval binding
+// (SPEC §8.1.8, issue #330) and, when it is effectively active, builds the
+// per-chunk context generator the representation generator uses.
+//
+// Capability-driven and FAIL-OPEN, exactly like OCR/STT: with the feature off,
+// with no chat provider resolvable, or with a generator that cannot be built,
+// the contextualizer stays nil — the corpus embeds raw under the effective
+// `…|off` embed identity plus a warning, never a hard error and never a raw
+// corpus wearing a contextual identity.
+func (svc *Service) resolveContextualBinding(cfg config.Config) {
+	binding := cfg.ContextualBinding()
+	svc.contextualActive = binding.Active
+	if binding.FellOpen {
+		svc.getLogger().Printf(
+			"contextual retrieval requested (retrieval.contextual.enabled=true) but no chat provider is available; " +
+				"embedding raw chunks and recording the effective `off` embed identity (SPEC §8.1.8) — " +
+				"configure a chat-capable provider to enable it")
+		return
+	}
+	if !binding.Active || svc.repGen == nil {
+		return
+	}
+	gen, err := providerfactory.Generator(binding.Profile)
+	if err != nil {
+		svc.contextualActive = false
+		svc.getLogger().Printf(
+			"contextual retrieval disabled: build context generator (%s): %v", binding.Profile.Name, err)
+		return
+	}
+	svc.repGen.SetContextualizer(newChunkContextGenerator(
+		gen, binding, filepath.Join(cfg.StateDir, "cache", "context"), svc.getLogger().Printf))
 }
 
 // resolveTranslateBinding resolves the optional transcript-translation binding
@@ -1360,6 +1402,17 @@ func (s *Service) SetTranslator(translator model.Generator, providerName, modelN
 		}
 	}
 	s.translateTargetLangs = norm
+}
+
+// SetContextualizer overrides the contextual-retrieval binding (SPEC §8.1.8),
+// primarily for tests and for callers that supply their own generator. Passing a
+// nil contextualizer disables contextualization: every chunk then records
+// embedding_mode=disabled and embeds raw, exactly as before the feature existed.
+func (s *Service) SetContextualizer(c ChunkContextualizer) {
+	s.contextualActive = c != nil
+	if s.repGen != nil {
+		s.repGen.SetContextualizer(c)
+	}
 }
 
 // SetTranslateTranscriber overrides the whisper translate-task binding and

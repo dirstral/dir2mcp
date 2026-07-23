@@ -151,7 +151,7 @@ func buildEmbedBatch(tasks []model.ChunkTask) (validTasks []model.ChunkTask, inp
 			return nil, nil, nil, fmt.Errorf("%w: zero label not supported", ErrFatal)
 		}
 		validTasks = append(validTasks, task)
-		inputs = append(inputs, task.Text)
+		inputs = append(inputs, task.EmbedInput())
 		labels = append(labels, chunkID)
 	}
 	return validTasks, inputs, labels, nil
@@ -187,7 +187,11 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 			continue
 		}
 		textIdx = append(textIdx, i)
-		textInputs = append(textInputs, t.Text)
+		// EmbedInput, not Text: under contextual retrieval (SPEC §8.1.8) the
+		// embedder receives `context + "\n\n" + chunk` while the chunk's stored,
+		// displayed and CITED text stays raw (#403). With the feature off (the
+		// default) EmbedInput IS Text, byte-for-byte.
+		textInputs = append(textInputs, t.EmbedInput())
 	}
 
 	if len(textInputs) > 0 {
@@ -761,7 +765,10 @@ func (w *EmbeddingWorker) skipOversizeText(ctx context.Context, tasks []model.Ch
 	keptLabels := make([]uint64, 0, len(labels))
 	var oversize []uint64
 	for i, t := range tasks {
-		if !isMediaModality(t.Modality) && utf8.RuneCountInString(t.Text) > maxRunes {
+		// Measure the input actually sent to the provider (the contextualized text
+		// when contextual retrieval is on), so the oversize pre-skip cannot be
+		// under-counted into a provider-rejected batch.
+		if !isMediaModality(t.Modality) && utf8.RuneCountInString(t.EmbedInput()) > maxRunes {
 			oversize = append(oversize, labels[i])
 			continue
 		}

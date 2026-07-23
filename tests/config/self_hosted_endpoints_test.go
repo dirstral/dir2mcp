@@ -50,7 +50,7 @@ func TestSelfHosted_EmbedBaseURLResolves(t *testing.T) {
 	// The embed identity must encode the self-hosted profile + custom base_url
 	// + model so a change to any is corpus-lifetime / reindex-bound (SPEC
 	// §8.1.4 / §8.5 / issue #560): the non-canonical endpoint is the 2nd field.
-	if id := r.EmbedIdentity(); id != "gpu-embed|http://gpu-vps:8080/v1|bge-m3||0|0|off|off" {
+	if id := r.EmbedIdentity(); id != "gpu-embed|http://gpu-vps:8080/v1|bge-m3||0|0|off|off|off" {
 		t.Fatalf("embed identity = %q", id)
 	}
 }

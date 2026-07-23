@@ -689,6 +689,13 @@ type ProviderResolution struct {
 	// into the corpus-lifetime identity (SPEC 8.1.4). It is not a provider
 	// attribute, so it lives on the resolution rather than on a Profile.
 	lateChunking bool
+	// contextual is the EFFECTIVE contextual-retrieval component of the embed
+	// identity (SPEC 8.1.4/8.1.8, issue #330), stamped by Config.Providers from
+	// the resolved ContextualBinding: provider.EmbedContextualOff when the
+	// feature is off OR fell open for want of a chat provider, else the
+	// "ctx:<hash>" generator token. Like lateChunking it is not a provider
+	// attribute, so it lives on the resolution.
+	contextual string
 }
 
 // providersResolution builds the resolution from the parsed doc + env.
@@ -1049,7 +1056,16 @@ func (r ProviderResolution) EmbedIdentity() string {
 	if err != nil {
 		return ""
 	}
-	return provider.EmbedIdentity(p, r.lateChunking)
+	return provider.EmbedIdentity(p, r.lateChunking, r.contextual)
+}
+
+// EmbedContextual is the terminal `contextual` component of the corpus-lifetime
+// embed identity (SPEC 8.1.4/8.1.8), recorded separately in the config snapshot
+// as `embed_contextual` (§5.5) so an operator can read the effective
+// contextualization mode without parsing the composite identity. It is
+// provider.EmbedContextualOff unless contextual retrieval is EFFECTIVELY on.
+func (r ProviderResolution) EmbedContextual() string {
+	return provider.NormalizeEmbedContextual(r.contextual)
 }
 
 // EmbedBaseURL is the normalized embed base_url component of the corpus-lifetime
@@ -1069,6 +1085,20 @@ func (r ProviderResolution) EmbedBaseURL() string {
 // credential expansion (SPEC §8.1). The CLI wiring (C2-iii) calls
 // Resolve per capability and builds the adapter via providerfactory.
 func (cfg Config) Providers() ProviderResolution {
+	r := cfg.baseProviders()
+	// Fold the EFFECTIVE contextual-retrieval mode onto the resolution so the
+	// embed identity captures it (SPEC 8.1.4/8.1.8, issue #330). Resolved from
+	// the binding (not the raw config flag) so a fail-open corpus records `off`.
+	r.contextual = cfg.ContextualBinding().Identity
+	return r
+}
+
+// baseProviders builds the provider resolution WITHOUT the contextual-retrieval
+// identity component. ContextualBinding itself has to resolve the chat
+// capability, so it uses this rather than Providers() — otherwise the two would
+// recurse into each other. The component is irrelevant to capability resolution
+// (it only enters EmbedIdentity), so the distinction is invisible to callers.
+func (cfg Config) baseProviders() ProviderResolution {
 	base := builtinProfiles()
 	seedLegacy(base, cfg)
 	r := cfg.providersDoc.resolve(base, nil)

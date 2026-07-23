@@ -133,12 +133,12 @@ func TestSelectAutoPrecedence(t *testing.T) {
 
 func TestEmbedIdentity(t *testing.T) {
 	p := provider.Profile{Name: "mistral", EmbedTextModel: "mistral-embed", EmbedCodeModel: "codestral-embed"}
-	id := provider.EmbedIdentity(p, false)
+	id := provider.EmbedIdentity(p, false, provider.EmbedContextualOff)
 	// Identity is provider|base_url|text_model|code_model|text_dim|code_dim|
-	// multimodal|late_chunking (SPEC 8.1.4/8.1.6/8.1.7, issue #332/#446/#560);
-	// an unset/canonical base_url records as "", unset dims as 0, multimodal +
-	// late_chunking as off.
-	if id != "mistral||mistral-embed|codestral-embed|0|0|off|off" {
+	// multimodal|late_chunking|contextual (SPEC 8.1.4/8.1.6/8.1.7/8.1.8, issue
+	// #332/#446/#560/#330); an unset/canonical base_url records as "", unset
+	// dims as 0, and multimodal + late_chunking + contextual as off.
+	if id != "mistral||mistral-embed|codestral-embed|0|0|off|off|off" {
 		t.Fatalf("identity = %q", id)
 	}
 	if err := provider.VerifyEmbedIdentity("", id); err != nil {
@@ -151,20 +151,20 @@ func TestEmbedIdentity(t *testing.T) {
 	// A different requested output dimension is a distinct identity
 	// (reindex-bound, SPEC 8.1.6): same provider+models but dim 768 must
 	// not match the native (dim 0) identity.
-	native := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-001"}, false)
-	dimmed := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-001", EmbedTextDim: 768}, false)
+	native := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-001"}, false, provider.EmbedContextualOff)
+	dimmed := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-001", EmbedTextDim: 768}, false, provider.EmbedContextualOff)
 	if native == dimmed {
 		t.Fatalf("requested dimension must change embed identity: %q == %q", native, dimmed)
 	}
 	// A different multimodal mode is a distinct identity (reindex-bound,
 	// SPEC 8.1.7).
-	mm := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2", EmbedMultimodal: "augment"}, false)
-	if mm == provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2"}, false) {
+	mm := provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2", EmbedMultimodal: "augment"}, false, provider.EmbedContextualOff)
+	if mm == provider.EmbedIdentity(provider.Profile{Name: "gemini", EmbedTextModel: "gemini-embedding-2", EmbedCodeModel: "gemini-embedding-2"}, false, provider.EmbedContextualOff) {
 		t.Fatalf("multimodal mode must change embed identity")
 	}
 	// A different late-chunking mode is a distinct identity (reindex-bound,
 	// issue #332/#446): the same profile with the mode on must NOT match off.
-	if provider.EmbedIdentity(p, true) == provider.EmbedIdentity(p, false) {
+	if provider.EmbedIdentity(p, true, provider.EmbedContextualOff) == provider.EmbedIdentity(p, false, provider.EmbedContextualOff) {
 		t.Fatalf("late-chunking mode must change embed identity")
 	}
 	// Legacy identities must NOT force a spurious reindex against the
@@ -175,7 +175,7 @@ func TestEmbedIdentity(t *testing.T) {
 	// "||…|off|off", a 6-field (pre-late-chunking, #446) to "||…|off", and a
 	// 7-field (pre-base_url, #560) gains only the empty base_url. The current
 	// side is the 8-field form.
-	current := "mistral||mistral-embed|codestral-embed|0|0|off|off"
+	current := "mistral||mistral-embed|codestral-embed|0|0|off|off|off"
 	legacy3 := "mistral|mistral-embed|codestral-embed"
 	if err := provider.VerifyEmbedIdentity(legacy3, current); err != nil {
 		t.Errorf("legacy 3-field identity must match native current: %v", err)
@@ -193,8 +193,14 @@ func TestEmbedIdentity(t *testing.T) {
 	if err := provider.VerifyEmbedIdentity(legacy7, current); err != nil {
 		t.Errorf("legacy 7-field (pre-base_url) identity must match current: %v", err)
 	}
+	// pre-contextual 8-field form (#330): the shape every shipped index records
+	// today. It gains only the terminal "|off".
+	legacy8 := "mistral||mistral-embed|codestral-embed|0|0|off|off"
+	if err := provider.VerifyEmbedIdentity(legacy8, current); err != nil {
+		t.Errorf("legacy 8-field (pre-contextual) identity must match current: %v", err)
+	}
 	// But a legacy identity vs a non-native dimension still mismatches.
-	_ = cfgErr(t, provider.VerifyEmbedIdentity(legacy3, "mistral||mistral-embed|codestral-embed|768|0|off|off"))
+	_ = cfgErr(t, provider.VerifyEmbedIdentity(legacy3, "mistral||mistral-embed|codestral-embed|768|0|off|off|off"))
 }
 
 // TestEmbedIdentity_BaseURL exercises the SPEC 8.1.4 base_url component of the
@@ -205,9 +211,9 @@ func TestEmbedIdentity(t *testing.T) {
 func TestEmbedIdentity_BaseURL(t *testing.T) {
 	// baseURLOf extracts the 2nd identity field (the normalized base_url).
 	baseURLOf := func(p provider.Profile) string {
-		parts := strings.Split(provider.EmbedIdentity(p, false), "|")
+		parts := strings.Split(provider.EmbedIdentity(p, false, provider.EmbedContextualOff), "|")
 		if len(parts) < 2 {
-			t.Fatalf("identity has no base_url field: %q", provider.EmbedIdentity(p, false))
+			t.Fatalf("identity has no base_url field: %q", provider.EmbedIdentity(p, false, provider.EmbedContextualOff))
 		}
 		return parts[1]
 	}
@@ -250,7 +256,7 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 	if baseURLOf(a) == "" || baseURLOf(b) == "" {
 		t.Fatalf("custom endpoints must yield a non-empty base_url component: %q %q", baseURLOf(a), baseURLOf(b))
 	}
-	idA, idB := provider.EmbedIdentity(a, false), provider.EmbedIdentity(b, false)
+	idA, idB := provider.EmbedIdentity(a, false, provider.EmbedContextualOff), provider.EmbedIdentity(b, false, provider.EmbedContextualOff)
 	if idA == idB {
 		t.Fatalf("two kind:openai profiles at different custom endpoints must differ: %q", idA)
 	}
@@ -283,7 +289,7 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 	// stays valid against the current hosted-default identity — no spurious
 	// reindex — but mismatches a corpus pinned to a custom endpoint.
 	hostedCurrent := provider.EmbedIdentity(provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
-		BaseURL: "https://api.mistral.ai/v1", EmbedTextModel: "mistral-embed", EmbedCodeModel: "codestral-embed"}, false)
+		BaseURL: "https://api.mistral.ai/v1", EmbedTextModel: "mistral-embed", EmbedCodeModel: "codestral-embed"}, false, provider.EmbedContextualOff)
 	legacyHosted := "mistral|mistral-embed|codestral-embed|0|0|off|off" // pre-base_url 7-field
 	if err := provider.VerifyEmbedIdentity(legacyHosted, hostedCurrent); err != nil {
 		t.Errorf("pre-base_url hosted-default identity must not reindex: %v", err)
@@ -298,7 +304,7 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 // default, or vectors from two backends could silently share one index.
 func TestEmbedIdentity_PerProfileCanonical(t *testing.T) {
 	baseURLOf := func(p provider.Profile) string {
-		return strings.Split(provider.EmbedIdentity(p, false), "|")[1]
+		return strings.Split(provider.EmbedIdentity(p, false, provider.EmbedContextualOff), "|")[1]
 	}
 	mistralReal := provider.Profile{Name: "mistral", Kind: provider.KindOpenAI,
 		BaseURL: "https://api.mistral.ai/v1", EmbedTextModel: "text-embedding-3-small"}
@@ -307,7 +313,7 @@ func TestEmbedIdentity_PerProfileCanonical(t *testing.T) {
 	if got := baseURLOf(mistralAtOpenAI); got == "" {
 		t.Errorf("a mistral profile pointed at api.openai.com must NOT collapse to \"\" (kind-wide mixing bug)")
 	}
-	if provider.EmbedIdentity(mistralReal, false) == provider.EmbedIdentity(mistralAtOpenAI, false) {
+	if provider.EmbedIdentity(mistralReal, false, provider.EmbedContextualOff) == provider.EmbedIdentity(mistralAtOpenAI, false, provider.EmbedContextualOff) {
 		t.Errorf("mistral@mistral and mistral@openai must have distinct identities")
 	}
 }
@@ -353,11 +359,11 @@ func TestEmbedBaseURL_CanonicalizationRobustness(t *testing.T) {
 	if got := norm("user:secret@${EMBED_URL}"); strings.Contains(got, "secret") {
 		t.Errorf("fallback must drop a userinfo credential: got %q", got)
 	}
-	// The delimiter guarantee holds end-to-end: the identity keeps exactly 8 fields.
+	// The delimiter guarantee holds end-to-end: the identity keeps exactly 9 fields.
 	id := provider.EmbedIdentity(provider.Profile{Name: "custom", Kind: provider.KindOpenAI,
-		CredentialLess: true, BaseURL: "${EMBED_URL}|x", EmbedTextModel: "m"}, false)
-	if n := strings.Count(id, "|"); n != 7 {
-		t.Errorf("identity must have 8 fields (7 pipes), got %d: %q", n, id)
+		CredentialLess: true, BaseURL: "${EMBED_URL}|x", EmbedTextModel: "m"}, false, provider.EmbedContextualOff)
+	if n := strings.Count(id, "|"); n != 8 {
+		t.Errorf("identity must have 9 fields (8 pipes), got %d: %q", n, id)
 	}
 }
 
