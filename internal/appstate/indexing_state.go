@@ -3,6 +3,7 @@ package appstate
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -36,6 +37,18 @@ type IndexingSnapshot struct {
 }
 
 type IndexingState struct {
+	// snap is a snapshot barrier, used INVERTED relative to the usual
+	// reader/writer split: every mutator takes RLock and Snapshot takes the
+	// exclusive Lock. Mutators are single atomic operations, so they are safe
+	// to run concurrently with one another (RLock lets them all through and
+	// costs a bare atomic add on the uncontended path). Snapshot, by contrast,
+	// reads thirteen fields one at a time and must not observe a state no
+	// mutator ever produced, so it excludes mutation for the duration of the
+	// read. Without this, a status scrape could interleave with ResetProgress
+	// or a counter batch and report indexed+skipped+errors > scanned — numbers
+	// that never existed (#426 lineage).
+	snap sync.RWMutex
+
 	jobID   atomic.Value
 	mode    atomic.Value
 	running atomic.Bool
@@ -67,6 +80,8 @@ func (s *IndexingState) SetJobID(jobID string) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
 		jobID = defaultJobID()
@@ -78,6 +93,8 @@ func (s *IndexingState) SetMode(mode string) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.mode.Store(normalizeMode(mode))
 }
 
@@ -85,6 +102,8 @@ func (s *IndexingState) SetRunning(running bool) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.running.Store(running)
 }
 
@@ -96,17 +115,21 @@ func (s *IndexingState) SetRunning(running bool) {
 // rather than a single scan and must survive across rescans. jobID/mode/running
 // are lifecycle fields, not counters, and are left as-is.
 //
-// Snapshot() reads each counter independently without a lock, so a concurrent
-// status scrape can interleave with this reset. To keep the
-// indexed+skipped+errors <= scanned invariant intact for every observer, the
-// component counters are zeroed first and scanned is zeroed last: any snapshot
-// taken mid-reset then sees a still-large (or already-zero) scanned alongside
-// component counters that are only ever <= their pre-reset values, never the
-// reverse (scanned=0 while indexed still carries the previous run's total).
+// The whole reset is atomic with respect to Snapshot (both go through the snap
+// barrier), so no observer can see it half-applied. The component-before-scanned
+// ordering below is kept as belt-and-braces for any future lock-free reader, but
+// it is NOT on its own sufficient to hold the indexed+skipped+errors <= scanned
+// invariant: a field-by-field reader also tears against the ordinary counter
+// path, where a scan does AddScanned then AddIndexed as separate operations and
+// a reader that sampled scanned before the first and indexed after the second
+// sees indexed > scanned with no reset involved. The barrier is what makes the
+// invariant true; the ordering alone never did.
 func (s *IndexingState) ResetProgress() {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.indexed.Store(0)
 	s.skipped.Store(0)
 	s.deleted.Store(0)
@@ -120,6 +143,8 @@ func (s *IndexingState) AddScanned(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.scanned.Add(delta)
 }
 
@@ -127,6 +152,8 @@ func (s *IndexingState) AddIndexed(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.indexed.Add(delta)
 }
 
@@ -134,6 +161,8 @@ func (s *IndexingState) AddSkipped(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.skipped.Add(delta)
 }
 
@@ -141,6 +170,8 @@ func (s *IndexingState) AddDeleted(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.deleted.Add(delta)
 }
 
@@ -148,6 +179,8 @@ func (s *IndexingState) AddRepresentations(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.representations.Add(delta)
 }
 
@@ -155,6 +188,8 @@ func (s *IndexingState) AddChunksTotal(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.chunksTotal.Add(delta)
 }
 
@@ -162,6 +197,8 @@ func (s *IndexingState) AddEmbeddedOK(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.embeddedOK.Add(delta)
 }
 
@@ -169,6 +206,8 @@ func (s *IndexingState) AddErrors(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.errors.Add(delta)
 }
 
@@ -179,6 +218,8 @@ func (s *IndexingState) MarkWatchActive() {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.watchActive.Store(true)
 }
 
@@ -190,6 +231,8 @@ func (s *IndexingState) AddWatchOverflow(delta int64) {
 	if s == nil {
 		return
 	}
+	s.snap.RLock()
+	defer s.snap.RUnlock()
 	s.watchActive.Store(true)
 	s.watchOverflows.Add(delta)
 }
@@ -201,6 +244,9 @@ func (s *IndexingState) Snapshot() IndexingSnapshot {
 			Mode:  ModeIncremental,
 		}
 	}
+
+	s.snap.Lock()
+	defer s.snap.Unlock()
 
 	return IndexingSnapshot{
 		JobID:           loadString(&s.jobID, defaultJobID()),
