@@ -32,6 +32,23 @@ const (
 	HyDEModeReplace = "replace"
 )
 
+// Hierarchical (coarse-to-fine) retrieval knobs (SPEC §9.7/§16.2, config
+// `retrieval.hierarchical.*`). HierarchicalSourceRepsAuto is the sentinel that
+// selects each document's PRIMARY retrievable text representation — exactly one
+// per document, so a summary's `coverage.source_rep_id` is unambiguous (§5.2).
+// The levels name the two summary granularities of §5.2.
+const (
+	HierarchicalSourceRepsAuto = "auto"
+	HierarchicalLevelDocument  = "document"
+	HierarchicalLevelSection   = "section"
+	// DefaultHierarchicalMaxTokens is the spec default per-summary generation
+	// bound; DefaultHierarchicalPromptVersion names the built-in (general,
+	// domain-free) summary prompt template, part of the summary derivation
+	// identity (§8.6.7).
+	DefaultHierarchicalMaxTokens     = 512
+	DefaultHierarchicalPromptVersion = "v1"
+)
+
 const EffectiveConfigSnapshotFile = ".dir2mcp.yaml.snapshot"
 
 // DefaultMediaClipMaxDurationMS / DefaultMediaClipMaxBytes are the built-in
@@ -353,6 +370,46 @@ type Config struct {
 	// query language is skipped (no self-translation). Has no built-in fixed
 	// language pair (general-purpose).
 	CrossLingualTargetLangs []string
+	// RetrievalHierarchicalEnabled opts IN to hierarchical (coarse-to-fine)
+	// retrieval (SPEC §9.7, config `retrieval.hierarchical.enabled`). When true,
+	// ingest additionally derives a `summary` representation per document (§5.2)
+	// and search expands a summary hit to the fine chunks it covers before
+	// dedup/rerank. Off by default ⇒ flat retrieval (§9.1) is unchanged.
+	//
+	// It is deliberately NOT part of the corpus-lifetime embed identity (§8.1.4):
+	// a summary is an ADDITIVE vector in the same space as its document's chunks,
+	// so toggling this is an index add/remove, never a corpus-wide re-embed.
+	RetrievalHierarchicalEnabled bool
+	// RetrievalHierarchicalSourceReps selects WHICH fine representations of each
+	// document are summarized (config `retrieval.hierarchical.source_reps`). Empty
+	// or the sentinel "auto" (the default) means the document's PRIMARY retrievable
+	// text representation — exactly one per document, so a summary's
+	// `coverage.source_rep_id` is unambiguous (§5.2). An explicit list of rep_types
+	// summarizes each named representation that exists on the document.
+	RetrievalHierarchicalSourceReps []string
+	// RetrievalHierarchicalLevels lists the summary levels produced (config
+	// `retrieval.hierarchical.levels`): "document" (the default) and/or "section".
+	// Section-level windowing is not implemented yet; a configured "section" is
+	// accepted, warned about at startup, and produces no summaries so coverage
+	// reporting stays honest.
+	RetrievalHierarchicalLevels []string
+	// RetrievalHierarchicalProvider optionally pins the generator profile used to
+	// write summaries (config `retrieval.hierarchical.provider`). Empty ⇒ the
+	// configured chat/annotator generator (§8.1.3).
+	RetrievalHierarchicalProvider string
+	// RetrievalHierarchicalMaxTokens bounds one summary generation call (config
+	// `retrieval.hierarchical.max_tokens`, §9.7). Applied only when the generator
+	// implements model.BoundedGenerator; 0 falls back to the generator default.
+	RetrievalHierarchicalMaxTokens int
+	// RetrievalHierarchicalPromptVersion names the built-in (general, domain-free)
+	// summary prompt template (config `retrieval.hierarchical.prompt_version`). It
+	// is part of the summary derivation identity (§8.6.7).
+	RetrievalHierarchicalPromptVersion string
+	// RetrievalHierarchicalPrompt optionally overrides the built-in template
+	// (config `retrieval.hierarchical.prompt`). The EFFECTIVE prompt is hashed into
+	// the summary derivation identity (`prompt_hash`, §5.2/§8.6.7), so an edited
+	// override re-derives summaries even without a prompt_version bump.
+	RetrievalHierarchicalPrompt string
 	// Rerank* configure the optional post-fusion rerank stage (SPEC
 	// 9.1.1). Reranking auto-activates when a provider credential is
 	// present. CohereAPIKey is a secret: env-sourced, never persisted
@@ -838,6 +895,13 @@ type fileConfig struct {
 	RetrievalHyDEMode                  *string
 	CrossLingualEnabled                *bool
 	CrossLingualTargetLangs            []string
+	RetrievalHierarchicalEnabled       *bool
+	RetrievalHierarchicalSourceReps    []string
+	RetrievalHierarchicalLevels        []string
+	RetrievalHierarchicalProvider      *string
+	RetrievalHierarchicalMaxTokens     *int
+	RetrievalHierarchicalPromptVersion *string
+	RetrievalHierarchicalPrompt        *string
 	RerankEnabled                      *bool
 	RerankProvider                     *string
 	CohereAPIKey                       *string
@@ -984,6 +1048,13 @@ type persistedConfig struct {
 	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
 	CrossLingualEnabled                bool          `yaml:"cross_lingual_enabled"`
 	CrossLingualTargetLangs            []string      `yaml:"cross_lingual_target_langs"`
+	RetrievalHierarchicalEnabled       bool          `yaml:"retrieval_hierarchical_enabled"`
+	RetrievalHierarchicalSourceReps    []string      `yaml:"retrieval_hierarchical_source_reps"`
+	RetrievalHierarchicalLevels        []string      `yaml:"retrieval_hierarchical_levels"`
+	RetrievalHierarchicalProvider      string        `yaml:"retrieval_hierarchical_provider"`
+	RetrievalHierarchicalMaxTokens     int           `yaml:"retrieval_hierarchical_max_tokens"`
+	RetrievalHierarchicalPromptVersion string        `yaml:"retrieval_hierarchical_prompt_version"`
+	RetrievalHierarchicalPrompt        string        `yaml:"retrieval_hierarchical_prompt"`
 	RerankEnabled                      bool          `yaml:"rerank_enabled"`
 	RerankProvider                     string        `yaml:"rerank_provider"`
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
@@ -1208,6 +1279,17 @@ func Default() Config {
 		// left empty, which means "auto" (the corpus's detected languages).
 		CrossLingualEnabled:     false,
 		CrossLingualTargetLangs: nil,
+		// Hierarchical (coarse-to-fine) retrieval defaults to OFF (SPEC §9.7): no
+		// summary representations are derived and retrieval is exactly the flat
+		// path. The remaining knobs carry their spec defaults so an enabled-but-
+		// unspecified config behaves predictably: source_reps empty ⇒ "auto" (the
+		// document's primary retrievable text representation), document-level
+		// summaries only, a 512-token generation bound, and the built-in v1 prompt.
+		RetrievalHierarchicalEnabled:       false,
+		RetrievalHierarchicalSourceReps:    nil,
+		RetrievalHierarchicalLevels:        []string{HierarchicalLevelDocument},
+		RetrievalHierarchicalMaxTokens:     DefaultHierarchicalMaxTokens,
+		RetrievalHierarchicalPromptVersion: DefaultHierarchicalPromptVersion,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
 		RerankProvider:            "cohere",
@@ -1364,6 +1446,13 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
 		CrossLingualEnabled:                cfg.CrossLingualEnabled,
 		CrossLingualTargetLangs:            append([]string(nil), cfg.CrossLingualTargetLangs...),
+		RetrievalHierarchicalEnabled:       cfg.RetrievalHierarchicalEnabled,
+		RetrievalHierarchicalSourceReps:    append([]string(nil), cfg.RetrievalHierarchicalSourceReps...),
+		RetrievalHierarchicalLevels:        append([]string(nil), cfg.RetrievalHierarchicalLevels...),
+		RetrievalHierarchicalProvider:      cfg.RetrievalHierarchicalProvider,
+		RetrievalHierarchicalMaxTokens:     cfg.RetrievalHierarchicalMaxTokens,
+		RetrievalHierarchicalPromptVersion: cfg.RetrievalHierarchicalPromptVersion,
+		RetrievalHierarchicalPrompt:        cfg.RetrievalHierarchicalPrompt,
 		RerankEnabled:                      rerankEnabledEffective(cfg),
 		RerankProvider:                     cfg.RerankProvider,
 		CohereBaseURL:                      cfg.CohereBaseURL,
@@ -2085,6 +2174,34 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.CrossLingualTargetLangs != nil {
 		cfg.CrossLingualTargetLangs = normalizeStringSlice(fc.CrossLingualTargetLangs)
 	}
+	applyHierarchicalFileParsed(cfg, fc)
+}
+
+// applyHierarchicalFileParsed overlays the opt-in hierarchical (coarse-to-fine)
+// retrieval file fields (SPEC §9.7/§16.2, #329) onto cfg. Split out of
+// applyRetrievalTuningFileParsed to keep that function within the gocyclo budget.
+func applyHierarchicalFileParsed(cfg *Config, fc fileConfig) {
+	if fc.RetrievalHierarchicalEnabled != nil {
+		cfg.RetrievalHierarchicalEnabled = *fc.RetrievalHierarchicalEnabled
+	}
+	if fc.RetrievalHierarchicalSourceReps != nil {
+		cfg.RetrievalHierarchicalSourceReps = normalizeStringSlice(fc.RetrievalHierarchicalSourceReps)
+	}
+	if fc.RetrievalHierarchicalLevels != nil {
+		cfg.RetrievalHierarchicalLevels = normalizeStringSlice(fc.RetrievalHierarchicalLevels)
+	}
+	if fc.RetrievalHierarchicalProvider != nil {
+		cfg.RetrievalHierarchicalProvider = *fc.RetrievalHierarchicalProvider
+	}
+	if fc.RetrievalHierarchicalMaxTokens != nil {
+		cfg.RetrievalHierarchicalMaxTokens = *fc.RetrievalHierarchicalMaxTokens
+	}
+	if fc.RetrievalHierarchicalPromptVersion != nil {
+		cfg.RetrievalHierarchicalPromptVersion = *fc.RetrievalHierarchicalPromptVersion
+	}
+	if fc.RetrievalHierarchicalPrompt != nil {
+		cfg.RetrievalHierarchicalPrompt = *fc.RetrievalHierarchicalPrompt
+	}
 }
 
 // applyIngestFileParsed overlays parsed chunking, ingest-mode, and STT
@@ -2575,6 +2692,14 @@ var configKeyAliases = map[string]string{
 	"cross_lingual_enabled":                   "retrieval.cross_lingual.enabled",
 	"cross_lingual":                           "retrieval.cross_lingual.enabled",
 	"cross_lingual_target_langs":              "retrieval.cross_lingual.target_langs",
+	"retrieval_hierarchical_enabled":          "retrieval.hierarchical.enabled",
+	"hierarchical_enabled":                    "retrieval.hierarchical.enabled",
+	"retrieval_hierarchical_source_reps":      "retrieval.hierarchical.source_reps",
+	"retrieval_hierarchical_levels":           "retrieval.hierarchical.levels",
+	"retrieval_hierarchical_provider":         "retrieval.hierarchical.provider",
+	"retrieval_hierarchical_max_tokens":       "retrieval.hierarchical.max_tokens",
+	"retrieval_hierarchical_prompt_version":   "retrieval.hierarchical.prompt_version",
+	"retrieval_hierarchical_prompt":           "retrieval.hierarchical.prompt",
 	"rerank_enabled":                          "rerank.enabled",
 	"rerank.cohere.api_key":                   "cohere_api_key",
 	"rerank.cohere.base_url":                  "cohere_base_url",
@@ -2716,7 +2841,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	}
 	switch key {
-	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.cross_lingual", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -2800,6 +2925,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"retrieval.mmr.enabled":           func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
 	"retrieval.hyde.enabled":          func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
 	"retrieval.cross_lingual.enabled": func(c *fileConfig) **bool { return &c.CrossLingualEnabled },
+	"retrieval.hierarchical.enabled":  func(c *fileConfig) **bool { return &c.RetrievalHierarchicalEnabled },
 	"dedup.retrieval":                 func(c *fileConfig) **bool { return &c.DedupRetrieval },
 	"retrieval.context_compression.enabled": func(c *fileConfig) **bool {
 		return &c.ContextCompressionEnabled
@@ -2862,6 +2988,9 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"distributed_embed_max_attempts": func(c *fileConfig) **int {
 		return &c.DistributedEmbedMaxAttempts
 	},
+	"retrieval.hierarchical.max_tokens": func(c *fileConfig) **int {
+		return &c.RetrievalHierarchicalMaxTokens
+	},
 }
 
 func setIntFileScalar(cfg *fileConfig, key, value string) error {
@@ -2898,6 +3027,7 @@ var nonNegativeIntKeys = map[string]bool{
 	"media.stt.request_timeout_sec":           true,
 	"media.subtitles.ttml.align_tolerance_ms": true,
 	"media.subtitles.collapse_repeats":        true,
+	"retrieval.hierarchical.max_tokens":       true,
 }
 
 // setFloatFileScalar parses value as a float64 and assigns it to the
@@ -3071,6 +3201,17 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.ChunkingStrategy = strPtr(value)
 	case "retrieval.hyde.mode":
 		cfg.RetrievalHyDEMode = strPtr(value)
+	case "retrieval.hierarchical.provider":
+		cfg.RetrievalHierarchicalProvider = strPtr(value)
+	case "retrieval.hierarchical.prompt_version":
+		cfg.RetrievalHierarchicalPromptVersion = strPtr(value)
+	case "retrieval.hierarchical.prompt":
+		cfg.RetrievalHierarchicalPrompt = strPtr(value)
+	case "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+		// Scalar form of a list-valued key: the spec's `source_reps: auto`
+		// sentinel and a single `levels: document` both parse as a scalar, so
+		// fold them into the same one-element list the block form produces.
+		setFileListValue(cfg, key, value)
 	}
 }
 
@@ -3183,6 +3324,10 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendValue(&cfg.MediaSubtitlesScrubPhrases, value)
 	case "retrieval.cross_lingual.target_langs":
 		appendValue(&cfg.CrossLingualTargetLangs, value)
+	case "retrieval.hierarchical.source_reps":
+		appendValue(&cfg.RetrievalHierarchicalSourceReps, value)
+	case "retrieval.hierarchical.levels":
+		appendValue(&cfg.RetrievalHierarchicalLevels, value)
 	}
 }
 
@@ -3191,7 +3336,7 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs":
+	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
 		return true
 	default:
 		return false
@@ -3272,6 +3417,13 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
 	writeBool("cross_lingual_enabled", cfg.CrossLingualEnabled)
 	writeList("cross_lingual_target_langs", cfg.CrossLingualTargetLangs)
+	writeBool("retrieval_hierarchical_enabled", cfg.RetrievalHierarchicalEnabled)
+	writeList("retrieval_hierarchical_source_reps", cfg.RetrievalHierarchicalSourceReps)
+	writeList("retrieval_hierarchical_levels", cfg.RetrievalHierarchicalLevels)
+	writeScalar("retrieval_hierarchical_provider", cfg.RetrievalHierarchicalProvider)
+	writeInt("retrieval_hierarchical_max_tokens", cfg.RetrievalHierarchicalMaxTokens)
+	writeScalar("retrieval_hierarchical_prompt_version", cfg.RetrievalHierarchicalPromptVersion)
+	writeScalar("retrieval_hierarchical_prompt", cfg.RetrievalHierarchicalPrompt)
 	writeBool("rerank_enabled", cfg.RerankEnabled)
 	writeScalar("rerank_provider", cfg.RerankProvider)
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
@@ -4331,7 +4483,112 @@ func (c *Config) validateRetrievalNumericBounds() error {
 	if err := c.validateAdaptiveBounds(); err != nil {
 		return err
 	}
+	if err := c.normalizeHierarchical(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// normalizeHierarchical normalizes and validates the retrieval.hierarchical
+// block (SPEC §9.7/§16.2) in place. It runs regardless of `enabled` so a
+// misspelled level or a negative token bound is CONFIG_INVALID at config time
+// rather than lying dormant until the knob is flipped on.
+//
+// `source_reps` is normalized to nil for the `auto` sentinel (and for an empty
+// list) so downstream code has ONE representation of "auto". `levels` defaults
+// to [document]; the only accepted values are `document` and `section`.
+func (c *Config) normalizeHierarchical() error {
+	if strings.TrimSpace(c.RetrievalHierarchicalPromptVersion) == "" {
+		c.RetrievalHierarchicalPromptVersion = DefaultHierarchicalPromptVersion
+	}
+	if c.RetrievalHierarchicalMaxTokens < 0 {
+		return fmt.Errorf("retrieval.hierarchical.max_tokens must be non-negative (0 = generator default): %d", c.RetrievalHierarchicalMaxTokens)
+	}
+	c.RetrievalHierarchicalSourceReps = normalizeHierarchicalSourceReps(c.RetrievalHierarchicalSourceReps)
+	levels, err := normalizeHierarchicalLevels(c.RetrievalHierarchicalLevels)
+	if err != nil {
+		return err
+	}
+	c.RetrievalHierarchicalLevels = levels
+	return nil
+}
+
+// normalizeHierarchicalSourceReps lowercases/trims the configured source rep
+// types and collapses the `auto` sentinel (or an empty list) to nil, which every
+// consumer reads as "the document's primary retrievable text representation"
+// (SPEC §16.2). An explicit list keeps its declared order.
+func normalizeHierarchicalSourceReps(reps []string) []string {
+	out := make([]string, 0, len(reps))
+	for _, rep := range reps {
+		rep = strings.ToLower(strings.TrimSpace(rep))
+		if rep == "" || rep == HierarchicalSourceRepsAuto {
+			// Any `auto` entry means auto for the whole document.
+			return nil
+		}
+		out = append(out, rep)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// normalizeHierarchicalLevels lowercases/trims the configured summary levels,
+// defaults an empty list to [document], and rejects any value outside the §5.2
+// enum so a typo fails deterministically at config time.
+func normalizeHierarchicalLevels(levels []string) ([]string, error) {
+	out := make([]string, 0, len(levels))
+	seen := make(map[string]struct{}, len(levels))
+	for _, level := range levels {
+		level = strings.ToLower(strings.TrimSpace(level))
+		if level == "" {
+			continue
+		}
+		if level != HierarchicalLevelDocument && level != HierarchicalLevelSection {
+			return nil, fmt.Errorf("retrieval.hierarchical.levels must contain only %q or %q: %q",
+				HierarchicalLevelDocument, HierarchicalLevelSection, level)
+		}
+		if _, dup := seen[level]; dup {
+			continue
+		}
+		seen[level] = struct{}{}
+		out = append(out, level)
+	}
+	if len(out) == 0 {
+		return []string{HierarchicalLevelDocument}, nil
+	}
+	return out, nil
+}
+
+// HierarchicalDocumentLevelEnabled reports whether document-level summaries
+// should be derived: hierarchical retrieval is on and `document` is among the
+// configured levels (SPEC §16.2).
+func (c Config) HierarchicalDocumentLevelEnabled() bool {
+	if !c.RetrievalHierarchicalEnabled {
+		return false
+	}
+	for _, level := range c.RetrievalHierarchicalLevels {
+		if level == HierarchicalLevelDocument {
+			return true
+		}
+	}
+	return false
+}
+
+// HierarchicalSectionLevelRequested reports whether the operator asked for
+// section-level summaries. Section windowing is not implemented yet, so callers
+// warn once and derive document-level summaries only — honest coverage rather
+// than a silent no-op (SPEC §9.7).
+func (c Config) HierarchicalSectionLevelRequested() bool {
+	if !c.RetrievalHierarchicalEnabled {
+		return false
+	}
+	for _, level := range c.RetrievalHierarchicalLevels {
+		if level == HierarchicalLevelSection {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeHyDEMode normalizes retrieval.hyde.mode in place: empty becomes
