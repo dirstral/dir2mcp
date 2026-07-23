@@ -105,6 +105,13 @@ type Service struct {
 	// language_covered flag; it is never part of the derivation identity.
 	sttLanguages []string
 
+	// onUncoveredLanguage is the resolved media.stt.on_uncovered_language action
+	// (SPEC §8.2.1, #566): "warn" (default, fail-open) transcribes an
+	// uncovered-language item anyway and records the fact; "skip" records the item
+	// as documents.status="skipped" with skip_reason="language_uncovered" instead
+	// of transcribing to degraded output. Resolved once from config in NewService.
+	onUncoveredLanguage string
+
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
 	// enabled (tri-state) AND the active STT backend advertises CapDiarize.
@@ -579,6 +586,88 @@ func (s *Service) SetOnUnsupported(mode string) {
 	s.onUnsupported = normalizeOnUnsupported(mode)
 }
 
+// onUncoveredLanguageWarn / onUncoveredLanguageSkip are the resolved
+// media.stt.on_uncovered_language actions (SPEC §8.2.1, #566). "skip" suppresses
+// transcription for an uncovered source language; "warn" (and any other resolved
+// value) is the fail-open default: transcribe anyway.
+const (
+	onUncoveredLanguageWarn = "warn"
+	onUncoveredLanguageSkip = "skip"
+)
+
+// normalizeOnUncoveredLanguage maps the raw media.stt.on_uncovered_language config
+// value to the resolved §8.2.1 action. Only "skip" (case-insensitive) selects the
+// strict skip contract; everything else — including empty and any unrecognized
+// value — is the fail-open "warn" default, so a service constructed from a bare
+// config.Config transcribes as today (config.Validate rejects unknown values, but
+// a Service built directly from an unvalidated config must still degrade safely).
+func normalizeOnUncoveredLanguage(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), onUncoveredLanguageSkip) {
+		return onUncoveredLanguageSkip
+	}
+	return onUncoveredLanguageWarn
+}
+
+// SetOnUncoveredLanguage overrides the resolved §8.2.1 honest-coverage floor
+// action, primarily for tests that need to exercise warn/skip without threading a
+// full config. Only "skip" is strict; anything else is the fail-open warn default.
+func (s *Service) SetOnUncoveredLanguage(action string) {
+	s.onUncoveredLanguage = normalizeOnUncoveredLanguage(action)
+}
+
+// sttLanguageUncovered reports whether the pinned STT source language trips the
+// honest-coverage floor (SPEC §8.2.1): the finally-selected model declares a
+// non-empty stt_languages set and the pinned language is outside it. It keys off
+// the pinned source language (s.transcriptLanguage) and the routed profile's
+// declared coverage (s.sttLanguages) — the same inputs as the Slice A
+// construction-time warning — both resolved once in resolveTranscriptIdentityFields.
+// It deliberately uses only the configured pin, never per-item auto-detection:
+// langdetect is text-based and cannot know an item's language before it is
+// transcribed, so a skip-before-transcribe decision can only rest on the pin.
+// False when there is no pin or coverage is unknown (STTLanguageCoverageSet
+// returns declared=false for a blank language or an empty coverage set).
+func (s *Service) sttLanguageUncovered() bool {
+	lang := strings.TrimSpace(s.transcriptLanguage)
+	if lang == "" {
+		return false
+	}
+	declared, covered := provider.STTLanguageCoverageSet(s.sttLanguages, lang)
+	return declared && !covered
+}
+
+// skipUncoveredLanguageTranscript applies the SPEC §8.2.1 honest-coverage floor
+// SKIP action (#566) for a media item about to be transcribed. It returns
+// skip=false when transcription should proceed (warn mode, or a covered/unknown
+// language); the caller then transcribes as today. It returns skip=true when the
+// pinned source language is outside the selected STT model's declared coverage AND
+// media.stt.on_uncovered_language=skip, in which case transcription is NOT run:
+//
+//   - When the item produced no other searchable representation (mediaProduced=false)
+//     it is recorded as a durable status="skipped" with skip_reason="language_uncovered"
+//     and credited to the skipped counter, so the gap surfaces as honest not-indexed
+//     coverage in the skip_reasons aggregate instead of garbage the §8.6.6 quality gate
+//     silently drops. suppressCredit is true so the caller does not also credit it as
+//     indexed (#426).
+//   - When the item already produced media chunks (embed_multimodal=augment) it stays
+//     searchable via those, so it is NOT recorded as skipped — only the transcript is
+//     suppressed and suppressCredit is false (the document is still indexed).
+//
+// It is reached only after the sidecar attempt returned no sidecar transcript, so a
+// real subtitle track (not produced by the uncovered STT model) still wins.
+func (s *Service) skipUncoveredLanguageTranscript(ctx context.Context, doc model.Document, mediaProduced bool) (skip, suppressCredit bool) {
+	if s.onUncoveredLanguage != onUncoveredLanguageSkip || !s.sttLanguageUncovered() {
+		return false, false
+	}
+	s.getLogger().Printf("stt: skipping transcription of %s (%s) — source language %q is outside %s's declared coverage %v (media.stt.on_uncovered_language=skip, SPEC §8.2.1)",
+		doc.RelPath, doc.DocType, strings.TrimSpace(s.transcriptLanguage), s.sttProvider, s.sttLanguages)
+	if mediaProduced {
+		return true, false
+	}
+	s.addSkipped(1)
+	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonLanguageUncovered)
+	return true, true
+}
+
 // degradeUnsupportedExtraction applies the §7.4.B.2 degradation contract to a
 // pdf/image/document asset whose format no active extraction engine can read,
 // and which produced no direct-embedding media chunks either (so it would
@@ -645,6 +734,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		logger:                          log.Default(),
 		onDocumentDeletedMaxConcurrency: defaultOnDocumentDeletedMaxConcurrency,
 		onUnsupported:                   normalizeOnUnsupported(cfg.IngestOnUnsupported),
+		onUncoveredLanguage:             normalizeOnUncoveredLanguage(cfg.MediaSTTOnUncoveredLanguage),
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -1268,6 +1358,15 @@ func (s *Service) SetTranscriptLanguage(language string) {
 func (s *Service) SetSTTIdentity(providerName, model string) {
 	s.sttProvider = strings.TrimSpace(providerName)
 	s.sttModel = strings.TrimSpace(model)
+}
+
+// SetSTTLanguages overrides the resolved STT profile's declared language coverage
+// (SPEC §8.2.1, #566) — the non-empty BCP-47 set that drives the honest-coverage
+// floor. It mirrors SetSTTIdentity for tests that need deterministic coverage
+// without resolving a real STT provider profile. A nil/empty set means
+// open/unknown (no coverage assertion), exactly as an undeclared profile.
+func (s *Service) SetSTTLanguages(languages []string) {
+	s.sttLanguages = append([]string(nil), languages...)
 }
 
 // SetDiarizer wires the optional model-driven diarization seam (SPEC §8.6.8) and
@@ -3241,6 +3340,14 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 	// off (no transcriber) or the media yields no transcript, the no-representation
 	// check below still surfaces an unsearchable video (#398).
 	if isSidecarMediaType(doc.DocType) && s.transcriber != nil {
+		// Honest-coverage floor, skip action (SPEC §8.2.1, #566): when the selected
+		// STT model does not cover the pinned source language and
+		// media.stt.on_uncovered_language=skip, suppress transcription rather than
+		// emit degraded output. Handled in a helper so this function stays under the
+		// cyclomatic-complexity budget; see skipUncoveredLanguageTranscript.
+		if skip, suppressCredit := s.skipUncoveredLanguageTranscript(ctx, doc, mediaProduced); skip {
+			return suppressCredit, nil
+		}
 		produced, err := s.generateTranscriptRepresentation(ctx, doc, content)
 		if err != nil {
 			// Provider/transient failures should not fail the entire ingest run.

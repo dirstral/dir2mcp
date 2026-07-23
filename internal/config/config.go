@@ -713,6 +713,18 @@ type Config struct {
 	// that is absent or not STT-capable is rejected as CONFIG_INVALID at startup.
 	MediaSTTLanguageProviders map[string]string
 
+	// MediaSTTOnUncoveredLanguage is the honest-coverage floor action (config
+	// `media.stt.on_uncovered_language`, SPEC §8.2.1, #566): what the daemon does
+	// when the resolved source language is outside the finally-selected STT model's
+	// declared stt_languages coverage. "warn" (default, fail-open) transcribes
+	// anyway and records the (language, model, covered=false) fact on the transcript
+	// meta_json so an operator sees it. "skip" (strict) records the item as
+	// documents.status="skipped" with skip_reason="language_uncovered" instead of
+	// transcribing to degraded output — no transcript representation is produced.
+	// The floor only applies when coverage is DECLARED (a non-empty stt_languages);
+	// unknown coverage never trips it under either mode.
+	MediaSTTOnUncoveredLanguage string
+
 	// MediaBatchTwoPhase / MediaBatchProgress / MediaBatchManifest configure the
 	// optional batch-ergonomics surface for large-archive media ingests (SPEC
 	// §8.6.11; config block `media.batch`). All default OFF/empty so behavior is
@@ -885,6 +897,7 @@ type fileConfig struct {
 	MediaSTTMaxPayloadMB               *int
 	MediaSTTRequestTimeoutSec          *int
 	MediaSTTLanguageStrict             *bool
+	MediaSTTOnUncoveredLanguage        *string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
 	ServerTLSKeyFile                   *string
@@ -1028,6 +1041,7 @@ type persistedConfig struct {
 	MediaSTTMaxPayloadMB               int           `yaml:"media_stt_max_payload_mb"`
 	MediaSTTRequestTimeoutSec          int           `yaml:"media_stt_request_timeout_sec"`
 	MediaSTTLanguageStrict             bool          `yaml:"media_stt_language_strict"`
+	MediaSTTOnUncoveredLanguage        string        `yaml:"media_stt_on_uncovered_language"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
 	MediaBatchManifest                 string        `yaml:"media_batch_manifest"`
@@ -1231,12 +1245,16 @@ func Default() Config {
 		MediaSTTRequestTimeoutSec: 0,
 		// A pinned STT language is a provider hint, not per-file ground truth, so
 		// it does not drive quality-gate quarantine by default (dir2mcp#439 F3).
-		MediaSTTLanguageStrict:    false,
-		MediaVariantsGroup:        false,
-		MediaVariantsSelect:       "best",
-		MediaTranslateEnabled:     false,
-		MediaTranslateTargetLangs: nil,
-		MediaTranslateEngine:      "chat",
+		MediaSTTLanguageStrict: false,
+		// Honest-coverage floor action (SPEC §8.2.1, #566): fail-open by default —
+		// transcribe an uncovered-language item anyway and record the fact — so
+		// behavior is unchanged unless an operator opts into strict skipping.
+		MediaSTTOnUncoveredLanguage: onUncoveredLanguageWarn,
+		MediaVariantsGroup:          false,
+		MediaVariantsSelect:         "best",
+		MediaTranslateEnabled:       false,
+		MediaTranslateTargetLangs:   nil,
+		MediaTranslateEngine:        "chat",
 		// Cross-line context for the chat translate engine (issue #573): translate
 		// cues in windows of this many, each with a small read-only margin, so the
 		// model sees neighbouring cues. On by default (quality fix); the 1:1
@@ -1404,6 +1422,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTMaxPayloadMB:               cfg.MediaSTTMaxPayloadMB,
 		MediaSTTRequestTimeoutSec:          cfg.MediaSTTRequestTimeoutSec,
 		MediaSTTLanguageStrict:             cfg.MediaSTTLanguageStrict,
+		MediaSTTOnUncoveredLanguage:        cfg.MediaSTTOnUncoveredLanguage,
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
 		X402Mode:                           cfg.X402.Mode,
@@ -2261,6 +2280,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTLanguageStrict != nil {
 		cfg.MediaSTTLanguageStrict = *fc.MediaSTTLanguageStrict
 	}
+	if fc.MediaSTTOnUncoveredLanguage != nil {
+		cfg.MediaSTTOnUncoveredLanguage = *fc.MediaSTTOnUncoveredLanguage
+	}
 }
 
 // applyMediaSubtitlesFileParsed copies the set media.subtitles.* file fields
@@ -2619,6 +2641,7 @@ var configKeyAliases = map[string]string{
 	"media_stt_max_payload_mb":                "media.stt.max_payload_mb",
 	"media_stt_request_timeout_sec":           "media.stt.request_timeout_sec",
 	"media_stt_language_strict":               "media.stt.language_strict",
+	"media_stt_on_uncovered_language":         "media.stt.on_uncovered_language",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
 	"stt_elevenlabs_model":                    "stt.elevenlabs.model",
@@ -3092,6 +3115,8 @@ func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaSubtitlesSegmentation = strPtr(value)
 	case "media.translate.engine":
 		cfg.MediaTranslateEngine = strPtr(value)
+	case "media.stt.on_uncovered_language":
+		cfg.MediaSTTOnUncoveredLanguage = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -3310,6 +3335,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_stt_max_payload_mb", cfg.MediaSTTMaxPayloadMB)
 	writeInt("media_stt_request_timeout_sec", cfg.MediaSTTRequestTimeoutSec)
 	writeBool("media_stt_language_strict", cfg.MediaSTTLanguageStrict)
+	writeScalar("media_stt_on_uncovered_language", cfg.MediaSTTOnUncoveredLanguage)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
 	writeScalar("media_batch_manifest", cfg.MediaBatchManifest)
@@ -3791,6 +3817,7 @@ func (c *Config) Validate() error {
 		// its own root cause first): reject a language_providers route that names an
 		// unknown or non-STT-capable profile (SPEC §8.2.1, #566) as CONFIG_INVALID.
 		c.validateSTTLanguageProviders,
+		c.validateMediaSTTOnUncoveredLanguage,
 		c.validateMediaTranslate,
 		c.validateMediaSubtitles,
 		c.validateMediaDiarize,
@@ -4088,6 +4115,35 @@ func (c *Config) validateIngestOnUnsupported() error {
 		return fmt.Errorf("ingest.on_unsupported must be one of lenient, strict: %q", c.IngestOnUnsupported)
 	}
 	c.IngestOnUnsupported = mode
+	return nil
+}
+
+// onUncoveredLanguageWarn / onUncoveredLanguageSkip are the two honest-coverage
+// floor actions for media.stt.on_uncovered_language (SPEC §8.2.1, #566). "warn"
+// (default, fail-open) transcribes an uncovered-language item anyway and records
+// the fact; "skip" (strict) records it as documents.status="skipped" with
+// skip_reason="language_uncovered" instead of transcribing to degraded output.
+const (
+	onUncoveredLanguageWarn = "warn"
+	onUncoveredLanguageSkip = "skip"
+)
+
+// validateMediaSTTOnUncoveredLanguage normalizes MediaSTTOnUncoveredLanguage
+// (defaulting empty to the fail-open "warn" default) and rejects any value
+// outside warn/skip (SPEC §8.2.1, #566). It mirrors validateIngestOnUnsupported:
+// a small closed string enum with a lenient default so a bare config validates
+// unchanged.
+func (c *Config) validateMediaSTTOnUncoveredLanguage() error {
+	action := strings.ToLower(strings.TrimSpace(c.MediaSTTOnUncoveredLanguage))
+	if action == "" {
+		action = Default().MediaSTTOnUncoveredLanguage
+	}
+	switch action {
+	case onUncoveredLanguageWarn, onUncoveredLanguageSkip:
+	default:
+		return fmt.Errorf("media.stt.on_uncovered_language must be one of warn, skip: %q", c.MediaSTTOnUncoveredLanguage)
+	}
+	c.MediaSTTOnUncoveredLanguage = action
 	return nil
 }
 
