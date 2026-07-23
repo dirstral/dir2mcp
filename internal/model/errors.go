@@ -33,6 +33,17 @@ var (
 	// should retry once ingestion completes rather than fall back to raw bytes.
 	ErrOCRNotReady = errors.New("ocr not ready")
 
+	// ErrRelatedSourceNotFound is returned by RelatedSearcher.Related when the
+	// seed chunk_id / rel_path resolves to no indexed segment (SPEC §15.12): the
+	// source could not be located, so the tool layer surfaces INVALID_FIELD rather
+	// than an empty result.
+	ErrRelatedSourceNotFound = errors.New("related source segment not found")
+
+	// ErrRelatedNotSupported is returned by RelatedSearcher.Related when the
+	// configured store cannot resolve seed segments, so dir2mcp_related cannot be
+	// served.
+	ErrRelatedNotSupported = errors.New("related retrieval not supported by this store")
+
 	// ErrMediaNoText indicates a multimodal media-only document (SPEC 8.1.7):
 	// embedded directly under model.embed.multimodal=replace with no text
 	// representation. This is a permanent condition — unlike ErrOCRNotReady,

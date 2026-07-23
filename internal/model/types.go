@@ -447,6 +447,52 @@ type SearchQuery struct {
 	DateTo   int64
 }
 
+// RelatedQuery is the input to a query-by-example "more like this" retrieval
+// (SPEC §15.12): exactly ONE of SourceChunkID / SourceRelPath identifies the
+// seed segment (the tool layer enforces the oneOf), and the same §9.5/§9.6
+// filters as SearchQuery narrow the returned neighbours.
+type RelatedQuery struct {
+	// SourceChunkID is the seed chunk when the request identified the source by
+	// chunk_id; 0 when the source was given by rel_path.
+	SourceChunkID uint64
+	// SourceRelPath is the seed document (corpus-relative) when the request
+	// identified the source by rel_path; "" when the source was given by chunk_id.
+	SourceRelPath string
+	K             int
+	// Index selects the vector axis to search: auto|text|code|both. "auto"
+	// matches the seed segment's own index_kind.
+	Index string
+	// ExcludeSameDocument widens seed exclusion for a chunk_id request: when true
+	// (default) every chunk of the seed chunk's document is excluded; when false
+	// only the seed chunk itself is excluded. No-op for a rel_path request — a
+	// document's own chunks are always excluded.
+	ExcludeSameDocument bool
+	PathPrefix          string
+	FileGlob            string
+	DocTypes            []string
+	Languages           []string
+	LanguageMatch       string
+	DateFrom            int64
+	DateTo              int64
+}
+
+// RelatedResult is the output of a RelatedSearcher.Related call (SPEC §15.12).
+type RelatedResult struct {
+	// SourceChunkID / HasSourceChunkID echo the resolved seed chunk id for a
+	// chunk_id request; HasSourceChunkID is false for a rel_path request so the
+	// field is omitted from the tool output.
+	SourceChunkID    uint64
+	HasSourceChunkID bool
+	// SourceRelPath is the resolved seed document rel_path (present for both
+	// request shapes).
+	SourceRelPath string
+	K             int
+	// IndexUsed is the axis actually searched (text|code|both).
+	IndexUsed        string
+	Hits             []SearchHit
+	IndexingComplete bool
+}
+
 type SearchHit struct {
 	ChunkID uint64
 	RelPath string

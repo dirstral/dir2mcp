@@ -298,6 +298,29 @@ func TestSearchOutputSchemaConformance(t *testing.T) {
 	assertConforms(t, "search", searchOutputSchema(), structured)
 }
 
+func TestRelatedOutputSchemaConformance(t *testing.T) {
+	// chunk_id request: source_chunk_id is echoed alongside the required fields.
+	structured := map[string]interface{}{
+		"source_chunk_id":   uint64(42),
+		"source_rel_path":   "docs/report.pdf",
+		"k":                 15,
+		"index_used":        "text",
+		"hits":              []map[string]interface{}{serializeHit(fullSearchHit())},
+		"indexing_complete": true,
+	}
+	assertConforms(t, "related", relatedOutputSchema(), structured)
+
+	// rel_path request: source_chunk_id is omitted (still conforms — it is optional).
+	relPathReq := map[string]interface{}{
+		"source_rel_path":   "docs/report.pdf",
+		"k":                 15,
+		"index_used":        "both",
+		"hits":              []map[string]interface{}{},
+		"indexing_complete": false,
+	}
+	assertConforms(t, "related-relpath", relatedOutputSchema(), relPathReq)
+}
+
 func TestAskOutputSchemaConformance(t *testing.T) {
 	result := model.AskResult{
 		Question: "what drove revenue?",
