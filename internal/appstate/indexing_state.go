@@ -38,15 +38,25 @@ type IndexingSnapshot struct {
 
 type IndexingState struct {
 	// snap is a snapshot barrier, used INVERTED relative to the usual
-	// reader/writer split: every mutator takes RLock and Snapshot takes the
-	// exclusive Lock. Mutators are single atomic operations, so they are safe
-	// to run concurrently with one another (RLock lets them all through and
-	// costs a bare atomic add on the uncontended path). Snapshot, by contrast,
-	// reads thirteen fields one at a time and must not observe a state no
-	// mutator ever produced, so it excludes mutation for the duration of the
-	// read. Without this, a status scrape could interleave with ResetProgress
-	// or a counter batch and report indexed+skipped+errors > scanned — numbers
-	// that never existed (#426 lineage).
+	// reader/writer split, and the split is by mutation SHAPE, not by
+	// read-vs-write:
+	//
+	//   - Single-field mutators (every Add*/Set* that touches exactly one
+	//     field) take RLock. Each is a single atomic operation, so they are
+	//     safe to run concurrently with one another; RLock lets them all
+	//     through and costs a bare atomic add on the uncontended path.
+	//   - COMPOUND mutations that write more than one field — ResetProgress
+	//     (seven counters) and AddWatchOverflow (watchActive + watchOverflows)
+	//     — take the exclusive Lock. RLock would let them interleave with a
+	//     single-field mutator and leave a DURABLE invalid state: e.g. an
+	//     AddIndexed landing between ResetProgress's indexed.Store(0) and
+	//     scanned.Store(0) persists indexed>0 with scanned=0, which no reader
+	//     can un-see. Exclusion is what keeps a compound write all-or-nothing.
+	//   - Snapshot takes the exclusive Lock too: it reads thirteen fields one
+	//     at a time and must not observe a state no mutator ever produced.
+	//
+	// Without this a status scrape could report indexed+skipped+errors >
+	// scanned — numbers that never existed (#426 lineage).
 	snap sync.RWMutex
 
 	jobID   atomic.Value
@@ -115,21 +125,26 @@ func (s *IndexingState) SetRunning(running bool) {
 // rather than a single scan and must survive across rescans. jobID/mode/running
 // are lifecycle fields, not counters, and are left as-is.
 //
-// The whole reset is atomic with respect to Snapshot (both go through the snap
-// barrier), so no observer can see it half-applied. The component-before-scanned
-// ordering below is kept as belt-and-braces for any future lock-free reader, but
-// it is NOT on its own sufficient to hold the indexed+skipped+errors <= scanned
-// invariant: a field-by-field reader also tears against the ordinary counter
-// path, where a scan does AddScanned then AddIndexed as separate operations and
-// a reader that sampled scanned before the first and indexed after the second
-// sees indexed > scanned with no reset involved. The barrier is what makes the
-// invariant true; the ordering alone never did.
+// ResetProgress is a COMPOUND mutation (seven counters) and therefore takes the
+// exclusive snap lock rather than a shared RLock: under RLock a concurrent
+// AddIndexed could land between indexed.Store(0) and scanned.Store(0) and
+// persist indexed>0 with scanned=0 — a durable invariant violation, not merely
+// a torn read. Exclusion makes the reset's own writes atomic against Snapshot
+// and against any single concurrent mutator.
+//
+// Note the boundary it does NOT police: a caller that records a file as two
+// separate calls (AddScanned then AddIndexed) and whose reset fires between them
+// can still leave indexed>scanned, because that straddle is in the caller, not
+// inside this method. That is a non-issue in practice — ResetProgress runs at
+// scan start on the same goroutine that owns the scan's increments, so it is
+// never concurrent with them. The component-before-scanned ordering below is
+// now redundant belt-and-braces and no longer load-bearing.
 func (s *IndexingState) ResetProgress() {
 	if s == nil {
 		return
 	}
-	s.snap.RLock()
-	defer s.snap.RUnlock()
+	s.snap.Lock()
+	defer s.snap.Unlock()
 	s.indexed.Store(0)
 	s.skipped.Store(0)
 	s.deleted.Store(0)
@@ -226,13 +241,16 @@ func (s *IndexingState) MarkWatchActive() {
 // AddWatchOverflow increments the process-lifetime count of fsnotify kernel
 // event-buffer overflows (dropped-event bursts reconciled by the safety rescan
 // rather than per-event). It also marks the watcher active: an overflow can only
-// be observed while watching.
+// be observed while watching. Because it writes TWO fields it is a compound
+// mutation and takes the exclusive snap lock, so Snapshot can never observe
+// watchOverflows advanced while watchActive is still its old value (or vice
+// versa).
 func (s *IndexingState) AddWatchOverflow(delta int64) {
 	if s == nil {
 		return
 	}
-	s.snap.RLock()
-	defer s.snap.RUnlock()
+	s.snap.Lock()
+	defer s.snap.Unlock()
 	s.watchActive.Store(true)
 	s.watchOverflows.Add(delta)
 }
