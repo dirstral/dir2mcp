@@ -296,8 +296,8 @@ func languageFromRepMeta(metaJSON string) string {
 func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType, language string) (int64, error) {
 	_, err := exec.ExecContext(
 		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, language, embedding_status, embedding_error, error_category, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, language, embedding_status, embedding_error, error_category, chunk_context, embedding_mode, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -312,6 +312,8 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		   embedding_status=excluded.embedding_status,
 		   embedding_error=excluded.embedding_error,
 		   error_category=excluded.error_category,
+		   chunk_context=excluded.chunk_context,
+		   embedding_mode=excluded.embedding_mode,
 		   deleted=excluded.deleted`,
 		chunk.RepID,
 		chunk.Ordinal,
@@ -328,6 +330,8 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
 		strings.TrimSpace(chunk.EmbeddingError),
 		strings.TrimSpace(chunk.ErrorCategory),
+		chunk.Context,
+		model.NormalizeEmbeddingMode(chunk.EmbeddingMode),
 		boolToInt(chunk.Deleted),
 	)
 	if err != nil {
@@ -599,6 +603,17 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// honest coverage ("what wasn't indexed & why", #414/#395). Existing rows
 		// default to '' (unknown reason), which the aggregate normalizes.
 		`ALTER TABLE documents ADD COLUMN skip_reason TEXT NOT NULL DEFAULT ''`,
+		// chunk_context / embedding_mode back contextual retrieval (SPEC §5.3,
+		// §8.1.8, issue #330). chunk_context holds the generated document-aware
+		// context prepended to the chunk's EMBED input only — never to `text`,
+		// which stays the raw, displayed and CITED chunk (#403). embedding_mode
+		// disambiguates an empty context: 'disabled' (feature off), 'contextualized'
+		// (context generated), or 'fallback' (generation failed, embedded raw).
+		// Both are additive: a pre-feature index gets '' / 'disabled' on every
+		// existing row, which is exactly how the spec says such a corpus must read,
+		// and its embed identity migrates to `…|off` — so no reindex.
+		`ALTER TABLE chunks ADD COLUMN chunk_context TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE chunks ADD COLUMN embedding_mode TEXT NOT NULL DEFAULT 'disabled'`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -683,6 +698,8 @@ CREATE TABLE IF NOT EXISTS chunks (
   embedding_status TEXT NOT NULL DEFAULT 'pending',
   embedding_error TEXT NOT NULL DEFAULT '',
   error_category TEXT NOT NULL DEFAULT '',
+  chunk_context TEXT NOT NULL DEFAULT '',
+  embedding_mode TEXT NOT NULL DEFAULT 'disabled',
   deleted INTEGER NOT NULL DEFAULT 0,
   UNIQUE(rep_id, ordinal),
   FOREIGN KEY (rep_id) REFERENCES representations(rep_id) ON DELETE CASCADE
@@ -1716,7 +1733,7 @@ func (s *SQLiteStore) ChunkTaskByID(ctx context.Context, chunkID uint64) (task m
 
 	row := db.QueryRowContext(ctx, `
 WITH the_chunk AS (
-  SELECT chunk_id, rel_path, doc_type, rep_type, text, text_hash, index_kind, modality, media_ref, language
+  SELECT chunk_id, rel_path, doc_type, rep_type, text, text_hash, index_kind, modality, media_ref, language, chunk_context
   FROM chunks
   WHERE chunk_id = ? AND deleted = 0
 ),
@@ -1726,7 +1743,7 @@ ranked_spans AS (
   FROM spans s
   JOIN the_chunk tc ON tc.chunk_id = s.chunk_id
 )
-SELECT tc.chunk_id, tc.rel_path, tc.doc_type, tc.rep_type, tc.text, tc.text_hash, tc.index_kind, tc.modality, tc.media_ref, tc.language,
+SELECT tc.chunk_id, tc.rel_path, tc.doc_type, tc.rep_type, tc.text, tc.text_hash, tc.index_kind, tc.modality, tc.media_ref, tc.language, tc.chunk_context,
        COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''), COALESCE(d.mtime_unix, 0)
 FROM the_chunk tc
 LEFT JOIN ranked_spans sp ON sp.chunk_id = tc.chunk_id AND sp.rn = 1
@@ -1743,13 +1760,14 @@ LEFT JOIN documents d ON d.rel_path = tc.rel_path`, int64(chunkID))
 		modality  string
 		mediaRef  string
 		language  string
+		chunkCtx  string
 		spanK     string
 		spanS     int
 		spanE     int
 		spanExtra string
 		mtimeUnix int64
 	)
-	if scanErr := row.Scan(&cid, &relPath, &docType, &repType, &text, &thash, &idxKind, &modality, &mediaRef, &language,
+	if scanErr := row.Scan(&cid, &relPath, &docType, &repType, &text, &thash, &idxKind, &modality, &mediaRef, &language, &chunkCtx,
 		&spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); scanErr != nil {
 		if errors.Is(scanErr, sql.ErrNoRows) {
 			return model.ChunkTask{}, "", model.ErrNotFound
@@ -1775,6 +1793,11 @@ LEFT JOIN documents d ON d.rel_path = tc.rel_path`, int64(chunkID))
 	})
 	t.Modality = modality
 	t.MediaRef = mediaRef
+	// The generated context rides on the task's Context field only — Text stays
+	// the raw chunk, so a caller that renders a snippet/citation from this task
+	// (reranking, liveness) can never surface it (SPEC §8.1.8, #403). Only the
+	// embed path reads it, via ChunkTask.EmbedInput.
+	t.Context = chunkCtx
 	return t, thash, nil
 }
 
@@ -2310,6 +2333,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	// chunk with no document row (e.g. UpsertChunkTask seeds a bare chunk).
 	query := `WITH filtered_chunks AS (
 	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language,
+	                   c.chunk_context,
 	                   COALESCE(d.mtime_unix, 0) AS mtime_unix
 	            FROM chunks c
 	            LEFT JOIN documents d ON d.rel_path = c.rel_path
@@ -2323,6 +2347,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
 	          )
 	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind, fc.modality, fc.media_ref, fc.language,
+	                 fc.chunk_context,
 	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''), fc.mtime_unix
 	          FROM filtered_chunks fc
 	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
@@ -2351,13 +2376,14 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			modality  string
 			mediaRef  string
 			language  string
+			chunkCtx  string
 			spanK     string
 			spanS     int
 			spanE     int
 			spanExtra string
 			mtimeUnix int64
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &modality, &mediaRef, &language, &spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &modality, &mediaRef, &language, &chunkCtx, &spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -2379,6 +2405,11 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		})
 		task.Modality = modality
 		task.MediaRef = mediaRef
+		// Contextual retrieval (SPEC §8.1.8): the generated context travels as a
+		// SEPARATE field so only the embed path (ChunkTask.EmbedInput) joins it to
+		// the chunk. Snippet above is built from the raw text, so nothing the
+		// generator wrote can reach a citation (#403).
+		task.Context = chunkCtx
 		tasks = append(tasks, task)
 	}
 	return tasks, rows.Err()
@@ -2628,6 +2659,40 @@ func SpanFromRow(kind string, start, end int, extraJSON string) model.Span {
 
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
 	return s.markEmbeddingStatus(ctx, labels, "ok", "", "")
+}
+
+// HasFallbackContextChunks reports whether the document at relPath has any live
+// chunk whose contextual-retrieval state is `fallback` — a chunk whose context
+// generation failed, so it embedded RAW (SPEC §8.1.8, issue #330).
+//
+// It is the self-heal gate: while contextualization stays on, the ingest scan
+// treats such a document as stale even though its content hash is unchanged, so
+// the failed chunks are retried on the next scan and coverage converges instead
+// of leaving a silent, permanent hole.
+func (s *SQLiteStore) HasFallbackContextChunks(ctx context.Context, relPath string) (bool, error) {
+	normalizedPath, err := normalizeRelPath(relPath)
+	if err != nil {
+		return false, err
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer s.ReleaseDB()
+
+	var found int
+	err = db.QueryRowContext(ctx,
+		`SELECT 1 FROM chunks
+		 WHERE rel_path = ? AND deleted = 0 AND embedding_mode = ?
+		 LIMIT 1`,
+		normalizedPath, model.EmbeddingModeFallback).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RependEmbeddedChunks resets the given chunks' embedding_status back to

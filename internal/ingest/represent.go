@@ -72,6 +72,11 @@ type RepresentationGenerator struct {
 	// from config. A raw_text rep has no operator pin or source declaration, so
 	// detection is the only language signal (recorded as language_source=detected).
 	langDetectEnabled bool
+	// contextualizer generates the per-chunk, document-aware context contextual
+	// retrieval prepends to a chunk's EMBED input (SPEC §8.1.8). Nil (default)
+	// means the feature is off — the Service binds it only when contextual
+	// retrieval is effectively enabled.
+	contextualizer ChunkContextualizer
 }
 
 // SetLanguageDetection enables or disables best-effort raw_text language
@@ -307,6 +312,11 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 	if decision.quarantine {
 		embeddingStatus = "error"
 	}
+	// Contextual retrieval (SPEC §8.1.8, issue #330): resolve each chunk's
+	// document-aware context BEFORE the loop so the parent-document text is built
+	// once. Off by default — with no contextualizer bound this is a no-op and
+	// every chunk records embedding_mode=disabled, exactly as before.
+	contexts := rg.chunkContexts(ctx, segments)
 	for i, seg := range segments {
 		chunk := model.Chunk{
 			RepID:           repID,
@@ -317,6 +327,8 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 			EmbeddingStatus: embeddingStatus,
 			EmbeddingError:  decision.embErr,
 			ErrorCategory:   decision.category,
+			Context:         contexts[i].text,
+			EmbeddingMode:   contexts[i].mode,
 		}
 		// A kind-less span carries no provenance (e.g. a structured chunk whose
 		// source elements exposed no page); persist the chunk with no span row
@@ -333,6 +345,70 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 		return fmt.Errorf("soft delete stale chunks: %w", err)
 	}
 	return nil
+}
+
+// chunkContextState is one chunk's resolved contextual-retrieval outcome: the
+// generated context (empty unless generation succeeded) and the durable
+// per-chunk embedding_mode that disambiguates it (SPEC §5.3/§8.1.8).
+type chunkContextState struct {
+	text string
+	mode string
+}
+
+// SetContextualizer binds the per-chunk context generator used by contextual
+// retrieval (SPEC §8.1.8). Nil (the default) leaves the feature off: every chunk
+// records embedding_mode=disabled with no context, and the chunk writer is
+// byte-for-byte what it was before the feature existed.
+func (rg *RepresentationGenerator) SetContextualizer(c ChunkContextualizer) {
+	rg.contextualizer = c
+}
+
+// chunkContexts resolves the document-aware context for every segment of one
+// representation, returning states aligned 1:1 with segments.
+//
+// The "parent document" is the representation's own text — the segments joined
+// in order — so the generator sees the whole document a chunk came from without
+// the chunk writer needing the upstream source bytes. That joined text is also
+// what the cache key hashes (design 0004 §3), so a change ANYWHERE in the
+// document re-derives every one of its chunk contexts.
+//
+// Generation is FAIL-OPEN PER CHUNK (SPEC §8.1.8): a generator error leaves that
+// chunk with no context and mode=fallback — it embeds raw, in the same vector
+// space as its contextualized neighbours — instead of failing ingest. A fallback
+// chunk is retried on the next scan while contextualization stays on.
+func (rg *RepresentationGenerator) chunkContexts(ctx context.Context, segments []chunkSegment) []chunkContextState {
+	states := make([]chunkContextState, len(segments))
+	for i := range states {
+		states[i].mode = model.EmbeddingModeDisabled
+	}
+	if rg.contextualizer == nil || len(segments) == 0 {
+		return states
+	}
+	docText := joinSegmentTexts(segments)
+	for i, seg := range segments {
+		if strings.TrimSpace(seg.Text) == "" {
+			continue // nothing to situate; stays disabled, embeds raw
+		}
+		generated, err := rg.contextualizer.Contextualize(ctx, docText, seg.Text)
+		if err != nil || strings.TrimSpace(generated) == "" {
+			// Never log the chunk text or the generated context (they are corpus
+			// content); the error alone is what an operator needs.
+			states[i].mode = model.EmbeddingModeFallback
+			continue
+		}
+		states[i] = chunkContextState{text: generated, mode: model.EmbeddingModeContextualized}
+	}
+	return states
+}
+
+// joinSegmentTexts reconstructs the parent-document text a representation's
+// chunks were cut from, in chunk order.
+func joinSegmentTexts(segments []chunkSegment) string {
+	parts := make([]string, 0, len(segments))
+	for _, seg := range segments {
+		parts = append(parts, seg.Text)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // binarySniffLen bounds how many leading bytes looksLikeBinaryContent inspects.

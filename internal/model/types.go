@@ -230,6 +230,48 @@ type Chunk struct {
 	// specific filter. Additive: a corpus indexed before any language was
 	// recorded simply has empty values here (no migration, §9.5).
 	Language string
+	// Context is the generated document-aware context for contextual retrieval
+	// (SPEC §5.3 `chunk_context` / §8.1.8, issue #330). It is prepended to the
+	// text sent to the EMBEDDER only — never to Text, which stays the raw,
+	// displayed and CITED chunk (citation faithfulness, #403). Empty when
+	// contextual retrieval is off or the chunk fell back to raw.
+	Context string
+	// EmbeddingMode is the per-chunk contextualization state (SPEC §5.3
+	// `embedding_mode`): EmbeddingModeDisabled, EmbeddingModeContextualized, or
+	// EmbeddingModeFallback. It disambiguates an empty Context — feature off vs.
+	// context generated vs. generation failed — and is what the re-embed gate
+	// reads to retry fallback chunks. It is NOT part of the embed identity
+	// (§8.1.4): it is per-chunk state within one contextual corpus. Empty
+	// normalizes to EmbeddingModeDisabled.
+	EmbeddingMode string
+}
+
+// Per-chunk contextualization states (SPEC §5.3 `embedding_mode` / §8.1.8).
+const (
+	// EmbeddingModeDisabled means contextual retrieval was off for this chunk
+	// (feature disabled, fell open to off, or the chunk has no text to
+	// contextualize, e.g. a media chunk): it embedded raw with no context.
+	EmbeddingModeDisabled = "disabled"
+	// EmbeddingModeContextualized means a context was generated and prepended to
+	// this chunk's embed input.
+	EmbeddingModeContextualized = "contextualized"
+	// EmbeddingModeFallback means context generation FAILED for this chunk, so it
+	// embedded raw (fail-open per chunk). Such a chunk is retried on the next scan
+	// while contextualization stays on, and is counted in honest coverage — never
+	// a silent, permanent hole.
+	EmbeddingModeFallback = "fallback"
+)
+
+// NormalizeEmbeddingMode maps an empty/unknown value to EmbeddingModeDisabled so
+// a pre-feature row (no recorded mode) reads as "contextual retrieval was off",
+// exactly as SPEC §5.3 requires.
+func NormalizeEmbeddingMode(mode string) string {
+	switch mode {
+	case EmbeddingModeContextualized, EmbeddingModeFallback:
+		return mode
+	default:
+		return EmbeddingModeDisabled
+	}
 }
 
 type Span struct {
@@ -691,6 +733,29 @@ type ChunkTask struct {
 	// corpus rel_path whose bytes the worker embeds. Empty/"text" for text.
 	Modality string
 	MediaRef string
+	// Context is the chunk's generated document-aware context (SPEC §8.1.8,
+	// issue #330). It participates in EmbedInput ONLY: Text remains the raw
+	// chunk that snippets, reranking, and citations use, so the generated
+	// context can never leak into a quote (citation faithfulness, #403). Empty
+	// unless contextual retrieval produced a context for this chunk.
+	Context string
+}
+
+// contextualEmbedSeparator joins a generated context to its chunk in the embed
+// input (SPEC §8.1.8: `context + "\n\n" + chunk`).
+const contextualEmbedSeparator = "\n\n"
+
+// EmbedInput is the text actually sent to the embedder for this task. It is the
+// raw chunk Text unless contextual retrieval generated a Context for the chunk,
+// in which case it is `context + "\n\n" + chunk` (SPEC §8.1.8). This is the ONLY
+// place the two are joined: every display/citation path reads Text directly, so
+// the generated context never reaches a snippet, an open_file result, or an
+// answer quote (#403).
+func (t ChunkTask) EmbedInput() string {
+	if t.Context == "" {
+		return t.Text
+	}
+	return t.Context + contextualEmbedSeparator + t.Text
 }
 
 // NewChunkTask returns a task with the supplied components. If the provided
