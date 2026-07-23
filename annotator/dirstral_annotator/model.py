@@ -2,8 +2,8 @@
 
 A *cue* is a single recognizer's claim about a time range ("scorebug says
 Webb is pitching at 00:42:10-00:42:31"). Cues from all recognizers are fused
-into *annotations* — the merged, confidence-scored statements that get
-emitted as a sidecar next to the media file (dirstral-spec design 0004).
+into *annotations* — the merged, confidence-scored statements returned to
+dir2mcp from POST /recognize (dirstral-spec design 0004).
 """
 
 from __future__ import annotations
