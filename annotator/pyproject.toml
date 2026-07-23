@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dirstral-annotator"
 version = "0.2.0"
-description = "External recognition pipeline emitting annotation sidecars (dirstral-spec design 0004) for dir2mcp video corpora"
+description = "Reference recognition backend for dir2mcp's recognize capability (dirstral-spec design 0004)"
 requires-python = ">=3.11"
 # Core (play-by-play recognizer, fusion, emitters, eval) is stdlib-only by
 # design: the pilot's ground-truth path must run anywhere. Vision recognizers
