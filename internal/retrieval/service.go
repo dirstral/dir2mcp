@@ -309,6 +309,17 @@ type Service struct {
 	// serial per-variant generation cost (#444). Never nil after NewService; a nil
 	// value would still behave as an always-miss no-op.
 	expansionCache *expansionCache
+	// hierarchicalEnabled toggles the opt-in coarse-to-fine expand step of
+	// hierarchical retrieval (SPEC §9.7, #329): a `summary` hit is replaced by the
+	// fine chunks its `coverage` names, which are then deduped and reranked with
+	// the directly-retrieved hits. Default false ⇒ flat retrieval, unchanged.
+	// Wired from config.RetrievalHierarchicalEnabled at construction.
+	//
+	// It gates only the EXPANSION. Dropping `summary` hits from the returned set
+	// is unconditional: a model-generated summary is never source text, so it must
+	// never become a Citation.snippet or an answer quote whatever the config says
+	// (the §9.7 citation-faithfulness invariant).
+	hierarchicalEnabled bool
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -1138,6 +1149,13 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	if err != nil {
 		return nil, err
 	}
+	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): replace each `summary`
+	// candidate with the fine chunks its coverage names, dedup against the
+	// directly-retrieved hits, and rerank the merged pool. It runs BEFORE decay /
+	// the floor / truncation so expanded children compete for top-k on equal
+	// terms. A pool with no summary candidates — every corpus with the feature
+	// off — returns unchanged, so the flat path is untouched.
+	hits = s.expandHierarchical(ctx, query, hits, poolK)
 	// Apply the opt-in recency time-decay just BEFORE the relevance floor: it
 	// re-scores each hit by its source-document age, so the floor compares the
 	// decayed score and newer content survives a tie. Config-only; default 0 ⇒

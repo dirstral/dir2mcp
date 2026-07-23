@@ -97,6 +97,108 @@ type Representation struct {
 	Deleted     bool
 }
 
+// SummaryRepType is the rep_type of a model-generated summary representation
+// (SPEC §5.2, hierarchical retrieval §9.7). A summary is a coarse view over the
+// fine chunks of exactly ONE source representation of its OWN document; it
+// retrieves but never cites (§9.7 citation-faithfulness invariant).
+const SummaryRepType = "summary"
+
+// IsSummaryRepType reports whether repType is a summary representation: the
+// canonical `summary`, or a `summary-<source_rep_type>` variant written when one
+// document is summarized at more than one source representation (the same
+// suffixing idiom per-language `transcript-<lang>` representations use). It is
+// the single predicate every layer uses so a summary can never be mistaken for a
+// citable fine chunk (§9.7).
+func IsSummaryRepType(repType string) bool {
+	repType = strings.ToLower(strings.TrimSpace(repType))
+	return repType == SummaryRepType || strings.HasPrefix(repType, SummaryRepType+"-")
+}
+
+// Summary coverage range kinds (SPEC §5.2). `document` covers every non-deleted
+// chunk of the source representation; `ordinals` covers an INCLUSIVE chunk
+// ordinal range; `time` covers transcript segments/clips by interval OVERLAP.
+const (
+	SummaryRangeDocument = "document"
+	SummaryRangeOrdinals = "ordinals"
+	SummaryRangeTime     = "time"
+)
+
+// Summary levels (SPEC §5.2/§16.2): one summary over the whole document, or one
+// over a deterministic window of N adjacent fine units.
+const (
+	SummaryLevelDocument = "document"
+	SummaryLevelSection  = "section"
+)
+
+// SummaryCoverageRange is the fine-unit range a summary covers within its source
+// representation (SPEC §5.2). Exactly one shape is populated, selected by Kind:
+//
+//   - SummaryRangeDocument: no bounds — every non-deleted chunk of the source rep.
+//   - SummaryRangeOrdinals: [Start, End], an INCLUSIVE chunk-ordinal range.
+//   - SummaryRangeTime: [StartMS, EndMS], an INCLUSIVE time range matched by
+//     interval OVERLAP against each segment's [seg_start_ms, seg_end_ms].
+type SummaryCoverageRange struct {
+	Kind    string `json:"kind"`
+	Start   int    `json:"start,omitempty"`
+	End     int    `json:"end,omitempty"`
+	StartMS int    `json:"start_ms,omitempty"`
+	EndMS   int    `json:"end_ms,omitempty"`
+}
+
+// SummaryCoverage is the parent→child linkage of a summary representation (SPEC
+// §5.2): the SINGLE source representation whose chunks the summary summarizes,
+// plus the range within it. A summary covers exactly one representation, never a
+// mix, and that representation MUST belong to the summary's own document (the
+// same-document invariant) — expansion therefore never leaves the document.
+type SummaryCoverage struct {
+	SourceRepID int64                `json:"source_rep_id"`
+	Range       SummaryCoverageRange `json:"range"`
+}
+
+// SummaryMeta is the meta_json shape persisted on a `summary` representation
+// (SPEC §5.2). Provider/Model/PromptVersion/PromptHash form the generator side
+// of the summary derivation identity (§8.6.7); Coverage is the parent→child
+// linkage consumed by coarse-to-fine expansion (§9.7).
+type SummaryMeta struct {
+	SummaryLevel  string          `json:"summary_level"`
+	Provider      string          `json:"provider,omitempty"`
+	Model         string          `json:"model,omitempty"`
+	ModelVersion  string          `json:"model_version,omitempty"`
+	PromptVersion string          `json:"prompt_version,omitempty"`
+	PromptHash    string          `json:"prompt_hash,omitempty"`
+	Language      string          `json:"language,omitempty"`
+	Coverage      SummaryCoverage `json:"coverage"`
+}
+
+// Valid reports whether the coverage linkage is structurally usable for
+// expansion (SPEC §5.2): a positive source rep id and a known range kind whose
+// bounds satisfy start <= end. An invalid coverage is treated as "no summary" —
+// expansion skips it and retrieval falls back to the flat path for that unit.
+func (c SummaryCoverage) Valid() bool {
+	if c.SourceRepID <= 0 {
+		return false
+	}
+	switch c.Range.Kind {
+	case SummaryRangeDocument:
+		return true
+	case SummaryRangeOrdinals:
+		return c.Range.Start >= 0 && c.Range.Start <= c.Range.End
+	case SummaryRangeTime:
+		return c.Range.StartMS >= 0 && c.Range.StartMS <= c.Range.EndMS
+	default:
+		return false
+	}
+}
+
+// SummaryTimeRangeSelects reports whether a transcript segment / clip spanning
+// [segStartMS, segEndMS] is selected by an inclusive summary time range
+// [startMS, endMS]. Selection is by INTERVAL OVERLAP, not containment (SPEC
+// §5.2): a segment that straddles a window endpoint is evidence the summary was
+// built from and must not be dropped by coarse-to-fine expansion.
+func SummaryTimeRangeSelects(startMS, endMS, segStartMS, segEndMS int) bool {
+	return segStartMS <= endMS && segEndMS >= startMS
+}
+
 type Chunk struct {
 	ChunkID         uint64
 	RepID           int64

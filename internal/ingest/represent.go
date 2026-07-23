@@ -215,6 +215,33 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 	})
 }
 
+// PersistSummary writes a `summary` representation and its chunk(s) (SPEC §5.2,
+// hierarchical retrieval §9.7). The summary text is chunked with the same
+// markdown/text chunker documents use, so a summary longer than one chunk is
+// split rather than truncated, and every chunk is inserted on the TEXT logical
+// axis (§6.1) with embedding_status=pending — the existing embedding worker then
+// embeds it as an ADDITIVE vector in the same space as the document's fine
+// chunks (no embed-identity change, §8.1.4).
+//
+// Stale chunks from a previous, longer summary are soft-deleted, so a re-derived
+// summary never leaves orphaned coarse vectors behind.
+func (rg *RepresentationGenerator) PersistSummary(ctx context.Context, rep model.Representation, summaryText string) error {
+	if strings.TrimSpace(summaryText) == "" {
+		return fmt.Errorf("summary text must be non-empty")
+	}
+	segments := chunkRawTextByDocType("md", summaryText)
+	if len(segments) == 0 {
+		return fmt.Errorf("chunking produced zero segments for the summary of doc %d", rep.DocID)
+	}
+	return rg.store.WithTx(ctx, func(tx model.RepresentationStore) error {
+		repID, err := tx.UpsertRepresentation(ctx, rep)
+		if err != nil {
+			return fmt.Errorf("upsert summary representation: %w", err)
+		}
+		return rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, "text", segments, quarantineDecision{})
+	})
+}
+
 // GenerateMediaChunks emits one media chunk per span of a media document so
 // each is embedded directly from its bytes via the multimodal embedder (SPEC
 // 8.1.7), rather than via extracted text. The caller decides the unit: an

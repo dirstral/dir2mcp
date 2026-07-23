@@ -163,6 +163,21 @@ type Service struct {
 	// translateEngine == "whisper", nil for the chat engine.
 	translateSTT model.Transcriber
 
+	// summarizer is the chat/generation client used to derive document-level
+	// `summary` representations for hierarchical retrieval (SPEC §5.2/§9.7). It is
+	// the chat capability binding resolved at construction — honoring an explicit
+	// `retrieval.hierarchical.provider` pin — or nil when hierarchical retrieval is
+	// disabled (the default) or no chat-capable provider resolves, in which case
+	// the optional summary step self-skips (capability-driven, fail-open).
+	summarizer model.Generator
+
+	// summaryProvider/summaryModel record the resolved generator identity so each
+	// summary representation can carry it in meta_json (§5.2) and in the summary
+	// derivation identity (§8.6.7); a generator swap then re-derives the summary.
+	// Empty when summary generation is inactive.
+	summaryProvider string
+	summaryModel    string
+
 	// embedMultimodal is the resolved multimodal embedding mode (SPEC
 	// 8.1.7): "off" (default), "augment", or "replace". When augment/
 	// replace, media documents additionally (or exclusively) get a media
@@ -774,6 +789,10 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.translateEngine = "chat"
 	}
 	svc.resolveTranslateBinding(cfg)
+	// Resolve the optional summary-generation binding for hierarchical retrieval
+	// (SPEC §9.7). Off by default: with the feature disabled, or with no chat
+	// provider, the binding stays nil and every summary step self-skips.
+	svc.resolveSummaryBinding(cfg)
 	// Resolve the multimodal embedding mode once (SPEC 8.1.7); a missing or
 	// unresolvable embed profile leaves it off (text-only).
 	if ep, err := cfg.Providers().Resolve(provider.CapEmbed); err == nil {
@@ -2015,7 +2034,13 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
-	// Representations committed: stamp the withheld #402 done marker now that the
+	// Representations committed: derive the optional document-level `summary`
+	// representation over them (SPEC §5.2/§9.7). It runs AFTER the fine chunks are
+	// written (it summarizes them) and is fail-open by construction — it never
+	// returns an error, so an absent summary leaves the document fully indexed and
+	// flat-retrievable, and the next scan retries.
+	s.GenerateDocumentSummaries(ctx, doc)
+	// Stamp the withheld #402 done marker now that the
 	// chunks are durably written. finalizeContentHash re-reads the row, so a
 	// document a soft-error path persisted as status="error" is left unmarked and
 	// retried next run rather than recorded as fully indexed.
