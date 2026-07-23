@@ -64,6 +64,10 @@ type Service struct {
 	// (docling/docling-serve/mistral/off) or when no functional pandoc resolves.
 	pandocExtractor *pandocExtractor
 	transcriber     model.Transcriber
+	// recognizer is the optional recognition binding (design 0004): a backend
+	// that turns video into time-ranged annotation statements. Nil when
+	// recognize.provider is off (the default).
+	recognizer model.Recognizer
 
 	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
 	// active extraction engine supports (ingest.on_unsupported): "lenient"
@@ -783,6 +787,9 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		return nil, fmt.Errorf("configure transcriber: %w", err)
 	}
 	svc.transcriber = transcriber
+	if strings.EqualFold(strings.TrimSpace(cfg.RecognizeProvider), "serve") {
+		svc.recognizer = NewRecognizeServeClient(cfg.RecognizeServeURL)
+	}
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
 		// Best-effort raw_text language auto-detection (SPEC §8.8), on by default.
@@ -3370,7 +3377,14 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return false, nil
 	}
 
-	return s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
+	nonFatalErrored, err = s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
+	if nonFatalErrored || err != nil {
+		return nonFatalErrored, err
+	}
+	// Recognition (design 0004) runs after the transcript: both are derived
+	// representations of the same media, and a recognition-backend failure is
+	// a hard per-document error exactly like an STT failure.
+	return false, s.GenerateRecognitionRepresentation(ctx, doc)
 }
 
 // htmlRoutesToStructured reports whether an html document should be promoted to

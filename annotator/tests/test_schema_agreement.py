@@ -1,22 +1,21 @@
-"""Pin emitter ↔ spec agreement: the v1 JSON we emit must validate against
-the draft schema shipped with dirstral-spec design 0004. Skipped when the
-schema (submodule) or jsonschema isn't available; CI with the submodule
-checked out runs it.
+"""Pin backend ↔ spec agreement: the response `serve` returns must validate
+against the draft wire-contract schema shipped with dirstral-spec design
+0004. Skipped when the schema (submodule) or jsonschema isn't available;
+CI with the submodule checked out runs it.
 
 Override the schema location with DIRSTRAL_SPEC_DIR when working from a
 side-by-side spec checkout instead of the submodule.
 """
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 
-from dirstral_annotator.emit import emit_json
+from dirstral_annotator.emit import build_response
 from dirstral_annotator.model import Annotation, Document
 
-SCHEMA_REL = "docs/design/0004-annotation-sidecar.schema.json"
+SCHEMA_REL = "docs/design/0004-recognize-response.schema.json"
 
 
 def find_schema() -> Path | None:
@@ -29,11 +28,13 @@ def find_schema() -> Path | None:
     return next((c for c in candidates if c.is_file()), None)
 
 
-def test_emitted_json_validates_against_design_0004_draft_schema():
+def test_serve_response_validates_against_design_0004_draft_schema():
     jsonschema = pytest.importorskip("jsonschema")
     schema_path = find_schema()
     if schema_path is None:
         pytest.skip("dirstral-spec design-0004 draft schema not available")
+    import json
+
     doc = Document(
         media="game7.mp4",
         annotations=[
@@ -46,4 +47,4 @@ def test_emitted_json_validates_against_design_0004_draft_schema():
         ],
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    jsonschema.validate(json.loads(emit_json(doc)), schema)
+    jsonschema.validate(build_response(doc), schema)

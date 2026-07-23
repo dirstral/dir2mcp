@@ -64,17 +64,20 @@ class Annotation:
 
 
 @dataclass
-class AnnotatorInfo:
-    name: str = "dirstral-sports-annotator"
-    version: str = "0.1.0"
+class RecognizerInfo:
+    """Backend identity declared in every response; feeds the derivation
+    identity of the representation dir2mcp persists (design 0004 §4)."""
+
+    name: str = "dirstral-annotator"
+    version: str = "0.2.0"
 
 
 @dataclass
 class Document:
-    """Everything emitted for one media file."""
+    """Everything recognized for one media file."""
 
-    media: str  # media filename the sidecar sits next to
-    annotator: AnnotatorInfo = field(default_factory=AnnotatorInfo)
+    media: str  # media filename this result describes
+    recognizer: RecognizerInfo = field(default_factory=RecognizerInfo)
     entities: list[Player] = field(default_factory=list)
     annotations: list[Annotation] = field(default_factory=list)
 

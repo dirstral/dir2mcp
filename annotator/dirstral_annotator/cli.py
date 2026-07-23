@@ -1,18 +1,20 @@
 """Command-line entrypoints.
 
-    dirstral-annotate annotate game7.mp4 --roster roster.json \
-        [--game-pk 745123 --anchor "PITCH_EPOCH=VIDEO_S" ...] \
-        [--faces bank/] [--scorebug] [--jersey] [--fps 0.5] [--min-confidence 0.3]
+    # Run the recognition backend dir2mcp connects to
+    # (dir2mcp config: recognize.provider=serve, recognize.base_url=http://127.0.0.1:8765)
+    dirstral-annotate serve --roster roster.json [--games games.json] \
+        [--scorebug] [--jersey] [--faces bank/] [--fps 0.5] [--min-confidence 0.3] \
+        [--host 127.0.0.1] [--port 8765]
 
-    dirstral-annotate eval game7.mp4 --roster roster.json --game-pk 745123 \
-        --anchor "…=…" [--feed saved-gumbo.json] [--report report.md]
+    # Phase-1 accuracy gate against Statcast ground truth
+    dirstral-annotate eval game7.mp4 --roster roster.json \
+        (--game-pk 745123 | --feed saved-gumbo.json) --anchor "EPOCH=VIDEO_S" \
+        [--report report.md]
 
-`annotate` writes `game7.vtt` (the v0 sidecar dir2mcp indexes today) and
-`game7.annotations.json` (the v1 draft) next to the media file. `eval`
-re-runs annotation and scores it against the game's ground truth.
-
-Recognizers whose backends are missing are reported and skipped — the
-cascade degrades, it doesn't abort.
+`games.json` binds media basenames to their play-by-play source and time
+anchors: {"game7.mp4": {"game_pk": 745123, "anchors": ["1789265400.0=60.0"]}}.
+Vision recognizers whose backends are missing are reported and skipped —
+the cascade degrades, it doesn't abort.
 """
 
 from __future__ import annotations
@@ -21,117 +23,95 @@ import argparse
 import sys
 from pathlib import Path
 
-from .emit import write_sidecars
-from .eval import align, ground_truth, report, score
-from .fusion import fuse
-from .model import Cue, Document
-from .recognizers.base import RecognizerUnavailable
+from .eval import report as report_mod
+from .eval import score as score_mod
+from .pipeline import GameConfig, Pipeline, load_games
 from .roster import Roster
+from .serve import serve
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dirstral-annotate")
     sub = p.add_subparsers(dest="command", required=True)
-    for name in ("annotate", "eval"):
-        c = sub.add_parser(name)
-        c.add_argument("media", type=Path)
-        c.add_argument("--roster", type=Path, required=True)
-        c.add_argument("--game-pk", type=int, help="MLB statsapi gamePk for play-by-play labels")
-        c.add_argument("--feed", type=Path, help="saved GUMBO JSON (skips the network fetch)")
-        c.add_argument(
-            "--anchor", action="append", default=[], metavar="EPOCH=VIDEO_S",
-            help="wall-clock epoch seconds = video seconds; repeatable",
-        )
-        c.add_argument("--faces", type=Path, help="roster image bank dir; enables face recognition")
+
+    def vision_flags(c):
         c.add_argument("--scorebug", action="store_true", help="enable scorebug OCR")
         c.add_argument("--jersey", action="store_true", help="enable jersey-number OCR")
+        c.add_argument("--faces", type=Path, help="roster image bank dir; enables face recognition")
         c.add_argument("--fps", type=float, default=0.5, help="frame sampling rate (default 0.5)")
         c.add_argument("--min-confidence", type=float, default=0.0)
-    sub.choices["eval"].add_argument("--report", type=Path, help="write markdown report here")
+
+    s = sub.add_parser("serve", help="run the recognition backend for dir2mcp")
+    s.add_argument("--roster", type=Path, required=True)
+    s.add_argument("--games", type=Path, help="games.json: media basename -> play-by-play binding")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8765)
+    vision_flags(s)
+
+    e = sub.add_parser("eval", help="score recognition against Statcast ground truth")
+    e.add_argument("media", type=Path)
+    e.add_argument("--roster", type=Path, required=True)
+    e.add_argument("--game-pk", type=int)
+    e.add_argument("--feed", type=Path, help="saved GUMBO JSON (skips the network fetch)")
+    e.add_argument("--anchor", action="append", default=[], metavar="EPOCH=VIDEO_S", required=True)
+    e.add_argument("--report", type=Path, help="write markdown report here")
+    vision_flags(e)
     return p
 
 
-def _parse_anchors(specs: list[str]) -> list[align.Anchor]:
-    anchors = []
-    for spec in specs:
-        try:
-            epoch, video = spec.split("=", 1)
-            anchors.append(align.Anchor(epoch_s=float(epoch), video_s=float(video)))
-        except ValueError:
-            raise SystemExit(f"bad --anchor {spec!r}: expected EPOCH_SECONDS=VIDEO_SECONDS")
-    return anchors
-
-
-def _load_events(args) -> list[ground_truth.PitchEvent]:
-    feed = ground_truth.load_game(args.feed) if args.feed else ground_truth.fetch_game(args.game_pk)
-    return ground_truth.parse_pitches(feed)
-
-
-def _collect_cues(args, roster: Roster, alignment: align.Alignment | None) -> list[Cue]:
-    cues: list[Cue] = []
-    skipped: list[str] = []
-
-    if alignment is not None and (args.game_pk or args.feed):
-        from .recognizers.playbyplay import PlayByPlayRecognizer
-
-        events = _load_events(args)
-        cues += PlayByPlayRecognizer(events, alignment.offset_s, roster).recognize(args.media)
-
-    def try_recognizer(build):
-        try:
-            cues.extend(build().recognize(args.media))
-        except RecognizerUnavailable as exc:
-            skipped.append(str(exc))
-
-    if args.scorebug:
-        from .recognizers.scorebug import ScorebugRecognizer
-
-        try_recognizer(lambda: ScorebugRecognizer(roster, fps=args.fps))
-    if args.jersey:
-        from .recognizers.jersey import JerseyRecognizer
-
-        try_recognizer(lambda: JerseyRecognizer(roster, fps=args.fps))
-    if args.faces:
-        from .recognizers.faces import FaceRecognizer
-
-        try_recognizer(lambda: FaceRecognizer(roster, args.faces, fps=args.fps))
-
-    for msg in skipped:
-        print(f"skipped: {msg}", file=sys.stderr)
-    return cues
+def _pipeline(args, roster: Roster, games) -> Pipeline:
+    return Pipeline(
+        roster=roster,
+        games=games,
+        scorebug=args.scorebug,
+        jersey=args.jersey,
+        faces_bank=args.faces,
+        fps=args.fps,
+        min_confidence=args.min_confidence,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     roster = Roster.load(args.roster)
-    anchors = _parse_anchors(args.anchor)
-    alignment = align.estimate(anchors) if anchors else None
 
-    if (args.game_pk or args.feed) and alignment is None:
-        raise SystemExit("play-by-play labels need at least one --anchor to place them on the video timeline")
-    if alignment is not None and alignment.drifty:
+    if args.command == "serve":
+        games = load_games(args.games) if args.games else {}
+        server = serve(_pipeline(args, roster, games), host=args.host, port=args.port)
+        print(f"recognition backend listening on http://{args.host}:{server.server_address[1]} "
+              f"({len(games)} game binding(s))")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            server.shutdown()
+        return 0
+
+    # eval
+    if not (args.game_pk or args.feed):
+        raise SystemExit("eval needs --game-pk or --feed for ground truth")
+    game = GameConfig.parse({
+        "game_pk": args.game_pk,
+        "feed": str(args.feed) if args.feed else None,
+        "anchors": args.anchor,
+    })
+    if not game.anchors:
+        raise SystemExit("eval needs at least one --anchor to place labels on the video timeline")
+    alignment = game.alignment()
+    if alignment.drifty:
         print(
             f"warning: anchors disagree by {alignment.spread_s:.1f}s — "
             "timeline may be spliced; results near splices will be off",
             file=sys.stderr,
         )
 
-    cues = _collect_cues(args, roster, alignment)
-    annotations = fuse(cues, min_confidence=args.min_confidence)
-    doc = Document(media=args.media.name, annotations=annotations)
+    pipeline = _pipeline(args, roster, {args.media.name: game})
+    annotations = pipeline.annotations_for(args.media)
+    for msg in pipeline.skipped:
+        print(f"skipped: {msg}", file=sys.stderr)
 
-    if args.command == "annotate":
-        written = write_sidecars(doc, args.media, roster)
-        print(f"{len(annotations)} annotations from {len(cues)} cues -> "
-              + ", ".join(str(w) for w in written))
-        return 0
-
-    # eval
-    if not (args.game_pk or args.feed):
-        raise SystemExit("eval needs --game-pk or --feed for ground truth")
-    events = _load_events(args)
-    card = score.score(annotations, events, alignment, roster)
-    text = report.render(card, alignment, roster, title=args.media.name)
+    events = game.events()
+    card = score_mod.score(annotations, events, alignment, roster)
+    text = report_mod.render(card, alignment, roster, title=args.media.name)
     if args.report:
         args.report.write_text(text, encoding="utf-8")
         print(f"wrote {args.report}")
