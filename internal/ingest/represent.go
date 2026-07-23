@@ -64,6 +64,30 @@ func TranscriptRepType(language string) string {
 	return RepTypeTranscript + TranscriptLangSuffix(language)
 }
 
+// TrackRepQualifier returns the rep_type track qualifier for a 0-based
+// AUDIO-relative track index (SPEC §8.6.12). Track 0 (the container's first
+// audio stream) returns the empty string so it keeps the BARE "transcript"
+// rep_type — a single-track corpus is byte-for-byte unchanged and never
+// re-derives on upgrade. Each additional track N ≥ 1 returns "@t<N>", producing
+// the distinct "transcript@t<N>" rep_type. The "@" delimiter never appears in a
+// BCP-47 language suffix (which is "-"-prefixed), so a full rep-key
+// transcript[@t<N>][-<lang>] parses the track qualifier and the language suffix
+// independently.
+func TrackRepQualifier(track int) string {
+	if track <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("@t%d", track)
+}
+
+// TranscriptRepTypeForTrack composes a transcript rep_type for a given
+// 0-based audio track and optional language (SPEC §8.6.12/§8.6.2):
+// transcript[@t<N>][-<lang>]. Track 0 with an empty language yields the bare
+// "transcript"; track 2 into English yields "transcript@t2-en".
+func TranscriptRepTypeForTrack(track int, language string) string {
+	return RepTypeTranscript + TrackRepQualifier(track) + TranscriptLangSuffix(language)
+}
+
 // RepresentationGenerator handles creation of representations from documents
 type RepresentationGenerator struct {
 	store model.RepresentationStore

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -781,6 +782,18 @@ type Config struct {
 	// The floor only applies when coverage is DECLARED (a non-empty stt_languages);
 	// unknown coverage never trips it under either mode.
 	MediaSTTOnUncoveredLanguage string
+	// MediaSTTTracks selects WHICH audio tracks of a multi-track media container
+	// are transcribed (config `media.stt.tracks`, SPEC §8.6.12, issue #567). It is
+	// the RAW, unvalidated form as written in config: an empty slice (the default)
+	// or the single keyword `first` means "only the first audio stream" (today's
+	// behavior and cost); `all` means "every audio track"; a list of 0-based
+	// audio-relative indices (e.g. `0`, `2`) means exactly those tracks. Parse it
+	// into the resolved selection with ParseSTTTracks, which also rejects invalid
+	// forms (duplicate/negative indices, a keyword mixed with indices) as
+	// CONFIG_INVALID. Track 0 always keeps the bare `transcript` rep_type; each
+	// additional track N>=1 gets a `transcript@t<N>` rep_type, so a single-track
+	// corpus is byte-for-byte unchanged.
+	MediaSTTTracks []string
 
 	// MediaBatchTwoPhase / MediaBatchProgress / MediaBatchManifest configure the
 	// optional batch-ergonomics surface for large-archive media ingests (SPEC
@@ -852,6 +865,91 @@ type Config struct {
 	// bespoke flat parser. Unexported/runtime-derived: not persisted,
 	// not part of Default()/persistedConfig. Access via cfg.Providers().
 	providersDoc providersDoc
+}
+
+// STTTrackMode is the resolved kind of a media.stt.tracks selection (SPEC
+// §8.6.12).
+type STTTrackMode int
+
+const (
+	// STTTracksFirst transcribes only the container's first audio stream — the
+	// default (and today's single-track behavior and cost). It is the zero value.
+	STTTracksFirst STTTrackMode = iota
+	// STTTracksAll transcribes every audio track.
+	STTTracksAll
+	// STTTracksList transcribes exactly the explicitly-listed 0-based tracks.
+	STTTracksList
+)
+
+// STTTrackSelection is the resolved, validated media.stt.tracks selection (SPEC
+// §8.6.12). Build it from the raw config with ParseSTTTracks. For STTTracksList
+// the Indices are sorted ascending and de-duplicated so they are processed in
+// container stream order regardless of how the list was written ([2,0] ≡ [0,2]).
+type STTTrackSelection struct {
+	Mode    STTTrackMode
+	Indices []int
+}
+
+// ParseSTTTracks resolves the raw media.stt.tracks config (Config.MediaSTTTracks)
+// into an STTTrackSelection (SPEC §8.6.12). The accepted forms are:
+//
+//   - empty / unset, or the single keyword "first"  -> STTTracksFirst (default)
+//   - the single keyword "all"                      -> STTTracksAll
+//   - a list of non-negative 0-based indices        -> STTTracksList
+//
+// It rejects, as CONFIG_INVALID: an unknown keyword; a keyword mixed with
+// indices; a negative or non-integer index; a duplicate index; and an explicit
+// empty list (which would select no tracks). Whether a listed index actually
+// exists in a given media file is a per-file, runtime concern (a corpus mixes
+// files with different track counts), so an out-of-range index is NOT rejected
+// here — it is handled per file by the ingest pipeline as a track-scoped skip.
+func ParseSTTTracks(raw []string) (STTTrackSelection, error) {
+	items := make([]string, 0, len(raw))
+	for _, r := range raw {
+		if t := strings.TrimSpace(r); t != "" {
+			items = append(items, t)
+		}
+	}
+	if len(items) == 0 {
+		return STTTrackSelection{Mode: STTTracksFirst}, nil
+	}
+	// A single keyword form.
+	if len(items) == 1 {
+		switch strings.ToLower(items[0]) {
+		case "first":
+			return STTTrackSelection{Mode: STTTracksFirst}, nil
+		case "all":
+			return STTTrackSelection{Mode: STTTracksAll}, nil
+		}
+	}
+	// Otherwise every element MUST be a non-negative integer index.
+	seen := make(map[int]struct{}, len(items))
+	indices := make([]int, 0, len(items))
+	for _, it := range items {
+		switch strings.ToLower(it) {
+		case "first", "all":
+			return STTTrackSelection{}, fmt.Errorf(
+				"CONFIG_INVALID: media.stt.tracks may not mix the keyword %q with track indices; use %q alone or a list of 0-based indices",
+				strings.ToLower(it), strings.ToLower(it))
+		}
+		n, err := strconv.Atoi(it)
+		if err != nil {
+			return STTTrackSelection{}, fmt.Errorf(
+				"CONFIG_INVALID: media.stt.tracks entry %q is not a valid track index; expected \"first\", \"all\", or 0-based integers", it)
+		}
+		if n < 0 {
+			return STTTrackSelection{}, fmt.Errorf(
+				"CONFIG_INVALID: media.stt.tracks index %d is negative; track indices are 0-based", n)
+		}
+		if _, dup := seen[n]; dup {
+			return STTTrackSelection{}, fmt.Errorf(
+				"CONFIG_INVALID: media.stt.tracks lists duplicate index %d", n)
+		}
+		seen[n] = struct{}{}
+		indices = append(indices, n)
+	}
+	sort.Ints(indices)
+	return STTTrackSelection{Mode: STTTracksList, Indices: indices}, nil
 }
 
 type fileConfig struct {
@@ -962,6 +1060,7 @@ type fileConfig struct {
 	MediaSTTRequestTimeoutSec          *int
 	MediaSTTLanguageStrict             *bool
 	MediaSTTOnUncoveredLanguage        *string
+	MediaSTTTracks                     []string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
 	ServerTLSKeyFile                   *string
@@ -1113,6 +1212,7 @@ type persistedConfig struct {
 	MediaSTTRequestTimeoutSec          int           `yaml:"media_stt_request_timeout_sec"`
 	MediaSTTLanguageStrict             bool          `yaml:"media_stt_language_strict"`
 	MediaSTTOnUncoveredLanguage        string        `yaml:"media_stt_on_uncovered_language"`
+	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
 	MediaBatchManifest                 string        `yaml:"media_batch_manifest"`
@@ -1512,6 +1612,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTRequestTimeoutSec:          cfg.MediaSTTRequestTimeoutSec,
 		MediaSTTLanguageStrict:             cfg.MediaSTTLanguageStrict,
 		MediaSTTOnUncoveredLanguage:        cfg.MediaSTTOnUncoveredLanguage,
+		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
 		X402Mode:                           cfg.X402.Mode,
@@ -2400,6 +2501,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTOnUncoveredLanguage != nil {
 		cfg.MediaSTTOnUncoveredLanguage = *fc.MediaSTTOnUncoveredLanguage
 	}
+	if fc.MediaSTTTracks != nil {
+		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
+	}
 }
 
 // applyMediaSubtitlesFileParsed copies the set media.subtitles.* file fields
@@ -2540,11 +2644,7 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			continue
 		}
 
-		value = unquoteYAMLScalar(value)
-		if strings.Contains(value, "\\n") {
-			value = strings.ReplaceAll(value, "\\n", "\n")
-		}
-		if err := setFileScalarValue(&cfg, key, value); err != nil {
+		if err := handleYAMLScalarValue(&cfg, key, value); err != nil {
 			return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 	}
@@ -2552,6 +2652,24 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 		return fileConfig{}, err
 	}
 	return cfg, nil
+}
+
+// handleYAMLScalarValue assigns a single bare (non-list, non-section) value to the
+// fileConfig field selected by key, after unescaping. A bare scalar under a
+// list-valued key (e.g. `media.stt.tracks: all`) is a single-element list, not a
+// scalar field, so it is routed to the list appender — otherwise the keyword forms
+// (`first`/`all`) of media.stt.tracks would be silently dropped by the scalar path,
+// which has no such field.
+func handleYAMLScalarValue(cfg *fileConfig, key, value string) error {
+	value = unquoteYAMLScalar(value)
+	if strings.Contains(value, "\\n") {
+		value = strings.ReplaceAll(value, "\\n", "\n")
+	}
+	if isListConfigKey(key) {
+		setFileListValue(cfg, key, value)
+		return nil
+	}
+	return setFileScalarValue(cfg, key, value)
 }
 
 // resolveYAMLKey splits a "key: value" line, prefixes the key with the
@@ -2767,6 +2885,7 @@ var configKeyAliases = map[string]string{
 	"media_stt_request_timeout_sec":           "media.stt.request_timeout_sec",
 	"media_stt_language_strict":               "media.stt.language_strict",
 	"media_stt_on_uncovered_language":         "media.stt.on_uncovered_language",
+	"media_stt_tracks":                        "media.stt.tracks",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
 	"stt_elevenlabs_model":                    "stt.elevenlabs.model",
@@ -3291,44 +3410,64 @@ func setX402StringFileScalar(cfg *fileConfig, key, value string) {
 // setFileListValue appends value to the list field selected by the
 // canonicalized key, initializing the slice on first use and skipping
 // blank items.
+// appendConfigListValue appends item to *target (allocating an empty slice
+// first so a set-but-empty list is distinguishable from an unset one), skipping
+// blank items. Shared by setFileListValue and its retrieval delegation.
+func appendConfigListValue(target *[]string, item string) {
+	if *target == nil {
+		*target = []string{}
+	}
+	if strings.TrimSpace(item) == "" {
+		return
+	}
+	*target = append(*target, item)
+}
+
 func setFileListValue(cfg *fileConfig, key, value string) {
 	key = canonicalizeConfigKey(key)
-	appendValue := func(target *[]string, item string) {
-		if *target == nil {
-			*target = []string{}
-		}
-		if strings.TrimSpace(item) == "" {
-			return
-		}
-		*target = append(*target, item)
+	if setRetrievalFileListValue(cfg, key, value) {
+		return
 	}
-
 	switch key {
 	case "trusted_proxies":
-		appendValue(&cfg.TrustedProxies, value)
+		appendConfigListValue(&cfg.TrustedProxies, value)
 	case "path_excludes":
-		appendValue(&cfg.PathExcludes, value)
+		appendConfigListValue(&cfg.PathExcludes, value)
 	case "secret_patterns":
-		appendValue(&cfg.SecretPatterns, value)
+		appendConfigListValue(&cfg.SecretPatterns, value)
 	case "allowed_origins":
-		appendValue(&cfg.AllowedOrigins, value)
+		appendConfigListValue(&cfg.AllowedOrigins, value)
 	case "media.translate.target_langs":
-		appendValue(&cfg.MediaTranslateTargetLangs, value)
+		appendConfigListValue(&cfg.MediaTranslateTargetLangs, value)
+	case "media.stt.tracks":
+		appendConfigListValue(&cfg.MediaSTTTracks, value)
 	case "media.filter_words":
-		appendValue(&cfg.MediaFilterWords, value)
+		appendConfigListValue(&cfg.MediaFilterWords, value)
 	case "media.subtitles.glossary":
-		appendValue(&cfg.MediaSubtitlesGlossary, value)
+		appendConfigListValue(&cfg.MediaSubtitlesGlossary, value)
 	case "media.subtitles.drop_phrases":
-		appendValue(&cfg.MediaSubtitlesDropPhrases, value)
+		appendConfigListValue(&cfg.MediaSubtitlesDropPhrases, value)
 	case "media.subtitles.scrub_phrases":
-		appendValue(&cfg.MediaSubtitlesScrubPhrases, value)
-	case "retrieval.cross_lingual.target_langs":
-		appendValue(&cfg.CrossLingualTargetLangs, value)
-	case "retrieval.hierarchical.source_reps":
-		appendValue(&cfg.RetrievalHierarchicalSourceReps, value)
-	case "retrieval.hierarchical.levels":
-		appendValue(&cfg.RetrievalHierarchicalLevels, value)
+		appendConfigListValue(&cfg.MediaSubtitlesScrubPhrases, value)
 	}
+}
+
+// setRetrievalFileListValue appends the retrieval.* list-valued keys
+// (cross-lingual target langs #574, hierarchical source_reps/levels #329),
+// returning true when key matched. Split out of setFileListValue so it stays
+// within the gocyclo budget once media.stt.tracks (#567) lands alongside them.
+func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
+	switch key {
+	case "retrieval.cross_lingual.target_langs":
+		appendConfigListValue(&cfg.CrossLingualTargetLangs, value)
+	case "retrieval.hierarchical.source_reps":
+		appendConfigListValue(&cfg.RetrievalHierarchicalSourceReps, value)
+	case "retrieval.hierarchical.levels":
+		appendConfigListValue(&cfg.RetrievalHierarchicalLevels, value)
+	default:
+		return false
+	}
+	return true
 }
 
 // isListConfigKey reports whether key (after canonicalization) maps to
@@ -3336,7 +3475,7 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
 		return true
 	default:
 		return false
@@ -3488,6 +3627,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_stt_request_timeout_sec", cfg.MediaSTTRequestTimeoutSec)
 	writeBool("media_stt_language_strict", cfg.MediaSTTLanguageStrict)
 	writeScalar("media_stt_on_uncovered_language", cfg.MediaSTTOnUncoveredLanguage)
+	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
 	writeScalar("media_batch_manifest", cfg.MediaBatchManifest)
@@ -4436,6 +4576,13 @@ func (c *Config) validateMediaSTTNumericBounds() error {
 	}
 	if c.MediaSTTRequestTimeoutSec < 0 {
 		return fmt.Errorf("media.stt.request_timeout_sec must be non-negative (0 = client default): %d", c.MediaSTTRequestTimeoutSec)
+	}
+	// media.stt.tracks (SPEC §8.6.12): reject an invalid selection (unknown keyword,
+	// keyword-mixed-with-indices, negative/non-integer/duplicate index) at startup so
+	// a typo fails fast rather than per file. ParseSTTTracks is the single source of
+	// truth for the grammar (also used by the ingest pipeline).
+	if _, err := ParseSTTTracks(c.MediaSTTTracks); err != nil {
+		return err
 	}
 	return nil
 }

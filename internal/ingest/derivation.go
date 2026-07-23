@@ -90,6 +90,20 @@ func (s *Service) activeDiarizeIdentity() string {
 // produces valid meta_json (and an empty recorded identity that the gate treats
 // as "always passes").
 func (s *Service) sttTranscriptMetaJSON(speakers []Speaker, text string, hasWords bool) (string, error) {
+	meta := s.sttTranscriptMeta(speakers, text, hasWords)
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// sttTranscriptMeta builds the transcriptMeta value for a bare machine-
+// transcribed transcript representation (the struct behind sttTranscriptMetaJSON).
+// It is split out so the per-track path (SPEC §8.6.12) can layer the
+// track/track_language/track_label fields onto the same base before marshaling,
+// keeping the STT-identity/language/diarization construction in one place.
+func (s *Service) sttTranscriptMeta(speakers []Speaker, text string, hasWords bool) transcriptMeta {
 	meta := transcriptMeta{
 		Source:     sttSource,
 		Language:   strings.TrimSpace(s.transcriptLanguage),
@@ -140,11 +154,7 @@ func (s *Service) sttTranscriptMetaJSON(speakers []Speaker, text string, hasWord
 			meta.Speakers = speakers
 		}
 	}
-	encoded, err := json.Marshal(meta)
-	if err != nil {
-		return "", err
-	}
-	return string(encoded), nil
+	return meta
 }
 
 // activeTranscriptIdentity is the STT (+ diarize, when active) derivation
