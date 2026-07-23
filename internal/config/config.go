@@ -3309,6 +3309,12 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 	if setRerankStringFileScalar(cfg, key, value) {
 		return
 	}
+	if setRetrievalContextualStringFileScalar(cfg, key, value) {
+		return
+	}
+	if setRetrievalHierarchicalStringFileScalar(cfg, key, value) {
+		return
+	}
 	switch key {
 	case "elevenlabs_base_url":
 		cfg.ElevenLabsBaseURL = strPtr(value)
@@ -3328,6 +3334,15 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.ChunkingStrategy = strPtr(value)
 	case "retrieval.hyde.mode":
 		cfg.RetrievalHyDEMode = strPtr(value)
+	}
+}
+
+// setRetrievalHierarchicalStringFileScalar assigns the retrieval.hierarchical.*
+// string keys (SPEC §9.7/§16.2, #329), returning true when key matched. Split
+// out of setModelStringFileScalar to keep that function within the gocyclo
+// budget alongside the contextual (#330) delegation.
+func setRetrievalHierarchicalStringFileScalar(cfg *fileConfig, key, value string) bool {
+	switch key {
 	case "retrieval.hierarchical.provider":
 		cfg.RetrievalHierarchicalProvider = strPtr(value)
 	case "retrieval.hierarchical.prompt_version":
@@ -3339,6 +3354,18 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		// sentinel and a single `levels: document` both parse as a scalar, so
 		// fold them into the same one-element list the block form produces.
 		setFileListValue(cfg, key, value)
+	default:
+		return false
+	}
+	return true
+}
+
+// setRetrievalContextualStringFileScalar assigns the retrieval.contextual.*
+// string keys (SPEC §8.1.8/§16.2, #330), returning true when key matched. Split
+// out of setModelStringFileScalar so that function stays within the gocyclo
+// budget once #330's cases land on top of #329's hierarchical cases.
+func setRetrievalContextualStringFileScalar(cfg *fileConfig, key, value string) bool {
+	switch key {
 	case "retrieval.contextual.provider":
 		cfg.RetrievalContextualProvider = strPtr(value)
 	case "retrieval.contextual.model":
@@ -3347,7 +3374,10 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.RetrievalContextualPromptVersion = strPtr(value)
 	case "retrieval.contextual.prompt":
 		cfg.RetrievalContextualPrompt = strPtr(value)
+	default:
+		return false
 	}
+	return true
 }
 
 // setIngestStringFileScalar assigns ingest mode and STT string keys

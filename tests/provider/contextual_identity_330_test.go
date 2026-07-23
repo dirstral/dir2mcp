@@ -124,9 +124,19 @@ func TestEmbedIdentity_ContextualTogglesIdentity(t *testing.T) {
 	if off == on {
 		t.Fatal("enabling contextual retrieval must change the embed identity")
 	}
-	// An identical spec is stable (no gratuitous re-embed on restart).
-	if provider.ContextualIdentity(spec) != provider.ContextualIdentity(spec) {
-		t.Fatal("the contextual token must be deterministic")
+	// An identical spec is stable (no gratuitous re-embed on restart). Compare
+	// two INDEPENDENTLY constructed specs rather than calling the function twice
+	// on the same value: hashing one value twice would pass even if the token
+	// leaked allocation identity or map iteration order into the digest.
+	same := provider.ContextualSpec{
+		Profile:       provider.Profile{Name: "openai"},
+		Model:         "gpt-4o-mini",
+		MaxTokens:     128,
+		PromptVersion: "v1",
+		Prompt:        "situate the chunk",
+	}
+	if provider.ContextualIdentity(spec) != provider.ContextualIdentity(same) {
+		t.Fatal("the contextual token must be deterministic across equal specs")
 	}
 	base := provider.ContextualIdentity(spec)
 	for _, tc := range []struct {
