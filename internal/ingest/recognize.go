@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -209,10 +210,18 @@ func (s *Service) StartRecognizeBackend(ctx context.Context) error {
 	if wait <= 0 {
 		wait = recognizeHealthWaitDefault
 	}
+	return s.awaitRecognizeHealthy(ctx, baseURL, wait, cmd.Process.Pid, exited, &exitErr, terminate)
+}
+
+// awaitRecognizeHealthy polls GET {base_url}/health until the managed backend is
+// up (returns nil), the deadline passes (terminates the child, returns an
+// error), the child exits early (returns the exit error), or ctx is cancelled.
+// exitErr is read only after the exited channel closes, so the read is safe.
+func (s *Service) awaitRecognizeHealthy(ctx context.Context, baseURL string, wait time.Duration, pid int, exited <-chan struct{}, exitErr *error, terminate func()) error {
 	deadline := time.Now().Add(wait)
 	for {
 		if err := probeRecognizeHealth(ctx, baseURL); err == nil {
-			s.getLogger().Printf("recognize backend healthy at %s (pid %d)", baseURL, cmd.Process.Pid)
+			s.getLogger().Printf("recognize backend healthy at %s (pid %d)", baseURL, pid)
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -221,7 +230,7 @@ func (s *Service) StartRecognizeBackend(ctx context.Context) error {
 		}
 		select {
 		case <-exited:
-			return fmt.Errorf("recognize backend exited before becoming healthy: %v", exitErr)
+			return fmt.Errorf("recognize backend exited before becoming healthy: %v", *exitErr)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(recognizeHealthPoll):
@@ -237,6 +246,53 @@ type recognitionMeta struct {
 	Provider     string `json:"provider,omitempty"`
 	Model        string `json:"model,omitempty"`
 	ModelVersion string `json:"model_version,omitempty"`
+}
+
+// recognitionSegments filters a backend's annotations to the well-formed ones,
+// sorts them deterministically, and returns the time-spanned chunk segments plus
+// the canonical string the derivation rep_hash is computed over.
+//
+// Malformed annotations are dropped (a served backend is untrusted input, so the
+// core does not rely on the draft schema alone): empty or whitespace-only text
+// (a non-searchable chunk), a negative start (the wire contract is 0-based, §5),
+// or a reversed span (end before start). The survivors are sorted by
+// (start, end, text) so the rep_hash and the persisted chunk order are STABLE
+// regardless of the order the backend emitted them in — the serve contract makes
+// no ordering guarantee, and an order-only change MUST NOT flap the rep_hash and
+// force a spurious re-derivation.
+func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, string) {
+	type validAnnotation struct {
+		startMS int
+		endMS   int
+		text    string
+	}
+	valid := make([]validAnnotation, 0, len(anns))
+	for _, ann := range anns {
+		text := strings.TrimSpace(ann.Text)
+		if text == "" || ann.StartMS < 0 || ann.EndMS < ann.StartMS {
+			continue
+		}
+		valid = append(valid, validAnnotation{startMS: ann.StartMS, endMS: ann.EndMS, text: text})
+	}
+	sort.Slice(valid, func(i, j int) bool {
+		if valid[i].startMS != valid[j].startMS {
+			return valid[i].startMS < valid[j].startMS
+		}
+		if valid[i].endMS != valid[j].endMS {
+			return valid[i].endMS < valid[j].endMS
+		}
+		return valid[i].text < valid[j].text
+	})
+	segments := make([]chunkSegment, 0, len(valid))
+	var hashInput strings.Builder
+	for _, v := range valid {
+		segments = append(segments, chunkSegment{
+			Text: v.text,
+			Span: model.Span{Kind: "time", StartMS: v.startMS, EndMS: v.endMS},
+		})
+		fmt.Fprintf(&hashInput, "%d|%d|%s\n", v.startMS, v.endMS, v.text)
+	}
+	return segments, hashInput.String()
 }
 
 // GenerateRecognitionRepresentation runs the configured recognition backend
@@ -255,19 +311,7 @@ func (s *Service) GenerateRecognitionRepresentation(ctx context.Context, doc mod
 		return fmt.Errorf("recognize %s: %w", doc.RelPath, err)
 	}
 
-	segments := make([]chunkSegment, 0, len(result.Annotations))
-	var hashInput strings.Builder
-	for _, ann := range result.Annotations {
-		text := strings.TrimSpace(ann.Text)
-		if text == "" || ann.EndMS < ann.StartMS {
-			continue
-		}
-		segments = append(segments, chunkSegment{
-			Text: text,
-			Span: model.Span{Kind: "time", StartMS: ann.StartMS, EndMS: ann.EndMS},
-		})
-		fmt.Fprintf(&hashInput, "%d|%d|%s\n", ann.StartMS, ann.EndMS, text)
-	}
+	segments, hashInput := recognitionSegments(result.Annotations)
 	if len(segments) == 0 {
 		return nil
 	}
@@ -285,7 +329,7 @@ func (s *Service) GenerateRecognitionRepresentation(ctx context.Context, doc mod
 	rep := model.Representation{
 		DocID:       doc.DocID,
 		RepType:     RepTypeRecognition,
-		RepHash:     computeRepHash([]byte(hashInput.String())),
+		RepHash:     computeRepHash([]byte(hashInput)),
 		MetaJSON:    string(meta),
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,

@@ -86,8 +86,15 @@ func TestRecognize_GeneratesRecognitionRepresentation(t *testing.T) {
 		}
 	}
 
-	// One chunk per annotation, statement text preserved (this is what makes
-	// "find all pitches by player X" a plain search query).
+	assertRecognitionChunksAndSpans(t, st)
+}
+
+// assertRecognitionChunksAndSpans checks that the two test annotations produced
+// one chunk each — statement text preserved (this is what makes "find all
+// pitches by player X" a plain search query) — and one `time` span each with the
+// annotation window, in ascending time order.
+func assertRecognitionChunksAndSpans(t *testing.T, st *fakeIngestStore) {
+	t.Helper()
 	if len(st.chunks) != 2 {
 		t.Fatalf("expected one chunk per annotation, got %d", len(st.chunks))
 	}
@@ -95,8 +102,6 @@ func TestRecognize_GeneratesRecognitionRepresentation(t *testing.T) {
 		!strings.Contains(st.chunks[1].Text, "Logan Webb to Mookie Betts") {
 		t.Fatalf("chunk texts must carry the statements, got %q / %q", st.chunks[0].Text, st.chunks[1].Text)
 	}
-
-	// Each chunk carries exactly one `time` span with the annotation window.
 	if len(st.spans) != 2 {
 		t.Fatalf("expected two time spans, got %+v", st.spans)
 	}
@@ -270,5 +275,73 @@ func TestRecognizeConfig_Validation(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "CONFIG_INVALID") {
 			t.Fatalf("provider=%q url=%q: want CONFIG_INVALID mentioning %q, got %v", tc.provider, tc.url, tc.wantErr, err)
 		}
+	}
+}
+
+// runRecognitionOnce persists one recognition result through the ingest path and
+// returns the recording store, so a test can assert the persisted rep/chunks.
+func runRecognitionOnce(t *testing.T, result model.RecognizeResult) *fakeIngestStore {
+	t.Helper()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "v.mp4"), "fake-video")
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc.SetRecognizer(&fakeRecognizer{result: result})
+	doc := model.Document{DocID: 1, RelPath: "v.mp4", DocType: "video"}
+	if err := svc.GenerateRecognitionRepresentation(context.Background(), doc); err != nil {
+		t.Fatalf("GenerateRecognitionRepresentation: %v", err)
+	}
+	return st
+}
+
+// TestRecognize_StableHashAndDropsMalformed pins two core guarantees over the
+// untrusted serve response: malformed annotations are dropped, and the
+// derivation rep_hash (plus chunk order) is stable regardless of the order the
+// backend emitted annotations in — an order-only change MUST NOT force a
+// spurious re-derivation.
+func TestRecognize_StableHashAndDropsMalformed(t *testing.T) {
+	t.Parallel()
+	// Out of time order, with two malformed entries that must be dropped:
+	// a negative start, and a reversed span (end < start).
+	unordered := model.RecognizeResult{
+		Name: "rec", Version: "1",
+		Annotations: []model.RecognizedAnnotation{
+			{StartMS: 5000, EndMS: 6000, Text: "third"},
+			{StartMS: 1000, EndMS: 2000, Text: "first"},
+			{StartMS: -100, EndMS: 500, Text: "negative-start dropped"},
+			{StartMS: 3000, EndMS: 4000, Text: "second"},
+			{StartMS: 9000, EndMS: 8000, Text: "reversed dropped"},
+		},
+	}
+	// The SAME well-formed annotations in a different input order.
+	reordered := model.RecognizeResult{
+		Name: "rec", Version: "1",
+		Annotations: []model.RecognizedAnnotation{
+			{StartMS: 3000, EndMS: 4000, Text: "second"},
+			{StartMS: 5000, EndMS: 6000, Text: "third"},
+			{StartMS: 1000, EndMS: 2000, Text: "first"},
+		},
+	}
+
+	a := runRecognitionOnce(t, unordered)
+	b := runRecognitionOnce(t, reordered)
+
+	// 5 annotations in, 2 malformed dropped, 3 chunks out.
+	if len(a.chunks) != 3 {
+		t.Fatalf("expected 3 well-formed chunks (2 malformed dropped), got %d: %+v", len(a.chunks), a.chunks)
+	}
+	// Chunks emerge in ascending time order regardless of input order.
+	if a.chunks[0].Text != "first" || a.chunks[1].Text != "second" || a.chunks[2].Text != "third" {
+		t.Fatalf("chunks must be time-sorted, got %q, %q, %q", a.chunks[0].Text, a.chunks[1].Text, a.chunks[2].Text)
+	}
+	if len(a.reps) != 1 || len(b.reps) != 1 {
+		t.Fatalf("expected one rep each, got %d and %d", len(a.reps), len(b.reps))
+	}
+	if a.reps[0].RepHash == "" {
+		t.Fatal("rep_hash must be set")
+	}
+	// Order-only change in the backend response must NOT change the rep_hash.
+	if a.reps[0].RepHash != b.reps[0].RepHash {
+		t.Fatalf("rep_hash must be stable across annotation reordering: %q != %q", a.reps[0].RepHash, b.reps[0].RepHash)
 	}
 }
