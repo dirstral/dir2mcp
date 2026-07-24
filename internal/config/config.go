@@ -546,6 +546,11 @@ type Config struct {
 	// RecognizeServeURL, e.g. `dirstral-annotator serve`).
 	RecognizeProvider string
 	RecognizeServeURL string
+	// RecognizeServeCommand, when set with provider "serve", makes dir2mcp
+	// launch the backend itself (`sh -c <command>`), wait for /health, and
+	// terminate it on daemon shutdown — instead of connecting to an
+	// operator-started process.
+	RecognizeServeCommand string
 
 	// MediaSidecarsDisabled opts OUT of subtitle sidecar ingestion (spec
 	// §8.6.4). Sidecar ingestion is enabled by default (spec default
@@ -1078,6 +1083,7 @@ type fileConfig struct {
 	STTElevenLabsLanguageCode          *string
 	RecognizeProvider                  *string
 	RecognizeServeURL                  *string
+	RecognizeServeCommand              *string
 	QualityGatesEnabled                *bool
 	LanguageDetectionEnabled           *bool
 	MediaSidecarsDisabled              *bool
@@ -1239,6 +1245,7 @@ type persistedConfig struct {
 	STTElevenLabsLanguageCode          string        `yaml:"stt_elevenlabs_language_code"`
 	RecognizeProvider                  string        `yaml:"recognize_provider"`
 	RecognizeServeURL                  string        `yaml:"recognize_serve_url"`
+	RecognizeServeCommand              string        `yaml:"recognize_serve_command"`
 	QualityGatesEnabled                bool          `yaml:"quality_gates_enabled"`
 	LanguageDetectionEnabled           bool          `yaml:"language_detection_enabled"`
 	MediaSidecarsDisabled              bool          `yaml:"media_sidecars_disabled"`
@@ -1658,6 +1665,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		STTElevenLabsLanguageCode:          cfg.STTElevenLabsLanguageCode,
 		RecognizeProvider:                  cfg.RecognizeProvider,
 		RecognizeServeURL:                  cfg.RecognizeServeURL,
+		RecognizeServeCommand:              cfg.RecognizeServeCommand,
 		QualityGatesEnabled:                cfg.QualityGatesEnabled,
 		LanguageDetectionEnabled:           cfg.LanguageDetectionEnabled,
 		MediaSidecarsDisabled:              cfg.MediaSidecarsDisabled,
@@ -2511,6 +2519,9 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.RecognizeServeURL != nil {
 		cfg.RecognizeServeURL = *fc.RecognizeServeURL
+	}
+	if fc.RecognizeServeCommand != nil {
+		cfg.RecognizeServeCommand = *fc.RecognizeServeCommand
 	}
 	if fc.STTMistralModel != nil {
 		cfg.STTMistralModel = *fc.STTMistralModel
@@ -3542,6 +3553,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.RecognizeProvider = strPtr(value)
 	case "recognize.base_url":
 		cfg.RecognizeServeURL = strPtr(value)
+	case "recognize.serve_command":
+		cfg.RecognizeServeCommand = strPtr(value)
 	case "stt.mistral.model":
 		cfg.STTMistralModel = strPtr(value)
 	case "stt.elevenlabs.model":
@@ -3782,6 +3795,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("stt_provider", cfg.STTProvider)
 	writeScalar("recognize_provider", cfg.RecognizeProvider)
 	writeScalar("recognize_serve_url", cfg.RecognizeServeURL)
+	writeScalar("recognize_serve_command", cfg.RecognizeServeCommand)
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
@@ -4359,6 +4373,10 @@ func (c *Config) validateRecognizeProvider() error {
 	sel := strings.ToLower(strings.TrimSpace(c.RecognizeProvider))
 	switch sel {
 	case "", "off", "none", "disabled":
+		if strings.TrimSpace(c.RecognizeServeCommand) != "" {
+			return fmt.Errorf("CONFIG_INVALID: recognize.serve_command is set but recognize.provider is %q; "+
+				"set recognize.provider to serve (or remove the command)", c.RecognizeProvider)
+		}
 		return nil
 	case "serve":
 		u, err := url.Parse(strings.TrimSpace(c.RecognizeServeURL))

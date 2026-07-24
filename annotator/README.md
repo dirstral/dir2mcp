@@ -49,9 +49,19 @@ recognize_provider: serve
 recognize_serve_url: http://127.0.0.1:8765
 ```
 
+Or let dir2mcp own the whole lifecycle — launch, health-wait, and shutdown —
+so `dir2mcp up` is the only command anyone runs:
+
+```yaml
+recognize_provider: serve
+recognize_serve_url: http://127.0.0.1:8765
+recognize_serve_command: dirstral-annotate serve --roster roster.json --games games.json --port 8765
+```
+
 `dir2mcp up` over the footage directory now indexes every video through the
 backend; a backend failure is recorded per-document exactly like an STT
-failure.
+failure, and in managed mode a backend that never becomes healthy fails
+startup loudly instead.
 
 ### Configuration files
 

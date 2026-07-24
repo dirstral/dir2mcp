@@ -169,6 +169,19 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	defer cleanupPIDFile()
 
+	// Managed recognition backend (design 0004 §3): with recognize.serve_command
+	// configured, the daemon launches the backend, waits for /health, and ties
+	// the child's lifetime to runCtx so shutdown terminates it. Optional
+	// capability discovered by type assertion (hooks may inject other ingestors).
+	if rb, ok := ing.(interface {
+		StartRecognizeBackend(context.Context) error
+	}); ok {
+		if err := rb.StartRecognizeBackend(runCtx); err != nil {
+			writeCLIError(a.stderr, opts.jsonOutput, exitIngestionFatal, fmt.Sprintf("start recognize backend: %v", err))
+			return exitIngestionFatal
+		}
+	}
+
 	// One mutex-guarded sink shared by every goroutine that logs to stderr during
 	// the concurrent phase (embed workers, corpus writer, watch worker, the
 	// persistence autosave callback, and the event loop). Without it, direct

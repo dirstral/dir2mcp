@@ -8,8 +8,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -112,6 +114,119 @@ func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (m
 // real binding is resolved from config in NewService).
 func (s *Service) SetRecognizer(recognizer model.Recognizer) {
 	s.recognizer = recognizer
+}
+
+const (
+	// recognizeHealthWaitDefault bounds how long a freshly launched managed
+	// backend may take to answer /health before startup fails.
+	recognizeHealthWaitDefault = 30 * time.Second
+	recognizeHealthPoll        = 250 * time.Millisecond
+	// recognizeProbeTimeout bounds one /health round-trip.
+	recognizeProbeTimeout = 3 * time.Second
+	// recognizeStopGrace is how long a SIGTERM-ed managed backend gets to
+	// exit before SIGKILL (mirrors the daemon's own shutdown grace idea).
+	recognizeStopGrace = 5 * time.Second
+)
+
+// probeRecognizeHealth performs one GET {base_url}/health round-trip.
+func probeRecognizeHealth(ctx context.Context, baseURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(strings.TrimSpace(baseURL), "/")+"/health", nil)
+	if err != nil {
+		return fmt.Errorf("build health request: %w", err)
+	}
+	client := &http.Client{Timeout: recognizeProbeTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// SetRecognizeHealthWait overrides the managed-backend health deadline
+// (tests only).
+func (s *Service) SetRecognizeHealthWait(d time.Duration) { s.recognizeHealthWait = d }
+
+// RecognizeBackendPID reports the managed backend's process id (0 when none
+// was launched). Exposed for tests and diagnostics.
+func (s *Service) RecognizeBackendPID() int { return s.recognizeBackendPID }
+
+// StartRecognizeBackend brings the recognition backend up for the daemon's
+// lifetime (design 0004 §3). With recognize.serve_command configured,
+// dir2mcp launches the command itself, waits for /health, and terminates
+// the child when ctx is cancelled — `dir2mcp up` is the only process the
+// operator runs. Without a command (connect-only), it probes the configured
+// base URL once and logs a warning when unreachable; per-document ingest
+// errors remain the hard signal. No-op when recognition is off.
+func (s *Service) StartRecognizeBackend(ctx context.Context) error {
+	if s.recognizer == nil {
+		return nil
+	}
+	baseURL := s.cfg.RecognizeServeURL
+	command := strings.TrimSpace(s.cfg.RecognizeServeCommand)
+	if command == "" {
+		if err := probeRecognizeHealth(ctx, baseURL); err != nil {
+			s.getLogger().Printf("warning: recognize backend %s is not reachable yet: %v", baseURL, err)
+		}
+		return nil
+	}
+
+	cmd := exec.Command("sh", "-c", command)
+	setRecognizeBackendProcAttr(cmd)
+	logW := s.getLogger().Writer()
+	cmd.Stdout, cmd.Stderr = logW, logW
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start recognize backend: %w", err)
+	}
+	s.recognizeBackendPID = cmd.Process.Pid
+
+	var exitErr error
+	exited := make(chan struct{})
+	go func() {
+		exitErr = cmd.Wait()
+		close(exited)
+	}()
+	terminate := func() {
+		_ = signalRecognizeBackend(cmd.Process.Pid, syscall.SIGTERM)
+		select {
+		case <-exited:
+		case <-time.After(recognizeStopGrace):
+			_ = signalRecognizeBackend(cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			terminate()
+		case <-exited:
+		}
+	}()
+
+	wait := s.recognizeHealthWait
+	if wait <= 0 {
+		wait = recognizeHealthWaitDefault
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if err := probeRecognizeHealth(ctx, baseURL); err == nil {
+			s.getLogger().Printf("recognize backend healthy at %s (pid %d)", baseURL, cmd.Process.Pid)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			terminate()
+			return fmt.Errorf("recognize backend did not become healthy at %s within %s", baseURL, wait)
+		}
+		select {
+		case <-exited:
+			return fmt.Errorf("recognize backend exited before becoming healthy: %v", exitErr)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(recognizeHealthPoll):
+		}
+	}
 }
 
 // recognitionMeta is the meta_json persisted on a recognition representation.

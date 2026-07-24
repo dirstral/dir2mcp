@@ -68,6 +68,11 @@ type Service struct {
 	// that turns video into time-ranged annotation statements. Nil when
 	// recognize.provider is off (the default).
 	recognizer model.Recognizer
+	// recognizeBackendPID is the managed backend child's pid (0 when dir2mcp
+	// did not launch one); recognizeHealthWait overrides the startup health
+	// deadline (tests).
+	recognizeBackendPID int
+	recognizeHealthWait time.Duration
 
 	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
 	// active extraction engine supports (ingest.on_unsupported): "lenient"
