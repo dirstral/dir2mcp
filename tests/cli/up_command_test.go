@@ -288,7 +288,11 @@ func TestUpInvalidFlagWithJSONEmitsJSONError(t *testing.T) {
 		} `json:"error"`
 		ExitCode int `json:"exit_code"`
 	}
-	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+	payloadJSON := jsonErrorPayloadFromStderr(stderr.String())
+	if payloadJSON == nil {
+		t.Fatalf("no JSON error payload found on stderr; raw=%s", stderr.String())
+	}
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		t.Fatalf("unmarshal up parse error payload: %v raw=%s", err, stderr.String())
 	}
 	if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
@@ -783,7 +787,11 @@ func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 		} `json:"error"`
 		ExitCode int `json:"exit_code"`
 	}
-	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+	payloadJSON := jsonErrorPayloadFromStderr(stderr.String())
+	if payloadJSON == nil {
+		t.Fatalf("no JSON error payload found on stderr; raw=%s", stderr.String())
+	}
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		t.Fatalf("unmarshal ingestion stderr payload: %v raw=%s", err, stderr.String())
 	}
 	if payload.Error.Code != "INGESTION_FATAL" || payload.ExitCode != 3 {
