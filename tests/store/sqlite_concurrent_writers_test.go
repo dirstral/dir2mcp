@@ -34,8 +34,14 @@ func TestSQLiteStore_ConcurrentWritersNoBusy(t *testing.T) {
 
 	// Bound the test so a regression that re-introduces lock contention or
 	// blocking causes a fast, descriptive failure rather than an unbounded
-	// CI hang. 30s is generous for the workload below on cold cache.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// CI hang. 30s is generous for the workload below on cold cache. The bound
+	// guards against a genuine hang, not throughput: this test asserts the
+	// absence of SQLITE_BUSY under contention, so the wall-clock ceiling is
+	// incidental to what it checks. raceScaled expands the deadline under
+	// `-race` (5-20x slowdown), where full-suite contention on a shared CI
+	// runner would otherwise trip the 30s ceiling and surface as a spurious
+	// "context deadline exceeded" — a timeout, not a busy error (issue #614).
+	ctx, cancel := context.WithTimeout(context.Background(), raceScaled(30*time.Second))
 	defer cancel()
 
 	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
