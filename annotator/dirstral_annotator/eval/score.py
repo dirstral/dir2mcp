@@ -71,6 +71,8 @@ def score(
         t = alignment.to_video(ev.epoch_s)
         found = False
         for i, ann in enumerate(pitch_anns):
+            if i in matched_anns:
+                continue  # one predicted annotation covers at most one event
             if pitcher.id not in ann.entity_ids:
                 continue
             if ann.start_s - tolerance_s <= t <= ann.end_s + tolerance_s:

@@ -37,6 +37,11 @@ func TestManifestErrorCode(t *testing.T) {
 			want: manifestErrTranscribeFailed,
 		},
 		{
+			name: "recognition provider failure -> RECOGNIZE_FAILED",
+			err:  fmt.Errorf("%w: recognize %s: %w", ErrRecognitionProviderFailure, "game.mp4", errors.New("backend down")),
+			want: manifestErrRecognizeFailed,
+		},
+		{
 			name: "other failure -> EXTRACT_FAILED",
 			err:  errors.New("some generic derivation failure"),
 			want: manifestErrExtractFailed,

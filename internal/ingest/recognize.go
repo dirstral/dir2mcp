@@ -308,7 +308,10 @@ func (s *Service) GenerateRecognitionRepresentation(ctx context.Context, doc mod
 	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
 	result, err := s.recognizer.Recognize(ctx, absPath)
 	if err != nil {
-		return fmt.Errorf("recognize %s: %w", doc.RelPath, err)
+		// Tag with the provider-failure sentinel so a transient recognize-backend
+		// failure classifies as RECOGNIZE_FAILED (manifestErrorCode), parallel to
+		// the STT/OCR provider sentinels — not the generic EXTRACT_FAILED.
+		return fmt.Errorf("%w: recognize %s: %w", ErrRecognitionProviderFailure, doc.RelPath, err)
 	}
 
 	segments, hashInput := recognitionSegments(result.Annotations)

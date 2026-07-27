@@ -83,6 +83,23 @@ def test_score_misses_and_false_positives(events, roster):
     assert card.overall.precision == 0.5
 
 
+def test_one_annotation_covers_at_most_one_event(events, roster):
+    # A single wide annotation spanning two distinct ground-truth pitches must
+    # satisfy only ONE of them — the recall loop skips already-matched
+    # annotations, so a broad prediction cannot inflate recall.
+    alignment = estimate([Anchor(events[0].epoch_s, 60.0)])
+    t0 = alignment.to_video(events[0].epoch_s)
+    t1 = alignment.to_video(events[1].epoch_s)
+    assert t0 != t1  # the two events map to distinct video times
+    lo, hi = sorted((t0, t1))
+    wide = Annotation(start_s=lo - 1, end_s=hi + 1, event="pitch",
+                      entity_ids=("player:webb-logan",), text="", confidence=0.9,
+                      sources=("playbyplay",))
+    card = score([wide], events, alignment, roster)
+    assert card.overall.tp == 1  # not 2 — one annotation, one event
+    assert card.per_source_found["playbyplay"] == 1
+
+
 def test_report_renders(events, roster):
     alignment = estimate([Anchor(events[0].epoch_s, 60.0)])
     anns = [make_annotation(events, alignment, i) for i in range(4)]

@@ -50,7 +50,9 @@ def iter_frames(
             str(out),
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"ffmpeg timed out after 300s on {media_path}") from exc
         except FileNotFoundError as exc:
             raise RecognizerUnavailable(f"ffmpeg not found ({ffmpeg})") from exc
         except subprocess.CalledProcessError as exc:

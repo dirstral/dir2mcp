@@ -31,7 +31,10 @@ def make_handler(pipeline: Pipeline):
                 self._reply(404, {"error": "not found"})
                 return
             try:
-                length = min(int(self.headers.get("Content-Length", 0)), MAX_REQUEST_BYTES)
+                declared = int(self.headers.get("Content-Length", 0))
+                if declared < 0:
+                    raise ValueError("negative Content-Length")
+                length = min(declared, MAX_REQUEST_BYTES)
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 media = Path(payload["path"])
             except (ValueError, KeyError):

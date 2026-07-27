@@ -4384,6 +4384,14 @@ func (c *Config) validateRecognizeProvider() error {
 			return fmt.Errorf("CONFIG_INVALID: recognize.provider \"serve\" requires recognize.base_url "+
 				"to be an http(s) URL, got %q", c.RecognizeServeURL)
 		}
+		if u.User != nil {
+			// Reject embedded credentials outright: recognize.base_url is persisted
+			// verbatim into config/snapshot YAML and echoed in health-probe logs, so
+			// user:password@host would leak the secret. The error deliberately does
+			// NOT echo the URL. The local recognition backend is unauthenticated;
+			// any real auth belongs out of band, not in the persisted base URL.
+			return fmt.Errorf("CONFIG_INVALID: recognize.base_url must not embed credentials (user:password@host)")
+		}
 		return nil
 	}
 	return fmt.Errorf("CONFIG_INVALID: recognize.provider %q is not a recognized recognition backend; "+

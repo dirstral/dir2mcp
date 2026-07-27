@@ -41,6 +41,8 @@ class PlayByPlayRecognizer:
             video_t = ev.epoch_s + self.offset_s
             start = max(0.0, video_t - PRE_ROLL_S)
             end = video_t + POST_ROLL_S
+            if end < start:
+                continue  # event predates the video entirely; nothing to cite
             pitcher = self.roster.by_mlbam(ev.pitcher_id)
             batter = self.roster.by_mlbam(ev.batter_id)
             entities = tuple(p.id for p in (pitcher, batter) if p)

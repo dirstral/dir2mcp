@@ -474,6 +474,13 @@ var ErrOCRProviderFailure = errors.New("ocr provider failure")
 // distinct from the transcript's TRANSCRIBE_FAILED.
 var ErrTranslateProviderFailure = errors.New("translation provider failure")
 
+// ErrRecognitionProviderFailure marks failures originating from the recognition
+// backend call itself (design 0004) — as opposed to persistence/cache write
+// failures. Wrapped at GenerateRecognitionRepresentation so manifestErrorCode
+// classifies a transient recognize-backend failure as RECOGNIZE_FAILED rather
+// than the generic EXTRACT_FAILED, mirroring the STT/OCR provider sentinels.
+var ErrRecognitionProviderFailure = errors.New("recognition provider failure")
+
 // ErrFileTooLarge marks a document rejected because its size exceeds the ingest
 // size cap (§14.4). Wrapped at the size-check sites so manifestErrorCode
 // classifies it as the canonical FILE_TOO_LARGE code rather than the generic
