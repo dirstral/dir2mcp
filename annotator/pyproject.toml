@@ -16,6 +16,9 @@ dependencies = []
 ocr = ["pytesseract>=0.3", "Pillow>=10"]
 face = ["insightface>=0.7", "opencv-python-headless>=4.9", "onnxruntime>=1.17"]
 jersey = ["ultralytics>=8.2", "pytesseract>=0.3", "Pillow>=10"]
+# Test runner + the schema-agreement contract test's validator. The tested
+# code is stdlib-only; the runner and jsonschema are external test tooling.
+test = ["pytest>=8", "jsonschema>=4"]
 all = ["dirstral-annotator[ocr,face,jersey]"]
 
 [project.scripts]

@@ -71,6 +71,14 @@ def test_serve_recognize_round_trip(tmp_path):
             raise AssertionError("expected 404")
         except urllib.error.HTTPError as exc:
             assert exc.code == 404
+
+        # valid JSON but a non-object body (a list) -> 400, not a 500/traceback
+        nonobject = urllib.request.Request(base + "/recognize", data=b"[]")
+        try:
+            urllib.request.urlopen(nonobject)
+            raise AssertionError("expected 400")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
     finally:
         server.shutdown()
 

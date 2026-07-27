@@ -99,9 +99,14 @@ timestamps, ~2017 onward) — no manual annotation.
 ## Tests
 
 ```bash
-python3 -m pytest tests/   # stdlib-only; no network, models, or ffmpeg
+pip install -e '.[test]'   # test runner + jsonschema (external test tooling)
+python3 -m pytest tests/    # tested code needs no network, models, or ffmpeg
 ```
 
-Includes a live HTTP round-trip against the serve handler and a
-schema-agreement test validating responses against the dirstral-spec draft
-wire contract. The dir2mcp side is pinned by `tests/ingest/recognize_test.go`.
+The recognizer/fusion/eval **code** under test is stdlib-only; only the
+external test tooling (`pytest`, and `jsonschema` for the contract test) is
+installed via the `test` extra. The suite includes a live HTTP round-trip
+against the serve handler and a schema-agreement test validating responses
+against the dirstral-spec draft wire contract (a hard failure if `jsonschema`
+is missing, skipped only when the `dirstral-spec` schema isn't checked out).
+The dir2mcp side is pinned by `tests/ingest/recognize_test.go`.

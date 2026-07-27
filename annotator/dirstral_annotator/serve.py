@@ -36,8 +36,10 @@ def make_handler(pipeline: Pipeline):
                     raise ValueError("negative Content-Length")
                 length = min(declared, MAX_REQUEST_BYTES)
                 payload = json.loads(self.rfile.read(length) or b"{}")
+                # TypeError covers a valid-JSON but non-object body (null, [], a
+                # number): payload["path"] would otherwise raise uncaught.
                 media = Path(payload["path"])
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, TypeError):
                 self._reply(400, {"error": "body must be JSON with a 'path' field"})
                 return
             if not media.is_file():

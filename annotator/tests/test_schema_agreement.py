@@ -1,7 +1,8 @@
 """Pin backend ↔ spec agreement: the response `serve` returns must validate
 against the draft wire-contract schema shipped with dirstral-spec design
-0004. Skipped when the schema (submodule) or jsonschema isn't available;
-CI with the submodule checked out runs it.
+0004. Skipped only when the schema (submodule) isn't checked out; a missing
+`jsonschema` is a hard error (install the `test` extra), not a silent skip —
+otherwise this contract test would pass without validating anything.
 
 Override the schema location with DIRSTRAL_SPEC_DIR when working from a
 side-by-side spec checkout instead of the submodule.
@@ -10,6 +11,7 @@ side-by-side spec checkout instead of the submodule.
 import os
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from dirstral_annotator.emit import build_response
@@ -29,7 +31,6 @@ def find_schema() -> Path | None:
 
 
 def test_serve_response_validates_against_design_0004_draft_schema():
-    jsonschema = pytest.importorskip("jsonschema")
     schema_path = find_schema()
     if schema_path is None:
         pytest.skip("dirstral-spec design-0004 draft schema not available")
