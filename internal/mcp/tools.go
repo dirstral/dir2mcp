@@ -771,7 +771,7 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {},
+		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -806,7 +806,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
-	dateFrom, dateTo, toolErr := parseDateWindow(args)
+	tw, toolErr := parseTemporalFilters(args)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -814,7 +814,8 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	sq := model.SearchQuery{
-		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch, DateFrom: dateFrom, DateTo: dateTo,
+		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
+		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
 	}
 	// index_used MUST be the index the query was actually routed to (SPEC §15.2),
 	// not the requested name. Prefer AxisSearcher so the reported axis is read back
@@ -1013,7 +1014,7 @@ func mapRelatedError(err error) *toolExecutionError {
 
 func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {},
+		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -1048,14 +1049,15 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
-	dateFrom, dateTo, toolErr := parseDateWindow(args)
+	tw, toolErr := parseTemporalFilters(args)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch, DateFrom: dateFrom, DateTo: dateTo}
+	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
+		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS}
 	if mode == "search_only" {
 		return s.runSearchOnlyMode(ctx, question, sq)
 	}
@@ -2077,6 +2079,61 @@ func parseDateWindow(args map[string]interface{}) (dateFrom, dateTo int64, toolE
 		}
 	}
 	return dateFrom, dateTo, nil
+}
+
+// parseTimeWindow parses the optional time_from_ms/time_to_ms arguments (SPEC
+// §9.8) into an inclusive intra-document millisecond window with explicit
+// presence flags. Each bound, when present, must be an integer >= 0; an inverted
+// window (from after to) is an INVALID_FIELD error (df-008). Presence is
+// explicit — not inferred from the value — because 0 is a valid lower bound
+// (video start). A window that simply matches nothing is left to retrieval to
+// return as an empty result, not an error.
+func parseTimeWindow(args map[string]interface{}) (fromMS int, hasFrom bool, toMS int, hasTo bool, toolErr *toolExecutionError) {
+	fromMS, hasFrom, err := parseOptionalIntegerWithPresence(args, "time_from_ms")
+	if err != nil {
+		return 0, false, 0, false, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	toMS, hasTo, err = parseOptionalIntegerWithPresence(args, "time_to_ms")
+	if err != nil {
+		return 0, false, 0, false, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if hasFrom && fromMS < 0 {
+		return 0, false, 0, false, &toolExecutionError{Code: "INVALID_FIELD", Message: "time_from_ms must be >= 0", Retryable: false}
+	}
+	if hasTo && toMS < 0 {
+		return 0, false, 0, false, &toolExecutionError{Code: "INVALID_FIELD", Message: "time_to_ms must be >= 0", Retryable: false}
+	}
+	if hasFrom && hasTo && fromMS > toMS {
+		return 0, false, 0, false, &toolExecutionError{Code: "INVALID_FIELD", Message: "time_from_ms must not be after time_to_ms", Retryable: false}
+	}
+	return fromMS, hasFrom, toMS, hasTo, nil
+}
+
+// temporalFilters bundles the parsed optional temporal retrieval filters: the
+// §9.6 document-date window and the §9.8 intra-document media time window.
+type temporalFilters struct {
+	dateFrom, dateTo int64
+	timeFromMS       int
+	hasTimeFrom      bool
+	timeToMS         int
+	hasTimeTo        bool
+}
+
+// parseTemporalFilters parses the date_from/date_to (§9.6) and
+// time_from_ms/time_to_ms (§9.8) arguments together, so search/ask validate both
+// temporal windows in one step and share identical semantics.
+func parseTemporalFilters(args map[string]interface{}) (temporalFilters, *toolExecutionError) {
+	var tf temporalFilters
+	var toolErr *toolExecutionError
+	tf.dateFrom, tf.dateTo, toolErr = parseDateWindow(args)
+	if toolErr != nil {
+		return temporalFilters{}, toolErr
+	}
+	tf.timeFromMS, tf.hasTimeFrom, tf.timeToMS, tf.hasTimeTo, toolErr = parseTimeWindow(args)
+	if toolErr != nil {
+		return temporalFilters{}, toolErr
+	}
+	return tf, nil
 }
 
 // mapSearchError converts a search/ask error into a toolExecutionError.
@@ -3270,6 +3327,16 @@ func searchInputSchema() map[string]interface{} {
 				"type":        "string",
 				"description": "Optional (SPEC §9.6): restrict hits to documents whose date (mtime) is on or before this bound (inclusive). Accepts an RFC 3339 timestamp or a bare YYYY-MM-DD date (end of that UTC day, 23:59:59Z). Absent = open upper bound.",
 			},
+			"time_from_ms": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "Optional (SPEC §9.8): intra-document media time-window lower bound, in milliseconds within a document's timeline (§5.4). When set, only time-spanned hits are eligible and are kept iff their span overlaps [time_from_ms, time_to_ms] (inclusive). Absent = open lower bound. time_from_ms > time_to_ms is INVALID_FIELD.",
+			},
+			"time_to_ms": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "Optional (SPEC §9.8): intra-document media time-window upper bound, in milliseconds within a document's timeline (§5.4). Absent = open upper bound.",
+			},
 		},
 		"required": []string{"query"},
 	}
@@ -3385,6 +3452,16 @@ func askInputSchema() map[string]interface{} {
 			"date_to": map[string]interface{}{
 				"type":        "string",
 				"description": "Optional (SPEC §9.6): restrict retrieved contexts to documents whose date (mtime) is on or before this bound (inclusive). Accepts an RFC 3339 timestamp or a bare YYYY-MM-DD date (end of that UTC day, 23:59:59Z). Absent = open upper bound.",
+			},
+			"time_from_ms": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "Optional (SPEC §9.8): intra-document media time-window lower bound, in milliseconds within a document's timeline (§5.4). When set, only time-spanned contexts are eligible and are kept iff their span overlaps [time_from_ms, time_to_ms] (inclusive). Absent = open lower bound. time_from_ms > time_to_ms is INVALID_FIELD.",
+			},
+			"time_to_ms": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "Optional (SPEC §9.8): intra-document media time-window upper bound, in milliseconds within a document's timeline (§5.4). Absent = open upper bound.",
 			},
 		},
 		"required": []string{"question"},
