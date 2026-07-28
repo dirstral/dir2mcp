@@ -3615,6 +3615,39 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 		return false
 	}
 
+	// Optional intra-document media time-window (SPEC §9.8): when either bound is
+	// set, restrict to time-spanned hits whose span overlaps the inclusive
+	// [time_from_ms, time_to_ms] window. Mirrors the speaker filter — a hit with a
+	// non-time span (or none) never matches an active window, so a corpus without
+	// time-spanned representations returns no time-filtered hits. Applied here at
+	// candidate selection (before de-dup, reranking, and truncation to k), so k
+	// counts only in-window hits; inactive by default.
+	if !withinTimeWindow(hit.Span, query) {
+		return false
+	}
+
+	return true
+}
+
+// withinTimeWindow implements the SPEC §9.8 intra-document media time-window
+// filter. It is inactive (returns true) unless the query set at least one bound.
+// When active, only a hit carrying a `time` span that OVERLAPS the inclusive
+// [TimeFromMS, TimeToMS] window is kept — overlap, not containment, so a segment
+// straddling a bound still surfaces. An absent bound (Has*=false) is unbounded on
+// that side.
+func withinTimeWindow(span model.Span, query model.SearchQuery) bool {
+	if !query.HasTimeFrom && !query.HasTimeTo {
+		return true // filter inactive — behaviour unchanged
+	}
+	if span.Kind != "time" {
+		return false // only time-spanned hits are eligible
+	}
+	if query.HasTimeTo && span.StartMS > query.TimeToMS {
+		return false
+	}
+	if query.HasTimeFrom && span.EndMS < query.TimeFromMS {
+		return false
+	}
 	return true
 }
 

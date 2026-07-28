@@ -589,6 +589,20 @@ type SearchQuery struct {
 	// filter (unchanged behavior). Callers validate DateFrom <= DateTo upstream.
 	DateFrom int64
 	DateTo   int64
+	// TimeFromMS / TimeToMS optionally restrict hits to an intra-document media
+	// time window (SPEC §9.8): non-negative millisecond offsets within a
+	// document's timeline, both bounds inclusive, with overlap (not containment)
+	// semantics. Each bound is meaningful only when its HasTimeFrom / HasTimeTo
+	// flag is set — 0 is a valid lower bound (video start), so presence cannot be
+	// inferred from the value, and a zero-value SearchQuery leaves the filter off.
+	// The filter is active when EITHER bound is present; while active, only
+	// time-spanned hits are eligible (a non-time span never matches), so a corpus
+	// without time-spanned representations returns no time-filtered hits. Callers
+	// validate TimeFromMS <= TimeToMS upstream.
+	HasTimeFrom bool
+	TimeFromMS  int
+	HasTimeTo   bool
+	TimeToMS    int
 }
 
 // RelatedQuery is the input to a query-by-example "more like this" retrieval
