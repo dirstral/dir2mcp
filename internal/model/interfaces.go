@@ -275,6 +275,36 @@ type StructuredTranscriber interface {
 	TranscribeStructured(ctx context.Context, relPath string, data []byte) (TranscriptResult, error)
 }
 
+// RecognizedAnnotation is one time-ranged statement a recognition backend
+// makes about a media file's content (design 0004 §5). StartMS/EndMS are
+// absolute offsets from the start of the media.
+type RecognizedAnnotation struct {
+	StartMS    int
+	EndMS      int
+	Event      string
+	Entities   []string
+	Text       string
+	Confidence float64
+	Sources    []string
+}
+
+// RecognizeResult is a recognition backend's full response for one media
+// file. Name/Version identify the backend and feed the persisted
+// representation's derivation identity (design 0004 §4).
+type RecognizeResult struct {
+	Name        string
+	Version     string
+	Annotations []RecognizedAnnotation
+}
+
+// Recognizer runs content recognition over a media file (design 0004): given
+// the absolute path of a local media file, it returns time-ranged annotation
+// statements. Recognizers receive a path rather than bytes because media
+// files are large and served backends read them directly from disk.
+type Recognizer interface {
+	Recognize(ctx context.Context, absPath string) (RecognizeResult, error)
+}
+
 type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)
 }

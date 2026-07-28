@@ -64,6 +64,15 @@ type Service struct {
 	// (docling/docling-serve/mistral/off) or when no functional pandoc resolves.
 	pandocExtractor *pandocExtractor
 	transcriber     model.Transcriber
+	// recognizer is the optional recognition binding (design 0004): a backend
+	// that turns video into time-ranged annotation statements. Nil when
+	// recognize.provider is off (the default).
+	recognizer model.Recognizer
+	// recognizeBackendPID is the managed backend child's pid (0 when dir2mcp
+	// did not launch one); recognizeHealthWait overrides the startup health
+	// deadline (tests).
+	recognizeBackendPID int
+	recognizeHealthWait time.Duration
 
 	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
 	// active extraction engine supports (ingest.on_unsupported): "lenient"
@@ -465,6 +474,13 @@ var ErrOCRProviderFailure = errors.New("ocr provider failure")
 // distinct from the transcript's TRANSCRIBE_FAILED.
 var ErrTranslateProviderFailure = errors.New("translation provider failure")
 
+// ErrRecognitionProviderFailure marks failures originating from the recognition
+// backend call itself (design 0004) — as opposed to persistence/cache write
+// failures. Wrapped at GenerateRecognitionRepresentation so manifestErrorCode
+// classifies a transient recognize-backend failure as RECOGNIZE_FAILED rather
+// than the generic EXTRACT_FAILED, mirroring the STT/OCR provider sentinels.
+var ErrRecognitionProviderFailure = errors.New("recognition provider failure")
+
 // ErrFileTooLarge marks a document rejected because its size exceeds the ingest
 // size cap (§14.4). Wrapped at the size-check sites so manifestErrorCode
 // classifies it as the canonical FILE_TOO_LARGE code rather than the generic
@@ -783,6 +799,9 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		return nil, fmt.Errorf("configure transcriber: %w", err)
 	}
 	svc.transcriber = transcriber
+	if strings.EqualFold(strings.TrimSpace(cfg.RecognizeProvider), "serve") {
+		svc.recognizer = NewRecognizeServeClient(cfg.RecognizeServeURL)
+	}
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
 		// Best-effort raw_text language auto-detection (SPEC §8.8), on by default.
@@ -3370,7 +3389,14 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return false, nil
 	}
 
-	return s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
+	nonFatalErrored, err = s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
+	if nonFatalErrored || err != nil {
+		return nonFatalErrored, err
+	}
+	// Recognition (design 0004) runs after the transcript: both are derived
+	// representations of the same media, and a recognition-backend failure is
+	// a hard per-document error exactly like an STT failure.
+	return false, s.GenerateRecognitionRepresentation(ctx, doc)
 }
 
 // htmlRoutesToStructured reports whether an html document should be promoted to

@@ -1,0 +1,41 @@
+{
+  "gamePk": 745123,
+  "liveData": {
+    "plays": {
+      "allPlays": [
+        {
+          "result": {"description": "Freddie Freeman flies out to center field."},
+          "about": {"inning": 1},
+          "matchup": {
+            "pitcher": {"id": 657277, "fullName": "Logan Webb"},
+            "batter": {"id": 518692, "fullName": "Freddie Freeman"}
+          },
+          "playEvents": [
+            {"isPitch": true, "startTime": "2026-07-20T02:10:00.000Z",
+             "details": {"description": "Called Strike"}},
+            {"isPitch": false, "startTime": "2026-07-20T02:10:10.000Z",
+             "details": {"description": "Mound visit"}},
+            {"isPitch": true, "startTime": "2026-07-20T02:10:25.000Z",
+             "details": {"description": "In play, out(s)"}}
+          ]
+        },
+        {
+          "result": {"description": "Mookie Betts strikes out swinging."},
+          "about": {"inning": 1},
+          "matchup": {
+            "pitcher": {"id": 657277, "fullName": "Logan Webb"},
+            "batter": {"id": 605141, "fullName": "Mookie Betts"}
+          },
+          "playEvents": [
+            {"isPitch": true, "startTime": "2026-07-20T02:11:30.000Z",
+             "details": {"description": "Swinging Strike"}},
+            {"isPitch": true,
+             "details": {"description": "no timestamp; must be skipped"}},
+            {"isPitch": true, "startTime": "2026-07-20T02:11:55.000Z",
+             "details": {"description": "Swinging Strike"}}
+          ]
+        }
+      ]
+    }
+  }
+}
