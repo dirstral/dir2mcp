@@ -38,10 +38,6 @@ const (
 	manifestErrExtractFailed    = "EXTRACT_FAILED"
 	manifestErrOCRFailed        = "OCR_FAILED"
 	manifestErrTranslateFailed  = "TRANSLATE_FAILED"
-	// manifestErrRecognizeFailed classifies a recognition-backend (design 0004)
-	// failure, distinguished via ErrRecognitionProviderFailure, distinct from the
-	// generic EXTRACT_FAILED.
-	manifestErrRecognizeFailed = "RECOGNIZE_FAILED"
 	// manifestErrFileTooLarge (§14.4) classifies an asset over the ingest size cap.
 	manifestErrFileTooLarge = "FILE_TOO_LARGE"
 	// manifestErrBinarySkipped (§14.4) is recorded on the skipped manifest entry
@@ -64,8 +60,6 @@ func manifestErrorCode(err error) string {
 		return manifestErrOCRFailed
 	case errors.Is(err, ErrTranscriptProviderFailure):
 		return manifestErrTranscribeFailed
-	case errors.Is(err, ErrRecognitionProviderFailure):
-		return manifestErrRecognizeFailed
 	case errors.Is(err, ErrFileTooLarge):
 		return manifestErrFileTooLarge
 	default:

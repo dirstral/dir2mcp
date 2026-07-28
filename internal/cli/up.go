@@ -140,7 +140,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize corpus source: %v", err))
 		return exitConfigInvalid
 	}
-	setCorpusFSIfSupported(ing, corpusFS)
+	if setter, ok := ing.(corpusFSSetter); ok {
+		setter.SetCorpusFS(corpusFS)
+	}
 	// Route retrieval-time reads (open_file raw text / OCR / transcript) through
 	// the corpus filesystem for object-store backends so open_file works on an S3
 	// corpus (#432). Local/NFS corpora keep the historical local read path (their
@@ -166,10 +168,6 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return code
 	}
 	defer cleanupPIDFile()
-
-	if code := a.startManagedRecognizeBackend(runCtx, ing, opts.jsonOutput); code != exitSuccess {
-		return code
-	}
 
 	// One mutex-guarded sink shared by every goroutine that logs to stderr during
 	// the concurrent phase (embed workers, corpus writer, watch worker, the
@@ -1151,35 +1149,6 @@ func initIndexingState(ctx context.Context, st model.Store, ret *retrieval.Servi
 		indexingState.AddEmbeddedOK(int64(chunks))
 	}
 	return indexingState
-}
-
-// startManagedRecognizeBackend launches the recognition backend when the
-// ingestor exposes the managed-lifecycle capability (design 0004 §3), tying the
-// child to runCtx so shutdown terminates it. The capability is optional and
-// discovered by type assertion (hooks may inject other ingestors). Returns
-// exitSuccess when there is nothing to start or startup succeeds; on failure it
-// writes the CLI error and returns exitIngestionFatal.
-func (a *App) startManagedRecognizeBackend(runCtx context.Context, ing model.Ingestor, jsonOutput bool) int {
-	rb, ok := ing.(interface {
-		StartRecognizeBackend(context.Context) error
-	})
-	if !ok {
-		return exitSuccess
-	}
-	if err := rb.StartRecognizeBackend(runCtx); err != nil {
-		writeCLIError(a.stderr, jsonOutput, exitIngestionFatal, fmt.Sprintf("start recognize backend: %v", err))
-		return exitIngestionFatal
-	}
-	return exitSuccess
-}
-
-// setCorpusFSIfSupported hands the resolved corpus filesystem to the ingestor
-// when it accepts one (object-store backends); a no-op for ingestors that do
-// not implement corpusFSSetter.
-func setCorpusFSIfSupported(ing model.Ingestor, corpusFS corpusfs.CorpusFS) {
-	if setter, ok := ing.(corpusFSSetter); ok {
-		setter.SetCorpusFS(corpusFS)
-	}
 }
 
 // corpusFSSetter is implemented by ingestors that accept an injected corpus

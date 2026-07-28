@@ -541,17 +541,6 @@ type Config struct {
 	STTElevenLabsModel        string
 	STTElevenLabsLanguageCode string
 
-	// RecognizeProvider selects the recognition capability backend (design
-	// 0004): "off" (default) or "serve" (a locally served recognizer at
-	// RecognizeServeURL, e.g. `dirstral-annotator serve`).
-	RecognizeProvider string
-	RecognizeServeURL string
-	// RecognizeServeCommand, when set with provider "serve", makes dir2mcp
-	// launch the backend itself (`sh -c <command>`), wait for /health, and
-	// terminate it on daemon shutdown — instead of connecting to an
-	// operator-started process.
-	RecognizeServeCommand string
-
 	// MediaSidecarsDisabled opts OUT of subtitle sidecar ingestion (spec
 	// §8.6.4). Sidecar ingestion is enabled by default (spec default
 	// media.sidecars.enabled: true): a .vtt/.srt/.ttml file next to a media file
@@ -1081,9 +1070,6 @@ type fileConfig struct {
 	STTMistralModel                    *string
 	STTElevenLabsModel                 *string
 	STTElevenLabsLanguageCode          *string
-	RecognizeProvider                  *string
-	RecognizeServeURL                  *string
-	RecognizeServeCommand              *string
 	QualityGatesEnabled                *bool
 	LanguageDetectionEnabled           *bool
 	MediaSidecarsDisabled              *bool
@@ -1243,9 +1229,6 @@ type persistedConfig struct {
 	STTMistralModel                    string        `yaml:"stt_mistral_model"`
 	STTElevenLabsModel                 string        `yaml:"stt_elevenlabs_model"`
 	STTElevenLabsLanguageCode          string        `yaml:"stt_elevenlabs_language_code"`
-	RecognizeProvider                  string        `yaml:"recognize_provider"`
-	RecognizeServeURL                  string        `yaml:"recognize_serve_url"`
-	RecognizeServeCommand              string        `yaml:"recognize_serve_command"`
 	QualityGatesEnabled                bool          `yaml:"quality_gates_enabled"`
 	LanguageDetectionEnabled           bool          `yaml:"language_detection_enabled"`
 	MediaSidecarsDisabled              bool          `yaml:"media_sidecars_disabled"`
@@ -1492,7 +1475,6 @@ func Default() Config {
 		IngestWatch:               false,
 		IngestWatchDebounce:       500 * time.Millisecond,
 		STTProvider:               "mistral",
-		RecognizeProvider:         "off",
 		STTMistralModel:           "voxtral-mini-latest",
 		STTElevenLabsModel:        "scribe_v1",
 		STTElevenLabsLanguageCode: "",
@@ -1663,9 +1645,6 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		STTMistralModel:                    cfg.STTMistralModel,
 		STTElevenLabsModel:                 cfg.STTElevenLabsModel,
 		STTElevenLabsLanguageCode:          cfg.STTElevenLabsLanguageCode,
-		RecognizeProvider:                  cfg.RecognizeProvider,
-		RecognizeServeURL:                  cfg.RecognizeServeURL,
-		RecognizeServeCommand:              cfg.RecognizeServeCommand,
 		QualityGatesEnabled:                cfg.QualityGatesEnabled,
 		LanguageDetectionEnabled:           cfg.LanguageDetectionEnabled,
 		MediaSidecarsDisabled:              cfg.MediaSidecarsDisabled,
@@ -2513,15 +2492,6 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.STTProvider != nil {
 		cfg.STTProvider = *fc.STTProvider
-	}
-	if fc.RecognizeProvider != nil {
-		cfg.RecognizeProvider = *fc.RecognizeProvider
-	}
-	if fc.RecognizeServeURL != nil {
-		cfg.RecognizeServeURL = *fc.RecognizeServeURL
-	}
-	if fc.RecognizeServeCommand != nil {
-		cfg.RecognizeServeCommand = *fc.RecognizeServeCommand
 	}
 	if fc.STTMistralModel != nil {
 		cfg.STTMistralModel = *fc.STTMistralModel
@@ -3549,12 +3519,6 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IndexBackend = strPtr(value)
 	case "stt.provider":
 		cfg.STTProvider = strPtr(value)
-	case "recognize.provider":
-		cfg.RecognizeProvider = strPtr(value)
-	case "recognize.base_url":
-		cfg.RecognizeServeURL = strPtr(value)
-	case "recognize.serve_command":
-		cfg.RecognizeServeCommand = strPtr(value)
 	case "stt.mistral.model":
 		cfg.STTMistralModel = strPtr(value)
 	case "stt.elevenlabs.model":
@@ -3793,9 +3757,6 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("ingest_watch", cfg.IngestWatch)
 	writeScalar("ingest_watch_debounce", cfg.IngestWatchDebounce.String())
 	writeScalar("stt_provider", cfg.STTProvider)
-	writeScalar("recognize_provider", cfg.RecognizeProvider)
-	writeScalar("recognize_serve_url", cfg.RecognizeServeURL)
-	writeScalar("recognize_serve_command", cfg.RecognizeServeCommand)
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
@@ -4321,7 +4282,6 @@ func (c *Config) Validate() error {
 		// unknown or non-STT-capable profile (SPEC §8.2.1, #566) as CONFIG_INVALID.
 		c.validateSTTLanguageProviders,
 		c.validateMediaSTTOnUncoveredLanguage,
-		c.validateRecognizeProvider,
 		c.validateMediaTranslate,
 		c.validateMediaSubtitles,
 		c.validateMediaDiarize,
@@ -4362,40 +4322,6 @@ func (c *Config) validateSTTProvider() error {
 	}
 	return fmt.Errorf("CONFIG_INVALID: stt.provider %q is not a recognized speech-to-text backend; "+
 		"use one of auto, mistral, elevenlabs, whisper, openai, gemini, or off", c.STTProvider)
-}
-
-// validateRecognizeProvider fails fast (CONFIG_INVALID) on a misconfigured
-// recognition binding (design 0004 §3): the only providers are off (default)
-// and serve, and serve requires a usable http(s) base URL — a recognizer
-// silently disabled by a bad URL would only surface at first video ingest,
-// far from the misconfiguration.
-func (c *Config) validateRecognizeProvider() error {
-	sel := strings.ToLower(strings.TrimSpace(c.RecognizeProvider))
-	switch sel {
-	case "", "off", "none", "disabled":
-		if strings.TrimSpace(c.RecognizeServeCommand) != "" {
-			return fmt.Errorf("CONFIG_INVALID: recognize.serve_command is set but recognize.provider is %q; "+
-				"set recognize.provider to serve (or remove the command)", c.RecognizeProvider)
-		}
-		return nil
-	case "serve":
-		u, err := url.Parse(strings.TrimSpace(c.RecognizeServeURL))
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("CONFIG_INVALID: recognize.provider \"serve\" requires recognize.base_url "+
-				"to be an http(s) URL, got %q", c.RecognizeServeURL)
-		}
-		if u.User != nil {
-			// Reject embedded credentials outright: recognize.base_url is persisted
-			// verbatim into config/snapshot YAML and echoed in health-probe logs, so
-			// user:password@host would leak the secret. The error deliberately does
-			// NOT echo the URL. The local recognition backend is unauthenticated;
-			// any real auth belongs out of band, not in the persisted base URL.
-			return fmt.Errorf("CONFIG_INVALID: recognize.base_url must not embed credentials (user:password@host)")
-		}
-		return nil
-	}
-	return fmt.Errorf("CONFIG_INVALID: recognize.provider %q is not a recognized recognition backend; "+
-		"use serve or off", c.RecognizeProvider)
 }
 
 // validateMediaBatch enforces the media.batch (SPEC §8.6.11) invariants. All

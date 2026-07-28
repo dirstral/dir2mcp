@@ -50,10 +50,6 @@ const (
 	RepTypeAnnotationJSON = "annotation_json"
 	// RepTypeAnnotationText is the representation type for flattened annotation text
 	RepTypeAnnotationText = "annotation_text"
-	// RepTypeRecognition is the representation type for recognition-backend
-	// annotations over media (design 0004): time-ranged statements persisted
-	// as one chunk per annotation with a `time` span.
-	RepTypeRecognition = "recognition"
 )
 
 // TranscriptRepType returns the rep_type for a transcript in the given language.
