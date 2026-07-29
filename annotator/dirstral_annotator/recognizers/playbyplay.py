@@ -6,6 +6,13 @@ Given the game's `game_pk` and a wall-clock→video-time offset (estimated
 from anchors, see eval.align), every recorded pitch becomes a high-
 confidence cue on the video timeline.
 
+A pitch has two rostered-relevant roles: the pitcher *threw* it and the
+batter *faced* it. They are emitted as distinct events — `pitch` for the
+pitcher, `at_bat` for the batter — because the phase-1 metric is pitcher-
+keyed: a rostered batter appearing at an opponent's pitch is a real
+appearance, not a pitch by that player, and tagging it `pitch` would make
+every opponent-pitched at-bat a false positive.
+
 This recognizer doubles as the eval ground-truth source; the fetch/parse
 lives in eval.ground_truth so both uses share one implementation.
 """
@@ -45,21 +52,39 @@ class PlayByPlayRecognizer:
                 continue  # event predates the video entirely; nothing to cite
             pitcher = self.roster.by_mlbam(ev.pitcher_id)
             batter = self.roster.by_mlbam(ev.batter_id)
-            entities = tuple(p.id for p in (pitcher, batter) if p)
-            if not entities:
+            if pitcher is None and batter is None:
                 continue  # nobody on our roster is involved; skip, don't guess
             pitcher_name = pitcher.name if pitcher else ev.pitcher_name
             batter_name = batter.name if batter else ev.batter_name
             desc = f" — {ev.description}" if ev.description else ""
-            cues.append(
-                Cue(
-                    source=self.name,
-                    start_s=start,
-                    end_s=end,
-                    event="pitch",
-                    entity_ids=entities,
-                    confidence=CONFIDENCE,
-                    text=f"Pitch: {pitcher_name} to {batter_name}{desc}",
+            if pitcher is not None:
+                # A pitch thrown BY a rostered player — the event the phase-1
+                # metric scores (recall/precision are pitcher-keyed).
+                cues.append(
+                    Cue(
+                        source=self.name,
+                        start_s=start,
+                        end_s=end,
+                        event="pitch",
+                        entity_ids=(pitcher.id,),
+                        confidence=CONFIDENCE,
+                        text=f"Pitch: {pitcher_name} to {batter_name}{desc}",
+                    )
                 )
-            )
+            if batter is not None:
+                # A rostered player AT THE PLATE. They appear at this pitch but
+                # did not throw it, so it is an at-bat, not a pitch — tagging it
+                # "pitch" would count every opponent-pitched at-bat as a false
+                # positive under the pitcher-keyed precision metric.
+                cues.append(
+                    Cue(
+                        source=self.name,
+                        start_s=start,
+                        end_s=end,
+                        event="at_bat",
+                        entity_ids=(batter.id,),
+                        confidence=CONFIDENCE,
+                        text=f"At bat: {batter_name} vs {pitcher_name}{desc}",
+                    )
+                )
         return cues
