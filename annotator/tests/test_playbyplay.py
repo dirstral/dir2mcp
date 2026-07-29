@@ -70,6 +70,7 @@ def test_our_pitcher_facing_our_batter_splits_into_two_events(roster):
     # intrasquad edge: both rostered -> one pitch (pitcher) + one at_bat (batter)
     ev = _pitch(1000.0, WEBB, RAMOS)
     cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+    assert len(cues) == 2  # exactly one pitch + one at_bat, no duplicates
     assert {(c.event, c.entity_ids) for c in cues} == {
         ("pitch", ("player:webb-logan",)),
         ("at_bat", ("player:ramos-heliot",)),
