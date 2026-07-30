@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,55 @@ func TestRecognition_NoBackend_StillReportsUnsearchableVideo(t *testing.T) {
 	// backend available is told about it (#622).
 	if !strings.Contains(strings.ToLower(doc.ErrorMessage), "recogni") {
 		t.Errorf("error_message = %q, want it to offer a recognition backend as a remedy", doc.ErrorMessage)
+	}
+}
+
+// TestRecognition_RunsWhenTranscriptProviderFails covers the review finding on
+// #623: generateTranscriptOrSidecar also soft-fails (nonFatalErrored=true, err=nil)
+// when STT is configured but the provider fails and no media chunks exist. That
+// leaves the document with no transcript — exactly when recognition is the only
+// remaining source — so recognition must still run, and the transcript failure's
+// own status="error" must be preserved so it is retried next run.
+func TestRecognition_RunsWhenTranscriptProviderFails(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("fake-video-bytes"), 0o600); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.RecognizeProvider = "serve"
+	svc := mustNewIngestService(t, cfg, st)
+	// STT configured but failing, with no media chunks -> the transcript path
+	// soft-fails and previously short-circuited before recognition.
+	svc.SetTranscriber(&fakeTranscriber{err: errors.New("stt backend down")})
+	rec := &fakeRecognizer{result: recognizeTestResult()}
+	svc.SetRecognizer(rec)
+
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if rec.calls != 1 {
+		t.Fatalf("recognition backend calls = %d, want 1 — a transcript provider failure "+
+			"must not skip recognition", rec.calls)
+	}
+	repTypes, err := st.RepresentationTypesByPath(ctx, "clip.mp4")
+	if err != nil {
+		t.Fatalf("RepresentationTypesByPath: %v", err)
+	}
+	var found bool
+	for _, rt := range repTypes {
+		if rt == ingest.RepTypeRecognition {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %q representation persisted, got %v", ingest.RepTypeRecognition, repTypes)
 	}
 }
 

@@ -3391,12 +3391,12 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	var noVideoRep bool
 	if !skipTranscript {
 		nonFatalErrored, noVideoRep, err = s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
-		if nonFatalErrored || err != nil {
+		if err != nil {
 			return nonFatalErrored, err
 		}
 	}
 
-	return s.recognizeAndFinalizeMedia(ctx, doc, secretPatterns, noVideoRep)
+	return s.recognizeAndFinalizeMedia(ctx, doc, secretPatterns, noVideoRep, nonFatalErrored)
 }
 
 // recognizeAndFinalizeMedia runs recognition over a media document and finalizes
@@ -3414,10 +3414,19 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 // only becomes a durable status="error" diagnostic when recognition came up empty
 // too. Split out of generateRepresentations to keep that function within the
 // cyclomatic-complexity budget.
-func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, noVideoRep bool) (bool, error) {
+//
+// `transcriptSoftFailed` carries that function's own non-fatal outcome through
+// unchanged. The transcript path can soft-fail for reasons that leave the media
+// with no transcript but say nothing about recognition — an uncovered-language
+// skip, or an STT provider failure with no media chunks — and those are precisely
+// the cases where recognition is the only remaining source, so recognition still
+// runs. Its already-persisted status="error" and error count are preserved either
+// way, so the transcript is retried on the next incremental run even when
+// recognition indexed annotations in the meantime.
+func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, noVideoRep, transcriptSoftFailed bool) (bool, error) {
 	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
 	if err != nil {
-		return false, err
+		return transcriptSoftFailed, err
 	}
 	if noVideoRep && !recognized {
 		// Only now is the verdict final: no sidecar, no derived transcript, no
@@ -3431,7 +3440,7 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 		// not to also credit it as indexed (issue #426).
 		return true, nil
 	}
-	return false, nil
+	return transcriptSoftFailed, nil
 }
 
 // htmlRoutesToStructured reports whether an html document should be promoted to
