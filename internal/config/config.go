@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1001,6 +1002,12 @@ func ParseSTTTracks(raw []string) (STTTrackSelection, error) {
 }
 
 type fileConfig struct {
+	// unknownKeys collects config-file keys that no setter claimed, so the
+	// loader can warn instead of discarding operator intent in silence (#628).
+	// Not a config value itself: it never participates in the overlay onto
+	// Config, only in the warning surfaced after load.
+	unknownKeys []string
+
 	RootDir         *string
 	StateDir        *string
 	ListenAddr      *string
@@ -2056,6 +2063,15 @@ func applyFileOverrides(cfg *Config, path string) error {
 		return fmt.Errorf("parse config file %s: %w", path, err)
 	}
 	applyParsedFileOverrides(cfg, fileCfg)
+	// Keys nobody claimed are operator intent that would otherwise be discarded
+	// without a word — a typo, a stale key from an older release, or a writer/
+	// loader spelling mismatch like #624. Warn rather than fail: an unknown key
+	// must not break an existing deployment (#628).
+	if len(fileCfg.unknownKeys) > 0 {
+		cfg.Warnings = append(cfg.Warnings, fmt.Errorf(
+			"config file %s: %d unrecognized key(s) ignored: %s",
+			path, len(fileCfg.unknownKeys), strings.Join(fileCfg.unknownKeys, ", ")))
+	}
 
 	// Decode the dynamic providers:/model: subtree with yaml.v3
 	// (SPEC 0.7.0 §16.2) — independent of the flat parser above.
@@ -2742,6 +2758,9 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 	lineNo := 0
 	currentListKey := ""
 	sectionByIndent := map[int]string{}
+	// True while inside a top-level block decoded separately with yaml.v3, whose
+	// children must not be reported as unrecognized keys (#628).
+	inSideParsedBlock := false
 
 	for scanner.Scan() {
 		lineNo++
@@ -2770,6 +2789,11 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 		if key == "" {
 			return fileConfig{}, fmt.Errorf("line %d: empty key", lineNo)
 		}
+		// A top-level key re-decides whether we are inside a side-parsed block;
+		// nested lines inherit the enclosing block's answer.
+		if indent == 0 {
+			inSideParsedBlock = sideParsedTopLevelBlocks[key]
+		}
 
 		if value == "" {
 			newListKey, err := handleYAMLEmptyValue(&cfg, key, sectionByIndent, indent)
@@ -2787,7 +2811,7 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			continue
 		}
 
-		if err := handleYAMLScalarValue(&cfg, key, value); err != nil {
+		if err := handleYAMLScalarValue(&cfg, key, value, !inSideParsedBlock); err != nil {
 			return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 	}
@@ -2803,7 +2827,9 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 // scalar field, so it is routed to the list appender — otherwise the keyword forms
 // (`first`/`all`) of media.stt.tracks would be silently dropped by the scalar path,
 // which has no such field.
-func handleYAMLScalarValue(cfg *fileConfig, key, value string) error {
+// `collectUnknown` is false while the parser is inside a side-parsed top-level
+// block, whose children legitimately never reach a scalar setter (#628).
+func handleYAMLScalarValue(cfg *fileConfig, key, value string, collectUnknown bool) error {
 	value = unquoteYAMLScalar(value)
 	if strings.Contains(value, "\\n") {
 		value = strings.ReplaceAll(value, "\\n", "\n")
@@ -2812,7 +2838,58 @@ func handleYAMLScalarValue(cfg *fileConfig, key, value string) error {
 		setFileListValue(cfg, key, value)
 		return nil
 	}
-	return setFileScalarValue(cfg, key, value)
+	if err := setFileScalarValue(cfg, key, value); err != nil {
+		return err
+	}
+	if collectUnknown && !scalarKeyIsRecognized(key, value) {
+		cfg.unknownKeys = append(cfg.unknownKeys, key)
+	}
+	return nil
+}
+
+// sideParsedTopLevelBlocks are the top-level config blocks decoded separately
+// with yaml.v3 rather than by the flat parser: the provider/model bindings (SPEC
+// §16.2), the cost.prices overrides (#327) and the carbon block (#328). The flat
+// parser still walks their lines, and because they are not registered map
+// sections their children arrive UNPREFIXED (`kind`, `base_url`, `provider`, …),
+// so they must be exempted by enclosing block rather than by key prefix.
+// Otherwise every valid config carrying a providers: block would warn — a false
+// positive far worse than the silence this warning replaces (#628).
+var sideParsedTopLevelBlocks = map[string]bool{
+	"providers": true,
+	"model":     true,
+	"cost":      true,
+	"carbon":    true,
+}
+
+// sideParsedKeyPrefixes are the nested maps decoded separately that DO arrive
+// prefixed, because they sit under the registered `media` section (#574, #566).
+var sideParsedKeyPrefixes = []string{
+	"media.translate.glossary.",
+	"media.stt.language_providers.",
+}
+
+// scalarKeyIsRecognized reports whether any setter claims key.
+//
+// Detection is by EFFECT rather than by enumerating every known key: the string
+// keys live in switch chains that cannot be enumerated at runtime, and a
+// hand-maintained list would drift out of step exactly like the alias table did
+// in #624. Every fileConfig field is a pointer, so applying the key to a fresh
+// fileConfig and finding it unchanged proves nothing assigned it.
+func scalarKeyIsRecognized(key, value string) bool {
+	for _, prefix := range sideParsedKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	var probe fileConfig
+	if err := setFileScalarValue(&probe, key, value); err != nil {
+		// A parse/validation error means a setter DID claim the key; the caller
+		// surfaces the error itself.
+		return true
+	}
+	probe.unknownKeys = nil
+	return !reflect.DeepEqual(probe, fileConfig{})
 }
 
 // resolveYAMLKey splits a "key: value" line, prefixes the key with the

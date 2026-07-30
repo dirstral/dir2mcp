@@ -1444,6 +1444,7 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
 		return config.Config{}, authMaterial{}, "", "", false, exitConfigInvalid
 	}
+	a.emitConfigWarnings(cfg, opts.quiet)
 	tlsCertFile, tlsKeyFile, code := a.applyTLSConfig(&cfg, opts)
 	if code != exitSuccess {
 		return config.Config{}, authMaterial{}, "", "", false, code
