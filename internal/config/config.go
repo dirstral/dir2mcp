@@ -3078,6 +3078,19 @@ var configKeyAliases = map[string]string{
 	"media_batch_two_phase":                   "media.batch.two_phase",
 	"media_batch_progress":                    "media.batch.progress",
 	"media_batch_manifest":                    "media.batch.manifest",
+
+	// Recognition (design 0004). These underscore spellings are what the snapshot
+	// writer emits — and therefore what `dir2mcp config init` puts in the
+	// generated .dir2mcp.yaml — so they MUST resolve here or that generated file
+	// does not round-trip: the keys are dropped silently, recognition stays off
+	// with no error or warning, and because the provider never reaches the runtime
+	// config, validateRecognizeProvider never fires on an incomplete `serve`
+	// binding either (#624). Note recognize_serve_url maps to recognize.base_url —
+	// a rename, not a mechanical "_" -> "." substitution, which is why it was
+	// missed.
+	"recognize_provider":      "recognize.provider",
+	"recognize_serve_url":     "recognize.base_url",
+	"recognize_serve_command": "recognize.serve_command",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
