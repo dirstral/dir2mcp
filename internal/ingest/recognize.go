@@ -302,8 +302,19 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 // document is not a video. A backend that returns zero annotations persists
 // nothing — an empty representation would only inflate coverage.
 func (s *Service) GenerateRecognitionRepresentation(ctx context.Context, doc model.Document) error {
+	_, err := s.generateRecognitionRepresentation(ctx, doc)
+	return err
+}
+
+// generateRecognitionRepresentation is GenerateRecognitionRepresentation plus
+// whether a recognition representation was actually persisted. The media
+// pipeline needs that signal because recognition is an independent
+// representation source (§5.2 `recognize`): a video whose only available source
+// is recognition must still count as searchable rather than being reported as
+// representation-less (#622).
+func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc model.Document) (bool, error) {
 	if s.repGen == nil || s.recognizer == nil || doc.DocType != "video" {
-		return nil
+		return false, nil
 	}
 	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
 	result, err := s.recognizer.Recognize(ctx, absPath)
@@ -311,12 +322,12 @@ func (s *Service) GenerateRecognitionRepresentation(ctx context.Context, doc mod
 		// Tag with the provider-failure sentinel so a transient recognize-backend
 		// failure classifies as RECOGNIZE_FAILED (manifestErrorCode), parallel to
 		// the STT/OCR provider sentinels — not the generic EXTRACT_FAILED.
-		return fmt.Errorf("%w: recognize %s: %w", ErrRecognitionProviderFailure, doc.RelPath, err)
+		return false, fmt.Errorf("%w: recognize %s: %w", ErrRecognitionProviderFailure, doc.RelPath, err)
 	}
 
 	segments, hashInput := recognitionSegments(result.Annotations)
 	if len(segments) == 0 {
-		return nil
+		return false, nil
 	}
 
 	meta, err := json.Marshal(recognitionMeta{
@@ -326,7 +337,7 @@ func (s *Service) GenerateRecognitionRepresentation(ctx context.Context, doc mod
 		ModelVersion: result.Version,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal recognition meta: %w", err)
+		return false, fmt.Errorf("marshal recognition meta: %w", err)
 	}
 
 	rep := model.Representation{
@@ -345,8 +356,8 @@ func (s *Service) GenerateRecognitionRepresentation(ctx context.Context, doc mod
 		return s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, repID, "text", segments, quarantineDecision{})
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.addRepresentations(1)
-	return nil
+	return true, nil
 }

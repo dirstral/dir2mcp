@@ -498,13 +498,15 @@ var errBinaryOnRawTextPath = errors.New(
 // errNoVideoRepresentation marks a video document that produced zero
 // representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it, no
 // transcript was derived (speech-to-text is off/unconfigured, or the video has no
-// audio track to transcribe — issue #495), and multimodal keyframe embedding is
-// off. Such a video is known but unsearchable, so it is surfaced as a durable
-// non-fatal diagnostic instead of a silent no-op (#398).
+// audio track to transcribe — issue #495), multimodal keyframe embedding is off,
+// and recognition produced nothing either (recognize.provider=off, or the backend
+// returned no annotations — #622). Such a video is known but unsearchable, so it
+// is surfaced as a durable non-fatal diagnostic instead of a silent no-op (#398).
 var errNoVideoRepresentation = errors.New(
 	"video produced no representation: no subtitle sidecar found, no transcript was derived " +
-		"(speech-to-text is off/unconfigured or the video has no audio track), and multimodal keyframe embedding is off — " +
-		"configure a speech-to-text provider, enable embed_multimodal, or provide a .vtt/.srt sidecar to make it searchable")
+		"(speech-to-text is off/unconfigured or the video has no audio track), multimodal keyframe embedding is off, " +
+		"and no recognition annotations were produced — configure a speech-to-text provider, enable embed_multimodal, " +
+		"configure a recognition backend (recognize.provider), or provide a .vtt/.srt sidecar to make it searchable")
 
 // activeExtractionAvailability derives which extraction engines are active for
 // this run (§7.4.B "Extractor availability") from the resolved extractors. The
@@ -3385,18 +3387,60 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// transcript when audio media chunks were produced (SPEC 8.1.7). `augment`
 	// and `off` keep the transcript path unchanged.
 	skipTranscript := s.embedMultimodal == "replace" && mediaProduced
-	if skipTranscript {
-		return false, nil
+
+	var noVideoRep bool
+	if !skipTranscript {
+		nonFatalErrored, noVideoRep, err = s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
+		if err != nil {
+			return nonFatalErrored, err
+		}
 	}
 
-	nonFatalErrored, err = s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
-	if nonFatalErrored || err != nil {
-		return nonFatalErrored, err
+	return s.recognizeAndFinalizeMedia(ctx, doc, secretPatterns, noVideoRep, nonFatalErrored)
+}
+
+// recognizeAndFinalizeMedia runs recognition over a media document and finalizes
+// the video no-representation verdict.
+//
+// Recognition (design 0004 §4) runs after transcript handling, but it is an
+// INDEPENDENT representation source (§5.2 `recognize`), not a step subordinate to
+// the transcript: it must run even when the transcript path produced nothing (STT
+// off, no sidecar, no audio track) and even when multimodal `replace` skipped the
+// transcript entirely — otherwise a video whose only available source is
+// recognition is never recognized at all (#622). A recognition-backend failure is
+// a hard per-document error exactly like an STT failure.
+//
+// `noVideoRep` is the provisional verdict from generateTranscriptOrSidecar; it
+// only becomes a durable status="error" diagnostic when recognition came up empty
+// too. Split out of generateRepresentations to keep that function within the
+// cyclomatic-complexity budget.
+//
+// `transcriptSoftFailed` carries that function's own non-fatal outcome through
+// unchanged. The transcript path can soft-fail for reasons that leave the media
+// with no transcript but say nothing about recognition — an uncovered-language
+// skip, or an STT provider failure with no media chunks — and those are precisely
+// the cases where recognition is the only remaining source, so recognition still
+// runs. Its already-persisted status="error" and error count are preserved either
+// way, so the transcript is retried on the next incremental run even when
+// recognition indexed annotations in the meantime.
+func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, noVideoRep, transcriptSoftFailed bool) (bool, error) {
+	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
+	if err != nil {
+		return transcriptSoftFailed, err
 	}
-	// Recognition (design 0004) runs after the transcript: both are derived
-	// representations of the same media, and a recognition-backend failure is
-	// a hard per-document error exactly like an STT failure.
-	return false, s.GenerateRecognitionRepresentation(ctx, doc)
+	if noVideoRep && !recognized {
+		// Only now is the verdict final: no sidecar, no derived transcript, no
+		// multimodal keyframe chunks AND no recognition — the video is known but
+		// unsearchable, so record it as a durable status="error" diagnostic
+		// (#398/#495) while letting the run continue.
+		s.getLogger().Printf("no representation produced for video %s: %v", doc.RelPath, errNoVideoRepresentation)
+		s.addErrors(1)
+		s.persistNonFatalDocError(ctx, doc, errNoVideoRepresentation, secretPatterns)
+		// The document is now durably status="error" and counted; signal the caller
+		// not to also credit it as indexed (issue #426).
+		return true, nil
+	}
+	return transcriptSoftFailed, nil
 }
 
 // htmlRoutesToStructured reports whether an html document should be promoted to
@@ -3468,21 +3512,24 @@ func (s *Service) generateHTMLStructured(ctx context.Context, doc model.Document
 // any stale sidecar transcripts and re-running STT. Sidecar ingestion bypasses
 // the quality gate (authored, not model-derived; §8.6.6/§8.6.7).
 //
-// It returns (nonFatalErrored, err) with the same contract as
-// generateRepresentations: nonFatalErrored is true when a soft-failure path
-// persisted the document as status="error" and counted it as an error itself, so
-// the caller must not also credit it as indexed (issue #426).
-func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, error) {
+// It returns (nonFatalErrored, noVideoRepresentation, err). nonFatalErrored is
+// true when a soft-failure path persisted the document as status="error" and
+// counted it as an error itself, so the caller must not also credit it as
+// indexed (issue #426). noVideoRepresentation is true when this video yielded
+// no transcript, no sidecar and no media chunks — a PROVISIONAL verdict the
+// caller finalizes only after recognition has had its chance, since recognition
+// is an independent representation source (#622).
+func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, bool, error) {
 	if !forceReindex {
 		ingested, err := s.ingestSidecarTranscripts(ctx, doc)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		if ingested {
-			return false, nil
+			return false, false, nil
 		}
 	} else if err := s.retireStaleSidecarTranscripts(ctx, doc); err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	// Route audio AND video (issue #495) through the same STT transcript path when
@@ -3497,7 +3544,7 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		// emit degraded output. Handled in a helper so this function stays under the
 		// cyclomatic-complexity budget; see skipUncoveredLanguageTranscript.
 		if skip, suppressCredit := s.skipUncoveredLanguageTranscript(ctx, doc, mediaProduced); skip {
-			return suppressCredit, nil
+			return suppressCredit, false, nil
 		}
 		produced, err := s.generateTranscriptRepresentation(ctx, doc, content)
 		if err != nil {
@@ -3523,15 +3570,15 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 					// above; signal the caller not to also credit it as indexed
 					// (issue #426). A doc that DID produce media chunks stays "ok"
 					// and searchable, so it is still credited (returns false).
-					return true, nil
+					return true, false, nil
 				}
-				return false, nil
+				return false, false, nil
 			}
-			return false, err
+			return false, false, err
 		}
 		if produced {
 			s.addRepresentations(1)
-			return false, nil
+			return false, false, nil
 		}
 		// produced == false: the transcript was empty (silence) or the video has no
 		// audio track to transcribe. Fall through so an otherwise unsearchable video
@@ -3539,18 +3586,15 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 	}
 
 	// #398/#495: a video with no subtitle sidecar (handled above), no derived
-	// transcript, and no multimodal keyframe chunks yields zero representations —
-	// known but unsearchable. Record it as status="error" so it is durably visible
-	// (CorpusStats.Errors / RecentFailures) and retried once a sidecar is added,
-	// STT is configured, or embed_multimodal is enabled. The run still continues
-	// (returns nil), mirroring the #413 provider-failure path.
+	// transcript, and no multimodal keyframe chunks has produced nothing HERE.
+	// The verdict is only provisional though: recognition (#622) is an
+	// independent representation source that has not run yet, so report the
+	// condition upward and let the caller record the durable status="error"
+	// diagnostic if recognition comes up empty too.
 	if doc.DocType == "video" && !mediaProduced {
-		s.getLogger().Printf("no representation produced for video %s: %v", doc.RelPath, errNoVideoRepresentation)
-		s.addErrors(1)
-		s.persistNonFatalDocError(ctx, doc, errNoVideoRepresentation, secretPatterns)
-		return true, nil
+		return false, true, nil
 	}
-	return false, nil
+	return false, false, nil
 }
 
 // retireStaleSidecarTranscripts tombstones a media document's existing
