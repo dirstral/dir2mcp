@@ -1111,6 +1111,30 @@ func (a *App) emitConfigWarnings(cfg config.Config, quiet bool) {
 // process exit code. It lets a failure keep its canonical §14 code (e.g. a bind
 // failure carries exit code exitServerBindFailure but code "BIND_FAILED") rather
 // than the coarser exit-code label. The plain-text path is unaffected.
+// writeStoreInitError reports a metadata-store Init failure, preserving any
+// canonical §14 code the store attached to the error.
+//
+// Every Init call site funnelled failures through writeCLIError, which stamps
+// the JSON `code` field from the exit code (GENERIC_ERROR). An index-format
+// mismatch therefore reached machine consumers as GENERIC_ERROR even though the
+// store raises a typed *store.IndexVersionMismatchError whose Code() is
+// INDEX_VERSION_MISMATCH; the canonical code survived only as a prefix inside
+// the human-readable message, which is the "CLI prose only" gap of #422 V6.
+// BIND_FAILED and TLS_CONFIG_INVALID are wired through writeCLIErrorWithCode
+// for exactly this reason — the store path just has many more call sites, so it
+// gets one helper rather than eleven copies of the same errors.As.
+func writeStoreInitError(stderr io.Writer, jsonOutput bool, exitCode int, err error, message string) {
+	var mismatch *store.IndexVersionMismatchError
+	if errors.As(err, &mismatch) {
+		// The remedy is already in mismatch.Error() ("reindex the corpus"), so the
+		// hint names the command rather than restating the diagnosis.
+		writeCLIErrorWithCode(stderr, jsonOutput, exitCode, mismatch.Code(), message,
+			"run `dir2mcp reindex --force` with a compatible binary, or point --state-dir at a fresh directory")
+		return
+	}
+	writeCLIError(stderr, jsonOutput, exitCode, message)
+}
+
 func writeCLIErrorWithCode(stderr io.Writer, jsonOutput bool, exitCode int, code, message string, hints ...string) {
 	if jsonOutput {
 		filteredHints := make([]string, 0, len(hints))

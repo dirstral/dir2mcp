@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // decodeCLIErrorCode extracts the machine-readable `code` from a JSON CLI error
@@ -75,5 +78,57 @@ func TestApplyTLSConfig_EmitsTLSConfigInvalid(t *testing.T) {
 	}
 	if got := decodeCLIErrorCode(t, stderr.Bytes()); got != protocol.ErrorCodeTLSConfigInvalid {
 		t.Fatalf("error code = %q, want %q (body=%s)", got, protocol.ErrorCodeTLSConfigInvalid, stderr.String())
+	}
+}
+
+// TestWriteStoreInitError_EmitsIndexVersionMismatch proves an index-format
+// mismatch reaches machine consumers as the canonical §14.3
+// INDEX_VERSION_MISMATCH code rather than the coarse exit-code label.
+//
+// This is the gap #422 V6 called "CLI prose only": the store already raised a
+// typed *store.IndexVersionMismatchError whose Code() was correct, but every
+// Init call site funnelled it through writeCLIError, which derives the JSON
+// `code` from the exit code. The canonical code survived only as a prefix
+// inside the human-readable message, so a machine consumer saw GENERIC_ERROR.
+// The pre-existing test asserted Code() on the raw Go error and never crossed
+// the CLI boundary, which is why the gap went undetected.
+func TestWriteStoreInitError_EmitsIndexVersionMismatch(t *testing.T) {
+	mismatch := &store.IndexVersionMismatchError{Persisted: "1", Expected: "2"}
+
+	var stderr bytes.Buffer
+	writeStoreInitError(&stderr, true, exitIndexLoadFailure, mismatch,
+		fmt.Sprintf("initialize metadata store: %v", mismatch))
+
+	if got := decodeCLIErrorCode(t, stderr.Bytes()); got != protocol.ErrorCodeIndexVersionMismatch {
+		t.Errorf("code = %q, want %q\npayload: %s",
+			got, protocol.ErrorCodeIndexVersionMismatch, stderr.String())
+	}
+}
+
+// TestWriteStoreInitError_WrappedMismatchStillDetected covers the realistic
+// path: a store implementation that wraps the sentinel before returning it.
+// errors.As must still find it, or the fix only works for the one backend that
+// happens to return the error bare.
+func TestWriteStoreInitError_WrappedMismatchStillDetected(t *testing.T) {
+	wrapped := fmt.Errorf("open corpus: %w",
+		&store.IndexVersionMismatchError{Persisted: "1", Expected: "2"})
+
+	var stderr bytes.Buffer
+	writeStoreInitError(&stderr, true, exitIndexLoadFailure, wrapped, "initialize metadata store")
+
+	if got := decodeCLIErrorCode(t, stderr.Bytes()); got != protocol.ErrorCodeIndexVersionMismatch {
+		t.Errorf("wrapped mismatch: code = %q, want %q", got, protocol.ErrorCodeIndexVersionMismatch)
+	}
+}
+
+// TestWriteStoreInitError_UnrelatedErrorKeepsGenericCode is the false-positive
+// guard: an ordinary Init failure must NOT be relabelled as a version mismatch.
+func TestWriteStoreInitError_UnrelatedErrorKeepsGenericCode(t *testing.T) {
+	var stderr bytes.Buffer
+	writeStoreInitError(&stderr, true, exitIndexLoadFailure,
+		errors.New("disk full"), "initialize metadata store: disk full")
+
+	if got := decodeCLIErrorCode(t, stderr.Bytes()); got == protocol.ErrorCodeIndexVersionMismatch {
+		t.Errorf("unrelated error was mislabelled %q", got)
 	}
 }

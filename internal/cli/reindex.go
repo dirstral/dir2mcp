@@ -267,7 +267,7 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 	st := a.storeForConfig(cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		_ = st.Close()
-		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
+		writeStoreInitError(a.stderr, global.jsonOutput, exitIndexLoadFailure, err, fmt.Sprintf("initialize metadata store: %v", err))
 		return nil, nil, exitIndexLoadFailure
 	}
 	// Snapshot the content-hash gate BEFORE clearing it so an interrupted or

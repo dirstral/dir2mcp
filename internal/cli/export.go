@@ -60,7 +60,7 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 	st := a.storeForConfig(cfg)
 	defer a.closeStoreWithLog(st)
 	if initErr := st.Init(ctx); initErr != nil && !errors.Is(initErr, model.ErrNotImplemented) {
-		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", initErr))
+		writeStoreInitError(a.stderr, global.jsonOutput, exitIndexLoadFailure, initErr, fmt.Sprintf("initialize metadata store: %v", initErr))
 		return exitIndexLoadFailure
 	}
 
