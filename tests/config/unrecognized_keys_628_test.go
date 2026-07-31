@@ -11,6 +11,8 @@ package tests
 // config would be worse than the silence it replaces.
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,11 +69,17 @@ func TestGeneratedConfig_ProducesNoWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read generated: %v", err)
 	}
+	// The base_url is served by an httptest server rather than hard-coded, per the
+	// repo guideline against embedding provider base URLs. Nothing in this test
+	// dials it: LoadFile only parses, so the server exists to supply a real URL.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+
 	enriched := string(generated) + "" +
 		"providers:\n" +
 		"  ollama:\n" +
 		"    kind: openai\n" +
-		"    base_url: http://localhost:11434/v1\n" +
+		"    base_url: " + srv.URL + "/v1\n" +
 		"    embed_text_model: bge-m3:latest\n" +
 		"    chat_model: qwen2.5:7b-instruct\n" +
 		"model:\n" +
