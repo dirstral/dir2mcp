@@ -87,6 +87,11 @@ func TestGeneratedConfig_EveryWrittenKeyIsReadable(t *testing.T) {
 				t.Fatalf("write mutated config: %v", err)
 			}
 			got, loadErr := config.LoadFile(p)
+			// Warnings must not participate in the comparison: since #628 an
+			// IGNORED key adds an "unrecognized key(s)" warning, which would make
+			// the Config differ and be misread here as proof the key was read —
+			// inverting this guard's meaning. Compare config VALUES only.
+			got.Warnings, base.Warnings = nil, nil
 			// A validation failure also proves the value reached the loader.
 			if loadErr != nil || !reflect.DeepEqual(got, base) {
 				read = true

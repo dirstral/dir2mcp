@@ -1088,6 +1088,24 @@ func writeCLIError(stderr io.Writer, jsonOutput bool, exitCode int, message stri
 	writeCLIErrorWithCode(stderr, jsonOutput, exitCode, exitCodeLabel(exitCode), message, hints...)
 }
 
+// emitConfigWarnings prints the non-fatal config-load diagnostics collected in
+// Config.Warnings to stderr.
+//
+// Nothing consumed that field before (#628): warnings about a deprecated
+// DIR2MCP_SESSION_TIMEOUT, an unparseable duration, or an unrecognized config
+// key were appended and then silently discarded, so an operator whose config was
+// partly ignored had no way to find out. Diagnostics go to stderr so they never
+// contaminate --json stdout, and --quiet suppresses them like other non-error
+// output.
+func (a *App) emitConfigWarnings(cfg config.Config, quiet bool) {
+	if quiet {
+		return
+	}
+	for _, w := range cfg.Warnings {
+		_, _ = fmt.Fprintf(a.stderr, "warning: %v\n", w)
+	}
+}
+
 // writeCLIErrorWithCode is writeCLIError with an explicit machine-readable
 // `code` for the JSON payload, decoupling the emitted error code from the
 // process exit code. It lets a failure keep its canonical §14 code (e.g. a bind
