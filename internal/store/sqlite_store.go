@@ -27,6 +27,11 @@ type SQLiteStore struct {
 
 	mu sync.Mutex
 	db *sql.DB
+	// rdb is a multi-connection READ-ONLY pool over the same file (#429 F11).
+	// db stays single-connection so writes remain serialized; rdb lets queries
+	// run concurrently with an in-flight write instead of queueing behind it.
+	// Nil until initLocked succeeds, and nil-safe: readDB falls back to db.
+	rdb *sql.DB
 
 	activeOps int
 	closing   bool
@@ -396,20 +401,40 @@ func NewSQLiteStore(path string) *SQLiteStore {
 //     handle are still serialized by the single-connection pool.
 //   - PRAGMA busy_timeout instructs SQLite to wait rather than return BUSY
 //     immediately when an external process holds the database lock.
+//
+// sqliteDSN builds a DSN carrying the PER-CONNECTION pragmas.
+//
+// busy_timeout and foreign_keys are connection-local. They used to be applied
+// with one ExecContext each, which stuck only because SetMaxOpenConns(1) meant
+// there was exactly one connection to apply them to. The read pool (#429 F11)
+// has several, and database/sql opens them lazily, so a pragma set via
+// ExecContext would land on whichever connection happened to serve that call
+// and silently miss the rest. Carrying them in the DSN makes every connection
+// get them at open time.
+//
+// journal_mode is deliberately NOT here: it is a persistent, database-level
+// setting, so one connection setting it is enough, and putting it in the DSN
+// would apply it at connect time, before checkSchemaVersion can run. That would
+// break the #405 tripwire, which requires a future-schema database to be left
+// byte-for-byte untouched (the WAL switch creates a -wal file).
+func sqliteDSN(path string) string {
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+}
+
 func openDB(ctx context.Context, path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	// busy_timeout is connection-local and non-persistent: setting it neither
-	// creates nor mutates any on-disk file. Set it first so the WAL switch below
-	// waits rather than returning SQLITE_BUSY immediately when another process
-	// holds the database lock.
-	if _, err := db.ExecContext(ctx, `PRAGMA busy_timeout=5000;`); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
+	// busy_timeout and foreign_keys now arrive via the DSN (sqliteDSN), so they
+	// are in effect on every connection the moment it opens. busy_timeout being
+	// live before the WAL switch below still matters for the same reason it did
+	// when it was an ExecContext: switching journal_mode can itself return
+	// SQLITE_BUSY when another process holds the database lock, and without a
+	// busy timeout already in effect that PRAGMA fails immediately instead of
+	// waiting. Neither pragma creates or mutates an on-disk file.
+	//
 	// Reject a database written by a NEWER binary BEFORE any persistent mutation
 	// (#405). PRAGMA journal_mode=WAL below persistently creates/modifies the
 	// -wal file, so the downgrade tripwire MUST run first: a future-schema DB we
@@ -424,25 +449,36 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	// the database lock; without busy_timeout already in effect, that PRAGMA
 	// returns immediately rather than waiting.
 	//
-	// foreign_keys=ON makes the ON DELETE CASCADE constraints declared on
-	// representations/chunks/spans actually fire (#405). SQLite defaults it
-	// OFF, which left those cascades inert — harmless while every delete path
-	// is a soft-delete (UPDATE deleted=1), but a footgun the moment a hard
-	// DELETE FROM documents is introduced (compaction/vacuum), which would
-	// silently orphan child rows. It MUST be set outside any transaction; the
-	// single-connection pool (SetMaxOpenConns(1)) makes this per-connection
-	// pragma stick for the life of the store handle.
-	for _, pragma := range []string{
-		`PRAGMA journal_mode=WAL;`,
-		`PRAGMA foreign_keys=ON;`,
-	} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
+	// journal_mode is persistent and database-level, so setting it once here is
+	// enough and the read pool inherits WAL from the file. foreign_keys, which
+	// used to sit in this loop, is per-connection and moved to the DSN: relying
+	// on SetMaxOpenConns(1) to make it stick would have silently left the
+	// ON DELETE CASCADE constraints (#405) inert on every read-pool connection.
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL;`); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	return db, nil
 }
+
+// openReadDB opens the concurrent read pool (#429 F11). It MUST be called only
+// after openDB has run the #405 tripwire and switched the file to WAL: WAL is
+// what lets these readers proceed while the writer holds its transaction, and
+// opening a pool against a future-schema database would defeat the tripwire.
+func openReadDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(sqliteReadPoolSize)
+	db.SetMaxIdleConns(sqliteReadPoolSize)
+	return db, nil
+}
+
+// sqliteReadPoolSize bounds concurrent readers. Small on purpose: these are
+// short point lookups and paged scans, and every open connection costs a file
+// descriptor and its own page cache.
+const sqliteReadPoolSize = 4
 
 // schemaVersion is the persistence-layer schema revision this binary
 // understands, stamped into the database file header via PRAGMA user_version
@@ -811,6 +847,15 @@ CREATE INDEX IF NOT EXISTS idx_mcp_nonce_ledger_expires ON mcp_nonce_ledger(expi
 	}
 
 	s.db = db
+	// Open the read pool only now: the tripwire has passed, WAL is on, and every
+	// migration has been stamped, so readers can never observe a half-migrated
+	// schema and can never be the connection that touches a future-schema file.
+	// A failure here is NOT fatal -- readDB falls back to the writer handle, so
+	// the store degrades to the previous single-connection behaviour instead of
+	// refusing to start (#429 F11).
+	if rdb, rerr := openReadDB(s.path); rerr == nil {
+		s.rdb = rdb
+	}
 	return nil
 }
 
@@ -1989,7 +2034,9 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 		return model.Document{}, err
 	}
 
-	db, err := s.ensureDB(ctx)
+	// Read pool (#429 F11): recency decay calls this once per unique rel_path per
+	// query, so on the writer handle it queued behind in-flight ingest writes.
+	db, err := s.ensureReadDB(ctx)
 	if err != nil {
 		return model.Document{}, err
 	}
@@ -2029,7 +2076,9 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 }
 
 func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit, offset int) ([]model.Document, int64, error) {
-	db, err := s.ensureDB(ctx)
+	// Read pool (#429 F11): SELECT-only, and the glob branch scans every matching
+	// row per page, so this is exactly the shape that should not block on ingest.
+	db, err := s.ensureReadDB(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -3128,13 +3177,22 @@ func (s *SQLiteStore) Close() error {
 	}
 	s.closing = true
 	db := s.db
+	rdb := s.rdb
 	s.db = nil
+	s.rdb = nil
 	for s.activeOps > 0 {
 		s.cond.Wait()
 	}
 	s.mu.Unlock()
 
 	err := db.Close()
+	if rdb != nil {
+		// Report the writer's error in preference: it is the handle whose close
+		// failure can indicate unflushed work.
+		if rerr := rdb.Close(); err == nil {
+			err = rerr
+		}
+	}
 
 	s.mu.Lock()
 	s.closing = false
@@ -3160,6 +3218,35 @@ func (s *SQLiteStore) ensureDB(ctx context.Context) (*sql.DB, error) {
 		return nil, errors.New("sqlite db not initialized")
 	}
 	s.activeOps++
+	return s.db, nil
+}
+
+// ensureReadDB returns the concurrent read pool for a query-only path, holding
+// the same activeOps refcount as ensureDB so Close still waits for in-flight
+// reads. Callers MUST pair it with ReleaseDB.
+//
+// Falls back to the writer handle when the pool is unavailable, so a caller is
+// never broken by the pool failing to open; it just loses the concurrency.
+// Only SELECT-only paths may use this: a write issued here would race the
+// writer's serialization and reintroduce the SQLITE_BUSY this store avoids.
+func (s *SQLiteStore) ensureReadDB(ctx context.Context) (*sql.DB, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil, errors.New("sqlite db is closing")
+	}
+	if s.db == nil {
+		if err := s.initLocked(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if s.db == nil {
+		return nil, errors.New("sqlite db not initialized")
+	}
+	s.activeOps++
+	if s.rdb != nil {
+		return s.rdb, nil
+	}
 	return s.db, nil
 }
 
