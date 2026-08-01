@@ -949,6 +949,12 @@ func readRecordAt(reader *mmap.ReaderAt, loc locator) ([]float32, model.IndexPay
 // store believes is indexed; the chunks are simply still pending and get
 // re-embedded. Erroring instead would make one torn record poison the whole
 // segment on load.
+// maxRecordBodyLen bounds a single record's body when scanning. Real records are
+// a vector plus a small payload (a 3072-dimension vector is about 12 KB), so 1
+// GiB is far above anything legitimate and far below the ~21.5 GB a corrupt
+// uint32 pair can encode.
+const maxRecordBodyLen = 1 << 30
+
 func scanSegment(path string) (map[uint64]locator, int64, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -980,6 +986,18 @@ func scanSegment(path string) (map[uint64]locator, int64, bool, error) {
 		vecLen := binary.LittleEndian.Uint32(hdr[9:13])
 		payloadLen := binary.LittleEndian.Uint32(hdr[13:17])
 		bodyLen := int64(vecLen)*4 + int64(payloadLen)
+		// vecLen and payloadLen are uint32, so a corrupt header can encode a body
+		// near 21.5 GB. Discard takes an int, which is 32-bit on some platforms,
+		// where that value wraps and can go negative; bufio panics on a negative
+		// count, crashing Load instead of failing cleanly. Bound it first.
+		//
+		// An over-long body is treated as a torn tail rather than an error, which
+		// matches what the scan already does for every other unreadable record:
+		// stop at the last complete one. Startup then recovers instead of
+		// bricking, and only records at or after the damage are dropped.
+		if bodyLen < 0 || bodyLen > maxRecordBodyLen {
+			return locators, offset, true, nil
+		}
 		if _, err := r.Discard(int(bodyLen)); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				// Torn record body: stop at the last complete record.

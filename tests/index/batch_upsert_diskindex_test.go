@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -261,5 +262,49 @@ func TestLoad_RecoversTornTail(t *testing.T) {
 	}
 	if n := liveRecords(t, again, 4); n != 3 {
 		t.Fatalf("post-recovery append lost: live records = %d, want 3", n)
+	}
+}
+
+// TestLoad_CorruptOversizedHeaderDoesNotPanic covers a corrupt record header
+// whose vecLen/payloadLen encode a body far larger than the file.
+//
+// Both are uint32, so the computed body length can approach 21.5 GB. Discard
+// takes an int, 32-bit on some platforms, where that value wraps and can go
+// negative; bufio panics on a negative count, so Load would crash rather than
+// fail cleanly. The scan bounds the length first and treats an impossible
+// record as a torn tail, which is what it already does for every other
+// unreadable record.
+//
+// Honest limitation: on a 64-bit host int is wide enough that the value stays
+// positive and Discard merely hits EOF, so this test passes with or without the
+// bound here. It pins the recoverable OUTCOME on every platform and documents
+// the corrupt-header case; the panic it guards against is reachable only where
+// int is 32 bits.
+func TestLoad_CorruptOversizedHeaderDoesNotPanic(t *testing.T) {
+	ctx := context.Background()
+	idx, segPath := newTestIndex(t)
+	mustUpsertDisk(t, idx, model.IndexPayload{ChunkID: 1, RelPath: "good.txt"}, []float32{1, 0, 0, 0})
+
+	raw, err := os.ReadFile(segPath)
+	if err != nil {
+		t.Fatalf("read segment: %v", err)
+	}
+	// Append a header claiming the largest body two uint32 fields can express.
+	hdr := make([]byte, 17)
+	binary.LittleEndian.PutUint64(hdr[0:8], 99)
+	hdr[8] = 0
+	binary.LittleEndian.PutUint32(hdr[9:13], ^uint32(0))
+	binary.LittleEndian.PutUint32(hdr[13:17], ^uint32(0))
+	if err := os.WriteFile(segPath, append(raw, hdr...), 0o600); err != nil {
+		t.Fatalf("write corrupt segment: %v", err)
+	}
+
+	reopened := diskindex.New(segPath)
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.Load(ctx, segPath); err != nil {
+		t.Fatalf("Load must recover from a corrupt oversized header, got: %v", err)
+	}
+	if n := liveRecords(t, reopened, 4); n != 1 {
+		t.Fatalf("live records = %d, want the 1 good record before the corruption", n)
 	}
 }
