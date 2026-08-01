@@ -41,12 +41,20 @@ const (
 // the on-disk path it persists to (used by the caller to wire the
 // PersistenceManager and reindex cleanup).
 //
-//   - "memory" (default): the in-memory HNSW reference, persisted to the
-//     versioned vectors_<kind>.v2.hnsw snapshot. This path is byte-identical to
-//     legacy behavior.
+//   - "memory" (default): the in-memory reference (HNSWIndex; the name is
+//     historical — it performs an exhaustive brute-force cosine scan, not
+//     approximate HNSW search), persisted to the versioned
+//     vectors_<kind>.v2.hnsw snapshot. This path is byte-identical to legacy
+//     behavior.
 //   - "disk": the Tier-B pure-Go on-disk backend (internal/index/diskindex),
-//     persisted to vectors_<kind>.diskv1.idx with vector payloads kept
-//     memory-mapped on disk so the corpus is not bounded by RAM.
+//     also an exhaustive brute-force cosine scan (not ANN), persisted to
+//     vectors_<kind>.diskv1.idx with vector payloads kept memory-mapped on
+//     disk so the corpus is not bounded by RAM.
+//
+// Both memory and disk are exact (linear-cost) search, not approximate
+// nearest-neighbor; see docs/dual-machine-deployment.md §2.4 for the
+// exact-vs-ANN trade-off and the corpus-size guidance for switching to
+// "qdrant"/"pgvector" (issue #429 F3).
 //
 // An empty/unknown backend falls back to "memory"; config validation already
 // rejects unknown values, so this is defensive only.

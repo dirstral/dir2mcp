@@ -191,12 +191,12 @@ on relocation alone. (`dirstral-spec/docs/SPEC.md` §7.8.)
 
 ### 2.4 Choose the vector backend (`index.backend`)
 
-| `index.backend` | Tier | External infra | When |
-|---|:--:|:--:|---|
-| `memory` (default) | A | none | In-memory HNSW, pure-Go, snapshotted to StateDir. Zero-infra default. |
-| `disk` | B | none | Pure-Go on-disk / memmapped single-node index; for corpora too large for RAM. |
-| `qdrant` | C | required | External Qdrant collection. |
-| `pgvector` | C | required | External PostgreSQL + pgvector. |
+| `index.backend` | Tier | External infra | Search | When |
+|---|:--:|:--:|---|---|
+| `memory` (default) | A | none | Exact, exhaustive scan | In-memory, pure-Go, snapshotted to StateDir. Zero-infra default. |
+| `disk` | B | none | Exact, exhaustive scan | Pure-Go on-disk / memmapped single-node index; for corpora too large for RAM. |
+| `qdrant` | C | required | Approximate (ANN) | External Qdrant collection. |
+| `pgvector` | C | required | Approximate (ANN) | External PostgreSQL + pgvector. |
 
 `memory` and `disk` keep all index state under the local StateDir and need no
 external service. The Tier-C backends are **optional** and connect to an external
@@ -224,6 +224,27 @@ Tier-C connection secrets (`qdrant.api_key`, `pgvector.dsn`) follow the same
 runtime-only credential rules and are never written to disk. A configured Tier-C
 backend that is unreachable at preflight fails startup rather than silently
 downgrading. (`dirstral-spec/docs/SPEC.md` §6.2–6.3.)
+
+#### `memory`/`disk` are exact search, not ANN
+
+Despite the `HNSWIndex` type name in `internal/index/hnsw_index.go` (kept as-is
+to avoid churn to a public type and its on-disk snapshot format), neither
+Tier-A/B backend builds an HNSW graph or does approximate nearest-neighbor
+search. Both `memory` and `disk` score every query vector against **every**
+stored vector with an exhaustive cosine scan and keep only the top-k. There is
+no ANN index to build, no recall/latency knob to tune, and no approximation
+error: recall is exact, always identical to a brute-force scan over the whole
+corpus. The trade-off is that query cost grows **linearly** with the number of
+indexed chunks, because every query touches every vector.
+
+As a rough order-of-magnitude guide — not a benchmark, and actual numbers
+depend on hardware, embedding dimensionality, and concurrent query load —
+expect the per-query cost of the exhaustive scan to become noticeable somewhere
+around **100K–200K chunks** (roughly **0.5–4s per query** in that range) and to
+reach multi-second latency around **~1M chunks**. If your corpus is at or
+approaching that order of magnitude and query latency matters, switch
+`index.backend` to `qdrant` or `pgvector` — both build real ANN indexes and
+stay sub-linear as the corpus grows.
 
 ### 2.5 Start the daemon and expose only the MCP endpoint
 
