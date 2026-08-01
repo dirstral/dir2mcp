@@ -2254,6 +2254,18 @@ func (s *SQLiteStore) listFilesSQLPaged(
 	probe := s.versionProbeDB()
 	epoch, cacheable := s.listCache.begin(ctx, probe)
 
+	key := "prefix\x00" + normalizedPrefix
+	var memo listFilesCacheEntry
+	memoized := false
+	if cacheable {
+		memo, memoized = s.listCache.lookup(epoch, key)
+	}
+	if memoized && int64(offset) >= memo.total {
+		// The memo proves the listing ends before this offset, so the page query
+		// would only make SQLite walk rows to discard them all.
+		return []model.Document{}, memo.total, nil
+	}
+
 	query := selectCols + whereClause + " ORDER BY rel_path LIMIT ? OFFSET ?"
 	args := append(append([]any{}, prefixArgs...), limit, offset)
 
@@ -2275,11 +2287,8 @@ func (s *SQLiteStore) listFilesSQLPaged(
 		return nil, 0, err
 	}
 
-	key := "prefix\x00" + normalizedPrefix
-	if cacheable {
-		if entry, ok := s.listCache.lookup(epoch, key); ok {
-			return docs, entry.total, nil
-		}
+	if memoized {
+		return docs, memo.total, nil
 	}
 
 	total, exact := derivedListTotal(len(docs), limit, offset)
@@ -2351,6 +2360,11 @@ func (s *SQLiteStore) listFilesGlobPaged(
 	epoch, cacheable := s.listCache.begin(ctx, probe)
 	if cacheable {
 		if entry, ok := s.listCache.lookup(epoch, key); ok {
+			if int64(offset) >= entry.total {
+				// The memo proves the listing ends before this offset, so scanning
+				// would only re-glob rows to discard them all.
+				return []model.Document{}, entry.total, nil
+			}
 			start, skip := entry.startFor(offset)
 			docs, err := s.scanGlobPage(ctx, db, selectCols, whereClause, prefixArgs, matcher, start, skip, limit)
 			if err != nil {

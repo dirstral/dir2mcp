@@ -22,10 +22,11 @@ import (
 //
 // The probe MUST run on a connection that never writes: data_version is
 // explicitly documented NOT to change for commits made on the same connection,
-// and its values are only comparable within one connection. Hence the pinned
-// *sql.Conn taken from the query_only read pool. When there is no read pool, or
-// the probe errors, the cache is bypassed entirely and every call recomputes,
-// which is exactly the pre-#429-F10 behaviour.
+// and its values are only comparable within one connection. Hence the *sql.Conn
+// pinned from SQLiteStore.vdb, the dedicated single-connection query_only handle
+// that exists for nothing else. When that handle is unavailable, or the probe
+// errors, the cache is bypassed entirely and every call recomputes, which is
+// exactly the pre-#429-F10 behaviour.
 //
 // Locking: probeMu owns the pinned connection and is the only lock ever held
 // across database I/O; mu guards the in-memory epoch and entries and is only

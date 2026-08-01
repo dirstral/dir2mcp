@@ -169,6 +169,17 @@ func TestListFiles_GlobPagesMatchUnpagedListing(t *testing.T) {
 		}
 		assertSameOrder(t, relPaths(docs), want, fmt.Sprintf("page(limit=%d offset=%d)", tc.limit, tc.offset))
 	}
+
+	// An offset the memo already proves is past the end must not scan at all.
+	before := st.ListFilesQueryStatsForTest()
+	if _, total, err := listFilesPage(ctx, st, "docs/*.md", 100, len(markdown)+1000); err != nil {
+		t.Fatalf("far past-the-end page: %v", err)
+	} else if total != int64(len(markdown)) {
+		t.Errorf("far past-the-end page: total = %d, want %d", total, len(markdown))
+	}
+	if after := st.ListFilesQueryStatsForTest(); after != before {
+		t.Errorf("a page the memo proves is past the end still queried: %+v -> %+v", before, after)
+	}
 }
 
 // listFilesPage is ListFiles with no path prefix, so the tests read as one call
@@ -252,7 +263,7 @@ func TestListFiles_TotalExactWithoutCount(t *testing.T) {
 	// Fresh store so this exercises the uncached path: an offset past the end
 	// must not report the offset as the total.
 	other := newTestStore(t)
-	seedListFilesCorpus(t, other, 7)
+	otherAll, _ := seedListFilesCorpus(t, other, 9)
 	docs, total, err = listFilesPage(ctx, other, "", 10, 1000)
 	if err != nil {
 		t.Fatalf("past-the-end page: %v", err)
@@ -260,8 +271,8 @@ func TestListFiles_TotalExactWithoutCount(t *testing.T) {
 	if len(docs) != 0 {
 		t.Errorf("past-the-end page returned %d documents, want 0", len(docs))
 	}
-	if total != int64(len(all)) {
-		t.Errorf("past-the-end page: total = %d, want %d", total, len(all))
+	if total != int64(len(otherAll)) {
+		t.Errorf("past-the-end page: total = %d, want %d", total, len(otherAll))
 	}
 }
 
