@@ -44,6 +44,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -232,12 +233,14 @@ func (d *DiskIndex) BatchUpsert(ctx context.Context, items []model.IndexUpsert) 
 			return errors.New("payload chunk_id cannot be zero")
 		}
 	}
+	// Item validation stays ahead of the lock so a malformed batch is rejected
+	// without touching shared state. Reading d.path must NOT: Load assigns it
+	// under d.mu, so an unlocked read here races a concurrent reopen.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.path == "" {
 		return errors.New("disk index requires a path")
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	return d.appendBatch(items)
 }
 
@@ -401,6 +404,24 @@ func (d *DiskIndex) appendRecord(chunkID uint64, tombstone bool, vector []float3
 
 // ensureAppendEnd initialises d.appendEnd from the open file, writing the header
 // on a fresh/empty file. Caller holds the write lock.
+// syncDir fsyncs the directory holding path so a newly created file's directory
+// entry is durable. Syncing the file alone leaves a window where the contents
+// are on stable storage but the name is not, so a crash can lose a segment the
+// caller was told was durable. Best-effort: platforms that cannot open a
+// directory for read report no error rather than failing an otherwise good
+// write.
+func syncDir(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = dir.Close() }()
+	if err := dir.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return err
+	}
+	return nil
+}
+
 func (d *DiskIndex) ensureAppendEnd(f *os.File) error {
 	if d.appendEnd != 0 {
 		return nil
@@ -411,6 +432,12 @@ func (d *DiskIndex) ensureAppendEnd(f *os.File) error {
 	}
 	if info.Size() == 0 {
 		if err := writeHeader(f); err != nil {
+			return err
+		}
+		// The segment file was just created; persist its directory entry too, so
+		// the durability the batch barrier promises covers the file's existence
+		// and not only its contents.
+		if err := syncDir(d.path); err != nil {
 			return err
 		}
 		d.appendEnd = int64(headerLen)
@@ -768,17 +795,20 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 		return scanErr
 	}
 
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	// Drop a torn tail left by an ungraceful crash mid-append/mid-batch before
 	// anything appends after it, otherwise the garbage bytes would sit in the
 	// middle of the log and make every later scan stop short of the new records.
+	//
+	// This runs INSIDE the critical section: truncating outside it lets a
+	// concurrent durable append land past end between the scan and the truncate,
+	// and the truncate would then silently destroy it.
 	if torn {
 		if err := os.Truncate(path, end); err != nil {
 			return fmt.Errorf("diskindex: truncate torn segment tail at %d: %w", end, err)
 		}
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	if err := d.invalidateReaderLocked(); err != nil {
 		return err
 	}
