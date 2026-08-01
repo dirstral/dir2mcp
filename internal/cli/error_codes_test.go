@@ -128,7 +128,12 @@ func TestWriteStoreInitError_UnrelatedErrorKeepsGenericCode(t *testing.T) {
 	writeStoreInitError(&stderr, true, exitIndexLoadFailure,
 		errors.New("disk full"), "initialize metadata store: disk full")
 
-	if got := decodeCLIErrorCode(t, stderr.Bytes()); got == protocol.ErrorCodeIndexVersionMismatch {
-		t.Errorf("unrelated error was mislabelled %q", got)
+	// Assert the exact expected label, not merely "not the mismatch code": a
+	// weaker check would pass if the helper started emitting some third, equally
+	// wrong code. exitIndexLoadFailure has no dedicated label, so exitCodeLabel
+	// maps it to GENERIC_ERROR, which is exactly the pre-fix behaviour that must
+	// survive for errors this helper does not classify.
+	if got, want := decodeCLIErrorCode(t, stderr.Bytes()), exitCodeLabel(exitIndexLoadFailure); got != want {
+		t.Errorf("unrelated error: code = %q, want %q", got, want)
 	}
 }
