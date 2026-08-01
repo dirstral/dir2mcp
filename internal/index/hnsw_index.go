@@ -117,9 +117,16 @@ type hnswSnapshot struct {
 	Identity string
 }
 
-// NewHNSWIndex creates an empty in-memory HNSW index. The optional
-// path argument is used by Save/Load; if non-empty those methods will
-// persist to the given file.
+// NewHNSWIndex creates an empty in-memory index. Despite the type/function
+// name (kept for historical/on-disk-format compatibility rather than renamed;
+// issue #429 F3), this does not build an HNSW graph and is not an approximate
+// nearest-neighbor structure: Search performs an exhaustive brute-force cosine
+// scan over every stored vector, so query cost is linear in the number of
+// vectors. That makes recall exact (no ANN recall/latency trade-off to tune),
+// at the cost of not scaling sub-linearly the way the qdrant backend does.
+// (pgvector is ANN only up to pgvector's 2000-dimension index limit; above it
+// that backend also falls back to an exact sequential scan.) The optional path argument is used by Save/Load; if non-empty those
+// methods will persist to the given file.
 func NewHNSWIndex(path string) *HNSWIndex {
 	return &HNSWIndex{
 		path:                path,
