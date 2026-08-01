@@ -421,6 +421,18 @@ func sqliteDSN(path string) string {
 	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 }
 
+// sqliteReadOnlyDSN is sqliteDSN plus query_only, which makes SQLite itself
+// reject any write attempted on the connection.
+//
+// Without it the read pool is read-only by convention alone: the connections
+// are ordinary read/write handles, so a future call site could route a write
+// through readDB and silently reintroduce the multi-writer SQLITE_BUSY that
+// SetMaxOpenConns(1) exists to prevent. query_only turns that latent mistake
+// into an immediate, obvious error at the point it is written.
+func sqliteReadOnlyDSN(path string) string {
+	return sqliteDSN(path) + "&_pragma=query_only(1)"
+}
+
 func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
@@ -466,7 +478,7 @@ func openDB(ctx context.Context, path string) (*sql.DB, error) {
 // what lets these readers proceed while the writer holds its transaction, and
 // opening a pool against a future-schema database would defeat the tripwire.
 func openReadDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", sqliteDSN(path))
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
 	if err != nil {
 		return nil, err
 	}

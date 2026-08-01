@@ -144,3 +144,33 @@ func TestReadPool_ClosedStoreClosesBothHandles(t *testing.T) {
 		t.Error("read pool still usable after Close; it was not closed")
 	}
 }
+
+// TestReadPool_RejectsWrites pins that the pool is read-only by ENFORCEMENT and
+// not merely by convention. Without PRAGMA query_only the pooled connections are
+// ordinary read/write handles, so a future call site could route a write through
+// them and silently reintroduce the multi-writer SQLITE_BUSY contention that the
+// single-connection writer exists to prevent. This turns that latent mistake
+// into an immediate error.
+func TestReadPool_RejectsWrites(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	writer, reader, _, err := st.HandlesForTest(ctx)
+	if err != nil {
+		t.Fatalf("HandlesForTest: %v", err)
+	}
+	if reader == nil {
+		t.Fatal("read pool was not opened")
+	}
+
+	// The same statement must succeed on the writer and fail on the pool, so the
+	// test cannot pass because the statement was invalid for some other reason.
+	if _, err := writer.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS read_pool_probe(id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("writer must accept the probe statement: %v", err)
+	}
+	if _, err := reader.ExecContext(ctx,
+		`INSERT INTO read_pool_probe(id) VALUES (1)`); err == nil {
+		t.Error("the read pool accepted a write; it is read-only by convention only")
+	}
+}
