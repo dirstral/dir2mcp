@@ -646,17 +646,27 @@ An optional post-fusion **reranking** stage can re-score retrieval candidates wi
 - Env overrides: `COHERE_API_KEY=...` auto-enables; `DIR2MCP_RERANK_ENABLED=false` opts out even with a credential; `DIR2MCP_RERANK_MODEL=...` overrides the model. Env wins over YAML for the key; the key is a secret and is never written to the config snapshot.
 - For `index=both`, reranking is applied once to the merged candidate pool. Ordering is deterministic (relevance desc, then `chunk_id`).
 
-### Relevance floor (optional)
+### Relevance floor and insufficient-evidence abstention
 
-An optional **relevance floor** drops low-similarity candidate hits before they reach the model, so a query with no strongly-relevant chunks returns fewer (or zero) results instead of diluting the answer with weak context. It is **server-side and config-only** — not an MCP tool parameter, so it changes no tool input/output schema.
+Two separate controls decide what counts as evidence (SPEC §9.4.3). Both are **server-side** — neither is an MCP tool parameter, so neither changes a tool input/output schema.
 
-- The floor is applied **last**, after scoring/fusion, reranking, and dedup/truncation, using each hit's final (post-rerank) score. A hit whose score equals the floor is **kept** (strict less-than drops).
-- **Default `0` = disabled** (pass-through): behavior is unchanged unless you configure it. A negative value is rejected as invalid config.
+**1. The relevance floor (`retrieval.min_score`) is a RELATIVE pruning control.** It drops low-scoring candidate hits before they reach the model, so a query with no strongly-relevant chunks returns fewer results instead of diluting the answer with weak context.
+
+- The floor is applied **last**, after scoring/fusion, reranking, decay, and dedup/truncation, and compares each hit's final score **min-max normalized over the result set**. Raw scores are incommensurable across retrieval modes (cosine ≈ `0..1`, RRF max ≈ `0.033`, a provider-specific rerank scale), so normalizing is what makes one configured number mean the same thing in every mode. A hit whose normalized score equals the floor is **kept** (strict less-than drops).
+- It **ships enabled** at `0.05`, i.e. "drop hits sitting in the bottom 5% of the observed score range". Because normalization maps the weakest hit to `0`, that also always drops the weakest hit of a non-degenerate set; a degenerate all-equal set normalizes to all-`1` and survives in full. Set `0` to disable it explicitly. Values outside `[0,1]` are rejected as invalid config.
+- Being relative, this floor **cannot** express "the best hit is too weak": the top hit normalizes to `1.0` by construction, so some hit always clears any floor. That is the job of the second control.
 
   ```yaml
   retrieval:
-    min_score: 0.0   # 0 disables; e.g. 0.4 drops hits scoring below 0.4
+    min_score: 0.05   # ships enabled; 0 disables; 1 keeps only the top-scoring hit(s)
   ```
+
+**2. Abstention uses an ABSOLUTE evidence threshold.** When retrieval returns candidates but none of them is strong enough on an absolute scale, `ask` does not generate an answer from them: it returns an explicit *insufficient evidence* answer with an **empty `citations` array** (a normal result, not an error), and keeps the rejected candidates in `hits` so you can see what was turned down. Its wording differs from the empty-corpus answer, so a caller can tell "I found nothing" apart from "I found material and judged it too weak".
+
+- **Signal and scale:** the hit's own `(query, chunk)` score, tagged with the scale it is on. `cosine` is the vector index's query/chunk cosine similarity; `rerank` is the reranker's relevance score for the pair. A candidate that reached the result set only through lexical BM25 carries no absolute signal (an FTS5 `bm25()` score is corpus-relative, and an RRF score encodes rank rather than relevance).
+- **Shipped values:** `cosine ≥ 0.05`, `rerank ≥ 0.02`. They are deliberately conservative, because embedding cosine baselines are provider-dependent and a tighter default would make the guard silently corpus-specific. They are server constants and are **not** operator-configurable; `retrieval.min_score` configures the pruning floor only.
+- **Aggregation:** the eligible set clears the threshold when its **strongest** hit does, each hit measured against the threshold for its **own** scale (one response may legitimately carry several scales at once).
+- **Blind spot:** when no eligible hit carries an absolute signal at all, the guard fails **open** and the answer is generated. Suppressing answers on a corpus whose vector index is simply unavailable would be the worse failure.
 
 An optional **recency time-decay** boosts newer content for dated corpora (news, logs, changelogs, meeting notes). It is **server-side and config-only** — not an MCP tool parameter, so it changes no tool input/output schema.
 
