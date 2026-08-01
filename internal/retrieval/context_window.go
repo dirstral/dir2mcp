@@ -59,10 +59,13 @@ func matchCenteredWindow(text, query string, budget int) string {
 	if len(runes) <= budget {
 		return text
 	}
-	inner := budget
-	if inner > ragWindowEllipsisReserve*2 {
-		inner -= ragWindowEllipsisReserve
+	// Reserve for the ellipsis markers exactly once. A budget too small to hold
+	// them cannot carry a marked window at all, so fall back to a bounded head
+	// truncation rather than returning more runes than the caller budgeted.
+	if budget <= ragWindowEllipsisReserve {
+		return truncateSnippet(text, budget)
 	}
+	inner := budget - ragWindowEllipsisReserve
 	positions, weights := termMatchPositions(runes, queryMatchTerms(query))
 	if len(positions) == 0 {
 		return truncateSnippet(text, budget)

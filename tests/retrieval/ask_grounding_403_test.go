@@ -52,6 +52,107 @@ func TestAsk_RebuildsModelAuthoredSourcesFooter(t *testing.T) {
 	}
 }
 
+// TestAsk_KeepsProseReferencesLineInBody guards the footer-stripping rule
+// against over-reach: the scan walks backwards from the end of the answer, so a
+// prose line such as "References: RFC 7231" sitting above a bulleted list must
+// NOT be mistaken for an attribution footer and take the rest of the answer with
+// it. A candidate footer has to name a document (or be a bare label) to qualify.
+func TestAsk_KeepsProseReferencesLineInBody(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+
+	body := strings.Join([]string{
+		"The header semantics are defined upstream [docs/a.md].",
+		"References: RFC 7231 covers the caching rules.",
+		"",
+		"- first consequence",
+		"- second consequence",
+	}, "\n")
+	gen := &fakeGenerator{out: body}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "docs/a.md", Snippet: "alpha"})
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if !strings.Contains(got.Answer, "References: RFC 7231 covers the caching rules.") {
+		t.Fatalf("prose References line was stripped as a footer: %q", got.Answer)
+	}
+	if !strings.Contains(got.Answer, "- second consequence") {
+		t.Fatalf("answer body was truncated by footer stripping: %q", got.Answer)
+	}
+	if !strings.HasSuffix(got.Answer, "Sources: [docs/a.md]") {
+		t.Fatalf("expected the rebuilt footer appended after the body, got %q", got.Answer)
+	}
+}
+
+// TestAsk_StripsBareLabelSourcesFooter covers the other footer shape a model
+// emits: a bare "Sources:" label with the documents listed on following lines.
+// It must be removed and rebuilt from the in-context set rather than left in
+// place beside the server's own footer.
+func TestAsk_StripsBareLabelSourcesFooter(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+
+	gen := &fakeGenerator{out: "Answer body [docs/a.md]\n\nSources:\n- docs/a.md\n- ghost/unretrieved.pdf"}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "docs/a.md", Snippet: "alpha"})
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if strings.Contains(got.Answer, "ghost/unretrieved.pdf") {
+		t.Fatalf("model-authored footer leaked a document that was never in context: %q", got.Answer)
+	}
+	if strings.Count(got.Answer, "Sources:") != 1 {
+		t.Fatalf("expected exactly one footer, got %q", got.Answer)
+	}
+	if !strings.HasSuffix(got.Answer, "Sources: [docs/a.md]") {
+		t.Fatalf("expected the footer rebuilt from the in-context set, got %q", got.Answer)
+	}
+}
+
+// TestAsk_ContextSectionStaysWithinBudget pins the per-document budget contract
+// of the windowing path: whatever window is selected, the assembled Context
+// section must not exceed the configured max_context_chars.
+func TestAsk_ContextSectionStaysWithinBudget(t *testing.T) {
+	full := strings.Repeat("padding sentence with clause words. ", 200)
+	idx := index.NewHNSWIndex("")
+	store := &fullTextStore{text: map[uint64]string{}}
+	for id := uint64(1); id <= 4; id++ {
+		addVec(t, idx, id, []float32{1, float32(id) / 100})
+		store.text[id] = full
+	}
+
+	for _, budget := range []int{80, 120, 400, 1000} {
+		gen := &fakeGenerator{out: "ok"}
+		svc := retrieval.NewService(store, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+			"mistral-embed": {1, 0},
+		}}, gen)
+		for id := uint64(1); id <= 4; id++ {
+			svc.SetChunkMetadata(id, model.SearchHit{ChunkID: id, RelPath: "docs/d.md", Snippet: "padding"})
+		}
+		svc.SetMaxContextChars(budget)
+
+		if _, err := svc.Ask(context.Background(), "clause words", model.SearchQuery{K: 4}); err != nil {
+			t.Fatalf("Ask(budget=%d) failed: %v", budget, err)
+		}
+		start := strings.LastIndex(gen.lastPrompt, "Context:\n")
+		if start == -1 {
+			t.Fatalf("budget=%d: expected a Context section", budget)
+		}
+		if got := len([]rune(gen.lastPrompt[start+len("Context:\n"):])); got > budget {
+			t.Fatalf("budget=%d: context section is %d runes, over budget", budget, got)
+		}
+	}
+}
+
 // TestAsk_AbstainsWhenEvidenceIsAbsolutelyWeak pins issue #403 F4 / SPEC §9.4.3:
 // when every eligible hit falls below the ABSOLUTE evidence threshold, ask must
 // not generate an answer from them. It returns an explicit insufficient-evidence

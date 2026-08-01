@@ -3240,7 +3240,13 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit) []st
 		limit = ragMaxContextDocs
 	}
 	texts := make([]string, limit)
-	fetcher, _ := s.store.(chunkByIDer)
+	// Copy the store under the guard like every other accessor in this file
+	// (applyRecencyDecay, rerankPool): the field can be reassigned after
+	// construction, so an unguarded read races with that assignment.
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	fetcher, _ := store.(chunkByIDer)
 	if fetcher == nil {
 		return texts
 	}
@@ -3593,9 +3599,19 @@ var footerContinuationRe = regexp.MustCompile(`^\s*(?:[-*\x{2022}]|\d+[.)]|\[)`)
 // rebuilding it from the in-context citation set is what keeps the emitted
 // footer derived from what the server actually supplied.
 //
-// Only a TRAILING footer is removed: the header line must be followed by nothing
-// but blank lines, list items, or bracketed-tag lines. A "Sources:" that
-// introduces a prose paragraph is body text and is left alone.
+// Only a TRAILING footer is removed, and only when it really is one. Three
+// conditions must hold together, because the scan walks backwards and would
+// otherwise delete the whole tail of the answer at the first `References:` it
+// meets in the body:
+//
+//  1. the header line matches sourcesFooterRe;
+//  2. everything after it is blank, a list item, or a bracketed-tag line;
+//  3. the block either NAMES a document (a path-shaped token) or is a bare
+//     label with no trailing text of its own.
+//
+// Condition 3 is what keeps a prose line such as "References: RFC 7231" sitting
+// above a bulleted list from being read as an attribution footer: it names no
+// document and carries prose after the label, so it is body text.
 func stripSourcesFooter(answer string) string {
 	lines := strings.Split(answer, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -3605,9 +3621,35 @@ func stripSourcesFooter(answer string) string {
 		if !isFooterBlockTail(lines[i+1:]) {
 			break
 		}
+		if !footerNamesDocument(lines[i:]) && !bareFooterLabelRe.MatchString(lines[i]) {
+			break
+		}
 		return strings.TrimRight(strings.Join(lines[:i], "\n"), " \t\n")
 	}
 	return answer
+}
+
+// bareFooterLabelRe matches a footer header carrying nothing but the label, the
+// shape a model emits when it opens the block and lists the documents on the
+// following lines.
+var bareFooterLabelRe = regexp.MustCompile(`(?i)^\s*(?:sources?|references?)\s*:\s*$`)
+
+// footerTokenRe splits a candidate footer line into the tokens that could name a
+// document, dropping the punctuation a list separator adds around them.
+var footerTokenRe = regexp.MustCompile(`[^\s,;()\[\]]+`)
+
+// footerNamesDocument reports whether a candidate footer block names at least
+// one document, i.e. carries a token shaped like a path (a separator or a file
+// extension). A block that names none is prose, not an attribution footer.
+func footerNamesDocument(lines []string) bool {
+	for _, line := range lines {
+		for _, tok := range footerTokenRe.FindAllString(line, -1) {
+			if looksLikeCitationPath(strings.Trim(tok, ".,;:")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isFooterBlockTail reports whether every remaining line can belong to an

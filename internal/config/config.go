@@ -280,7 +280,9 @@ type Config struct {
 	// modes — cosine (~0..1) vs RRF (max ≈ 0.033) vs a provider rerank scale — so a
 	// single raw threshold would silently wipe out all hybrid/RRF results (#411).
 	// It is config-only (NOT an MCP tool parameter) so no tool input/output schema
-	// changes. Negative values are CONFIG_INVALID.
+	// changes. Values outside [0,1] are CONFIG_INVALID: a negative floor would
+	// never drop anything, and a floor above 1 would silently drop every hit
+	// (see validateMinScore).
 	//
 	// SPEC §9.4.3 splits this control in two and requires this one to ship
 	// ENABLED, so it defaults to defaultRetrievalMinScore rather than to 0.
