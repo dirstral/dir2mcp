@@ -609,7 +609,7 @@ type builtIndex struct {
 func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, builtIndex, builtIndex, int) {
 	st := a.storeForConfig(*cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
+		writeStoreInitError(a.stderr, jsonOutput, exitIndexLoadFailure, err, fmt.Sprintf("initialize metadata store: %v", err))
 		return nil, builtIndex{}, builtIndex{}, exitIndexLoadFailure
 	}
 

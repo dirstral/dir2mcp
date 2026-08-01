@@ -46,7 +46,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		st := a.storeForConfig(cfg)
 		defer func() { _ = st.Close() }()
 		if initErr := st.Init(ctx); initErr != nil && !errors.Is(initErr, model.ErrNotImplemented) {
-			writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", initErr))
+			writeStoreInitError(a.stderr, global.jsonOutput, exitIndexLoadFailure, initErr, fmt.Sprintf("initialize metadata store: %v", initErr))
 			return exitIndexLoadFailure
 		}
 		// status --json must emit a single JSON object, not an NDJSON stream.

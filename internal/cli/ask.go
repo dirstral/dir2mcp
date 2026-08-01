@@ -73,7 +73,7 @@ func (a *App) runAskLocal(ctx context.Context, global globalOptions, opts askOpt
 	st := a.storeForConfig(cfg)
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		writeCLIError(a.stderr, global.jsonOutput, exitIndexLoadFailure, fmt.Sprintf("initialize metadata store: %v", err))
+		writeStoreInitError(a.stderr, global.jsonOutput, exitIndexLoadFailure, err, fmt.Sprintf("initialize metadata store: %v", err))
 		return exitIndexLoadFailure
 	}
 
