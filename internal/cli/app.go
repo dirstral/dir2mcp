@@ -1129,7 +1129,7 @@ func writeStoreInitError(stderr io.Writer, jsonOutput bool, exitCode int, err er
 		// The remedy is already in mismatch.Error() ("reindex the corpus"), so the
 		// hint names the command rather than restating the diagnosis.
 		writeCLIErrorWithCode(stderr, jsonOutput, exitCode, mismatch.Code(), message,
-			"run `dir2mcp reindex --force` with a compatible binary, or point --state-dir at a fresh directory")
+			"run `dir2mcp reindex` with a compatible binary, or point --state-dir at a fresh directory")
 		return
 	}
 	writeCLIError(stderr, jsonOutput, exitCode, message)
