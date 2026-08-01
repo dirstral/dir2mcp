@@ -3267,7 +3267,7 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit) []st
 // generator and returns, alongside the prompt string, the indices (into hits)
 // of the chunks that were actually placed in the context window. Only those
 // chunks were seen by the model, so callers MUST restrict the answer's
-// citations to this set — a chunk dropped by the doc-count cap
+// citations to this set, since a chunk dropped by the doc-count cap
 // (ragMaxContextDocs) or the maxContextChars budget was never given to the LLM
 // and citing it overstates grounding (issue #403 F1).
 //

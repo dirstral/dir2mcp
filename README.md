@@ -648,7 +648,7 @@ An optional post-fusion **reranking** stage can re-score retrieval candidates wi
 
 ### Relevance floor and insufficient-evidence abstention
 
-Two separate controls decide what counts as evidence (SPEC §9.4.3). Both are **server-side** — neither is an MCP tool parameter, so neither changes a tool input/output schema.
+Two separate controls decide what counts as evidence (SPEC §9.4.3). Both are **server-side**: neither is an MCP tool parameter, so neither changes a tool input/output schema.
 
 **1. The relevance floor (`retrieval.min_score`) is a RELATIVE pruning control.** It drops low-scoring candidate hits before they reach the model, so a query with no strongly-relevant chunks returns fewer results instead of diluting the answer with weak context.
 
