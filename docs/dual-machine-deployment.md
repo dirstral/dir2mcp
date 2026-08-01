@@ -196,7 +196,7 @@ on relocation alone. (`dirstral-spec/docs/SPEC.md` §7.8.)
 | `memory` (default) | A | none | Exact, exhaustive scan | In-memory, pure-Go, snapshotted to StateDir. Zero-infra default. |
 | `disk` | B | none | Exact, exhaustive scan | Pure-Go on-disk / memmapped single-node index; for corpora too large for RAM. |
 | `qdrant` | C | required | Approximate (ANN) | External Qdrant collection. |
-| `pgvector` | C | required | Approximate (ANN) | External PostgreSQL + pgvector. |
+| `pgvector` | C | required | Approximate (ANN), see note | External PostgreSQL + pgvector. |
 
 `memory` and `disk` keep all index state under the local StateDir and need no
 external service. The Tier-C backends are **optional** and connect to an external
@@ -242,8 +242,16 @@ hardware, embedding dimensionality, and concurrent query load), expect the per-q
 around **100K–200K chunks** (roughly **0.5–4s per query** in that range) and to
 reach multi-second latency around **~1M chunks**. If your corpus is at or
 approaching that order of magnitude and query latency matters, switch
-`index.backend` to `qdrant` or `pgvector`: both build real ANN indexes and stay
+`index.backend` to `qdrant` or `pgvector`, which build real ANN indexes and stay
 sub-linear as the corpus grows.
+
+One caveat on `pgvector`: its `hnsw`/`ivfflat` indexes are capped at
+**2000 dimensions** (`HNSWMaxDim`). Above that, dir2mcp skips the ANN index and
+warns, and the table answers queries by **exact sequential scan**, so you are
+back to linear cost with an external database in front of it. This is not a
+corner case: `gemini-embedding-001` defaults to 3072 dimensions. If you need ANN
+on `pgvector`, request a smaller Matryoshka output dimension (`<= 2000`) for the
+embedding model, or use `qdrant`, which has no such limit.
 
 ### 2.5 Start the daemon and expose only the MCP endpoint
 
