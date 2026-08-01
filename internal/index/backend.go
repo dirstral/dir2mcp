@@ -42,7 +42,7 @@ const (
 // PersistenceManager and reindex cleanup).
 //
 //   - "memory" (default): the in-memory reference (HNSWIndex; the name is
-//     historical — it performs an exhaustive brute-force cosine scan, not
+//     historical, and it performs an exhaustive brute-force cosine scan, not
 //     approximate HNSW search), persisted to the versioned
 //     vectors_<kind>.v2.hnsw snapshot. This path is byte-identical to legacy
 //     behavior.

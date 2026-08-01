@@ -237,14 +237,13 @@ error: recall is exact, always identical to a brute-force scan over the whole
 corpus. The trade-off is that query cost grows **linearly** with the number of
 indexed chunks, because every query touches every vector.
 
-As a rough order-of-magnitude guide — not a benchmark, and actual numbers
-depend on hardware, embedding dimensionality, and concurrent query load —
-expect the per-query cost of the exhaustive scan to become noticeable somewhere
+As a rough order-of-magnitude guide (not a benchmark; actual numbers depend on
+hardware, embedding dimensionality, and concurrent query load), expect the per-query cost of the exhaustive scan to become noticeable somewhere
 around **100K–200K chunks** (roughly **0.5–4s per query** in that range) and to
 reach multi-second latency around **~1M chunks**. If your corpus is at or
 approaching that order of magnitude and query latency matters, switch
-`index.backend` to `qdrant` or `pgvector` — both build real ANN indexes and
-stay sub-linear as the corpus grows.
+`index.backend` to `qdrant` or `pgvector`: both build real ANN indexes and stay
+sub-linear as the corpus grows.
 
 ### 2.5 Start the daemon and expose only the MCP endpoint
 
