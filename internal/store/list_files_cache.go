@@ -26,13 +26,21 @@ import (
 // *sql.Conn taken from the query_only read pool. When there is no read pool, or
 // the probe errors, the cache is bypassed entirely and every call recomputes,
 // which is exactly the pre-#429-F10 behaviour.
+//
+// Locking: probeMu owns the pinned connection and is the only lock ever held
+// across database I/O; mu guards the in-memory epoch and entries and is only
+// ever held for a few field assignments. The order is always probeMu then mu,
+// never the reverse. Keeping them separate means a cache lookup never waits
+// behind someone else's probe.
 type listFilesCache struct {
-	mu sync.Mutex
+	probeMu sync.Mutex
 	// conn is pinned for the store's lifetime because data_version readings are
-	// only comparable when they come from the same connection. It costs one slot
-	// of the read pool (sqliteReadPoolSize), which is why the probe is a single
-	// pragma read and never anything heavier.
-	conn    *sql.Conn
+	// only comparable when they come from the same connection. It belongs to the
+	// dedicated single-connection probe handle (SQLiteStore.vdb), so pinning it
+	// costs the read pool nothing.
+	conn *sql.Conn
+
+	mu      sync.Mutex
 	version int64
 	primed  bool
 	entries map[string]listFilesCacheEntry
@@ -70,43 +78,60 @@ const (
 // begin probes the database change counter and returns the epoch that lookup
 // and store must be called with. ok is false when the cache is unavailable; the
 // caller then computes everything from SQL and memoizes nothing.
-func (c *listFilesCache) begin(ctx context.Context, rdb *sql.DB) (epoch int64, ok bool) {
-	if rdb == nil {
+func (c *listFilesCache) begin(ctx context.Context, vdb *sql.DB) (epoch int64, ok bool) {
+	if vdb == nil {
 		return 0, false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+	return c.probeLocked(ctx, vdb)
+}
 
+// probeLocked reads data_version on the pinned connection and rolls the epoch
+// forward, dropping every memo when a commit has landed. c.probeMu must be held,
+// which is also what keeps concurrent probes from applying their epochs out of
+// order (data_version values are only defined for equality comparison, so a
+// later reading cannot be recognized as newer).
+func (c *listFilesCache) probeLocked(ctx context.Context, vdb *sql.DB) (int64, bool) {
 	if c.conn == nil {
-		conn, err := rdb.Conn(ctx)
+		conn, err := vdb.Conn(ctx)
 		if err != nil {
 			return 0, false
 		}
 		c.conn = conn
 	}
-	return c.probeLocked(ctx)
-}
-
-// probeLocked reads data_version on the pinned connection and rolls the epoch
-// forward, dropping every memo when a commit has landed. c.mu must be held and
-// c.conn must be non-nil.
-func (c *listFilesCache) probeLocked(ctx context.Context) (int64, bool) {
 	var version int64
 	if err := c.conn.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&version); err != nil {
 		// A broken probe connection must not disable the cache forever: drop it so
 		// the next call re-pins, and bypass the cache for this call.
 		_ = c.conn.Close()
 		c.conn = nil
-		c.entries = nil
-		c.primed = false
+		c.invalidate()
 		return 0, false
 	}
+	c.roll(version)
+	return version, true
+}
+
+// roll makes version the current epoch, dropping every memo when it differs
+// from the epoch they were computed in.
+func (c *listFilesCache) roll(version int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.primed || version != c.version {
 		c.entries = nil
 		c.version = version
 		c.primed = true
 	}
-	return version, true
+}
+
+// invalidate drops every memo and un-primes the epoch, so nothing is reused
+// until a probe succeeds again.
+func (c *listFilesCache) invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = nil
+	c.primed = false
 }
 
 // lookup returns the memoized entry for key, if it was computed in the epoch
@@ -127,14 +152,20 @@ func (c *listFilesCache) lookup(epoch int64, key string) (listFilesCacheEntry, b
 // the caller's own computation: such an entry describes a newer database state
 // than epoch, and memoizing it under epoch could hand a concurrent caller a
 // total that does not match the rows it sees. Dropping it costs one recount.
-func (c *listFilesCache) store(ctx context.Context, epoch int64, key string, entry listFilesCacheEntry) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.primed || c.conn == nil {
+func (c *listFilesCache) store(ctx context.Context, vdb *sql.DB, epoch int64, key string, entry listFilesCacheEntry) {
+	if vdb == nil {
 		return
 	}
-	current, ok := c.probeLocked(ctx)
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+	current, ok := c.probeLocked(ctx, vdb)
 	if !ok || current != epoch {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.primed || c.version != epoch {
 		return
 	}
 	if len(c.entries) >= listFilesCacheMaxEntries {
@@ -150,12 +181,14 @@ func (c *listFilesCache) store(ctx context.Context, epoch int64, key string, ent
 // before the handle that connection came from is closed, and it leaves the cache
 // usable again if the store is later reopened.
 func (c *listFilesCache) reset() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
 	if c.conn != nil {
 		_ = c.conn.Close()
 		c.conn = nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.entries = nil
 	c.version = 0
 	c.primed = false

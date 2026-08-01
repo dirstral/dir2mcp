@@ -2251,7 +2251,8 @@ func (s *SQLiteStore) listFilesSQLPaged(
 ) ([]model.Document, int64, error) {
 	// Probe before the page query so a memo hit is pinned to a state no newer
 	// than the rows it is returned with.
-	epoch, cacheable := s.listCache.begin(ctx, s.versionProbeDB())
+	probe := s.versionProbeDB()
+	epoch, cacheable := s.listCache.begin(ctx, probe)
 
 	query := selectCols + whereClause + " ORDER BY rel_path LIMIT ? OFFSET ?"
 	args := append(append([]any{}, prefixArgs...), limit, offset)
@@ -2289,7 +2290,7 @@ func (s *SQLiteStore) listFilesSQLPaged(
 		}
 	}
 	if cacheable {
-		s.listCache.store(ctx, epoch, key, listFilesCacheEntry{total: total})
+		s.listCache.store(ctx, probe, epoch, key, listFilesCacheEntry{total: total})
 	}
 	return docs, total, nil
 }
@@ -2346,7 +2347,8 @@ func (s *SQLiteStore) listFilesGlobPaged(
 	key string,
 	limit, offset int,
 ) ([]model.Document, int64, error) {
-	epoch, cacheable := s.listCache.begin(ctx, s.versionProbeDB())
+	probe := s.versionProbeDB()
+	epoch, cacheable := s.listCache.begin(ctx, probe)
 	if cacheable {
 		if entry, ok := s.listCache.lookup(epoch, key); ok {
 			start, skip := entry.startFor(offset)
@@ -2363,7 +2365,7 @@ func (s *SQLiteStore) listFilesGlobPaged(
 		return nil, 0, err
 	}
 	if cacheable {
-		s.listCache.store(ctx, epoch, key, entry)
+		s.listCache.store(ctx, probe, epoch, key, entry)
 	}
 	return docs, entry.total, nil
 }
