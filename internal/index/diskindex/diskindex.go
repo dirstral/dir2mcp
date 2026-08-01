@@ -44,6 +44,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -118,13 +119,32 @@ type DiskIndex struct {
 	lastSaveTime        time.Time
 }
 
-// compile-time assertions: DiskIndex satisfies the core contract and both
-// optional capabilities (issue #246/#247).
+// compile-time assertions: DiskIndex satisfies the core contract and the
+// optional capabilities (issue #246/#247/#429 F8).
 var (
 	_ model.Index          = (*DiskIndex)(nil)
 	_ model.Persistable    = (*DiskIndex)(nil)
 	_ model.FilteringIndex = (*DiskIndex)(nil)
+	_ model.BatchUpserter  = (*DiskIndex)(nil)
 )
+
+// SetSyncHookForTest replaces the fsync used as the durability barrier and
+// returns a function restoring the previous one.
+//
+// It is exported solely so the batch tests can count fsyncs from tests/ rather
+// than in-package: AGENTS.md requires new test files to live under tests/, and
+// counting durability barriers is the only way to pin "one fsync per batch
+// instead of one per record" (#429 F8) as an observable property. Production
+// code never calls this; the zero state is a real f.Sync().
+func SetSyncHookForTest(fn func(*os.File) error) (restore func()) {
+	prev := syncFile
+	syncFile = fn
+	return func() { syncFile = prev }
+}
+
+// syncFile fsyncs f. It is a package-level var solely so SetSyncHookForTest can
+// swap it; every production path leaves it at the real f.Sync() below.
+var syncFile = func(f *os.File) error { return f.Sync() }
 
 // New creates an empty disk index. path is the segment file used by Save/Load
 // and the append log; it may be empty for a purely in-process instance, in
@@ -181,6 +201,138 @@ func (d *DiskIndex) Upsert(ctx context.Context, vector []float32, payload model.
 	return d.appendRecord(payload.ChunkID, false, vector, payload)
 }
 
+// BatchUpsert appends every item to the segment through ONE file open, ONE
+// buffered write pass and ONE fsync (issue #429 F8), instead of the open +
+// write + fsync + close that Upsert pays per record. Ingest upserts one vector
+// per chunk, so the per-record barrier capped disk-backend indexing at the
+// fsync rate; batching moves that cap to once per embed batch.
+//
+// Durability is honestly per BATCH, not per item: when this returns nil every
+// item is on stable storage, but a crash part-way through loses the whole batch
+// (the caller's chunks simply stay pending and are re-embedded; see
+// EmbeddingWorker.indexChunks, which only marks chunks embedded after this
+// returns). Nothing is ever silently half-applied: a write or fsync failure
+// truncates the segment back to its pre-batch length so the log can never be
+// scanned as a mix of applied and torn records, and the in-memory locator map
+// is only advanced after the barrier succeeds.
+func (d *DiskIndex) BatchUpsert(ctx context.Context, items []model.IndexUpsert) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	// Validate the whole batch before touching the file so a malformed item
+	// cannot leave a partially written segment behind (Upsert rejects the same
+	// two cases).
+	for i := range items {
+		if len(items[i].Vector) == 0 {
+			return errors.New("vector cannot be empty")
+		}
+		if items[i].Payload.ChunkID == 0 {
+			return errors.New("payload chunk_id cannot be zero")
+		}
+	}
+	// Item validation stays ahead of the lock so a malformed batch is rejected
+	// without touching shared state. Reading d.path must NOT: Load assigns it
+	// under d.mu, so an unlocked read here races a concurrent reopen.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.path == "" {
+		return errors.New("disk index requires a path")
+	}
+	return d.appendBatch(items)
+}
+
+// appendBatch writes every item as a record, fsyncs once, and then publishes the
+// new locators. On any failure it rolls the segment back to its pre-batch length
+// and leaves the in-memory state untouched. Caller holds the write lock.
+func (d *DiskIndex) appendBatch(items []model.IndexUpsert) error {
+	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := d.ensureAppendEnd(f); err != nil {
+		return err
+	}
+	if _, err := f.Seek(d.appendEnd, io.SeekStart); err != nil {
+		return err
+	}
+
+	start := d.appendEnd
+	locs, end, werr := writeBatch(f, start, items)
+	if werr == nil {
+		// The single durability barrier for the whole batch.
+		werr = syncFile(f)
+	}
+	if werr != nil {
+		return d.rollbackBatch(f, start, werr)
+	}
+
+	// Published only now that the bytes are durable. Applying in slice order
+	// makes a repeated chunk ID within one batch resolve last-writer-wins,
+	// exactly as a sequence of Upserts would.
+	for i := range items {
+		d.locators[items[i].Payload.ChunkID] = locs[i]
+	}
+	d.appendEnd = end
+	// One mutation per item keeps the autosave delta accounting identical to the
+	// per-record path.
+	d.version += uint64(len(items))
+	// The mmap view is now stale (file grew); drop it so the next read re-maps.
+	return d.invalidateReaderLocked()
+}
+
+// writeBatch encodes every item into w through a single buffered writer, with
+// the first record landing at offset start. It returns one locator per item
+// (parallel to items) and the new end offset. It does not fsync: appendBatch
+// owns the batch's single durability barrier.
+func writeBatch(w io.Writer, start int64, items []model.IndexUpsert) ([]locator, int64, error) {
+	bw := bufio.NewWriter(w)
+	locs := make([]locator, len(items))
+	offset := start
+	for i := range items {
+		payloadBytes, err := encodePayload(items[i].Payload)
+		if err != nil {
+			return nil, 0, err
+		}
+		n, err := writeRecord(bw, items[i].Payload.ChunkID, false, items[i].Vector, payloadBytes)
+		if err != nil {
+			return nil, 0, err
+		}
+		locs[i] = locator{
+			offset:     offset,
+			vecLen:     uint32(len(items[i].Vector)),
+			payloadLen: uint32(len(payloadBytes)),
+		}
+		offset += int64(n)
+	}
+	if err := bw.Flush(); err != nil {
+		return nil, 0, err
+	}
+	return locs, offset, nil
+}
+
+// rollbackBatch truncates the segment back to its pre-batch length after a
+// failed batch and returns cause (joined with any rollback failure). d.locators
+// and d.appendEnd are never advanced before the fsync succeeds, so after the
+// truncation the in-memory state already matches the file again; only the mmap
+// view has to be dropped. Caller holds the write lock.
+func (d *DiskIndex) rollbackBatch(f *os.File, start int64, cause error) error {
+	if terr := f.Truncate(start); terr != nil {
+		return errors.Join(cause, fmt.Errorf("diskindex: rollback truncate to %d: %w", start, terr))
+	}
+	if serr := syncFile(f); serr != nil {
+		return errors.Join(cause, fmt.Errorf("diskindex: rollback sync: %w", serr))
+	}
+	if ierr := d.invalidateReaderLocked(); ierr != nil {
+		return errors.Join(cause, ierr)
+	}
+	return cause
+}
+
 // Delete writes a tombstone record for each id and drops the locator. Unknown
 // ids are ignored. Tombstones keep the on-disk log append-only and consistent;
 // space is reclaimed on the next Save (compaction).
@@ -230,7 +382,7 @@ func (d *DiskIndex) appendRecord(chunkID uint64, tombstone bool, vector []float3
 	if err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		return err
 	}
 	d.appendEnd += int64(n)
@@ -252,6 +404,24 @@ func (d *DiskIndex) appendRecord(chunkID uint64, tombstone bool, vector []float3
 
 // ensureAppendEnd initialises d.appendEnd from the open file, writing the header
 // on a fresh/empty file. Caller holds the write lock.
+// syncDir fsyncs the directory holding path so a newly created file's directory
+// entry is durable. Syncing the file alone leaves a window where the contents
+// are on stable storage but the name is not, so a crash can lose a segment the
+// caller was told was durable. Best-effort: platforms that cannot open a
+// directory for read report no error rather than failing an otherwise good
+// write.
+func syncDir(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = dir.Close() }()
+	if err := dir.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return err
+	}
+	return nil
+}
+
 func (d *DiskIndex) ensureAppendEnd(f *os.File) error {
 	if d.appendEnd != 0 {
 		return nil
@@ -262,6 +432,12 @@ func (d *DiskIndex) ensureAppendEnd(f *os.File) error {
 	}
 	if info.Size() == 0 {
 		if err := writeHeader(f); err != nil {
+			return err
+		}
+		// The segment file was just created; persist its directory entry too, so
+		// the durability the batch barrier promises covers the file's existence
+		// and not only its contents.
+		if err := syncDir(d.path); err != nil {
 			return err
 		}
 		d.appendEnd = int64(headerLen)
@@ -607,7 +783,7 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 		return errors.New("path is required")
 	}
 
-	locators, end, scanErr := scanSegment(path)
+	locators, end, torn, scanErr := scanSegment(path)
 	if scanErr != nil {
 		if errors.Is(scanErr, os.ErrNotExist) {
 			d.mu.Lock()
@@ -621,6 +797,18 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// Drop a torn tail left by an ungraceful crash mid-append/mid-batch before
+	// anything appends after it, otherwise the garbage bytes would sit in the
+	// middle of the log and make every later scan stop short of the new records.
+	//
+	// This runs INSIDE the critical section: truncating outside it lets a
+	// concurrent durable append land past end between the scan and the truncate,
+	// and the truncate would then silently destroy it.
+	if torn {
+		if err := os.Truncate(path, end); err != nil {
+			return fmt.Errorf("diskindex: truncate torn segment tail at %d: %w", end, err)
+		}
+	}
 	if err := d.invalidateReaderLocked(); err != nil {
 		return err
 	}
@@ -750,17 +938,33 @@ func readRecordAt(reader *mmap.ReaderAt, loc locator) ([]float32, model.IndexPay
 
 // scanSegment reads the segment header + record headers to rebuild the locator
 // map (last-writer-wins, tombstones drop entries) without retaining vectors. It
-// returns the locator map and the end-of-file offset.
-func scanSegment(path string) (map[uint64]locator, int64, error) {
+// returns the locator map, the offset just past the last COMPLETE record, and
+// whether the segment ended in a torn (partially written) record.
+//
+// A torn tail is not an error: the segment is an append log whose durability
+// barrier is per write (Upsert) or per batch (BatchUpsert, issue #429 F8), so an
+// ungraceful crash can leave a prefix of an unsynced batch in the file. Those
+// records belong to chunks the embed worker never marked embedded (it marks
+// only after the barrier returns), so dropping them loses nothing the metadata
+// store believes is indexed; the chunks are simply still pending and get
+// re-embedded. Erroring instead would make one torn record poison the whole
+// segment on load.
+// maxRecordBodyLen bounds a single record's body when scanning. Real records are
+// a vector plus a small payload (a 3072-dimension vector is about 12 KB), so 1
+// GiB is far above anything legitimate and far below the ~21.5 GB a corrupt
+// uint32 pair can encode.
+const maxRecordBodyLen = 1 << 30
+
+func scanSegment(path string) (map[uint64]locator, int64, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	defer func() { _ = f.Close() }()
 
 	r := bufio.NewReader(f)
 	if err := verifyHeader(r); err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
 	locators := make(map[uint64]locator)
@@ -769,17 +973,37 @@ func scanSegment(path string) (map[uint64]locator, int64, error) {
 	for {
 		if _, err := io.ReadFull(r, hdr); err != nil {
 			if errors.Is(err, io.EOF) {
-				break
+				return locators, offset, false, nil
 			}
-			return nil, 0, err
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				// Torn record header: stop at the last complete record.
+				return locators, offset, true, nil
+			}
+			return nil, 0, false, err
 		}
 		chunkID := binary.LittleEndian.Uint64(hdr[0:8])
 		tombstone := hdr[8] == 1
 		vecLen := binary.LittleEndian.Uint32(hdr[9:13])
 		payloadLen := binary.LittleEndian.Uint32(hdr[13:17])
 		bodyLen := int64(vecLen)*4 + int64(payloadLen)
+		// vecLen and payloadLen are uint32, so a corrupt header can encode a body
+		// near 21.5 GB. Discard takes an int, which is 32-bit on some platforms,
+		// where that value wraps and can go negative; bufio panics on a negative
+		// count, crashing Load instead of failing cleanly. Bound it first.
+		//
+		// An over-long body is treated as a torn tail rather than an error, which
+		// matches what the scan already does for every other unreadable record:
+		// stop at the last complete one. Startup then recovers instead of
+		// bricking, and only records at or after the damage are dropped.
+		if bodyLen < 0 || bodyLen > maxRecordBodyLen {
+			return locators, offset, true, nil
+		}
 		if _, err := r.Discard(int(bodyLen)); err != nil {
-			return nil, 0, fmt.Errorf("truncated record body for chunk %d: %w", chunkID, err)
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// Torn record body: stop at the last complete record.
+				return locators, offset, true, nil
+			}
+			return nil, 0, false, fmt.Errorf("truncated record body for chunk %d: %w", chunkID, err)
 		}
 		if tombstone {
 			delete(locators, chunkID)
@@ -788,7 +1012,6 @@ func scanSegment(path string) (map[uint64]locator, int64, error) {
 		}
 		offset += int64(recordHdrLen) + bodyLen
 	}
-	return locators, offset, nil
 }
 
 // verifyHeader reads and validates the segment magic + version.

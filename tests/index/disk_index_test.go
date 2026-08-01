@@ -331,10 +331,21 @@ func TestDiskIndex_LoadBadMagicErrors(t *testing.T) {
 	}
 }
 
-// TestDiskIndex_LoadTruncatedBodyErrors verifies a segment truncated mid-record
-// (a torn write) is reported as an error rather than panicking or silently
-// dropping data.
-func TestDiskIndex_LoadTruncatedBodyErrors(t *testing.T) {
+// TestDiskIndex_LoadTruncatedBodyRecovers verifies a segment truncated
+// mid-record (a torn write) loads to the last COMPLETE record instead of
+// panicking or erroring.
+//
+// This deliberately replaces the older "a torn tail is an error" expectation
+// (issue #429 F8). The batch path (BatchUpsert) trades one fsync per record for
+// one per batch, so an ungraceful crash can leave a prefix of a batch in the
+// file; failing the load would make the whole index unusable (the daemon exits
+// with exitIndexLoadFailure) after a crash that lost nothing. It loses nothing
+// because BatchUpsert returns only after its fsync and the embed worker marks
+// chunks embedded strictly after that returns: every record in a torn tail
+// belongs to a chunk still PENDING in sqlite, which is simply re-embedded. A
+// structurally wrong file (bad magic/version) is still a hard error; see
+// TestDiskIndex_LoadBadMagicErrors.
+func TestDiskIndex_LoadTruncatedBodyRecovers(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	segPath := filepath.Join(dir, diskindex.SegmentFileName("text"))
@@ -355,8 +366,30 @@ func TestDiskIndex_LoadTruncatedBodyErrors(t *testing.T) {
 
 	reopened := diskindex.New(segPath)
 	t.Cleanup(func() { _ = reopened.Close() })
-	if err := reopened.Load(ctx, segPath); err == nil {
-		t.Fatal("expected an error loading a truncated segment, got nil")
+	if err := reopened.Load(ctx, segPath); err != nil {
+		t.Fatalf("loading a segment with a torn tail must recover, got: %v", err)
+	}
+	// The torn record is dropped (it is the only one here), and the recovered
+	// segment is usable: a fresh append lands and survives another reopen.
+	hits, err := reopened.Search(ctx, []float32{1, 2, 3}, 10, model.Filter{})
+	if err != nil {
+		t.Fatalf("Search after recovery: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("hits = %+v, want none (the torn record must not be served)", hits)
+	}
+	mustUpsertDisk(t, reopened, model.IndexPayload{ChunkID: 2, RelPath: "b.md"}, []float32{4, 5, 6})
+	again := diskindex.New(segPath)
+	t.Cleanup(func() { _ = again.Close() })
+	if err := again.Load(ctx, segPath); err != nil {
+		t.Fatalf("Load after post-recovery append: %v", err)
+	}
+	hits, err = again.Search(ctx, []float32{4, 5, 6}, 10, model.Filter{})
+	if err != nil {
+		t.Fatalf("Search after reopen: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ChunkID != 2 {
+		t.Fatalf("hits = %+v, want the post-recovery record for chunk 2", hits)
 	}
 }
 
