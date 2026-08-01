@@ -623,7 +623,57 @@ func payloadFromTask(t model.ChunkTask) model.IndexPayload {
 // indexChunks adds each vector to the index and fires the OnIndexedChunk hook.
 // On an index error it marks the failed chunk and, if any chunks were already
 // added, marks those as embedded first.
+//
+// When the backend implements model.BatchUpserter (issue #429 F8) the whole
+// batch is applied in one call first — the on-disk backend fsyncs once per batch
+// there instead of once per chunk, which is what caps disk-backend ingest at the
+// fsync rate. The batch is a pure fast path: any batch error falls through to
+// the per-chunk loop below, which reproduces the existing error contract exactly
+// (partial MarkEmbedded, transient-vs-terminal classification, per-chunk
+// MarkFailedWithCategory) by finding the offending chunk itself. Replaying is
+// safe because BatchUpserter requires a failed batch to leave the index
+// replayable (the disk backend rolls its segment back).
+//
+// Durability note: with the batch path a chunk's vector is durable per batch
+// rather than per chunk. The invariant that matters is unchanged — BatchUpsert
+// returns only after its durability barrier, and chunks are marked embedded in
+// the store strictly after indexChunks returns — so a crash can never leave the
+// store claiming a chunk is embedded whose vector was lost; those chunks stay
+// pending and are re-embedded on the next run.
 func (w *EmbeddingWorker) indexChunks(ctx context.Context, validTasks []model.ChunkTask, labels []uint64, vectors [][]float32) (int, error) {
+	if batcher, ok := w.Index.(model.BatchUpserter); ok {
+		if w.batchIndexChunks(ctx, batcher, validTasks, vectors) {
+			return len(labels), nil
+		}
+	}
+	return w.upsertChunksSerially(ctx, validTasks, labels, vectors)
+}
+
+// batchIndexChunks applies every vector through the backend's batch path and
+// reports whether it succeeded. On success it fires OnIndexedChunk in task order,
+// exactly as the per-chunk loop does; on failure it reports false so the caller
+// can replay per chunk and attribute the error.
+func (w *EmbeddingWorker) batchIndexChunks(ctx context.Context, batcher model.BatchUpserter, validTasks []model.ChunkTask, vectors [][]float32) bool {
+	items := make([]model.IndexUpsert, len(validTasks))
+	for idx := range validTasks {
+		items[idx] = model.IndexUpsert{Vector: vectors[idx], Payload: payloadFromTask(validTasks[idx])}
+	}
+	if err := batcher.BatchUpsert(ctx, items); err != nil {
+		w.logf("batch upsert of %d chunks failed (%v); replaying per chunk to isolate the offender", len(items), err)
+		return false
+	}
+	for idx := range validTasks {
+		if w.OnIndexedChunk != nil {
+			w.OnIndexedChunk(validTasks[idx].Metadata.ChunkID, validTasks[idx].Metadata)
+		}
+	}
+	return true
+}
+
+// upsertChunksSerially is the per-chunk index path: the fallback for backends
+// without model.BatchUpserter and the replay that attributes a failed batch to a
+// specific chunk. It owns the index-error contract described on indexChunks.
+func (w *EmbeddingWorker) upsertChunksSerially(ctx context.Context, validTasks []model.ChunkTask, labels []uint64, vectors [][]float32) (int, error) {
 	for idx := range validTasks {
 		if addErr := w.Index.Upsert(ctx, vectors[idx], payloadFromTask(validTasks[idx])); addErr != nil {
 			if idx > 0 {

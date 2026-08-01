@@ -84,6 +84,41 @@ type Index interface {
 	Close() error
 }
 
+// IndexUpsert is one (vector, payload) pair for a batched upsert. It carries
+// exactly the two arguments Index.Upsert takes, so a batch is semantically a
+// sequence of Upserts applied in slice order (last writer wins on a repeated
+// ChunkID).
+type IndexUpsert struct {
+	Vector  []float32
+	Payload IndexPayload
+}
+
+// BatchUpserter is the OPTIONAL capability for indexes that can apply many
+// upserts as a single unit (issue #429 F8). It exists because a per-write
+// durability barrier — the on-disk backend fsyncs every appended record — caps
+// ingest at the fsync rate: one fsync per chunk. A backend that implements this
+// pays the barrier once per batch instead.
+//
+// Callers type-assert against it (mirroring Persistable / FilteringIndex /
+// LexicalSearcher) and fall back to a per-item Upsert loop when the backend does
+// not implement it, so memory/Qdrant/pgvector are unaffected.
+//
+// Contract:
+//   - Applying items in order MUST be equivalent to calling Upsert once per
+//     item: same validation (empty vector / zero ChunkID are errors), same
+//     last-writer-wins semantics.
+//   - Durability is per BATCH, not per item: on return with a nil error every
+//     item is as durable as an individual Upsert would have been, but a crash
+//     mid-batch may lose the whole batch. Callers must therefore not record a
+//     batch's items as persisted anywhere until BatchUpsert has returned nil.
+//   - On a non-nil error the index MUST be left in a state where replaying the
+//     same items through Upsert is safe — either by rolling the batch back or
+//     by relying on the last-writer-wins idempotency of Upsert. Callers use that
+//     replay to attribute the failure to a specific item.
+type BatchUpserter interface {
+	BatchUpsert(ctx context.Context, items []IndexUpsert) error
+}
+
 // Persistable is the optional capability for indexes that can durably
 // snapshot/restore themselves to a path (issue #247). The in-memory HNSW and
 // the future on-disk backend implement it; networked backends (Qdrant,
