@@ -3250,6 +3250,24 @@ func (s *SQLiteStore) ensureReadDB(ctx context.Context) (*sql.DB, error) {
 	return s.db, nil
 }
 
+// HandlesForTest exposes the writer handle, the read pool (nil when it failed to
+// open) and the pool's configured size.
+//
+// Exported solely so the read-pool tests can live under tests/ as AGENTS.md
+// requires: the properties worth pinning are that a read proceeds while a write
+// transaction is held open, and that the per-connection pragmas reach every
+// pooled connection, and neither is observable through the ordinary store API.
+// Production code never calls this.
+func (s *SQLiteStore) HandlesForTest(ctx context.Context) (writer, reader *sql.DB, poolSize int, err error) {
+	if _, err := s.ensureDB(ctx); err != nil {
+		return nil, nil, 0, err
+	}
+	defer s.ReleaseDB()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db, s.rdb, sqliteReadPoolSize, nil
+}
+
 type dbQueryHandle interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row

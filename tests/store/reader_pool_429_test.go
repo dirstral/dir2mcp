@@ -1,4 +1,4 @@
-package store
+package tests
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // #429 F11: the store served every query through a single-connection pool, so a
@@ -18,9 +19,9 @@ import (
 // per-connection pragmas that used to "stick" only because there was one
 // connection are now in effect on every pooled connection.
 
-func newTestStore(t *testing.T) *SQLiteStore {
+func newTestStore(t *testing.T) *store.SQLiteStore {
 	t.Helper()
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.db"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.db"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
@@ -40,11 +41,10 @@ func TestReadPool_ReadProceedsDuringOpenWrite(t *testing.T) {
 		t.Fatalf("seed document: %v", err)
 	}
 
-	db, err := st.ensureDB(ctx)
+	db, _, _, err := st.HandlesForTest(ctx)
 	if err != nil {
-		t.Fatalf("ensureDB: %v", err)
+		t.Fatalf("HandlesForTest: %v", err)
 	}
-	defer st.ReleaseDB()
 
 	// Occupy the single writer connection with an open transaction.
 	tx, err := db.BeginTx(ctx, nil)
@@ -85,14 +85,18 @@ func TestReadPool_PragmasApplyToEveryConnection(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 
-	if st.rdb == nil {
+	_, rdb, poolSize, err := st.HandlesForTest(ctx)
+	if err != nil {
+		t.Fatalf("HandlesForTest: %v", err)
+	}
+	if rdb == nil {
 		t.Fatal("read pool was not opened")
 	}
 
 	// Hold several connections open simultaneously so each is a distinct one.
-	conns := make([]interface{ Close() error }, 0, sqliteReadPoolSize)
-	for i := 0; i < sqliteReadPoolSize; i++ {
-		c, err := st.rdb.Conn(ctx)
+	conns := make([]interface{ Close() error }, 0, poolSize)
+	for i := 0; i < poolSize; i++ {
+		c, err := rdb.Conn(ctx)
 		if err != nil {
 			t.Fatalf("open pooled conn %d: %v", i, err)
 		}
@@ -122,11 +126,14 @@ func TestReadPool_PragmasApplyToEveryConnection(t *testing.T) {
 // alive after the store is closed.
 func TestReadPool_ClosedStoreClosesBothHandles(t *testing.T) {
 	ctx := context.Background()
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.db"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.db"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	rdb := st.rdb
+	_, rdb, _, err := st.HandlesForTest(ctx)
+	if err != nil {
+		t.Fatalf("HandlesForTest: %v", err)
+	}
 	if rdb == nil {
 		t.Fatal("read pool was not opened")
 	}
