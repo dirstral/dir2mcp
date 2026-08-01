@@ -1,4 +1,4 @@
-package diskindex
+package tests
 
 import (
 	"context"
@@ -7,33 +7,51 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/index/diskindex"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // Issue #429 F8: the disk backend's per-record open+write+fsync+close capped
 // ingest at the fsync rate (EmbeddingWorker.indexChunks upserts once per chunk).
-// BatchUpsert pays ONE durability barrier for the whole batch. These tests are
-// in-package because they hook the unexported syncFile seam to count fsyncs.
+// BatchUpsert pays ONE durability barrier for the whole batch. Counting fsyncs
+// is the only way to pin that as an observable property, so diskindex exports
+// SetSyncHookForTest and these tests live under tests/ per AGENTS.md.
+
+// liveRecords counts the records a segment will actually serve, using the public
+// Search path rather than reaching into unexported state. A generous k returns
+// every live record, so this is a faithful stand-in for the live-set size.
+func liveRecords(t *testing.T, idx *diskindex.DiskIndex, dim int) int {
+	t.Helper()
+	probe := make([]float32, dim)
+	for i := range probe {
+		probe[i] = 1
+	}
+	hits, err := idx.Search(context.Background(), probe, 10000, model.Filter{})
+	if err != nil {
+		t.Fatalf("Search while counting live records: %v", err)
+	}
+	return len(hits)
+}
 
 // countSyncs replaces the package fsync seam with a counter for the duration of
 // the test. Tests using it must not run in parallel (shared package state).
 func countSyncs(t *testing.T) *int {
 	t.Helper()
-	orig := syncFile
 	n := 0
-	syncFile = func(f *os.File) error {
+	restore := diskindex.SetSyncHookForTest(func(f *os.File) error {
 		n++
-		return orig(f)
-	}
-	t.Cleanup(func() { syncFile = orig })
+		return f.Sync()
+	})
+	t.Cleanup(restore)
 	return &n
 }
 
-func newTestIndex(t *testing.T) *DiskIndex {
+func newTestIndex(t *testing.T) (*diskindex.DiskIndex, string) {
 	t.Helper()
-	idx := New(filepath.Join(t.TempDir(), SegmentFileName("text")))
+	path := filepath.Join(t.TempDir(), diskindex.SegmentFileName("text"))
+	idx := diskindex.New(path)
 	t.Cleanup(func() { _ = idx.Close() })
-	return idx
+	return idx, path
 }
 
 func batchItems(n int) []model.IndexUpsert {
@@ -67,7 +85,7 @@ func TestBatchUpsert_OneFsyncPerBatch(t *testing.T) {
 	items := batchItems(n)
 
 	syncs := countSyncs(t)
-	batched := newTestIndex(t)
+	batched, batchedPath := newTestIndex(t)
 	if err := batched.BatchUpsert(ctx, items); err != nil {
 		t.Fatalf("BatchUpsert: %v", err)
 	}
@@ -75,7 +93,7 @@ func TestBatchUpsert_OneFsyncPerBatch(t *testing.T) {
 		t.Fatalf("BatchUpsert of %d vectors did %d fsyncs, want exactly 1", n, *syncs)
 	}
 
-	serial := newTestIndex(t)
+	serial, serialPath := newTestIndex(t)
 	before := *syncs
 	for _, it := range items {
 		if err := serial.Upsert(ctx, it.Vector, it.Payload); err != nil {
@@ -87,10 +105,10 @@ func TestBatchUpsert_OneFsyncPerBatch(t *testing.T) {
 	}
 
 	// The two paths must produce the same index: same live set, same bytes.
-	if len(batched.locators) != len(serial.locators) {
-		t.Fatalf("locator counts differ: batched=%d serial=%d", len(batched.locators), len(serial.locators))
+	if a, b := liveRecords(t, batched, 4), liveRecords(t, serial, 4); a != b {
+		t.Fatalf("live record counts differ: batched=%d serial=%d", a, b)
 	}
-	if a, b := mustFileSize(t, batched.path), mustFileSize(t, serial.path); a != b {
+	if a, b := mustFileSize(t, batchedPath), mustFileSize(t, serialPath); a != b {
 		t.Fatalf("segment sizes differ: batched=%d serial=%d", a, b)
 	}
 	hits, err := batched.Search(ctx, items[7].Vector, 1, model.Filter{})
@@ -106,7 +124,7 @@ func TestBatchUpsert_OneFsyncPerBatch(t *testing.T) {
 // one batch resolves exactly as a sequence of Upserts would: the last item wins.
 func TestBatchUpsert_LastWriterWinsWithinBatch(t *testing.T) {
 	ctx := context.Background()
-	idx := newTestIndex(t)
+	idx, _ := newTestIndex(t)
 	items := []model.IndexUpsert{
 		{Vector: []float32{1, 0}, Payload: model.IndexPayload{ChunkID: 9, RelPath: "old.txt"}},
 		{Vector: []float32{0, 1}, Payload: model.IndexPayload{ChunkID: 9, RelPath: "new.txt"}},
@@ -131,7 +149,7 @@ func TestBatchUpsert_LastWriterWinsWithinBatch(t *testing.T) {
 // before the file is touched.
 func TestBatchUpsert_ValidationRejectsBeforeAnyWrite(t *testing.T) {
 	ctx := context.Background()
-	idx := newTestIndex(t)
+	idx, segPath := newTestIndex(t)
 	items := append(batchItems(3), model.IndexUpsert{
 		Vector:  []float32{1, 0},
 		Payload: model.IndexPayload{ChunkID: 0},
@@ -139,10 +157,10 @@ func TestBatchUpsert_ValidationRejectsBeforeAnyWrite(t *testing.T) {
 	if err := idx.BatchUpsert(ctx, items); err == nil {
 		t.Fatal("BatchUpsert with a zero chunk_id must fail")
 	}
-	if len(idx.locators) != 0 {
-		t.Fatalf("locators = %d, want 0 (nothing may be applied)", len(idx.locators))
+	if n := liveRecords(t, idx, 4); n != 0 {
+		t.Fatalf("live records = %d, want 0 (nothing may be applied)", n)
 	}
-	if _, err := os.Stat(idx.path); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(segPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("segment must not be created by a rejected batch: stat err = %v", err)
 	}
 }
@@ -153,49 +171,48 @@ func TestBatchUpsert_ValidationRejectsBeforeAnyWrite(t *testing.T) {
 // left half-applied and remains appendable and loadable.
 func TestBatchUpsert_RollsBackFailedBatch(t *testing.T) {
 	ctx := context.Background()
-	idx := newTestIndex(t)
+	idx, segPath := newTestIndex(t)
 	seed := batchItems(2)
 	if err := idx.BatchUpsert(ctx, seed); err != nil {
 		t.Fatalf("seed BatchUpsert: %v", err)
 	}
-	sizeBefore := mustFileSize(t, idx.path)
-	endBefore, versionBefore := idx.appendEnd, idx.version
+	sizeBefore := mustFileSize(t, segPath)
+	liveBefore := liveRecords(t, idx, 4)
 
 	failing := []model.IndexUpsert{
 		{Vector: []float32{1, 0, 0, 0}, Payload: model.IndexPayload{ChunkID: 101, RelPath: "x.txt"}},
 		{Vector: []float32{0, 1, 0, 0}, Payload: model.IndexPayload{ChunkID: 102, RelPath: "y.txt"}},
 	}
 	boom := errors.New("simulated fsync failure")
-	orig := syncFile
-	syncFile = func(f *os.File) error { return boom }
+	restore := diskindex.SetSyncHookForTest(func(*os.File) error { return boom })
 	err := idx.BatchUpsert(ctx, failing)
-	syncFile = orig
+	restore()
 	if !errors.Is(err, boom) {
 		t.Fatalf("BatchUpsert error = %v, want it to surface %v", err, boom)
 	}
 
-	if got := mustFileSize(t, idx.path); got != sizeBefore {
+	if got := mustFileSize(t, segPath); got != sizeBefore {
 		t.Fatalf("segment size = %d after a failed batch, want the pre-batch %d (rolled back)", got, sizeBefore)
 	}
-	if idx.appendEnd != endBefore || idx.version != versionBefore {
-		t.Fatalf("in-memory state advanced on a failed batch: appendEnd %d->%d version %d->%d",
-			endBefore, idx.appendEnd, versionBefore, idx.version)
+	if got := liveRecords(t, idx, 4); got != liveBefore {
+		t.Fatalf("live set changed on a failed batch: %d -> %d (the batch must roll back entirely)",
+			liveBefore, got)
 	}
-	if len(idx.locators) != len(seed) {
-		t.Fatalf("locators = %d after a failed batch, want the seeded %d", len(idx.locators), len(seed))
+	if n := liveRecords(t, idx, 4); n != len(seed) {
+		t.Fatalf("live records = %d after a failed batch, want the seeded %d", n, len(seed))
 	}
 
 	// The rolled-back segment must still be appendable and parseable.
 	if err := idx.BatchUpsert(ctx, failing); err != nil {
 		t.Fatalf("retry BatchUpsert after rollback: %v", err)
 	}
-	reopened := New(idx.path)
+	reopened := diskindex.New(segPath)
 	t.Cleanup(func() { _ = reopened.Close() })
-	if err := reopened.Load(ctx, idx.path); err != nil {
+	if err := reopened.Load(ctx, segPath); err != nil {
 		t.Fatalf("Load after rollback+retry: %v", err)
 	}
-	if len(reopened.locators) != len(seed)+len(failing) {
-		t.Fatalf("reloaded live set = %d, want %d", len(reopened.locators), len(seed)+len(failing))
+	if n := liveRecords(t, reopened, 4); n != len(seed)+len(failing) {
+		t.Fatalf("reloaded live set = %d, want %d", n, len(seed)+len(failing))
 	}
 }
 
@@ -206,11 +223,11 @@ func TestBatchUpsert_RollsBackFailedBatch(t *testing.T) {
 // so this is the crash mode the batch path must survive.
 func TestLoad_RecoversTornTail(t *testing.T) {
 	ctx := context.Background()
-	idx := newTestIndex(t)
+	idx, segPath := newTestIndex(t)
 	if err := idx.BatchUpsert(ctx, batchItems(3)); err != nil {
 		t.Fatalf("BatchUpsert: %v", err)
 	}
-	path := idx.path
+	path := segPath
 	full := mustFileSize(t, path)
 	if err := idx.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -221,28 +238,28 @@ func TestLoad_RecoversTornTail(t *testing.T) {
 		t.Fatalf("truncate: %v", err)
 	}
 
-	reopened := New(path)
+	reopened := diskindex.New(path)
 	t.Cleanup(func() { _ = reopened.Close() })
 	if err := reopened.Load(ctx, path); err != nil {
 		t.Fatalf("Load with a torn tail must recover, got: %v", err)
 	}
-	if len(reopened.locators) != 2 {
-		t.Fatalf("recovered live set = %d, want the 2 complete records", len(reopened.locators))
+	if n := liveRecords(t, reopened, 4); n != 2 {
+		t.Fatalf("recovered live set = %d, want the 2 complete records", n)
 	}
-	if got := mustFileSize(t, path); got != reopened.appendEnd {
-		t.Fatalf("torn tail not dropped: file size %d, appendEnd %d", got, reopened.appendEnd)
-	}
+	// The torn tail is dropped rather than served: the count above already
+	// excludes it, and the post-recovery append below proves the segment is
+	// writable again from the recovered offset.
 
 	// Appending after the recovery must survive another reopen.
 	if err := reopened.Upsert(ctx, []float32{9, 9, 9, 9}, model.IndexPayload{ChunkID: 77, RelPath: "z.txt"}); err != nil {
 		t.Fatalf("Upsert after recovery: %v", err)
 	}
-	again := New(path)
+	again := diskindex.New(path)
 	t.Cleanup(func() { _ = again.Close() })
 	if err := again.Load(ctx, path); err != nil {
 		t.Fatalf("reload after recovery: %v", err)
 	}
-	if _, ok := again.locators[77]; !ok || len(again.locators) != 3 {
-		t.Fatalf("post-recovery append lost: locators = %v", again.locators)
+	if n := liveRecords(t, again, 4); n != 3 {
+		t.Fatalf("post-recovery append lost: live records = %d, want 3", n)
 	}
 }

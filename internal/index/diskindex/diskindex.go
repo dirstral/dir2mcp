@@ -127,9 +127,22 @@ var (
 	_ model.BatchUpserter  = (*DiskIndex)(nil)
 )
 
-// syncFile fsyncs f. It is a package-level var solely so the batch tests can
-// count durability barriers (one per batch vs one per record); production
-// behavior is always (*os.File).Sync.
+// SetSyncHookForTest replaces the fsync used as the durability barrier and
+// returns a function restoring the previous one.
+//
+// It is exported solely so the batch tests can count fsyncs from tests/ rather
+// than in-package: AGENTS.md requires new test files to live under tests/, and
+// counting durability barriers is the only way to pin "one fsync per batch
+// instead of one per record" (#429 F8) as an observable property. Production
+// code never calls this; the zero state is a real f.Sync().
+func SetSyncHookForTest(fn func(*os.File) error) (restore func()) {
+	prev := syncFile
+	syncFile = fn
+	return func() { syncFile = prev }
+}
+
+// syncFile fsyncs f. It is a package-level var solely so SetSyncHookForTest can
+// swap it; every production path leaves it at the real f.Sync() below.
 var syncFile = func(f *os.File) error { return f.Sync() }
 
 // New creates an empty disk index. path is the segment file used by Save/Load
