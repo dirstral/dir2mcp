@@ -625,7 +625,7 @@ func payloadFromTask(t model.ChunkTask) model.IndexPayload {
 // added, marks those as embedded first.
 //
 // When the backend implements model.BatchUpserter (issue #429 F8) the whole
-// batch is applied in one call first — the on-disk backend fsyncs once per batch
+// batch is applied in one call first: the on-disk backend fsyncs once per batch
 // there instead of once per chunk, which is what caps disk-backend ingest at the
 // fsync rate. The batch is a pure fast path: any batch error falls through to
 // the per-chunk loop below, which reproduces the existing error contract exactly
@@ -635,9 +635,9 @@ func payloadFromTask(t model.ChunkTask) model.IndexPayload {
 // replayable (the disk backend rolls its segment back).
 //
 // Durability note: with the batch path a chunk's vector is durable per batch
-// rather than per chunk. The invariant that matters is unchanged — BatchUpsert
+// rather than per chunk. The invariant that matters is unchanged, because BatchUpsert
 // returns only after its durability barrier, and chunks are marked embedded in
-// the store strictly after indexChunks returns — so a crash can never leave the
+// the store strictly after indexChunks returns, so a crash can never leave the
 // store claiming a chunk is embedded whose vector was lost; those chunks stay
 // pending and are re-embedded on the next run.
 func (w *EmbeddingWorker) indexChunks(ctx context.Context, validTasks []model.ChunkTask, labels []uint64, vectors [][]float32) (int, error) {

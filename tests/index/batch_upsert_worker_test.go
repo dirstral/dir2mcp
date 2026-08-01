@@ -160,7 +160,7 @@ func TestIndexChunks_FallsBackWithoutBatchUpsert(t *testing.T) {
 
 // TestIndexChunks_BatchFailureReplaysPerChunk pins the partial-failure contract:
 // when the batch call fails, the worker replays per chunk so the offending chunk
-// is still attributed — healthy predecessors are marked embedded and only the
+// is still attributed: healthy predecessors are marked embedded and only the
 // bad chunk is marked failed with its category.
 func TestIndexChunks_BatchFailureReplaysPerChunk(t *testing.T) {
 	ctx := context.Background()
@@ -192,7 +192,7 @@ func TestIndexChunks_BatchFailureReplaysPerChunk(t *testing.T) {
 }
 
 // TestEmbedAndIndex_DiskBackendBatchesEndToEnd wires the real disk backend to the
-// worker and pins that the batch path leaves the segment durable and searchable —
+// worker and pins that the batch path leaves the segment durable and searchable,
 // including after a reopen, so the single per-batch fsync really persisted every
 // vector.
 func TestEmbedAndIndex_DiskBackendBatchesEndToEnd(t *testing.T) {

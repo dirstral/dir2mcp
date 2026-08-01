@@ -149,7 +149,7 @@ func TestBatchUpsert_ValidationRejectsBeforeAnyWrite(t *testing.T) {
 
 // TestBatchUpsert_RollsBackFailedBatch pins the crash-safety guarantee: when the
 // batch's durability barrier fails, the segment is truncated back to its
-// pre-batch length and the in-memory state is untouched — so the index is never
+// pre-batch length and the in-memory state is untouched, so the index is never
 // left half-applied and remains appendable and loadable.
 func TestBatchUpsert_RollsBackFailedBatch(t *testing.T) {
 	ctx := context.Background()

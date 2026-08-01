@@ -338,12 +338,12 @@ func TestDiskIndex_LoadBadMagicErrors(t *testing.T) {
 // This deliberately replaces the older "a torn tail is an error" expectation
 // (issue #429 F8). The batch path (BatchUpsert) trades one fsync per record for
 // one per batch, so an ungraceful crash can leave a prefix of a batch in the
-// file; failing the load would make the whole index unusable — the daemon exits
-// with exitIndexLoadFailure — after a crash that lost nothing. It loses nothing
+// file; failing the load would make the whole index unusable (the daemon exits
+// with exitIndexLoadFailure) after a crash that lost nothing. It loses nothing
 // because BatchUpsert returns only after its fsync and the embed worker marks
 // chunks embedded strictly after that returns: every record in a torn tail
 // belongs to a chunk still PENDING in sqlite, which is simply re-embedded. A
-// structurally wrong file (bad magic/version) is still a hard error — see
+// structurally wrong file (bad magic/version) is still a hard error; see
 // TestDiskIndex_LoadBadMagicErrors.
 func TestDiskIndex_LoadTruncatedBodyRecovers(t *testing.T) {
 	ctx := context.Background()

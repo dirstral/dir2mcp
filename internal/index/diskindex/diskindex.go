@@ -195,7 +195,7 @@ func (d *DiskIndex) Upsert(ctx context.Context, vector []float32, payload model.
 //
 // Durability is honestly per BATCH, not per item: when this returns nil every
 // item is on stable storage, but a crash part-way through loses the whole batch
-// (the caller's chunks simply stay pending and are re-embedded — see
+// (the caller's chunks simply stay pending and are re-embedded; see
 // EmbeddingWorker.indexChunks, which only marks chunks embedded after this
 // returns). Nothing is ever silently half-applied: a write or fsync failure
 // truncates the segment back to its pre-batch length so the log can never be
@@ -271,7 +271,7 @@ func (d *DiskIndex) appendBatch(items []model.IndexUpsert) error {
 
 // writeBatch encodes every item into w through a single buffered writer, with
 // the first record landing at offset start. It returns one locator per item
-// (parallel to items) and the new end offset. It does not fsync — appendBatch
+// (parallel to items) and the new end offset. It does not fsync: appendBatch
 // owns the batch's single durability barrier.
 func writeBatch(w io.Writer, start int64, items []model.IndexUpsert) ([]locator, int64, error) {
 	bw := bufio.NewWriter(w)
@@ -756,7 +756,7 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 	}
 
 	// Drop a torn tail left by an ungraceful crash mid-append/mid-batch before
-	// anything appends after it — otherwise the garbage bytes would sit in the
+	// anything appends after it, otherwise the garbage bytes would sit in the
 	// middle of the log and make every later scan stop short of the new records.
 	if torn {
 		if err := os.Truncate(path, end); err != nil {
@@ -901,8 +901,8 @@ func readRecordAt(reader *mmap.ReaderAt, loc locator) ([]float32, model.IndexPay
 // A torn tail is not an error: the segment is an append log whose durability
 // barrier is per write (Upsert) or per batch (BatchUpsert, issue #429 F8), so an
 // ungraceful crash can leave a prefix of an unsynced batch in the file. Those
-// records belong to chunks the embed worker never marked embedded — it marks
-// only after the barrier returns — so dropping them loses nothing the metadata
+// records belong to chunks the embed worker never marked embedded (it marks
+// only after the barrier returns), so dropping them loses nothing the metadata
 // store believes is indexed; the chunks are simply still pending and get
 // re-embedded. Erroring instead would make one torn record poison the whole
 // segment on load.

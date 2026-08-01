@@ -14,9 +14,9 @@ import (
 // ungraceful crash (SIGKILL/OOM/power loss) before the snapshot ran.
 //
 // Durable backends (disk, qdrant, pgvector) deliberately do NOT implement it:
-// their writes are durable before the write call returns — the disk backend
+// their writes are durable before the write call returns; the disk backend
 // fsyncs per record, or once per batch on the model.BatchUpserter path (issue
-// #429 F8), always before the caller marks those chunks embedded — and they
+// #429 F8), always before the caller marks those chunks embedded), and they
 // rebuild from a durable store on load, so there is nothing to reconcile.
 // ReconcileEmbeddedVectors treats a backend that does not implement
 // VectorPresence as a no-op.

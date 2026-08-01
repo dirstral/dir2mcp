@@ -95,7 +95,7 @@ type IndexUpsert struct {
 
 // BatchUpserter is the OPTIONAL capability for indexes that can apply many
 // upserts as a single unit (issue #429 F8). It exists because a per-write
-// durability barrier — the on-disk backend fsyncs every appended record — caps
+// durability barrier (the on-disk backend fsyncs every appended record) caps
 // ingest at the fsync rate: one fsync per chunk. A backend that implements this
 // pays the barrier once per batch instead.
 //
@@ -112,7 +112,7 @@ type IndexUpsert struct {
 //     mid-batch may lose the whole batch. Callers must therefore not record a
 //     batch's items as persisted anywhere until BatchUpsert has returned nil.
 //   - On a non-nil error the index MUST be left in a state where replaying the
-//     same items through Upsert is safe — either by rolling the batch back or
+//     same items through Upsert is safe, either by rolling the batch back or
 //     by relying on the last-writer-wins idempotency of Upsert. Callers use that
 //     replay to attribute the failure to a specific item.
 type BatchUpserter interface {
