@@ -187,3 +187,30 @@ def test_recognizer_crops_are_not_ingested_as_frames(tmp_path, monkeypatch):
     assert len(second) == 4, f"crops leaked into the frame list: {len(second)} entries"
     assert second[-1][0] == 6.0, "timestamps inflated by ingesting crops"
     assert all("-p" not in p.name for _, p in second)
+
+
+def test_mkdtemp_failure_does_not_strand_waiters(tmp_path, monkeypatch):
+    """The in-flight marker is set before the temp dir exists. A mkdtemp failure
+    that left it set would block every later caller for that media forever."""
+    import threading as _t
+    media = tmp_path / "game.mp4"
+    media.write_bytes(b"x" * 32)
+
+    monkeypatch.setattr(base.tempfile, "mkdtemp",
+                        lambda **kw: (_ for _ in ()).throw(OSError("no space left on device")))
+    with pytest.raises(OSError):
+        list(base.iter_frames(media, fps=0.5))
+    assert not base._FRAME_INFLIGHT, "in-flight marker survived the failure"
+
+    # A later caller must proceed rather than block.
+    monkeypatch.undo()
+    monkeypatch.setattr(base.subprocess, "run", _fake_run(2))
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+    done = _t.Event()
+    out = []
+    def worker():
+        out.append(len(list(base.iter_frames(media, fps=0.5))))
+        done.set()
+    _t.Thread(target=worker, daemon=True).start()
+    assert done.wait(10), "a later caller blocked forever after a mkdtemp failure"
+    assert out == [2]

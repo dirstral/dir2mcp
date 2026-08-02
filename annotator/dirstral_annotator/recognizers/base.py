@@ -167,7 +167,16 @@ def iter_frames(
             _FRAME_INFLIGHT.add(key)
 
     if cached is None:
-        tmp = Path(tempfile.mkdtemp(prefix="dirstral-frames-"))
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="dirstral-frames-"))
+        except BaseException:
+            # The in-flight marker is already set. Failing to clear it here (a
+            # full disk, a bad TMPDIR) would leave every later caller for this
+            # key blocked forever in the wait loop above.
+            with _FRAME_LOCK:
+                _FRAME_INFLIGHT.discard(key)
+                _FRAME_LOCK.notify_all()
+            raise
         out = tmp / "frame-%08d.jpg"
         cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "error",
