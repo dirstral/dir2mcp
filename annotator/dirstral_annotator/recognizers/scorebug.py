@@ -163,7 +163,9 @@ def default_ocr(psm: int | None = None) -> OcrFn:
     config = f"--psm {psm}" if psm is not None else ""
 
     def ocr(frame: Path) -> str:
-        return pytesseract.image_to_string(Image.open(frame), config=config)
+        with Image.open(frame) as img:
+            img.load()
+            return pytesseract.image_to_string(img, config=config)
 
     return ocr
 
@@ -228,8 +230,13 @@ def parse_overlay(text: str) -> tuple[list[NameRead], list[PitchRead]]:
             # belongs to another field, so keep at most the last two words.
             kind = " ".join(match.group(1).split()[-2:])
             kind = kind if _is_pitch_type(kind) else ""
+            speed = int(match.group(2))
+            # Same plausibility gate as the typed branch: a garbled line ending
+            # in digits followed by a unit is otherwise accepted at any value.
+            if speed not in PLAUSIBLE_SPEED:
+                continue
             pitches.append(
-                PitchRead(pitch_type=kind, speed=int(match.group(2)), unit=match.group(3))
+                PitchRead(pitch_type=kind, speed=speed, unit=match.group(3))
             )
             claimed.update(kind.split())
             claimed.add(match.group(3))
@@ -443,9 +450,20 @@ def _prepared_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
     dir rather than beside the frame, because the frame directory is a cache
     other recognizers iterate.
     """
-    from PIL import Image, ImageOps  # required by the OCR extra
+    try:
+        from PIL import Image, ImageOps  # required by the OCR extra
+    except ImportError as exc:  # pragma: no cover - exercised via the contract test
+        # recognize() must degrade the cascade, not abort it, so a missing
+        # Pillow has to arrive as RecognizerUnavailable rather than ImportError.
+        raise RecognizerUnavailable("Pillow is required for scorebug OCR") from exc
 
-    img = Image.open(frame)
+    # load() inside the context manager pulls the pixels into memory and lets
+    # the descriptor close immediately. This runs at least once per frame, so
+    # relying on garbage collection to release it leaks handles across a long
+    # media file and can exhaust the process limit.
+    with Image.open(frame) as opened:
+        opened.load()
+        img = opened.copy()
     x, y, w, h = region
     box = (
         max(0, int(x * img.width)),

@@ -269,3 +269,38 @@ def test_missing_ocr_backend_degrades_instead_of_aborting(monkeypatch):
     monkeypatch.setitem(sys.modules, "pytesseract", None)
     with pytest.raises(RecognizerUnavailable):
         scorebug.default_ocr()
+
+
+def test_velocity_branch_rejects_implausible_speeds():
+    """The unit-anchored pattern must apply the same plausibility gate as the
+    typed one; a garbled line ending in digits plus a unit was accepted at any
+    value."""
+    from dirstral_annotator.recognizers import scorebug as sb
+
+    _, ok = sb.parse_overlay("SLIDER 88 MPH")
+    assert [p.speed for p in ok] == [88]
+
+    for line in ("GARBLE 07 MPH", "NOISE 999 KPH", "XX 12 MPH"):
+        _, bad = sb.parse_overlay(line)
+        assert bad == [], f"accepted implausible speed: {line} -> {bad}"
+
+
+def test_missing_pillow_degrades_the_cascade(monkeypatch, tmp_path):
+    """_prepared_crops must raise RecognizerUnavailable, not ImportError, so the
+    pipeline skips this recognizer instead of aborting the whole run."""
+    import builtins
+    from dirstral_annotator.recognizers import scorebug as sb
+    from dirstral_annotator.recognizers.base import RecognizerUnavailable
+
+    real_import = builtins.__import__
+
+    def no_pil(name, *a, **kw):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError("No module named 'PIL'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_pil)
+    frame = tmp_path / "frame-00000001.jpg"
+    frame.write_bytes(b"\xff\xd8\xff")
+    with pytest.raises(RecognizerUnavailable):
+        list(sb._prepared_crops(frame, (0.0, 0.0, 1.0, 1.0), tmp_path))
