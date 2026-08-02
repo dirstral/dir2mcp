@@ -1,0 +1,107 @@
+"""Frame-extraction plumbing: caching, cleanup and timeout derivation.
+
+These pin the four review findings on the caching change. Each one describes a
+failure that costs disk or aborts a legitimate run, and none had coverage.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from dirstral_annotator.recognizers import base
+
+
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    base._cleanup_frame_dirs()
+    yield
+    base._cleanup_frame_dirs()
+
+
+def _fake_run(frames: int):
+    """Stand in for ffmpeg, writing `frames` jpegs into the -vf output dir."""
+    def run(cmd, **kw):
+        out = Path(cmd[-1])
+        for i in range(1, frames + 1):
+            (out.parent / f"frame-{i:08d}.jpg").write_bytes(b"\xff\xd8\xff")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+    return run
+
+
+def test_extraction_is_shared_across_recognizers(tmp_path, monkeypatch):
+    """The cascade must decode once, not once per recognizer (the bug that made
+    a 3h broadcast cost three hour-long passes)."""
+    media = tmp_path / "game.mp4"
+    media.write_bytes(b"x" * 32)
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return _fake_run(3)(cmd, **kw)
+
+    monkeypatch.setattr(base.subprocess, "run", run)
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+
+    for _ in range(3):  # scorebug, jersey, faces
+        assert len(list(base.iter_frames(media, fps=0.5))) == 3
+    assert len(calls) == 1, f"expected one extraction, got {len(calls)}"
+
+
+def test_failed_extraction_leaves_no_directory(tmp_path, monkeypatch):
+    """A failure must not strand a partially written JPEG set until exit."""
+    media = tmp_path / "game.mp4"
+    media.write_bytes(b"x" * 32)
+    created: list[Path] = []
+    real_mkdtemp = base.tempfile.mkdtemp
+
+    def mkdtemp(**kw):
+        d = real_mkdtemp(**kw)
+        created.append(Path(d))
+        return d
+
+    monkeypatch.setattr(base.tempfile, "mkdtemp", mkdtemp)
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+    monkeypatch.setattr(base.subprocess, "run", lambda cmd, **kw: (_ for _ in ()).throw(
+        subprocess.CalledProcessError(1, cmd, b"", b"boom")))
+
+    with pytest.raises(RuntimeError):
+        list(base.iter_frames(media, fps=0.5))
+    assert created, "extraction should have created a temp dir"
+    assert not created[0].exists(), "temp dir survived a failed extraction"
+    assert not base._FRAME_CACHE, "a failed extraction must not be cached"
+
+
+def test_cache_is_bounded(tmp_path, monkeypatch):
+    """`serve` handles many media over its lifetime; an unbounded memo would
+    keep every JPEG set until the process exits."""
+    monkeypatch.setattr(base.subprocess, "run", _fake_run(1))
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+    dirs = []
+    for i in range(base._FRAME_CACHE_MAX + 2):
+        m = tmp_path / f"m{i}.mp4"
+        m.write_bytes(b"x" * (32 + i))
+        list(base.iter_frames(m, fps=0.5))
+        dirs.append(list(base._FRAME_CACHE.values())[-1])
+    assert len(base._FRAME_CACHE) == base._FRAME_CACHE_MAX
+    assert not dirs[0].exists(), "evicted extraction was not removed from disk"
+
+
+def test_probe_duration_handles_null(tmp_path, monkeypatch):
+    """ffprobe reports "duration": null for some containers; float(None) would
+    abort an extraction that should just fall back to no limit."""
+    monkeypatch.setattr(base.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 0, b'{"format": {"duration": null}}', b""))
+    assert base.probe_duration_s(tmp_path / "x.mp4") is None
+
+
+def test_timeout_scales_with_duration(tmp_path, monkeypatch):
+    """A fixed ceiling cannot serve both a clip and a 3h broadcast."""
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 12236.0)
+    assert base._extract_timeout_s(tmp_path / "x.mp4", "ffprobe") == pytest.approx(48944.0)
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 5.0)
+    assert base._extract_timeout_s(tmp_path / "x.mp4", "ffprobe") == 600.0
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: None)
+    assert base._extract_timeout_s(tmp_path / "x.mp4", "ffprobe") == float("inf")
