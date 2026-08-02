@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -322,5 +323,49 @@ func TestAsk_SendsWholeChunkWhenItFitsTheBudget(t *testing.T) {
 	}
 	if !strings.Contains(gen.lastPrompt, full) {
 		t.Fatalf("expected the whole chunk in the prompt, got %q", gen.lastPrompt)
+	}
+}
+
+// TestAsk_DiscardsReplyWhenNoDocumentFitsTheBudget covers the reachable
+// misconfiguration where rag_max_context_chars is small but positive.
+//
+// buildRAGPrompt then fits no complete fenced block, so the prompt's Context
+// section is empty and usedIdx is empty. Adopting the model's reply there would
+// publish prose grounded in nothing beside an empty citations array, which a
+// caller cannot tell apart from a well-sourced answer (SPEC 9.4.1). The budget
+// is clamped only against <= 0 and the upper bound, so config can reach this.
+func TestAsk_DiscardsReplyWhenNoDocumentFitsTheBudget(t *testing.T) {
+	// Eight hits sharing a 120 char budget leaves 15 chars per document, below
+	// what one fenced block needs; this is the reviewer's exact scenario.
+	idx := index.NewHNSWIndex("")
+	texts := map[uint64]string{}
+	for id := uint64(1); id <= 8; id++ {
+		addVec(t, idx, id, []float32{1, 0})
+		texts[id] = strings.Repeat("body sentence. ", 30)
+	}
+	store := &fullTextStore{text: texts}
+
+	fabricated := "The contract terminates on 1 March 2027."
+	gen := &fakeGenerator{out: fabricated}
+	svc := retrieval.NewService(store, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	for id := uint64(1); id <= 8; id++ {
+		svc.SetChunkMetadata(id, model.SearchHit{
+			ChunkID: id, RelPath: fmt.Sprintf("docs/a%d.md", id), Snippet: "body sentence.",
+			Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 4},
+		})
+	}
+	svc.SetMaxContextChars(120) // positive, but 15 chars per doc across 8 hits
+
+	res, err := svc.Ask(context.Background(), "when does it terminate?", model.SearchQuery{K: 8})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if strings.Contains(res.Answer, fabricated) {
+		t.Errorf("published an ungrounded reply with no context in the prompt:\n%s", res.Answer)
+	}
+	if len(res.Citations) != 0 {
+		t.Errorf("citations = %d, want 0 when nothing reached the prompt", len(res.Citations))
 	}
 }
