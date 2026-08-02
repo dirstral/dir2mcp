@@ -214,3 +214,38 @@ def test_mkdtemp_failure_does_not_strand_waiters(tmp_path, monkeypatch):
     _t.Thread(target=worker, daemon=True).start()
     assert done.wait(10), "a later caller blocked forever after a mkdtemp failure"
     assert out == [2]
+
+
+def test_fresh_extraction_is_claimed_before_the_lock_is_released(tmp_path, monkeypatch):
+    """A just-extracted entry sits in the cache before its iterator claims it.
+    If the claim is not made in the same critical section, another thread
+    trimming to the cap can rmtree the directory the caller is about to read.
+    """
+    import threading as _t
+
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+    evicting = _t.Event()
+
+    def run_then_let_others_evict(cmd, **kw):
+        out = _fake_run(2)(cmd, **kw)
+        evicting.set()          # other threads pile in while we are mid-extract
+        return out
+
+    monkeypatch.setattr(base.subprocess, "run", run_then_let_others_evict)
+
+    target = tmp_path / "target.mp4"
+    target.write_bytes(b"x" * 32)
+
+    result = {}
+    def reader():
+        frames = list(base.iter_frames(target, fps=0.5))
+        result["ok"] = len(frames) == 2 and all(p.exists() for _, p in frames)
+
+    t = _t.Thread(target=reader); t.start()
+    evicting.wait(5)
+    for i in range(base._FRAME_CACHE_MAX + 3):   # push hard on the cap
+        m = tmp_path / f"filler{i}.mp4"
+        m.write_bytes(b"x" * (64 + i))
+        list(base.iter_frames(m, fps=0.5))
+    t.join(10)
+    assert result.get("ok"), "a freshly extracted directory was evicted before its reader claimed it"

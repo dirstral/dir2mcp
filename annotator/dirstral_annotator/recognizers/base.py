@@ -165,6 +165,13 @@ def iter_frames(
         cached = _FRAME_CACHE.get(key)
         if cached is None:
             _FRAME_INFLIGHT.add(key)
+        else:
+            # Claim the reference in the SAME critical section that found the
+            # entry. Releasing the lock before claiming leaves a window where
+            # another thread's eviction can rmtree it, since it is not yet
+            # marked in use.
+            _FRAME_CACHE.move_to_end(key)
+            _FRAME_USERS[key] = _FRAME_USERS.get(key, 0) + 1
 
     if cached is None:
         try:
@@ -211,14 +218,14 @@ def iter_frames(
             raise
         with _FRAME_LOCK:
             _FRAME_CACHE[key] = tmp
+            # Claim before releasing the lock, for the same reason: a fresh
+            # extraction that is in the cache but not yet marked in use can be
+            # evicted and deleted by another thread trimming to the cap.
+            _FRAME_USERS[key] = _FRAME_USERS.get(key, 0) + 1
             _FRAME_INFLIGHT.discard(key)
+            _evict_locked()
             _FRAME_LOCK.notify_all()
             cached = tmp
-
-    with _FRAME_LOCK:
-        _FRAME_CACHE.move_to_end(key)
-        _FRAME_USERS[key] = _FRAME_USERS.get(key, 0) + 1
-        _evict_locked()
 
     try:
         for i, frame in enumerate(_sampled_frames(cached)):
