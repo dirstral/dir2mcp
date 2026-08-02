@@ -4,8 +4,15 @@ The pilot's committed metric is event-level: for each ground-truth pitch,
 did some predicted pitch annotation involving that pitcher overlap it
 (within tolerance)? Recall = found pitches / all pitches; precision =
 predicted pitch annotations that correspond to some real pitch by that
-player. Reported overall, per player, and per contributing source (which is
-what decides which recognizers the archive actually needs).
+player. Reported overall, per player, and per contributing source.
+
+Read the per-source counts narrowly. They say which sources contributed to a
+credited `pitch` annotation naming the *pitcher*; they do NOT rank recognizer
+quality, and an absent source has not been measured as weak. A recognizer
+that reports who is on screen (scorebug, jersey, face) emits `at_bat` /
+`appearance` cues about whoever it sees, which at a pitch is usually the
+batter, so it can never enter this table however well it works. `eval.diagnose`
+exists to tell those cases apart; the report prints both together on purpose.
 """
 
 from __future__ import annotations
@@ -19,6 +26,9 @@ from .align import Alignment
 from .ground_truth import PitchEvent
 
 TOLERANCE_S = 5.0
+# The only annotation event this metric looks at. Named so the diagnostics can
+# state the eligibility rule instead of re-hardcoding the string.
+SCORED_EVENT = "pitch"
 
 
 @dataclass
@@ -42,7 +52,9 @@ class PRCount:
 class Scorecard:
     overall: PRCount = field(default_factory=PRCount)
     per_player: dict[str, PRCount] = field(default_factory=lambda: defaultdict(PRCount))
-    # source tag -> pitches found by annotations that source contributed to
+    # source tag -> pitches found by annotations that source contributed to.
+    # Only sources that reach a credited `pitch` annotation can appear; see the
+    # module docstring before reading an absent source as a weak one.
     per_source_found: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     total_events: int = 0
 
@@ -55,7 +67,7 @@ def score(
     tolerance_s: float = TOLERANCE_S,
 ) -> Scorecard:
     card = Scorecard()
-    pitch_anns = [a for a in annotations if a.event == "pitch"]
+    pitch_anns = [a for a in annotations if a.event == SCORED_EVENT]
     matched_anns: set[int] = set()
 
     # Recall: every rostered ground-truth pitch must be covered.
