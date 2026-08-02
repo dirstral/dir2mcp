@@ -8,6 +8,9 @@ so the package imports, tests, and runs the metadata-driven recognizers
 
 from __future__ import annotations
 
+import atexit
+import json
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator
@@ -30,17 +33,74 @@ class RecognizerUnavailable(RuntimeError):
     the cascade still runs."""
 
 
+#: Extractions already performed this process, keyed by
+#: (resolved path, mtime, size, fps). Every recognizer in the cascade samples
+#: the SAME media at the SAME fps, and each used to trigger its own full
+#: decode: a three hour broadcast cost three hour-long passes for one run.
+_FRAME_CACHE: dict[tuple[str, int, int, float], Path] = {}
+_FRAME_TMPDIRS: list[str] = []
+
+
+def _cleanup_frame_dirs() -> None:
+    while _FRAME_TMPDIRS:
+        shutil.rmtree(_FRAME_TMPDIRS.pop(), ignore_errors=True)
+
+
+atexit.register(_cleanup_frame_dirs)
+
+
+def probe_duration_s(media_path: Path, ffprobe: str = "ffprobe") -> float | None:
+    """Media duration in seconds, or None when ffprobe cannot report it."""
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", str(media_path)],
+            check=True, capture_output=True, timeout=60,
+        ).stdout
+        return float(json.loads(out)["format"]["duration"])
+    except (subprocess.SubprocessError, OSError, KeyError, ValueError):
+        return None
+
+
+def _extract_timeout_s(media_path: Path, ffmpeg: str) -> float:
+    """Budget for the extraction pass, scaled to the media.
+
+    A fixed ceiling cannot work: decoding is proportional to duration, so any
+    constant is either far too small for real footage or meaningless for a
+    clip. A three hour broadcast needs roughly an hour of decode, which the
+    previous hardcoded 300s could never accommodate. Allow 4x realtime, with a
+    floor for short media, and treat an unknown duration as "no limit" rather
+    than guessing a number that would abort a legitimate run.
+    """
+    duration = probe_duration_s(media_path, ffprobe=ffmpeg.replace("ffmpeg", "ffprobe"))
+    if duration is None:
+        return float("inf")
+    return max(600.0, duration * 4.0)
+
+
 def iter_frames(
     media_path: Path, fps: float = 1.0, ffmpeg: str = "ffmpeg"
 ) -> Iterator[tuple[float, Path]]:
     """Yield (timestamp_seconds, jpeg_path) sampled at `fps` via ffmpeg.
 
-    Frames land in a temp dir that is deleted when the iterator is
-    exhausted or closed, so callers must consume (or copy) eagerly.
+    Frames are extracted once per (media, fps) and reused by every recognizer
+    in the process; they are removed at interpreter exit, not when the iterator
+    is exhausted. Callers must therefore not assume the directory disappears
+    mid-run, and must still copy anything they need beyond process lifetime.
     """
     if fps <= 0:
         raise ValueError("fps must be positive")
-    with tempfile.TemporaryDirectory(prefix="dirstral-frames-") as tmp:
+
+    try:
+        st = media_path.stat()
+    except OSError as exc:
+        raise RuntimeError(f"cannot stat {media_path}: {exc}") from exc
+    key = (str(media_path.resolve()), st.st_mtime_ns, st.st_size, fps)
+
+    cached = _FRAME_CACHE.get(key)
+    if cached is None:
+        tmp = tempfile.mkdtemp(prefix="dirstral-frames-")
+        _FRAME_TMPDIRS.append(tmp)
         out = Path(tmp) / "frame-%08d.jpg"
         cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "error",
@@ -49,16 +109,23 @@ def iter_frames(
             "-q:v", "3",
             str(out),
         ]
+        timeout = _extract_timeout_s(media_path, ffmpeg)
         try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+            subprocess.run(cmd, check=True, capture_output=True,
+                           timeout=None if timeout == float("inf") else timeout)
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"ffmpeg timed out after 300s on {media_path}") from exc
+            raise RuntimeError(
+                f"ffmpeg timed out after {timeout:.0f}s on {media_path}"
+            ) from exc
         except FileNotFoundError as exc:
             raise RecognizerUnavailable(f"ffmpeg not found ({ffmpeg})") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"ffmpeg failed on {media_path}: {exc.stderr.decode(errors='replace')[-500:]}"
             ) from exc
-        for i, frame in enumerate(sorted(Path(tmp).glob("frame-*.jpg"))):
-            # ffmpeg's fps filter emits frame N at timestamp N/fps.
-            yield i / fps, frame
+        cached = Path(tmp)
+        _FRAME_CACHE[key] = cached
+
+    for i, frame in enumerate(sorted(cached.glob("frame-*.jpg"))):
+        # ffmpeg's fps filter emits frame N at timestamp N/fps.
+        yield i / fps, frame
