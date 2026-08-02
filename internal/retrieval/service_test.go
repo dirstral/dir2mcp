@@ -626,12 +626,21 @@ func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask failed: %v", err)
 	}
-	if got.Answer != "Generated answer with [docs/a.md]" {
+	// The generated body is preserved verbatim; the attribution footer restates
+	// the one document the answer actually referenced (SPEC 9.4.1).
+	if !strings.HasPrefix(got.Answer, "Generated answer with [docs/a.md]") {
 		t.Fatalf("expected generated answer, got %q", got.Answer)
+	}
+	if !strings.HasSuffix(got.Answer, "Sources: [docs/a.md]") {
+		t.Fatalf("expected footer naming the referenced source, got %q", got.Answer)
 	}
 }
 
-func TestAsk_AppendsMissingAttributions(t *testing.T) {
+// TestAsk_OmitsFooterWhenAnswerReferencesNoSource pins issue #403 F2: an answer
+// that references no document inline gets NO `Sources:` footer. Force-appending
+// every in-context citation conflated "was in the prompt" with "supported the
+// answer", which SPEC 9.4.1 forbids.
+func TestAsk_OmitsFooterWhenAnswerReferencesNoSource(t *testing.T) {
 	idx := index.NewHNSWIndex("")
 	addVec(t, idx, 1, []float32{1, 0})
 	addVec(t, idx, 2, []float32{0.9, 0.1})
@@ -653,15 +662,18 @@ func TestAsk_AppendsMissingAttributions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask failed: %v", err)
 	}
-	if !strings.Contains(got.Answer, "Sources:") {
-		t.Fatalf("expected answer to include sources suffix, got %q", got.Answer)
+	if strings.Contains(got.Answer, "Sources:") {
+		t.Fatalf("expected no sources footer for an answer that cites nothing, got %q", got.Answer)
 	}
-	if !strings.Contains(got.Answer, "[docs/a.md]") || !strings.Contains(got.Answer, "[docs/b.md]") {
-		t.Fatalf("expected answer to include missing source tags, got %q", got.Answer)
+	if got.Answer != "Generated summary without explicit source tags." {
+		t.Fatalf("expected the generated body untouched, got %q", got.Answer)
 	}
 }
 
-func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
+// TestAsk_FooterListsOnlyReferencedSources pins issue #403 F2: the footer names
+// the documents the answer references and omits the in-context documents it does
+// not, so the footer never ranges wider than what supported the answer.
+func TestAsk_FooterListsOnlyReferencedSources(t *testing.T) {
 	idx := index.NewHNSWIndex("")
 	addVec(t, idx, 1, []float32{1, 0})
 	addVec(t, idx, 2, []float32{0.9, 0.1})
@@ -683,15 +695,17 @@ func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask failed: %v", err)
 	}
-	// should still include both a.md and b.md, but a.md only once
-	if !strings.Contains(got.Answer, "[docs/a.md]") {
-		t.Fatalf("expected answer to still contain [docs/a.md], got %q", got.Answer)
+	if !strings.Contains(got.Answer, "Sources: [docs/a.md]") {
+		t.Fatalf("expected the referenced source in the footer, got %q", got.Answer)
 	}
-	if !strings.Contains(got.Answer, "[docs/b.md]") {
-		t.Fatalf("expected answer to contain [docs/b.md], got %q", got.Answer)
+	// docs/b.md was in context but the answer never referenced it, so it must not
+	// be attributed as a source of the answer.
+	if strings.Contains(got.Answer, "[docs/b.md]") {
+		t.Fatalf("expected unreferenced in-context doc to stay out of the footer, got %q", got.Answer)
 	}
-	if strings.Count(got.Answer, "[docs/a.md]") != 1 {
-		t.Fatalf("expected only one [docs/a.md] tag, got %q", got.Answer)
+	// b.md is still reported as a retrieved hit and an in-context citation.
+	if len(got.Citations) != 2 {
+		t.Fatalf("expected both in-context citations, got %d", len(got.Citations))
 	}
 }
 

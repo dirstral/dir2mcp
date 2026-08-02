@@ -784,11 +784,264 @@ func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask failed: %v", err)
 	}
-	if got.Answer != "Generated answer with [docs/a.md]" {
+	// The generated body is preserved verbatim; the attribution footer restates
+	// the one document the answer actually referenced (SPEC 9.4.1).
+	if !strings.HasPrefix(got.Answer, "Generated answer with [docs/a.md]") {
 		t.Fatalf("expected generated answer, got %q", got.Answer)
+	}
+	if !strings.HasSuffix(got.Answer, "Sources: [docs/a.md]") {
+		t.Fatalf("expected footer naming the referenced source, got %q", got.Answer)
 	}
 }
 
+// TestAsk_OmitsFooterWhenAnswerReferencesNoSource pins issue #403 F2: an answer
+// that references no document inline gets NO `Sources:` footer. Force-appending
+// every in-context citation conflated "was in the prompt" with "supported the
+// answer", which SPEC 9.4.1 forbids.
+func TestAsk_OmitsFooterWhenAnswerReferencesNoSource(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, &fakeGenerator{out: "Generated summary without explicit source tags."})
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/a.md",
+		Snippet: "alpha snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
+	})
+	svc.SetChunkMetadata(2, model.SearchHit{
+		RelPath: "docs/b.md",
+		Snippet: "beta snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 3, EndLine: 4},
+	})
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 2})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if strings.Contains(got.Answer, "Sources:") {
+		t.Fatalf("expected no sources footer for an answer that cites nothing, got %q", got.Answer)
+	}
+	if got.Answer != "Generated summary without explicit source tags." {
+		t.Fatalf("expected the generated body untouched, got %q", got.Answer)
+	}
+}
+
+// TestAsk_FooterListsOnlyReferencedSources pins issue #403 F2: the footer names
+// the documents the answer references and omits the in-context documents it does
+// not, so the footer never ranges wider than what supported the answer.
+func TestAsk_FooterListsOnlyReferencedSources(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, &fakeGenerator{out: "Generated summary with [docs/a.md] already present."})
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/a.md",
+		Snippet: "alpha snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
+	})
+	svc.SetChunkMetadata(2, model.SearchHit{
+		RelPath: "docs/b.md",
+		Snippet: "beta snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 3, EndLine: 4},
+	})
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 2})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if !strings.Contains(got.Answer, "Sources: [docs/a.md]") {
+		t.Fatalf("expected the referenced source in the footer, got %q", got.Answer)
+	}
+	// docs/b.md was in context but the answer never referenced it, so it must not
+	// be attributed as a source of the answer.
+	if strings.Contains(got.Answer, "[docs/b.md]") {
+		t.Fatalf("expected unreferenced in-context doc to stay out of the footer, got %q", got.Answer)
+	}
+	// b.md is still reported as a retrieved hit and an in-context citation.
+	if len(got.Citations) != 2 {
+		t.Fatalf("expected both in-context citations, got %d", len(got.Citations))
+	}
+}
+
+// TestEvictDocument_RemovesChunksFromSearch verifies that after EvictDocument
+// is called for a document, its chunks no longer appear in Search results even
+// though the HNSW index still contains the corresponding label vectors.
+func TestEvictDocument_RemovesChunksFromSearch(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	// labels 1 (docs/kept.md) and 2 (docs/deleted.md) are both in the index.
+	for _, l := range []uint64{1, 2} {
+		addVec(t, idx, l, []float32{1, 0})
+	}
+
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/kept.md", DocType: "md", Snippet: "stays"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/deleted.md", DocType: "md", Snippet: "goes away"})
+
+	// Before eviction both documents appear in search results.
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search before eviction: %v", err)
+	}
+	relPaths := make([]string, 0, len(hits))
+	for _, h := range hits {
+		relPaths = append(relPaths, h.RelPath)
+	}
+	if !slices.Contains(relPaths, "docs/deleted.md") {
+		t.Fatalf("expected docs/deleted.md in pre-eviction results, got %v", relPaths)
+	}
+
+	// Evict the document.
+	svc.EvictDocument("docs/deleted.md")
+
+	// After eviction, docs/deleted.md must not appear even though the vector
+	// label still lives in the HNSW index.
+	hits, err = svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search after eviction: %v", err)
+	}
+	for _, h := range hits {
+		if h.RelPath == "docs/deleted.md" {
+			t.Fatalf("docs/deleted.md still appears in results after EvictDocument")
+		}
+	}
+	// The non-evicted document must still be present.
+	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
+		return h.RelPath == "docs/kept.md"
+	}) {
+		t.Fatalf("docs/kept.md missing from results after evicting a different document")
+	}
+}
+
+func TestEvictDocuments_RemovesMultipleDocumentsFromSearch(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	for _, l := range []uint64{1, 2, 3} {
+		addVec(t, idx, l, []float32{1, 0})
+	}
+
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/keep.md", DocType: "md", Snippet: "keep"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/drop-a.md", DocType: "md", Snippet: "drop a"})
+	svc.SetChunkMetadata(3, model.SearchHit{RelPath: "docs/drop-b.md", DocType: "md", Snippet: "drop b"})
+
+	svc.EvictDocuments([]string{"docs/drop-a.md", "docs/drop-b.md"})
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for _, h := range hits {
+		if h.RelPath == "docs/drop-a.md" || h.RelPath == "docs/drop-b.md" {
+			t.Fatalf("evicted document still appears in results: %#v", h)
+		}
+	}
+	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
+		return h.RelPath == "docs/keep.md"
+	}) {
+		t.Fatalf("docs/keep.md missing after batch eviction, got %v", hits)
+	}
+}
+
+func TestSearch_ExpandsCandidateWindowAfterEvictions(t *testing.T) {
+	idx := &expandingRetrievalIndex{
+		labels: []uint64{1, 2, 3, 4, 5, 6},
+		scores: []float32{0.99, 0.98, 0.97, 0.96, 0.95, 0.94},
+	}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetOversampleFactor(5)
+
+	for _, label := range []uint64{1, 2, 3, 4, 5} {
+		svc.SetChunkMetadata(label, model.SearchHit{
+			RelPath: "docs/deleted.md",
+			DocType: "md",
+			Snippet: "deleted",
+		})
+	}
+	svc.SetChunkMetadata(6, model.SearchHit{
+		RelPath: "docs/live.md",
+		DocType: "md",
+		Snippet: "live",
+	})
+	svc.EvictDocument("docs/deleted.md")
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 1})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit after expanding candidate window, got %d", len(hits))
+	}
+	if hits[0].RelPath != "docs/live.md" {
+		t.Fatalf("expected docs/live.md, got %#v", hits[0])
+	}
+	if len(idx.queries) < 2 {
+		t.Fatalf("expected multiple ANN searches after evictions, got %v", idx.queries)
+	}
+	if idx.queries[0] != 5 || idx.queries[1] <= idx.queries[0] {
+		t.Fatalf("unexpected ANN search fanout progression: %v", idx.queries)
+	}
+}
+
+func TestSearch_StopsExpandingWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	idx := &cancelAfterFirstSearchIndex{
+		labels: []uint64{1, 2, 3, 4, 5},
+		scores: []float32{0.99, 0.98, 0.97, 0.96, 0.95},
+		cancel: cancel,
+	}
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetOversampleFactor(5)
+	for _, label := range []uint64{1, 2, 3, 4, 5} {
+		svc.SetChunkMetadata(label, model.SearchHit{
+			RelPath: "docs/deleted.md",
+			DocType: "md",
+			Snippet: "deleted",
+		})
+	}
+	svc.EvictDocument("docs/deleted.md")
+
+	_, err := svc.Search(ctx, model.SearchQuery{Query: "q", K: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if idx.calls != 1 {
+		t.Fatalf("expected one ANN search before cancellation, got %d", idx.calls)
+	}
+}
+
+// TestSearch_EmptyRelPathChunkNotReturned verifies that a chunk registered with
+// an empty RelPath (e.g. an orphaned eviction stub) is never surfaced in Search
+// results, exercising the matchFilters guard via the public API.
+func TestSearch_EmptyRelPathChunkNotReturned(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 99, []float32{1, 0})
+
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(99, model.SearchHit{ChunkID: 99, RelPath: "", DocType: "unknown"})
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for _, h := range hits {
+		if h.RelPath == "" {
+			t.Fatal("Search returned a hit with empty RelPath")
+		}
+	}
+}
 func TestAsk_UsesConfiguredSystemPromptAndContextBudget(t *testing.T) {
 	idx := index.NewHNSWIndex("")
 	addVec(t, idx, 1, []float32{1, 0})
@@ -1047,245 +1300,5 @@ func TestAsk_TinyBudgetSkipsPartialBeginMarker(t *testing.T) {
 	if strings.Contains(ctx, "<<<BEGIN") &&
 		!strings.Contains(ctx, "<<<BEGIN UNTRUSTED DOCUMENT [docs/big.md]>>>") {
 		t.Fatalf("emitted a partial BEGIN marker at a tiny budget, got %q", ctx)
-	}
-}
-
-func TestAsk_AppendsMissingAttributions(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	addVec(t, idx, 1, []float32{1, 0})
-	addVec(t, idx, 2, []float32{0.9, 0.1})
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, &fakeGenerator{out: "Generated summary without explicit source tags."})
-	svc.SetChunkMetadata(1, model.SearchHit{
-		RelPath: "docs/a.md",
-		Snippet: "alpha snippet",
-		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
-	})
-	svc.SetChunkMetadata(2, model.SearchHit{
-		RelPath: "docs/b.md",
-		Snippet: "beta snippet",
-		Span:    model.Span{Kind: "lines", StartLine: 3, EndLine: 4},
-	})
-
-	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 2})
-	if err != nil {
-		t.Fatalf("Ask failed: %v", err)
-	}
-	if !strings.Contains(got.Answer, "Sources:") {
-		t.Fatalf("expected answer to include sources suffix, got %q", got.Answer)
-	}
-	if !strings.Contains(got.Answer, "[docs/a.md]") || !strings.Contains(got.Answer, "[docs/b.md]") {
-		t.Fatalf("expected answer to include missing source tags, got %q", got.Answer)
-	}
-}
-
-func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	addVec(t, idx, 1, []float32{1, 0})
-	addVec(t, idx, 2, []float32{0.9, 0.1})
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, &fakeGenerator{out: "Generated summary with [docs/a.md] already present."})
-	svc.SetChunkMetadata(1, model.SearchHit{
-		RelPath: "docs/a.md",
-		Snippet: "alpha snippet",
-		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
-	})
-	svc.SetChunkMetadata(2, model.SearchHit{
-		RelPath: "docs/b.md",
-		Snippet: "beta snippet",
-		Span:    model.Span{Kind: "lines", StartLine: 3, EndLine: 4},
-	})
-
-	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 2})
-	if err != nil {
-		t.Fatalf("Ask failed: %v", err)
-	}
-	// should still include both a.md and b.md, but a.md only once
-	if !strings.Contains(got.Answer, "[docs/a.md]") {
-		t.Fatalf("expected answer to still contain [docs/a.md], got %q", got.Answer)
-	}
-	if !strings.Contains(got.Answer, "[docs/b.md]") {
-		t.Fatalf("expected answer to contain [docs/b.md], got %q", got.Answer)
-	}
-	if strings.Count(got.Answer, "[docs/a.md]") != 1 {
-		t.Fatalf("expected only one [docs/a.md] tag, got %q", got.Answer)
-	}
-}
-
-// TestEvictDocument_RemovesChunksFromSearch verifies that after EvictDocument
-// is called for a document, its chunks no longer appear in Search results even
-// though the HNSW index still contains the corresponding label vectors.
-func TestEvictDocument_RemovesChunksFromSearch(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	// labels 1 (docs/kept.md) and 2 (docs/deleted.md) are both in the index.
-	for _, l := range []uint64{1, 2} {
-		addVec(t, idx, l, []float32{1, 0})
-	}
-
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, nil)
-	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/kept.md", DocType: "md", Snippet: "stays"})
-	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/deleted.md", DocType: "md", Snippet: "goes away"})
-
-	// Before eviction both documents appear in search results.
-	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
-	if err != nil {
-		t.Fatalf("Search before eviction: %v", err)
-	}
-	relPaths := make([]string, 0, len(hits))
-	for _, h := range hits {
-		relPaths = append(relPaths, h.RelPath)
-	}
-	if !slices.Contains(relPaths, "docs/deleted.md") {
-		t.Fatalf("expected docs/deleted.md in pre-eviction results, got %v", relPaths)
-	}
-
-	// Evict the document.
-	svc.EvictDocument("docs/deleted.md")
-
-	// After eviction, docs/deleted.md must not appear even though the vector
-	// label still lives in the HNSW index.
-	hits, err = svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
-	if err != nil {
-		t.Fatalf("Search after eviction: %v", err)
-	}
-	for _, h := range hits {
-		if h.RelPath == "docs/deleted.md" {
-			t.Fatalf("docs/deleted.md still appears in results after EvictDocument")
-		}
-	}
-	// The non-evicted document must still be present.
-	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
-		return h.RelPath == "docs/kept.md"
-	}) {
-		t.Fatalf("docs/kept.md missing from results after evicting a different document")
-	}
-}
-
-func TestEvictDocuments_RemovesMultipleDocumentsFromSearch(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	for _, l := range []uint64{1, 2, 3} {
-		addVec(t, idx, l, []float32{1, 0})
-	}
-
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, nil)
-	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/keep.md", DocType: "md", Snippet: "keep"})
-	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/drop-a.md", DocType: "md", Snippet: "drop a"})
-	svc.SetChunkMetadata(3, model.SearchHit{RelPath: "docs/drop-b.md", DocType: "md", Snippet: "drop b"})
-
-	svc.EvictDocuments([]string{"docs/drop-a.md", "docs/drop-b.md"})
-
-	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	for _, h := range hits {
-		if h.RelPath == "docs/drop-a.md" || h.RelPath == "docs/drop-b.md" {
-			t.Fatalf("evicted document still appears in results: %#v", h)
-		}
-	}
-	if !slices.ContainsFunc(hits, func(h model.SearchHit) bool {
-		return h.RelPath == "docs/keep.md"
-	}) {
-		t.Fatalf("docs/keep.md missing after batch eviction, got %v", hits)
-	}
-}
-
-func TestSearch_ExpandsCandidateWindowAfterEvictions(t *testing.T) {
-	idx := &expandingRetrievalIndex{
-		labels: []uint64{1, 2, 3, 4, 5, 6},
-		scores: []float32{0.99, 0.98, 0.97, 0.96, 0.95, 0.94},
-	}
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, nil)
-	svc.SetOversampleFactor(5)
-
-	for _, label := range []uint64{1, 2, 3, 4, 5} {
-		svc.SetChunkMetadata(label, model.SearchHit{
-			RelPath: "docs/deleted.md",
-			DocType: "md",
-			Snippet: "deleted",
-		})
-	}
-	svc.SetChunkMetadata(6, model.SearchHit{
-		RelPath: "docs/live.md",
-		DocType: "md",
-		Snippet: "live",
-	})
-	svc.EvictDocument("docs/deleted.md")
-
-	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 1})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(hits) != 1 {
-		t.Fatalf("expected 1 hit after expanding candidate window, got %d", len(hits))
-	}
-	if hits[0].RelPath != "docs/live.md" {
-		t.Fatalf("expected docs/live.md, got %#v", hits[0])
-	}
-	if len(idx.queries) < 2 {
-		t.Fatalf("expected multiple ANN searches after evictions, got %v", idx.queries)
-	}
-	if idx.queries[0] != 5 || idx.queries[1] <= idx.queries[0] {
-		t.Fatalf("unexpected ANN search fanout progression: %v", idx.queries)
-	}
-}
-
-func TestSearch_StopsExpandingWhenContextCanceled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	idx := &cancelAfterFirstSearchIndex{
-		labels: []uint64{1, 2, 3, 4, 5},
-		scores: []float32{0.99, 0.98, 0.97, 0.96, 0.95},
-		cancel: cancel,
-	}
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, nil)
-	svc.SetOversampleFactor(5)
-	for _, label := range []uint64{1, 2, 3, 4, 5} {
-		svc.SetChunkMetadata(label, model.SearchHit{
-			RelPath: "docs/deleted.md",
-			DocType: "md",
-			Snippet: "deleted",
-		})
-	}
-	svc.EvictDocument("docs/deleted.md")
-
-	_, err := svc.Search(ctx, model.SearchQuery{Query: "q", K: 1})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
-	}
-	if idx.calls != 1 {
-		t.Fatalf("expected one ANN search before cancellation, got %d", idx.calls)
-	}
-}
-
-// TestSearch_EmptyRelPathChunkNotReturned verifies that a chunk registered with
-// an empty RelPath (e.g. an orphaned eviction stub) is never surfaced in Search
-// results, exercising the matchFilters guard via the public API.
-func TestSearch_EmptyRelPathChunkNotReturned(t *testing.T) {
-	idx := index.NewHNSWIndex("")
-	addVec(t, idx, 99, []float32{1, 0})
-
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
-		"mistral-embed": {1, 0},
-	}}, nil)
-	svc.SetChunkMetadata(99, model.SearchHit{ChunkID: 99, RelPath: "", DocType: "unknown"})
-
-	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "q", K: 5})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	for _, h := range hits {
-		if h.RelPath == "" {
-			t.Fatal("Search returned a hit with empty RelPath")
-		}
 	}
 }

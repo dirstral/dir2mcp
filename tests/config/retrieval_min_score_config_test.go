@@ -9,12 +9,39 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 )
 
-// TestRetrievalMinScore_DefaultDisabled pins the local-first default: the
-// relevance floor is 0 (disabled) unless explicitly configured.
-func TestRetrievalMinScore_DefaultDisabled(t *testing.T) {
+// TestRetrievalMinScore_DefaultEnabled pins SPEC §9.4.3 (issue #403 F4): the
+// relevance floor MUST ship ENABLED, so omitting the key keeps it on at the
+// server's documented default rather than leaving it at 0. A floor that shipped
+// disabled made a single weak lexical match indistinguishable from a
+// well-grounded answer.
+func TestRetrievalMinScore_DefaultEnabled(t *testing.T) {
 	cfg := config.Default()
+	if cfg.RetrievalMinScore <= 0 {
+		t.Fatalf("retrieval.min_score must ship enabled (> 0), got %v", cfg.RetrievalMinScore)
+	}
+	if cfg.RetrievalMinScore > 1 {
+		t.Fatalf("retrieval.min_score is a normalized relevance floor in [0,1], got %v", cfg.RetrievalMinScore)
+	}
+}
+
+// TestRetrievalMinScore_ZeroDisablesExplicitly pins the other half of §9.4.3:
+// `0` remains the explicit disable representation and must survive the merge
+// rather than being overwritten by the now-nonzero default.
+func TestRetrievalMinScore_ZeroDisablesExplicitly(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, strings.Join([]string{
+		"retrieval:",
+		"  min_score: 0",
+		"",
+	}, "\n"))
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
 	if cfg.RetrievalMinScore != 0 {
-		t.Fatalf("retrieval.min_score must default to 0 (disabled), got %v", cfg.RetrievalMinScore)
+		t.Fatalf("explicit min_score: 0 must disable the floor, got %v", cfg.RetrievalMinScore)
 	}
 }
 

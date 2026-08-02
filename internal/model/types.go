@@ -678,6 +678,23 @@ type SearchHit struct {
 	// mirroring Language above. It is internal to retrieval and is NOT serialized
 	// into the tool result (the §9.2 hit structure is unchanged); 0 means unknown.
 	MTimeUnix int64
+	// EvidenceScore / EvidenceScale carry the ABSOLUTE relevance signal for this
+	// hit: a score whose meaning does not depend on the other hits in the same
+	// response (SPEC §9.4.3). Score alone cannot serve that role because a
+	// rank-based RRF fusion score encodes rank rather than relevance, and the
+	// index=both path min-max normalizes per axis; both destroy the absolute
+	// reading. EvidenceScale names the scale EvidenceScore is on, so the
+	// insufficient-evidence threshold can be maintained per scale instead of one
+	// number applied across incommensurable scales:
+	//
+	//	"cosine" - query/chunk cosine similarity from the vector index
+	//	"rerank" - the reranker's own relevance score for the (query, chunk) pair
+	//	""       - no absolute signal available (e.g. a BM25-only fused candidate)
+	//
+	// They are internal to retrieval and are NOT serialized into the tool result
+	// (the §9.2 hit structure is unchanged), mirroring Language / MTimeUnix above.
+	EvidenceScore float64
+	EvidenceScale string
 }
 
 type ChunkMetadata struct {

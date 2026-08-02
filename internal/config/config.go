@@ -62,6 +62,21 @@ const (
 	DefaultMediaClipMaxBytes      = 26214400
 )
 
+// defaultRetrievalMinScore is the shipped default for `retrieval.min_score`,
+// the RELATIVE pruning floor of SPEC §9.4.3, which requires the floor to ship
+// enabled. The floor compares a score min-max normalized over the result set,
+// so 0.05 means "drop hits sitting in the bottom 5% of the observed score
+// range"; because normalization maps the weakest hit to 0, that also always
+// drops the weakest hit of a non-degenerate set (a degenerate all-equal set
+// normalizes to all-1 and survives in full).
+//
+// The value is deliberately permissive. §9.1.1 leaves raw scores on
+// incommensurable scales, so this floor can only ever be a relative ranking
+// control (#411); an aggressive relative default would cost recall without
+// making a weak answer detectable, which is the job of the separate ABSOLUTE
+// evidence threshold in internal/retrieval/evidence.go. `0` disables the floor.
+const defaultRetrievalMinScore = 0.05
+
 // DefaultMediaSubtitlesAlignToleranceMS is the bilingual cross-language cue
 // alignment tolerance (SPEC §8.6.10, media.subtitles.ttml.align_tolerance_ms):
 // a secondary segment whose start is within this many milliseconds of a primary
@@ -265,9 +280,18 @@ type Config struct {
 	// modes — cosine (~0..1) vs RRF (max ≈ 0.033) vs a provider rerank scale — so a
 	// single raw threshold would silently wipe out all hybrid/RRF results (#411).
 	// It is config-only (NOT an MCP tool parameter) so no tool input/output schema
-	// changes. Default 0 = disabled (no floor): behavior is unchanged unless
-	// configured, preserving the local-first, no-surprises default. Negative
-	// values are CONFIG_INVALID.
+	// changes. Values outside [0,1] are CONFIG_INVALID: a negative floor would
+	// never drop anything, and a floor above 1 would silently drop every hit
+	// (see validateMinScore).
+	//
+	// SPEC §9.4.3 splits this control in two and requires this one to ship
+	// ENABLED, so it defaults to defaultRetrievalMinScore rather than to 0.
+	// `0` remains the explicit disable representation. Note what this floor is
+	// and is NOT: because it normalizes over the result set, the top hit always
+	// maps to 1.0, so some hit always clears any floor. It PRUNES weak hits
+	// relative to the best one; it can never report that the best one is itself
+	// too weak. The absolute threshold that triggers ask abstention is a
+	// separate, non-configurable control (internal/retrieval/evidence.go).
 	RetrievalMinScore float64
 	// CostPriceOverrides maps a model name to per-1K-token USD prices,
 	// overriding the built-in defaults used by the per-query query_metrics
@@ -1416,9 +1440,9 @@ func Default() Config {
 		// DedupRetrieval defaults to false (SPEC 9.2): retrieval-time
 		// cross-file de-duplication is off unless explicitly enabled.
 		DedupRetrieval: false,
-		// RetrievalMinScore defaults to 0 (disabled): no relevance floor is
-		// applied unless explicitly configured.
-		RetrievalMinScore: 0,
+		// RetrievalMinScore ships ENABLED (SPEC §9.4.3): omitting the key keeps
+		// the relevance floor on at defaultRetrievalMinScore. `0` disables it.
+		RetrievalMinScore: defaultRetrievalMinScore,
 		// RetrievalRecencyHalfLife defaults to 0 (disabled): no time-decay is
 		// applied unless explicitly configured.
 		RetrievalRecencyHalfLife: 0,

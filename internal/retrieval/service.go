@@ -1497,6 +1497,34 @@ func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 	return out
 }
 
+// abstainOnWeakEvidence applies the insufficient-evidence guard (SPEC §9.4.3,
+// issue #403 F4) and returns the abstention result when it fires.
+//
+// `hits` is already the ELIGIBLE set: applyMinScoreFloor ran inside s.search, so
+// the relative pruning floor has selected it and no below-floor candidate can
+// reach the prompt or the citations. What that relative floor cannot report is
+// that the eligible set is ITSELF too weak (its normalization maps the best hit
+// to 1.0, so some hit always clears any floor), which is why an absolute
+// threshold decides abstention separately (see evidence.go).
+//
+// Abstaining returns an explicit insufficient-evidence answer with an EMPTY
+// citations array. It is a normal result, not an error (§14), and the rejected
+// candidates stay in `hits` so a caller can inspect what was turned down.
+func (s *Service) abstainOnWeakEvidence(ctx context.Context, question string, hits []model.SearchHit) (model.AskResult, bool) {
+	if len(hits) == 0 || classifyEvidence(hits) != evidenceInsufficient {
+		return model.AskResult{}, false
+	}
+	s.logf("ask: abstaining, none of %d eligible hits cleared the absolute evidence threshold", len(hits))
+	indexingComplete, _ := s.IndexingComplete(ctx)
+	return model.AskResult{
+		Question:         question,
+		Answer:           insufficientEvidenceAnswer(len(hits)),
+		Citations:        []model.Citation{},
+		Hits:             hits,
+		IndexingComplete: indexingComplete,
+	}, true
+}
+
 func (s *Service) Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
@@ -1569,42 +1597,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		})
 	}
 
+	if abstained, ok := s.abstainOnWeakEvidence(ctx, question, hits); ok {
+		return abstained, nil
+	}
+
 	answer := buildFallbackAnswer(question, hits)
 	if s.gen != nil && len(hits) > 0 {
-		s.metaMu.RLock()
-		systemPrompt := s.ragSystemPrompt
-		maxContextChars := s.ragMaxContextChars
-		compressor := s.compressor
-		s.metaMu.RUnlock()
-		// buildRAGPrompt compresses only the model-facing snippet text; the
-		// `hits` and `citations` built above are never mutated, so cited spans
-		// remain byte-for-byte identical to what was retrieved. usedIdx reports
-		// which hits actually reached the model's context window (issue #403 F1).
-		prompt, usedIdx := buildRAGPrompt(question, hits, systemPrompt, maxContextChars, compressor)
-		var generated string
-		genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
-			var gErr error
-			generated, gErr = s.gen.Generate(ctx, prompt)
-			return gErr
-		})
-		if genErr != nil {
-			// log the error so callers have visibility; fall back to the
-			// precomputed answer when generation fails.  avoid recording the
-			// entire question in logs since it may contain sensitive data.
-			safeQuestion := truncateQuestion(question)
-			s.logf("generator error for question %q: %v", safeQuestion, genErr)
-		} else {
-			if trimmed := strings.TrimSpace(generated); trimmed != "" {
-				answer = trimmed
-				// Faithfulness (issue #403): the answer came from the model, so
-				// its citations MUST reference only the chunks the model actually
-				// saw. Restrict citations to the in-context set (F1) and strip any
-				// inline [rel_path] tag the model hallucinated for a document not
-				// in that set (F3).
-				citations = citationsForIndices(hits, usedIdx)
-				answer = stripHallucinatedCitations(answer, citations)
-			}
-		}
+		answer, citations = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
 	}
 	answer = ensureAnswerAttributions(answer, citations)
 
@@ -1620,6 +1619,71 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		Hits:             hits,
 		IndexingComplete: indexingComplete,
 	}, nil
+}
+
+// generateGroundedAnswer runs RAG generation and returns the answer and the
+// citations that survive it. Extracted from Ask purely to keep Ask's
+// cyclomatic complexity within the repo's gocyclo budget; the logic is
+// unchanged.
+func (s *Service) generateGroundedAnswer(
+	ctx context.Context, question, fallback string, hits []model.SearchHit, citations []model.Citation,
+) (string, []model.Citation) {
+	answer := fallback
+	s.metaMu.RLock()
+	systemPrompt := s.ragSystemPrompt
+	maxContextChars := s.ragMaxContextChars
+	compressor := s.compressor
+	s.metaMu.RUnlock()
+	// buildRAGPrompt compresses only the model-facing snippet text; the
+	// `hits` and `citations` built above are never mutated, so cited spans
+	// remain byte-for-byte identical to what was retrieved. usedIdx reports
+	// which hits actually reached the model's context window (issue #403 F1).
+	prompt, usedIdx := buildRAGPrompt(question, hits, s.contextTexts(ctx, hits), systemPrompt, maxContextChars, compressor)
+	var generated string
+	genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
+		var gErr error
+		generated, gErr = s.gen.Generate(ctx, prompt)
+		return gErr
+	})
+	if genErr != nil {
+		// log the error so callers have visibility; fall back to the
+		// precomputed answer when generation fails.  avoid recording the
+		// entire question in logs since it may contain sensitive data.
+		safeQuestion := truncateQuestion(question)
+		s.logf("generator error for question %q: %v", safeQuestion, genErr)
+	} else {
+		// len(usedIdx) == 0 means the budget could not hold even one complete
+		// fenced block, so the prompt's Context section was empty. Adopting
+		// the model's reply would publish an answer grounded in nothing next
+		// to an empty citations array: the overstated grounding §9.4.1
+		// forbids, and indistinguishable to a caller from a sourced reply.
+		// Reachable by configuration, since rag_max_context_chars is clamped
+		// only against <= 0 and the upper bound. Keep the fallback answer.
+		//
+		// The prompt is still built and sent, which is deliberate: the #445
+		// fence tests exercise construction under tiny budgets through this
+		// path, and skipping the call would stop them observing it.
+		if trimmed := strings.TrimSpace(generated); trimmed != "" && len(usedIdx) == 0 {
+			// Nothing was shown to the model, so nothing may be cited. The
+			// citations built before generation cover every retrieved hit;
+			// leaving them here would attach the full retrieved set to a
+			// fallback answer none of it supported, which is the same
+			// overstated grounding the F1 narrowing exists to prevent.
+			s.logf("rag: context budget %d chars fits no document (%d hits); discarding the ungrounded reply", maxContextChars, len(hits))
+			citations = nil
+		} else if trimmed := strings.TrimSpace(generated); trimmed != "" {
+			answer = trimmed
+			// Faithfulness (issue #403): the answer came from the model, so
+			// its citations MUST reference only the chunks the model actually
+			// saw. Restrict citations to the in-context set (F1) and strip any
+			// inline [rel_path] tag the model hallucinated for a document not
+			// in that set (F3).
+			citations = citationsForIndices(hits, usedIdx)
+			answer = stripHallucinatedCitations(answer, citations)
+		}
+	}
+
+	return answer, citations
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
@@ -2642,6 +2706,13 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		}
 		h := cand[r.Index]
 		h.Score = r.RelevanceScore
+		// The reranker scored this (query, chunk) pair directly, so its score is
+		// an absolute relevance signal on the provider's own scale and supersedes
+		// the cosine reading recorded at retrieval time (SPEC §9.4.3). The
+		// un-reranked tail appended below keeps whatever scale it already carried,
+		// which is exactly why the scale travels per hit rather than per response.
+		h.EvidenceScore = r.RelevanceScore
+		h.EvidenceScale = evidenceScaleRerank
 		out = append(out, h)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -2965,6 +3036,13 @@ func (s *Service) searchHitFromIndexHit(indexName string, h model.IndexHit) mode
 		}
 	}
 	hit.Score = float64(h.Score)
+	// Record the cosine similarity as this hit's ABSOLUTE evidence signal
+	// (SPEC §9.4.3) before any downstream stage overwrites Score with a
+	// rank-based fusion score or a per-axis normalized one. The vector index is
+	// the only stage that produces a query/chunk similarity, so this is the
+	// single place the "cosine" scale can be recorded.
+	hit.EvidenceScore = float64(h.Score)
+	hit.EvidenceScale = evidenceScaleCosine
 	return hit
 }
 
@@ -3172,14 +3250,68 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 	return strings.Join(lines, "\n")
 }
 
+// ragMaxContextDocs caps how many retrieved chunks may be placed in the prompt.
+const ragMaxContextDocs = 8
+
+// ragMinDocTextChars is the smallest per-document text window worth emitting.
+// Below it the fence markers would dominate the block and the window could not
+// carry the matched region the citation names (SPEC §9.4.2), so the document is
+// skipped instead.
+const ragMinDocTextChars = 16
+
+// contextTexts resolves the FULL chunk text for each hit that can reach the
+// prompt, so context selection works on the whole chunk rather than on the
+// ~240-rune store snippet (SPEC §9.4.2, issue #403 F5). It reuses the
+// chunkByIDer capability exactly as rerankDocs does; entries stay empty when the
+// store lacks the capability, the chunk id is zero, the lookup fails, or the
+// chunk carries no text (a media chunk), and the builder then falls back to the
+// hit's Snippet. At most ragMaxContextDocs lookups run per ask.
+func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit) []string {
+	limit := len(hits)
+	if limit > ragMaxContextDocs {
+		limit = ragMaxContextDocs
+	}
+	texts := make([]string, limit)
+	// Copy the store under the guard like every other accessor in this file
+	// (applyRecencyDecay, rerankPool): the field can be reassigned after
+	// construction, so an unguarded read races with that assignment.
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	fetcher, _ := store.(chunkByIDer)
+	if fetcher == nil {
+		return texts
+	}
+	for i := 0; i < limit; i++ {
+		if hits[i].ChunkID == 0 {
+			continue
+		}
+		task, _, err := fetcher.ChunkTaskByID(ctx, hits[i].ChunkID)
+		if err != nil {
+			continue
+		}
+		texts[i] = strings.TrimSpace(task.Text)
+	}
+	return texts
+}
+
 // buildRAGPrompt assembles the system+question+context prompt sent to the
 // generator and returns, alongside the prompt string, the indices (into hits)
 // of the chunks that were actually placed in the context window. Only those
 // chunks were seen by the model, so callers MUST restrict the answer's
-// citations to this set — a chunk dropped by the doc-count cap (8) or the
-// maxContextChars budget was never given to the LLM and citing it overstates
-// grounding (issue #403 F1).
-func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
+// citations to this set, since a chunk dropped by the doc-count cap
+// (ragMaxContextDocs) or the maxContextChars budget was never given to the LLM
+// and citing it overstates grounding (issue #403 F1).
+//
+// fullTexts carries the resolved full chunk text per hit (see contextTexts) and
+// may be short or hold empty entries; an unavailable entry falls back to the
+// hit's Snippet.
+//
+// Each document gets an equal share of maxContextChars and is sent as a
+// match-centered window of that size (SPEC §9.4.2, issue #403 F5) rather than a
+// flat 300-rune head, so a clause past the head of a 2500-rune chunk still
+// reaches the model that cites it.
+func buildRAGPrompt(question string, hits []model.SearchHit, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
 	systemPrompt = strings.TrimSpace(systemPrompt)
 	if systemPrompt == "" {
 		systemPrompt = defaultRAGSystemPrompt
@@ -3200,75 +3332,112 @@ func buildRAGPrompt(question string, hits []model.SearchHit, systemPrompt string
 
 	remaining := maxContextChars
 	limit := len(hits)
-	if limit > 8 {
-		limit = 8
+	if limit > ragMaxContextDocs {
+		limit = ragMaxContextDocs
 	}
+	perDoc := maxContextChars / limitOrOne(limit)
 	used := make([]int, 0, limit)
 	for i := 0; i < limit && remaining > 0; i++ {
-		h := hits[i]
-		// Preserve the bracketed [rel_path] citation tag structurally so the
-		// answering model (and ensureAnswerAttributions) can match it, but note
-		// the tag's contents may be sanitized by neutralizeHeaderField for
-		// fence-safety on adversarial inputs (marker/terminator literals in a
-		// crafted RelPath/Title are redacted). When a human-readable Title is
-		// available, surface it alongside the path as a parenthetical hint so the
-		// model has the document name in addition to its path.
-		//
-		// Wrap the snippet in explicit BEGIN/END UNTRUSTED DOCUMENT markers
-		// (issue #445) so the model can distinguish untrusted corpus DATA from
-		// trusted instructions; the default system prompt tells it to never
-		// follow directions embedded inside these markers.
-		header := ragDocOpenMarker + " [" + neutralizeHeaderField(h.RelPath) + "]"
-		if title := strings.TrimSpace(h.Title); title != "" {
-			header += " (" + neutralizeHeaderField(title) + ")"
+		block, ok := ragDocBlock(question, hits[i], docTextAt(fullTexts, i), perDoc, remaining, compressor)
+		if !ok {
+			// The remaining budget cannot hold a complete, fenced block for this
+			// document. Stop rather than emit a partial one: a truncated block
+			// would either break the untrusted fence (issue #445) or cite text the
+			// model was never shown (SPEC §9.4.2).
+			break
 		}
-		header += ragDocOpenMarkerEnd + "\n"
-		// Evidence-guided compression (issue #335) reshapes ONLY this local
-		// copy of the snippet that flows into the prompt; h.Snippet and the
-		// caller's citations are untouched. Disabled compressor ⇒ identity.
-		modelText := compressor.compressSnippet(question, strings.TrimSpace(h.Snippet))
-		snippet := neutralizeRAGMarkers(truncateSnippet(modelText, 300))
-		switch {
-		case snippet != "":
-			// Available text (incl. an augment media hit's OCR/transcript)
-			// grounds the answer normally.
-		case isMediaHit(h):
-			// A replace-mode media-only hit has no text: cite it without quoted
-			// context rather than as a missing snippet (SPEC 8.1.7).
-			snippet = "(" + strings.ToLower(strings.TrimSpace(h.Modality)) + " media; cited without quoted text)"
-		default:
-			snippet = "(no snippet)"
-		}
-		// Keep the closing marker out of the truncatable region so a
-		// budget-boundary document never emits an unterminated fence (issue
-		// #445): the model must always be able to see where untrusted content
-		// ends.
-		closing := "\n" + ragDocCloseMarker + "\n"
-		line := header + snippet + closing
-
-		lineLen := len([]rune(line))
-		if lineLen <= remaining {
-			b.WriteString(line)
-			remaining -= lineLen
-			used = append(used, i)
-			continue
-		}
-
-		fitLen := remaining - len([]rune(closing))
-		// Only truncate when the full opening marker still fits; otherwise
-		// truncateRunes would cut inside the BEGIN marker and emit an
-		// unbalanced fence (a partial open marker followed by a valid END
-		// marker). In that case skip the doc entirely (issue #445).
-		if fitLen >= len([]rune(header)) {
-			truncated := truncateRunes(header+snippet, fitLen)
-			if strings.TrimSpace(truncated) != "" {
-				b.WriteString(truncated + closing)
-				used = append(used, i)
-			}
-		}
-		remaining = 0
+		b.WriteString(block)
+		remaining -= len([]rune(block))
+		used = append(used, i)
 	}
 	return b.String(), used
+}
+
+// limitOrOne guards the per-document division against a zero document count.
+func limitOrOne(limit int) int {
+	if limit < 1 {
+		return 1
+	}
+	return limit
+}
+
+// docTextAt returns the resolved full chunk text for position i, or "" when the
+// caller supplied no entry for it.
+func docTextAt(fullTexts []string, i int) string {
+	if i < 0 || i >= len(fullTexts) {
+		return ""
+	}
+	return fullTexts[i]
+}
+
+// ragDocBlock renders one fenced context block for a hit, or reports false when
+// the remaining budget cannot hold a complete block. The returned block always
+// carries a complete opening marker and a complete closing marker, so the
+// untrusted fence is never left partial or straddled (issue #445).
+func ragDocBlock(question string, h model.SearchHit, fullText string, perDoc, remaining int, compressor contextCompressor) (string, bool) {
+	// Preserve the bracketed [rel_path] citation tag structurally so the
+	// answering model (and ensureAnswerAttributions) can match it, but note
+	// the tag's contents may be sanitized by neutralizeHeaderField for
+	// fence-safety on adversarial inputs (marker/terminator literals in a
+	// crafted RelPath/Title are redacted). When a human-readable Title is
+	// available, surface it alongside the path as a parenthetical hint so the
+	// model has the document name in addition to its path.
+	//
+	// Wrap the snippet in explicit BEGIN/END UNTRUSTED DOCUMENT markers
+	// (issue #445) so the model can distinguish untrusted corpus DATA from
+	// trusted instructions; the default system prompt tells it to never
+	// follow directions embedded inside these markers.
+	header := ragDocOpenMarker + " [" + neutralizeHeaderField(h.RelPath) + "]"
+	if title := strings.TrimSpace(h.Title); title != "" {
+		header += " (" + neutralizeHeaderField(title) + ")"
+	}
+	header += ragDocOpenMarkerEnd + "\n"
+	closing := "\n" + ragDocCloseMarker + "\n"
+
+	// The window budget is the document's fair share, narrowed to whatever the
+	// global budget still leaves once both fence markers are accounted for. A
+	// budget-boundary document therefore gets a SMALLER match-centered window
+	// instead of a head-truncated one, which keeps the matched region (and hence
+	// the text its citation names) inside the prompt.
+	budget := perDoc
+	if avail := remaining - len([]rune(header)) - len([]rune(closing)); avail < budget {
+		budget = avail
+	}
+	if budget < ragMinDocTextChars {
+		return "", false
+	}
+	return header + ragDocSnippet(question, h, fullText, budget, compressor) + closing, true
+}
+
+// ragDocSnippet produces the model-facing text for one hit: the full chunk text
+// when available (falling back to the hit's store snippet), evidence-compressed,
+// marker-neutralized, and reduced to a match-centered window of at most budget
+// runes.
+func ragDocSnippet(question string, h model.SearchHit, fullText string, budget int, compressor contextCompressor) string {
+	text := strings.TrimSpace(fullText)
+	if text == "" {
+		text = strings.TrimSpace(h.Snippet)
+	}
+	// Evidence-guided compression (issue #335) reshapes ONLY this local copy of
+	// the text that flows into the prompt; h.Snippet and the caller's citations
+	// are untouched. Disabled compressor ⇒ identity.
+	text = compressor.compressSnippet(question, text)
+	// Neutralize BEFORE windowing: the redaction marker is longer than the fence
+	// literal it replaces, so neutralizing afterwards could push the block past
+	// the budget it was sized against (issue #445 + §9.4.2 budget accounting).
+	snippet := matchCenteredWindow(neutralizeRAGMarkers(text), question, budget)
+	switch {
+	case snippet != "":
+		// Available text (incl. an augment media hit's OCR/transcript)
+		// grounds the answer normally.
+	case isMediaHit(h):
+		// A replace-mode media-only hit has no text: cite it without quoted
+		// context rather than as a missing snippet (SPEC 8.1.7).
+		snippet = "(" + strings.ToLower(strings.TrimSpace(h.Modality)) + " media; cited without quoted text)"
+	default:
+		snippet = "(no snippet)"
+	}
+	return snippet
 }
 
 // neutralizeRAGMarkers replaces any occurrence of the untrusted-document fence
@@ -3290,20 +3459,6 @@ func neutralizeHeaderField(s string) string {
 	s = neutralizeRAGMarkers(s)
 	s = strings.ReplaceAll(s, ragDocOpenMarkerEnd, ragDocMarkerRedaction)
 	return s
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	if maxRunes <= 3 {
-		return string(r[:maxRunes])
-	}
-	return string(r[:maxRunes-3]) + "..."
 }
 
 func truncateSnippet(s string, maxRunes int) string {
@@ -3365,10 +3520,8 @@ func stripHallucinatedCitations(answer string, citations []model.Citation) strin
 	}
 	removed := false
 	out := inlineCitationRe.ReplaceAllStringFunc(answer, func(match string) string {
-		trimmed := strings.TrimSpace(match)
-		inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
-		p := citationTagPath(inner)
-		if p == "" || !looksLikeCitationPath(p) {
+		p := inlineCitationTagPath(match)
+		if p == "" {
 			// Not a file citation (footnote marker, prose, link label): keep.
 			return match
 		}
@@ -3391,6 +3544,158 @@ func stripHallucinatedCitations(answer string, citations []model.Citation) strin
 		return answer
 	}
 	return strings.TrimSpace(out)
+}
+
+// inlineCitationTagPath parses ONE inlineCitationRe match (a bracketed tag,
+// possibly with the leading space the pattern absorbs) into the document path it
+// cites, or "" when the bracket is not a file citation at all (a footnote marker
+// like [1], bracketed prose, a markdown link label). It is the single parse
+// shared by the two faithfulness rules of §9.4.1: stripHallucinatedCitations
+// uses it to decide which tags name a document, and inlineCitationPaths uses it
+// to decide which documents the answer actually references.
+func inlineCitationTagPath(match string) string {
+	trimmed := strings.TrimSpace(match)
+	if len(trimmed) < 2 {
+		return ""
+	}
+	p := citationTagPath(strings.TrimSpace(trimmed[1 : len(trimmed)-1]))
+	if p == "" || !looksLikeCitationPath(p) {
+		return ""
+	}
+	return p
+}
+
+// inlineCitationPaths returns the set of document paths the answer text cites
+// inline, each recorded under both its full path and its basename so a tag and a
+// citation that differ only in that respect still match (the same leniency
+// stripHallucinatedCitations applies).
+func inlineCitationPaths(answer string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, match := range inlineCitationRe.FindAllString(answer, -1) {
+		p := inlineCitationTagPath(match)
+		if p == "" {
+			continue
+		}
+		out[p] = struct{}{}
+		out[path.Base(p)] = struct{}{}
+	}
+	return out
+}
+
+// citationsReferencedByAnswer narrows the in-context citation set to the
+// citations the answer actually references inline, preserving order.
+//
+// This is the distinction §9.4.1 requires an attribution footer to respect
+// (issue #403 F2): being placed in the prompt is not evidence that a document
+// supported the answer. Listing every supplied context as a `Source:` conflates
+// "was in context" with "supported this claim", so an answer written entirely
+// from contractA.pdf would still name contractB.pdf and contractC.pdf as its
+// sources.
+func citationsReferencedByAnswer(answer string, citations []model.Citation) []model.Citation {
+	cited := inlineCitationPaths(answer)
+	if len(cited) == 0 {
+		return nil
+	}
+	out := make([]model.Citation, 0, len(citations))
+	for _, c := range citations {
+		rel := strings.TrimSpace(c.RelPath)
+		if rel == "" {
+			continue
+		}
+		if _, ok := cited[rel]; ok {
+			out = append(out, c)
+			continue
+		}
+		if _, ok := cited[path.Base(rel)]; ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// sourcesFooterRe matches the opening line of an attribution footer, whether the
+// server appended it or the model wrote it ("Sources:", "Source:",
+// "References:", "Reference:").
+var sourcesFooterRe = regexp.MustCompile(`(?i)^\s*(?:sources?|references?)\s*:`)
+
+// footerContinuationRe matches a line that can belong to an attribution footer
+// block: a list item or a line opening with a bracketed citation tag.
+var footerContinuationRe = regexp.MustCompile(`^\s*(?:[-*\x{2022}]|\d+[.)]|\[)`)
+
+// stripSourcesFooter removes a trailing attribution footer from an answer.
+//
+// §9.4.1 requires a MODEL-authored footer to be sanitized too, not just a
+// server-appended one: the model can write its own `Sources:` block naming
+// documents it was never given, and because a prose footer is not a [rel_path]
+// tag, stripHallucinatedCitations does not reach it. Removing the block and
+// rebuilding it from the in-context citation set is what keeps the emitted
+// footer derived from what the server actually supplied.
+//
+// Only a TRAILING footer is removed, and only when it really is one. Three
+// conditions must hold together, because the scan walks backwards and would
+// otherwise delete the whole tail of the answer at the first `References:` it
+// meets in the body:
+//
+//  1. the header line matches sourcesFooterRe;
+//  2. everything after it is blank, a list item, or a bracketed-tag line;
+//  3. the block either NAMES a document (a path-shaped token) or is a bare
+//     label with no trailing text of its own.
+//
+// Condition 3 is what keeps a prose line such as "References: RFC 7231" sitting
+// above a bulleted list from being read as an attribution footer: it names no
+// document and carries prose after the label, so it is body text.
+func stripSourcesFooter(answer string) string {
+	lines := strings.Split(answer, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !sourcesFooterRe.MatchString(lines[i]) {
+			continue
+		}
+		if !isFooterBlockTail(lines[i+1:]) {
+			break
+		}
+		if !footerNamesDocument(lines[i:]) && !bareFooterLabelRe.MatchString(lines[i]) {
+			break
+		}
+		return strings.TrimRight(strings.Join(lines[:i], "\n"), " \t\n")
+	}
+	return answer
+}
+
+// bareFooterLabelRe matches a footer header carrying nothing but the label, the
+// shape a model emits when it opens the block and lists the documents on the
+// following lines.
+var bareFooterLabelRe = regexp.MustCompile(`(?i)^\s*(?:sources?|references?)\s*:\s*$`)
+
+// footerTokenRe splits a candidate footer line into the tokens that could name a
+// document, dropping the punctuation a list separator adds around them.
+var footerTokenRe = regexp.MustCompile(`[^\s,;()\[\]]+`)
+
+// footerNamesDocument reports whether a candidate footer block names at least
+// one document, i.e. carries a token shaped like a path (a separator or a file
+// extension). A block that names none is prose, not an attribution footer.
+func footerNamesDocument(lines []string) bool {
+	for _, line := range lines {
+		for _, tok := range footerTokenRe.FindAllString(line, -1) {
+			if looksLikeCitationPath(strings.Trim(tok, ".,;:")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isFooterBlockTail reports whether every remaining line can belong to an
+// attribution footer block rather than to the answer body.
+func isFooterBlockTail(rest []string) bool {
+	for _, line := range rest {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !footerContinuationRe.MatchString(line) {
+			return false
+		}
+	}
+	return true
 }
 
 // citationLineSuffixRe matches a trailing line-number suffix on a citation path:
@@ -3446,58 +3751,60 @@ func looksLikeCitationPath(p string) bool {
 // so bare filenames like "lease.pdf" or "main.go" read as citation paths.
 var citationExtensionRe = regexp.MustCompile(`\.[A-Za-z0-9]{1,6}$`)
 
+// maxAttributionSources caps how many documents the rebuilt attribution footer
+// names.
+const maxAttributionSources = 5
+
+// ensureAnswerAttributions rebuilds the answer's trailing `Sources:` footer so
+// that it reports what SUPPORTED the answer rather than what was retrieved
+// (SPEC §9.4.1, issue #403 F2).
+//
+// It previously force-appended every in-context citation whose [rel_path] tag
+// was not literally present in the answer. That conflated "was in the prompt"
+// with "supported this answer": an answer written entirely from contractA.pdf
+// still listed contractB.pdf and contractC.pdf as its sources, and a consumer
+// spot-checking the footer could not tell the difference. §9.4.1 forbids a
+// footer that ranges wider than the in-context set and restricts it to the
+// documents the answer actually references.
+//
+// Two steps, in order:
+//
+//  1. Any footer already present is REMOVED, including one the model wrote
+//     itself, so a model-authored `Sources:` block naming documents the model
+//     was never given cannot pass through unchecked.
+//  2. A footer is appended only for the in-context citations the remaining
+//     answer body references inline. When the answer references none, no footer
+//     is emitted: there is nothing the server can truthfully attribute.
 func ensureAnswerAttributions(answer string, citations []model.Citation) string {
-	answer = strings.TrimSpace(answer)
+	answer = strings.TrimSpace(stripSourcesFooter(answer))
 	if answer == "" || len(citations) == 0 {
 		return answer
 	}
 
-	type sourceEntry struct {
-		rel   string
-		title string
-	}
-	ordered := make([]sourceEntry, 0, len(citations))
+	sources := make([]string, 0, maxAttributionSources)
 	seen := make(map[string]struct{}, len(citations))
-	for _, c := range citations {
+	for _, c := range citationsReferencedByAnswer(answer, citations) {
 		rel := strings.TrimSpace(c.RelPath)
-		if rel == "" {
-			continue
-		}
 		if _, ok := seen[rel]; ok {
 			continue
 		}
 		seen[rel] = struct{}{}
-		ordered = append(ordered, sourceEntry{rel: rel, title: strings.TrimSpace(c.Title)})
+		// The canonical [rel_path] tag is what the model emits inline. When a
+		// human-readable title is present we surface it next to the path so the
+		// footer is more readable than bare paths.
+		display := "[" + rel + "]"
+		if title := strings.TrimSpace(c.Title); title != "" {
+			display += " (" + title + ")"
+		}
+		sources = append(sources, display)
+		if len(sources) == maxAttributionSources {
+			break
+		}
 	}
-	if len(ordered) == 0 {
+	if len(sources) == 0 {
 		return answer
 	}
-
-	missing := make([]string, 0, len(ordered))
-	for _, src := range ordered {
-		// The canonical [rel_path] tag is what the model emits inline; we
-		// only need to add a Sources line for paths it failed to mention.
-		// When a human-readable title is present we surface it next to the
-		// path so the appended block is more readable than bare paths.
-		tag := "[" + src.rel + "]"
-		if strings.Contains(answer, tag) {
-			continue
-		}
-		display := tag
-		if src.title != "" {
-			display = tag + " (" + src.title + ")"
-		}
-		missing = append(missing, display)
-	}
-	if len(missing) == 0 {
-		return answer
-	}
-
-	limit := len(missing)
-	if limit > 5 {
-		limit = 5
-	}
-	return answer + "\n\nSources: " + strings.Join(missing[:limit], ", ")
+	return answer + "\n\nSources: " + strings.Join(sources, ", ")
 }
 
 // FormatCitation renders a human-readable citation string for a span (SPEC §9.3).
