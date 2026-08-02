@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import json
 import shutil
+import re
 import subprocess
 import tempfile
 import threading
@@ -57,6 +58,22 @@ _FRAME_CACHE: "OrderedDict[tuple[str, int, int, float], Path]" = OrderedDict()
 _FRAME_LOCK = threading.Condition()
 _FRAME_USERS: dict[tuple[str, int, int, float], int] = {}
 _FRAME_INFLIGHT: set[tuple[str, int, int, float]] = set()
+
+
+#: Exactly the files ffmpeg's `frame-%08d.jpg` pattern produces, and nothing
+#: else. Recognizers write siblings into this directory (JerseyRecognizer saves
+#: crops as `frame-<n>-p<x>x<y>.jpg`), and now that the directory is SHARED
+#: across the cascade a loose `frame-*.jpg` glob would feed one recognizer's
+#: crops to the next as if they were sampled frames: wrong images, and
+#: timestamps inflated by the extra entries (a 900s clip yielded cues out to
+#: 6446s). Each iterator was previously handed a private directory, so this
+#: only became reachable when extraction started being reused.
+_SAMPLED_FRAME_RE = re.compile(r"^frame-\d+\.jpg$")
+
+
+def _sampled_frames(directory: Path) -> list[Path]:
+    return sorted(p for p in directory.glob("frame-*.jpg")
+                  if _SAMPLED_FRAME_RE.match(p.name))
 
 
 def _evict_frame_dir(path: Path) -> None:
@@ -195,7 +212,7 @@ def iter_frames(
         _evict_locked()
 
     try:
-        for i, frame in enumerate(sorted(cached.glob("frame-*.jpg"))):
+        for i, frame in enumerate(_sampled_frames(cached)):
             # ffmpeg's fps filter emits frame N at timestamp N/fps.
             yield i / fps, frame
     finally:

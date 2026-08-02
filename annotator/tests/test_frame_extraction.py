@@ -161,3 +161,29 @@ def test_concurrent_callers_extract_once(tmp_path, monkeypatch):
 
     assert out == [2, 2], f"both callers should see all frames, got {out}"
     assert len(calls) == 1, f"expected one extraction, got {len(calls)}"
+
+
+def test_recognizer_crops_are_not_ingested_as_frames(tmp_path, monkeypatch):
+    """Recognizers write siblings into the frame directory: JerseyRecognizer
+    saves crops as `frame-<n>-p<x>x<y>.jpg`. Now that the directory is shared
+    across the cascade, a loose glob would hand one recognizer's crops to the
+    next as sampled frames, with timestamps inflated by the extra entries.
+    """
+    media = tmp_path / "game.mp4"
+    media.write_bytes(b"x" * 32)
+    monkeypatch.setattr(base.subprocess, "run", _fake_run(4))
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+
+    first = list(base.iter_frames(media, fps=0.5))
+    assert len(first) == 4
+    assert first[-1][0] == 6.0, "4 frames at 0.5 fps end at t=6.0"
+
+    # Simulate the jersey recognizer saving crops beside the frames it read.
+    frame_dir = next(iter(base._FRAME_CACHE.values()))
+    for i, (_, f) in enumerate(first):
+        (frame_dir / f"{f.stem}-p{100 + i}x{200 + i}.jpg").write_bytes(b"\xff\xd8\xff")
+
+    second = list(base.iter_frames(media, fps=0.5))
+    assert len(second) == 4, f"crops leaked into the frame list: {len(second)} entries"
+    assert second[-1][0] == 6.0, "timestamps inflated by ingesting crops"
+    assert all("-p" not in p.name for _, p in second)
