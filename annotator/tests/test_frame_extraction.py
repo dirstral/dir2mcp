@@ -105,3 +105,59 @@ def test_timeout_scales_with_duration(tmp_path, monkeypatch):
     assert base._extract_timeout_s(tmp_path / "x.mp4", "ffprobe") == 600.0
     monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: None)
     assert base._extract_timeout_s(tmp_path / "x.mp4", "ffprobe") == float("inf")
+
+
+def test_in_use_extraction_is_not_evicted(tmp_path, monkeypatch):
+    """serve runs under ThreadingHTTPServer: one request must not rmtree the
+    frames another request is mid-iteration on."""
+    monkeypatch.setattr(base.subprocess, "run", _fake_run(3))
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+
+    held = tmp_path / "held.mp4"
+    held.write_bytes(b"x" * 32)
+    it = base.iter_frames(held, fps=0.5)
+    first = next(it)                      # iterator now holds this extraction
+    held_dir = next(iter(base._FRAME_CACHE.values()))
+
+    # Push well past the cap from "other requests".
+    for i in range(base._FRAME_CACHE_MAX + 3):
+        m = tmp_path / f"other{i}.mp4"
+        m.write_bytes(b"x" * (64 + i))
+        list(base.iter_frames(m, fps=0.5))
+
+    assert held_dir.exists(), "an in-use extraction was evicted from disk"
+    assert first[1].exists(), "the frame being iterated was deleted"
+    rest = list(it)                        # must still be readable
+    assert len(rest) == 2
+    it.close()
+
+
+def test_concurrent_callers_extract_once(tmp_path, monkeypatch):
+    """Two threads asking for the same media must not both decode it."""
+    import threading as _t
+
+    media = tmp_path / "game.mp4"
+    media.write_bytes(b"x" * 32)
+    calls = []
+    started = _t.Event()
+
+    def slow_run(cmd, **kw):
+        calls.append(cmd)
+        started.set()
+        _t.Event().wait(0.3)          # hold the extraction open
+        return _fake_run(2)(cmd, **kw)
+
+    monkeypatch.setattr(base.subprocess, "run", slow_run)
+    monkeypatch.setattr(base, "probe_duration_s", lambda *a, **k: 10.0)
+
+    out = []
+    def worker():
+        out.append(len(list(base.iter_frames(media, fps=0.5))))
+
+    t1 = _t.Thread(target=worker); t1.start()
+    started.wait(2)
+    t2 = _t.Thread(target=worker); t2.start()
+    t1.join(10); t2.join(10)
+
+    assert out == [2, 2], f"both callers should see all frames, got {out}"
+    assert len(calls) == 1, f"expected one extraction, got {len(calls)}"

@@ -13,6 +13,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
@@ -46,14 +47,40 @@ class RecognizerUnavailable(RuntimeError):
 _FRAME_CACHE_MAX = 4
 _FRAME_CACHE: "OrderedDict[tuple[str, int, int, float], Path]" = OrderedDict()
 
+#: serve runs under ThreadingHTTPServer, so /recognize requests touch this cache
+#: concurrently. Without synchronisation two threads race the dict, and eviction
+#: can rmtree a directory another thread is still iterating, failing a
+#: recognition mid-run. _FRAME_USERS refcounts active iterators so an in-use
+#: extraction is never deleted, and _FRAME_INFLIGHT lets a second caller wait
+#: for an extraction already running rather than start a duplicate hour-long
+#: decode of the same media.
+_FRAME_LOCK = threading.Condition()
+_FRAME_USERS: dict[tuple[str, int, int, float], int] = {}
+_FRAME_INFLIGHT: set[tuple[str, int, int, float]] = set()
+
 
 def _evict_frame_dir(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _evict_locked() -> None:
+    """Trim to the cap, skipping entries an iterator still holds.
+
+    Caller must hold _FRAME_LOCK. Over-cap is preferable to deleting frames out
+    from under a running recognizer; the entry is reclaimed once its last
+    reader finishes.
+    """
+    while len(_FRAME_CACHE) > _FRAME_CACHE_MAX:
+        victim = next((k for k in _FRAME_CACHE if not _FRAME_USERS.get(k)), None)
+        if victim is None:
+            return
+        _evict_frame_dir(_FRAME_CACHE.pop(victim))
+
+
 def _cleanup_frame_dirs() -> None:
-    while _FRAME_CACHE:
-        _evict_frame_dir(_FRAME_CACHE.popitem(last=False)[1])
+    with _FRAME_LOCK:
+        while _FRAME_CACHE:
+            _evict_frame_dir(_FRAME_CACHE.popitem(last=False)[1])
 
 
 atexit.register(_cleanup_frame_dirs)
@@ -113,10 +140,16 @@ def iter_frames(
         raise RuntimeError(f"cannot stat {media_path}: {exc}") from exc
     key = (str(media_path.resolve()), st.st_mtime_ns, st.st_size, fps)
 
-    cached = _FRAME_CACHE.get(key)
-    if cached is not None:
-        _FRAME_CACHE.move_to_end(key)
-    else:
+    with _FRAME_LOCK:
+        # Wait out an extraction of the same media already running in another
+        # thread instead of starting a duplicate decode.
+        while key in _FRAME_INFLIGHT:
+            _FRAME_LOCK.wait()
+        cached = _FRAME_CACHE.get(key)
+        if cached is None:
+            _FRAME_INFLIGHT.add(key)
+
+    if cached is None:
         tmp = Path(tempfile.mkdtemp(prefix="dirstral-frames-"))
         out = tmp / "frame-%08d.jpg"
         cmd = [
@@ -130,29 +163,49 @@ def iter_frames(
         try:
             subprocess.run(cmd, check=True, capture_output=True,
                            timeout=None if timeout == float("inf") else timeout)
-        except subprocess.TimeoutExpired as exc:
+        except BaseException as exc:
+            # A failed extraction must leave nothing behind: not the partially
+            # written directory, not a cache entry, and not a marker that would
+            # strand another thread waiting in the loop above.
             _evict_frame_dir(tmp)
-            raise RuntimeError(
-                f"ffmpeg timed out after {timeout:.0f}s on {media_path}"
-            ) from exc
-        except FileNotFoundError as exc:
-            _evict_frame_dir(tmp)
-            raise RecognizerUnavailable(f"ffmpeg not found ({ffmpeg})") from exc
-        except subprocess.CalledProcessError as exc:
-            _evict_frame_dir(tmp)
-            raise RuntimeError(
-                f"ffmpeg failed on {media_path}: {exc.stderr.decode(errors='replace')[-500:]}"
-            ) from exc
-        except BaseException:
-            # Anything else (KeyboardInterrupt included) must also not leave a
-            # partially written directory behind until interpreter exit.
-            _evict_frame_dir(tmp)
+            with _FRAME_LOCK:
+                _FRAME_INFLIGHT.discard(key)
+                _FRAME_LOCK.notify_all()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise RuntimeError(
+                    f"ffmpeg timed out after {timeout:.0f}s on {media_path}"
+                ) from exc
+            if isinstance(exc, FileNotFoundError):
+                raise RecognizerUnavailable(f"ffmpeg not found ({ffmpeg})") from exc
+            if isinstance(exc, subprocess.CalledProcessError):
+                raise RuntimeError(
+                    f"ffmpeg failed on {media_path}: "
+                    f"{exc.stderr.decode(errors='replace')[-500:]}"
+                ) from exc
             raise
-        _FRAME_CACHE[key] = tmp
-        while len(_FRAME_CACHE) > _FRAME_CACHE_MAX:
-            _evict_frame_dir(_FRAME_CACHE.popitem(last=False)[1])
-        cached = tmp
+        with _FRAME_LOCK:
+            _FRAME_CACHE[key] = tmp
+            _FRAME_INFLIGHT.discard(key)
+            _FRAME_LOCK.notify_all()
+            cached = tmp
 
-    for i, frame in enumerate(sorted(cached.glob("frame-*.jpg"))):
-        # ffmpeg's fps filter emits frame N at timestamp N/fps.
-        yield i / fps, frame
+    with _FRAME_LOCK:
+        _FRAME_CACHE.move_to_end(key)
+        _FRAME_USERS[key] = _FRAME_USERS.get(key, 0) + 1
+        _evict_locked()
+
+    try:
+        for i, frame in enumerate(sorted(cached.glob("frame-*.jpg"))):
+            # ffmpeg's fps filter emits frame N at timestamp N/fps.
+            yield i / fps, frame
+    finally:
+        # Release the hold whether the caller exhausted the iterator or closed
+        # it early, then retry the eviction this reader may have been blocking.
+        with _FRAME_LOCK:
+            remaining = _FRAME_USERS.get(key, 1) - 1
+            if remaining > 0:
+                _FRAME_USERS[key] = remaining
+            else:
+                _FRAME_USERS.pop(key, None)
+            _evict_locked()
+            _FRAME_LOCK.notify_all()
