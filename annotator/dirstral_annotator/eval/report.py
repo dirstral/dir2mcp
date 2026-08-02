@@ -63,8 +63,17 @@ def render(
         "",
         f"Counts sources that reached a credited `{SCORED_EVENT}` annotation naming "
         "the pitcher. **An absent source has not been measured as weak**; it may "
-        "be making a kind of claim this metric never reads. See the diagnostics "
-        "below before drawing any conclusion from this table.",
+        "be making a kind of claim this metric never reads."
+        + (
+            " See the diagnostics below before drawing any conclusion from this"
+            " table."
+            if diagnostics is not None
+            # Without diagnostics there is no section below to consult, and
+            # pointing at one that is not there reads as though the reader
+            # simply failed to find it.
+            else " Re-run with diagnostics enabled to tell an unreachable source"
+            " apart from a weak one."
+        ),
         "",
         "| Source | Found pitches it contributed to |",
         "|---|---|",
