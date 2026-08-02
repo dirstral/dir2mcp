@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -32,10 +33,70 @@ type SQLiteStore struct {
 	// run concurrently with an in-flight write instead of queueing behind it.
 	// Nil until initLocked succeeds, and nil-safe: readDB falls back to db.
 	rdb *sql.DB
+	// vdb is a one-connection READ-ONLY handle used for nothing but the
+	// `PRAGMA data_version` probe that guards the ListFiles memo (#429 F10). It is
+	// deliberately separate from rdb: the probe pins its connection for the
+	// store's lifetime (data_version readings are only comparable within one
+	// connection), and pinning a slot of the shared read pool would both shrink
+	// read concurrency and put the probe behind whatever scans are in flight.
+	// Nil when it failed to open, which simply disables the memo.
+	vdb *sql.DB
+
+	// listCache memoizes the ListFiles total (and the glob resume index) for as
+	// long as no writer commits (#429 F10). It has its own lock and must never be
+	// held while mu is held.
+	listCache listFilesCache
+	// Counters behind ListFilesQueryStatsForTest; see that method.
+	listCountQueries  atomic.Int64
+	listGlobFullScans atomic.Int64
+	listGlobPageScans atomic.Int64
 
 	activeOps int
 	closing   bool
 	cond      *sync.Cond
+}
+
+// ListFilesQueryStats counts the database work ListFiles has done since the
+// store was opened. See ListFilesQueryStatsForTest.
+type ListFilesQueryStats struct {
+	// CountQueries is the number of `SELECT COUNT(*)` statements executed for a
+	// ListFiles total.
+	CountQueries int64
+	// GlobFullScans is the number of times the glob path scanned and re-globbed
+	// every prefix-matched row.
+	GlobFullScans int64
+	// GlobPageScans is the number of times the glob path materialized a page by
+	// resuming from a recorded boundary instead of rescanning from the start.
+	GlobPageScans int64
+}
+
+// ListFilesQueryStatsForTest reports the ListFiles query counters.
+//
+// Exported solely so the #429 F10 regression test can live under tests/ as
+// AGENTS.md requires: the property worth pinning is that paging through a corpus
+// stops re-running the COUNT and the full glob rescan per page, and the number
+// of statements a query path issues is not observable through the ordinary store
+// API. Production code never calls this.
+func (s *SQLiteStore) ListFilesQueryStatsForTest() ListFilesQueryStats {
+	return ListFilesQueryStats{
+		CountQueries:  s.listCountQueries.Load(),
+		GlobFullScans: s.listGlobFullScans.Load(),
+		GlobPageScans: s.listGlobPageScans.Load(),
+	}
+}
+
+// versionProbeDB returns the dedicated data_version handle, or nil when it
+// failed to open (in which case the ListFiles memo is bypassed and every call
+// recounts). The probe must never run on the writer handle: data_version by
+// definition does NOT change for commits made on the same connection, so a
+// probe there would miss this store's own ingest writes.
+//
+// Callers must already hold an activeOps reference (i.e. have called ensureDB or
+// ensureReadDB) so the returned handle cannot be closed underneath them.
+func (s *SQLiteStore) versionProbeDB() *sql.DB {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vdb
 }
 
 type MCPSessionRecord struct {
@@ -487,6 +548,24 @@ func openReadDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// openVersionProbeDB opens the single-connection read-only handle that carries
+// the `PRAGMA data_version` probe (#429 F10). Like openReadDB it MUST run only
+// after openDB has passed the #405 tripwire and switched the file to WAL.
+//
+// One connection is the point: the probe pins it so successive data_version
+// readings are comparable (they are meaningless across connections), and keeping
+// it out of the shared read pool means the probe never queues behind a scan and
+// never costs the pool a slot.
+func openVersionProbeDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
+}
+
 // sqliteReadPoolSize bounds concurrent readers. Small on purpose: these are
 // short point lookups and paged scans, and every open connection costs a file
 // descriptor and its own page cache.
@@ -867,6 +946,11 @@ CREATE INDEX IF NOT EXISTS idx_mcp_nonce_ledger_expires ON mcp_nonce_ledger(expi
 	// refusing to start (#429 F11).
 	if rdb, rerr := openReadDB(s.path); rerr == nil {
 		s.rdb = rdb
+	}
+	// Same deal for the data_version probe handle (#429 F10): a failure here just
+	// disables the ListFiles memo, it never blocks startup.
+	if vdb, verr := openVersionProbeDB(s.path); verr == nil {
+		s.vdb = vdb
 	}
 	return nil
 }
@@ -2122,7 +2206,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	// evaluate it in Go over the prefix-matched rows and paginate in Go. Without a
 	// glob the query keeps its efficient SQL LIMIT/OFFSET pagination unchanged.
 	if trimmedGlob == "" {
-		return s.listFilesSQLPaged(ctx, db, selectCols, whereClause, prefixArgs, limit, offset)
+		return s.listFilesSQLPaged(ctx, db, selectCols, whereClause, prefixArgs, normalizedPrefix, limit, offset)
 	}
 
 	matcher, err := model.CompileGlob(trimmedGlob)
@@ -2132,46 +2216,56 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 		return []model.Document{}, 0, nil
 	}
 
-	query := selectCols + whereClause + " ORDER BY rel_path"
-	rows, err := db.QueryContext(ctx, query, prefixArgs...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	matched := make([]model.Document, 0, limit)
-	var total int64
-	for rows.Next() {
-		doc, scanErr := scanListFilesRow(rows)
-		if scanErr != nil {
-			return nil, 0, scanErr
-		}
-		if !matcher.Match(doc.RelPath) {
-			continue
-		}
-		total++
-		// Only materialize the requested page; earlier rows advance offset and
-		// later rows only bump the total count.
-		if int64(offset) < total && int64(len(matched)) < int64(limit) {
-			matched = append(matched, doc)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
-
-	return matched, total, nil
+	// The cache key is the full filter: whereClause/prefixArgs are a pure
+	// function of normalizedPrefix, so prefix plus glob identifies the listing.
+	key := "glob\x00" + normalizedPrefix + "\x00" + trimmedGlob
+	return s.listFilesGlobPaged(ctx, db, selectCols, whereClause, prefixArgs, matcher, key, limit, offset)
 }
 
 // listFilesSQLPaged runs the glob-free ListFiles path: prefix filtering plus
-// SQL-side ORDER BY / LIMIT / OFFSET pagination and a matching COUNT.
+// SQL-side ORDER BY / LIMIT / OFFSET pagination and a matching total.
+//
+// The total is obtained, in order of cost:
+//  1. from the page itself when the page came back short (that proves where the
+//     result set ends, so no COUNT is needed);
+//  2. from the memo, while no commit has landed since it was computed (see
+//     listFilesCache: the guard is SQLite's own data_version, so a reused total
+//     is a count of exactly the corpus the caller is looking at, not a stale
+//     count of an older one);
+//  3. from `SELECT COUNT(*)`, as before.
+//
+// Before #429 F10 step 3 ran on every page, so walking N documents cost O(N)
+// full count scans.
+//
+// Exactness is unchanged by the memo: the total is exact as of a database state
+// observed during this call. Ingest committing between the page query and the
+// total can still make the two describe adjacent states, exactly as it could
+// when every page ran its own COUNT after its own page query.
 func (s *SQLiteStore) listFilesSQLPaged(
 	ctx context.Context,
 	db *sql.DB,
 	selectCols, whereClause string,
 	prefixArgs []any,
+	normalizedPrefix string,
 	limit, offset int,
 ) ([]model.Document, int64, error) {
+	// Probe before the page query so a memo hit is pinned to a state no newer
+	// than the rows it is returned with.
+	probe := s.versionProbeDB()
+	epoch, cacheable := s.listCache.begin(ctx, probe)
+
+	key := "prefix\x00" + normalizedPrefix
+	var memo listFilesCacheEntry
+	memoized := false
+	if cacheable {
+		memo, memoized = s.listCache.lookup(epoch, key)
+	}
+	if memoized && int64(offset) >= memo.total {
+		// The memo proves the listing ends before this offset, so the page query
+		// would only make SQLite walk rows to discard them all.
+		return []model.Document{}, memo.total, nil
+	}
+
 	query := selectCols + whereClause + " ORDER BY rel_path LIMIT ? OFFSET ?"
 	args := append(append([]any{}, prefixArgs...), limit, offset)
 
@@ -2193,13 +2287,197 @@ func (s *SQLiteStore) listFilesSQLPaged(
 		return nil, 0, err
 	}
 
+	if memoized {
+		return docs, memo.total, nil
+	}
+
+	total, exact := derivedListTotal(len(docs), limit, offset)
+	if !exact {
+		total, err = s.countListFiles(ctx, db, whereClause, prefixArgs)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	if cacheable {
+		s.listCache.store(ctx, probe, epoch, key, listFilesCacheEntry{total: total})
+	}
+	return docs, total, nil
+}
+
+// derivedListTotal reports the total a page proves on its own. A page that came
+// back with fewer rows than the limit ended the result set, so the total is
+// exactly offset+len(page) and no COUNT is needed. A full page may or may not
+// have more rows behind it, and an empty page at a non-zero offset proves
+// nothing (the offset may simply be past the end); both report false.
+func derivedListTotal(pageLen, limit, offset int) (int64, bool) {
+	if pageLen >= limit {
+		return 0, false
+	}
+	if pageLen == 0 && offset > 0 {
+		return 0, false
+	}
+	return int64(offset + pageLen), true
+}
+
+// countListFiles runs the exact COUNT(*) for a ListFiles filter.
+func (s *SQLiteStore) countListFiles(
+	ctx context.Context,
+	db *sql.DB,
+	whereClause string,
+	prefixArgs []any,
+) (int64, error) {
+	s.listCountQueries.Add(1)
 	var total int64
 	countQuery := "SELECT COUNT(*) FROM documents" + whereClause
 	if err := db.QueryRowContext(ctx, countQuery, prefixArgs...).Scan(&total); err != nil {
-		return nil, 0, err
+		return 0, err
+	}
+	return total, nil
+}
+
+// listFilesGlobPaged runs the glob ListFiles path. The glob is evaluated in Go
+// (SQLite GLOB cannot express the canonical segment-aware/`**` semantics), so a
+// page cannot be expressed as SQL LIMIT/OFFSET.
+//
+// Before #429 F10 that meant every page rescanned and re-globbed every
+// prefix-matched row, making a walk quadratic. Now the first page's scan also
+// records the exact total and a sparse resume index, and later pages of the same
+// listing resume from the nearest recorded boundary and stop as soon as the page
+// is full. The memo (total and index alike) is dropped by the first commit from
+// any writer, so a resumed page is over exactly the rows the full scan saw and
+// the total is a count of that same corpus; see listFilesCache for the full
+// exactness contract.
+func (s *SQLiteStore) listFilesGlobPaged(
+	ctx context.Context,
+	db *sql.DB,
+	selectCols, whereClause string,
+	prefixArgs []any,
+	matcher *model.CompiledGlob,
+	key string,
+	limit, offset int,
+) ([]model.Document, int64, error) {
+	probe := s.versionProbeDB()
+	epoch, cacheable := s.listCache.begin(ctx, probe)
+	if cacheable {
+		if entry, ok := s.listCache.lookup(epoch, key); ok {
+			if int64(offset) >= entry.total {
+				// The memo proves the listing ends before this offset, so scanning
+				// would only re-glob rows to discard them all.
+				return []model.Document{}, entry.total, nil
+			}
+			start, skip := entry.startFor(offset)
+			docs, err := s.scanGlobPage(ctx, db, selectCols, whereClause, prefixArgs, matcher, start, skip, limit)
+			if err != nil {
+				return nil, 0, err
+			}
+			return docs, entry.total, nil
+		}
 	}
 
-	return docs, total, nil
+	docs, entry, err := s.scanGlobAll(ctx, db, selectCols, whereClause, prefixArgs, matcher, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	if cacheable {
+		s.listCache.store(ctx, probe, epoch, key, entry)
+	}
+	return docs, entry.total, nil
+}
+
+// scanGlobAll walks every prefix-matched row once, returning the requested page
+// plus the cache entry (exact total + sparse resume index) for the listing.
+func (s *SQLiteStore) scanGlobAll(
+	ctx context.Context,
+	db *sql.DB,
+	selectCols, whereClause string,
+	prefixArgs []any,
+	matcher *model.CompiledGlob,
+	limit, offset int,
+) ([]model.Document, listFilesCacheEntry, error) {
+	s.listGlobFullScans.Add(1)
+
+	query := selectCols + whereClause + " ORDER BY rel_path"
+	rows, err := db.QueryContext(ctx, query, prefixArgs...)
+	if err != nil {
+		return nil, listFilesCacheEntry{}, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	bounds := newGlobBounds(limit)
+	matched := make([]model.Document, 0, limit)
+	var total int64
+	for rows.Next() {
+		doc, scanErr := scanListFilesRow(rows)
+		if scanErr != nil {
+			return nil, listFilesCacheEntry{}, scanErr
+		}
+		if !matcher.Match(doc.RelPath) {
+			continue
+		}
+		bounds.observe(total, doc.RelPath)
+		// Only materialize the requested page; earlier rows advance offset and
+		// later rows only bump the total count.
+		if int64(offset) <= total && len(matched) < limit {
+			matched = append(matched, doc)
+		}
+		total++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, listFilesCacheEntry{}, err
+	}
+	return matched, bounds.entry(total), nil
+}
+
+// scanGlobPage materializes one page of an already-counted glob listing: it
+// resumes at start (a boundary recorded by scanGlobAll), discards skip further
+// matches, and stops the moment the page is full.
+func (s *SQLiteStore) scanGlobPage(
+	ctx context.Context,
+	db *sql.DB,
+	selectCols, whereClause string,
+	prefixArgs []any,
+	matcher *model.CompiledGlob,
+	start string,
+	skip, limit int,
+) ([]model.Document, error) {
+	s.listGlobPageScans.Add(1)
+
+	query := selectCols + whereClause
+	args := append([]any{}, prefixArgs...)
+	if start != "" {
+		query += ` AND rel_path >= ?`
+		args = append(args, start)
+	}
+	query += " ORDER BY rel_path"
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	matched := make([]model.Document, 0, limit)
+	for rows.Next() {
+		doc, scanErr := scanListFilesRow(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if !matcher.Match(doc.RelPath) {
+			continue
+		}
+		if skip > 0 {
+			skip--
+			continue
+		}
+		matched = append(matched, doc)
+		if len(matched) >= limit {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return matched, nil
 }
 
 // scanListFilesRow scans one documents row into a model.Document for ListFiles.
@@ -3190,12 +3468,18 @@ func (s *SQLiteStore) Close() error {
 	s.closing = true
 	db := s.db
 	rdb := s.rdb
+	vdb := s.vdb
 	s.db = nil
 	s.rdb = nil
+	s.vdb = nil
 	for s.activeOps > 0 {
 		s.cond.Wait()
 	}
 	s.mu.Unlock()
+
+	// Release the pinned data_version probe connection BEFORE closing the handle
+	// it came from, and drop every memo so a reopened store starts clean.
+	s.listCache.reset()
 
 	err := db.Close()
 	if rdb != nil {
@@ -3203,6 +3487,11 @@ func (s *SQLiteStore) Close() error {
 		// failure can indicate unflushed work.
 		if rerr := rdb.Close(); err == nil {
 			err = rerr
+		}
+	}
+	if vdb != nil {
+		if verr := vdb.Close(); err == nil {
+			err = verr
 		}
 	}
 
