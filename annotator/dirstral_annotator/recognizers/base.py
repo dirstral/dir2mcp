@@ -192,8 +192,12 @@ def iter_frames(
             "-q:v", "3",
             str(out),
         ]
-        timeout = _extract_timeout_s(media_path, ffprobe)
         try:
+            # Inside the cleanup block: this shells out to ffprobe, so a
+            # KeyboardInterrupt here would otherwise leave the temp directory on
+            # disk and the in-flight marker set, deadlocking later callers for
+            # this media exactly as a failing mkdtemp would.
+            timeout = _extract_timeout_s(media_path, ffprobe)
             subprocess.run(cmd, check=True, capture_output=True,
                            timeout=None if timeout == float("inf") else timeout)
         except BaseException as exc:
@@ -206,7 +210,7 @@ def iter_frames(
                 _FRAME_LOCK.notify_all()
             if isinstance(exc, subprocess.TimeoutExpired):
                 raise RuntimeError(
-                    f"ffmpeg timed out after {timeout:.0f}s on {media_path}"
+                    f"ffmpeg timed out after {exc.timeout:.0f}s on {media_path}"
                 ) from exc
             if isinstance(exc, FileNotFoundError):
                 raise RecognizerUnavailable(f"ffmpeg not found ({ffmpeg})") from exc

@@ -249,3 +249,23 @@ def test_fresh_extraction_is_claimed_before_the_lock_is_released(tmp_path, monke
         list(base.iter_frames(m, fps=0.5))
     t.join(10)
     assert result.get("ok"), "a freshly extracted directory was evicted before its reader claimed it"
+
+
+def test_ffprobe_interrupt_does_not_strand_waiters(tmp_path, monkeypatch):
+    """_extract_timeout_s shells out to ffprobe. An interrupt there must clean
+    up like any other failure, or the temp dir leaks and later callers for this
+    media deadlock on the in-flight marker."""
+    media = tmp_path / "game.mp4"
+    media.write_bytes(b"x" * 32)
+    created = []
+    real_mkdtemp = base.tempfile.mkdtemp
+    monkeypatch.setattr(base.tempfile, "mkdtemp",
+                        lambda **kw: created.append(real_mkdtemp(**kw)) or created[-1])
+    monkeypatch.setattr(base, "_extract_timeout_s",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        list(base.iter_frames(media, fps=0.5))
+
+    assert not base._FRAME_INFLIGHT, "in-flight marker survived an interrupt"
+    assert not Path(created[0]).exists(), "temp dir survived an interrupt"
