@@ -643,8 +643,9 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonO
 	return st, built[0], built[1], exitSuccess
 }
 
-// vectorIndexKinds is the fixed order of the vector index kinds: it drives both
-// the concurrent load below and, on failure, which kind's error is reported.
+// vectorIndexKinds is the fixed order of the vector index kinds: it drives the
+// concurrent load below, which kind's error is reported when both fail, and the
+// order of the embedded-chunk metadata warm-load.
 var vectorIndexKinds = [2]string{index.KindText, index.KindCode}
 
 // loadVectorIndices loads the text and code indices concurrently (issue #429
@@ -1042,7 +1043,7 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 		return 0, nil
 	}
 	total := 0
-	for _, kind := range []string{"text", "code"} {
+	for _, kind := range vectorIndexKinds {
 		loaded, err := preloadEmbeddedChunkMetadataForKind(ctx, source, ret, kind)
 		total += loaded
 		if err != nil {
