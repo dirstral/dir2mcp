@@ -154,10 +154,14 @@ def test_concurrent_callers_extract_once(tmp_path, monkeypatch):
     def worker():
         out.append(len(list(base.iter_frames(media, fps=0.5))))
 
-    t1 = _t.Thread(target=worker); t1.start()
-    started.wait(2)
-    t2 = _t.Thread(target=worker); t2.start()
-    t1.join(10); t2.join(10)
+    t1 = _t.Thread(target=worker, daemon=True)
+    t1.start()
+    assert started.wait(5), "the first extraction never started"
+    t2 = _t.Thread(target=worker, daemon=True)
+    t2.start()
+    t1.join(10)
+    t2.join(10)
+    assert not (t1.is_alive() or t2.is_alive()), "a caller never returned; iter_frames is deadlocked"
 
     assert out == [2, 2], f"both callers should see all frames, got {out}"
     assert len(calls) == 1, f"expected one extraction, got {len(calls)}"
@@ -241,13 +245,20 @@ def test_fresh_extraction_is_claimed_before_the_lock_is_released(tmp_path, monke
         frames = list(base.iter_frames(target, fps=0.5))
         result["ok"] = len(frames) == 2 and all(p.exists() for _, p in frames)
 
-    t = _t.Thread(target=reader); t.start()
-    evicting.wait(5)
+    # daemon so a regression that deadlocks the reader fails this test instead of
+    # hanging the whole run at interpreter teardown.
+    t = _t.Thread(target=reader, daemon=True)
+    t.start()
+    assert evicting.wait(5), (
+        "the patched extraction never ran, so the race window was never opened "
+        "and this test would pass without checking anything"
+    )
     for i in range(base._FRAME_CACHE_MAX + 3):   # push hard on the cap
         m = tmp_path / f"filler{i}.mp4"
         m.write_bytes(b"x" * (64 + i))
         list(base.iter_frames(m, fps=0.5))
     t.join(10)
+    assert not t.is_alive(), "the reader never finished; iter_frames is deadlocked"
     assert result.get("ok"), "a freshly extracted directory was evicted before its reader claimed it"
 
 
