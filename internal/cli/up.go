@@ -602,6 +602,20 @@ type builtIndex struct {
 	path  string
 }
 
+// indexLoadFailure describes a failed vector-index load: the exit code to
+// return plus the operator-facing message and hints to print.
+//
+// The index loads run concurrently (issue #429 F6), so they cannot write to
+// a.stderr themselves: two goroutines racing on the same writer would interleave
+// their output and, worse, whichever lost the race would decide the exit code.
+// Each load therefore returns its failure as data and the (single-threaded)
+// caller reports exactly one of them, chosen by a fixed kind order.
+type indexLoadFailure struct {
+	exitCode int
+	message  string
+	hints    []string
+}
+
 // initStoreAndIndices initialises the metadata store and both vector indices,
 // dispatching on cfg.IndexBackend ("memory" default | "disk" | "qdrant" |
 // "pgvector"; issues #246, #268, #269). On success the caller is responsible for
@@ -620,18 +634,59 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonO
 	// vector payloads on disk (issue #246). A missing snapshot is treated as a
 	// fresh index and repopulated on the next reindex.
 	identity := cfg.Providers().EmbedIdentity()
-	textIx, code := a.loadVectorIndex(ctx, cfg, index.KindText, identity, jsonOutput)
-	if code != exitSuccess {
+	built, fail := a.loadVectorIndices(ctx, cfg, identity)
+	if fail != nil {
+		writeCLIError(a.stderr, jsonOutput, fail.exitCode, fail.message, fail.hints...)
 		_ = st.Close()
-		return nil, builtIndex{}, builtIndex{}, code
+		return nil, builtIndex{}, builtIndex{}, fail.exitCode
 	}
-	codeIx, code := a.loadVectorIndex(ctx, cfg, index.KindCode, identity, jsonOutput)
-	if code != exitSuccess {
-		_ = st.Close()
-		_ = textIx.index.Close()
-		return nil, builtIndex{}, builtIndex{}, code
+	return st, built[0], built[1], exitSuccess
+}
+
+// vectorIndexKinds is the fixed order of the vector index kinds: it drives both
+// the concurrent load below and, on failure, which kind's error is reported.
+var vectorIndexKinds = [2]string{index.KindText, index.KindCode}
+
+// loadVectorIndices loads the text and code indices concurrently (issue #429
+// F6). Serially, cold start paid the two rehydrations back to back: for the
+// memory backend each one is a full gob decode of that kind's snapshot, so a
+// large corpus spent tens of seconds before anything could be served. The two
+// loads touch disjoint state (separate index instances, separate snapshot
+// paths, separate identity reconciliation), so they are genuinely independent.
+//
+// On failure the surviving index is closed and exactly one failure is reported,
+// picked in vectorIndexKinds order rather than by whichever goroutine finished
+// first, so the message and exit code stay deterministic and attributable. A
+// failing load does NOT cancel its sibling: the sibling may be mid-Reset against
+// a networked backend, and interrupting that is a worse outcome than waiting out
+// a load that is about to abort the process anyway.
+func (a *App) loadVectorIndices(ctx context.Context, cfg *config.Config, identity string) ([2]builtIndex, *indexLoadFailure) {
+	var (
+		built [2]builtIndex
+		fails [2]*indexLoadFailure
+		wg    sync.WaitGroup
+	)
+	for i, kind := range vectorIndexKinds {
+		wg.Add(1)
+		go func(slot int, kind string) {
+			defer wg.Done()
+			built[slot], fails[slot] = a.loadVectorIndex(ctx, cfg, kind, identity)
+		}(i, kind)
 	}
-	return st, textIx, codeIx, exitSuccess
+	wg.Wait()
+
+	for i, fail := range fails {
+		if fail == nil {
+			continue
+		}
+		for j := range built {
+			if j != i && built[j].index != nil {
+				_ = built[j].index.Close()
+			}
+		}
+		return [2]builtIndex{}, fail
+	}
+	return built, nil
 }
 
 // loadVectorIndex constructs the configured vector backend for one kind via the
@@ -640,34 +695,57 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonO
 // configured one (issue #247): EnsureIdentity resets the index when the identity
 // is empty (fresh) or differs, so a vector space built under a different embed
 // provider/model/dimension is never silently reused.
-func (a *App) loadVectorIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
+//
+// It runs on its own goroutine (see loadVectorIndices), so it reports problems
+// by returning an *indexLoadFailure instead of writing to a.stderr.
+func (a *App) loadVectorIndex(ctx context.Context, cfg *config.Config, kind, identity string) (builtIndex, *indexLoadFailure) {
 	// Networked backends (Qdrant #268, pgvector #269) carry connection config
 	// NewBackend can't reach and have no local persistence path, so they branch
 	// out before the local memory/disk dispatch. EnsureIdentity still runs (both
 	// implement Identity/Reset); the Persistable Load step is skipped because the
 	// remote store owns its own durability.
-	if strings.EqualFold(strings.TrimSpace(cfg.IndexBackend), index.BackendQdrant) {
-		return a.loadQdrantIndex(ctx, cfg, kind, identity, jsonOutput)
+	if a.newIndex == nil {
+		if strings.EqualFold(strings.TrimSpace(cfg.IndexBackend), index.BackendQdrant) {
+			return a.loadQdrantIndex(ctx, cfg, kind, identity)
+		}
+		if strings.EqualFold(strings.TrimSpace(cfg.IndexBackend), index.BackendPgvector) {
+			return a.loadPgvectorIndex(ctx, cfg, kind, identity)
+		}
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.IndexBackend), index.BackendPgvector) {
-		return a.loadPgvectorIndex(ctx, cfg, kind, identity, jsonOutput)
-	}
-	ix, path := index.NewBackend(cfg.IndexBackend, cfg.StateDir, kind)
+	ix, path := a.newBackendIndex(*cfg, kind)
 	if p, ok := ix.(model.Persistable); ok {
 		if err := p.Load(ctx, path); err != nil &&
 			!errors.Is(err, model.ErrNotImplemented) &&
 			!errors.Is(err, os.ErrNotExist) {
-			writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("load %s index: %v", kind, err))
 			_ = ix.Close()
-			return builtIndex{}, exitIndexLoadFailure
+			return builtIndex{}, &indexLoadFailure{
+				exitCode: exitIndexLoadFailure,
+				message:  fmt.Sprintf("load %s index: %v", kind, err),
+			}
 		}
 	}
 	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("reconcile %s index identity: %v", kind, err))
 		_ = ix.Close()
-		return builtIndex{}, exitIndexLoadFailure
+		return builtIndex{}, identityFailure(kind, err)
 	}
-	return builtIndex{index: ix, path: path}, exitSuccess
+	return builtIndex{index: ix, path: path}, nil
+}
+
+// newBackendIndex resolves the local index.backend dispatch, honouring the
+// newIndex hook when tests inject one.
+func (a *App) newBackendIndex(cfg config.Config, kind string) (model.Index, string) {
+	if a.newIndex != nil {
+		return a.newIndex(cfg, kind)
+	}
+	return index.NewBackend(cfg.IndexBackend, cfg.StateDir, kind)
+}
+
+// identityFailure describes a failed embed-identity reconciliation for one kind.
+func identityFailure(kind string, err error) *indexLoadFailure {
+	return &indexLoadFailure{
+		exitCode: exitIndexLoadFailure,
+		message:  fmt.Sprintf("reconcile %s index identity: %v", kind, err),
+	}
 }
 
 // loadQdrantIndex constructs the networked Qdrant backend for one kind (issue
@@ -675,22 +753,23 @@ func (a *App) loadVectorIndex(ctx context.Context, cfg *config.Config, kind, ide
 // against a per-kind collection, then reconciles the recorded embed identity.
 // There is no local persistence path, so builtIndex.path is left empty and the
 // PersistenceManager is never wired for this kind.
-func (a *App) loadQdrantIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
+func (a *App) loadQdrantIndex(ctx context.Context, cfg *config.Config, kind, identity string) (builtIndex, *indexLoadFailure) {
 	ix, err := index.NewQdrantBackend(ctx, index.QdrantParams{
 		URL:        cfg.Qdrant.URL,
 		APIKey:     cfg.Qdrant.APIKey,
 		Collection: cfg.Qdrant.Collection,
 	}, kind)
 	if err != nil {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("connect %s index to qdrant: %v", kind, err))
-		return builtIndex{}, exitIndexLoadFailure
+		return builtIndex{}, &indexLoadFailure{
+			exitCode: exitIndexLoadFailure,
+			message:  fmt.Sprintf("connect %s index to qdrant: %v", kind, err),
+		}
 	}
 	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("reconcile %s index identity: %v", kind, err))
 		_ = ix.Close()
-		return builtIndex{}, exitIndexLoadFailure
+		return builtIndex{}, identityFailure(kind, err)
 	}
-	return builtIndex{index: ix, path: ""}, exitSuccess
+	return builtIndex{index: ix, path: ""}, nil
 }
 
 // loadPgvectorIndex constructs the networked PostgreSQL + pgvector backend for
@@ -700,13 +779,16 @@ func (a *App) loadQdrantIndex(ctx context.Context, cfg *config.Config, kind, ide
 // or a missing extension is reported as a remediable error and aborts startup.
 // There is no local persistence path, so builtIndex.path is left empty and the
 // PersistenceManager is never wired for this kind.
-func (a *App) loadPgvectorIndex(ctx context.Context, cfg *config.Config, kind, identity string, jsonOutput bool) (builtIndex, int) {
+func (a *App) loadPgvectorIndex(ctx context.Context, cfg *config.Config, kind, identity string) (builtIndex, *indexLoadFailure) {
 	dsn := strings.TrimSpace(cfg.IndexPgvectorDSN)
 	if dsn == "" {
-		writeCLIError(a.stderr, jsonOutput, exitConfigInvalid,
-			"CONFIG_INVALID: index.backend=pgvector but no DSN configured",
-			"Set DIR2MCP_INDEX_PGVECTOR_DSN (or store it in the keychain / .env.local) to a Postgres connection string.")
-		return builtIndex{}, exitConfigInvalid
+		return builtIndex{}, &indexLoadFailure{
+			exitCode: exitConfigInvalid,
+			message:  "CONFIG_INVALID: index.backend=pgvector but no DSN configured",
+			hints: []string{
+				"Set DIR2MCP_INDEX_PGVECTOR_DSN (or store it in the keychain / .env.local) to a Postgres connection string.",
+			},
+		}
 	}
 	ix, err := index.NewPgvectorBackend(ctx, index.PgvectorParams{
 		DSN:    dsn,
@@ -714,15 +796,16 @@ func (a *App) loadPgvectorIndex(ctx context.Context, cfg *config.Config, kind, i
 		Table:  cfg.IndexPgvectorTable,
 	}, kind)
 	if err != nil {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("connect %s index to pgvector: %v", kind, err))
-		return builtIndex{}, exitIndexLoadFailure
+		return builtIndex{}, &indexLoadFailure{
+			exitCode: exitIndexLoadFailure,
+			message:  fmt.Sprintf("connect %s index to pgvector: %v", kind, err),
+		}
 	}
 	if err := index.EnsureIdentity(ctx, ix, identity); err != nil {
-		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("reconcile %s index identity: %v", kind, err))
 		_ = ix.Close()
-		return builtIndex{}, exitIndexLoadFailure
+		return builtIndex{}, identityFailure(kind, err)
 	}
-	return builtIndex{index: ix, path: ""}, exitSuccess
+	return builtIndex{index: ix, path: ""}, nil
 }
 
 // buildMCPServerOptions constructs the list of mcp.ServerOption values,
@@ -927,40 +1010,78 @@ func (a *App) runEventLoop(
 	}
 }
 
+// embeddedChunkPreloadPageSize is how many already-embedded chunks the startup
+// warm-load asks for per page (issue #429 F6).
+//
+// It is deliberately large. The store re-evaluates its "all embedded chunks"
+// filter for every page, so a page costs O(embedded chunks) no matter how many
+// rows it returns and the walk costs O(N^2 / pageSize) in total: the page COUNT
+// is the multiplier, not the page size. Measured on a synthetic 100k-chunk
+// corpus (50k text + 50k code), cold-start preload was
+//
+//	page=500 -> 67.2s   page=2000 -> 19.0s   page=5000 -> 9.4s   page=20000 -> 4.1s
+//
+// with peak RSS flat across all of them (1.70-1.71 GB, dominated by the vectors
+// themselves), because only one page of rows is live at a time. 5000 keeps the
+// transient page small while removing ~85% of the wall time. The quadratic shape
+// itself is a store-side fix and survives this constant.
+const embeddedChunkPreloadPageSize = 5000
+
+// preloadEmbeddedChunkMetadata warm-loads the retrieval metadata for every
+// already-embedded chunk, one index kind at a time.
+//
+// The two walks are NOT run concurrently. They are genuinely independent (each
+// pages over a disjoint, kind-scoped row set, and a chunk_id belongs to exactly
+// one axis), but the store's listing runs on the single-connection writer handle
+// rather than the #631 query-only read pool, so two concurrent walks serialize
+// inside database/sql anyway: measured on the 100k-chunk corpus, concurrent
+// walks took 62-67s against 59-67s serial, i.e. no gain outside the noise. Only
+// the page size above moves that number.
 func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkLister, ret *retrieval.Service) (int, error) {
 	if source == nil || ret == nil {
 		return 0, nil
 	}
-	const pageSize = 500
 	total := 0
-	kinds := []string{"text", "code"}
-	for _, kind := range kinds {
-		var afterChunkID int64
-		for {
-			tasks, err := source.ListEmbeddedChunkMetadata(ctx, kind, pageSize, afterChunkID)
-			if err != nil {
-				if errors.Is(err, model.ErrNotImplemented) {
-					break
-				}
-				return total, err
-			}
-			for _, task := range tasks {
-				// ToSearchHit carries every field the in-memory metadata needs,
-				// including the representation Language (SPEC §5.2/§8.8) so the
-				// per-language retrieval filter (§9.5) works against warm-loaded
-				// metadata after a restart, not just freshly-indexed chunks.
-				ret.SetChunkMetadataForIndex(kind, task.Metadata.ChunkID, task.Metadata.ToSearchHit())
-				total++
-			}
-			if len(tasks) < pageSize {
-				break
-			}
-			// Keyset seek: pages are ordered by chunk_id ascending, so carry the
-			// last chunk_id forward instead of an OFFSET that rescans skipped rows.
-			afterChunkID = int64(tasks[len(tasks)-1].Metadata.ChunkID)
+	for _, kind := range []string{"text", "code"} {
+		loaded, err := preloadEmbeddedChunkMetadataForKind(ctx, source, ret, kind)
+		total += loaded
+		if err != nil {
+			return total, err
 		}
 	}
 	return total, nil
+}
+
+// preloadEmbeddedChunkMetadataForKind pages through one index kind's embedded
+// chunks and registers each one's retrieval metadata. A store that does not
+// implement the listing is treated as "nothing to preload" for that kind.
+func preloadEmbeddedChunkMetadataForKind(ctx context.Context, source embeddedChunkLister, ret *retrieval.Service, kind string) (int, error) {
+	const pageSize = embeddedChunkPreloadPageSize
+	total := 0
+	var afterChunkID int64
+	for {
+		tasks, err := source.ListEmbeddedChunkMetadata(ctx, kind, pageSize, afterChunkID)
+		if err != nil {
+			if errors.Is(err, model.ErrNotImplemented) {
+				return total, nil
+			}
+			return total, err
+		}
+		for _, task := range tasks {
+			// ToSearchHit carries every field the in-memory metadata needs,
+			// including the representation Language (SPEC §5.2/§8.8) so the
+			// per-language retrieval filter (§9.5) works against warm-loaded
+			// metadata after a restart, not just freshly-indexed chunks.
+			ret.SetChunkMetadataForIndex(kind, task.Metadata.ChunkID, task.Metadata.ToSearchHit())
+			total++
+		}
+		if len(tasks) < pageSize {
+			return total, nil
+		}
+		// Keyset seek: pages are ordered by chunk_id ascending, so carry the
+		// last chunk_id forward instead of an OFFSET that rescans skipped rows.
+		afterChunkID = int64(tasks[len(tasks)-1].Metadata.ChunkID)
+	}
 }
 
 // Compile-time guard: the concrete store handed to startEmbeddingIfNotReadOnly
