@@ -89,6 +89,10 @@ type App struct {
 	newIngestor  func(config.Config, model.Store) (model.Ingestor, error)
 	newStore     func(config.Config) model.Store
 	newRetriever func(config.Config, model.Store) model.Retriever
+	// newIndex replaces the local index.backend dispatch for one kind ("text"
+	// or "code"), returning the index and the path it persists to. Nil in
+	// production; tests set it via RuntimeHooks.NewIndex.
+	newIndex func(config.Config, string) (model.Index, string)
 
 	cachedStyles map[bool]*styles
 
@@ -147,6 +151,14 @@ type RuntimeHooks struct {
 	NewIngestor  func(config.Config, model.Store) (model.Ingestor, error)
 	NewStore     func(config.Config) model.Store
 	NewRetriever func(config.Config, model.Store) model.Retriever
+	// NewIndex replaces the local index.backend dispatch, returning the index
+	// for one kind ("text" or "code") and the path it persists to. It exists so
+	// tests can inject an instrumented index (the concurrent startup load of
+	// issue #429 F6 is otherwise unobservable from outside the package, and
+	// AGENTS.md keeps new tests under tests/). When set it also bypasses the
+	// networked qdrant/pgvector branches. It is called once per kind, from two
+	// goroutines at once, so an implementation must be safe for concurrent use.
+	NewIndex func(config.Config, string) (model.Index, string)
 }
 
 type globalOptions struct {
@@ -383,6 +395,9 @@ func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
 	}
 	if hooks.NewRetriever != nil {
 		app.newRetriever = hooks.NewRetriever
+	}
+	if hooks.NewIndex != nil {
+		app.newIndex = hooks.NewIndex
 	}
 	return app
 }
