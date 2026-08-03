@@ -138,16 +138,26 @@ def _diagnostics_sections(diag: Diagnostics, roster: Roster, debug: bool) -> lis
         "it is deliberately easier than the gate above and must never be quoted as "
         "accuracy.",
         "",
+        "`Reachable` is the pitches whose pitcher or batter this source names "
+        "*somewhere* in the media, so `of reachable` asks how often it identified "
+        "someone it demonstrably can identify. That is the column that separates a "
+        "recognizer which rarely resolves anyone from one whose gallery simply does "
+        "not contain half the roster; raw coverage cannot tell those apart, and they "
+        "call for opposite responses.",
+        "",
         "| Source | Pitches w/ pitcher cue | Pitches w/ batter cue | Pitches covered "
-        "| Coverage |",
-        "|---|---|---|---|---|",
+        "| Coverage | Reachable | of reachable |",
+        "|---|---|---|---|---|---|---|",
     ]
     for src in sorted(diag.per_source):
         d = diag.per_source[src]
         pct = _pct(d.pitches_covered / diag.scored_pitches if diag.scored_pitches else None)
+        reach_pct = _pct(
+            d.pitches_covered / d.pitches_reachable if d.pitches_reachable else None
+        )
         lines.append(
             f"| {src} | {d.pitches_with_pitcher_cue} | {d.pitches_with_batter_cue} "
-            f"| {d.pitches_covered} | {pct} |"
+            f"| {d.pitches_covered} | {pct} | {d.pitches_reachable} | {reach_pct} |"
         )
 
     off_target = {

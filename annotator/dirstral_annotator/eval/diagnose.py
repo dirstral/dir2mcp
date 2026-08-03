@@ -88,6 +88,10 @@ class SourceDiagnostics:
     pitches_with_pitcher_cue: int = 0
     pitches_with_batter_cue: int = 0
     pitches_covered: int = 0  # pitcher or batter named within tolerance
+    #: Pitches whose pitcher or batter this source names SOMEWHERE in the media,
+    #: at any time. It is the source's own effective vocabulary, so it separates
+    #: "cannot identify this person at all" from "did not identify them here".
+    pitches_reachable: int = 0
     found_pitches: int = 0  # credited by the scorecard
     samples: list[Cue] = field(default_factory=list)
 
@@ -219,6 +223,11 @@ def diagnose(
     # Pitch coverage is per-window so one chatty cue cannot cover a pitch twice.
     covered_pitcher: dict[str, set[int]] = defaultdict(set)
     covered_batter: dict[str, set[int]] = defaultdict(set)
+    # Every identity a source emits anywhere, used below to compute what it
+    # could have covered. A face bank missing half a roster and a recognizer
+    # that rarely resolves a face both show up as low raw coverage; only this
+    # tells them apart, and they call for opposite responses.
+    vocabulary: dict[str, set[str]] = defaultdict(set)
 
     for cue in cues:
         b = bucket(cue.source)
@@ -231,6 +240,7 @@ def diagnose(
         if cue.event == SCORED_EVENT:
             b.scored_event_cues += 1
         for pid in cue.entity_ids:
+            vocabulary[cue.source].add(pid)
             if roster.get(pid) is None:
                 b.unknown_entity_ids.add(pid)
         if len(b.samples) < DEBUG_SAMPLE:
@@ -258,6 +268,11 @@ def diagnose(
         b.pitches_with_pitcher_cue = len(covered_pitcher[src])
         b.pitches_with_batter_cue = len(covered_batter[src])
         b.pitches_covered = len(covered_pitcher[src] | covered_batter[src])
+        known = vocabulary[src]
+        b.pitches_reachable = sum(
+            1 for w in windows
+            if w.pitcher_id in known or (w.batter_id is not None and w.batter_id in known)
+        )
     return diag
 
 
