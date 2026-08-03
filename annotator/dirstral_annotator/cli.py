@@ -9,7 +9,12 @@
     # Phase-1 accuracy gate against Statcast ground truth
     dirstral-annotate eval game7.mp4 --roster roster.json \
         (--game-pk 745123 | --feed saved-gumbo.json) --anchor "EPOCH=VIDEO_S" \
-        [--report report.md]
+        [--report report.md] [--debug]
+
+The report always carries per-source diagnostics (cues emitted, cues surviving
+fusion and the confidence floor, near-miss distances) so a recognizer that
+contributes nothing to the pitcher-keyed metric can be told apart from one the
+metric cannot read; `--debug` adds sample cues per source.
 
 `games.json` binds media basenames to their play-by-play source and time
 anchors: {"game7.mp4": {"game_pk": 745123, "anchors": ["1789265400.0=60.0"]}}.
@@ -23,6 +28,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .eval import diagnose as diagnose_mod
 from .eval import report as report_mod
 from .eval import score as score_mod
 from .pipeline import GameConfig, Pipeline, load_games
@@ -55,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--feed", type=Path, help="saved GUMBO JSON (skips the network fetch)")
     e.add_argument("--anchor", action="append", default=[], metavar="EPOCH=VIDEO_S", required=True)
     e.add_argument("--report", type=Path, help="write markdown report here")
+    e.add_argument(
+        "--debug",
+        action="store_true",
+        help="add per-source sample cues to the report's diagnostics",
+    )
     vision_flags(e)
     return p
 
@@ -105,13 +116,22 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     pipeline = _pipeline(args, roster, {args.media.name: game})
-    annotations = pipeline.annotations_for(args.media)
+    # Keep the pre-fusion cues: they are what makes an empty source row
+    # explainable (ineligible / floored / weak) instead of just empty.
+    cues, annotations = diagnose_mod.run_pipeline(pipeline, args.media)
     for msg in pipeline.skipped:
         print(f"skipped: {msg}", file=sys.stderr)
 
     events = game.events()
     card = score_mod.score(annotations, events, alignment, roster)
-    text = report_mod.render(card, alignment, roster, title=args.media.name)
+    diagnostics = diagnose_mod.diagnose(
+        cues, annotations, events, alignment, roster, card,
+        min_confidence=args.min_confidence,
+    )
+    text = report_mod.render(
+        card, alignment, roster, title=args.media.name,
+        diagnostics=diagnostics, debug=args.debug,
+    )
     if args.report:
         args.report.write_text(text, encoding="utf-8")
         print(f"wrote {args.report}")
