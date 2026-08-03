@@ -34,7 +34,8 @@ def _events(pitcher_idx, batter_idx):
         PitchEvent(game_pk=1, epoch_s=float(i) * 10, pitcher_id=1000 + p,
                    pitcher_name=f"P{p}", batter_id=1000 + b, batter_name=f"P{b}",
                    inning=1, description="")
-        for i, (p, b) in enumerate(zip(pitcher_idx, batter_idx))
+        # strict: a length mismatch is a bug in the caller, not fewer pitches to test
+        for i, (p, b) in enumerate(zip(pitcher_idx, batter_idx, strict=True))
     ]
 
 
