@@ -82,3 +82,63 @@ def test_session_providers_never_raises():
             raise RuntimeError("boom")
 
     assert faces._session_providers(Broken()) == []
+
+
+@pytest.mark.parametrize("bad", ["gpu", "none", "CUDA11", "cude"])
+def test_unknown_provider_is_rejected(monkeypatch, bad):
+    """A typo must not quietly mean auto. That silent-default behaviour is the
+    exact failure this module exists to remove."""
+    _offer(monkeypatch, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setenv(faces.PROVIDER_ENV, bad)
+    with pytest.raises(RecognizerUnavailable) as exc:
+        faces.select_face_providers()
+    assert "unknown face provider" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["", "  ", "AUTO", "auto ", " CPU "])
+def test_blank_and_cased_values_are_accepted(monkeypatch, value):
+    """An empty variable means unset, and case/whitespace are normalised; only
+    genuinely unrecognised words are rejected."""
+    _offer(monkeypatch, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setenv(faces.PROVIDER_ENV, value)
+    providers, _ = faces.select_face_providers()
+    expected = "CPUExecutionProvider" if value.strip().lower() == "cpu" else "CUDAExecutionProvider"
+    assert providers[0] == expected
+
+
+def test_session_providers_prefers_recognition():
+    """Models can bind differently; reporting the first one found could claim
+    CUDA while the model whose cost dominates ran on CPU."""
+    class Sess:
+        def __init__(self, provs): self._p = provs
+        def get_providers(self): return list(self._p)
+
+    class Model:
+        def __init__(self, provs): self.session = Sess(provs)
+
+    class App:
+        models = {
+            "detection": Model(["CUDAExecutionProvider"]),
+            "recognition": Model(["CPUExecutionProvider"]),
+        }
+
+    assert faces._session_providers(App()) == ["CPUExecutionProvider"]
+
+
+def test_session_providers_warns_on_disagreement(caplog):
+    class Sess:
+        def __init__(self, provs): self._p = provs
+        def get_providers(self): return list(self._p)
+
+    class Model:
+        def __init__(self, provs): self.session = Sess(provs)
+
+    class App:
+        models = {
+            "detection": Model(["CUDAExecutionProvider"]),
+            "recognition": Model(["CPUExecutionProvider"]),
+        }
+
+    with caplog.at_level(logging.WARNING):
+        faces._session_providers(App())
+    assert any("different execution providers" in r.message for r in caplog.records)

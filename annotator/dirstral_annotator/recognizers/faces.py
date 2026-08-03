@@ -43,6 +43,10 @@ SIM_THRESHOLD = 0.40
 #: of quietly costing hours.
 PROVIDER_ENV = "DIRSTRAL_FACE_PROVIDER"
 
+#: Accepted values. Anything else is rejected rather than defaulted, so a typo
+#: cannot quietly select a provider the caller did not ask for.
+_PROVIDER_CHOICES = frozenset({"auto", "cpu", "cuda"})
+
 
 def select_face_providers(requested: str | None = None) -> tuple[list[str], int]:
     """Return the ONNX provider list and insightface ctx_id to use.
@@ -57,7 +61,20 @@ def select_face_providers(requested: str | None = None) -> tuple[list[str], int]
     not need a GPU. That was measurably wrong, and worse, invisible: a CPU run on
     a GPU host looked identical to a correct one.
     """
-    want = (requested or os.environ.get(PROVIDER_ENV) or "auto").strip().lower()
+    # Strip first, then fall back: a variable set to whitespace is a blank
+    # variable, and should mean "unset" exactly as an empty one does.
+    want = (requested or "").strip().lower()
+    if not want:
+        want = (os.environ.get(PROVIDER_ENV) or "").strip().lower() or "auto"
+    if want not in _PROVIDER_CHOICES:
+        # Silently treating a typo as "auto" is the same class of failure this
+        # function exists to remove: "gpu" or "none" would look accepted and run
+        # on whatever happened to be available.
+        raise RecognizerUnavailable(
+            f"unknown face provider {want!r}; expected one of "
+            f"{', '.join(sorted(_PROVIDER_CHOICES))} "
+            f"(set via {PROVIDER_ENV} or the provider argument)"
+        )
     if want == "cpu":
         return ["CPUExecutionProvider"], -1
 
@@ -86,16 +103,35 @@ def select_face_providers(requested: str | None = None) -> tuple[list[str], int]
 
 
 def _session_providers(app: object) -> list[str]:
-    """Providers the underlying ONNX sessions actually bound, best effort."""
+    """Providers the ONNX sessions actually bound, best effort.
+
+    Prefers the `recognition` model. insightface builds a session per model and
+    they can bind differently, so reporting whichever happened to be first could
+    claim CUDA while the heaviest model quietly ran on CPU. Recognition is the
+    one whose cost dominates, so it is the honest one to report.
+    """
     try:
         models = getattr(app, "models", {}) or {}
-        for model in models.values():
-            session = getattr(model, "session", None)
-            if session is not None:
-                return list(session.get_providers())
+        sessions = {
+            name: getattr(model, "session", None) for name, model in models.items()
+        }
+        bound = {
+            name: list(sess.get_providers())
+            for name, sess in sessions.items()
+            if sess is not None
+        }
+        if not bound:
+            return []
+        if len({tuple(v) for v in bound.values()}) > 1:
+            logging.getLogger(__name__).warning(
+                "face models bound different execution providers: %s", bound
+            )
+        for preferred in ("recognition", "detection"):
+            if preferred in bound:
+                return bound[preferred]
+        return next(iter(bound.values()))
     except Exception:  # pragma: no cover - diagnostics must never break a run
-        pass
-    return []
+        return []
 
 
 def default_embedder(provider: str | None = None) -> EmbedFn:
