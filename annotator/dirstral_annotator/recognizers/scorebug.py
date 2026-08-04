@@ -1,121 +1,83 @@
-"""Scorebug recognizer: OCR the broadcast overlay.
+"""Scorebug recognizer: read a baseball broadcast's overlay against a roster.
+
+One consumer of the generic overlay-text reader in `overlay.py`. Everything
+about *finding* burned-in text and getting a clean string out of it lives
+there; everything here is baseball. The split is where it is because the two
+halves generalise differently: the reader reaches 96.5% identity coverage on
+pilot footage with no data feed and transfers unchanged to a corpus in another
+language, while the interpretation below transfers to nothing that is not a
+baseball broadcast.
 
 The overlay names the current batter and pitcher during every at-bat, which
-makes this the workhorse signal for broadcast footage that has no structured
-play-by-play feed (the normal case for an archive). Unlike the play-by-play
-recognizer it needs nothing but the pixels.
-
-Reading it well takes three things, and the naive "OCR the whole frame and
-fuzzy-match every line against the roster" loop got none of them:
-
-1. *Where.* The bug occupies about 3% of the frame. Whole-frame OCR has to
-   segment a crowd, a scoreboard and a sponsor board before it reaches the
-   30-pixel-tall name, and usually never does. We OCR a handful of candidate
-   overlay bands instead, then lock onto whichever one is actually producing
-   reads so the rest of the run pays for one crop.
-2. *How.* Overlay text is light-on-dark, small and JPEG-soft. Upscaling the
-   crop to a fixed text height and binarising it turns a garbled read into a
-   clean one; the two passes (grey and binarised) disagree often enough on
-   real footage to be worth running both.
-3. *What.* The bug is structured, not prose: `5.LILE` is the batter in the
-   fifth lineup slot, `RAY  P: 90` is the pitcher and his pitch count,
-   `SLIDER 88 MPH` is the pitch that was just thrown. Parsing those forms and
-   matching only the name part against the roster is what keeps precision up:
-   feeding whole OCR lines to a fuzzy matcher turns "ee" into Jung Hoo Lee and
-   "#0" into the player wearing 0.
+makes this the workhorse signal for footage that has no structured play-by-play
+feed (the normal case for an archive). What the parser has to get right is that
+the bug is *structured*, not prose: `5.LILE` is the batter in the fifth lineup
+slot, `RAY  P: 90` is the pitcher and his pitch count, `SLIDER 88 MPH` is the
+pitch that was just thrown. Parsing those forms and matching only the name part
+against the roster is what keeps precision up (0.541 to 0.991 on the 450-frame
+fixture): feeding whole OCR lines to a fuzzy matcher turns "ee" into Jung Hoo
+Lee and "#0" into the player wearing 0.
 
 Note on the leading digit: it is the *lineup slot*, not the jersey number
 (Daylen Lile bats fifth wearing 4), so it is used as a structural marker for
 "this is the batter field" and never as a number-vs-roster constraint.
 
-Consecutive frames resolving to the same player collapse into one cue
-spanning the run: the overlay persisting for 20 seconds is one at-bat
-sighting, not 20 observations (which would also defeat fusion's per-source
-confidence cap).
+Consecutive frames resolving to the same player collapse into one cue spanning
+the run: the overlay persisting for 20 seconds is one at-bat sighting, not 20
+observations (which would also defeat fusion's per-source confidence cap).
 
-The OCR engine is injected as a callable `(image_path) -> str`; the default
-adapter uses pytesseract when installed.
-
-Reading a frame is the expensive step (about a second per frame on the pilot
-host, so nearly two hours for a three hour broadcast) and it is embarrassingly
-parallel, so it runs on a worker pool; see `_PooledReader` for why the pool is
-threads and `_with_lookahead` for how the cue list stays identical to a serial
-run despite the band search being sequential state.
+This module also supplies the reader's band search with its evidence.
+`_interpret` returns a hit count that is deliberately not "the OCR returned
+something": a crop of crowd texture returns plenty. It is "the OCR returned
+something this roster recognises as a field", which is the signal that made the
+region search land on the bug instead of on the stands.
 """
 
 from __future__ import annotations
 
 import difflib
-import os
 import re
-import tempfile
-import threading
 import unicodedata
-from collections import deque
-from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
 
 from ..model import Cue
 from ..roster import Roster
-from .base import RecognizerUnavailable, iter_frames
-
-OcrFn = Callable[[Path], str]
-Region = tuple[float, float, float, float]
-
-# Fractional (x, y, w, h) boxes searched for the overlay, covering the corners
-# broadcasts actually use: MLB/NBC hangs its bug top left, most other sports
-# put it along the bottom. Deliberately generous, because a band that clips the
-# name is worse than one that includes some crowd.
-CANDIDATE_REGIONS: tuple[Region, ...] = (
-    (0.00, 0.02, 0.55, 0.16),  # upper left
-    (0.00, 0.80, 0.55, 0.18),  # lower left
-    (0.20, 0.80, 0.60, 0.18),  # lower centre
-    (0.20, 0.02, 0.60, 0.16),  # upper centre
+from .base import collapse_sightings
+from .overlay import (
+    OCR_PSM,
+    OcrFn,
+    OverlayRead,
+    OverlayReader,
+    Region,
+    default_ocr,
+    default_workers,
 )
 
-# A run of frames may drop a detection for a beat (OCR flicker, or a replay
-# that hides the bug); allow this many seconds of gap before closing the run.
-RUN_GAP_S = 3.0
-
-# Crops are upscaled so the band is about this tall before OCR. Fixed pixels,
-# not a fixed factor, so an SD archive gets the magnification it needs and a
-# 4K master is not blown up into a slow no-op.
-TARGET_BAND_PX = 320
-MAX_UPSCALE = 4.0
-# Everything darker than this becomes black in the second pass. Overlay text is
-# near-white by design, so the cut can sit high.
-BINARY_THRESHOLD = 140
-# tesseract page-segmentation mode for a cropped overlay strip.
-OCR_PSM = 6
-
-# Region search: while unlocked, only every Nth frame pays for the full sweep;
-# once one band has produced this many reads it is the only one OCR'd.
-SCAN_STRIDE = 4
-LOCK_AFTER_READS = 5
-
-# Worker pool for the per-frame read. The default is a quarter of the core
-# count, not all of it, for a measured reason: tesseract is built against
-# OpenMP and runs four threads per page (NLWP 4 on every invocation), so N
-# workers put 4N threads on the machine. On the pilot's 16 core host that
-# makes 4 workers the fastest setting (3.0x to 3.3x on the scorebug), 8
-# workers slower than running serially (0.83x to 0.90x) and 12 workers four
-# times slower than serial. Raise DIRSTRAL_ANNOTATOR_WORKERS where tesseract
-# is built without OpenMP, or where the host has cores to spare. Setting
-# OMP_THREAD_LIMIT=1 makes each worker use one core and lets the count go
-# higher, but it is process wide: it would also throttle the torch and
-# onnxruntime work the jersey and face recognizers do in the same process.
-WORKERS_ENV = "DIRSTRAL_ANNOTATOR_WORKERS"
-OCR_THREADS_PER_WORKER = 4
-MAX_DEFAULT_WORKERS = 8
-# How far ahead of the authoritative loop frames are speculatively dispatched.
-# Has to exceed the worker count or the pool drains while the main thread
-# folds one frame's reads into the sighting lists; a few frames per worker is
-# enough, and each pending entry is only a path and a short result list.
-LOOKAHEAD_PER_WORKER = 4
-MIN_LOOKAHEAD = 16
+# `collapse_sightings`, `OcrFn` and `default_ocr` have always been imported
+# from this module by the other recognizers and by tests. Their homes are now
+# `base` (cue shaping) and `overlay` (reading), but the names stay valid here.
+__all__ = [
+    "BATTER",
+    "LOOSE",
+    "PITCHER",
+    "PITCH_TYPES",
+    "PLAUSIBLE_SPEED",
+    "UNKNOWN",
+    "NameRead",
+    "OcrFn",
+    "PitchRead",
+    "Region",
+    "ScorebugRecognizer",
+    "collapse_sightings",
+    "default_ocr",
+    "default_workers",
+    "match_name",
+    "parse_bands",
+    "parse_overlay",
+]
 
 # Name matching. Short reads (three or four characters: RAY, COX) are accepted
 # only on an exact roster match, because that is the length at which fuzzy
@@ -175,54 +137,6 @@ PLAUSIBLE_SPEED = range(40, 121)
 _WORD_RE = re.compile(r"[A-Z][A-Z'\-]{2,}")
 
 
-def default_ocr(psm: int | None = None) -> OcrFn:
-    """pytesseract adapter, optionally pinned to a page-segmentation mode.
-
-    `psm` is left alone by default because the other recognizers share this
-    adapter on crops of their own shape. The scorebug asks for mode 6, "a
-    single uniform block of text": tesseract's default keeps hunting for page
-    structure that a 200-pixel-tall overlay strip does not have.
-    """
-    try:
-        import pytesseract  # type: ignore
-        from PIL import Image  # type: ignore
-    except ImportError as exc:
-        raise RecognizerUnavailable(
-            "scorebug OCR needs pytesseract + Pillow (pip install "
-            "'dirstral-annotator[ocr]') and a tesseract binary"
-        ) from exc
-
-    config = f"--psm {psm}" if psm is not None else ""
-
-    def ocr(frame: Path) -> str:
-        with Image.open(frame) as img:
-            img.load()
-            return pytesseract.image_to_string(img, config=config)
-
-    return ocr
-
-
-def default_workers() -> int:
-    """How many frames to read at once, from the environment or the host.
-
-    `DIRSTRAL_ANNOTATOR_WORKERS=1` forces the serial path; a value that is not
-    a positive integer is ignored rather than silently disabling the pool. The
-    unset default divides the core count by the threads one OCR pass already
-    uses, because a worker is not one core's worth of work: see
-    OCR_THREADS_PER_WORKER.
-    """
-    raw = os.environ.get(WORKERS_ENV, "").strip()
-    if raw:
-        try:
-            requested = int(raw)
-        except ValueError:
-            requested = 0
-        if requested >= 1:
-            return requested
-    cores = os.cpu_count() or 1
-    return max(1, min(cores // OCR_THREADS_PER_WORKER, MAX_DEFAULT_WORKERS))
-
-
 @dataclass(frozen=True)
 class NameRead:
     """One name the overlay parser recovered, with the role its position in
@@ -246,9 +160,17 @@ class PitchRead:
         return " ".join(parts)
 
 
-#: Everything one band of one frame yields: the names it named and the pitch
-#: graphic it showed. The unit of work the reader pool schedules.
-_Band = tuple[list[NameRead], list[PitchRead]]
+@dataclass(frozen=True)
+class _Fields:
+    """What one band of one frame said, once the roster has had its say.
+
+    `names` is (player id, confidence, role) so the caller does not resolve the
+    same read twice; `pitches` stays unresolved because a speed graphic names
+    nobody.
+    """
+
+    names: tuple[tuple[str, float, str], ...] = ()
+    pitches: tuple[PitchRead, ...] = ()
 
 
 def parse_overlay(text: str) -> tuple[list[NameRead], list[PitchRead]]:
@@ -320,6 +242,27 @@ def parse_overlay(text: str) -> tuple[list[NameRead], list[PitchRead]]:
     return names, _dedupe_pitches(pitches)
 
 
+def parse_bands(texts: Iterable[str]) -> tuple[list[NameRead], list[PitchRead]]:
+    """Merge one band's preprocessing passes into one set of fields.
+
+    The grey and thresholded passes disagree, and neither is reliably better:
+    44 of 215 readable frames on the pilot fixture were readable only after
+    thresholding. So both are parsed and the union kept, with each (name, role)
+    counted once and each speed described by its fullest reading.
+    """
+    names: list[NameRead] = []
+    pitches: list[PitchRead] = []
+    seen: set[tuple[str, str]] = set()
+    for text in texts:
+        found_names, found_pitches = parse_overlay(text)
+        for read in found_names:
+            if (read.name, read.role) not in seen:
+                seen.add((read.name, read.role))
+                names.append(read)
+        pitches += found_pitches
+    return names, _dedupe_pitches(pitches)
+
+
 class ScorebugRecognizer:
     name = "scorebug"
 
@@ -332,17 +275,28 @@ class ScorebugRecognizer:
         regions: Iterable[Region] | None = None,
         pitch_cues: bool = True,
         workers: int | None = None,  # None: default_workers(); 1: serial
+        lang: str | None = None,  # OCR language; None: the reader's default
     ):
         self.roster = roster
-        self.ocr = ocr if ocr is not None else default_ocr(psm=OCR_PSM)
-        self.fps = fps
-        self.crop = crop
-        if crop is not None:
-            self.regions: tuple[Region, ...] = (tuple(crop),)  # type: ignore[assignment]
-        else:
-            self.regions = tuple(regions) if regions is not None else CANDIDATE_REGIONS
         self.pitch_cues = pitch_cues
-        self.workers = default_workers() if workers is None else max(1, int(workers))
+        self.reader = OverlayReader(
+            ocr=ocr,
+            fps=fps,
+            crop=crop,
+            regions=regions,
+            workers=workers,
+            lang=lang,
+            psm=OCR_PSM,
+            name=self.name,
+        )
+        # Mirrored so the recognizer still answers for its own configuration.
+        # The reader owns them; these are reads of what it settled on.
+        self.ocr = self.reader.ocr
+        self.fps = self.reader.fps
+        self.crop = self.reader.crop
+        self.regions = self.reader.regions
+        self.workers = self.reader.workers
+        self.lang = self.reader.lang
         self._index = _name_index(roster)
 
     def recognize(self, media_path: Path) -> list[Cue]:
@@ -352,42 +306,30 @@ class ScorebugRecognizer:
         loose: list[tuple[float, str, float]] = []
         graphics: list[tuple[float, PitchRead]] = []
 
-        search = _RegionSearch(self.regions)
-        with (
-            tempfile.TemporaryDirectory(prefix="dirstral-scorebug-") as tmp,
-            _reader(self.ocr, Path(tmp), self.workers) as reader,
-        ):
-            frames = iter_frames(media_path, fps=self.fps)
-            for i, t, frame in _with_lookahead(frames, search, reader):
-                for region in search.regions_for(i):
-                    names, pitches = reader.read(i, frame, region)
-                    hits = 0
-                    for read in names:
-                        resolved = self._resolve(read)
-                        if resolved is None:
-                            continue
-                        pid, conf = resolved
-                        if read.role == LOOSE:
-                            # Not evidence of anything on its own, and not
-                            # evidence that this band holds the bug either,
-                            # so it does not count towards the region lock.
-                            loose.append((t, pid, conf))
-                            continue
-                        hits += 1
-                        if read.role == BATTER:
-                            batters.append((t, pid, conf))
-                            continue
-                        if read.role == PITCHER:
-                            pitchers.append((t, pid, conf))
-                        # Named, but not at the plate: the pitcher between
-                        # deliveries, or whoever else the graphics package
-                        # chose to put on screen.
-                        appearances.append((t, pid, conf))
-                    hits += len(pitches)
-                    graphics += [(t, pitch) for pitch in pitches]
-                    search.record(region, hits)
-                    if hits:
-                        break  # this band answered; skip the other crops
+        # `closing` because the reader owns a worker pool and a scratch
+        # directory for the length of the iteration: abandoning it part way
+        # through (an error in this loop, an interrupt) has to shut them down
+        # now rather than whenever the generator is collected.
+        with closing(self.reader.read(media_path, self._interpret)) as reads:
+            for read, fields in reads:
+                t = read.timestamp_s
+                for pid, conf, role in fields.names:
+                    if role == LOOSE:
+                        # Not evidence of anything on its own, and not
+                        # evidence that this band holds the bug either, which
+                        # is why `_interpret` keeps it out of the hit count.
+                        loose.append((t, pid, conf))
+                        continue
+                    if role == BATTER:
+                        batters.append((t, pid, conf))
+                        continue
+                    if role == PITCHER:
+                        pitchers.append((t, pid, conf))
+                    # Named, but not at the plate: the pitcher between
+                    # deliveries, or whoever else the graphics package chose
+                    # to put on screen.
+                    appearances.append((t, pid, conf))
+                graphics += [(t, pitch) for pitch in fields.pitches]
 
         gap = 1.0 / self.fps
         confirmed = batters + appearances
@@ -400,6 +342,28 @@ class ScorebugRecognizer:
             cues += self._pitch_cues(graphics, pitchers)
         cues.sort(key=lambda c: (c.start_s, c.event, c.entity_ids))
         return cues
+
+    def _interpret(self, read: OverlayRead) -> tuple[_Fields, int]:
+        """Turn one band's text into roster-resolved fields plus a hit count.
+
+        The hit count is what the reader's band search runs on, and it counts
+        only reads this roster recognises off a structured line, plus pitch
+        graphics. A loose word never counts even when it resolves: it is as
+        likely to have come out of the stands as off the bug, and letting it
+        vote would let crowd texture win the band search.
+        """
+        names, pitches = parse_bands(read.texts)
+        resolved: list[tuple[str, float, str]] = []
+        hits = 0
+        for name_read in names:
+            hit = self._resolve(name_read)
+            if hit is None:
+                continue
+            pid, conf = hit
+            resolved.append((pid, conf, name_read.role))
+            if name_read.role != LOOSE:
+                hits += 1
+        return _Fields(tuple(resolved), tuple(pitches)), hits + len(pitches)
 
     def _resolve(self, read: NameRead) -> tuple[str, float] | None:
         hit = match_name(self._index, read.name)
@@ -448,278 +412,6 @@ class ScorebugRecognizer:
                 )
             )
         return cues
-
-
-class _RegionSearch:
-    """Try every candidate band until one proves itself, then stay on it.
-
-    Sweeping four bands on every frame would cost more OCR than the whole-frame
-    pass this replaces, so unlocked sweeps are strided and the winner is locked
-    in after a few reads. If the overlay moves (a graphics package change part
-    way through a file) the lock releases once the locked band goes quiet.
-    """
-
-    RELEASE_AFTER_MISSES = 60
-
-    def __init__(self, regions: tuple[Region, ...]):
-        self.regions = regions
-        self.locked: Region | None = regions[0] if len(regions) == 1 else None
-        self.scores: dict[Region, int] = {}
-        self.misses = 0
-
-    def regions_for(self, frame_index: int) -> tuple[Region, ...]:
-        if self.locked is not None:
-            return (self.locked,)
-        if frame_index % SCAN_STRIDE:
-            return ()
-        return self.regions
-
-    def record(self, region: Region, hits: int) -> None:
-        if hits:
-            self.scores[region] = self.scores.get(region, 0) + hits
-            self.misses = 0
-            if self.locked is None and self.scores[region] >= LOCK_AFTER_READS:
-                self.locked = region
-        elif self.locked == region and len(self.regions) > 1:
-            self.misses += 1
-            if self.misses >= self.RELEASE_AFTER_MISSES:
-                self.locked = None
-                self.scores.clear()
-                self.misses = 0
-
-
-def read_band(ocr: OcrFn, frame: Path, region: Region, work: Path) -> _Band:
-    """OCR one band of one frame and parse both preprocessing passes.
-
-    The whole of the expensive per-frame work, and a pure function of
-    (frame, region): nothing here reads or writes recognizer state, which is
-    what makes it safe to run several at once.
-    """
-    names: list[NameRead] = []
-    pitches: list[PitchRead] = []
-    seen: set[tuple[str, str]] = set()
-    for path in _prepared_crops(frame, region, work):
-        found_names, found_pitches = parse_overlay(ocr(path))
-        for read in found_names:
-            if (read.name, read.role) not in seen:
-                seen.add((read.name, read.role))
-                names.append(read)
-        pitches += found_pitches
-    return names, _dedupe_pitches(pitches)
-
-
-class _Workspaces:
-    """A scratch directory per worker thread.
-
-    `_prepared_crops` writes its two renderings under fixed names, so threads
-    sharing one directory would overwrite each other's crop between the write
-    and the OCR of it. A directory per thread keeps the fixed names, and with
-    them a bounded amount of scratch (two files per worker, rewritten every
-    frame, rather than two per frame kept until the run ends).
-    """
-
-    def __init__(self, root: Path):
-        self._root = root
-        self._local = threading.local()
-        self._lock = threading.Lock()
-        self._issued = 0
-
-    def current(self) -> Path:
-        work = getattr(self._local, "work", None)
-        if work is None:
-            with self._lock:
-                self._issued += 1
-                work = self._root / f"worker-{self._issued}"
-            work.mkdir(parents=True, exist_ok=True)
-            self._local.work = work
-        return work
-
-
-class _SerialReader:
-    """Read one band at a time on the calling thread.
-
-    The reference behaviour, and what `workers=1` selects. `dispatch` and
-    `retire` exist so the loop in `recognize` is written once.
-    """
-
-    workers = 1
-
-    def __init__(self, ocr: OcrFn, work: Path):
-        self._ocr = ocr
-        self._work = work
-
-    def dispatch(self, index: int, frame: Path, region: Region) -> None:
-        pass
-
-    def read(self, index: int, frame: Path, region: Region) -> _Band:
-        return read_band(self._ocr, frame, region, self._work)
-
-    def retire(self, index: int) -> None:
-        pass
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        pass
-
-
-class _PooledReader:
-    """Read bands on a worker pool, keyed by frame index so order cannot leak.
-
-    Results are handed back only when `recognize` asks for a specific
-    (frame index, region), so the cue list is built in frame order whatever
-    order the workers happen to finish in. A band that was dispatched and then
-    not asked for (the region search changed its mind) is dropped; a band that
-    is asked for and was never dispatched is read on the spot.
-
-    The pool is threads, not processes, which the task's own measurement
-    justifies: on the pilot fixture 6 threads and 6 processes both returned
-    the same reads at the same speed (4.98x versus 4.92x over serial), because
-    pytesseract shells out to the `tesseract` binary and Pillow drops the GIL
-    around its own work, so the interpreter lock is not the constraint.
-    Threads then win on everything else: no pickling constraint on the
-    injected OCR callable (the default adapter is a closure), no second copy
-    of any model per worker, and a RecognizerUnavailable raised in a worker
-    arrives at `future.result()` as itself.
-    """
-
-    def __init__(self, ocr: OcrFn, work: Path, workers: int):
-        self.workers = workers
-        self._ocr = ocr
-        self._workspaces = _Workspaces(work)
-        self._executor = _new_executor(workers)
-        self._pending: dict[tuple[int, Region], Future[_Band]] = {}
-
-    def _read_here(self, frame: Path, region: Region) -> _Band:
-        return read_band(self._ocr, frame, region, self._workspaces.current())
-
-    def dispatch(self, index: int, frame: Path, region: Region) -> None:
-        key = (index, region)
-        if key not in self._pending:
-            self._pending[key] = self._executor.submit(self._read_here, frame, region)
-
-    def read(self, index: int, frame: Path, region: Region) -> _Band:
-        pending = self._pending.pop((index, region), None)
-        if pending is None:
-            return self._read_here(frame, region)
-        return pending.result()
-
-    def retire(self, index: int) -> None:
-        """Drop dispatches for frames the loop has already passed."""
-        for key in [k for k in self._pending if k[0] <= index]:
-            self._pending.pop(key).cancel()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        for pending in self._pending.values():
-            pending.cancel()
-        self._pending.clear()
-        self._executor.shutdown(wait=True, cancel_futures=True)
-
-
-def _new_executor(workers: int) -> Executor:
-    return ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scorebug")
-
-
-def _reader(ocr: OcrFn, work: Path, workers: int) -> _SerialReader | _PooledReader:
-    return _SerialReader(ocr, work) if workers <= 1 else _PooledReader(ocr, work, workers)
-
-
-def _with_lookahead(
-    frames: Iterable[tuple[float, Path]],
-    search: _RegionSearch,
-    reader: _SerialReader | _PooledReader,
-) -> Iterator[tuple[int, float, Path]]:
-    """Yield (index, timestamp, frame) while dispatching the reads to come.
-
-    Which band a frame is OCR'd on is sequential state: it depends on what the
-    frames before it produced, so the pool cannot simply be handed the whole
-    file. It is handed a guess instead, taken from the region search as it
-    stands when the frame enters the window, and `recognize` stays
-    authoritative: it asks the search which bands it actually wants and takes a
-    dispatched result only for exactly those. A guess the search does not take
-    is dropped, and a band it wants that was never guessed is read on the spot,
-    so the cue list is the serial one whatever the pool did.
-
-    The whole window is re-dispatched on every step. Dispatching is keyed and
-    idempotent, so this costs one dict lookup per frame in the window and
-    means the handful of frames already in flight when the search locks onto a
-    band get read on the pool rather than one at a time.
-    """
-    lookahead = max(MIN_LOOKAHEAD, LOOKAHEAD_PER_WORKER * reader.workers)
-    window: deque[tuple[int, float, Path]] = deque()
-    numbered = enumerate(frames)
-
-    def top_up() -> None:
-        while len(window) < lookahead:
-            item = next(numbered, None)
-            if item is None:
-                break
-            index, (timestamp, frame) = item
-            window.append((index, timestamp, frame))
-        for index, _timestamp, frame in window:
-            for region in search.regions_for(index):
-                reader.dispatch(index, frame, region)
-
-    top_up()
-    while window:
-        current = window.popleft()
-        yield current
-        reader.retire(current[0])
-        top_up()
-
-
-def _prepared_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
-    """Yield OCR-ready renderings of one band: upscaled greyscale, and the same
-    crop hard-thresholded.
-
-    Overlay text is light on dark, which Otsu handles badly when the crop also
-    catches a bright crowd; a fixed threshold recovers the name in exactly the
-    frames the grey pass garbles. Both are written to the recognizer's own temp
-    dir rather than beside the frame, because the frame directory is a cache
-    other recognizers iterate.
-    """
-    try:
-        from PIL import Image, ImageOps  # required by the OCR extra
-    except ImportError as exc:  # pragma: no cover - exercised via the contract test
-        # recognize() must degrade the cascade, not abort it, so a missing
-        # Pillow has to arrive as RecognizerUnavailable rather than ImportError.
-        raise RecognizerUnavailable("Pillow is required for scorebug OCR") from exc
-
-    # load() inside the context manager pulls the pixels into memory and lets
-    # the descriptor close immediately. This runs at least once per frame, so
-    # relying on garbage collection to release it leaks handles across a long
-    # media file and can exhaust the process limit.
-    with Image.open(frame) as opened:
-        opened.load()
-        img = opened.copy()
-    x, y, w, h = region
-    box = (
-        max(0, int(x * img.width)),
-        max(0, int(y * img.height)),
-        min(img.width, int((x + w) * img.width)),
-        min(img.height, int((y + h) * img.height)),
-    )
-    if box[2] <= box[0] or box[3] <= box[1]:
-        return
-    crop = img.crop(box).convert("L")
-    scale = min(MAX_UPSCALE, max(1.0, TARGET_BAND_PX / max(1, crop.height)))
-    if scale > 1.0:
-        crop = crop.resize(
-            (int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS
-        )
-    crop = ImageOps.autocontrast(crop)
-
-    grey = work / "band-grey.png"
-    crop.save(grey)
-    yield grey
-
-    binary = work / "band-bin.png"
-    crop.point(lambda p: 255 if p > BINARY_THRESHOLD else 0).save(binary)
-    yield binary
 
 
 def _cluster_graphics(
@@ -842,6 +534,10 @@ def _fold(text: str) -> str:
     whichever it feels like; folding both to ASCII makes them one string. The
     structure (the lineup digit, the `P:` marker) has to survive, so this is
     the form the field patterns run against.
+
+    Latin-specific, and deliberately not shared with the reader: decomposing
+    and dropping combining marks is right for Nuñez and wrong for Cyrillic,
+    where it would fold Russian's short i onto a plain i.
     """
     folded = unicodedata.normalize("NFKD", text)
     folded = "".join(c for c in folded if not unicodedata.combining(c))
@@ -852,42 +548,3 @@ def _upper(text: str) -> str:
     """Fold to letters and spaces only: the form roster names are keyed by."""
     kept = [c if (c.isalpha() and c.isascii()) or c in " '-" else " " for c in _fold(text)]
     return " ".join("".join(kept).split())
-
-
-def collapse_sightings(
-    sightings: list[tuple[float, str, float]],
-    source: str,
-    event: str,
-    frame_gap: float,
-) -> list[Cue]:
-    """Collapse per-frame (t, player_id, confidence) hits into per-run cues.
-
-    Shared by every frame-sampling recognizer (scorebug, jersey, face).
-    A run of consecutive sightings of one player becomes one cue spanning
-    first..last sighting (extended by one frame interval so a single-frame
-    sighting still has nonzero duration); confidence is the run's max.
-    """
-    runs: dict[str, list[tuple[float, float, float, float]]] = {}
-    for t, pid, conf in sorted(sightings):
-        pruns = runs.setdefault(pid, [])
-        if pruns and t - pruns[-1][1] <= frame_gap + RUN_GAP_S:
-            s, _, c, first = pruns[-1]
-            pruns[-1] = (s, t, max(c, conf), first)
-        else:
-            pruns.append((t, t, conf, t))
-
-    cues = []
-    for pid, pruns in runs.items():
-        for start, end, conf, _ in pruns:
-            cues.append(
-                Cue(
-                    source=source,
-                    start_s=start,
-                    end_s=end + frame_gap,
-                    event=event,
-                    entity_ids=(pid,),
-                    confidence=round(conf, 4),
-                )
-            )
-    cues.sort(key=lambda c: (c.start_s, c.entity_ids))
-    return cues
