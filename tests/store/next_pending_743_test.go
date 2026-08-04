@@ -246,14 +246,39 @@ type pendingSeed struct {
 	deletedDoc int64
 }
 
-// seedPendingCorpus builds a corpus whose kinds INTERLEAVE by chunk_id (text,
-// code, text, code, ...) plus the rows a batch must exclude: already-embedded
-// and failed chunks, a soft-deleted chunk, and chunks whose parent document is
-// errored or tombstoned.
-func seedPendingCorpus(t *testing.T, st *store.SQLiteStore) pendingSeed {
+// chunkInserter inserts seed chunks and carries the first error, so the seed
+// below reads as the corpus it describes rather than as one error check per
+// row. `add` returns 0 once an error has been recorded; the caller checks `err`
+// once at the end.
+type chunkInserter struct {
+	ctx     context.Context
+	tx      model.RepresentationStore
+	reps    map[string]int64
+	ordinal int
+	err     error
+}
+
+func (ci *chunkInserter) add(relPath, kind, status string, deleted bool, spans []model.Span) int64 {
+	if ci.err != nil {
+		return 0
+	}
+	ci.ordinal++
+	id, err := ci.tx.InsertChunkWithSpans(ci.ctx, model.Chunk{
+		RepID: ci.reps[relPath], Ordinal: ci.ordinal, Text: "chunk " + kind, TextHash: "h",
+		IndexKind: kind, EmbeddingStatus: status, Deleted: deleted,
+	}, spans)
+	if err != nil {
+		ci.err = err
+		return 0
+	}
+	return id
+}
+
+// seedPendingDocuments creates the three parent documents the corpus needs: a
+// healthy one, an errored one and a tombstoned one.
+func seedPendingDocuments(t *testing.T, st *store.SQLiteStore) map[string]int64 {
 	t.Helper()
 	ctx := context.Background()
-
 	docs := []struct {
 		relPath string
 		status  string
@@ -277,81 +302,57 @@ func seedPendingCorpus(t *testing.T, st *store.SQLiteStore) pendingSeed {
 		}
 		ids[d.relPath] = doc.DocID
 	}
+	return ids
+}
+
+// seedPendingCorpus builds a corpus whose kinds INTERLEAVE by chunk_id (text,
+// code, text, code, ...) plus the rows a batch must exclude: already-embedded
+// and errored chunks, a soft-deleted chunk, and chunks whose parent document is
+// errored or tombstoned.
+func seedPendingCorpus(t *testing.T, st *store.SQLiteStore) pendingSeed {
+	t.Helper()
+	ctx := context.Background()
+
+	docIDs := seedPendingDocuments(t, st)
 
 	var seed pendingSeed
 	err := st.WithTx(ctx, func(tx model.RepresentationStore) error {
-		reps := map[string]int64{}
-		for relPath, docID := range ids {
+		ins := &chunkInserter{ctx: ctx, tx: tx, reps: map[string]int64{}}
+		for relPath, docID := range docIDs {
 			repID, rerr := tx.UpsertRepresentation(ctx, model.Representation{
 				DocID: docID, RepType: "raw_text", RepHash: "h-" + relPath,
 			})
 			if rerr != nil {
 				return rerr
 			}
-			reps[relPath] = repID
-		}
-		ordinal := 0
-		insert := func(relPath, kind, status string, deleted bool, spans []model.Span) (int64, error) {
-			ordinal++
-			return tx.InsertChunkWithSpans(ctx, model.Chunk{
-				RepID: reps[relPath], Ordinal: ordinal, Text: "chunk " + kind, TextHash: "h",
-				IndexKind: kind, EmbeddingStatus: status, Deleted: deleted,
-			}, spans)
+			ins.reps[relPath] = repID
 		}
 		for i := 0; i < 3; i++ {
-			id, cerr := insert("notes/a.md", "text", "pending", false,
-				[]model.Span{{Kind: "lines", StartLine: 1, EndLine: 2}})
-			if cerr != nil {
-				return cerr
-			}
-			seed.text = append(seed.text, id)
-			id, cerr = insert("notes/a.md", "code", "pending", false,
-				[]model.Span{{Kind: "lines", StartLine: 3, EndLine: 4}})
-			if cerr != nil {
-				return cerr
-			}
-			seed.code = append(seed.code, id)
+			seed.text = append(seed.text, ins.add("notes/a.md", "text", "pending", false,
+				[]model.Span{{Kind: "lines", StartLine: 1, EndLine: 2}}))
+			seed.code = append(seed.code, ins.add("notes/a.md", "code", "pending", false,
+				[]model.Span{{Kind: "lines", StartLine: 3, EndLine: 4}}))
 		}
-		// Rows a batch must never return.
-		if _, cerr := insert("notes/a.md", "text", "ok", false, nil); cerr != nil {
-			return cerr
-		}
-		// "error", not "failed": normalizeEmbeddingStatus knows only
-		// ok/error/pending and maps anything else to pending, so a chunk seeded
-		// as "failed" is a PENDING chunk and would not test what it looks like
-		// it tests.
-		if _, cerr := insert("notes/a.md", "text", "error", false, nil); cerr != nil {
-			return cerr
-		}
-		if _, cerr := insert("notes/a.md", "text", "pending", true, nil); cerr != nil {
-			return cerr
-		}
-		id, cerr := insert("notes/bad.md", "text", "pending", false, nil)
-		if cerr != nil {
-			return cerr
-		}
-		seed.erroredDoc = id
-		if id, cerr = insert("notes/gone.md", "text", "pending", false, nil); cerr != nil {
-			return cerr
-		}
-		seed.deletedDoc = id
+		// Rows a batch must never return. "error", not "failed":
+		// normalizeEmbeddingStatus knows only ok/error/pending and maps anything
+		// else to pending, so a chunk seeded as "failed" is a PENDING chunk and
+		// would not test what it looks like it tests.
+		ins.add("notes/a.md", "text", "ok", false, nil)
+		ins.add("notes/a.md", "text", "error", false, nil)
+		ins.add("notes/a.md", "text", "pending", true, nil)
+		seed.erroredDoc = ins.add("notes/bad.md", "text", "pending", false, nil)
+		seed.deletedDoc = ins.add("notes/gone.md", "text", "pending", false, nil)
 
 		// A multi-span chunk (the batch must carry its FIRST span) and a
 		// span-less one.
-		if id, cerr = insert("notes/a.md", "text", "pending", false, []model.Span{
+		seed.multiSpan = ins.add("notes/a.md", "text", "pending", false, []model.Span{
 			{Kind: "lines", StartLine: 10, EndLine: 11},
 			{Kind: "lines", StartLine: 20, EndLine: 21},
-		}); cerr != nil {
-			return cerr
-		}
-		seed.multiSpan = id
-		seed.text = append(seed.text, id)
-		if id, cerr = insert("notes/a.md", "text", "pending", false, nil); cerr != nil {
-			return cerr
-		}
-		seed.noSpan = id
-		seed.text = append(seed.text, id)
-		return nil
+		})
+		seed.text = append(seed.text, seed.multiSpan)
+		seed.noSpan = ins.add("notes/a.md", "text", "pending", false, nil)
+		seed.text = append(seed.text, seed.noSpan)
+		return ins.err
 	})
 	if err != nil {
 		t.Fatalf("seed corpus: %v", err)
