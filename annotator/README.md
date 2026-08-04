@@ -56,6 +56,42 @@ DIRSTRAL_ANNOTATOR_OCR_LANG=rus dirstral-annotate serve …   # or lang="rus"
 Non-Latin scripts need the matching tesseract traineddata installed
 (`brew install tesseract-lang`, `apt install tesseract-ocr-rus`).
 
+### The burned-in clock reader
+
+`recognizers/clock.py` is one consumer of that reader, and the one that pays
+for itself fastest on an archive: a video timestamp is only citable once
+something says what wall-clock instant it was, and a news broadcast burns that
+into the corner of the frame.
+
+```python
+from dirstral_annotator.recognizers.clock import ClockReader
+
+reader = ClockReader(zones={"MSK": "Europe/Moscow"}, anchor_date=date(2025, 8, 20))
+anchor = reader.anchor(Path("broadcast.mp4"))   # None when there is no badge
+anchor.wall_clock_at(1830.0)                    # aware datetime of video 00:30:30
+```
+
+What it will not do is guess. The zone table is required (a badge label the
+caller has not named is not a reading), the date is required for an epoch (a
+badge shows a time of day and no date), a single reading is never an anchor,
+and readings that imply two different anchors are reported as two segments
+rather than averaged into one that is wrong for both.
+
+Two settings are measured rather than stylistic, and both differ from the
+scorebug's:
+
+- **psm 11, not 6.** A badge is an island of text in an empty corner, not a
+  dense strip. On sample footage psm 6 never read the badge at any crop size;
+  psm 11 read it.
+- **The OCR language changes the digits.** On the same pixels, a badge showing
+  `21:35` read as `21:35` under `eng` and as `21:55` under `rus`. Neither
+  reading is detectably wrong on its own, and a 20 minute error in an anchor is
+  inherited by every citation under it. Do not hand the clock reader the
+  language you use for the prose overlays without checking it against a frame,
+  and list the zone label the way your OCR actually renders it (a Latin-script
+  model returns `MCK` for Cyrillic `МСК`, so a Russian corpus may want both
+  spellings in the table).
+
 ## Run the backend
 
 ```bash
