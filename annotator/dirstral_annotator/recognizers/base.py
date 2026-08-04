@@ -19,7 +19,6 @@ import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
 
@@ -335,7 +334,7 @@ def text_tokens(text: str) -> tuple[str, ...]:
             start += 1
         while end > start and _is_punctuation(raw[end - 1]):
             end -= 1
-        if end > start:
+        if end > start and _has_content(raw[start:end]):
             out.append(raw[start:end])
     return tuple(out)
 
@@ -344,15 +343,47 @@ def _is_punctuation(char: str) -> bool:
     return unicodedata.category(char)[0] == "P"
 
 
-def _matched_tokens(a: tuple[str, ...], b: tuple[str, ...]) -> int:
-    """Length of the ordered common token subsequence, via difflib's blocks.
+def _has_content(token: str) -> bool:
+    """Whether a token carries any letter or digit.
 
-    autojunk off: difflib's popularity heuristic starts discarding elements at
-    200, and a long overlay read is exactly where the common words carrying
-    the match would be discarded.
+    Edge trimming alone does not clear symbol-only reads, because Unicode
+    classes `|` and `+` as maths symbols (`Sm`), not punctuation. Tesseract
+    emits a bare `|` for a column rule or a hard vertical edge often enough
+    that, without this, a frame whose only "text" is the divider between two
+    poll bars produces a text cue.
     """
-    matcher = SequenceMatcher(None, a, b, autojunk=False)
-    return sum(block.size for block in matcher.get_matching_blocks())
+    return any(char.isalnum() for char in token)
+
+
+def _matched_tokens(a: tuple[str, ...], b: tuple[str, ...]) -> int:
+    """Length of the longest common token subsequence.
+
+    A true LCS rather than difflib's matching blocks. `SequenceMatcher` finds
+    non-overlapping matching *blocks* by recursively taking the longest one
+    first, which is a greedy choice and can miss a longer subsequence: for
+    `b c a x b c` against `a b c` it reports 2, though every token of the
+    shorter read appears in order in the longer and the answer is 3. That case
+    is not hypothetical for a scroller, where a passage leaving the right edge
+    can reappear at the left within one anchor's lifetime, and this function
+    documents itself as a subsequence measure.
+
+    Two rows rather than a full table: only the previous row is ever read, and
+    reads here run to a few dozen tokens at most.
+    """
+    if not a or not b:
+        return 0
+    if len(a) < len(b):
+        a, b = b, a
+    previous = [0] * (len(b) + 1)
+    for left in a:
+        current = [0] * (len(b) + 1)
+        for index, right in enumerate(b, start=1):
+            if left == right:
+                current[index] = previous[index - 1] + 1
+            else:
+                current[index] = max(previous[index], current[index - 1])
+        previous = current
+    return previous[-1]
 
 
 def text_overlap(a: str, b: str) -> float:
@@ -364,14 +395,15 @@ def text_overlap(a: str, b: str) -> float:
     tokens and differ only at the clipped ends.
 
     Three measures were compared on 180 consecutive frames of the TV Rain
-    ticker, OCR'd for real with tesseract `rus`. Same-passage pairs (0.5s to
-    4s apart) against pairs 30s apart, which are unrelated passages:
+    ticker, OCR'd for real with tesseract `rus`: 1404 same-passage pairs (0.5s
+    to 4s apart) against 7260 pairs at least 30s apart, which are unrelated
+    passages.
 
-      | measure                       | same passage: med / worst | unrelated: worst |
-      |-------------------------------|---------------------------|------------------|
-      | longest common SUBSTRING/min  | 0.909 / 0.375             | 0.132            |
-      | difflib ratio over characters | 0.910 / 0.761             | 0.398            |
-      | this: token subsequence/min   | 0.778 / 0.538             | 0.200            |
+      | measure                       | same: med / worst | unrelated: med / worst |
+      |-------------------------------|-------------------|------------------------|
+      | longest common substring/min  | 0.882 / 0.378     | 0.053 / 0.132          |
+      | difflib ratio over characters | 0.902 / 0.797     | 0.248 / 0.400          |
+      | this: token LCS/min           | 0.778 / 0.455     | 0.000 / 0.231          |
 
     All three separate the two populations, so this is not a question of which
     one works. It is a question of dynamic range, because the run test compares
@@ -381,18 +413,19 @@ def text_overlap(a: str, b: str) -> float:
     Longest common substring, the intuitive choice for a sliding window, is
     ruled out by its spread rather than by its floor. OCR noise inside the
     window (`ЕВАМ` for `ЕКАМ`, `Навойне` for `На войне`) breaks the contiguous
-    run, so two frames half a second apart score anywhere from 0.375 to 0.964.
-    A measure whose same-passage score varies by a factor of 2.6 at a fixed
-    time separation cannot express "the content has turned over". A
-    subsequence tolerates those breaks; a substring cannot.
+    run, so two adjacent frames score anywhere from 0.378 to 1.000. A measure
+    whose same-passage score varies by a factor of 2.6 at a fixed time
+    separation cannot express "the content has turned over". A subsequence
+    tolerates those breaks; a substring cannot. The same adjacent pairs under
+    this measure span 0.636 to 1.000, a factor of 1.6.
 
     Character-level difflib is stable but has a high coincidence floor:
     unrelated Cyrillic reads share enough single characters by chance to score
-    0.236 on median and 0.398 at worst. Against the anchor that leaves a
-    usable band of about 0.40 to 0.95, a factor of 2.4. Tokens put the floor at
-    0.091 median and 0.200 worst, giving a band of 0.20 to 0.81, a factor of 4,
-    and the anchor decay lands inside it with room on both sides (median score
-    against the run's first read: 0.81 at 1s, 0.50 at 10s, 0.31 at 15s, 0.09
+    0.248 on median and 0.400 at worst. Against the anchor that leaves a usable
+    band of about 0.40 to 0.90, a factor of 2.2. Tokens put the floor at 0.000
+    median and 0.231 worst, giving a band of 0.23 to 0.78, a factor of 3.4, and
+    the anchor decay lands inside it with room on both sides (median score
+    against the run's first read: 0.82 at 1s, 0.50 at 10s, 0.33 at 15s, 0.00
     at 30s). Wider range means the default threshold is not balanced on a knife
     edge on a corpus nobody has measured yet.
 

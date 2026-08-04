@@ -46,6 +46,29 @@ def test_overlap_survives_noise_inside_the_window():
     assert text_overlap(clean, noisy) >= 0.75
 
 
+def test_overlap_is_a_true_lcs_not_difflibs_matching_blocks():
+    """`SequenceMatcher.get_matching_blocks()` takes the longest block first and
+    recurses either side, which is greedy: for `b c a x b c` against `a b c` it
+    reports 2 of 3, though every token of the shorter read appears in order in
+    the longer. A scroller can reissue a passage at the left edge while the
+    same words are still leaving at the right, so the shape is reachable, and
+    this function documents itself as containment. LCS answers 3 of 3."""
+    longer = "буферной зоны на линии фронта обсуждают создание буферной зоны"
+    shorter = "создание буферной зоны"
+    assert text_overlap(longer, shorter) == 1.0
+
+
+def test_symbol_only_reads_carry_no_tokens():
+    """Unicode classes `|` as a maths symbol (`Sm`), not punctuation, so edge
+    trimming alone leaves it standing. Tesseract emits a bare `|` for a column
+    rule often enough that a frame whose only "text" is the divider between two
+    poll bars would otherwise produce a cue."""
+    assert text_tokens("|") == ()
+    assert text_tokens("| + |") == ()
+    assert text_overlap("|", "|") == 0.0
+    assert text_tokens("53% | 10%") == ("53", "10")  # trailing % trims as before
+
+
 def test_overlap_of_unrelated_russian_text_stays_low():
     a = "Европейские лидеры обсуждают создание буферной зоны на линии фронта"
     b = "Умер советский и российский композитор Родион Щедрин"
