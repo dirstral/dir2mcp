@@ -15,8 +15,11 @@ import re
 import subprocess
 import tempfile
 import threading
+import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
 
@@ -290,4 +293,233 @@ def collapse_sightings(
                 )
             )
     cues.sort(key=lambda c: (c.start_s, c.entity_ids))
+    return cues
+
+
+#: How much of a read has to still be on screen for a run to stay open, as a
+#: fraction of the shorter of the two token sequences. Measured on 180
+#: consecutive frames of the TV Rain ticker (0.5s apart, real tesseract `rus`):
+#: reads of the same scrolling passage score 0.53 or better even 4s apart,
+#: while reads of unrelated passages never exceed 0.20. 0.5 sits in the middle
+#: of that gap and reads naturally: half of what is on screen was on screen
+#: when the run opened.
+TEXT_RUN_SIMILARITY = 0.5
+
+#: Below this many tokens a fuzzy comparison is not evidence of anything, so
+#: the run test falls back to exact equality. A clock badge reads as two
+#: tokens ("10:24 МСК"), and at 0.5 similarity "10:24 МСК" and "10:25 МСК"
+#: would collapse into one run, silently erasing the minute that makes the
+#: badge worth reading. This is the same refusal #639 made for short fuzzy
+#: roster matches, for the same reason.
+MIN_MATCH_TOKENS = 3
+
+
+def text_tokens(text: str) -> tuple[str, ...]:
+    """Whitespace tokens, NFKC-normalised, stripped of edge punctuation.
+
+    Deliberately NOT `scorebug._fold`: that decomposes with NFKD and drops
+    combining marks, which is right for Nuñez and wrong for Cyrillic, where it
+    folds й onto и and ё onto е. NFKC composes instead, so no letter loses its
+    identity, and case is handled at comparison time rather than here so the
+    caller's text survives verbatim into the cue.
+
+    Edge punctuation is stripped by Unicode category rather than by an ASCII
+    list, so the Russian quotation marks «» and the em dash the ticker uses as
+    a source separator come off exactly as an ASCII comma would. Inner
+    punctuation stays: `40-километровой` is one token, not two.
+    """
+    out = []
+    for raw in unicodedata.normalize("NFKC", text).split():
+        start, end = 0, len(raw)
+        while start < end and _is_punctuation(raw[start]):
+            start += 1
+        while end > start and _is_punctuation(raw[end - 1]):
+            end -= 1
+        if end > start:
+            out.append(raw[start:end])
+    return tuple(out)
+
+
+def _is_punctuation(char: str) -> bool:
+    return unicodedata.category(char)[0] == "P"
+
+
+def _matched_tokens(a: tuple[str, ...], b: tuple[str, ...]) -> int:
+    """Length of the ordered common token subsequence, via difflib's blocks.
+
+    autojunk off: difflib's popularity heuristic starts discarding elements at
+    200, and a long overlay read is exactly where the common words carrying
+    the match would be discarded.
+    """
+    matcher = SequenceMatcher(None, a, b, autojunk=False)
+    return sum(block.size for block in matcher.get_matching_blocks())
+
+
+def text_overlap(a: str, b: str) -> float:
+    """How much of the shorter read is contained, in order, in the longer.
+
+    1.0 when one read's tokens are a subsequence of the other's, which is the
+    shape a scrolling overlay actually produces: consecutive frames hold a
+    sliding window over one sentence, so they share a long ordered run of
+    tokens and differ only at the clipped ends.
+
+    Three measures were compared on 180 consecutive frames of the TV Rain
+    ticker, OCR'd for real with tesseract `rus`. Same-passage pairs (0.5s to
+    4s apart) against pairs 30s apart, which are unrelated passages:
+
+      | measure                       | same passage: med / worst | unrelated: worst |
+      |-------------------------------|---------------------------|------------------|
+      | longest common SUBSTRING/min  | 0.909 / 0.375             | 0.132            |
+      | difflib ratio over characters | 0.910 / 0.761             | 0.398            |
+      | this: token subsequence/min   | 0.778 / 0.538             | 0.200            |
+
+    All three separate the two populations, so this is not a question of which
+    one works. It is a question of dynamic range, because the run test compares
+    every read against a fixed anchor and the score has to fall meaningfully as
+    the content turns over, not just sit high and then drop off a cliff.
+
+    Longest common substring, the intuitive choice for a sliding window, is
+    ruled out by its spread rather than by its floor. OCR noise inside the
+    window (`ЕВАМ` for `ЕКАМ`, `Навойне` for `На войне`) breaks the contiguous
+    run, so two frames half a second apart score anywhere from 0.375 to 0.964.
+    A measure whose same-passage score varies by a factor of 2.6 at a fixed
+    time separation cannot express "the content has turned over". A
+    subsequence tolerates those breaks; a substring cannot.
+
+    Character-level difflib is stable but has a high coincidence floor:
+    unrelated Cyrillic reads share enough single characters by chance to score
+    0.236 on median and 0.398 at worst. Against the anchor that leaves a
+    usable band of about 0.40 to 0.95, a factor of 2.4. Tokens put the floor at
+    0.091 median and 0.200 worst, giving a band of 0.20 to 0.81, a factor of 4,
+    and the anchor decay lands inside it with room on both sides (median score
+    against the run's first read: 0.81 at 1s, 0.50 at 10s, 0.31 at 15s, 0.09
+    at 30s). Wider range means the default threshold is not balanced on a knife
+    edge on a corpus nobody has measured yet.
+
+    Normalising by the shorter sequence rather than by both (difflib's own
+    `ratio`) is what keeps a partly-garbled or half-occluded read from breaking
+    a run: a short correct read contained in a long one scores 1.0 instead of
+    being penalised for the length it never had.
+
+    Comparison is case-insensitive via `str.casefold`, which is correct for
+    Cyrillic; the caller's original text is never modified.
+    """
+    ta = tuple(w.casefold() for w in text_tokens(a))
+    tb = tuple(w.casefold() for w in text_tokens(b))
+    shorter = min(len(ta), len(tb))
+    if not shorter:
+        return 0.0
+    return _matched_tokens(ta, tb) / shorter
+
+
+def _same_passage(
+    anchor: tuple[str, ...], candidate: tuple[str, ...],
+    similarity: float, min_tokens: int,
+) -> bool:
+    if anchor == candidate:
+        return True  # a static overlay: identical reads, no fuzziness needed
+    if len(anchor) < min_tokens or len(candidate) < min_tokens:
+        return False
+    shorter = min(len(anchor), len(candidate))
+    return _matched_tokens(anchor, candidate) / shorter >= similarity
+
+
+@dataclass
+class _TextRun:
+    """One open run of reads of the same passage, while it is being built."""
+
+    start_s: float
+    last_s: float
+    confidence: float
+    #: casefolded tokens of the run's FIRST read; every later read is compared
+    #: against these, never against its predecessor. See collapse_text_sightings.
+    anchor: tuple[str, ...]
+    best_text: str
+
+
+def collapse_text_sightings(
+    sightings: list[tuple[float, str, float]],
+    source: str,
+    event: str,
+    frame_gap: float,
+    similarity: float = TEXT_RUN_SIMILARITY,
+    min_tokens: int = MIN_MATCH_TOKENS,
+) -> list[Cue]:
+    """Collapse per-frame (t, text, confidence) reads into per-passage cues.
+
+    The text counterpart of `collapse_sightings`, for overlays whose string
+    changes from frame to frame while the thing on screen does not. A news
+    ticker scrolls: the same headline is OCR'd at a different horizontal
+    offset every frame, so every frame yields a different string and collapsing
+    on identity emits one cue per frame. On 90s of TV Rain (180 frames, real
+    tesseract) that is 180 near-duplicate cues for five headlines; this returns
+    9, one per screenful, each carrying a readable window of the ticker.
+
+    A read joins the open run when it lands within the same time gap
+    `collapse_sightings` allows AND still overlaps the run's FIRST read by
+    `similarity`. Anchoring on the first read rather than on the previous one
+    is what bounds the run: chaining neighbour to neighbour is transitive, and
+    a ticker that scrolls for 45 minutes chains into one 45-minute cue whose
+    text is the whole programme (measured: chaining returns 1 cue for the same
+    90s, at any threshold below 0.65). Against a fixed anchor a run ends when
+    what is on screen has actually turned over, which for a scrolling overlay
+    is the dwell time of a screenful and for a static one is never.
+
+    That last property is why this needs no special case for static overlays:
+    identical reads score 1.0 against the anchor forever, so a fixed banner
+    collapses exactly as `collapse_sightings` would. It is also why the
+    baseball path is untouched: it keeps calling `collapse_sightings`, which
+    this function does not modify.
+
+    The cue carries the run's longest read verbatim, not a reconstruction
+    spliced from the windows. Splicing was built and measured against a
+    hand-transcribed ground truth of the same 90s: token precision 0.836
+    against 0.837 for the longest read, recall 0.896 against 0.875, and the
+    extra recall is material the next run's cue already carries. It buys
+    nothing and costs duplicated fragments at every splice point
+    (`лидеры лидеры`, `погибших погибших`), so it is not shipped. A
+    medoid-of-run selector scored 0.876 precision, four points better, at
+    O(n^2) comparisons per run; that is not worth quadratic work in a run that
+    can be thousands of frames long, but it is the first thing to try if the
+    carried text is ever the weak link.
+
+    Unlike `collapse_sightings` this walks one chronological channel and does
+    not track several entities at once: an overlay band shows one string per
+    frame, so interleaved sightings of two different passages are two runs,
+    not two concurrent ones. Cues carry no entity ids, because ticker text is
+    not an entity; note that `fusion.fuse` merges overlapping same-event cues
+    that share no entity, so a consumer emitting these needs either distinct
+    events or a fusion rule of its own.
+    """
+    runs: list[_TextRun] = []
+    for t, text, conf in sorted(sightings):
+        tokens = tuple(word.casefold() for word in text_tokens(text))
+        if not tokens:
+            continue  # a blank or all-punctuation read is not evidence of anything
+        stripped = text.strip()
+        open_run = runs[-1] if runs else None
+        if (open_run is not None
+                and t - open_run.last_s <= frame_gap + RUN_GAP_S
+                and _same_passage(open_run.anchor, tokens, similarity, min_tokens)):
+            open_run.last_s = t
+            open_run.confidence = max(open_run.confidence, conf)
+            if len(stripped) > len(open_run.best_text):
+                open_run.best_text = stripped
+        else:
+            runs.append(_TextRun(start_s=t, last_s=t, confidence=conf,
+                                 anchor=tokens, best_text=stripped))
+
+    cues = [
+        Cue(
+            source=source,
+            start_s=run.start_s,
+            end_s=run.last_s + frame_gap,
+            event=event,
+            entity_ids=(),
+            confidence=round(run.confidence, 4),
+            text=run.best_text,
+        )
+        for run in runs
+    ]
+    cues.sort(key=lambda c: (c.start_s, c.text))
     return cues
