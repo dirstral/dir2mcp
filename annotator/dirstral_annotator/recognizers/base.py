@@ -426,7 +426,7 @@ def text_overlap(a: str, b: str) -> float:
     Character-level difflib is stable but has a high coincidence floor:
     unrelated Cyrillic reads share enough single characters by chance to score
     0.248 on median and 0.400 at worst. Against the anchor that leaves a usable
-    band of about 0.40 to 0.90, a factor of 2.2. Tokens put the floor at 0.000
+    band of about 0.40 to 0.90, a factor of 2.3. Tokens put the floor at 0.000
     median and 0.231 worst, giving a band of 0.23 to 0.78, a factor of 3.4, and
     the anchor decay lands inside it with room on both sides (median score
     against the run's first read: 0.82 at 1s, 0.50 at 10s, 0.33 at 15s, 0.00
