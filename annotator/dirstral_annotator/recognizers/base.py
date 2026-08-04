@@ -397,7 +397,11 @@ def text_overlap(a: str, b: str) -> float:
     Three measures were compared on 180 consecutive frames of the TV Rain
     ticker, OCR'd for real with tesseract `rus`: 1404 same-passage pairs (0.5s
     to 4s apart) against 7260 pairs at least 30s apart, which are unrelated
-    passages.
+    passages. The reads are committed as
+    `tests/fixtures/tvrain_ticker_measure.json` and every figure below is
+    re-derived from them by `test_text_collapse.py`, because a previous version
+    of this table carried a number that no longer matched the code and nothing
+    recomputed it.
 
       | measure                       | same: med / worst | unrelated: med / worst |
       |-------------------------------|-------------------|------------------------|

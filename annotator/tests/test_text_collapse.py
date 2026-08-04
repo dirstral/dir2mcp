@@ -1,16 +1,23 @@
 """Backend-free tests for text-similarity run collapsing (scrolling overlays).
 
-The fixture is real material: 60 consecutive frames of TV Rain's news ticker,
-OCR'd with tesseract `rus`, so the drift and the OCR noise in it are the ones
-the code has to survive rather than a synthetic sliding window.
+Both fixtures are real material: consecutive frames of TV Rain's news ticker
+OCR'd with tesseract `rus`, so the drift and the OCR noise in them are the ones
+the code has to survive rather than a synthetic sliding window. The 60-frame
+run exercises collapsing; the 180-frame run is what the `text_overlap`
+docstring's measurement table is derived from, and is re-derived here so the
+two cannot drift apart.
 """
 
 import json
 from itertools import pairwise
 from pathlib import Path
+from statistics import median
+
+import pytest
 
 from dirstral_annotator.recognizers.base import (
     MIN_MATCH_TOKENS,
+    _matched_tokens,
     collapse_sightings,
     collapse_text_sightings,
     text_overlap,
@@ -18,11 +25,21 @@ from dirstral_annotator.recognizers.base import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tvrain_ticker_reads.json"
+#: The longer run the `text_overlap` docstring's measurement table is derived
+#: from. Separate from the collapsing fixture above because the table needs
+#: pairs 30s apart to have an unrelated population at all, and 30s of ticker
+#: does not contain them.
+MEASURE_FIXTURE = Path(__file__).parent / "fixtures" / "tvrain_ticker_measure.json"
 
 
 def ticker_sightings(confidence: float = 0.7):
     data = json.loads(FIXTURE.read_text(encoding="utf-8"))
     return [(r["t"], r["text"], confidence) for r in data["reads"]]
+
+
+def measurement_reads():
+    data = json.loads(MEASURE_FIXTURE.read_text(encoding="utf-8"))
+    return [(r["t"], r["text"]) for r in data["reads"]]
 
 
 # --- the measure -----------------------------------------------------------
@@ -233,3 +250,75 @@ def test_real_ticker_cue_text_still_carries_a_readable_headline():
     cues = collapse_text_sightings(ticker_sightings(), source="ticker",
                                    event="overlay_text", frame_gap=0.5)
     assert max(text_overlap(c.text, headline) for c in cues) >= 0.9
+
+
+# --- the docstring's measurement table -------------------------------------
+
+def test_the_measured_table_in_the_docstring_still_reproduces():
+    """`text_overlap`'s docstring justifies the measure with numbers. This
+    re-derives them from the committed fixture so they cannot quietly go stale.
+
+    They already did once: the table shipped a same-passage worst of 0.538 for
+    this measure, which is above what it actually scores (0.455) and above what
+    the difflib-blocks measure that produced it could reach, since LCS is an
+    upper bound on that. Nothing caught it because nothing recomputed it.
+    """
+    reads = measurement_reads()
+    times = [t for t, _ in reads]
+    tokens = [tuple(w.casefold() for w in text_tokens(text)) for _, text in reads]
+
+    def score(i, j):
+        a, b = tokens[i], tokens[j]
+        shorter = min(len(a), len(b))
+        return _matched_tokens(a, b) / shorter if shorter else 0.0
+
+    same, unrelated = [], []
+    for i in range(len(times)):
+        for j in range(i + 1, len(times)):
+            gap = times[j] - times[i]
+            if 0.5 <= gap <= 4.0:
+                same.append(score(i, j))
+            elif gap >= 30.0:
+                unrelated.append(score(i, j))
+
+    assert len(same) == 1404 and len(unrelated) == 7260
+    assert median(same) == pytest.approx(0.778, abs=0.001)
+    assert min(same) == pytest.approx(0.455, abs=0.001)
+    assert median(unrelated) == pytest.approx(0.000, abs=0.001)
+    assert max(unrelated) == pytest.approx(0.231, abs=0.001)
+
+    # The decay figures the docstring quotes against a fixed anchor.
+    for lag, want in ((1.0, 0.818), (10.0, 0.500), (15.0, 0.333), (30.0, 0.000)):
+        at_lag = [score(i, j)
+                  for i in range(len(times))
+                  for j in range(i + 1, len(times))
+                  if abs(times[j] - times[i] - lag) < 1e-9]
+        assert median(at_lag) == pytest.approx(want, abs=0.001), f"lag {lag}s"
+
+
+def test_this_measure_is_steadier_than_a_substring_at_a_fixed_separation():
+    """The docstring rules longest-common-SUBSTRING out by its spread rather
+    than its floor: 2.6x against 1.6x here, at a fixed 0.5s separation."""
+    reads = measurement_reads()
+    texts = [text.casefold() for _, text in reads]
+    tokens = [tuple(w.casefold() for w in text_tokens(text)) for _, text in reads]
+
+    def longest_common_substring(a, b):
+        best, previous = 0, [0] * (len(b) + 1)
+        for left in a:
+            current = [0] * (len(b) + 1)
+            for index, right in enumerate(b, start=1):
+                if left == right:
+                    current[index] = previous[index - 1] + 1
+                    best = max(best, current[index])
+            previous = current
+        return best
+
+    adjacent = list(range(len(reads) - 1))
+    substring = [longest_common_substring(texts[i], texts[i + 1])
+                 / min(len(texts[i]), len(texts[i + 1])) for i in adjacent]
+    ours = [_matched_tokens(tokens[i], tokens[i + 1])
+            / min(len(tokens[i]), len(tokens[i + 1])) for i in adjacent]
+
+    assert max(substring) / min(substring) == pytest.approx(2.6, abs=0.05)
+    assert max(ours) / min(ours) == pytest.approx(1.6, abs=0.05)
