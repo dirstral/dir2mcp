@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from dirstral_annotator.recognizers import overlay, scorebug
+from dirstral_annotator.recognizers import base, overlay, scorebug
 from dirstral_annotator.recognizers.base import RecognizerUnavailable
 from dirstral_annotator.recognizers.overlay import OverlayRead
 from dirstral_annotator.recognizers.scorebug import (
@@ -318,7 +318,7 @@ def test_the_names_other_modules_import_from_here_still_resolve():
     """`collapse_sightings`, `OcrFn` and `default_ocr` moved to `base` and
     `overlay` with the split; jersey, faces and callers outside the package
     have always imported them from here."""
-    assert scorebug.collapse_sightings is not None
+    assert scorebug.collapse_sightings is base.collapse_sightings
     assert scorebug.default_ocr is overlay.default_ocr
     assert scorebug.default_workers is overlay.default_workers
     assert scorebug.OcrFn is overlay.OcrFn

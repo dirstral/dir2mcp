@@ -31,11 +31,12 @@ from .base import RecognizerUnavailable, collapse_sightings, iter_frames
 from .overlay import (
     OcrFn,
     Workspaces,
-    _new_executor,
+    default_lang,
     default_ocr,
     default_workers,
     lookahead_for,
     map_in_order,
+    new_executor,
 )
 
 Bbox = tuple[int, int, int, int]  # x, y, w, h
@@ -82,6 +83,10 @@ class JerseyRecognizer:
         self.roster = roster
         self.detector = detector if detector is not None else default_detector()
         self.ocr = ocr if ocr is not None else default_ocr(lang=lang)
+        # The language the default adapter was built with, resolved. Records
+        # what this recognizer will read in; says nothing about an injected
+        # OCR callable, which answers for its own language.
+        self.lang = default_lang() if lang is None else lang
         self.fps = fps
         self.workers = default_workers() if workers is None else max(1, int(workers))
         # An injected detector is used as given: the caller supplied the
@@ -211,7 +216,7 @@ class _PooledReader:
         self._detectors = detectors
         self._ocr = ocr
         self._workspaces = Workspaces(work)
-        self._executor = _new_executor(workers, name)
+        self._executor = new_executor(workers, name)
 
     def _read_here(self, frame: Path) -> list[str]:
         return read_numbers(

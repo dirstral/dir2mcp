@@ -296,6 +296,7 @@ class ScorebugRecognizer:
         self.crop = self.reader.crop
         self.regions = self.reader.regions
         self.workers = self.reader.workers
+        self.lang = self.reader.lang
         self._index = _name_index(roster)
 
     def recognize(self, media_path: Path) -> list[Cue]:

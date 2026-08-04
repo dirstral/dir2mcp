@@ -36,18 +36,18 @@ unavailable.
 `recognizers/overlay.py` is the reusable half of the scorebug recognizer:
 find the band of the frame that holds burned-in text, defeat light-on-dark
 with a second hard-thresholded pass, OCR both, and hand back
-`(timestamp, region, texts)`. It knows nothing about sport, roster or
-language. `ScorebugRecognizer` is one consumer of it (baseball fields against
-a roster); a news archive is another (headline banners, tickers, a burned-in
-clock badge as a wall-clock anchor), and gets there with different `regions=`
-and a different interpretation rather than different reading code.
+`(timestamp, region, texts)`. It knows nothing about sport or roster.
+`ScorebugRecognizer` is one consumer of it (baseball fields against a roster);
+a news archive is another (headline banners, tickers, a burned-in clock badge
+as a wall-clock anchor), and gets there with different `regions=` and a
+different interpretation rather than different reading code.
 
 The interpretation is passed in, and it also tells the reader how much
 evidence each band held: that hit count is what the band search locks onto,
 and it has to be the caller's judgement, because "the OCR returned something"
 is true of a crop of crowd texture too.
 
-OCR language is a parameter, never a constant:
+OCR language is configurable, never a constant in the code:
 
 ```bash
 DIRSTRAL_ANNOTATOR_OCR_LANG=rus dirstral-annotate serve …   # or lang="rus"

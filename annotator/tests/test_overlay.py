@@ -113,7 +113,7 @@ def test_the_reader_keeps_every_preprocessing_pass(monkeypatch, tmp_path):
     )
     passes = iter(["grey read", "binarised read"])
     reader = OverlayReader(ocr=lambda p: next(passes), crop=WHOLE, workers=1)
-    assert list(reader.read_text(MEDIA))[0].texts == ("grey read", "binarised read")
+    assert next(iter(reader.read_text(MEDIA))).texts == ("grey read", "binarised read")
 
 
 def test_best_is_the_longest_pass():
@@ -321,6 +321,17 @@ def test_the_page_segmentation_mode_is_a_parameter(
     overlay.default_ocr()(jpeg)
     overlay.default_ocr(psm=overlay.OCR_PSM)(jpeg)
     assert [call["config"] for call in fake_tesseract.calls] == ["", "--psm 6"]
+
+
+def test_a_reader_reports_the_language_it_settled_on(monkeypatch):
+    """Resolved, not echoed: a caller inspecting the reader should see what it
+    will actually OCR in, whether that came from the argument or the
+    environment."""
+    monkeypatch.setenv(overlay.LANG_ENV, "rus")
+    assert OverlayReader(ocr=lambda p: "").lang == "rus"
+    assert OverlayReader(ocr=lambda p: "", lang="eng").lang == "eng"
+    monkeypatch.delenv(overlay.LANG_ENV)
+    assert OverlayReader(ocr=lambda p: "").lang is None
 
 
 def test_a_missing_engine_degrades_instead_of_aborting(monkeypatch):

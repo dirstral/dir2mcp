@@ -251,6 +251,11 @@ class OverlayReader:
         name: str = "overlay",  # scratch dir and worker thread prefix
     ):
         self.ocr = ocr if ocr is not None else default_ocr(psm=psm, lang=lang)
+        # The language the default adapter was built with, resolved through
+        # LANG_ENV. Records what this reader will read in; says nothing about
+        # an injected OCR callable, which answers for its own language.
+        self.lang = default_lang() if lang is None else lang
+        self.psm = psm
         self.fps = fps
         self.crop = crop
         if crop is not None:
@@ -430,7 +435,7 @@ class _PooledReader:
         self.workers = workers
         self._ocr = ocr
         self._workspaces = Workspaces(work)
-        self._executor = _new_executor(workers, name)
+        self._executor = new_executor(workers, name)
         self._pending: dict[tuple[int, Region], Future[list[str]]] = {}
 
     def _read_here(self, frame: Path, region: Region) -> list[str]:
@@ -462,7 +467,7 @@ class _PooledReader:
         self._executor.shutdown(wait=True, cancel_futures=True)
 
 
-def _new_executor(workers: int, name: str = "overlay") -> Executor:
+def new_executor(workers: int, name: str = "overlay") -> Executor:
     return ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
 
 

@@ -154,7 +154,7 @@ def _reverse_executor_factory(monkeypatch, module):
     def new_executor(workers, name="test"):
         return pool
 
-    monkeypatch.setattr(module, "_new_executor", new_executor)
+    monkeypatch.setattr(module, "new_executor", new_executor)
 
     original = Future.result
 
