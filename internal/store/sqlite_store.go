@@ -899,6 +899,11 @@ CREATE INDEX IF NOT EXISTS idx_chunks_rep_id ON chunks(rep_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
 CREATE INDEX IF NOT EXISTS idx_chunks_index_kind ON chunks(index_kind);
 CREATE INDEX IF NOT EXISTS idx_chunks_rel_path_deleted ON chunks(rel_path, deleted);
+-- Serves the keyset page of ListEmbeddedChunkMetadata (#732): the three equality
+-- terms are the leading columns and chunk_id is last, so a kind-scoped page seeks
+-- straight to the cursor and reads only the rows it returns, already in chunk_id
+-- order (no sort, no scan of the rest of the corpus).
+CREATE INDEX IF NOT EXISTS idx_chunks_embedded_kind_seek ON chunks(embedding_status, deleted, index_kind, chunk_id);
 CREATE INDEX IF NOT EXISTS idx_spans_chunk_id_span_id ON spans(chunk_id, span_id);
 CREATE INDEX IF NOT EXISTS idx_mcp_sessions_last_seen ON mcp_sessions(last_seen_unix);
 CREATE INDEX IF NOT EXISTS idx_mcp_payment_outcomes_updated ON mcp_payment_outcomes(updated_unix);
@@ -2779,14 +2784,123 @@ func (s *SQLiteStore) ChunkModalityPresence(ctx context.Context, relPath string)
 	return m == 1, t == 1, nil
 }
 
+// embeddedChunkPageQuery builds one page of the ListEmbeddedChunkMetadata walk
+// together with its positional arguments.
+//
+// Both selective predicates (the index_kind filter and the page LIMIT) live
+// INSIDE filtered_chunks, which is what keeps a page's cost bounded (#732).
+// They used to sit in the outer query. SQLite pushes an outer equality term like
+// index_kind down on its own, but it can never push a LIMIT into a subquery, so
+// the CTE (and the ROW_NUMBER window materialized over its spans) still covered
+// EVERY embedded chunk above the cursor and the outer LIMIT threw all but one
+// page of it away: a full keyset walk therefore cost O(N^2 / pageSize). Written
+// this way the candidate scan itself stops at one page, and the walk is linear in
+// the corpus. idx_chunks_embedded_kind_seek makes the kind-scoped page a pure
+// index seek; without a kind, the leading embedding_status column of
+// idx_chunks_embedding_status plus the implicit rowid serves the same seek.
+//
+// An explicit ORDER BY chunk_id inside the CTE makes the LIMIT select the FIRST
+// page after the cursor (a bare LIMIT would take an arbitrary subset); the outer
+// ORDER BY is kept so the returned rows stay ordered for the caller's keyset
+// cursor regardless of how the joins are executed.
+//
+// The first span of a chunk is picked by joining on MIN(span_id) rather than by a
+// ROW_NUMBER() window over a spans CTE. Same row (spans.span_id is the primary
+// key, so the lowest span_id is the window's rn = 1), but once filtered_chunks is
+// materialized SQLite drives that window off a full scan of the spans table on
+// EVERY page, which reintroduces per-page O(N) work from the other side of the
+// join. The correlated MIN is one index seek per returned row.
+func embeddedChunkPageQuery(indexKind string, limit int, afterChunkID int64) (string, []any) {
+	args := []any{"ok", afterChunkID}
+	kindPredicate := ""
+	if strings.TrimSpace(indexKind) != "" {
+		kindPredicate = " AND c.index_kind = ?"
+	}
+	query := `WITH filtered_chunks AS (
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language
+	            FROM chunks c
+	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > ?` + kindPredicate + `
+	            ORDER BY c.chunk_id
+	            LIMIT ?
+	          )
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp."end", 0), COALESCE(sp.extra_json, ''),
+	                 COALESCE(d.title, ''), fc.modality, fc.media_ref, fc.language, COALESCE(d.mtime_unix, 0)
+	          FROM filtered_chunks fc
+	          LEFT JOIN spans sp ON sp.span_id = (
+	            SELECT MIN(s.span_id) FROM spans s WHERE s.chunk_id = fc.chunk_id
+	          )
+	          LEFT JOIN documents d ON d.rel_path = fc.rel_path
+	          ORDER BY fc.chunk_id`
+	if kindPredicate != "" {
+		args = append(args, indexKind)
+	}
+	args = append(args, limit)
+	return query, args
+}
+
+// EmbeddedChunkPageQueryForTest returns the SQL a single ListEmbeddedChunkMetadata
+// page runs.
+//
+// Exported solely so the #732 regression test can live under tests/ as AGENTS.md
+// requires: the property worth pinning is WHERE in the statement the page's two
+// selective predicates sit, which is neither observable through the ordinary
+// store API nor reliably visible in a query plan (the planner is free to pick the
+// same index either way). Production code never calls this.
+func EmbeddedChunkPageQueryForTest(indexKind string, limit int, afterChunkID int64) (string, []any) {
+	return embeddedChunkPageQuery(indexKind, limit, afterChunkID)
+}
+
+// ExplainEmbeddedChunkPageForTest returns the SQLite query plan (one string per
+// plan row) for a single ListEmbeddedChunkMetadata page.
+//
+// Exported solely so the #732 regression test can live under tests/ as AGENTS.md
+// requires: the property worth pinning is that a page SEEKS its rows through an
+// index instead of scanning the whole chunks table, and a query plan is not
+// observable through the ordinary store API. Production code never calls this.
+func (s *SQLiteStore) ExplainEmbeddedChunkPageForTest(ctx context.Context, indexKind string, limit int, afterChunkID int64) ([]string, error) {
+	db, err := s.ensureReadDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	query, args := embeddedChunkPageQuery(indexKind, limit, afterChunkID)
+	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			return nil, err
+		}
+		plan = append(plan, detail)
+	}
+	return plan, rows.Err()
+}
+
 // ListEmbeddedChunkMetadata pages through embedded ("ok") chunks using keyset
 // (seek) pagination: afterChunkID is an exclusive lower bound on chunk_id (pass 0
 // to start), and callers carry the last chunk_id of each page forward as the next
 // afterChunkID. Rows are ordered by chunk_id ascending, so this walks each row
 // exactly once — unlike OFFSET, which rescans and discards skipped rows every
 // page (quadratic on large embedded sets).
+//
+// It reads through the query-only pool (#631), not the single-connection writer:
+// it is a SELECT-only path, so on the writer it made every page queue behind
+// in-flight ingest writes and made two concurrent kind walks serialize inside
+// database/sql for no gain (#732). Both production callers (the startup warm-load
+// in internal/cli and the vector reconciliation in internal/index) call it
+// outside any write transaction, and the reconciler's interleaved re-pends only
+// touch chunk_ids at or below the cursor it has already passed, so reading a
+// slightly different snapshot than the writer holds cannot change the walk.
 func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit int, afterChunkID int64) ([]model.ChunkTask, error) {
-	db, err := s.ensureDB(ctx)
+	db, err := s.ensureReadDB(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2798,30 +2912,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 		afterChunkID = 0
 	}
 
-	args := []any{"ok", afterChunkID}
-	query := `WITH filtered_chunks AS (
-	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language
-	            FROM chunks c
-	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > ?
-	          ),
-	          ranked_spans AS (
-	            SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
-	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
-	            FROM spans s
-	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
-	          )
-	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
-	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''),
-	                 COALESCE(d.title, ''), fc.modality, fc.media_ref, fc.language, COALESCE(d.mtime_unix, 0)
-	          FROM filtered_chunks fc
-	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1
-	          LEFT JOIN documents d ON d.rel_path = fc.rel_path`
-	if strings.TrimSpace(indexKind) != "" {
-		query += ` WHERE fc.index_kind = ?`
-		args = append(args, indexKind)
-	}
-	args = append(args, limit)
-	query += ` ORDER BY fc.chunk_id LIMIT ?`
+	query, args := embeddedChunkPageQuery(indexKind, limit, afterChunkID)
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
