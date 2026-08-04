@@ -244,13 +244,52 @@ def _zone_beside(text: str, start: int, end: int, known: set[str]) -> str | None
     before them) once punctuation and OCR's invented spaces are folded out.
     A loose substring test would let a two-letter label like `ET` match inside
     any word that happens to contain it.
+
+    Anchoring alone is not enough, because folding is what removes the word
+    boundaries: `11:20 ETA 5 min` folds to `ETA5MIN`, which starts with `ET`,
+    and `TICKET 11:20` folds to `TICKET`, which ends with it. Both read as a
+    labelled time before this check.
+
+    So the boundary is checked against the ORIGINAL text rather than the folded
+    window. Folding cannot answer the question it creates: `MSK LIVE` and
+    `MSKVA` fold to strings that both continue with a letter past `MSK`, and
+    the first is a real badge while the second is not. Keeping each folded
+    character's source index lets the fold do what it is for (`11:20 E T` is
+    what OCR returns for a letter-spaced badge) while the word boundary is
+    still read off the text as printed.
     """
-    after = _fold_label(text[end : end + ZONE_WINDOW])
-    before = _fold_label(text[max(0, start - ZONE_WINDOW) : start])
+    after, after_at = _fold_indexed(text, end, min(len(text), end + ZONE_WINDOW))
+    lo = max(0, start - ZONE_WINDOW)
+    before, before_at = _fold_indexed(text, lo, start)
     for label in sorted(known, key=len, reverse=True):
-        if label and (after.startswith(label) or before.endswith(label)):
+        if not label:
+            continue
+        n = len(label)
+        if after.startswith(label) and not _letter_after(text, after_at[n - 1]):
+            return label
+        if before.endswith(label) and not _letter_before(text, before_at[-n]):
             return label
     return None
+
+
+def _fold_indexed(text: str, lo: int, hi: int) -> tuple[str, list[int]]:
+    """`_fold_label` over `text[lo:hi]`, plus each kept character's source index."""
+    folded: list[str] = []
+    where: list[int] = []
+    for offset in range(lo, hi):
+        char = text[offset]
+        if not _NOT_WORD_RE.match(char):
+            folded.append(char.upper())
+            where.append(offset)
+    return "".join(folded), where
+
+
+def _letter_before(text: str, index: int) -> bool:
+    return index > 0 and text[index - 1].isalpha()
+
+
+def _letter_after(text: str, index: int) -> bool:
+    return index + 1 < len(text) and text[index + 1].isalpha()
 
 
 @dataclass(frozen=True)
@@ -260,7 +299,10 @@ class ClockRead:
     timestamp_s: float  # video time this frame was sampled at
     seconds_of_day: int  # what the badge said, in its own zone
     zone: str
-    texts: tuple[str, ...] = ()  # the OCR passes it was reconciled from
+    #: The OCR passes it was reconciled from. Kept out of the repr: a real file
+    #: yields a hundred readings of several passes each, and a bare
+    #: `print(anchor)` would otherwise print every one of them.
+    texts: tuple[str, ...] = field(default=(), repr=False)
 
     @property
     def implied_offset_s(self) -> float:
@@ -289,7 +331,17 @@ class ClockSegment:
     upper_s: float
     first_s: float  # video time of the first reading in the segment
     last_s: float
-    readings: tuple[ClockRead, ...] = field(default_factory=tuple)
+    #: Kept out of the generated repr for the same reason as `ClockRead.texts`;
+    #: `__repr__` below reports the count instead, which is what a caller
+    #: inspecting a segment actually wants to see.
+    readings: tuple[ClockRead, ...] = field(default_factory=tuple, repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"ClockSegment(zone={self.zone!r}, lower_s={self.lower_s!r}, "
+            f"upper_s={self.upper_s!r}, first_s={self.first_s!r}, "
+            f"last_s={self.last_s!r}, readings={len(self.readings)})"
+        )
 
     @property
     def offset_s(self) -> float:
@@ -552,8 +604,10 @@ class ClockReader:
         Separate from the reading so an anchor can be recomputed, or derived
         from readings taken out of several windows of one file, without paying
         for the OCR again. The counters it reports (`conflicts`, `bands_read`)
-        describe this reader's last `read_clock`, so they are zero for readings
-        it did not take itself.
+        describe this reader's last `read_clock` and carry over from it: they
+        are zero only on an instance that has never run one. On an instance
+        that has, they still describe that run and not the readings passed in
+        here, so read them from the reader that took the readings.
         """
         readings = list(reads)
         segments = _segments(readings, self.min_readings)

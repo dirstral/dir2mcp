@@ -83,9 +83,40 @@ def test_what_is_not_a_reading(text):
 
 def test_a_label_is_not_matched_inside_a_word():
     """`ET` is a real zone label and `TICKET` is a real word on a real overlay.
-    A substring test would turn one into the other."""
-    assert parse_times("11:20 TICKET", {"ET": -5 * 3600}) == []
-    assert parse_times("11:20 ET", {"ET": -5 * 3600})[0].hour == 11
+    A substring test would turn one into the other.
+
+    Anchoring to the digits is not sufficient on its own, because folding strips
+    the word boundaries: `ETA` after the time still starts with `ET`, and
+    `TICKET` before it still ends with `ET`. Only the first case here is caught
+    by position alone, which is what made the original test pass while both
+    others were open.
+    """
+    et = {"ET": -5 * 3600}
+    assert parse_times("11:20 TICKET", et) == []
+    assert parse_times("11:20 ETA 5 min", et) == []
+    assert parse_times("TICKET 11:20", et) == []
+    assert parse_times("11:20 ET", et)[0].hour == 11
+    assert parse_times("ET 11:20", et)[0].hour == 11
+
+
+def test_a_letter_spaced_label_still_reads():
+    """Why folding survives the boundary check: OCR returns `E T` for a
+    letter-spaced badge, and a whole-token comparison would reject it."""
+    et = {"ET": -5 * 3600}
+    assert parse_times("11:20 E T", et)[0].zone == "ET"
+    assert parse_times("11:20 (ET)", et)[0].zone == "ET"
+    assert parse_times("11:20 M S K", {"MSK": 3 * 3600})[0].zone == "MSK"
+
+
+def test_a_label_followed_by_another_word_still_reads():
+    """The case that rules out checking the boundary on the folded window:
+    `MSK LIVE` and `MSKVA` both continue with a letter once the space is folded
+    out, and only the first is a badge. The boundary has to be read off the
+    text as printed."""
+    msk = {"MSK": 3 * 3600}
+    assert parse_times("21:35 MSK LIVE", msk)[0].zone == "MSK"
+    assert parse_times("LIVE MSK 21:35", msk)[0].zone == "MSK"
+    assert parse_times("21:35 MSKVA", msk) == []
 
 
 def test_an_unlabelled_badge_needs_the_caller_to_say_which_zone():
@@ -104,14 +135,28 @@ def test_labels_fold_over_case_and_punctuation():
 
 # --- the zone table is data ------------------------------------------------
 
+def has_tzdata(name: str) -> bool:
+    """Whether an IANA name resolves on this host.
+
+    `clock.py` names a host with no tz database as a supported case, which is
+    why the zone table accepts fixed offsets at all, so the IANA leg of these
+    tests is skipped rather than failed there. `importorskip("zoneinfo")` does
+    not cover it: the module imports fine and only the lookup raises.
+    """
+    try:
+        resolve_zones({"_": name})
+    except ValueError:
+        return False
+    return True
+
+
 def test_a_zone_may_be_an_offset_a_name_or_a_tzinfo():
-    zones = resolve_zones(
-        {"A": 3 * 3600, "B": "UTC", "C": timezone(timedelta(hours=-5))}
-    )
+    zones = resolve_zones({"A": 3 * 3600, "C": timezone(timedelta(hours=-5))})
     at = datetime(2026, 1, 1, tzinfo=UTC)
     assert zones["A"].utcoffset(at) == timedelta(hours=3)
-    assert zones["B"].utcoffset(at) == timedelta(0)
     assert zones["C"].utcoffset(at) == timedelta(hours=-5)
+    if has_tzdata("UTC"):
+        assert resolve_zones({"B": "UTC"})["B"].utcoffset(at) == timedelta(0)
 
 
 def test_an_unresolvable_zone_is_an_error_not_a_guess():
@@ -189,7 +234,11 @@ def test_the_clock_moves_the_band_lock_onto_the_badge(frames):
     judgement is "a time next to a zone I named". A ticker full of numbers is
     not that, which is why the lock has to end up on the badge and stay."""
     frames(ticking(21 * 3600 + 30 * 60))
-    reads = [read for read, _ in reader().reader.read(MEDIA, reader()._interpret)]
+    # One instance: `reader()` twice would run the overlay reader of the first
+    # against the bound interpreter of a second, so the band counters would
+    # land on an object this test discards.
+    clock = reader()
+    reads = [read for read, _ in clock.reader.read(MEDIA, clock._interpret)]
     assert {read.region for read in reads[-10:]} == {BADGE}
 
 
@@ -398,7 +447,8 @@ def test_a_date_turns_the_anchor_into_an_aware_instant(frames):
 def test_the_zone_is_applied_at_the_anchors_own_date(frames):
     """A named zone is not a fixed offset. Resolving it at today's date, or at
     the reader's, silently moves an anchor by an hour for half the year."""
-    pytest.importorskip("zoneinfo")
+    if not has_tzdata("America/New_York"):
+        pytest.skip("no tz database on this host; fixed offsets cover that case")
     zones = {"ET": "America/New_York"}
     frames(ticking(12 * 3600, zone="ET"))
     winter = reader(zones=zones, anchor_date=date(2026, 1, 15)).anchor(MEDIA)

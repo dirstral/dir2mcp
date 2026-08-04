@@ -64,11 +64,15 @@ something says what wall-clock instant it was, and a news broadcast burns that
 into the corner of the frame.
 
 ```python
+from datetime import date
+from pathlib import Path
+
 from dirstral_annotator.recognizers.clock import ClockReader
 
 reader = ClockReader(zones={"MSK": "Europe/Moscow"}, anchor_date=date(2025, 8, 20))
 anchor = reader.anchor(Path("broadcast.mp4"))   # None when there is no badge
-anchor.wall_clock_at(1830.0)                    # aware datetime of video 00:30:30
+if anchor is not None:
+    anchor.wall_clock_at(1830.0)                # aware datetime of video 00:30:30
 ```
 
 What it will not do is guess. The zone table is required (a badge label the
@@ -85,7 +89,7 @@ scorebug's:
   psm 11 read it.
 - **The OCR language changes the digits.** On the same pixels, a badge showing
   `21:35` read as `21:35` under `eng` and as `21:55` under `rus`. Neither
-  reading is detectably wrong on its own, and a 20 minute error in an anchor is
+  reading is detectably wrong on its own, and a 20-minute error in an anchor is
   inherited by every citation under it. Do not hand the clock reader the
   language you use for the prose overlays without checking it against a frame,
   and list the zone label the way your OCR actually renders it (a Latin-script
