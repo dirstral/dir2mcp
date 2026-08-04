@@ -36,6 +36,12 @@ class RecognizerUnavailable(RuntimeError):
     the cascade still runs."""
 
 
+#: A run of frames may drop a detection for a beat (OCR flicker, a replay that
+#: hides the overlay, a face turning away); allow this many seconds of gap
+#: before closing the run.
+RUN_GAP_S = 3.0
+
+
 #: Extractions already performed this process, keyed by
 #: (resolved path, mtime, size, fps). Every recognizer in the cascade samples
 #: the SAME media at the SAME fps, and each used to trigger its own full
@@ -246,3 +252,42 @@ def iter_frames(
                 _FRAME_USERS.pop(key, None)
             _evict_locked()
             _FRAME_LOCK.notify_all()
+
+
+def collapse_sightings(
+    sightings: list[tuple[float, str, float]],
+    source: str,
+    event: str,
+    frame_gap: float,
+) -> list[Cue]:
+    """Collapse per-frame (t, entity_id, confidence) hits into per-run cues.
+
+    Shared by every frame-sampling recognizer (scorebug, jersey, face).
+    A run of consecutive sightings of one entity becomes one cue spanning
+    first..last sighting (extended by one frame interval so a single-frame
+    sighting still has nonzero duration); confidence is the run's max.
+    """
+    runs: dict[str, list[tuple[float, float, float, float]]] = {}
+    for t, pid, conf in sorted(sightings):
+        pruns = runs.setdefault(pid, [])
+        if pruns and t - pruns[-1][1] <= frame_gap + RUN_GAP_S:
+            s, _, c, first = pruns[-1]
+            pruns[-1] = (s, t, max(c, conf), first)
+        else:
+            pruns.append((t, t, conf, t))
+
+    cues = []
+    for pid, pruns in runs.items():
+        for start, end, conf, _ in pruns:
+            cues.append(
+                Cue(
+                    source=source,
+                    start_s=start,
+                    end_s=end + frame_gap,
+                    event=event,
+                    entity_ids=(pid,),
+                    confidence=round(conf, 4),
+                )
+            )
+    cues.sort(key=lambda c: (c.start_s, c.entity_ids))
+    return cues

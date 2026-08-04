@@ -1,4 +1,8 @@
-"""Scorebug overlay parsing, roster matching and cue shape.
+"""Scorebug interpretation: overlay parsing, roster matching and cue shape.
+
+This is the baseball half of the seam. The reading half (region search,
+preprocessing, the pool, the OCR adapter) is generic and lives in
+`test_overlay.py`; what is pinned here is what the strings *mean*.
 
 Backend-free: no tesseract, no Pillow, no video. The OCR strings below are
 verbatim tesseract output from the pilot fixture (a Nationals at Giants
@@ -11,8 +15,9 @@ import sys
 
 import pytest
 
-from dirstral_annotator.recognizers import scorebug
+from dirstral_annotator.recognizers import overlay, scorebug
 from dirstral_annotator.recognizers.base import RecognizerUnavailable
+from dirstral_annotator.recognizers.overlay import OverlayRead
 from dirstral_annotator.recognizers.scorebug import (
     BATTER,
     LOOSE,
@@ -20,8 +25,8 @@ from dirstral_annotator.recognizers.scorebug import (
     UNKNOWN,
     ScorebugRecognizer,
     _name_index,
-    _RegionSearch,
     match_name,
+    parse_bands,
     parse_overlay,
 )
 from dirstral_annotator.roster import Roster
@@ -111,6 +116,25 @@ def test_bare_words_are_kept_only_alongside_structure():
     assert scorebug.NameRead("SEYMOUR", UNKNOWN) in names
 
 
+def test_both_preprocessing_passes_are_merged_not_chosen_between():
+    """Neither pass is reliably better, so the union of the two is kept: 44 of
+    215 readable pilot frames were readable only after thresholding."""
+    names, pitches = parse_bands([
+        "5.LILE 1-2 RAY P: 87",          # the grey pass lost the pitch graphic
+        "5.LILE 1-2 SLIDER 88 MPH",      # the binarised pass lost the pitcher
+    ])
+    assert scorebug.NameRead("LILE", BATTER) in names
+    assert scorebug.NameRead("RAY", PITCHER) in names
+    assert [(p.pitch_type, p.speed) for p in pitches] == [("SLIDER", 88)]
+    # A name both passes agree on is one read, not two.
+    assert [n for n in names if n.name == "LILE"] == [scorebug.NameRead("LILE", BATTER)]
+
+
+def test_a_speed_read_twice_keeps_the_fuller_description():
+    _, pitches = parse_bands(["SLIDER 88", "SLIDER 88 MPH"])
+    assert [p.describe() for p in pitches] == ["SLIDER 88 MPH"]
+
+
 # --- roster matching -------------------------------------------------------
 
 def test_exact_surname_matches(index):
@@ -144,31 +168,34 @@ def test_a_shared_surname_resolves_to_nobody(index):
     assert match_name(index, "SMITH") is None
 
 
-# --- region search ---------------------------------------------------------
+# --- the evidence handed back to the band search ---------------------------
 
-def test_search_sweeps_on_a_stride_then_locks():
-    regions = (("a",), ("b",))
-    search = _RegionSearch(regions)  # type: ignore[arg-type]
-    assert search.regions_for(0) == regions
-    assert search.regions_for(1) == ()
-    for _ in range(scorebug.LOCK_AFTER_READS):
-        search.record(regions[1], hits=1)
-    assert search.regions_for(0) == (regions[1],)
+def _hits(roster, text):
+    rec = ScorebugRecognizer(roster, ocr=lambda p: "", crop=WHOLE)
+    _, hits = rec._interpret(OverlayRead(0, 0.0, WHOLE, (text,)))
+    return hits
 
 
-def test_a_single_region_is_locked_from_the_start():
-    search = _RegionSearch((("only",),))  # type: ignore[arg-type]
-    assert search.regions_for(1) == (("only",),)
+def test_only_roster_reads_off_a_structured_line_count_as_evidence(roster):
+    """The reader locks its band search on this number, and the number is the
+    reason the search lands on the bug rather than on the stands. "The OCR
+    returned something" would not do: crowd texture returns plenty."""
+    assert _hits(roster, "5.LILE 1-2 RAY P: 87") == 2  # batter and pitcher
+    assert _hits(roster, "5.LILE 1-2 SLIDER 88 MPH") == 2  # batter and a graphic
 
 
-def test_lock_releases_when_the_bug_moves():
-    regions = (("a",), ("b",))
-    search = _RegionSearch(regions)  # type: ignore[arg-type]
-    for _ in range(scorebug.LOCK_AFTER_READS):
-        search.record(regions[0], hits=1)
-    for _ in range(_RegionSearch.RELEASE_AFTER_MISSES):
-        search.record(regions[0], hits=0)
-    assert search.regions_for(0) == regions
+def test_crowd_texture_is_worth_nothing_to_the_band_search(roster):
+    # Verbatim from a replay: plenty of text, one word of it a real surname.
+    noise = "Beir Lee GAS Pt atthe gL) TAT eM we PA) a pik wee Se bh"
+    fields, hits = ScorebugRecognizer(
+        roster, ocr=lambda p: "", crop=WHOLE
+    )._interpret(OverlayRead(0, 0.0, WHOLE, (noise,)))
+    assert hits == 0, "a loose read must never vote for a band"
+    assert [role for _, _, role in fields.names] == [LOOSE]
+
+
+def test_a_name_nobody_on_the_roster_shares_is_worth_nothing(roster):
+    assert _hits(roster, "5.BONDS 1-2 MAYS P: 87") == 0
 
 
 # --- recognizer ------------------------------------------------------------
@@ -184,11 +211,13 @@ def fake_frames(monkeypatch, tmp_path):
             path.write_text(text)
             frames.append((i / fps, path))
 
-        monkeypatch.setattr(scorebug, "iter_frames", lambda *a, **k: iter(frames))
+        # Frame sampling and preprocessing belong to the reader now, so the
+        # fakes are installed there.
+        monkeypatch.setattr(overlay, "iter_frames", lambda *a, **k: iter(frames))
         # The real crop needs Pillow and a real JPEG; the fake hands the OCR
         # callable the frame itself, once per preprocessing pass.
         monkeypatch.setattr(
-            scorebug, "_prepared_crops", lambda frame, region, work: iter([frame])
+            overlay, "_prepared_crops", lambda frame, region, work: iter([frame])
         )
         return lambda frame: frame.read_text()
 
@@ -285,22 +314,11 @@ def test_velocity_branch_rejects_implausible_speeds():
         assert bad == [], f"accepted implausible speed: {line} -> {bad}"
 
 
-def test_missing_pillow_degrades_the_cascade(monkeypatch, tmp_path):
-    """_prepared_crops must raise RecognizerUnavailable, not ImportError, so the
-    pipeline skips this recognizer instead of aborting the whole run."""
-    import builtins
-    from dirstral_annotator.recognizers import scorebug as sb
-    from dirstral_annotator.recognizers.base import RecognizerUnavailable
-
-    real_import = builtins.__import__
-
-    def no_pil(name, *a, **kw):
-        if name == "PIL" or name.startswith("PIL."):
-            raise ImportError("No module named 'PIL'")
-        return real_import(name, *a, **kw)
-
-    monkeypatch.setattr(builtins, "__import__", no_pil)
-    frame = tmp_path / "frame-00000001.jpg"
-    frame.write_bytes(b"\xff\xd8\xff")
-    with pytest.raises(RecognizerUnavailable):
-        list(sb._prepared_crops(frame, (0.0, 0.0, 1.0, 1.0), tmp_path))
+def test_the_names_other_modules_import_from_here_still_resolve():
+    """`collapse_sightings`, `OcrFn` and `default_ocr` moved to `base` and
+    `overlay` with the split; jersey, faces and callers outside the package
+    have always imported them from here."""
+    assert scorebug.collapse_sightings is not None
+    assert scorebug.default_ocr is overlay.default_ocr
+    assert scorebug.default_workers is overlay.default_workers
+    assert scorebug.OcrFn is overlay.OcrFn

@@ -27,7 +27,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from dirstral_annotator.recognizers import jersey, scorebug
+from dirstral_annotator.recognizers import jersey, overlay, scorebug
 from dirstral_annotator.recognizers.base import RecognizerUnavailable
 from dirstral_annotator.recognizers.jersey import JerseyRecognizer
 from dirstral_annotator.recognizers.scorebug import ScorebugRecognizer, default_workers
@@ -82,12 +82,14 @@ def frames(monkeypatch, tmp_path):
             path.write_text(text)
             listing.append((i / fps, path))
 
-        for module in (scorebug, jersey):
+        # The scorebug samples and preprocesses through the shared overlay
+        # reader; the jersey recognizer still does its own crop.
+        for module in (overlay, jersey):
             monkeypatch.setattr(module, "iter_frames", lambda *a, **k: iter(listing))
         # The real crop needs Pillow and a real JPEG; the fakes hand the OCR
         # callable the frame itself.
         monkeypatch.setattr(
-            scorebug, "_prepared_crops", lambda frame, region, work: iter([frame])
+            overlay, "_prepared_crops", lambda frame, region, work: iter([frame])
         )
         monkeypatch.setattr(jersey, "_crop", lambda frame, bbox, work: frame)
         return lambda frame: frame.read_text()
@@ -104,7 +106,7 @@ class _ReverseExecutor:
     recently submitted task runs first.
     """
 
-    def __init__(self, max_workers=None, thread_name_prefix=""):
+    def __init__(self, max_workers=None, thread_name_prefix="", *args, **kwargs):
         self._queued: list[tuple[Future, object, tuple, dict]] = []
 
     def submit(self, fn, *args, **kwargs):
@@ -141,10 +143,15 @@ def _watching(ocr):
 
 
 def _reverse_executor_factory(monkeypatch, module):
-    """Make `module` schedule on a reverse-completion pool."""
+    """Make `module` schedule on a reverse-completion pool.
+
+    The scorebug's pool lives in `overlay` now, the jersey's still in `jersey`,
+    so the module to patch differs; both look their factory up by module global
+    at construction time.
+    """
     pool = _ReverseExecutor()
 
-    def new_executor(workers):
+    def new_executor(workers, name="test"):
         return pool
 
     monkeypatch.setattr(module, "_new_executor", new_executor)
@@ -162,25 +169,25 @@ def _reverse_executor_factory(monkeypatch, module):
 # --- worker count ----------------------------------------------------------
 
 def test_worker_count_comes_from_the_environment(monkeypatch):
-    monkeypatch.setenv(scorebug.WORKERS_ENV, "3")
+    monkeypatch.setenv(overlay.WORKERS_ENV, "3")
     assert default_workers() == 3
 
 
 def test_one_worker_selects_the_serial_path(monkeypatch, tmp_path, roster, frames):
-    monkeypatch.setenv(scorebug.WORKERS_ENV, "1")
+    monkeypatch.setenv(overlay.WORKERS_ENV, "1")
     assert default_workers() == 1
     rec = ScorebugRecognizer(roster, ocr=frames(SCRIPT), crop=WHOLE)
     assert rec.workers == 1
-    assert isinstance(scorebug._reader(rec.ocr, tmp_path, rec.workers),
-                      scorebug._SerialReader)
-    assert isinstance(scorebug._reader(rec.ocr, tmp_path, 2), scorebug._PooledReader)
+    assert isinstance(overlay._reader(rec.ocr, tmp_path, rec.workers),
+                      overlay._SerialReader)
+    assert isinstance(overlay._reader(rec.ocr, tmp_path, 2), overlay._PooledReader)
 
 
 def test_recognizers_read_in_parallel_unless_told_otherwise(monkeypatch, roster, frames):
     """The pool is the default, not an opt-in: an unset environment on a
     multi-core host has to give more than one worker."""
-    monkeypatch.delenv(scorebug.WORKERS_ENV, raising=False)
-    monkeypatch.setattr(scorebug.os, "cpu_count", lambda: 16)
+    monkeypatch.delenv(overlay.WORKERS_ENV, raising=False)
+    monkeypatch.setattr(overlay.os, "cpu_count", lambda: 16)
     assert default_workers() > 1
     assert ScorebugRecognizer(roster, ocr=frames(SCRIPT)).workers > 1
     assert JerseyRecognizer(
@@ -192,21 +199,21 @@ def test_the_default_leaves_the_host_room_for_tesseracts_own_threads(monkeypatch
     """A worker is not one core's worth of work: tesseract runs four threads
     per page, so N workers put 4N threads on the machine. The default has to
     scale with the host and stay capped."""
-    monkeypatch.delenv(scorebug.WORKERS_ENV, raising=False)
+    monkeypatch.delenv(overlay.WORKERS_ENV, raising=False)
     for cores, expected in ((1, 1), (4, 1), (8, 2), (16, 4), (32, 8), (256, 8)):
-        monkeypatch.setattr(scorebug.os, "cpu_count", lambda cores=cores: cores)
+        monkeypatch.setattr(overlay.os, "cpu_count", lambda cores=cores: cores)
         assert default_workers() == expected, cores
     # cpu_count() is documented as possibly None.
-    monkeypatch.setattr(scorebug.os, "cpu_count", lambda: None)
+    monkeypatch.setattr(overlay.os, "cpu_count", lambda: None)
     assert default_workers() == 1
 
 
 def test_a_nonsense_worker_count_falls_back_to_the_host(monkeypatch):
     for junk in ("", "  ", "many", "0", "-4", "2.5"):
-        monkeypatch.setenv(scorebug.WORKERS_ENV, junk)
+        monkeypatch.setenv(overlay.WORKERS_ENV, junk)
         assert default_workers() >= 1
-    monkeypatch.delenv(scorebug.WORKERS_ENV)
-    assert 1 <= default_workers() <= scorebug.MAX_DEFAULT_WORKERS
+    monkeypatch.delenv(overlay.WORKERS_ENV)
+    assert 1 <= default_workers() <= overlay.MAX_DEFAULT_WORKERS
 
 
 # --- scorebug --------------------------------------------------------------
@@ -235,7 +242,7 @@ def test_scorebug_parallel_matches_serial_with_a_pinned_region(roster, frames):
 
 def test_scorebug_survives_reversed_completion_order(monkeypatch, roster, frames):
     serial = ScorebugRecognizer(roster, ocr=frames(SCRIPT), workers=1).recognize(MEDIA)
-    _reverse_executor_factory(monkeypatch, scorebug)
+    _reverse_executor_factory(monkeypatch, overlay)
     reversed_run = ScorebugRecognizer(
         roster, ocr=frames(SCRIPT), workers=WORKERS
     ).recognize(MEDIA)
@@ -250,7 +257,7 @@ def test_scorebug_parallel_matches_serial_across_a_lock_release(roster, frames):
     change under the pool. Getting that wrong is how a parallel run would
     quietly read the wrong crop and lock onto a different band.
     """
-    quiet = scorebug._RegionSearch.RELEASE_AFTER_MISSES + 10
+    quiet = overlay._RegionSearch.RELEASE_AFTER_MISSES + 10
     script = SCRIPT[:20] + ["Beir Lee GAS Pt atthe"] * quiet + SCRIPT[:20]
     serial = ScorebugRecognizer(roster, ocr=frames(script), workers=1)
     parallel = ScorebugRecognizer(roster, ocr=frames(script), workers=WORKERS)
@@ -263,8 +270,9 @@ def test_pooled_reader_reads_a_band_nobody_dispatched(roster, frames, tmp_path):
     depend on that: a band it was never handed is read on the spot."""
     ocr = frames(SCRIPT)
     frame = tmp_path / "frame-00000.jpg"
-    with scorebug._PooledReader(ocr, tmp_path, WORKERS) as reader:
-        names, pitches = reader.read(7, frame, WHOLE)
+    with overlay._PooledReader(ocr, tmp_path, WORKERS) as reader:
+        texts = reader.read(7, frame, WHOLE)
+    names, pitches = scorebug.parse_bands(texts)
     assert scorebug.NameRead("LILE", scorebug.BATTER) in names
     assert [p.speed for p in pitches] == []
 

@@ -1,19 +1,19 @@
 """Jersey-number recognizer: OCR digits on tracked player crops.
 
 Person detection is injected as `(jpeg_path) -> [bbox]` (default adapter:
-ultralytics YOLO when installed) and reuses the scorebug OCR callable on
-each crop. Numbers resolve to players via the roster; a number nobody on
+ultralytics YOLO when installed) and reuses the overlay reader's OCR callable
+on each crop. Numbers resolve to players via the roster; a number nobody on
 the roster wears is dropped rather than guessed.
 
-Weakest signal in the cascade (low resolution, motion blur — see the
+Weakest signal in the cascade (low resolution, motion blur; see the
 SoccerNet jersey benchmarks), so its confidence ceiling is deliberately
 modest and it exists to corroborate, not to decide.
 
-Frames are read on a worker pool for the same reason the scorebug's are: the
-per-frame detect-crop-OCR is the whole cost, it is a pure function of the
-frame, and a broadcast has thousands of them. Results come back keyed by
-frame so the sighting list is the serial one whatever order the workers
-finish in.
+Frames are read on a worker pool for the same reason the overlay reader's are:
+the per-frame detect-crop-OCR is the whole cost, it is a pure function of the
+frame, and a broadcast has thousands of them. The pool plumbing (worker count,
+per-thread scratch, in-order results) is shared with the overlay reader rather
+than reimplemented here; what is left below is the crop-and-read itself.
 """
 
 from __future__ import annotations
@@ -21,29 +21,28 @@ from __future__ import annotations
 import re
 import tempfile
 import threading
-from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Self
 
 from ..model import Cue
 from ..roster import Roster
-from .base import RecognizerUnavailable, iter_frames
-from .scorebug import OcrFn, collapse_sightings, default_ocr, default_workers
+from .base import RecognizerUnavailable, collapse_sightings, iter_frames
+from .overlay import (
+    OcrFn,
+    Workspaces,
+    _new_executor,
+    default_ocr,
+    default_workers,
+    lookahead_for,
+    map_in_order,
+)
 
 Bbox = tuple[int, int, int, int]  # x, y, w, h
 DetectFn = Callable[[Path], list[Bbox]]
 
 NUMBER_RE = re.compile(r"(?<!\d)(\d{1,2})(?!\d)")
 CONFIDENCE_CEILING = 0.6
-
-# Frames dispatched ahead of the loop that consumes them. Same reasoning as
-# the scorebug's window: enough per worker that the pool never drains while
-# the caller folds one frame's numbers into the sighting list, small enough
-# that only a handful of results are held at once.
-LOOKAHEAD_PER_WORKER = 4
-MIN_LOOKAHEAD = 16
 
 
 def default_detector() -> DetectFn:
@@ -78,10 +77,11 @@ class JerseyRecognizer:
         ocr: OcrFn | None = None,
         fps: float = 0.5,
         workers: int | None = None,  # None: default_workers(); 1: serial
+        lang: str | None = None,  # OCR language; None: the shared default
     ):
         self.roster = roster
         self.detector = detector if detector is not None else default_detector()
-        self.ocr = ocr if ocr is not None else default_ocr()
+        self.ocr = ocr if ocr is not None else default_ocr(lang=lang)
         self.fps = fps
         self.workers = default_workers() if workers is None else max(1, int(workers))
         # An injected detector is used as given: the caller supplied the
@@ -110,7 +110,7 @@ class JerseyRecognizer:
         if self.workers <= 1:
             return _SerialReader(self.detector, self.ocr, work)
         detectors = _Detectors(self._new_detector, seed=self.detector)
-        return _PooledReader(detectors, self.ocr, work, self.workers)
+        return _PooledReader(detectors, self.ocr, work, self.workers, self.name)
 
 
 def read_numbers(detect: DetectFn, ocr: OcrFn, frame: Path, work: Path) -> list[str]:
@@ -159,33 +159,6 @@ class _Detectors:
         return detect
 
 
-class _Workspaces:
-    """A scratch directory per worker thread.
-
-    Crops are written under a fixed name and overwritten per detection, so
-    two threads sharing one directory would swap crops between the write and
-    the OCR of it. A directory per thread keeps the scratch bounded (one file
-    per worker for a whole run) and keeps the crops out of the frame cache
-    directory, which the other recognizers in the cascade are iterating.
-    """
-
-    def __init__(self, root: Path):
-        self._root = root
-        self._local = threading.local()
-        self._lock = threading.Lock()
-        self._issued = 0
-
-    def current(self) -> Path:
-        work = getattr(self._local, "work", None)
-        if work is None:
-            with self._lock:
-                self._issued += 1
-                work = self._root / f"worker-{self._issued}"
-            work.mkdir(parents=True, exist_ok=True)
-            self._local.work = work
-        return work
-
-
 class _SerialReader:
     """Read one frame at a time on the calling thread: the reference path."""
 
@@ -212,11 +185,11 @@ class _SerialReader:
 class _PooledReader:
     """Read frames on a worker pool, yielding them back in frame order.
 
-    Nothing about this recognizer is sequential (unlike the scorebug's region
-    search), so ordering needs no reconciliation: frames are dispatched in
-    order, held in a bounded window, and awaited in that same order. A worker
-    finishing early simply waits its turn, so the sighting list, and with it
-    every cue, is the serial one.
+    Nothing about this recognizer is sequential (unlike the overlay reader's
+    region search), so ordering needs no reconciliation and `map_in_order` is
+    the whole of it: frames go in in order, are held in a bounded window, and
+    are awaited in that same order, so a worker finishing early simply waits
+    its turn and the sighting list, and with it every cue, is the serial one.
 
     The pool is threads, not processes, because the measurement says the GIL
     is not the constraint here: pytesseract shells out to the `tesseract`
@@ -226,12 +199,19 @@ class _PooledReader:
     loaded model) could not satisfy.
     """
 
-    def __init__(self, detectors: _Detectors, ocr: OcrFn, work: Path, workers: int):
+    def __init__(
+        self,
+        detectors: _Detectors,
+        ocr: OcrFn,
+        work: Path,
+        workers: int,
+        name: str = "jersey",
+    ):
         self.workers = workers
         self._detectors = detectors
         self._ocr = ocr
-        self._workspaces = _Workspaces(work)
-        self._executor = _new_executor(workers)
+        self._workspaces = Workspaces(work)
+        self._executor = _new_executor(workers, name)
 
     def _read_here(self, frame: Path) -> list[str]:
         return read_numbers(
@@ -241,33 +221,15 @@ class _PooledReader:
     def read(
         self, frames: Iterable[tuple[float, Path]]
     ) -> Iterator[tuple[float, list[str]]]:
-        lookahead = max(MIN_LOOKAHEAD, LOOKAHEAD_PER_WORKER * self.workers)
-        window: deque[tuple[float, Future[list[str]]]] = deque()
-        source = iter(frames)
-
-        def top_up() -> None:
-            while len(window) < lookahead:
-                item = next(source, None)
-                if item is None:
-                    return
-                t, frame = item
-                window.append((t, self._executor.submit(self._read_here, frame)))
-
-        top_up()
-        while window:
-            t, pending = window.popleft()
-            yield t, pending.result()
-            top_up()
+        return map_in_order(
+            self._executor, self._read_here, frames, lookahead_for(self.workers)
+        )
 
     def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:
         self._executor.shutdown(wait=True, cancel_futures=True)
-
-
-def _new_executor(workers: int) -> Executor:
-    return ThreadPoolExecutor(max_workers=workers, thread_name_prefix="jersey")
 
 
 def _crop(frame: Path, bbox: Bbox, work: Path) -> Path:

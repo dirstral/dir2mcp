@@ -22,8 +22,7 @@ from pathlib import Path
 
 from ..model import Cue
 from ..roster import Roster
-from .base import RecognizerUnavailable, iter_frames
-from .scorebug import collapse_sightings
+from .base import RecognizerUnavailable, collapse_sightings, iter_frames
 
 Embedding = list[float]
 # (frame jpeg) -> [(embedding, (x, y, w, h))]
