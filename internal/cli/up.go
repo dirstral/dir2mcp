@@ -1643,7 +1643,7 @@ func (a *App) prepareUpConfig(opts upOptions) (config.Config, authMaterial, stri
 			"The embed provider/model changed since the index was built — run `dir2mcp reindex`, or restore the previous embed config.")
 		return config.Config{}, authMaterial{}, "", "", false, exitConfigInvalid
 	}
-	auth, err := prepareAuthMaterial(cfg)
+	auth, err := prepareAuthMaterial(cfg, a.stderr)
 	if err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitAuthOrPayment, fmt.Sprintf("auth setup: %v", err))
 		return config.Config{}, authMaterial{}, "", "", false, exitAuthOrPayment

@@ -1620,7 +1620,20 @@ func ensureRootAccessible(root string) error {
 // prepareAuthMaterial resolves the bearer-token auth material for the
 // configured auth mode: "none" disables auth, "auto" delegates to
 // prepareAutoAuthMaterial, and "file:<path>" loads a token from disk.
-func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
+//
+// The two token modes have deliberately different contracts. "auto" owns
+// <state-dir>/secret.token: dir2mcp creates it, may rewrite it, and enforces
+// the SPEC §4.2 owner-only requirement on it. "file:<path>" is
+// operator-managed: the path is read and required to be non-empty, and
+// nothing else. Its mode is not checked and never changed, because a
+// deliberately group-readable token shared with other processes on the host
+// is a legitimate setup there, and because that flag is the documented escape
+// hatch (SPEC §17) for a token that must live outside the state directory.
+//
+// warn receives operator-facing security notices; they are written whatever
+// the output mode, because a credential that may have been exposed is not
+// status chatter that --quiet asked to be spared.
+func prepareAuthMaterial(cfg config.Config, warn io.Writer) (authMaterial, error) {
 	mode := strings.TrimSpace(cfg.AuthMode)
 	if mode == "" {
 		mode = "auto"
@@ -1634,7 +1647,7 @@ func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
 	}
 
 	if strings.EqualFold(mode, "auto") {
-		return prepareAutoAuthMaterial(cfg)
+		return prepareAutoAuthMaterial(cfg, warn)
 	}
 
 	if len(mode) >= len("file:") && strings.EqualFold(mode[:len("file:")], "file:") {
@@ -1670,7 +1683,11 @@ func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
 // prepareAutoAuthMaterial resolves auth material in "auto" mode: it prefers
 // the env-var token, otherwise reads the persisted secret.token, generating
 // and persisting a new random token when none exists.
-func prepareAutoAuthMaterial(cfg config.Config) (authMaterial, error) {
+//
+// The persisted token is hardened before it is read or rewritten, so an
+// existing file is held to the same SPEC §4.2 owner-only requirement as one
+// this run creates (#715).
+func prepareAutoAuthMaterial(cfg config.Config, warn io.Writer) (authMaterial, error) {
 	if token := strings.TrimSpace(os.Getenv(authTokenEnvVar)); token != "" {
 		return authMaterial{
 			mode:              "auto",
@@ -1680,6 +1697,9 @@ func prepareAutoAuthMaterial(cfg config.Config) (authMaterial, error) {
 		}, nil
 	}
 	tokenPath := filepath.Join(cfg.StateDir, secretTokenName)
+	if err := hardenSecretToken(tokenPath, warn); err != nil {
+		return authMaterial{}, err
+	}
 	token, err := readToken(tokenPath, true)
 	if err != nil {
 		return authMaterial{}, err
@@ -1706,6 +1726,48 @@ func prepareAutoAuthMaterial(cfg config.Config) (authMaterial, error) {
 	}, nil
 }
 
+// hardenSecretToken enforces SPEC §4.2 on the auto-managed token file before
+// it is read or rewritten, and tells the operator when it had to.
+//
+// Repair rather than refuse: this file is dir2mcp's own, and the modes get
+// lost for mundane reasons (a corpus restored from a tarball, copied with
+// `cp -r`, created by an older build under a 022 umask). Refusing would turn
+// every one of those into a dead daemon for a condition the daemon can fix
+// itself. But the repair is announced, because tightening the file does not
+// un-read it: a token another local account could read may already be in that
+// account's hands, and only the operator knows whether this host has other
+// accounts that matter.
+//
+// It is announced rather than acted on, too. Rotating the token would be the
+// safe reflex, but it invalidates every client that already holds it (the
+// Claude/ElevenLabs registrations, connection.json consumers, anything with
+// the bearer baked into a config), so a permission repair on startup would
+// silently break a working deployment. Whether the exposure warrants that
+// depends on who else has an account on this host, which the daemon cannot
+// know, so the warning names the one command instead of guessing.
+//
+// A non-regular path is refused outright: see statefs.HardenSecret for why a
+// symlinked credential is a different question from a symlinked cache.
+func hardenSecretToken(path string, warn io.Writer) error {
+	prior, exists, err := statefs.HardenSecret(path)
+	if err != nil {
+		if errors.Is(err, statefs.ErrNotRegular) {
+			return fmt.Errorf("%w; auto auth owns this file: it reads it and may rewrite it, so it must be a plain "+
+				"file. Remove it to have a fresh token generated, or point --auth file:<path> at an "+
+				"operator-managed token", err)
+		}
+		return fmt.Errorf("secure %s: %w", path, err)
+	}
+	if !exists || !statefs.WiderThanOwnerOnly(prior) {
+		return nil
+	}
+	writef(warn, "warning: %s was mode %04o, readable by other local accounts, and has been tightened to %04o\n",
+		path, prior.Perm(), statefs.FileMode.Perm())
+	writef(warn, "warning: tightening does not undo the exposure. If other accounts on this host may have read it, "+
+		"rotate the token: stop the server, delete %s, start again (a new token is generated) and re-register your clients\n", path)
+	return nil
+}
+
 // readToken reads and trims the token at path; when allowMissing is set, a
 // missing file yields an empty token instead of an error.
 func readToken(path string, allowMissing bool) (string, error) {
@@ -1729,10 +1791,17 @@ func generateTokenHex() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// writeSecretToken writes token to path with 0o600 permissions, truncating
-// any existing file.
+// writeSecretToken writes token to path owner-only, truncating any existing
+// file.
+//
+// statefs.Create rather than a bare os.OpenFile with the same mode: a create
+// mode says nothing about a file that already exists, so an existing token
+// left 0644 (by an older build, or by a restore that dropped the modes) would
+// otherwise keep that mode through every rewrite. statefs.Create tightens the
+// open descriptor, which also settles the case where the path was swapped
+// between the check in hardenSecretToken and this write.
 func writeSecretToken(path, token string) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	file, err := statefs.Create(path)
 	if err != nil {
 		return err
 	}
