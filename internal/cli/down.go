@@ -86,7 +86,7 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 	// just stopped will be respawned at next login/boot. Inform the operator
 	// (do NOT auto-uninstall) so `down` in a teardown script isn't mistaken
 	// for a permanent stop (#434).
-	writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, true, "stopped", a.corpusServiceManaged(cfg))
+	writeDownInfo(a.stdout, global.jsonOutput, cfg.StateDir, pid, true, "stopped", a.corpusServiceManaged(cfg, global))
 	return exitSuccess
 }
 
@@ -95,8 +95,8 @@ func (a *App) runDown(ctx context.Context, global globalOptions, args []string) 
 // unsupported platform) yields false so the informational note is simply
 // omitted and `down` never fails over it. Takes the already-loaded config so it
 // doesn't reload it.
-func (a *App) corpusServiceManaged(cfg config.Config) bool {
-	sc, err := serviceContextFromConfig(cfg, "")
+func (a *App) corpusServiceManaged(cfg config.Config, global globalOptions) bool {
+	sc, err := serviceContextFromConfig(cfg, "", resolveConfigPath(global))
 	if err != nil {
 		return false
 	}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 func TestServiceLabel(t *testing.T) {
@@ -431,5 +433,171 @@ func TestRunService_RejectsBadSubcommand(t *testing.T) {
 		if !strings.Contains(errBuf.String(), "subcommand") {
 			t.Errorf("args=%v: stderr missing subcommand hint: %q", args, errBuf.String())
 		}
+	}
+}
+
+// --- issue #738: remote corpora must not anchor the service on a local root ---
+
+// s3ServiceConfig builds a native-S3 corpus config whose corpus root is a local
+// path that does not exist. Per SPEC §7.8 the bucket + prefix IS the corpus root
+// for source.kind=s3, so this is a legitimate remote-only deployment.
+func s3ServiceConfig(rootDir, stateDir string) config.Config {
+	cfg := config.Default()
+	cfg.RootDir = rootDir
+	cfg.StateDir = stateDir
+	cfg.Source.Kind = "s3"
+	cfg.Source.S3Bucket = "my-corpus-bucket"
+	cfg.Source.S3Prefix = "corpus/"
+	return cfg
+}
+
+// For an S3 corpus the supervisor working directory must be a directory that
+// actually exists — the config file's own directory — not the ignored local
+// corpus root. Before the fix this rendered abs(RootDir), installing a unit
+// whose WorkingDirectory does not exist.
+func TestServiceContext_S3AnchorsWorkingDirOnConfigDir_738(t *testing.T) {
+	tmp := t.TempDir()
+	confDir := filepath.Join(tmp, "conf")
+	if err := os.MkdirAll(confDir, 0o700); err != nil {
+		t.Fatalf("mkdir conf: %v", err)
+	}
+	cfg := s3ServiceConfig(filepath.Join(tmp, "does-not-exist"), filepath.Join(tmp, "state"))
+
+	sc, err := serviceContextFromConfig(cfg, "", filepath.Join(confDir, ".dir2mcp.yaml"))
+	if err != nil {
+		t.Fatalf("serviceContextFromConfig: %v", err)
+	}
+	if sc.workingDir != confDir {
+		t.Fatalf("workingDir = %q, want the config directory %q", sc.workingDir, confDir)
+	}
+	if !isExistingDir(sc.workingDir) {
+		t.Fatalf("rendered WorkingDirectory %q does not exist", sc.workingDir)
+	}
+	if sc.stateDir != filepath.Join(tmp, "state") {
+		t.Errorf("stateDir = %q, want the configured absolute state dir", sc.stateDir)
+	}
+}
+
+// A relative state_dir must resolve against the SAME base the booted daemon
+// resolves it against (its working directory), or install would create and log
+// into a different directory than the daemon uses.
+func TestServiceContext_S3RelativeStateDirFollowsWorkingDir_738(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := s3ServiceConfig(filepath.Join(tmp, "does-not-exist"), ".dir2mcp")
+
+	sc, err := serviceContextFromConfig(cfg, "", filepath.Join(tmp, ".dir2mcp.yaml"))
+	if err != nil {
+		t.Fatalf("serviceContextFromConfig: %v", err)
+	}
+	if want := filepath.Join(tmp, ".dir2mcp"); sc.stateDir != want {
+		t.Fatalf("stateDir = %q, want %q (resolved against the working dir)", sc.stateDir, want)
+	}
+	if sc.logPath != filepath.Join(tmp, ".dir2mcp", "service.log") {
+		t.Errorf("logPath = %q, want it under the resolved state dir", sc.logPath)
+	}
+}
+
+// When an explicit --config names a path under a directory that does not exist,
+// the working directory falls back to the state directory, which is always local
+// (SPEC §7.8) and is created before the unit is written.
+func TestServiceContext_S3FallsBackToStateDirWhenConfigDirMissing_738(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, "state")
+	cfg := s3ServiceConfig(filepath.Join(tmp, "does-not-exist"), stateDir)
+
+	sc, err := serviceContextFromConfig(cfg, "", filepath.Join(tmp, "gone", "conf.yaml"))
+	if err != nil {
+		t.Fatalf("serviceContextFromConfig: %v", err)
+	}
+	if sc.workingDir != stateDir {
+		t.Fatalf("workingDir = %q, want the state dir %q", sc.workingDir, stateDir)
+	}
+}
+
+// The local/NFS contract is byte-identical to the pre-#738 behavior: the working
+// directory is the absolute corpus root and a relative state_dir hangs off it,
+// regardless of where the config file lives.
+func TestServiceContext_LocalAndNFSKeepCorpusRootWorkingDir_738(t *testing.T) {
+	for _, kind := range []string{"", "local", "nfs"} {
+		tmp := t.TempDir()
+		root := filepath.Join(tmp, "corpus")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatalf("mkdir corpus: %v", err)
+		}
+		cfg := config.Default()
+		cfg.RootDir = root
+		cfg.StateDir = ".dir2mcp"
+		cfg.Source.Kind = kind
+
+		sc, err := serviceContextFromConfig(cfg, "", filepath.Join(tmp, "elsewhere", ".dir2mcp.yaml"))
+		if err != nil {
+			t.Fatalf("kind=%q: serviceContextFromConfig: %v", kind, err)
+		}
+		if sc.workingDir != root {
+			t.Errorf("kind=%q: workingDir = %q, want the corpus root %q", kind, sc.workingDir, root)
+		}
+		if want := filepath.Join(root, ".dir2mcp"); sc.stateDir != want {
+			t.Errorf("kind=%q: stateDir = %q, want %q", kind, sc.stateDir, want)
+		}
+	}
+}
+
+// The rendered unit is what launchd/systemd actually consume, so pin the
+// end-to-end result too: an S3 corpus with no local root must render a
+// WorkingDirectory that exists on both backends.
+func TestRenderedUnitsUseAnExistingWorkingDirForS3_738(t *testing.T) {
+	tmp := t.TempDir()
+	missingRoot := filepath.Join(tmp, "does-not-exist")
+	cfg := s3ServiceConfig(missingRoot, filepath.Join(tmp, "state"))
+	sc, err := serviceContextFromConfig(cfg, "", filepath.Join(tmp, ".dir2mcp.yaml"))
+	if err != nil {
+		t.Fatalf("serviceContextFromConfig: %v", err)
+	}
+	spec := serviceSpec{
+		Label:      sc.label,
+		BinaryPath: sc.binaryPath,
+		WorkingDir: sc.workingDir,
+		Args:       []string{"up", "--foreground"},
+		LogPath:    sc.logPath,
+	}
+	if !isExistingDir(spec.WorkingDir) {
+		t.Fatalf("rendered WorkingDirectory %q does not exist", spec.WorkingDir)
+	}
+	for name, rendered := range map[string]string{
+		"launchd": renderLaunchdPlist(spec),
+		"systemd": renderSystemdUnit(spec),
+	} {
+		if !strings.Contains(rendered, "WorkingDirectory") {
+			t.Fatalf("%s unit has no WorkingDirectory:\n%s", name, rendered)
+		}
+		// The unit must not reference the ignored local corpus root anywhere:
+		// WorkingDirectory, the systemd EnvironmentFile, or the log paths.
+		if strings.Contains(rendered, missingRoot) {
+			t.Errorf("%s unit still points at the ignored local corpus root %q:\n%s", name, missingRoot, rendered)
+		}
+	}
+}
+
+// A relative --config was copied verbatim into the unit and then re-resolved by
+// the daemon against ITS working directory, which is not the directory the
+// operator ran install from. Both propagated paths are now absolute.
+func TestInstallServiceArgs_PropagatesAbsolutePaths_738(t *testing.T) {
+	sc := serviceContext{stateDir: filepath.Join("/srv", "corpus", "state")}
+	args := installServiceArgs(globalOptions{configPath: "conf/d.yaml", stateDir: "./state"}, sc)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	want := []string{"up", "--foreground",
+		"--config", filepath.Join(cwd, "conf", "d.yaml"),
+		"--state-dir", sc.stateDir}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("installServiceArgs = %v, want %v", args, want)
+	}
+
+	// No overrides -> no propagated paths (unchanged).
+	if got := installServiceArgs(globalOptions{}, sc); strings.Join(got, " ") != "up --foreground" {
+		t.Fatalf("installServiceArgs without overrides = %v", got)
 	}
 }

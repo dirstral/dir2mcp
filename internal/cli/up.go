@@ -441,9 +441,29 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 			return exitConfigInvalid
 		}
 	}
-	if err := ensureRootAccessible(cfg.RootDir); err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("root inaccessible: %v", err))
-		return exitRootInaccessible
+	return a.prepareUpDirectories(cfg, opts)
+}
+
+// prepareUpDirectories enforces the corpus-root requirement and creates the
+// local state hierarchy `up` needs. Split out of validateUpConfig to keep that
+// function under the cyclomatic-complexity budget.
+//
+// It runs AFTER x402 validation so the payments subdirectory is only created
+// for a config that already validated (including mode="off"), and never leaves
+// an inconsistent state behind.
+func (a *App) prepareUpDirectories(cfg *config.Config, opts upOptions) int {
+	// The corpus root is a LOCAL directory only for the filesystem-backed
+	// schemes. For an object-store source the bucket + prefix IS the corpus root
+	// (SPEC §7.8) and S3FS.Walk ignores its root argument outright, so demanding
+	// a local directory here fails a healthy remote-only deployment before S3 is
+	// ever contacted (#738). Only the state directory must stay local, and it is
+	// created and hardened immediately below. local/nfs keep the requirement:
+	// an NFS mount is an ordinary local path.
+	if !sourceIsRemote(*cfg) {
+		if err := ensureRootAccessible(cfg.RootDir); err != nil {
+			writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("root inaccessible: %v", err))
+			return exitRootInaccessible
+		}
 	}
 	if err := statefs.MkdirAllHardened(cfg.StateDir); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("create state dir: %v", err))
@@ -458,12 +478,8 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("secure state dir: %v", err))
 		return exitRootInaccessible
 	}
-	// create payments subdirectory while x402 configuration has been
-	// validated above. creating the state directory first ensures the
-	// parent exists. the call is intentionally unconditional here: we ensure
-	// the directory exists regardless of mode, avoiding inconsistent state.
-	// because it's done after x402 validation, a valid config (including
-	// mode="off") won't leave an inconsistent state.
+	// The payments subdirectory is created unconditionally so the layout is the
+	// same regardless of x402 mode, avoiding inconsistent state.
 	if err := statefs.MkdirAllHardened(filepath.Join(cfg.StateDir, "payments")); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("create payments dir: %v", err))
 		return exitRootInaccessible
