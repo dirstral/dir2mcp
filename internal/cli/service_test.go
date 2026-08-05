@@ -1169,3 +1169,55 @@ func slicesContains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// TestLaunchctlReportsAbsent_723_725 pins the darwin-side classifiers the same
+// way TestSystemctlReportsAbsent_723 pins the linux ones, and lives in this
+// UNTAGGED file on purpose.
+//
+// They are pure string classifiers with no darwin dependency, and keeping their
+// only coverage behind `//go:build darwin` meant Linux CI never exercised the
+// logic that decides whether `service status` reports a clean absent state or an
+// operational error. It also made `launchctlPrintReportsAbsent` dead code on
+// Linux, which is what golangci-lint's `unused` pass reported.
+func TestLaunchctlReportsAbsent_723_725(t *testing.T) {
+	t.Run("print: only a positively unregistered service is absent", func(t *testing.T) {
+		for _, tc := range []struct {
+			out  string
+			want bool
+		}{
+			{"Could not find service \"com.dirstral.x\" in domain for user", true},
+			{"Service not found in domain", true},
+			// A bootout-only phrase must NOT make `print` report absent: print
+			// never emits it, so seeing it means something else went wrong.
+			{"No such process", false},
+			// Everything that is not a positive identification stays an error,
+			// or status would launder a broken launchd into "installed, stopped".
+			{"Operation not permitted", false},
+			{"Could not connect to the bootstrap server", false},
+			{"", false},
+		} {
+			if got := launchctlPrintReportsAbsent(tc.out); got != tc.want {
+				t.Errorf("launchctlPrintReportsAbsent(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("bootout: absent covers the errno spellings too", func(t *testing.T) {
+		for _, tc := range []struct {
+			out  string
+			want bool
+		}{
+			{"No such process", true},
+			{"No such file or directory", true},
+			{"Could not find specified service", true},
+			// A superset of the print phrases, so those still count.
+			{"Could not find service \"com.dirstral.x\" in domain for user", true},
+			{"Operation not permitted", false},
+			{"", false},
+		} {
+			if got := launchctlBootoutReportsAbsent(tc.out); got != tc.want {
+				t.Errorf("launchctlBootoutReportsAbsent(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		}
+	})
+}
