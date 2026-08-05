@@ -109,6 +109,65 @@ func Harden(path string) error {
 	return chmodInfoIfWider(path, info, want)
 }
 
+// ErrNotRegular reports a path that must be a plain file and is not: a
+// symlink, a FIFO, a socket, a device node or a directory.
+var ErrNotRegular = errors.New("not a regular file")
+
+// HardenSecret tightens an existing secret file to the owner-only mode and
+// reports the permissions it had beforehand, so the caller can tell the
+// operator that the secret had been readable by other local accounts.
+// Tightening does not undo an exposure, so silently repairing a credential
+// without saying anything would be the wrong kind of quiet.
+//
+// Two things this does that `Harden` does not, both because a credential is
+// not derived content:
+//
+//   - It refuses a path that is not a regular file, without following it.
+//     `HardenTree` deliberately skips symlinks, because for a cache the mode
+//     that matters is the target's and the target may live outside the tree
+//     on purpose. A symlinked credential is the case that must not be
+//     trusted: it is read from outside the state directory at whatever mode
+//     that target happens to have, and rewriting it truncates the target. An
+//     operator who wants the token to live elsewhere has `--auth file:<path>`,
+//     which is operator-managed by contract.
+//   - A missing path is not an error: it reports exists=false so the caller
+//     can create the file itself.
+//
+// Windows has no POSIX mode bits. Go synthesizes 0666/0444 from the read-only
+// attribute and os.Chmod can only toggle that attribute, so the tightening
+// degrades to a no-op there and the file's confidentiality rests on the NTFS
+// ACLs it inherits from the state directory; no ACL repair is attempted. The
+// regular-file refusal is enforced on every platform.
+//
+// The mode is checked and then changed by path, so a state directory another
+// account can write to leaves a small window between the two. That account can
+// replace the token outright anyway, which is the larger problem and not one a
+// chmod can fix.
+func HardenSecret(path string) (prior fs.FileMode, exists bool, err error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return 0, true, fmt.Errorf("%s is %s: %w", path, info.Mode().String(), ErrNotRegular)
+	}
+	prior = info.Mode().Perm()
+	if err := chmodInfoIfWider(path, info, FileMode); err != nil {
+		return prior, true, err
+	}
+	return prior, true, nil
+}
+
+// WiderThanOwnerOnly reports whether mode grants any access beyond the owner.
+// On Windows the bits are synthetic (see HardenSecret), so this describes the
+// file the way Go reports it rather than the ACL that actually governs it.
+func WiderThanOwnerOnly(mode fs.FileMode) bool {
+	return mode.Perm()&^FileMode != 0
+}
+
 // HardenTree tightens root and everything under it.
 //
 // Called on the state directory at startup so a corpus indexed by an older
