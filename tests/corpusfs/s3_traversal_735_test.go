@@ -66,8 +66,10 @@ func TestS3FSWalk_RejectsTraversalAndAbsoluteKeys(t *testing.T) {
 
 	// Rejection must be observable, not a silent skip: an operator needs to see
 	// that the bucket carries keys dir2mcp refuses.
-	if len(rejected) < 4 {
-		t.Fatalf("OnUnsafeKey saw %d keys (%v); the bucket holds five unsafe ones", len(rejected), rejected)
+	// Exactly, not at least: a regression that silently drops one callback
+	// would otherwise still pass.
+	if len(rejected) != 5 {
+		t.Fatalf("OnUnsafeKey saw %d keys (%v); the bucket holds exactly five unsafe ones", len(rejected), rejected)
 	}
 	for _, key := range rejected {
 		if key == "corpus/keep.txt" {

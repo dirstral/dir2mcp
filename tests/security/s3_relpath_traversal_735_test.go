@@ -61,27 +61,44 @@ func TestTraversalIsRejectedRatherThanResolved(t *testing.T) {
 	}
 }
 
-func TestOrdinaryKeysStillWork(t *testing.T) {
-	cases := map[string]string{
-		"notes/a.md":             "notes/a.md",
-		"a.md":                   "a.md",
-		"deep/nested/path/x.txt": "deep/nested/path/x.txt",
-		// Redundant separators collapse; they address the same object and
-		// keyForRel would not preserve them anyway.
-		"a//b.txt":  "a/b.txt",
-		"a/./b.txt": "a/b.txt",
-		// Dots and spaces inside a name are ordinary S3 key bytes.
-		"a..b/c.txt":      "a..b/c.txt",
-		"weird name .txt": "weird name .txt",
-		"...leading.txt":  "...leading.txt",
-	}
-	for in, want := range cases {
-		got, err := relpath.Normalize(in)
+func TestOrdinaryKeysAreReturnedVerbatim(t *testing.T) {
+	// An S3 key is an opaque byte string, so a valid one must come back
+	// EXACTLY as it went in. Anything else records a rel_path that resolves to
+	// a different object than the bucket listed.
+	for _, key := range []string{
+		"notes/a.md",
+		"a.md",
+		"deep/nested/path/x.txt",
+		"a..b/c.txt",         // dots inside a name are ordinary bytes
+		"...leading.txt",     //
+		"weird name .txt",    // interior spaces
+		" leading-space.txt", // and leading ones: keyForRel does not trim
+		"trailing-space.txt ",
+	} {
+		got, err := relpath.Normalize(key)
 		if err != nil {
-			t.Fatalf("Normalize(%q) rejected a legitimate key: %v", in, err)
+			t.Fatalf("Normalize(%q) rejected a legitimate key: %v", key, err)
 		}
-		if got != want {
-			t.Fatalf("Normalize(%q) = %q, want %q", in, got, want)
+		if got != key {
+			t.Fatalf("Normalize(%q) = %q; a valid key must be returned unchanged", key, got)
+		}
+	}
+}
+
+// TestKeysThatWouldChangeUnderCleaningAreRejected is the other half of that.
+// `a//b.txt` and `a/b.txt` are two different S3 objects, so returning the
+// cleaned form for the first would have discovery record a rel_path that Open
+// then resolves to the second, fetching an object the corpus never saw. The
+// safe answer is to refuse the key, not to rewrite it.
+func TestKeysThatWouldChangeUnderCleaningAreRejected(t *testing.T) {
+	for _, key := range []string{
+		"a//b.txt",  // doubled separator
+		"a/./b.txt", // a `.` segment
+		"a/b.txt/",  // trailing separator on a file key
+		"./a.txt",   // leading `.` segment
+	} {
+		if got, err := relpath.Normalize(key); err == nil {
+			t.Fatalf("Normalize(%q) = %q; rewriting it addresses a different object", key, got)
 		}
 	}
 }

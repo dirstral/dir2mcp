@@ -39,44 +39,53 @@ var ErrOutsideRoot = errors.New("path resolves outside the corpus root")
 // (empty, or carrying a separator that cannot round-trip).
 var ErrNotRelative = errors.New("not a corpus-relative path")
 
-// Normalize returns the canonical slash-separated form of rel, or an error.
+// Normalize validates rel and returns it UNCHANGED, or an error.
 //
-// Accepts an ordinary relative path and collapses redundant separators and
-// `.` segments (`a//b` and `a/./b` both become `a/b`). Rejects:
+// It does not clean and it does not trim. An S3 key is an opaque byte string,
+// so `a//b.txt` and `a/b.txt` name two different objects: returning the cleaned
+// form for a key the bucket listed as the former would have discovery record a
+// rel_path that `Open` then resolves to the latter, fetching an object the
+// corpus never saw. Leading and trailing spaces are the same problem, which is
+// why keyForRel deliberately does not trim either.
+//
+// So a path that WOULD change under cleaning is rejected rather than rewritten.
+// That is stricter than it needs to be for safety alone (`a//b.txt` escapes
+// nothing), and it is what keeps the §7.8 promise that the rel_path set is the
+// same on every backend: a local walk can never produce `a//b.txt`, so an S3
+// corpus must not either.
+//
+// Rejects:
 //
 //   - empty or whitespace-only input
 //   - an absolute path (`/x`), including one produced by a doubled prefix
 //     separator, which is how `corpus//absolute.mp4` arrived
-//   - `.` and `..`, and any path with a `..` segment, before OR after
-//     cleaning, so `a/../../outside` is refused rather than resolved
+//   - `.` and `..`, and any path with a `..` segment, before OR after cleaning
 //   - a backslash, which is a legal S3 key byte and a separator on Windows
+//   - anything whose cleaned form differs from itself: `a//b`, `a/./b`,
+//     `a/b/`, and so on
 func Normalize(rel string) (string, error) {
-	trimmed := strings.TrimSpace(rel)
-	if trimmed == "" {
+	if strings.TrimSpace(rel) == "" {
 		return "", ErrNotRelative
 	}
-	if strings.Contains(trimmed, `\`) {
+	if strings.Contains(rel, `\`) {
 		return "", ErrNotRelative
 	}
-	if strings.HasPrefix(trimmed, "/") {
+	if strings.HasPrefix(rel, "/") {
 		return "", ErrOutsideRoot
 	}
-	// Refuse a traversal segment in the INPUT as well as in the cleaned form.
-	// path.Clean resolves `a/../b` to `b`, which is a safe path, but it is not
-	// the path the bucket listed: accepting it would let a key address an
-	// object under a name that no longer matches its key, and identity is
-	// meant to be the same set of rel_paths on every backend (§7.8).
-	if hasDotDot(trimmed) {
+	if hasDotDot(rel) {
 		return "", ErrOutsideRoot
 	}
-	cleaned := path.Clean(trimmed)
-	if cleaned == "." || cleaned == ".." {
+	cleaned := path.Clean(rel)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "/") || hasDotDot(cleaned) {
 		return "", ErrOutsideRoot
 	}
-	if strings.HasPrefix(cleaned, "/") || hasDotDot(cleaned) {
-		return "", ErrOutsideRoot
+	if cleaned != rel {
+		// Redundant separators, a `.` segment, a trailing slash: all name a
+		// different byte string than the cleaned form, and S3 keys are bytes.
+		return "", ErrNotRelative
 	}
-	return cleaned, nil
+	return rel, nil
 }
 
 // Valid reports whether rel is already a usable corpus-relative path.

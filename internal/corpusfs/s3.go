@@ -101,11 +101,14 @@ func (s *S3FS) MediaURL(ctx context.Context, relPath string) (string, bool, erro
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}
-	if s.presign == nil {
-		return "", false, nil
-	}
+	// Before the capability check, not after: a backend without a presigner
+	// would otherwise answer "no media URL" for a path that should have been
+	// refused outright, which is a different answer from Open and Localize.
 	if err := guardRel(relPath); err != nil {
 		return "", false, err
+	}
+	if s.presign == nil {
+		return "", false, nil
 	}
 	key := s.keyForRel(relPath)
 	url, err := s.presign(ctx, s.bucket, key)
@@ -168,23 +171,24 @@ func (s *S3FS) relForKey(key string) (string, error) {
 		return "", errKeyNotUnderPrefix
 	}
 	rel := strings.TrimPrefix(key, s.prefix)
-	// A directory placeholder is in scope and simply not a file; let the
-	// caller skip it rather than reporting it as an unsafe key.
-	if rel == "" || strings.HasSuffix(rel, "/") {
+	// The prefix itself. In scope, simply not a file.
+	if rel == "" {
 		return rel, nil
 	}
-	normalized, err := relpath.Normalize(rel)
-	if err != nil {
-		return "", err
+	// A directory placeholder is in scope and not a file, but its NAME still
+	// has to be inside the corpus: `corpus/../` is a placeholder shape and a
+	// traversal, and skipping it on shape alone would hide it from
+	// OnUnsafeKey. Validate what it points at, then let the caller skip it.
+	if strings.HasSuffix(rel, "/") {
+		if _, err := relpath.Normalize(strings.TrimSuffix(rel, "/")); err != nil {
+			return "", err
+		}
+		return rel, nil
 	}
-	// Emit the key's own relative form, not the cleaned one, so a rel_path
-	// always maps back to the object it came from. Normalize only accepts
-	// paths whose cleaned form is equivalent, so the two differ solely in
-	// redundant separators, which keyForRel would not preserve anyway.
-	if normalized != rel {
-		return normalized, nil
-	}
-	return rel, nil
+	// Normalize returns the path unchanged or refuses it, so a discovered
+	// rel_path is always the key's own bytes and maps back to the object it
+	// came from.
+	return relpath.Normalize(rel)
 }
 
 // Walk lists objects under the prefix and converts them to DiscoveredFile,
