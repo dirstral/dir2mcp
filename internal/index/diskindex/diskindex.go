@@ -590,11 +590,24 @@ func (d *DiskIndex) Reset(ctx context.Context, identity string) error {
 	if d.path == "" {
 		return nil
 	}
+	// Stage the new identity BEFORE destroying the segment, and publish it
+	// after. Whichever step fails, what is on disk stays a matched pair: a
+	// staging failure leaves the old segment with its old identity, and a
+	// publish failure leaves an empty segment with the old identity, which the
+	// next EnsureIdentity resets again onto an already-empty segment. The
+	// previous order could truncate and then fail, leaving live-looking vectors
+	// claimed by an identity that no longer described them (#728).
+	sidecarPath := identitySidecarPath(d.path)
+	staged, err := stageIdentitySidecar(sidecarPath, identity)
+	if err != nil {
+		return err
+	}
 	if err := truncateSegment(d.path); err != nil {
+		_ = os.Remove(staged)
 		return err
 	}
 	d.appendEnd = int64(headerLen)
-	return writeIdentitySidecar(identitySidecarPath(d.path), identity)
+	return publishIdentitySidecar(staged, sidecarPath)
 }
 
 // truncateSegment rewrites path with just a fresh header.
@@ -666,14 +679,22 @@ func (d *DiskIndex) Save(ctx context.Context, path string) error {
 	d.path = path
 	d.locators = newLocators
 	d.appendEnd = newEnd
-	// The compacted segment landed durably; record the version it captured so a
-	// subsequent Save with no intervening mutation is a no-op.
-	d.savedVersion = captured
-	d.lastSaveTime = time.Now()
 	if err := d.invalidateReaderLocked(); err != nil {
 		return err
 	}
-	return writeIdentitySidecar(identitySidecarPath(path), d.identity)
+	// The identity sidecar is part of this commit, not a postscript to it. A
+	// segment without its identity is unreadable on the next startup: Load maps
+	// a missing sidecar to "", EnsureIdentity reads that as a mismatch, and
+	// Reset discards every vector. So savedVersion must not advance until the
+	// sidecar is durable, or a failure here would mark the index clean and the
+	// `version == savedVersion` gate would ensure no later Save ever retried it
+	// (#728).
+	if err := writeIdentitySidecar(identitySidecarPath(path), d.identity); err != nil {
+		return err
+	}
+	d.savedVersion = captured
+	d.lastSaveTime = time.Now()
+	return nil
 }
 
 // AutosaveTick is the periodic-save entrypoint (issue #429 C-a): it compacts via
@@ -767,7 +788,9 @@ func finalizeFile(out *os.File, tmpPath, path string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	return nil
+	// The file's own contents are synced above; the rename that makes them
+	// visible under `path` needs the directory synced too (#728).
+	return syncDir(path)
 }
 
 // Load reopens the segment at path: it rebuilds the locator map by scanning
@@ -787,9 +810,12 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 	locators, end, torn, scanErr := scanSegment(path)
 	if scanErr != nil {
 		if errors.Is(scanErr, os.ErrNotExist) {
+			// No segment at all. A sidecar that is damaged here has nothing to
+			// protect, so it is not worth failing startup over.
+			identity, _ := readIdentitySidecar(identitySidecarPath(path))
 			d.mu.Lock()
 			d.path = path
-			d.identity = readIdentitySidecar(identitySidecarPath(path))
+			d.identity = identity
 			d.mu.Unlock()
 			return nil
 		}
@@ -813,10 +839,31 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 	if err := d.invalidateReaderLocked(); err != nil {
 		return err
 	}
+	identity, idErr := readIdentitySidecar(identitySidecarPath(path))
+	if idErr != nil {
+		// A sidecar that EXISTS and cannot be understood. This used to read as
+		// "" exactly like a missing one, so EnsureIdentity saw a mismatch and
+		// Reset discarded every vector the segment still held (#728).
+		//
+		// Only the damaged case fails here. A missing sidecar over a populated
+		// segment is NOT damage: appends are durable immediately while the
+		// sidecar is only written by Save and Reset, so every index between its
+		// first append and its first save is legitimately in that state. I had
+		// this wrong and the existing suite caught it.
+		//
+		// Reported rather than repaired: adopting the configured identity would
+		// silently pair vectors with an embedding space that may not be theirs,
+		// which is worse than saying so. `reindex` is the deliberate recovery.
+		return fmt.Errorf(
+			"diskindex: segment %s holds %d vectors but its recorded embed identity is damaged (%w); "+
+				"run `dir2mcp reindex` to rebuild it deliberately rather than losing it silently",
+			path, len(locators), idErr,
+		)
+	}
 	d.path = path
 	d.locators = locators
 	d.appendEnd = end
-	d.identity = readIdentitySidecar(identitySidecarPath(path))
+	d.identity = identity
 	return nil
 }
 
@@ -1052,33 +1099,92 @@ func decodePayload(b []byte) (model.IndexPayload, error) {
 }
 
 func writeIdentitySidecar(path, identity string) error {
+	staged, err := stageIdentitySidecar(path, identity)
+	if err != nil {
+		return err
+	}
+	return publishIdentitySidecar(staged, path)
+}
+
+// stageIdentitySidecar writes the identity to a temporary file beside path and
+// returns that file's name, leaving it unpublished.
+//
+// Split from the rename so Reset can make the write durable BEFORE it destroys
+// anything, and rename afterwards.
+func stageIdentitySidecar(path, identity string) (string, error) {
 	data, err := json.Marshal(struct {
 		Identity string `json:"identity"`
 	}{Identity: identity})
 	if err != nil {
-		return err
+		return "", err
 	}
 	tmp := path + ".tmp"
-	if err := statefs.WriteFile(tmp, data); err != nil {
-		return err
+	file, err := statefs.Create(tmp)
+	if err != nil {
+		return "", err
 	}
-	return os.Rename(tmp, path)
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	// fsync the file, not just close it: statefs.WriteFile returns once the
+	// bytes are in the page cache, so a crash could publish a rename pointing
+	// at an empty or partial sidecar. The segment already syncs this way in
+	// finalizeFile; the sidecar did not, which is why the two were not one
+	// durable transaction (#728).
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return tmp, nil
 }
 
-// readIdentitySidecar returns the recorded identity, or "" when the sidecar is
-// missing/unreadable (treated as a fresh index, like a missing snapshot).
-func readIdentitySidecar(path string) string {
+// publishIdentitySidecar renames the staged file into place and fsyncs the
+// directory, without which the rename itself is not durable across a crash.
+func publishIdentitySidecar(staged, path string) error {
+	if err := os.Rename(staged, path); err != nil {
+		_ = os.Remove(staged)
+		return err
+	}
+	return syncDir(path)
+}
+
+// errSidecarUnreadable marks a sidecar that exists but cannot be understood, as
+// distinct from one that is simply absent. Collapsing the two to "" is what let
+// a damaged sidecar look exactly like a fresh index (#728).
+var errSidecarUnreadable = errors.New("identity sidecar is present but unreadable")
+
+// readIdentitySidecar returns the recorded identity.
+//
+// Three outcomes, deliberately not two:
+//
+//   - the sidecar is absent: ("", nil). For a segment that is also absent this
+//     is a genuinely fresh index.
+//   - the sidecar is readable: (identity, nil).
+//   - the sidecar exists and is damaged: ("", errSidecarUnreadable). This used
+//     to return "" like the first case, so EnsureIdentity saw a mismatch and
+//     Reset threw away every vector the segment still held.
+func readIdentitySidecar(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("%w: %s: %v", errSidecarUnreadable, path, err)
 	}
 	var s struct {
 		Identity string `json:"identity"`
 	}
-	if json.Unmarshal(data, &s) != nil {
-		return ""
+	if err := json.Unmarshal(data, &s); err != nil {
+		return "", fmt.Errorf("%w: %s: %v", errSidecarUnreadable, path, err)
 	}
-	return s.Identity
+	return s.Identity, nil
 }
 
 // --- float32 <-> bytes (little-endian) ---
