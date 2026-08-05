@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
 // reindexProgressInterval is how often the reindex command prints a
@@ -260,8 +261,14 @@ func (s *reindexStaging) rollback(stderr io.Writer) {
 // already moved aside, writes a CLI error, and returns the exit code.
 func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg config.Config) (model.Store, *reindexStaging, int) {
 	staging := &reindexStaging{stateDir: cfg.StateDir}
-	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+	if err := statefs.MkdirAllHardened(cfg.StateDir); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitRootInaccessible, fmt.Sprintf("create state dir: %v", err))
+		return nil, nil, exitRootInaccessible
+	}
+	// Same repair as `up`: a reindex is the other way a corpus's state tree is
+	// created, and it is where a tree from an older build most often arrives.
+	if err := statefs.HardenTree(cfg.StateDir); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitRootInaccessible, fmt.Sprintf("secure state dir: %v", err))
 		return nil, nil, exitRootInaccessible
 	}
 	st := a.storeForConfig(cfg)

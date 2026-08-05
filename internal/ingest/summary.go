@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
@@ -365,11 +366,11 @@ func (s *Service) readOrComputeSummary(ctx context.Context, sourceText string) (
 		return "", err
 	}
 	out := strings.ReplaceAll(strings.ReplaceAll(generated, "\r\n", "\n"), "\r", "\n")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(cacheDir); err != nil {
 		s.getLogger().Printf("hierarchical retrieval: create summary cache dir failed (continuing uncached): %v", err)
 		return out, nil
 	}
-	if err := os.WriteFile(cachePath, []byte(out), 0o644); err != nil {
+	if err := statefs.WriteFile(cachePath, []byte(out)); err != nil {
 		s.getLogger().Printf("hierarchical retrieval: write summary cache failed (continuing uncached): %v", err)
 	}
 	return out, nil

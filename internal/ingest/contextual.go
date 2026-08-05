@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
 // maxContextDocumentRunes bounds how much of the parent document is shown to the
@@ -135,11 +136,11 @@ func (g *chunkContextGenerator) writeCache(cachePath, contextText string) {
 	if cachePath == "" {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+	if err := statefs.MkdirAll(filepath.Dir(cachePath)); err != nil {
 		g.warn("contextual retrieval: create cache dir: %v", err)
 		return
 	}
-	if err := os.WriteFile(cachePath, []byte(contextText), 0o644); err != nil {
+	if err := statefs.WriteFile(cachePath, []byte(contextText)); err != nil {
 		g.warn("contextual retrieval: write cache: %v", err)
 	}
 }

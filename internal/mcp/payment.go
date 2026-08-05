@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/statefs"
 	storepkg "github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/x402"
 )
@@ -877,7 +878,7 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 
 	// helper that (re)initializes the cached file/writer; caller must hold mutex.
 	initWriter := func() error {
-		if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
+		if err := statefs.MkdirAll(filepath.Dir(s.paymentLogPath)); err != nil {
 			return err
 		}
 		f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // owner read/write only

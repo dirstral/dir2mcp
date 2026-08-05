@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
 // readOrComputeTranslation returns the source transcript translated into
@@ -23,7 +24,7 @@ import (
 // same source media always yields the same translation for a given target.
 func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, sourceText, targetLang string) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "translate")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(cacheDir); err != nil {
 		return "", fmt.Errorf("create translate cache dir: %w", err)
 	}
 
@@ -50,7 +51,7 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 	}
 
 	out := strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n")
-	if err := os.WriteFile(cachePath, []byte(out), 0o644); err != nil {
+	if err := statefs.WriteFile(cachePath, []byte(out)); err != nil {
 		return "", fmt.Errorf("write translate cache: %w", err)
 	}
 	return out, nil

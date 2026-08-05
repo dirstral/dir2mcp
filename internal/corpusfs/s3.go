@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
 // s3API is the subset of the S3 client S3FS depends on. Interfacing it lets
@@ -392,7 +394,7 @@ func (s *S3FS) Localize(ctx context.Context, relPath string) (string, func(), er
 	if strings.TrimSpace(dir) == "" {
 		dir = os.TempDir()
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := statefs.MkdirAll(dir); err != nil {
 		return "", nil, fmt.Errorf("corpusfs: create cache dir: %w", err)
 	}
 	ext := path.Ext(relPath)

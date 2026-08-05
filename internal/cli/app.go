@@ -31,6 +31,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
@@ -1991,9 +1992,12 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 		return fmt.Errorf("marshal corpus snapshot: %w", err)
 	}
 
-	// Match previous file mode (0o644) used with os.WriteFile.
+	// Owner-only: this lives under the state directory and carries the corpus
+	// snapshot (paths, titles, counts), so it is corpus content in another
+	// shape rather than a public artifact (#726). atomicWriteFile chmods the
+	// temp file before the rename, so the mode is never briefly wider.
 	path := filepath.Join(stateDir, "corpus.json")
-	if err := atomicWriteFile(path, raw, 0o644); err != nil {
+	if err := atomicWriteFile(path, raw, statefs.FileMode); err != nil {
 		return fmt.Errorf("write corpus snapshot: %w", err)
 	}
 	return nil

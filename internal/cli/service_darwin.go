@@ -62,6 +62,8 @@ func (m *launchdManager) serviceTarget(label string) string {
 // GUI domain, kicking off an immediate (re)start via kickstart -k.
 func (m *launchdManager) install(spec serviceSpec) (string, error) {
 	plistPath := m.plistPath(spec.Label)
+	// launchd must be able to read this; it is a service definition, not
+	// corpus-derived content (#726).
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
 		return "", fmt.Errorf("create LaunchAgents dir: %w", err)
 	}

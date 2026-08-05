@@ -28,6 +28,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/quality"
 	"github.com/dirstral/dir2mcp/internal/scancache"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
@@ -3893,7 +3894,7 @@ func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model
 // detail (spec §7.4.B: the raw DoclingDocument is not a representation).
 func (s *Service) readOrComputeStructured(ctx context.Context, doc model.Document, content []byte, se structuredExtractor) (StructuredExtraction, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "docling")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(cacheDir); err != nil {
 		return StructuredExtraction{}, fmt.Errorf("create docling cache dir: %w", err)
 	}
 	cachePath := filepath.Join(cacheDir, s.ocrCacheKey(content)+".json")
@@ -3909,7 +3910,7 @@ func (s *Service) readOrComputeStructured(ctx context.Context, doc model.Documen
 		return StructuredExtraction{}, err
 	}
 	if encoded, mErr := json.Marshal(res); mErr == nil {
-		if wErr := os.WriteFile(cachePath, encoded, 0o644); wErr != nil {
+		if wErr := statefs.WriteFile(cachePath, encoded); wErr != nil {
 			s.getLogger().Printf("cache structured extraction for %s: %v", doc.RelPath, wErr)
 		}
 	}
@@ -4063,7 +4064,7 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 // readOrComputeOCR.
 func (s *Service) readOrComputePandoc(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "pandoc")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(cacheDir); err != nil {
 		return "", fmt.Errorf("create pandoc cache dir: %w", err)
 	}
 	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
@@ -4075,7 +4076,7 @@ func (s *Service) readOrComputePandoc(ctx context.Context, doc model.Document, c
 		return "", fmt.Errorf("%w: pandoc extract %s: %w", ErrOCRProviderFailure, doc.RelPath, err)
 	}
 	mdBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(md, "\r\n", "\n"), "\r", "\n"))
-	if err := os.WriteFile(cachePath, mdBytes, 0o644); err != nil {
+	if err := statefs.WriteFile(cachePath, mdBytes); err != nil {
 		return "", fmt.Errorf("write pandoc cache: %w", err)
 	}
 	return string(mdBytes), nil
@@ -5116,7 +5117,7 @@ func (s *Service) EnforceOCRCachePolicy(cacheDir string) error {
 
 func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "ocr")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(cacheDir); err != nil {
 		return "", fmt.Errorf("create ocr cache dir: %w", err)
 	}
 
@@ -5138,7 +5139,7 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	}
 
 	ocrBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(ocrText, "\r\n", "\n"), "\r", "\n"))
-	if err := os.WriteFile(cachePath, ocrBytes, 0o644); err != nil {
+	if err := statefs.WriteFile(cachePath, ocrBytes); err != nil {
 		return "", fmt.Errorf("write ocr cache: %w", err)
 	}
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
@@ -5268,7 +5269,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(cacheDir); err != nil {
 		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
@@ -5292,7 +5293,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	}
 
 	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
-	if err := os.WriteFile(cachePath, transcriptBytes, 0o644); err != nil {
+	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
 		return "", nil, fmt.Errorf("write transcript cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
@@ -5329,7 +5330,7 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(cacheDir); err != nil {
 		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
@@ -5361,7 +5362,7 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
 	}
 	translatedBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n"))
-	if err := os.WriteFile(cachePath, translatedBytes, 0o644); err != nil {
+	if err := statefs.WriteFile(cachePath, translatedBytes); err != nil {
 		return "", nil, fmt.Errorf("write whisper-translate cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
@@ -5502,7 +5503,7 @@ func (s *Service) writeCachedWords(path string, words []model.TimedWord) {
 		s.getLogger().Printf("marshal transcript words cache: %v", err)
 		return
 	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	if err := statefs.WriteFile(path, raw); err != nil {
 		s.getLogger().Printf("write transcript words cache (%s): %v", path, err)
 	}
 }

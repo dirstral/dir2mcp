@@ -15,6 +15,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/index/topk"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
 // Persisted snapshot basenames (issue #247). The ".v2" marker distinguishes
@@ -381,13 +382,13 @@ func (i *HNSWIndex) Save(ctx context.Context, path string) error {
 	// both os.Create and os.Rename would otherwise fail with "no such file or
 	// directory" (issue #375). MkdirAll on an existing directory is a no-op.
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := statefs.MkdirAll(dir); err != nil {
 			return err
 		}
 	}
 
 	tmpPath := path + ".tmp"
-	file, err := os.Create(tmpPath)
+	file, err := statefs.Create(tmpPath)
 	if err != nil {
 		return err
 	}
