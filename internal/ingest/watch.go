@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -235,7 +236,19 @@ func (w *fsWatchLoop) registerNewTree(absDir string) {
 	// which follows them when IngestFollowSymlinks is set. The default (off) path
 	// keeps the historical WalkDir behavior byte-for-byte.
 	if w.opts.FollowSymlinks {
-		walkWatchTree(absDir, resolvedRoot(w.absRoot), map[string]struct{}{}, addDir, armFile)
+		rootResolved := corpusfs.ResolveRoot(w.absRoot)
+		// A newly created (or moved-in) directory can itself be a symlink pointing
+		// outside the corpus. walkWatchTree refuses it, but say so: an operator who
+		// linked a directory into the corpus and sees nothing appear needs to know
+		// it was refused on purpose, not missed.
+		if _, ok := corpusfs.ResolveSymlinkWithinRoot(rootResolved, absDir); !ok {
+			w.svc.getLogger().Printf(
+				"watch: refusing directory %s: it does not resolve inside the corpus root; not watched or indexed",
+				absDir,
+			)
+			return
+		}
+		walkWatchTree(absDir, rootResolved, map[string]struct{}{}, addDir, armFile)
 		return
 	}
 	_ = filepath.WalkDir(absDir, func(path string, d os.DirEntry, err error) error {
@@ -332,15 +345,22 @@ func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (Disc
 		return DiscoveredFile{}, false
 	}
 	// Symlink policy: mirror the discovery walker. When symlinks are not
-	// followed, skip them; otherwise resolve to the target for size/type.
+	// followed, skip them; otherwise resolve the link and enforce root
+	// containment before looking at the target at all.
 	if info.Mode()&os.ModeSymlink != 0 {
-		if !w.opts.FollowSymlinks {
+		resolved, ok := w.followedSymlinkTarget(absPath, rel)
+		if !ok {
 			return DiscoveredFile{}, false
 		}
-		target, err := os.Stat(absPath)
+		target, err := os.Stat(resolved)
 		if err != nil {
 			return DiscoveredFile{}, false
 		}
+		// Hand downstream the RESOLVED path, exactly as the discovery walker
+		// records it in DiscoveredFile.AbsPath, so any consumer that reads the
+		// absolute path reads the target we just checked rather than re-traversing
+		// a link that may since have been repointed.
+		absPath = resolved
 		info = target
 	}
 	if !info.Mode().IsRegular() || info.Size() > w.opts.MaxSizeBytes {
@@ -361,6 +381,35 @@ func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (Disc
 		MTimeUnix: info.ModTime().Unix(),
 		Mode:      info.Mode(),
 	}, true
+}
+
+// followedSymlinkTarget applies the symlink policy to an in-root symlink the
+// watcher is about to index and returns its resolved target.
+//
+// It is the watcher's half of SPEC §1/§7.1 root isolation (issue #717): the
+// initial discovery walk refuses a symlink whose target resolves outside the
+// corpus, and a link that appears (or is repointed) while the watcher is running
+// must be refused on exactly the same terms, so a corpus cannot be extended past
+// its root just by creating a link after startup. The rule is not restated here:
+// corpusfs.ResolveSymlinkWithinRoot is the one implementation both walks call.
+//
+// Resolution happens on every call, i.e. when the event is handled, so the
+// decision is made against the link's target at that moment, not at creation.
+// ok=false is logged rather than dropped silently: an unexplained absence is
+// indistinguishable from "the watcher missed my file".
+func (w *fsWatchLoop) followedSymlinkTarget(absPath, rel string) (string, bool) {
+	if !w.opts.FollowSymlinks {
+		return "", false
+	}
+	resolved, ok := corpusfs.ResolveSymlinkWithinRoot(corpusfs.ResolveRoot(w.absRoot), absPath)
+	if !ok {
+		w.svc.getLogger().Printf(
+			"watch: refusing %s: symlink target does not resolve inside the corpus root; not indexed",
+			rel,
+		)
+		return "", false
+	}
+	return resolved, true
 }
 
 // matchesGitignoreForFile reports whether the file at slash-separated relPath
@@ -416,7 +465,15 @@ func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, follow
 	// waiting for the 10-minute safety rescan (issue #409). Cycles terminate via
 	// the resolved-path visited set. The default (off) path is unchanged.
 	if followSymlinks {
-		walkWatchTree(absRoot, resolvedRoot(absRoot), map[string]struct{}{}, add, nil)
+		rootResolved := corpusfs.ResolveRoot(absRoot)
+		// walkWatchTree refuses any directory it cannot resolve, the root included.
+		// That can only happen if the root itself stopped resolving (deleted or
+		// unreadable), in which case there is nothing to watch; report it instead of
+		// registering zero watches silently.
+		if _, ok := corpusfs.ResolveSymlinkWithinRoot(rootResolved, absRoot); !ok {
+			return fmt.Errorf("watch %s: corpus root did not resolve; no directories watched", absRoot)
+		}
+		walkWatchTree(absRoot, rootResolved, map[string]struct{}{}, add, nil)
 		return errors.Join(errs...)
 	}
 	_ = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
@@ -435,32 +492,6 @@ func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, follow
 	return errors.Join(errs...)
 }
 
-// resolvedRoot resolves absRoot to its canonical path for use as the containment
-// anchor of a symlink-following watch walk. A resolve failure falls back to the
-// lexical (cleaned) root so the walk still proceeds.
-func resolvedRoot(absRoot string) string {
-	if r, err := filepath.EvalSymlinks(absRoot); err == nil {
-		return filepath.Clean(r)
-	}
-	return filepath.Clean(absRoot)
-}
-
-// withinResolvedRoot reports whether candidate resolves inside rootResolved,
-// mirroring the discovery walker's isWithinRoot containment check
-// (internal/corpusfs/local.go): the watcher follows a symlink only when its
-// target stays inside the corpus, so it never watches (or indexes) content the
-// initial scan would not.
-func withinResolvedRoot(rootResolved, candidate string) bool {
-	rel, err := filepath.Rel(rootResolved, filepath.Clean(candidate))
-	if err != nil {
-		return false
-	}
-	if rel == "." {
-		return true
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
-}
-
 // walkWatchTree recursively visits absDir, invoking onDir for every non-skipped
 // directory and onFile (when non-nil) for every regular file, descending into
 // symlinked directories too. It is used only on the symlink-following watch
@@ -468,12 +499,14 @@ func withinResolvedRoot(rootResolved, candidate string) bool {
 // visited set holds resolved (EvalSymlinks) directory paths already entered so a
 // symlink cycle terminates AND a target reachable via both its real and a
 // symlinked name is walked once (under whichever name is seen first); a
-// symlinked directory is followed only when its target stays within rootResolved.
+// symlinked directory is followed only when its target stays within rootResolved
+// (the shared corpusfs check, so a directory link cannot extend the watch past
+// the root any more than a file link can — #717).
 // onDir/onFile receive the lexical path (through the symlink) so emitted fsnotify
 // events map back to a path under the watched root.
 func walkWatchTree(absDir, rootResolved string, visited map[string]struct{}, onDir func(string), onFile func(string)) {
-	resolved := resolvedRoot(absDir)
-	if !withinResolvedRoot(rootResolved, resolved) {
+	resolved, ok := corpusfs.ResolveSymlinkWithinRoot(rootResolved, absDir)
+	if !ok {
 		return
 	}
 	if _, seen := visited[resolved]; seen {

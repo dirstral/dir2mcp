@@ -54,11 +54,7 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 		return nil, fmt.Errorf("root is not a directory: %s", absRoot)
 	}
 
-	rootResolved := absRoot
-	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
-		rootResolved = resolved
-	}
-	rootResolved = filepath.Clean(rootResolved)
+	rootResolved := ResolveRoot(absRoot)
 
 	files := make([]DiscoveredFile, 0, 256)
 	walker := discoverWalker{
@@ -144,6 +140,42 @@ func resolveWithinRoot(root, relPath string) (string, error) {
 		return "", fmt.Errorf("%w: %q", ErrPathEscapesRoot, relPath)
 	}
 	return resolved, nil
+}
+
+// ResolveRoot returns the canonical (symlink-resolved, cleaned) form of an
+// absolute corpus root. It is the anchor every root-containment decision is made
+// against, so callers outside this package (the ingest watcher) compute it the
+// same way the discovery walk does. A resolve failure falls back to the lexical
+// form: the root is expected to exist, and a usable anchor is better than none.
+func ResolveRoot(absRoot string) string {
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(absRoot)
+}
+
+// ResolveSymlinkWithinRoot resolves linkPath (typically an in-root symlink) and
+// enforces that its target stays inside rootResolved, which must already be a
+// resolved root (see ResolveRoot). It returns the resolved target and ok=true
+// only when the link resolves AND lands in the corpus; ok=false means the caller
+// must treat the path as if it did not exist.
+//
+// This is the single implementation of the followed-symlink containment rule
+// required by SPEC §1/§7.1 root isolation: the discovery walk (handleSymlink
+// below) and the live watcher (internal/ingest/watch.go) both call it, so the
+// two cannot drift into judging the same link differently depending on when it
+// appeared (issue #717). Resolution happens on every call, never cached, so the
+// decision is always made against the link's current target.
+func ResolveSymlinkWithinRoot(rootResolved, linkPath string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(linkPath)
+	if err != nil {
+		return "", false
+	}
+	resolved = filepath.Clean(resolved)
+	if !isWithinRoot(rootResolved, resolved) {
+		return "", false
+	}
+	return resolved, true
 }
 
 func shouldSkipDirectory(name string) bool {
@@ -500,12 +532,8 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 		return err
 	}
 
-	resolvedPath, err := filepath.EvalSymlinks(symlinkPath)
-	if err != nil {
-		return nil
-	}
-	resolvedPath = filepath.Clean(resolvedPath)
-	if !isWithinRoot(w.rootResolved, resolvedPath) {
+	resolvedPath, ok := ResolveSymlinkWithinRoot(w.rootResolved, symlinkPath)
+	if !ok {
 		return nil
 	}
 
