@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,11 @@ const (
 	crashGoodIndex    = "LAST-KNOWN-GOOD-INDEX"
 	crashPartialIndex = "PARTIAL-REBUILD-FROM-CRASHED-RUN"
 	crashGoodHash     = "HASH-BEFORE-CRASHED-REINDEX"
+	// crashBackupSuffix mirrors reindexBackupSuffix in internal/cli, which is
+	// unexported. Deliberately spelled out here rather than exported from the
+	// package: the on-disk name is part of what a crashed corpus looks like to
+	// an operator, so the test should notice if it silently changes.
+	crashBackupSuffix = ".reindex-old"
 )
 
 // seedCrashedReindexState lays down the on-disk and in-store state a crashed
@@ -50,7 +56,7 @@ func seedCrashedReindexState(t *testing.T, stateDir, relPath string) string {
 	}
 	live := filepath.Join(stateDir, index.TextIndexFileName)
 	// The crashed run had already renamed the good index aside...
-	if err := os.WriteFile(live+".reindex-old", []byte(crashGoodIndex), 0o600); err != nil {
+	if err := os.WriteFile(live+crashBackupSuffix, []byte(crashGoodIndex), 0o600); err != nil {
 		t.Fatalf("seed backup index: %v", err)
 	}
 	// ...and had written part of the new one before it was killed.
@@ -81,6 +87,24 @@ func seedCrashedHashState(t *testing.T, stateDir, relPath string) {
 	}); err != nil {
 		t.Fatalf("crash-seed UpsertDocument: %v", err)
 	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("crash-seed Close: %v", err)
+	}
+	crashHashStateFromCurrent(t, stateDir)
+}
+
+// crashHashStateFromCurrent stages the store side of a reindex over whatever
+// hashes are there NOW (snapshot, then clear) and stops without resolving it,
+// standing in for the process being killed mid-run. Split out from
+// seedCrashedHashState so a second simulated crash chains onto the state the
+// previous run left rather than re-establishing a known-good one.
+func crashHashStateFromCurrent(t *testing.T, stateDir string) {
+	t.Helper()
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("crash-seed Init: %v", err)
+	}
 	if err := st.BackupContentHashes(ctx); err != nil {
 		t.Fatalf("crash-seed BackupContentHashes: %v", err)
 	}
@@ -91,6 +115,22 @@ func seedCrashedHashState(t *testing.T, stateDir, relPath string) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("crash-seed Close: %v", err)
 	}
+}
+
+// recrashReindex simulates another crash on top of the CURRENT corpus state:
+// it stages whatever is live now exactly as a real run would (an atomic rename
+// into the backup slot), leaves a partial file live, and stages-then-abandons
+// the content-hash snapshot. Nothing here calls the rollback path, which is the
+// point: a crash is when rollback does not run.
+func recrashReindex(t *testing.T, stateDir, live string) {
+	t.Helper()
+	if err := os.Rename(live, live+crashBackupSuffix); err != nil {
+		t.Fatalf("re-crash stage %s: %v", live, err)
+	}
+	if err := os.WriteFile(live, []byte(crashPartialIndex), 0o600); err != nil {
+		t.Fatalf("re-crash partial index: %v", err)
+	}
+	crashHashStateFromCurrent(t, stateDir)
 }
 
 // runReindexInDir runs `dir2mcp reindex` with the given ingestor hook from tmp
@@ -141,15 +181,22 @@ func TestReindex_AfterCrash_RetryPreservesLastKnownGood(t *testing.T) {
 	if got := readDocumentHash(t, stateDir, relPath); got != crashGoodHash {
 		t.Errorf("content_hash after a failed retry must be the pre-crash snapshot; want %q got %q", crashGoodHash, got)
 	}
-	if _, err := os.Stat(live + ".reindex-old"); !os.IsNotExist(err) {
+	if _, err := os.Stat(live + crashBackupSuffix); !os.IsNotExist(err) {
 		t.Errorf("no backup sidecar should linger after the retry rolled back; stat err=%v", err)
 	}
 }
 
 // TestReindex_AfterCrash_RepeatedCrashesDoNotRotatePartialState covers the
-// "repeated retries" case from the issue: however many times the rebuild
-// fails, the recovery slot must still hold the original good generation and
-// never a partial one.
+// "repeated crashes do not rotate partial state into the recovery slot" case
+// from the issue: however many times the rebuild is killed, the recovery slot
+// must still hold the original good generation and never a partial one.
+//
+// Every pass re-crashes on top of whatever the previous pass left, rather than
+// re-establishing a known-good corpus: a run that recovered and rolled back
+// leaves no leftovers at all, so re-seeding from constants would just exercise
+// the ordinary failed-retry path three times. Chaining means that if partial
+// state were ever rotated into the recovery slot, the corruption would carry
+// forward into the next pass's assertion instead of being papered over.
 func TestReindex_AfterCrash_RepeatedCrashesDoNotRotatePartialState(t *testing.T) {
 	tmp := t.TempDir()
 	stateDir := filepath.Join(tmp, ".dir2mcp")
@@ -157,6 +204,9 @@ func TestReindex_AfterCrash_RepeatedCrashesDoNotRotatePartialState(t *testing.T)
 	live := seedCrashedReindexState(t, stateDir, relPath)
 
 	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			recrashReindex(t, stateDir, live)
+		}
 		code, stderr := runReindexInDir(t, tmp, func(config.Config, model.Store) (model.Ingestor, error) {
 			return reindexFailingIngestor{}, nil
 		})
@@ -195,7 +245,7 @@ func TestReindex_AfterCrash_RecoversEveryLeftoverGeneration(t *testing.T) {
 	}
 	for _, name := range leftovers {
 		path := filepath.Join(stateDir, name)
-		if err := os.WriteFile(path+".reindex-old", []byte(crashGoodIndex+"/"+name), 0o600); err != nil {
+		if err := os.WriteFile(path+crashBackupSuffix, []byte(crashGoodIndex+"/"+name), 0o600); err != nil {
 			t.Fatalf("seed backup %s: %v", name, err)
 		}
 		if err := os.WriteFile(path, []byte(crashPartialIndex), 0o600); err != nil {
@@ -215,6 +265,11 @@ func TestReindex_AfterCrash_RecoversEveryLeftoverGeneration(t *testing.T) {
 		want := crashGoodIndex + "/" + name
 		if got := readFileString(t, path); got != want {
 			t.Errorf("%s must be restored from the crashed run's backup; want %q got %q", name, want, got)
+		}
+		// The warning is the only signal an operator gets that a previous run
+		// was interrupted, and it must name what it touched.
+		if !strings.Contains(stderr, name) {
+			t.Errorf("recovery warning must name %s; stderr=%q", name, stderr)
 		}
 		// Recovered files stay owner-only (#726): the state tree is hardened
 		// before recovery and a rename preserves the mode.
@@ -244,7 +299,7 @@ func TestReindex_AfterCrash_SuccessfulRetryClearsRecoveredBackups(t *testing.T) 
 	if code != 0 {
 		t.Fatalf("reindex should succeed; got exit %d stderr=%q", code, stderr)
 	}
-	if _, err := os.Stat(live + ".reindex-old"); !os.IsNotExist(err) {
+	if _, err := os.Stat(live + crashBackupSuffix); !os.IsNotExist(err) {
 		t.Errorf("committed reindex must not leave a recovery copy behind; stat err=%v", err)
 	}
 	if got := readDocumentHash(t, stateDir, relPath); got != rebuilt {

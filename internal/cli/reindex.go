@@ -278,6 +278,14 @@ func recoverInterruptedReindex(stateDir string, stderr io.Writer) error {
 		if name == reindexBackupSuffix || !strings.HasSuffix(name, reindexBackupSuffix) {
 			continue
 		}
+		// Only regular files are ours: staging produces a backup by renaming an
+		// index file, never a directory or a symlink. Renaming something of
+		// another shape into the live slot would move an unrelated path (or
+		// point the index at an arbitrary target), so leave it alone and let
+		// backup() refuse the occupied slot with its own explicit error.
+		if !entry.Type().IsRegular() {
+			continue
+		}
 		live := strings.TrimSuffix(name, reindexBackupSuffix)
 		if err := os.Rename(filepath.Join(stateDir, name), filepath.Join(stateDir, live)); err != nil {
 			return fmt.Errorf("restore last-known-good index %s: %w", live, err)
