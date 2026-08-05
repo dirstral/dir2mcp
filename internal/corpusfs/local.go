@@ -179,8 +179,7 @@ func ResolveSymlinkWithinRoot(rootResolved, linkPath string) (string, bool) {
 }
 
 func shouldSkipDirectory(name string) bool {
-	_, ok := defaultExcludedDirs[strings.TrimSpace(name)]
-	return ok
+	return IsExcludedDir(name)
 }
 
 type discoverWalker struct {
