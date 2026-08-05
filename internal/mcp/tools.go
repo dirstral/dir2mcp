@@ -617,18 +617,93 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 	}, nil
 }
 
-// listFilesFiltered paginates s.store.ListFiles and skips entries that violate
-// the list_files contract. Skipped entries are:
-//   - hidden paths (when includeHidden is false), so internal artifacts under
-//     dot-prefixed directories don't leak into the public listing.
-//   - filesystem-source documents whose rel_path no longer resolves to a real
-//     file under the configured root. Without this filter, stale rows left
-//     behind by older buggy ingest paths or manual edits would surface here
-//     and then 404 on the round-trip through open_file (issue #176).
+// visibleFilesLister is implemented by stores that can apply the list_files
+// hidden-path policy inside the query itself, so one page costs one store call
+// instead of a walk of the whole matching corpus (#694). Declared here as an
+// optional capability, the same way recentFailuresLister and
+// sessionPersistenceStore are, so model.Store keeps its narrow signature and
+// stores that cannot push the predicate down still work.
+type visibleFilesLister interface {
+	ListVisibleFiles(ctx context.Context, prefix, glob string, limit, offset int, includeHidden bool) ([]model.Document, int64, error)
+}
+
+// listFilesFiltered returns one page of the list_files listing plus its total.
 //
-// The total is the count of entries that survived filtering — the surviving
-// "real" total from the agent's perspective — not the raw store count.
+// Two filters define the listing:
+//   - hidden paths are dropped when includeHidden is false, so internal
+//     artifacts under dot-prefixed directories don't leak into the public
+//     listing. This is a pure function of rel_path, so the store evaluates it in
+//     SQL (SQLiteStore.ListVisibleFiles) and the page, the COUNT and the glob
+//     scan all agree on it for free.
+//   - filesystem-source documents whose rel_path no longer resolves to a real
+//     file under the configured root are dropped. Without this, stale rows left
+//     behind by older buggy ingest paths or manual edits would surface here and
+//     then 404 on the round-trip through open_file (issue #176). This one needs
+//     the filesystem, so it can only run in Go — but it now runs over the rows
+//     of the RETURNED PAGE, not over the corpus.
+//
+// Before #694 the handler pulled the entire matching corpus in 500-row store
+// pages on every call and stat'ed every row, because it wanted a `total` that
+// counted only rows surviving BOTH filters. That made `limit=1, offset=0` on a
+// million-document corpus roughly 2,000 store reads and a million
+// filepath.EvalSymlinks syscalls, and made a client's walk of all pages
+// quadratic. The paging work of #429 F10 was fully undone at the tool boundary.
+//
+// So `total` now means "matching, non-deleted, non-hidden rows in the store"
+// rather than "rows that also survived a filesystem stat". The two differ only
+// when the store holds a row whose backing file is gone, i.e. when ingest's
+// `deleted = 0` tombstoning has drifted — the degraded case the stat filter
+// exists as a safety net for. In a healthy corpus they are identical, and
+// `documents.deleted` is already the authoritative liveness signal that
+// ListFiles filters on in SQL. Paying O(corpus) stats on every request to keep
+// the total exact under drift is precisely the defect being fixed, so the
+// trade is deliberate.
+//
+// The visible consequence is that a page can come back SHORTER than `limit`
+// when a dead row is dropped from it. That was already possible at the end of a
+// listing, and a client looping `while offset < total` still terminates and
+// still observes every live file. What does NOT change is #176's actual
+// guarantee: every path this tool EMITS round-trips through open_file, because
+// page-scoped stat still gates every emitted row.
 func (s *Server) listFilesFiltered(ctx context.Context, pathPrefix, glob string, limit, offset int, includeHidden bool) ([]model.Document, int64, error) {
+	lister, ok := s.store.(visibleFilesLister)
+	if !ok {
+		return s.listFilesFilteredByWalk(ctx, pathPrefix, glob, limit, offset, includeHidden)
+	}
+
+	docs, total, err := lister.ListVisibleFiles(ctx, pathPrefix, glob, limit, offset, includeHidden)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.dropUnresolvableSources(docs), total, nil
+}
+
+// dropUnresolvableSources applies the #176 round-trip gate to the rows of a
+// single page. The root is resolved once for the page: the per-document gate
+// would otherwise re-run filepath.Abs + EvalSymlinks(root) per row. When the
+// configured root does not resolve at all the gate is skipped entirely, so a
+// misconfigured deployment still returns what the store has rather than an
+// empty list.
+func (s *Server) dropUnresolvableSources(docs []model.Document) []model.Document {
+	rootAbs, rootReal, ok := s.resolveRoot()
+	if !ok {
+		return docs
+	}
+	kept := make([]model.Document, 0, len(docs))
+	for _, doc := range docs {
+		if isResolvableSourceWithRoot(doc, rootAbs, rootReal) {
+			kept = append(kept, doc)
+		}
+	}
+	return kept
+}
+
+// listFilesFilteredByWalk is the pre-#694 implementation, kept as the fallback
+// for a store that cannot push the hidden-path predicate into its query. Such a
+// store cannot report a hidden-excluded total any other way, so the walk (and
+// its per-row stat) is unavoidable there; it is NOT the path any production
+// SQLiteStore takes.
+func (s *Server) listFilesFilteredByWalk(ctx context.Context, pathPrefix, glob string, limit, offset int, includeHidden bool) ([]model.Document, int64, error) {
 	const pageSize = 500
 	collected := make([]model.Document, 0, limit)
 	visibleSeen := 0
