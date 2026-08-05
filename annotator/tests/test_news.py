@@ -260,3 +260,43 @@ def test_a_non_positive_fps_is_refused_at_construction():
         NewsOverlayRecognizer(fps=0)
     with pytest.raises(ValueError):
         NewsOverlayRecognizer(fps=-0.5)
+
+
+# --- wiring -----------------------------------------------------------------
+
+def test_the_news_recognizer_needs_no_roster():
+    """A news archive has no roster, and every other recognizer in the cascade
+    resolves one. Requiring it would make the corpus this milestone targets
+    unservable."""
+    from dirstral_annotator.cli import _needs_roster, build_parser
+
+    parse = build_parser().parse_args
+    assert _needs_roster(parse(["serve", "--news"])) is False
+    assert _needs_roster(parse(["serve", "--news", "--scorebug"])) is True
+    assert _needs_roster(parse(["serve", "--jersey"])) is True
+    assert _needs_roster(parse(["serve", "--games", "g.json"])) is True
+
+
+def test_the_pipeline_runs_the_news_recognizer_when_asked(monkeypatch, tmp_path):
+    """The cascade seam: `--news` has to reach a NewsOverlayRecognizer, with
+    the OCR language it was given rather than a constant."""
+    from dirstral_annotator import pipeline as pipeline_mod
+    from dirstral_annotator.recognizers import news as news_mod
+    from dirstral_annotator.roster import Roster
+
+    built = {}
+
+    class Fake:
+        def __init__(self, **kwargs):
+            built.update(kwargs)
+
+        def recognize(self, media_path):
+            return []
+
+    monkeypatch.setattr(news_mod, "NewsOverlayRecognizer", Fake)
+    media = tmp_path / "broadcast.mp4"
+    media.write_bytes(b"")
+    pipeline_mod.Pipeline(
+        roster=Roster([]), news=True, ocr_lang="rus", fps=0.25
+    ).cues_for(media)
+    assert built == {"lang": "rus", "fps": 0.25}
