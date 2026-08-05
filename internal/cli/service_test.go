@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,93 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 )
+
+// recordedCmd is one supervisor invocation captured by the platform fakes.
+type recordedCmd struct {
+	name string
+	args []string
+}
+
+// argLine joins a recorded command back into a single string for sequence
+// assertions.
+func argLine(c recordedCmd) string {
+	return c.name + " " + strings.Join(c.args, " ")
+}
+
+// cmdResult is one scripted (combined output, error) pair.
+type cmdResult struct {
+	out string
+	err error
+}
+
+// fails builds a scripted failure with the given combined output.
+func fails(out string) cmdResult { return cmdResult{out: out, err: errors.New("exit status 1")} }
+
+// ok builds a scripted success with the given combined output.
+func ok(out string) cmdResult { return cmdResult{out: out} }
+
+// scriptedRunner is a runCmd stand-in that returns per-subcommand results and
+// records every call, so a test can inject a failure at ONE supervisor step and
+// assert what the manager did afterwards.
+//
+// Results are queued per subcommand: the first `bootstrap` result is consumed by
+// the install, the second by a rollback re-bootstrap. An exhausted or unscripted
+// subcommand succeeds silently, which keeps the happy path terse.
+type scriptedRunner struct {
+	results map[string][]cmdResult
+	calls   []recordedCmd
+}
+
+func newScriptedRunner(script map[string][]cmdResult) *scriptedRunner {
+	results := make(map[string][]cmdResult, len(script))
+	for k, v := range script {
+		results[k] = append([]cmdResult(nil), v...)
+	}
+	return &scriptedRunner{results: results}
+}
+
+// run is the injected runCmd. The script key is the first non-flag argument:
+// "bootout" for `launchctl bootout gui/501 …`, "is-active" for
+// `systemctl --user is-active …`.
+func (s *scriptedRunner) run(name string, args ...string) (string, error) {
+	s.calls = append(s.calls, recordedCmd{name: name, args: args})
+	key := ""
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			key = a
+			break
+		}
+	}
+	queue := s.results[key]
+	if len(queue) == 0 {
+		return "", nil
+	}
+	s.results[key] = queue[1:]
+	return queue[0].out, queue[0].err
+}
+
+// lines renders the recorded calls for assertions and failure messages.
+func (s *scriptedRunner) lines() []string {
+	out := make([]string, 0, len(s.calls))
+	for _, c := range s.calls {
+		out = append(out, argLine(c))
+	}
+	return out
+}
+
+// count returns how many recorded calls used the given subcommand.
+func (s *scriptedRunner) count(sub string) int {
+	n := 0
+	for _, c := range s.calls {
+		for _, a := range c.args {
+			if a == sub {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
 
 func TestServiceLabel(t *testing.T) {
 	got := serviceLabel("dir2mcp-stas-legal-main-45a264")
@@ -600,4 +689,483 @@ func TestInstallServiceArgs_PropagatesAbsolutePaths_738(t *testing.T) {
 	if got := installServiceArgs(globalOptions{}, sc); strings.Join(got, " ") != "up --foreground" {
 		t.Fatalf("installServiceArgs without overrides = %v", got)
 	}
+}
+
+// --- issue #725 / #723: supervisor output classification ---
+
+// TestSystemctlQueryClassify_725 pins the discriminator between a normal
+// systemd verdict and a systemctl that could not answer. Both exit non-zero, so
+// only the OUTPUT can tell them apart: before the fix every is-active/is-enabled
+// error was discarded and the CLI derived a plausible "installed, not running"
+// snapshot from the on-disk unit file instead.
+func TestSystemctlQueryClassify_725(t *testing.T) {
+	exit1 := errors.New("exit status 1")
+	for _, tc := range []struct {
+		name    string
+		query   systemctlQuery
+		out     string
+		err     error
+		want    string
+		wantErr bool
+	}{
+		{name: "active", query: systemctlIsActive, out: "active\n", want: "active"},
+		{name: "inactive exits non-zero but is normal", query: systemctlIsActive, out: "inactive\n", err: errors.New("exit status 3"), want: "inactive"},
+		{name: "failed is a normal state", query: systemctlIsActive, out: "failed\n", err: errors.New("exit status 3"), want: "failed"},
+		{name: "enabled", query: systemctlIsEnabled, out: "enabled\n", want: "enabled"},
+		{name: "disabled exits non-zero but is normal", query: systemctlIsEnabled, out: "disabled\n", err: exit1, want: "disabled"},
+		{name: "not-found verdict", query: systemctlIsEnabled, out: "not-found\n", err: exit1, want: "not-found"},
+		{
+			name:  "absent unit reported only as a diagnostic",
+			query: systemctlIsEnabled,
+			out:   "Failed to get unit file state for com.dirstral.x.service: No such file or directory\n",
+			err:   exit1,
+			want:  "not-found",
+		},
+		{
+			name:  "diagnostic printed alongside the verdict",
+			query: systemctlIsEnabled,
+			out:   "Failed to get unit file state for com.dirstral.x.service: No such file or directory\nnot-found\n",
+			err:   exit1,
+			want:  "not-found",
+		},
+		{
+			name:    "dead user bus must not read as a missing unit",
+			query:   systemctlIsActive,
+			out:     "Failed to connect to bus: No such file or directory\n",
+			err:     exit1,
+			wantErr: true,
+		},
+		{
+			name:    "no session bus",
+			query:   systemctlIsActive,
+			out:     "Failed to connect to bus: No medium found\n",
+			err:     exit1,
+			wantErr: true,
+		},
+		{
+			name:    "permission denied",
+			query:   systemctlIsEnabled,
+			out:     "Failed to get unit file state: Permission denied\n",
+			err:     exit1,
+			wantErr: true,
+		},
+		{
+			name:    "systemctl missing entirely",
+			query:   systemctlIsActive,
+			out:     "",
+			err:     errors.New(`exec: "systemctl": executable file not found in $PATH`),
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.query.classify(tc.out, tc.err)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an operational error, got verdict %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("verdict = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSystemctlReportsAbsent_723 pins the uninstall-side classification: only a
+// positively identified absent/not-loaded unit is benign. A transport or
+// permission failure must NOT be swallowed, or uninstall would delete the unit
+// file of a daemon that is still running.
+func TestSystemctlReportsAbsent_723(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		want bool
+	}{
+		{"Failed to disable unit: Unit file com.dirstral.x.service does not exist.", true},
+		{"Failed to stop com.dirstral.x.service: Unit com.dirstral.x.service not loaded.", true},
+		{"Failed to disable unit com.dirstral.x.service: No such unit", true},
+		{"Failed to connect to bus: No such file or directory", false},
+		{"Failed to connect to bus: No medium found", false},
+		{"Failed to disable unit: Access denied", false},
+		{"Interactive authentication required.", false},
+		{"", false},
+	} {
+		if got := systemctlReportsAbsent(tc.out); got != tc.want {
+			t.Errorf("systemctlReportsAbsent(%q) = %v, want %v", tc.out, got, tc.want)
+		}
+	}
+}
+
+// TestLaunchctlBootoutReportsAbsent_723 is the launchd analog: launchctl reports
+// "nothing to unload" through POSIX errno text, which is benign, while every
+// other failure means the service may still be booted in.
+func TestLaunchctlBootoutReportsAbsent_723(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		want bool
+	}{
+		{"Boot-out failed: 3: No such process", true},
+		{"Boot-out failed: 2: No such file or directory", true},
+		{`Could not find service "com.dirstral.x" in domain for port`, true},
+		{"Boot-out failed: 1: Operation not permitted", false},
+		{"Could not connect to the Mach bootstrap server", false},
+		{"", false},
+	} {
+		if got := launchctlBootoutReportsAbsent(tc.out); got != tc.want {
+			t.Errorf("launchctlBootoutReportsAbsent(%q) = %v, want %v", tc.out, got, tc.want)
+		}
+	}
+}
+
+// --- issue #724: transactional definition replacement ---
+
+// TestUnitTxn_RollbackRestoresPriorDefinition_724 pins the file half of an
+// atomic install: a failed install must leave the PREVIOUS definition on disk,
+// byte-for-byte and with its original permissions, not the half-installed
+// replacement.
+func TestUnitTxn_RollbackRestoresPriorDefinition_724(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "com.dirstral.demo.service")
+	const prior = "[Service]\nExecStart=/old/dir2mcp up\n"
+	if err := os.WriteFile(path, []byte(prior), 0o644); err != nil {
+		t.Fatalf("seed prior unit: %v", err)
+	}
+
+	txn, err := beginUnitTxn(path, 0o644)
+	if err != nil {
+		t.Fatalf("beginUnitTxn: %v", err)
+	}
+	if !txn.had {
+		t.Fatal("expected the prior definition to be captured")
+	}
+	if err := txn.write("[Service]\nExecStart=/new/dir2mcp up\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if body, _ := os.ReadFile(path); string(body) == prior {
+		t.Fatal("write did not replace the definition")
+	}
+	if err := txn.rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored unit: %v", err)
+	}
+	if string(body) != prior {
+		t.Errorf("rollback did not restore the prior definition:\n%s", body)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored unit: %v", err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("restored perms = %v, want 0644", fi.Mode().Perm())
+	}
+	if !strings.Contains(txn.describeRestored(), path) {
+		t.Errorf("describeRestored should name the path: %q", txn.describeRestored())
+	}
+}
+
+// TestUnitTxn_ReplacementDoesNotInheritPriorMode_724 pins that the previous
+// file's mode is used only to RESTORE it: the replacement definition gets the
+// mode the backend asked for, so a stray 0600 plist cannot silently narrow the
+// permissions of every future install.
+func TestUnitTxn_ReplacementDoesNotInheritPriorMode_724(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "com.dirstral.demo.service")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed prior unit: %v", err)
+	}
+
+	txn, err := beginUnitTxn(path, 0o644)
+	if err != nil {
+		t.Fatalf("beginUnitTxn: %v", err)
+	}
+	if err := txn.write("new"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("replacement perms = %v, want the requested 0644", fi.Mode().Perm())
+	}
+	if err := txn.rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	fi, err = os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("restored perms = %v, want the prior 0600", fi.Mode().Perm())
+	}
+}
+
+// TestUnitTxn_RollbackRemovesFirstInstall_724 pins the other half: when there
+// was no previous definition, a failed install must leave NOTHING behind, so a
+// half-installed unit cannot activate at the next login.
+func TestUnitTxn_RollbackRemovesFirstInstall_724(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "com.dirstral.demo.plist")
+
+	txn, err := beginUnitTxn(path, 0o644)
+	if err != nil {
+		t.Fatalf("beginUnitTxn: %v", err)
+	}
+	if txn.had {
+		t.Fatal("expected a first-time install")
+	}
+	if err := txn.write("<plist/>"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := txn.rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("definition still present after rollback: %v", err)
+	}
+	// Rolling back twice must stay clean (the removal is idempotent).
+	if err := txn.rollback(); err != nil {
+		t.Errorf("second rollback: %v", err)
+	}
+	// No staging files may be left in the directory.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("temporary staging files left behind: %v", entries)
+	}
+}
+
+// TestWrapInstallRollback_724 pins the operator-facing contract: a clean undo
+// says so, and an incomplete one names what could not be undone rather than
+// leaving the operator to infer the machine's state.
+func TestWrapInstallRollback_724(t *testing.T) {
+	txn := &unitTxn{path: "/tmp/x.service", had: true}
+	cause := fmt.Errorf("systemctl enable --now: exit status 1")
+
+	clean := wrapInstallRollback(cause, txn, nil)
+	if !strings.Contains(clean.Error(), "rolled back") || !strings.Contains(clean.Error(), "restored") {
+		t.Errorf("clean rollback error should state the undo: %v", clean)
+	}
+	dirty := wrapInstallRollback(cause, txn, []string{"could not restart the previous unit"})
+	if !strings.Contains(dirty.Error(), "ROLLBACK INCOMPLETE") {
+		t.Errorf("incomplete rollback must be explicit: %v", dirty)
+	}
+	if !strings.Contains(dirty.Error(), "could not restart the previous unit") {
+		t.Errorf("incomplete rollback must name the problem: %v", dirty)
+	}
+	if !errors.Is(dirty, cause) {
+		t.Errorf("the original cause must stay unwrappable: %v", dirty)
+	}
+}
+
+// --- issue #722: the install credential sweep must cover runtime secrets ---
+
+// clearRuntimeSecretEnv unsets every secret this test file manipulates, so a
+// developer machine with real AWS/Qdrant credentials exported cannot make the
+// assertions pass or fail spuriously.
+func clearRuntimeSecretEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+		"QDRANT_API_KEY", "DIR2MCP_INDEX_PGVECTOR_DSN",
+		"DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL", "DIR2MCP_X402_FACILITATOR_TOKEN",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+// TestPersistAndWarnCredentials_S3CapturesAWSKeys_722 is the issue's exact
+// reproduction: an s3 corpus installed from a shell that exports the AWS
+// credentials. Before the fix the sweep only looked at provider `api_key`
+// references, so the keys were neither written to .env.local nor reported, and
+// the supervised daemon failed at boot with the missing-credentials error.
+func TestPersistAndWarnCredentials_S3CapturesAWSKeys_722(t *testing.T) {
+	clearRuntimeSecretEnv(t)
+	dir := t.TempDir()
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s3cr3t-value")
+
+	cfg := s3ServiceConfig(filepath.Join(dir, "corpus"), filepath.Join(dir, "state"))
+	cfg.Source.S3AccessKeyID = "AKIAEXAMPLE"
+	cfg.Source.S3SecretAccessKey = "s3cr3t-value"
+
+	var out, errBuf bytes.Buffer
+	app := NewAppWithIO(&out, &errBuf)
+	rep := app.persistAndWarnCredentials(dir, cfg, false, false)
+
+	for _, key := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		if !slicesContains(rep.saved, key) {
+			t.Errorf("%s was not persisted; saved=%v", key, rep.saved)
+		}
+	}
+	if len(rep.missing) != 0 {
+		t.Errorf("nothing should be missing once the keys are captured: %v", rep.missing)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".env.local"))
+	if err != nil {
+		t.Fatalf("read .env.local: %v", err)
+	}
+	if !strings.Contains(string(body), "AWS_SECRET_ACCESS_KEY=s3cr3t-value") {
+		t.Errorf(".env.local missing the captured AWS credential:\n%s", body)
+	}
+}
+
+// TestPersistAndWarnCredentials_ReportsMissingRequiredSecret_722 pins the other
+// half of the issue: a required runtime secret with NO persistent source is
+// named (never valued) instead of the install reporting a clean success.
+func TestPersistAndWarnCredentials_ReportsMissingRequiredSecret_722(t *testing.T) {
+	clearRuntimeSecretEnv(t)
+	dir := t.TempDir()
+	cfg := s3ServiceConfig(filepath.Join(dir, "corpus"), filepath.Join(dir, "state"))
+
+	var out, errBuf bytes.Buffer
+	app := NewAppWithIO(&out, &errBuf)
+	rep := app.persistAndWarnCredentials(dir, cfg, false, false)
+
+	for _, key := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		if !slicesContains(rep.missing, key) {
+			t.Errorf("%s should be reported missing; missing=%v", key, rep.missing)
+		}
+	}
+	// The optional session token must not raise a false alarm.
+	if slicesContains(rep.missing, "AWS_SESSION_TOKEN") {
+		t.Errorf("the optional session token must not be reported missing: %v", rep.missing)
+	}
+	warn := errBuf.String()
+	if !strings.Contains(warn, "AWS_SECRET_ACCESS_KEY") || !strings.Contains(warn, "source.kind=s3") {
+		t.Errorf("stderr should name the secret and the feature that needs it:\n%s", warn)
+	}
+	if !strings.Contains(warn, "NOT bootable") {
+		t.Errorf("stderr should say the service is not bootable:\n%s", warn)
+	}
+}
+
+// TestPersistAndWarnCredentials_DotenvSatisfiesRequirement_722 pins that a
+// credential already persisted in the target directory's .env.local is not
+// re-reported as missing: the sweep measures whether the DAEMON will find it,
+// not whether this shell exported it.
+func TestPersistAndWarnCredentials_DotenvSatisfiesRequirement_722(t *testing.T) {
+	clearRuntimeSecretEnv(t)
+	dir := t.TempDir()
+	seed := "AWS_ACCESS_KEY_ID=AKIAFROMFILE\nAWS_SECRET_ACCESS_KEY=from-file\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env.local"), []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed .env.local: %v", err)
+	}
+	cfg := s3ServiceConfig(filepath.Join(dir, "corpus"), filepath.Join(dir, "state"))
+
+	var out, errBuf bytes.Buffer
+	app := NewAppWithIO(&out, &errBuf)
+	if rep := app.persistAndWarnCredentials(dir, cfg, false, false); len(rep.missing) != 0 {
+		t.Errorf("credentials already in .env.local must not be reported missing: %v", rep.missing)
+	}
+}
+
+// TestPersistAndWarnCredentials_PgvectorDSNRequired_722 covers the second
+// required runtime secret: `index.pgvector.dsn` has no config-file setter, so an
+// installed pgvector service is unbootable without it.
+func TestPersistAndWarnCredentials_PgvectorDSNRequired_722(t *testing.T) {
+	clearRuntimeSecretEnv(t)
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.RootDir = dir
+	cfg.IndexBackend = "pgvector"
+
+	var out, errBuf bytes.Buffer
+	app := NewAppWithIO(&out, &errBuf)
+	rep := app.persistAndWarnCredentials(dir, cfg, false, false)
+	if !slicesContains(rep.missing, "DIR2MCP_INDEX_PGVECTOR_DSN") {
+		t.Errorf("the pgvector DSN should be reported missing: %v", rep.missing)
+	}
+
+	// With the DSN exported it is captured instead.
+	t.Setenv("DIR2MCP_INDEX_PGVECTOR_DSN", "postgres://user:pw@localhost/db")
+	cfg.IndexPgvectorDSN = "postgres://user:pw@localhost/db"
+	rep = app.persistAndWarnCredentials(dir, cfg, true, false)
+	if !slicesContains(rep.saved, "DIR2MCP_INDEX_PGVECTOR_DSN") {
+		t.Errorf("the pgvector DSN should have been persisted: %v", rep.saved)
+	}
+	if len(rep.missing) != 0 {
+		t.Errorf("nothing should be missing after capture: %v", rep.missing)
+	}
+}
+
+// TestPersistAndWarnCredentials_LocalCorpusUnchanged_722 pins that a plain local
+// corpus with a provider credential behaves exactly as before: no runtime
+// secrets apply, so nothing new is demanded of an existing deployment.
+func TestPersistAndWarnCredentials_LocalCorpusUnchanged_722(t *testing.T) {
+	clearRuntimeSecretEnv(t)
+	dir := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "sk-live")
+	cfg := config.Default()
+	cfg.RootDir = dir
+
+	var out, errBuf bytes.Buffer
+	app := NewAppWithIO(&out, &errBuf)
+	rep := app.persistAndWarnCredentials(dir, cfg, false, false)
+	if !slicesContains(rep.saved, "MISTRAL_API_KEY") {
+		t.Errorf("the provider credential should still be persisted: %v", rep.saved)
+	}
+	if len(rep.missing) != 0 {
+		t.Errorf("a local corpus has no required runtime secrets: %v", rep.missing)
+	}
+}
+
+// TestPersistAndWarnCredentials_AWSCaptureDoesNotSilenceProviderWarning_722
+// pins that widening the sweep did not weaken the pre-existing warning: saving
+// an AWS credential says nothing about whether an embedding provider will
+// resolve at boot, so the "no persisted provider credential" warning must still
+// fire.
+func TestPersistAndWarnCredentials_AWSCaptureDoesNotSilenceProviderWarning_722(t *testing.T) {
+	clearRuntimeSecretEnv(t)
+	dir := t.TempDir()
+	for _, key := range config.Default().ProviderEnvVarRefs() {
+		t.Setenv(key, "")
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s3cr3t-value")
+
+	cfg := s3ServiceConfig(filepath.Join(dir, "corpus"), filepath.Join(dir, "state"))
+	cfg.Source.S3AccessKeyID = "AKIAEXAMPLE"
+	cfg.Source.S3SecretAccessKey = "s3cr3t-value"
+
+	var out, errBuf bytes.Buffer
+	app := NewAppWithIO(&out, &errBuf)
+	app.persistAndWarnCredentials(dir, cfg, false, false)
+	if !strings.Contains(errBuf.String(), "no persisted provider credential") {
+		t.Errorf("the provider-credential warning must survive an AWS-only capture:\n%s", errBuf.String())
+	}
+}
+
+// TestCredentialSweepKeys_722 pins the merge of the provider refs with the
+// runtime secret names: order is stable and a key referenced by both appears
+// once, so it is never written to .env.local twice.
+func TestCredentialSweepKeys_722(t *testing.T) {
+	runtime := []config.RuntimeSecretRef{
+		{Name: "AWS_ACCESS_KEY_ID"},
+		{Name: "MISTRAL_API_KEY"},
+		{Name: ""},
+	}
+	got := credentialSweepKeys([]string{"MISTRAL_API_KEY", "OPENAI_API_KEY"}, runtime)
+	want := []string{"MISTRAL_API_KEY", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("credentialSweepKeys = %v, want %v", got, want)
+	}
+}
+
+// slicesContains keeps the credential assertions readable.
+func slicesContains(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
 }
