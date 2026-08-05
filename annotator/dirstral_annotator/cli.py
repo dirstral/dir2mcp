@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--anchor", action="append", default=[], metavar="EPOCH=VIDEO_S", required=True)
     e.add_argument("--report", type=Path, help="write markdown report here")
     e.add_argument(
+        "--vision-only",
+        action="store_true",
+        help="score the vision cascade alone: the feed supplies ground truth but "
+             "does NOT run as a recognizer",
+    )
+    e.add_argument(
         "--debug",
         action="store_true",
         help="add per-source sample cues to the report's diagnostics",
@@ -147,7 +153,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    pipeline = _pipeline(args, roster, {args.media.name: game})
+    # `--vision-only` is the feed-free measurement (#741 milestone 1). The feed
+    # still supplies ground truth, which is what a label set IS, but it is kept
+    # out of the pipeline so play-by-play does not run as a recognizer.
+    #
+    # Without this the headline is mostly a measurement of wall-clock alignment:
+    # play-by-play emits a `pitch` cue per feed event, the scorer reads `pitch`
+    # annotations, and the feed is therefore scored against itself. That is the
+    # right number for a corpus that HAS a feed and a misleading one for the
+    # archives this milestone targets.
+    bindings = {} if args.vision_only else {args.media.name: game}
+    pipeline = _pipeline(args, roster, bindings)
+    if args.vision_only:
+        print("vision-only: play-by-play supplies ground truth only, not cues",
+              file=sys.stderr)
     # Keep the pre-fusion cues: they are what makes an empty source row
     # explainable (ineligible / floored / weak) instead of just empty.
     cues, annotations = diagnose_mod.run_pipeline(pipeline, args.media)
