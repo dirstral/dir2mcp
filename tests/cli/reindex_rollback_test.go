@@ -115,8 +115,11 @@ func TestReindex_RestoresContentHashesOnFailure(t *testing.T) {
 		t.Fatalf("reindex should fail when the ingestor errors; got exit 0 stderr=%q", stderr.String())
 	}
 
+	// Include stderr in the failure: the restore is best-effort and only warns,
+	// so a restore that errored is otherwise invisible and a CI failure here
+	// reads as an unexplained flake with no cause attached.
 	if got := readDocumentHash(t, stateDir, relPath); got != original {
-		t.Errorf("content_hash must be restored after a failed reindex; want %q got %q", original, got)
+		t.Errorf("content_hash must be restored after a failed reindex; want %q got %q stderr=%q", original, got, stderr.String())
 	}
 }
 
