@@ -548,10 +548,19 @@ var bundleURLPattern = regexp.MustCompile("(?i)\\b[a-z][a-z0-9+.-]*://[^\\s\"'`<
 // normalized on its way into the bundle.
 func redactURLCredentials(s string) string {
 	return bundleURLPattern.ReplaceAllStringFunc(s, func(raw string) string {
-		// Trailing sentence punctuation is prose, not part of the URL.
-		trimmed := strings.TrimRight(raw, ".,;:!)]}")
-		suffix := raw[len(trimmed):]
-		rest, fragment, hasFragment := strings.Cut(trimmed, "#")
+		// Trailing sentence punctuation after a URL in prose is not part of it,
+		// so it is trimmed off and re-appended. That is only safe when nothing
+		// at the end of the URL is being redacted: for a URL with parameters the
+		// trailing run would be the tail of the last parameter's VALUE, and
+		// re-appending it would leak the final characters of a credential. So a
+		// URL carrying a query or fragment keeps the punctuation inside the
+		// redacted value instead (cosmetic loss, no leak).
+		url, suffix := raw, ""
+		if !strings.ContainsAny(raw, "?#") {
+			url = strings.TrimRight(raw, ".,;:!)]}")
+			suffix = raw[len(url):]
+		}
+		rest, fragment, hasFragment := strings.Cut(url, "#")
 		rest, query, hasQuery := strings.Cut(rest, "?")
 
 		out := redactURLUserinfo(rest)

@@ -97,12 +97,20 @@ func TestRedactBundleSecrets(t *testing.T) {
 			mustNot:  "hunter2hunter2",
 			mustHave: "https://[REDACTED]@minio.internal:9000/bucket?password=[REDACTED]",
 		},
-		// Prose punctuation after a URL is not part of it.
+		// A credential ending in punctuation must not have its tail survive the
+		// prose-punctuation trim: the trailing run is absorbed into the
+		// redaction rather than re-appended.
 		{
-			name:     "trailing sentence punctuation preserved",
+			name:     "credential ending in a period does not leak its tail",
 			in:       "failed against https://host/v1?token=abcdef123456.",
 			mustNot:  "abcdef123456",
-			mustHave: "?token=[REDACTED].",
+			mustHave: "?token=[REDACTED]",
+		},
+		{
+			name:     "userinfo credential ending in punctuation",
+			in:       "dial redis://:hunter2hunter2@cache.internal:6379.",
+			mustNot:  "hunter2hunter2",
+			mustHave: "redis://[REDACTED]@cache.internal:6379.",
 		},
 		// URL userinfo (#720). The whole userinfo goes, not just the password:
 		// for an S3-compatible endpoint the username IS the access key ID. The
@@ -165,6 +173,10 @@ func TestRedactBundleSecretsLeavesInnocuousTextIntact(t *testing.T) {
 		"git@github.com:dirstral/dir2mcp.git",
 		// A fragment with no `name=value` pair carries no value to remove.
 		"https://host/docs#installation",
+		// Prose punctuation after a parameterless URL is not part of it and is
+		// preserved: nothing at the end of this URL is being redacted.
+		"see https://api.mistral.ai/v1/embeddings.",
+		"docs at https://host/guide (recommended).",
 	} {
 		t.Run(in, func(t *testing.T) {
 			if got := redactBundleSecrets(in); got != in {
