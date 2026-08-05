@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -33,7 +34,11 @@ const (
 	bundleURLPassword = "repro-only-secret"
 	bundleURLUser     = "audit-user"
 	bundleS3Bucket    = "audit-bucket"
-	bundleEndpoint    = "https://" + bundleURLUser + ":" + bundleURLPassword + "@example.invalid"
+	// The endpoint carries a credential in BOTH persisted URL forms the issue
+	// names: HTTP userinfo, and a query-string parameter.
+	bundleQueryPassword = "repro-only-query-secret"
+	bundleEndpoint      = "https://" + bundleURLUser + ":" + bundleURLPassword +
+		"@example.invalid/?password=" + bundleQueryPassword
 )
 
 // buildCredentialBundle runs `support-bundle` against a config whose persisted
@@ -69,12 +74,14 @@ func buildCredentialBundle(t *testing.T, extraArgs ...string) (entries map[strin
 
 	// The persisted snapshot must really contain the credential, otherwise the
 	// test would pass for the wrong reason.
-	onDisk, err := os.ReadFile(filepath.Join(stateDir, ".dir2mcp.yaml.snapshot"))
+	onDisk, err := os.ReadFile(config.EffectiveSnapshotPath(stateDir))
 	if err != nil {
 		t.Fatalf("read persisted snapshot: %v", err)
 	}
-	if !bytes.Contains(onDisk, []byte(bundleURLPassword)) {
-		t.Fatalf("precondition failed: the persisted snapshot does not contain the URL credential, so this test proves nothing:\n%s", onDisk)
+	for _, credential := range []string{bundleURLPassword, bundleQueryPassword} {
+		if !bytes.Contains(onDisk, []byte(credential)) {
+			t.Fatalf("precondition failed: the persisted snapshot does not contain %q, so this test proves nothing:\n%s", credential, onDisk)
+		}
 	}
 
 	return extractBundleEntries(t, dest), rootDir, stateDir
@@ -163,6 +170,7 @@ func TestSupportBundleDefaultRedactsURLCredential(t *testing.T) {
 	}
 	assertNoEntryContains(t, entries, bundleURLPassword, "a URL password")
 	assertNoEntryContains(t, entries, bundleURLUser, "a URL username (an S3 access key ID)")
+	assertNoEntryContains(t, entries, bundleQueryPassword, "a query-string password")
 }
 
 // TestSupportBundleDefaultRedactsCorpusAndStatePaths is the path half. The
@@ -245,8 +253,12 @@ func TestSupportBundleIncludeContentRestoresPathsButNeverCredentials(t *testing.
 
 	assertNoEntryContains(t, entries, bundleURLPassword, "a URL password despite --include-content")
 	assertNoEntryContains(t, entries, bundleURLUser, "a URL username despite --include-content")
+	assertNoEntryContains(t, entries, bundleQueryPassword, "a query-string password despite --include-content")
 	if !strings.Contains(snapshot, "[REDACTED]@example.invalid") {
 		t.Errorf("the endpoint host should survive with only its userinfo removed:\n%s", snapshot)
+	}
+	if !strings.Contains(snapshot, "password=[REDACTED]") {
+		t.Errorf("the query parameter name should survive with only its value removed:\n%s", snapshot)
 	}
 }
 
@@ -279,7 +291,7 @@ func TestSupportBundleRedactedSnapshotIsStillValidYAML(t *testing.T) {
 func TestSupportBundleSnapshotOnDiskIsUntouched(t *testing.T) {
 	_, rootDir, stateDir := buildCredentialBundle(t)
 
-	onDisk, err := os.ReadFile(filepath.Join(stateDir, ".dir2mcp.yaml.snapshot"))
+	onDisk, err := os.ReadFile(config.EffectiveSnapshotPath(stateDir))
 	if err != nil {
 		t.Fatalf("read snapshot: %v", err)
 	}

@@ -779,7 +779,7 @@ filtered on two independent tiers:
 
 | Tier | What it covers | When it is removed |
 |---|---|---|
-| Credentials | bearer tokens, `Authorization` headers, token-style query parameters, and the `user:pass@` userinfo of any URL | **always**, in every mode |
+| Credentials | bearer tokens, `Authorization` headers, the `user:pass@` userinfo of any URL, and the value of every URL query/fragment parameter | **always**, in every mode |
 | Local environment | corpus paths and titles, extraction error messages, and the config snapshot's paths, bind addresses, endpoints, prompts and operator-written glob/regex/word lists | by default; kept with `--include-content` |
 
 `--include-content` widens the second tier only. It never re-enables credential

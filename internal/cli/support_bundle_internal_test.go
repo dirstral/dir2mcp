@@ -36,6 +36,74 @@ func TestRedactBundleSecrets(t *testing.T) {
 			mustNot:  "supersecretquerytoken",
 			mustHave: "token=[REDACTED]",
 		},
+		// Password- and secret-style query parameters. The original rule listed
+		// only token/api_key names, so an endpoint authenticating with
+		// ?password= or &client_secret= survived into the bundle.
+		{
+			name:     "password query param",
+			in:       "https://host/mcp?password=hunter2hunter2&x=1",
+			mustNot:  "hunter2hunter2",
+			mustHave: "password=[REDACTED]",
+		},
+		{
+			name:     "client_secret query param",
+			in:       "https://host/oauth?client_secret=abcdef123456&grant_type=x",
+			mustNot:  "abcdef123456",
+			mustHave: "client_secret=[REDACTED]",
+		},
+		{
+			name:     "hyphenated client-secret query param",
+			in:       "https://host/oauth?client-secret=abcdef123456",
+			mustNot:  "abcdef123456",
+			mustHave: "client-secret=[REDACTED]",
+		},
+		{
+			name:     "x-api-key query param",
+			in:       "https://host/v1?x-api-key=abcdef123456",
+			mustNot:  "abcdef123456",
+			mustHave: "x-api-key=[REDACTED]",
+		},
+		{
+			name:     "fragment-form credential",
+			in:       "https://host/cb#id_token=abcdef123456&state=x",
+			mustNot:  "abcdef123456",
+			mustHave: "id_token=[REDACTED]",
+		},
+		{
+			name:     "signature query param",
+			in:       "https://host/blob?sig=abcdef123456",
+			mustNot:  "abcdef123456",
+			mustHave: "sig=[REDACTED]",
+		},
+		// No vocabulary: a parameter nobody has thought to name yet is redacted
+		// the same as `token`. This is the property a deny-list cannot have, and
+		// the reason the rule has no name list at all.
+		{
+			name:     "unknown parameter name is redacted too",
+			in:       "https://host/v1?wholly_novel_credential_name=abcdef123456",
+			mustNot:  "abcdef123456",
+			mustHave: "wholly_novel_credential_name=[REDACTED]",
+		},
+		{
+			name:     "every parameter in a multi-param URL",
+			in:       "https://host/v1?a=first-value&b=second-value",
+			mustNot:  "second-value",
+			mustHave: "a=[REDACTED]&b=[REDACTED]",
+		},
+		// Userinfo and query credentials in one URL: both go, host and path stay.
+		{
+			name:     "userinfo and query together",
+			in:       "https://u:p@minio.internal:9000/bucket?password=hunter2hunter2",
+			mustNot:  "hunter2hunter2",
+			mustHave: "https://[REDACTED]@minio.internal:9000/bucket?password=[REDACTED]",
+		},
+		// Prose punctuation after a URL is not part of it.
+		{
+			name:     "trailing sentence punctuation preserved",
+			in:       "failed against https://host/v1?token=abcdef123456.",
+			mustNot:  "abcdef123456",
+			mustHave: "?token=[REDACTED].",
+		},
 		// URL userinfo (#720). The whole userinfo goes, not just the password:
 		// for an S3-compatible endpoint the username IS the access key ID. The
 		// host survives, because knowing which endpoint was configured is the
@@ -95,6 +163,8 @@ func TestRedactBundleSecretsLeavesInnocuousTextIntact(t *testing.T) {
 		"http://[::1]:8080/mcp",
 		// scp-style remote, not a URL.
 		"git@github.com:dirstral/dir2mcp.git",
+		// A fragment with no `name=value` pair carries no value to remove.
+		"https://host/docs#installation",
 	} {
 		t.Run(in, func(t *testing.T) {
 			if got := redactBundleSecrets(in); got != in {

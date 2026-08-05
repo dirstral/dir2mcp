@@ -44,7 +44,7 @@ const supportLogTailBytes int64 = 2 * 1024 * 1024 // 2 MB
 //     credential came from), never the credentials; server.log, the client
 //     bridge logs, the snapshot and connection URLs all run through
 //     redactBundleSecrets, which strips bearer tokens, Authorization headers,
-//     token-style query parameters and URL userinfo.
+//     URL userinfo, and the value of every URL query/fragment parameter.
 //   - Values naming the operator's machine or corpus — corpus paths and titles,
 //     extraction error messages, and the snapshot's paths, endpoints, hosts,
 //     prompts and hand-written lists — are removed unless the operator opts in
@@ -495,41 +495,114 @@ func supportEntryNames(files []supportFile) []string {
 	return names
 }
 
-// bundleSecretRedactors mask credential material that can appear in client
-// bridge logs and connection URLs (bearer tokens, Authorization headers, and
-// token-style query parameters) before they are written into the shared bundle.
+// bundleSecretRedactors mask header-shaped credential material (bearer tokens
+// and Authorization headers) before it is written into the shared bundle. URLs
+// are handled structurally instead — see redactURLCredentials.
 var bundleSecretRedactors = []*regexp.Regexp{
 	// Authorization header: header name + (optional "Bearer ") + value.
 	regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*)(?:bearer\s+)?[^\s"',}]+`),
 	// Standalone "Bearer <token>".
 	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`),
-	// token-style query parameters (?token=..., &access_token=..., &api_key=...).
-	regexp.MustCompile(`(?i)([?&](?:token|access_token|api_key|apikey|key)=)[^&\s"']+`),
-	// URL userinfo: the `user:password@` (or bare `user@`) component of any
-	// absolute URL — https://u:p@host, postgres://u:p@host/db, redis://:p@host
-	// (#720).
-	//
-	// This is deliberately keyed on the SHAPE of the value, not on a list of
-	// known key names. A name-keyed rule only covers the URL-bearing settings
-	// that exist today and silently leaks the next one somebody adds; a
-	// shape-keyed rule covers every URL in every artifact — the config snapshot,
-	// server.log, the client bridge logs, connection.json — including fields not
-	// yet invented.
-	//
-	// The whole userinfo goes, not just the password: for an S3-compatible
-	// endpoint the *username* is the access key ID, which is credential
-	// material in its own right.
-	//
-	// The excluded characters keep the match inside a single URL authority, so
-	// `https://example.com/a@b` (an @ in the path) and a bare email address in
-	// prose are both left alone.
-	regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@\[\]"']+@`),
+}
+
+// bundleURLPattern finds absolute-URL-shaped substrings in free text so
+// redactURLCredentials can rewrite each one. The excluded characters stop a
+// match at whitespace or a quote, which is where a URL ends in a log line or a
+// YAML scalar.
+var bundleURLPattern = regexp.MustCompile("(?i)\\b[a-z][a-z0-9+.-]*://[^\\s\"'`<>]+")
+
+// redactURLCredentials removes credential material from every URL in s:
+// the userinfo component, and the VALUE of every query and fragment parameter.
+//
+// # Why every parameter, and not a list of credential-ish names
+//
+// The original rule redacted a fixed set of parameter names
+// (token/access_token/api_key/apikey/key). That is a deny-list, and it fails
+// OPEN: `?password=` and `?client_secret=` sailed straight through it, and so
+// would whatever name the next integration invents. Widening the vocabulary
+// only moves the boundary — it never closes it.
+//
+// So the value of EVERY parameter goes, with no vocabulary at all. Two
+// measurements say the cost is close to zero:
+//
+//   - A real effective-config snapshot contains no query parameters whatsoever.
+//     Persisted URLs are endpoints, and provider.NormalizeEmbedBaseURL already
+//     strips `RawQuery` before an endpoint is ever recorded.
+//   - dir2mcp does not build query-parameter URLs of its own, so server.log and
+//     the client bridge logs have essentially none to lose either.
+//
+// This also matches what the repo already does everywhere else it hands a URL
+// to something that logs or persists it: avutil.redactInput and
+// provider.NormalizeEmbedBaseURL both clear User, RawQuery and Fragment
+// wholesale rather than inspecting names. This is the same decision, one step
+// less destructive: parameter NAMES survive, because a name is not a credential
+// and "there was a password parameter here" is exactly the kind of thing a
+// maintainer reading a bundle needs to see.
+//
+// The whole userinfo goes, not just the password: for an S3-compatible endpoint
+// the *username* is the access key ID, which is credential material in its own
+// right.
+//
+// Rewriting is textual surgery on the matched substring rather than a
+// url.Parse/String round-trip, so a log line is never silently re-encoded or
+// normalized on its way into the bundle.
+func redactURLCredentials(s string) string {
+	return bundleURLPattern.ReplaceAllStringFunc(s, func(raw string) string {
+		// Trailing sentence punctuation is prose, not part of the URL.
+		trimmed := strings.TrimRight(raw, ".,;:!)]}")
+		suffix := raw[len(trimmed):]
+		rest, fragment, hasFragment := strings.Cut(trimmed, "#")
+		rest, query, hasQuery := strings.Cut(rest, "?")
+
+		out := redactURLUserinfo(rest)
+		if hasQuery {
+			out += "?" + redactParamValues(query)
+		}
+		if hasFragment {
+			out += "#" + redactParamValues(fragment)
+		}
+		return out + suffix
+	})
+}
+
+// redactURLUserinfo replaces the `user:pass@` component of scheme://authority.
+// An `@` later in the path is not userinfo and is left alone.
+func redactURLUserinfo(schemeAndPath string) string {
+	sep := strings.Index(schemeAndPath, "://")
+	if sep < 0 {
+		return schemeAndPath
+	}
+	head := schemeAndPath[:sep+3]
+	tail := schemeAndPath[sep+3:]
+	authority := tail
+	if slash := strings.Index(tail, "/"); slash >= 0 {
+		authority = tail[:slash]
+	}
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return schemeAndPath
+	}
+	return head + "[REDACTED]" + tail[at:]
+}
+
+// redactParamValues blanks the value of every `name=value` pair in a query or
+// fragment, keeping the names. A component with no `=` (a plain `#anchor`)
+// carries no value and is returned untouched.
+func redactParamValues(component string) string {
+	pairs := strings.Split(component, "&")
+	for i, pair := range pairs {
+		name, _, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		pairs[i] = name + "=[REDACTED]"
+	}
+	return strings.Join(pairs, "&")
 }
 
 // redactBundleSecrets masks credential material in text destined for the support
-// bundle. It is intentionally conservative (pattern-based) — the bundle is meant
-// to be shareable with a maintainer, so leaking a bearer token would defeat the
-// purpose.
+// bundle. The bundle is meant to be shareable with a maintainer, so leaking a
+// bearer token would defeat the purpose.
 //
 // This is the bundle's TIER-1 filter: it removes credentials, and it runs over
 // every artifact in every mode. --include-content never disables it, because
@@ -539,9 +612,7 @@ func redactBundleSecrets(s string) string {
 	out := s
 	out = bundleSecretRedactors[0].ReplaceAllString(out, "${1}[REDACTED]")
 	out = bundleSecretRedactors[1].ReplaceAllString(out, "Bearer [REDACTED]")
-	out = bundleSecretRedactors[2].ReplaceAllString(out, "${1}[REDACTED]")
-	out = bundleSecretRedactors[3].ReplaceAllString(out, "${1}[REDACTED]@")
-	return out
+	return redactURLCredentials(out)
 }
 
 // claudeMCPLogDirs returns the OS-specific directories where Claude Desktop
