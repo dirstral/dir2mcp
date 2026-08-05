@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -125,18 +126,25 @@ func (a *App) emitTTMLExport(ctx context.Context, global globalOptions, cfg conf
 }
 
 // emitSMILSidecar probes the media and writes a SMIL packaging document next to
-// the TTML --out path (same base name, .smil extension). It fails open per SPEC
-// §8.6.10: when ffprobe is unavailable or the media cannot be probed, it logs a
-// note (non-fatal) and produces no SMIL rather than failing the export.
+// the TTML --out path (same base name, .smil extension). The media is resolved
+// through the configured CorpusFS (Localize), so a non-local corpus (S3) is
+// probed from a temporary local copy rather than from a RootDir path that holds
+// no file (issue #736); for a local corpus Localize is the in-root path with a
+// no-op cleanup, so local behavior is unchanged. It fails open per SPEC §8.6.10:
+// when the media cannot be fetched or probed (ffprobe absent, corrupt input) it
+// warns (non-fatal) and produces no SMIL rather than failing the export.
 func (a *App) emitSMILSidecar(ctx context.Context, global globalOptions, cfg config.Config, opts exportOptions) {
-	mediaPath := filepath.Join(cfg.RootDir, opts.relPath)
+	mediaPath, cleanup, ok := a.localizeExportMedia(ctx, cfg, opts.relPath)
+	if !ok {
+		return
+	}
+	defer cleanup()
+
 	info, err := avutil.ProbeMediaInfo(ctx, mediaPath)
 	if err != nil {
 		// Fail open: omit SMIL, keep the TTML already written. Never echo raw
 		// ffprobe stderr at the user beyond a short note.
-		if !global.quiet && !global.jsonOutput {
-			writef(a.stdout, "skipping SMIL (media metadata unavailable): %v\n", err)
-		}
+		a.warnSMILSkipped("media metadata unavailable: %v", err)
 		return
 	}
 
@@ -145,17 +153,57 @@ func (a *App) emitSMILSidecar(ctx context.Context, global globalOptions, cfg con
 	// once with the primary language tag.
 	subs := []subtitle.SMILSubtitleRef{{Src: filepath.Base(opts.out), Lang: opts.lang}}
 	smil := subtitle.RenderSMIL(subtitle.SMILInput{
-		MediaSrc:  filepath.Base(mediaPath),
+		// The media reference is the corpus document's own name, never the
+		// localized copy's: a downloaded S3 object lands in a temp file whose
+		// name is an implementation detail and does not exist for a player.
+		MediaSrc:  path.Base(filepath.ToSlash(opts.relPath)),
 		Info:      info,
 		Subtitles: subs,
 	})
 	if err := writeFileAtomic(smilPath, []byte(smil)); err != nil {
-		if !global.quiet && !global.jsonOutput {
-			writef(a.stdout, "skipping SMIL (write failed): %v\n", err)
-		}
+		a.warnSMILSkipped("write %q: %v", smilPath, err)
 		return
 	}
 	if !global.quiet && !global.jsonOutput {
 		writef(a.stdout, "wrote %s\n", smilPath)
 	}
+}
+
+// localizeExportMedia resolves the corpus document at relPath to a real local
+// filesystem path for probing, returning it with a cleanup that releases any
+// temporary copy. It builds the CorpusFS the same way the server does
+// (buildCorpusFS), so the configured source kind — including S3, which has no
+// local file at RootDir/rel_path — is honored.
+//
+// It is called only from the SMIL path, which runs only when
+// media.subtitles.smil.enabled is set and an --out path was given, so an export
+// that needs no probe never fetches media.
+//
+// Both failure modes fail open (ok=false) but are reported distinctly: an
+// operator must be able to tell "the media could not be fetched" from "the media
+// was fetched and could not be probed".
+func (a *App) localizeExportMedia(ctx context.Context, cfg config.Config, relPath string) (string, func(), bool) {
+	fsys, err := buildCorpusFS(ctx, cfg)
+	if err != nil {
+		a.warnSMILSkipped("corpus source unavailable: %v", err)
+		return "", nil, false
+	}
+	localPath, cleanup, err := fsys.Localize(ctx, relPath)
+	if err != nil {
+		a.warnSMILSkipped("cannot read media %q from the corpus source: %v", relPath, err)
+		return "", nil, false
+	}
+	if cleanup == nil {
+		cleanup = func() {}
+	}
+	return localPath, cleanup, true
+}
+
+// warnSMILSkipped reports a non-fatal reason the SMIL companion was not written.
+// It goes to stderr as a `warning:` line, the CLI's convention for non-fatal
+// problems, and is NOT suppressed by --quiet/--json: silently omitting an
+// explicitly enabled artifact and saying nothing about it is what made issue
+// #736 invisible to S3 operators. stdout stays machine-safe.
+func (a *App) warnSMILSkipped(format string, args ...interface{}) {
+	writef(a.stderr, "warning: skipping SMIL ("+format+")\n", args...)
 }
