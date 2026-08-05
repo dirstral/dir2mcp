@@ -71,9 +71,11 @@ func TestRecognize_GeneratesRecognitionRepresentation(t *testing.T) {
 	if rec.calls != 1 {
 		t.Fatalf("expected exactly one backend call, got %d", rec.calls)
 	}
-	if want := filepath.Join(root, "games", "game7.mp4"); rec.lastAbsPath != want {
-		t.Fatalf("backend must receive the absolute media path, got %q want %q", rec.lastAbsPath, want)
-	}
+	// The backend must receive an absolute path to the media itself. For a local
+	// corpus that is the in-root file, but it comes from CorpusFS.Localize (#734),
+	// which resolves symlinks on the way — so identity is asserted with SameFile
+	// rather than string equality (a temp root is symlinked on macOS).
+	assertSameFile(t, filepath.Join(root, "games", "game7.mp4"), rec.lastAbsPath)
 
 	if len(st.reps) != 1 || st.reps[0].RepType != ingest.RepTypeRecognition {
 		t.Fatalf("expected one recognition representation, got %+v", st.reps)

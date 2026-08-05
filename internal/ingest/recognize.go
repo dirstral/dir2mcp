@@ -316,7 +316,36 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 	if s.repGen == nil || s.recognizer == nil || doc.DocType != "video" {
 		return false, nil
 	}
-	absPath := filepath.Join(s.cfg.RootDir, filepath.FromSlash(doc.RelPath))
+	// Recognition backends read the media from a real filesystem path, so the
+	// media must be resolved through the CorpusFS rather than reconstructed from
+	// RootDir+rel_path (#734): an object-store backend reports no local path
+	// (DiscoveredFile.AbsPath == "") and its Walk ignores RootDir, so a joined
+	// path names a file that does not exist and recognition fails on a corpus
+	// that ingested fine. Localize returns the resolved in-root path with a
+	// no-op cleanup for a local corpus (no copy, unchanged behavior) and a temp
+	// download for an object store. The Recognizer contract is synchronous — the
+	// backend has finished reading the file by the time Recognize returns — so
+	// releasing the copy on return is safe.
+	localPath, cleanup, err := s.corpusFS().Localize(ctx, doc.RelPath)
+	if err != nil {
+		// The backend was never reached, but the outcome for this document is the
+		// same as a backend failure — no recognition, retriable next scan — so it
+		// carries the same sentinel and classifies as RECOGNIZE_FAILED rather than
+		// the generic EXTRACT_FAILED (parallel to the STT path, which tags a failed
+		// audio-track extraction as a transcript provider failure).
+		return false, fmt.Errorf("%w: localize %s: %w", ErrRecognitionProviderFailure, doc.RelPath, err)
+	}
+	defer cleanup()
+
+	// The serve wire contract is an ABSOLUTE media path (design 0004 §5). LocalFS
+	// already returns one; an object store's temp copy lands under StateDir, which
+	// can be configured relative (e.g. "./.dir2mcp"), so absolutize before handing
+	// the path over — a connect-only backend does not share the daemon's CWD.
+	absPath, err := filepath.Abs(localPath)
+	if err != nil {
+		return false, fmt.Errorf("%w: resolve media path for %s: %w", ErrRecognitionProviderFailure, doc.RelPath, err)
+	}
+
 	result, err := s.recognizer.Recognize(ctx, absPath)
 	if err != nil {
 		// Tag with the provider-failure sentinel so a transient recognize-backend
