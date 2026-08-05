@@ -2657,6 +2657,105 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 	return stats, nil
 }
 
+// nextPendingQuery builds the SQL for one embed batch.
+//
+// Both selective predicates and the LIMIT sit INSIDE filtered_chunks. #732
+// fixed the same shape in embeddedChunkPageQuery; this one is #743. With
+// index_kind and the LIMIT outside the CTE, every call materialised the whole
+// pending set before discarding all but `limit` rows. That is not quadratic the
+// way the metadata walk was, because there is no cursor to compound it, but it
+// runs once per embed cycle for the life of an ingest: a deep queue paid a full
+// scan of everything still pending on every batch.
+//
+// The first span comes from a correlated MIN(span_id) rather than a
+// ROW_NUMBER() window for the reason #742 measured: with the LIMIT pushed down,
+// the window made SQLite drive the join off a full scan of `spans`, which cost
+// more than the CTE fix saved.
+//
+// The documents LEFT JOIN stays inside the CTE because it is a predicate, not
+// decoration: a chunk whose parent document is errored or tombstoned must not
+// be handed to the embed worker. The NULL guard preserves a chunk with no
+// document row (UpsertChunkTask seeds bare chunks).
+//
+// idx_chunks_embedded_kind_seek (embedding_status, deleted, index_kind,
+// chunk_id), added by #742, already covers this access path, so no new index.
+func nextPendingQuery(indexKind string, limit int) (string, []any) {
+	args := []any{"pending"}
+	kindPredicate := ""
+	if strings.TrimSpace(indexKind) != "" {
+		kindPredicate = " AND c.index_kind = ?"
+	}
+	query := `WITH filtered_chunks AS (
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language,
+	                   c.chunk_context,
+	                   COALESCE(d.mtime_unix, 0) AS mtime_unix
+	            FROM chunks c
+	            LEFT JOIN documents d ON d.rel_path = c.rel_path
+	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
+	              AND (d.rel_path IS NULL OR (d.deleted = 0 AND d.status != 'error'))` + kindPredicate + `
+	            ORDER BY c.chunk_id
+	            LIMIT ?
+	          )
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind, fc.modality, fc.media_ref, fc.language,
+	                 fc.chunk_context,
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp."end", 0), COALESCE(sp.extra_json, ''), fc.mtime_unix
+	          FROM filtered_chunks fc
+	          LEFT JOIN spans sp ON sp.span_id = (
+	            SELECT MIN(s.span_id) FROM spans s WHERE s.chunk_id = fc.chunk_id
+	          )
+	          ORDER BY fc.chunk_id`
+	if kindPredicate != "" {
+		args = append(args, indexKind)
+	}
+	args = append(args, limit)
+	return query, args
+}
+
+// NextPendingQueryForTest returns the SQL one embed batch runs.
+//
+// Exported solely so the #743 regression test can live under tests/ as
+// AGENTS.md requires. As #732 established, a query-plan assertion is not a
+// sufficient guard: with the predicates outside the CTE SQLite still picks a
+// reasonable index, so a plan-only test passes against unfixed code. What has
+// to be pinned is WHERE in the statement the predicates and the LIMIT sit.
+// Production code never calls this.
+func NextPendingQueryForTest(indexKind string, limit int) (string, []any) {
+	return nextPendingQuery(indexKind, limit)
+}
+
+// ExplainNextPendingForTest returns the SQLite query plan (one string per plan
+// row) for a single embed batch.
+//
+// Exported solely so the #743 regression test can live under tests/ as
+// AGENTS.md requires: the property worth pinning is that a batch SEEKS its rows
+// through an index rather than scanning the whole chunks table, which is not
+// observable through the ordinary store API. Production code never calls this.
+func (s *SQLiteStore) ExplainNextPendingForTest(ctx context.Context, indexKind string, limit int) ([]string, error) {
+	db, err := s.ensureReadDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	query, args := nextPendingQuery(indexKind, limit)
+	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			return nil, err
+		}
+		plan = append(plan, detail)
+	}
+	return plan, rows.Err()
+}
+
 func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error) {
 	db, err := s.ensureDB(ctx)
 	if err != nil {
@@ -2667,40 +2766,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		limit = 32
 	}
 
-	args := []any{"pending"}
-	// Skip chunks whose parent document is errored or tombstoned: a doc whose
-	// status is 'error' (e.g. a later representation failed after an earlier
-	// rep's chunks committed) or is deleted must not keep live embeddable
-	// chunks that the embed worker re-embeds every cycle. Documents are keyed
-	// by rel_path, which chunks denormalize, so a LEFT JOIN on it predicates
-	// the parent's lifecycle at candidate selection. The NULL guard preserves a
-	// chunk with no document row (e.g. UpsertChunkTask seeds a bare chunk).
-	query := `WITH filtered_chunks AS (
-	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language,
-	                   c.chunk_context,
-	                   COALESCE(d.mtime_unix, 0) AS mtime_unix
-	            FROM chunks c
-	            LEFT JOIN documents d ON d.rel_path = c.rel_path
-	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
-	              AND (d.rel_path IS NULL OR (d.deleted = 0 AND d.status != 'error'))
-	          ),
-	          ranked_spans AS (
-	            SELECT s.chunk_id, s.span_kind, s.start, s."end", s.extra_json,
-	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
-	            FROM spans s
-	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
-	          )
-	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind, fc.modality, fc.media_ref, fc.language,
-	                 fc.chunk_context,
-	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''), fc.mtime_unix
-	          FROM filtered_chunks fc
-	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
-	if strings.TrimSpace(indexKind) != "" {
-		query += " WHERE fc.index_kind = ?"
-		args = append(args, indexKind)
-	}
-	args = append(args, limit)
-	query += " ORDER BY fc.chunk_id LIMIT ?"
+	query, args := nextPendingQuery(indexKind, limit)
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
