@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -253,7 +254,7 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("create state dir %s: %v", sc.stateDir, err))
 		return exitGeneric
 	}
-	savedCreds, failedCreds := a.persistAndWarnCredentials(sc.workingDir, cfg, global.jsonOutput, global.quiet)
+	creds := a.persistAndWarnCredentials(sc.workingDir, cfg, global.jsonOutput, global.quiet)
 
 	serviceArgs := installServiceArgs(global, sc)
 
@@ -273,15 +274,24 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 		return a.emitServiceJSON(map[string]interface{}{
 			"action": "install", "label": sc.label, "backend": mgr.backendName(),
 			"unit_path": unitPath, "working_dir": sc.workingDir, "binary": sc.binaryPath,
-			"persisted_credentials": savedCreds,
-			"failed_credentials":    failedCreds,
+			"persisted_credentials": creds.saved,
+			"failed_credentials":    creds.failed,
+			// missing_credentials names required runtime secrets with no
+			// persistent source: the service is installed but cannot boot
+			// until each is resolvable from .env.local/keychain (#722).
+			"missing_credentials": creds.missing,
 		})
 	}
 	if !global.quiet {
 		writef(a.stdout, "installed %s service %q\n", mgr.backendName(), sc.label)
 		writef(a.stdout, "  unit:    %s\n", unitPath)
 		writef(a.stdout, "  workdir: %s\n", sc.workingDir)
-		writeln(a.stdout, "the daemon will start now and again at every login")
+		if len(creds.missing) > 0 {
+			writef(a.stdout, "the daemon will start at every login, but %d required credential(s) are still missing (see warnings above)\n",
+				len(creds.missing))
+		} else {
+			writeln(a.stdout, "the daemon will start now and again at every login")
+		}
 	}
 	return exitSuccess
 }
@@ -399,43 +409,150 @@ func (a *App) emitServiceJSON(payload map[string]interface{}) int {
 	return exitSuccess
 }
 
-// persistAndWarnCredentials is called during `service install`. It looks
-// for provider credentials in the current process environment (from the
-// operator's `export KEY=...` session) and persists any it finds to
-// .env.local in the corpus working directory, so the launchd service can
-// read them after a reboot — launchd does not inherit shell exports.
+// serviceCredentialReport is the outcome of the install-time credential sweep.
+// Every field holds env var NAMES only — never values (#722).
+type serviceCredentialReport struct {
+	// saved were found in the current process environment and written to
+	// .env.local, so the supervised daemon will see them after a reboot.
+	saved []string
+	// failed could not be written (bad value or write error).
+	failed []string
+	// missing are REQUIRED by the effective config and have no persistent
+	// source at all: the installed service cannot boot until they get one.
+	missing []string
+}
+
+// persistAndWarnCredentials is called during `service install`. It looks for the
+// runtime credentials the effective config depends on in the current process
+// environment (from the operator's `export KEY=...` session) and persists any it
+// finds to .env.local in the corpus working directory, so the supervised service
+// can read them after a reboot — launchd/systemd do not inherit shell exports.
 //
-// In JSON or quiet mode all normal output is suppressed; the caller
-// receives (saved, failed) to include in structured output instead.
-// Write failures and invalid values (containing newlines) are collected
-// into failed and reported as warnings in text mode.
-func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config, jsonOut, quiet bool) (saved, failed []string) {
+// The sweep covers BOTH provider-profile `api_key` references (ProviderEnvVarRefs)
+// and the non-provider runtime secrets of the effective config (RuntimeSecretRefs:
+// S3 credentials, the Qdrant key, the pgvector DSN, the broker URL, the x402
+// facilitator token). Before #722 only the provider refs were considered, so an
+// `source.kind: s3` install validated against AWS credentials that existed only
+// in the installing shell, then silently produced a service that could not boot.
+//
+// In JSON or quiet mode all normal output is suppressed; the caller receives the
+// report to include in structured output instead.
+func (a *App) persistAndWarnCredentials(workingDir string, cfg config.Config, jsonOut, quiet bool) serviceCredentialReport {
 	envPath := filepath.Join(workingDir, ".env.local")
-	refs := cfg.ProviderEnvVarRefs()
-	saved, failed = persistCredentialsFromEnv(envPath, refs)
+	providerRefs := cfg.ProviderEnvVarRefs()
+	runtimeRefs := cfg.RuntimeSecretRefs()
+
+	var rep serviceCredentialReport
+	rep.saved, rep.failed = persistCredentialsFromEnv(envPath, credentialSweepKeys(providerRefs, runtimeRefs))
+	rep.missing = unpersistedRequiredSecrets(workingDir, runtimeRefs, rep.saved)
 
 	if jsonOut || quiet {
-		return
+		return rep
 	}
-	for _, key := range saved {
-		writef(a.stdout, "  saved %s to %s (will survive reboots)\n", key, envPath)
+	a.reportCredentialSweep(envPath, rep, runtimeRefs)
+	// The provider-credential warning below is about PROVIDER keys only, so it
+	// must be suppressed only by a provider key: capturing an AWS credential
+	// says nothing about whether an embedding provider will resolve at boot.
+	if anyOf(rep.saved, providerRefs) || persistentCredentialInDotenv(workingDir, providerRefs) {
+		return rep
 	}
-	for _, key := range failed {
-		writef(a.stderr, "  warning: failed to persist %s to %s (check file permissions or key value)\n", key, envPath)
-	}
-	if len(saved) > 0 {
-		return
-	}
-	// Nothing in the current environment to auto-save. Fall back to the
-	// warning if there's also nothing already persisted in a dotenv file.
-	if persistentCredentialInDotenv(workingDir, refs) {
-		return
-	}
+	// Nothing in the current environment to auto-save, and nothing already
+	// persisted in a dotenv file.
 	writef(a.stderr, "warning: no persisted provider credential found in %s\n", envPath)
 	writeln(a.stderr, "  The service starts from a clean environment and will NOT inherit credentials exported in your shell.")
 	writeln(a.stderr, "  Run `dir2mcp config init` to persist the credential to .env.local (or add a providers: block to .dir2mcp.yaml),")
 	writeln(a.stderr, "  otherwise the daemon will fail at boot with \"no embedding provider configured\".")
-	return
+	return rep
+}
+
+// anyOf reports whether haystack contains at least one member of wanted.
+func anyOf(haystack, wanted []string) bool {
+	for _, w := range wanted {
+		if slices.Contains(haystack, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialSweepKeys merges the provider env var refs with the non-provider
+// runtime secret names, preserving first-seen order and dropping duplicates so a
+// key referenced by both is only written once.
+func credentialSweepKeys(providerRefs []string, runtimeRefs []config.RuntimeSecretRef) []string {
+	keys := make([]string, 0, len(providerRefs)+len(runtimeRefs))
+	seen := make(map[string]struct{}, len(providerRefs)+len(runtimeRefs))
+	add := func(name string) {
+		if _, dup := seen[name]; dup || strings.TrimSpace(name) == "" {
+			return
+		}
+		seen[name] = struct{}{}
+		keys = append(keys, name)
+	}
+	for _, name := range providerRefs {
+		add(name)
+	}
+	for _, ref := range runtimeRefs {
+		add(ref.Name)
+	}
+	return keys
+}
+
+// unpersistedRequiredSecrets names the required runtime secrets the installed
+// service will not be able to resolve at boot.
+//
+// A secret is satisfied when it was just persisted to .env.local, when the
+// target directory's dotenv already defines it, or when the effective config
+// resolved it from a source other than the current environment (the keychain).
+// The keychain caveat is documented in the README: a background agent may not be
+// able to unlock it unattended, so keychain-only credentials are still best
+// mirrored into .env.local with `dir2mcp config init`.
+func unpersistedRequiredSecrets(workingDir string, refs []config.RuntimeSecretRef, saved []string) []string {
+	var missing []string
+	for _, ref := range refs {
+		if !ref.Required || slices.Contains(saved, ref.Name) {
+			continue
+		}
+		fromEnv := strings.TrimSpace(os.Getenv(ref.Name)) != ""
+		if !fromEnv && ref.Resolved {
+			continue // resolved from a persistent source (keychain / dotenv)
+		}
+		if persistentCredentialInDotenv(workingDir, []string{ref.Name}) {
+			continue
+		}
+		missing = append(missing, ref.Name)
+	}
+	return missing
+}
+
+// reportCredentialSweep prints the human-readable half of the sweep: what was
+// persisted, what could not be, and which required secrets have no persistent
+// source. Values are never printed.
+func (a *App) reportCredentialSweep(envPath string, rep serviceCredentialReport, refs []config.RuntimeSecretRef) {
+	for _, key := range rep.saved {
+		writef(a.stdout, "  saved %s to %s (will survive reboots)\n", key, envPath)
+	}
+	for _, key := range rep.failed {
+		writef(a.stderr, "  warning: failed to persist %s to %s (check file permissions or key value)\n", key, envPath)
+	}
+	if len(rep.missing) == 0 {
+		return
+	}
+	writeln(a.stderr, "warning: the installed service is NOT bootable yet — required credentials have no persistent source:")
+	for _, key := range rep.missing {
+		writef(a.stderr, "  %s (required by %s)\n", key, secretFeature(refs, key))
+	}
+	writef(a.stderr, "  Export each one and re-run `dir2mcp service install` to capture it into %s,\n", envPath)
+	writeln(a.stderr, "  or add it to .env.local yourself. The supervised daemon starts from a clean environment.")
+}
+
+// secretFeature returns the config setting that pulls name in, for messages.
+func secretFeature(refs []config.RuntimeSecretRef, name string) string {
+	for _, ref := range refs {
+		if ref.Name == name {
+			return ref.Feature
+		}
+	}
+	return "the effective config"
 }
 
 // persistCredentialsFromEnv writes each key in envVarRefs that is found
@@ -505,6 +622,245 @@ func dotenvHasCredential(path string, refs []string) bool {
 	// credential found (conservative) — if the warning fires the operator
 	// can explicitly confirm credentials are configured another way.
 	return false
+}
+
+// --- supervisor output classification (#723, #725) ---
+//
+// Both backends invoke their supervisor through runCmd, which merges stderr into
+// stdout. A non-zero exit is NORMAL for several benign outcomes (booting out a
+// service that is not loaded, asking whether an absent unit is active), so the
+// exit status alone cannot tell a benign result from a real failure. The
+// discriminator is the OUTPUT, and the rule is deny-by-default: only a
+// positively recognized benign phrase is treated as benign; anything else — a
+// dead user bus, a permission denial, a missing binary — is surfaced.
+
+// containsAnyFold reports whether s contains any of phrases, case-insensitively.
+// phrases must already be lowercase.
+func containsAnyFold(s string, phrases []string) bool {
+	lower := strings.ToLower(s)
+	for _, p := range phrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// launchctlPrintAbsentPhrases are the substrings `launchctl print` emits for a
+// service that is not registered in the domain. Kept deliberately narrow: this
+// list decides whether `service status` reports a clean absent state or an
+// operational error.
+var launchctlPrintAbsentPhrases = []string{
+	"could not find service",
+	"not found in domain",
+}
+
+// launchctlBootoutAbsentPhrases are the substrings `launchctl bootout` emits
+// when there is nothing to unload. It is a superset of the print phrases:
+// bootout also reports the POSIX errno text ("No such process" for a service
+// that is not booted in, "No such file or directory" for a plist path that does
+// not exist), both of which mean the same thing — already absent.
+var launchctlBootoutAbsentPhrases = append([]string{
+	"no such process",
+	"no such file or directory",
+	"could not find specified service",
+}, launchctlPrintAbsentPhrases...)
+
+// launchctlPrintReportsAbsent reports whether a failed `launchctl print`
+// positively identified the service as unregistered.
+func launchctlPrintReportsAbsent(out string) bool {
+	return containsAnyFold(out, launchctlPrintAbsentPhrases)
+}
+
+// launchctlBootoutReportsAbsent reports whether a failed `launchctl bootout`
+// positively identified the service as already unloaded. Anything else — a
+// permission denial, a broken domain — must NOT be swallowed (#723).
+func launchctlBootoutReportsAbsent(out string) bool {
+	return containsAnyFold(out, launchctlBootoutAbsentPhrases)
+}
+
+// systemctlTransportPhrases mark an invocation that never reached the user
+// manager at all. They are checked FIRST because systemd reports a dead user bus
+// as "Failed to connect to bus: No such file or directory" — text that would
+// otherwise read as a missing unit and launder a transport failure into a benign
+// absent state (#725).
+var systemctlTransportPhrases = []string{
+	"failed to connect to bus",
+	"failed to get d-bus connection",
+	"connection refused",
+	"no medium found",
+	"permission denied",
+	"access denied",
+	"interactive authentication required",
+	"refusing to operate",
+}
+
+// systemctlAbsentPhrases are the substrings systemctl emits for a unit it does
+// not know or that is not loaded.
+var systemctlAbsentPhrases = []string{
+	"does not exist",
+	"not loaded",
+	"no such unit",
+	"no such file or directory",
+}
+
+// systemctlReportsAbsent reports whether a failed systemctl invocation
+// positively identified the unit as absent/not loaded, rather than failing to
+// reach systemd at all.
+func systemctlReportsAbsent(out string) bool {
+	if containsAnyFold(out, systemctlTransportPhrases) {
+		return false
+	}
+	return containsAnyFold(out, systemctlAbsentPhrases)
+}
+
+// systemctlQuery describes one `systemctl --user is-*` probe: the documented
+// one-word verdicts it can print, and the verdict a "unit does not exist"
+// diagnostic stands for.
+type systemctlQuery struct {
+	name   string
+	absent string
+	states []string
+}
+
+var (
+	// systemctlIsActive covers the ACTIVE STATE column of `systemctl list-units`.
+	systemctlIsActive = systemctlQuery{
+		name:   "is-active",
+		absent: "inactive",
+		states: []string{"active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"},
+	}
+	// systemctlIsEnabled covers the documented `is-enabled` verdicts.
+	systemctlIsEnabled = systemctlQuery{
+		name:   "is-enabled",
+		absent: "not-found",
+		states: []string{"enabled", "enabled-runtime", "linked", "linked-runtime", "alias", "masked", "masked-runtime", "static", "indirect", "disabled", "generated", "transient", "not-found", "bad"},
+	}
+)
+
+// classify turns one is-* invocation into a verdict or an operational error.
+//
+// The verdict is located by matching a documented state word on ANY output line
+// rather than by trusting the whole output: runCmd merges stderr in, and some
+// systemd versions print a diagnostic ("Failed to get unit file state for
+// x.service: No such file or directory") alongside — or instead of — the word.
+// When no verdict is present, an absent-unit diagnostic maps to the query's
+// absent verdict; everything else is a failure the caller must surface (#725).
+func (q systemctlQuery) classify(out string, err error) (string, error) {
+	for _, line := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(line); slices.Contains(q.states, s) {
+			return s, nil
+		}
+	}
+	if systemctlReportsAbsent(out) {
+		return q.absent, nil
+	}
+	detail := strings.TrimSpace(out)
+	if detail == "" {
+		detail = "(no output)"
+	}
+	if err != nil {
+		return "", fmt.Errorf("systemctl --user %s: %w: %s", q.name, err, detail)
+	}
+	return "", fmt.Errorf("systemctl --user %s: unrecognized output: %s", q.name, detail)
+}
+
+// --- transactional definition replacement (#724) ---
+
+// unitTxn captures a service definition file's prior contents so a failed
+// install can put back exactly what was there before.
+//
+// It makes the FILE half of an install atomic: the replacement is staged in the
+// same directory and renamed into place (a supervisor never observes a truncated
+// definition), and a rollback restores the prior bytes byte-for-byte, or removes
+// the file entirely when the install was a first-time one. The SUPERVISOR half —
+// re-loading the previous service — is backend-specific and layered on top.
+type unitTxn struct {
+	path string
+	// perm is the mode a freshly written definition gets.
+	perm os.FileMode
+	// prior/priorPerm/had describe what was on disk before write. priorPerm is
+	// tracked separately from perm so a rollback restores the previous file's
+	// own mode without the replacement inheriting it.
+	prior     []byte
+	priorPerm os.FileMode
+	had       bool
+}
+
+// beginUnitTxn snapshots the definition currently at path. A missing file is not
+// an error: it marks a first-time install, whose rollback is a removal.
+func beginUnitTxn(path string, perm os.FileMode) (*unitTxn, error) {
+	txn := &unitTxn{path: path, perm: perm, priorPerm: perm}
+	body, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		txn.prior, txn.had = body, true
+		if info, statErr := os.Stat(path); statErr == nil {
+			txn.priorPerm = info.Mode().Perm()
+		}
+		return txn, nil
+	case errors.Is(err, os.ErrNotExist):
+		return txn, nil
+	default:
+		return nil, err
+	}
+}
+
+// write atomically replaces the definition with content.
+func (t *unitTxn) write(content string) error {
+	return t.writeBytes([]byte(content), t.perm)
+}
+
+func (t *unitTxn) writeBytes(content []byte, perm os.FileMode) error {
+	dir := filepath.Dir(t.path)
+	f, err := os.CreateTemp(dir, ".dir2mcp-unit-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, t.path)
+}
+
+// rollback restores the definition to its pre-write state.
+func (t *unitTxn) rollback() error {
+	if !t.had {
+		if err := os.Remove(t.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return t.writeBytes(t.prior, t.priorPerm)
+}
+
+// describeRestored states what the definition on disk is after a rollback, so
+// the operator does not have to guess.
+func (t *unitTxn) describeRestored() string {
+	if t.had {
+		return fmt.Sprintf("the previous service definition at %s was restored", t.path)
+	}
+	return fmt.Sprintf("no service definition was left at %s", t.path)
+}
+
+// wrapInstallRollback annotates a failed install with the state the machine was
+// left in: either a clean undo, or an explicit list of what could not be undone.
+// A partially rolled back install is the one case an operator must never have to
+// infer, so the problems are named rather than summarized.
+func wrapInstallRollback(cause error, txn *unitTxn, problems []string) error {
+	if len(problems) == 0 {
+		return fmt.Errorf("%w (rolled back: %s)", cause, txn.describeRestored())
+	}
+	return fmt.Errorf("%w; ROLLBACK INCOMPLETE: %s", cause, strings.Join(problems, "; "))
 }
 
 // renderLaunchdPlist builds a macOS LaunchAgent property list for spec.

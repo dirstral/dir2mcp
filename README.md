@@ -276,6 +276,10 @@ Running `dir2mcp` with no arguments prints usage, which you can consult anytime 
 
 The launchd job starts from a clean environment and will **not** inherit a `MISTRAL_API_KEY` you only `export`ed in a shell. Persist the credential first with `dir2mcp config init` (writes `.env.local` in the corpus directory) so the booted daemon can find it; `service install` warns when no persisted credential is present.
 
+`service install` sweeps **every** credential the effective config needs, not just provider API keys: the S3 source credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), `QDRANT_API_KEY`, `DIR2MCP_INDEX_PGVECTOR_DSN`, `DIR2MCP_DISTRIBUTED_EMBED_BROKER_URL`, and `DIR2MCP_X402_FACILITATOR_TOKEN`. These have no config-file home by design, so the environment / keychain / `.env.local` is their only source. Any of them found in your current shell is copied into `.env.local`; any that is **required** by the config and has no persistent source is named in a warning (and in `missing_credentials` under `--json`) — the service is installed, but it will not boot until you give that secret a persistent source. Values are never printed.
+
+Install and uninstall are also fail-safe: a supervisor step that fails during install rolls the previous service definition (and its loaded/enabled state) back, and `uninstall` refuses to delete a unit whose daemon it could not verifiably stop, so a running daemon is never orphaned. On Linux, `service status` returns an error rather than reporting `installed, not running` when `systemctl --user` cannot answer (no user bus, permission denied, systemctl missing).
+
 ## MCP Tools
 
 | Tool | Description |
