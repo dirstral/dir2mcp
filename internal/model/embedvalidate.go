@@ -13,8 +13,13 @@ import (
 // A vector is malformed when it is:
 //
 //   - empty — nothing to score against;
-//   - the wrong length, when wantDim > 0 names a dimension the caller requested
-//     (SPEC 8.1.6) or has already fixed for this response;
+//   - the wrong length. wantDim > 0 names a dimension the caller requested
+//     (SPEC 8.1.6). When the caller has no requested dimension the FIRST vector
+//     fixes it for the rest of the response: one call must not return a ragged
+//     batch. Vectors of two different widths cannot share an index — depending
+//     on the backend that is a rejected upsert mid-batch, a silently truncated
+//     comparison, or a collection whose dimension was fixed by whichever vector
+//     happened to arrive first;
 //   - non-finite — a NaN or ±Inf component poisons every distance computation
 //     downstream (NaN comparisons are unordered, so such a vector can both never
 //     rank and corrupt a partial sort);
@@ -46,9 +51,15 @@ import (
 // batch index walks every integer, so that collision is a matter of batch size;
 // the worker's bisection identifies the individual chunk anyway.
 func ValidateEmbedVectors(code string, wantDim int, vectors [][]float32) error {
+	dim := wantDim
 	for _, v := range vectors {
-		if err := validateEmbedVector(code, wantDim, v); err != nil {
+		if err := validateEmbedVector(code, dim, v); err != nil {
 			return err
+		}
+		if dim == 0 {
+			// No dimension was requested: adopt the first vector's width so the
+			// rest of the response is checked against it.
+			dim = len(v)
 		}
 	}
 	return nil

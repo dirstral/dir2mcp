@@ -32,6 +32,8 @@ func TestValidateEmbedVectors(t *testing.T) {
 		{"NaN component", 0, [][]float32{{float32(math.NaN()), 1}}, true},
 		{"+Inf component", 0, [][]float32{{float32(math.Inf(1)), 1}}, true},
 		{"-Inf component", 0, [][]float32{{float32(math.Inf(-1)), 1}}, true},
+		{"consistent width without a requested dimension", 0, [][]float32{{1, 0}, {0, 1}}, false},
+		{"ragged batch without a requested dimension", 0, [][]float32{{1, 0}, {0, 1, 0}}, true},
 		{"requested dimension honored", 3, [][]float32{{1, 0, 0}}, false},
 		{"short of the requested dimension", 3, [][]float32{{1, 0}}, true},
 		{"longer than the requested dimension", 3, [][]float32{{1, 0, 0, 0}}, true},
