@@ -30,6 +30,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/setupwizard"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
@@ -444,8 +445,17 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("root inaccessible: %v", err))
 		return exitRootInaccessible
 	}
-	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+	if err := statefs.MkdirAllHardened(cfg.StateDir); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("create state dir: %v", err))
+		return exitRootInaccessible
+	}
+	// Repair a tree an older build left world-readable. Creating the root
+	// owner-only does nothing for the caches, snapshots and index segments
+	// already under it, and those are the corpus in another shape. Failing
+	// here rather than warning: continuing would leave that content readable
+	// by other local accounts while reporting a private state directory.
+	if err := statefs.HardenTree(cfg.StateDir); err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("secure state dir: %v", err))
 		return exitRootInaccessible
 	}
 	// create payments subdirectory while x402 configuration has been
@@ -454,7 +464,7 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 	// the directory exists regardless of mode, avoiding inconsistent state.
 	// because it's done after x402 validation, a valid config (including
 	// mode="off") won't leave an inconsistent state.
-	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
+	if err := statefs.MkdirAllHardened(filepath.Join(cfg.StateDir, "payments")); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitRootInaccessible, fmt.Sprintf("create payments dir: %v", err))
 		return exitRootInaccessible
 	}

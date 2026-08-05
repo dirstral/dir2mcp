@@ -50,6 +50,8 @@ func (m *systemdManager) install(spec serviceSpec) (string, error) {
 		return "", err
 	}
 	unit := m.unitPath(spec.Label)
+	// systemd must be able to read this; it is a service definition, not
+	// corpus-derived content (#726).
 	if err := os.MkdirAll(filepath.Dir(unit), 0o755); err != nil {
 		return "", fmt.Errorf("create systemd user dir: %w", err)
 	}

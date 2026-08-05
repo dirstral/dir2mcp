@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
@@ -114,7 +115,7 @@ func configCheck(err error) doctorCheck {
 // instead of a stat-only check because permission bits don't always
 // reflect the effective writability of a path (mounts, ACLs).
 func stateDirCheck(stateDir string) doctorCheck {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := statefs.MkdirAllHardened(stateDir); err != nil {
 		return doctorCheck{Name: "state_dir", Status: doctorStatusError, Detail: fmt.Sprintf("mkdir %s: %v", stateDir, err)}
 	}
 	probe, err := os.CreateTemp(stateDir, "doctor-probe-*")

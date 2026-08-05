@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/netutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
@@ -1797,6 +1798,8 @@ func SaveFile(path string, cfg Config) error {
 		raw = append(raw, '\n')
 	}
 
+	// Deliberately not owner-only: this is the operator's own .dir2mcp.yaml
+	// in their own directory, not the derived state tree (#726).
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
@@ -1840,10 +1843,14 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 		raw = append(raw, '\n')
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// The snapshot's directory IS the state directory, and this is often what
+	// creates it: any command that loads config against a fresh state path
+	// arrives here first. Creating it 0755 left the whole derived tree
+	// world-readable even though the snapshot itself was 0600 (#726).
+	if err := statefs.MkdirAllHardened(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("create snapshot directory: %w", err)
 	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	if err := statefs.WriteFile(path, raw); err != nil {
 		return "", fmt.Errorf("write snapshot file %s: %w", path, err)
 	}
 	return path, nil

@@ -53,6 +53,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/index/topk"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
 const (
@@ -248,7 +249,7 @@ func (d *DiskIndex) BatchUpsert(ctx context.Context, items []model.IndexUpsert) 
 // new locators. On any failure it rolls the segment back to its pre-batch length
 // and leaves the in-memory state untouched. Caller holds the write lock.
 func (d *DiskIndex) appendBatch(items []model.IndexUpsert) error {
-	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := statefs.OpenFile(d.path, os.O_RDWR|os.O_CREATE)
 	if err != nil {
 		return err
 	}
@@ -361,7 +362,7 @@ func (d *DiskIndex) Delete(ctx context.Context, chunkIDs []uint64) error {
 // file (with header) on first write, and updates the locator map. The caller
 // must hold the write lock.
 func (d *DiskIndex) appendRecord(chunkID uint64, tombstone bool, vector []float32, payload model.IndexPayload) error {
-	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := statefs.OpenFile(d.path, os.O_RDWR|os.O_CREATE)
 	if err != nil {
 		return err
 	}
@@ -598,7 +599,7 @@ func (d *DiskIndex) Reset(ctx context.Context, identity string) error {
 
 // truncateSegment rewrites path with just a fresh header.
 func truncateSegment(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := statefs.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return err
 	}
@@ -647,7 +648,7 @@ func (d *DiskIndex) Save(ctx context.Context, path string) error {
 	}
 
 	tmpPath := path + ".tmp"
-	out, err := os.Create(tmpPath)
+	out, err := statefs.Create(tmpPath)
 	if err != nil {
 		return err
 	}
@@ -1058,7 +1059,7 @@ func writeIdentitySidecar(path, identity string) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := statefs.WriteFile(tmp, data); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
