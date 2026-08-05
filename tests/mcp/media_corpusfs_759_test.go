@@ -227,6 +227,11 @@ func TestOpenMediaClip_S3Corpus_CutsFromLocalizedCopy(t *testing.T) {
 	if sawPath == filepath.Join(c.cfg.RootDir, "media", "voice.mp3") {
 		t.Fatalf("extraction used the reconstructed RootDir path %q; it must come from the CorpusFS", sawPath)
 	}
+	// The copy lives in the backend's own cache dir under the (always local)
+	// state dir, not anywhere under the corpus root.
+	if !strings.HasPrefix(sawPath, c.cacheDir+string(os.PathSeparator)) {
+		t.Fatalf("extraction path %q is not inside the CorpusFS cache dir %q", sawPath, c.cacheDir)
+	}
 	if got := len(c.client.gets); got != 1 {
 		t.Fatalf("GetObject called %d time(s), want exactly 1: %v", got, c.client.gets)
 	}
@@ -303,8 +308,8 @@ func TestAnnotate_S3Corpus_ReadsDocumentContent(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	// FORBIDDEN here is the secret-content gate, which runs on bytes that were
-	// actually read. Before the fix this was PERMISSION_DENIED from the failed
-	// path resolution.
+	// actually read. Before the fix this was FILE_NOT_FOUND, the ENOENT from the
+	// failed path resolution.
 	assertToolCallErrorCode(t, resp, protocol.ErrorCodeForbidden)
 	if len(c.client.gets) == 0 {
 		t.Fatal("no object was fetched; the content was not read through the CorpusFS")
