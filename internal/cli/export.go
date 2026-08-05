@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
@@ -78,36 +79,12 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 		return a.runTTMLExport(ctx, global, cfg, ts, opts)
 	}
 
-	filter := subtitle.NewWordFilter(cfg.MediaFilterWords)
-	// The glossary was already validated at config load, so a parse error here is
-	// unexpected; surface it rather than silently dropping the glossary.
-	glossary, err := subtitle.NewGlossary(cfg.MediaSubtitlesGlossary)
+	pipe, err := newCuePipeline(cfg)
 	if err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.glossary: %v", err))
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, err.Error())
 		return exitConfigInvalid
 	}
-	// The drop set was already validated at config load, so a parse error here is
-	// unexpected; surface it rather than silently dropping the rules.
-	drop, err := subtitle.NewDropSet(cfg.MediaSubtitlesDropPhrases)
-	if err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.drop_phrases: %v", err))
-		return exitConfigInvalid
-	}
-	// The scrub set was already validated at config load, so a parse error here is
-	// unexpected; surface it rather than silently dropping the rules.
-	scrub, err := subtitle.NewDropSet(cfg.MediaSubtitlesScrubPhrases)
-	if err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.scrub_phrases: %v", err))
-		return exitConfigInvalid
-	}
-	clean := subtitle.CleanOptions{
-		DropURLs:        cfg.MediaSubtitlesDropURLs,
-		Drop:            drop,
-		Scrub:           scrub,
-		CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
-		Glossary:        glossary,
-	}
-	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, filter, clean, cfg.MediaSubtitlesSegmentation)
+	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, pipe, cfg.MediaSubtitlesSegmentation)
 	if code != exitSuccess {
 		return code
 	}
@@ -115,11 +92,74 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 	return a.emitExport(global, opts, rendered)
 }
 
+// cuePipeline is the single cue-preparation pipeline every subtitle format
+// renders through: the media.filter_words word filter followed by the
+// media.subtitles.* editorial cleaning passes (glossary, drop_phrases,
+// scrub_phrases, collapse_repeats, drop_urls).
+//
+// It exists because TTML used to skip the cleaning half entirely (issue #729):
+// the same transcript exported as SRT and as TTML disagreed on every rule under
+// media.subtitles.*, and bilingual TTML aligned cue sets that the exports would
+// never render. Formats differ in how cues are BUILT (segmentation, bilingual
+// alignment) but MUST NOT differ in how cues are CLEANED, so the cleaning half
+// lives here and every renderer calls apply.
+//
+// Note what is deliberately NOT here: media.subtitles.segmentation. Broadcast
+// re-segmentation rewrites cue boundaries for VTT/SRT reading speed and is
+// documented as VTT/SRT-only in config; it is a build-stage concern, not an
+// editorial one, and stays with the VTT/SRT builder.
+type cuePipeline struct {
+	filter *subtitle.WordFilter
+	clean  subtitle.CleanOptions
+}
+
+// newCuePipeline compiles the configured filter/glossary/drop/scrub rules. The
+// config loader already validated all of them, so a compile error here is
+// unexpected; it is returned (and surfaced as a config-time failure) rather than
+// silently degrading into a no-op pipeline that would ship uncleaned cues.
+func newCuePipeline(cfg config.Config) (cuePipeline, error) {
+	glossary, err := subtitle.NewGlossary(cfg.MediaSubtitlesGlossary)
+	if err != nil {
+		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.glossary: %w", err)
+	}
+	drop, err := subtitle.NewDropSet(cfg.MediaSubtitlesDropPhrases)
+	if err != nil {
+		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.drop_phrases: %w", err)
+	}
+	scrub, err := subtitle.NewDropSet(cfg.MediaSubtitlesScrubPhrases)
+	if err != nil {
+		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.scrub_phrases: %w", err)
+	}
+	return cuePipeline{
+		filter: subtitle.NewWordFilter(cfg.MediaFilterWords),
+		clean: subtitle.CleanOptions{
+			DropURLs:        cfg.MediaSubtitlesDropURLs,
+			Drop:            drop,
+			Scrub:           scrub,
+			CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
+			Glossary:        glossary,
+		},
+	}, nil
+}
+
+// apply runs the word filter then the cleaning passes over built cues, in that
+// order, so filter_words removal and the cleanup compose (a cue emptied by the
+// filter is dropped before the cleaning passes ever see it). An empty config
+// leaves cues unchanged, so enabling nothing changes nothing.
+func (p cuePipeline) apply(cues []subtitle.Cue) []subtitle.Cue {
+	// media.filter_words: exported subtitles never contain the configured
+	// boilerplate/credits/watermark phrases, consistent with how ingest strips
+	// them before embedding. Cues empty after filtering are dropped.
+	cues = subtitle.FilterCues(cues, p.filter)
+	// media.subtitles.{glossary,drop_phrases,scrub_phrases,collapse_repeats,drop_urls}.
+	return subtitle.CleanCues(cues, p.clean)
+}
+
 // renderTranscriptExport resolves the transcript representation, builds cues
 // from its chunks, and renders them in the requested format. It returns the
 // serialized document, or an exit code on error (no transcript, no chunks,
 // unknown language, store failure).
-func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, filter *subtitle.WordFilter, clean subtitle.CleanOptions, segmentation string) (string, int) {
+func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, pipe cuePipeline, segmentation string) (string, int) {
 	reps, err := ts.TranscriptRepresentations(ctx, opts.relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -150,16 +190,7 @@ func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, 
 	for _, r := range rows {
 		chunks = append(chunks, subtitle.TranscriptChunk{Text: r.Text, Span: r.Span})
 	}
-	cues := buildCuesForSegmentation(chunks, segmentation, transcriptRepIsTranslation(rep.MetaJSON))
-	// Apply the configured caption word filter (media.filter_words) on export so
-	// exported VTT/SRT never contain the boilerplate/credits/watermark phrases,
-	// consistent with how ingest strips them before embedding. Cues empty after
-	// filtering are dropped. An empty config leaves cues unchanged.
-	cues = subtitle.FilterCues(cues, filter)
-	// Apply the configured cue-cleaning passes (media.subtitles.glossary /
-	// collapse_repeats / drop_urls) after word-filtering, so filter_words removal
-	// and this cleanup compose. An empty config leaves cues unchanged.
-	cues = subtitle.CleanCues(cues, clean)
+	cues := pipe.apply(buildCuesForSegmentation(chunks, segmentation, transcriptRepIsTranslation(rep.MetaJSON)))
 	if len(cues) == 0 {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("document %q transcript has no time-coded cues to export", opts.relPath))
 		return "", exitGeneric
