@@ -220,7 +220,7 @@ func TestExportSMILProbesMediaThroughCorpusFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SMIL not written for an S3 corpus: %v (stderr=%s)", err, stderr.String())
 	}
-	for _, want := range []string{`<video src="game.mp4"`, `width="320"`, `content="h264"`} {
+	for _, want := range []string{`<video src="videos/game.mp4"`, `width="320"`, `content="h264"`} {
 		if !strings.Contains(string(smil), want) {
 			t.Fatalf("SMIL missing %q in:\n%s", want, smil)
 		}
@@ -287,7 +287,7 @@ func TestExportSMILLocalCorpusProbesInRootFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SMIL not written for a local corpus: %v (stderr=%s)", err, stderr.String())
 	}
-	if !strings.Contains(string(smil), `<video src="talk.mp4"`) {
+	if !strings.Contains(string(smil), `<video src="media/talk.mp4"`) {
 		t.Fatalf("SMIL references the wrong media:\n%s", smil)
 	}
 }
@@ -327,7 +327,10 @@ func TestExportSMILUnprobeableMediaWarnsAndFailsOpen(t *testing.T) {
 	if _, err := os.Stat(strings.TrimSuffix(outPath, ".ttml") + ".smil"); err == nil {
 		t.Fatalf("SMIL must be omitted when the media cannot be probed")
 	}
-	if !strings.Contains(stderr.String(), "media metadata unavailable") {
+	// A fixed label, not the error: ProbeMediaInfo embeds raw ffprobe stderr
+	// and a local path in its message, and neither belongs on an operator's
+	// terminal (the same reason recognize.go refuses to echo backend bodies).
+	if !strings.Contains(stderr.String(), "media_metadata_unavailable") {
 		t.Fatalf("probe failure must be reported as a metadata problem, got stderr=%q", stderr.String())
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -142,9 +141,16 @@ func (a *App) emitSMILSidecar(ctx context.Context, global globalOptions, cfg con
 
 	info, err := avutil.ProbeMediaInfo(ctx, mediaPath)
 	if err != nil {
-		// Fail open: omit SMIL, keep the TTML already written. Never echo raw
-		// ffprobe stderr at the user beyond a short note.
-		a.warnSMILSkipped("media metadata unavailable: %v", err)
+		// Fail open: omit SMIL, keep the TTML already written.
+		//
+		// The reason is a fixed label and the error is NOT interpolated.
+		// ProbeMediaInfo returns `fmt.Errorf("ffprobe %q: %w: %s", path, err,
+		// stderr)`, so `%v` would put raw ffprobe stderr and a local filesystem
+		// path on the operator's terminal. The previous code did exactly that
+		// while carrying a comment saying it must not. `recognize.go` sets the
+		// precedent: "Deliberately no body echo: backend errors may include
+		// local paths".
+		a.warnSMILSkipped("media_metadata_unavailable")
 		return
 	}
 
@@ -153,15 +159,22 @@ func (a *App) emitSMILSidecar(ctx context.Context, global globalOptions, cfg con
 	// once with the primary language tag.
 	subs := []subtitle.SMILSubtitleRef{{Src: filepath.Base(opts.out), Lang: opts.lang}}
 	smil := subtitle.RenderSMIL(subtitle.SMILInput{
-		// The media reference is the corpus document's own name, never the
+		// The media reference is the corpus document's own path, never the
 		// localized copy's: a downloaded S3 object lands in a temp file whose
 		// name is an implementation detail and does not exist for a player.
-		MediaSrc:  path.Base(filepath.ToSlash(opts.relPath)),
+		//
+		// The full rel_path, not its base name. The base was what the previous
+		// local-only code emitted, and it does not identify the document:
+		// `videos/game.mp4` and `archive/game.mp4` both became `game.mp4`. It
+		// also only resolves for a reader sitting in the media's own directory,
+		// whereas rel_path resolves from the corpus root, which is where an
+		// export of a corpus is normally unpacked.
+		MediaSrc:  filepath.ToSlash(opts.relPath),
 		Info:      info,
 		Subtitles: subs,
 	})
 	if err := writeFileAtomic(smilPath, []byte(smil)); err != nil {
-		a.warnSMILSkipped("write %q: %v", smilPath, err)
+		a.warnSMILSkipped("write_failed")
 		return
 	}
 	if !global.quiet && !global.jsonOutput {
@@ -185,12 +198,12 @@ func (a *App) emitSMILSidecar(ctx context.Context, global globalOptions, cfg con
 func (a *App) localizeExportMedia(ctx context.Context, cfg config.Config, relPath string) (string, func(), bool) {
 	fsys, err := buildCorpusFS(ctx, cfg)
 	if err != nil {
-		a.warnSMILSkipped("corpus source unavailable: %v", err)
+		a.warnSMILSkipped("corpus_source_unavailable")
 		return "", nil, false
 	}
 	localPath, cleanup, err := fsys.Localize(ctx, relPath)
 	if err != nil {
-		a.warnSMILSkipped("cannot read media %q from the corpus source: %v", relPath, err)
+		a.warnSMILSkipped("media_fetch_failed")
 		return "", nil, false
 	}
 	if cleanup == nil {
@@ -204,6 +217,6 @@ func (a *App) localizeExportMedia(ctx context.Context, cfg config.Config, relPat
 // problems, and is NOT suppressed by --quiet/--json: silently omitting an
 // explicitly enabled artifact and saying nothing about it is what made issue
 // #736 invisible to S3 operators. stdout stays machine-safe.
-func (a *App) warnSMILSkipped(format string, args ...interface{}) {
-	writef(a.stderr, "warning: skipping SMIL ("+format+")\n", args...)
+func (a *App) warnSMILSkipped(reason string) {
+	writef(a.stderr, "warning: skipping SMIL (%s)\n", reason)
 }
