@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // TaskFetcher loads the authoritative chunk task for a leased job from the shared
@@ -28,6 +29,20 @@ type Embedder interface {
 	EmbedAndIndex(ctx context.Context, indexKind string, tasks []model.ChunkTask) (int, error)
 }
 
+// StatusWriter records a TERMINAL per-chunk embedding failure (SPEC §5.3
+// embedding_status=error, §7.7 per-document/per-chunk errors). The metadata
+// store satisfies it via MarkFailedWithCategory, the same entry point the
+// in-process embedding loop uses, so a distributed failure lands in `dir2mcp
+// status` / `doctor` in the exact shape an in-process one does.
+//
+// It exists because dead-lettering a job is not, by itself, a terminal outcome
+// for the CHUNK: the broker forgets the job, the chunk stays `pending`, and the
+// coordinator's next tick mints a fresh job with a fresh retry budget. Recording
+// the failure against the chunk is what stops that loop (#709).
+type StatusWriter interface {
+	MarkFailedWithCategory(ctx context.Context, labels []uint64, category, reason string) error
+}
+
 // Config configures a distributed embed-worker run-loop (SPEC §8.7.1, the
 // embed-worker / compute-plane role). All fields except the optional Logger and
 // the tuning knobs are required.
@@ -40,6 +55,24 @@ type Config struct {
 	// for that axis. A job whose index_kind has no embedder is dead-lettered
 	// (misconfiguration, never a vector in the wrong space).
 	Embedders map[string]Embedder
+
+	// Status records terminal per-chunk failures so a job that can never succeed
+	// stops being re-created (#709). Optional: with no StatusWriter the worker
+	// still rejects what it must, but a permanently-failing chunk stays `pending`
+	// and the coordinator keeps re-enqueuing it, so production wiring MUST set it.
+	Status StatusWriter
+
+	// CorpusID is the stable corpus identity (SPEC §5.5) THIS worker serves — the
+	// same value the coordinator for that corpus stamps on its jobs. A job naming
+	// any other corpus is rejected without being executed and without touching
+	// this worker's store.
+	//
+	// Empty means "unbound": the worker accepts every job it is handed, which is
+	// only safe on a broker it does not share with another corpus. Production
+	// wiring always sets it, resolved from the shared metadata store the job's
+	// chunk would be read from, so a worker's corpus binding and its data plane
+	// can never disagree (#708).
+	CorpusID string
 
 	// EmbedIdentity is THIS worker's configured embed identity (SPEC §8.1.4). A
 	// job whose EmbedIdentity differs is rejected (Nacked for redelivery /
@@ -157,7 +190,7 @@ func Run(ctx context.Context, cfg Config) error {
 			return ctx.Err()
 		default:
 		}
-		lease, err := cfg.Broker.Lease(ctx, cfg.leaseDuration())
+		lease, err := cfg.lease(ctx)
 		if errors.Is(err, ErrNoJob) {
 			if waitErr := sleepCtx(ctx, cfg.pollInterval()); waitErr != nil {
 				return waitErr
@@ -189,7 +222,7 @@ func (cfg Config) drainBatch(ctx context.Context, first Lease) []Lease {
 		if ctx.Err() != nil {
 			break
 		}
-		lease, err := cfg.Broker.Lease(ctx, cfg.leaseDuration())
+		lease, err := cfg.lease(ctx)
 		if err != nil {
 			// ErrNoJob (queue drained) or a transient lease error: embed what we
 			// already hold; the next Run cycle re-leases / backs off.
@@ -198,6 +231,21 @@ func (cfg Config) drainBatch(ctx context.Context, first Lease) []Lease {
 		leases = append(leases, lease)
 	}
 	return leases
+}
+
+// lease claims one job, restricted to this worker's corpus when both the worker
+// is bound to one and the broker can filter (SPEC §8.7.2). Claiming another
+// corpus's job only to reject it is not merely wasteful: every rejected delivery
+// consumes a redelivery attempt that belonged to the corpus that owns the job,
+// so a mixed queue drained by the wrong worker dead-letters healthy work (#708).
+// Brokers without the capability fall back to an unfiltered claim, where the
+// per-job corpus check in prepare is the guard.
+func (cfg Config) lease(ctx context.Context) (Lease, error) {
+	corpusID := strings.TrimSpace(cfg.CorpusID)
+	if scoped, ok := cfg.Broker.(CorpusScopedBroker); ok && corpusID != "" {
+		return scoped.LeaseForCorpus(ctx, corpusID, cfg.leaseDuration())
+	}
+	return cfg.Broker.Lease(ctx, cfg.leaseDuration())
 }
 
 // processBatch prepares every leased job (validate / identity / kind / fetch),
@@ -228,45 +276,97 @@ func (cfg Config) processBatch(ctx context.Context, leases []Lease) {
 
 // prepare runs the per-job checks that gate embedding a single leased job. It
 // returns ok=false (having already Acked/Nacked the lease) when the job must not
-// be embedded: an invalid job, an embed-identity mismatch, or an unknown
-// index_kind Nack for redelivery/dead-lettering; a tombstoned/missing chunk is
-// Acked as a safe no-op (SPEC §8.7.3 / §6.6). On ok=true the returned preparedJob
-// carries the authoritative task and its axis embedder.
+// be embedded. On ok=true the returned preparedJob carries the AUTHORITATIVE
+// task and the embedder for the axis that task currently belongs to.
+//
+// The three gates run in this order, and the order is load-bearing:
+//
+//  1. corpus binding — is this job even ours? A foreign job is rejected before
+//     anything reads or writes this worker's store (#708);
+//  2. job-level identity — is the job well-formed, in our vector space, and is
+//     its axis one we serve (SPEC §8.7.3);
+//  3. payload currency — does the job still describe the chunk as it exists
+//     now, and route to the axis that chunk is on NOW (#710).
 func (cfg Config) prepare(ctx context.Context, lease Lease) (preparedJob, bool) {
+	if !cfg.servesCorpus(ctx, lease) {
+		return preparedJob{}, false
+	}
+	if !cfg.acceptsJob(ctx, lease) {
+		return preparedJob{}, false
+	}
+	return cfg.routeToCurrentAxis(ctx, lease)
+}
+
+// servesCorpus reports whether the leased job belongs to the corpus this worker
+// serves (SPEC §8.7.2 corpus reference, §8.7.4 corpus isolation). A foreign job
+// is Nacked back for the corpus's own worker.
+//
+// Two properties matter here. It runs FIRST, before the store is touched: a
+// worker resolves chunk ids against ITS OWN metadata store, so executing corpus
+// A's job would read corpus B's chunk of the same id, embed it, write it into
+// B's Tier-C namespace and Ack A's job — A silently loses the work and B gets a
+// vector nothing asked for. And it never records a chunk failure: the chunk this
+// job names is not in this worker's store, so there is nothing here to fail.
+func (cfg Config) servesCorpus(ctx context.Context, lease Lease) bool {
+	want := strings.TrimSpace(cfg.CorpusID)
+	if want == "" {
+		// Unbound worker (single-corpus deployments and the in-process default).
+		return true
+	}
+	if got := strings.TrimSpace(lease.Job.CorpusID); got != want {
+		// The job's corpus id is logged; it is a digest by construction
+		// (identity.CorpusID), so this cannot disclose another corpus's path or
+		// bucket. Never log lease.Token — it is a lease credential (§16.1.1).
+		cfg.logf("embedqueue: job for chunk %d belongs to corpus %q, this worker serves %q; returning it unexecuted",
+			lease.Job.ChunkID, got, want)
+		_ = cfg.Broker.Nack(ctx, lease.Token, cfg.retryAfter())
+		return false
+	}
+	return true
+}
+
+// acceptsJob runs the checks that depend only on the job payload: it is
+// well-formed, it was enqueued in this worker's vector space, and its axis is
+// one this worker can write. Each failure is permanent for THIS worker, so the
+// job goes back for another worker to try — and, on the delivery that exhausts
+// the broker's budget, is recorded against the chunk so it stops being re-made.
+func (cfg Config) acceptsJob(ctx context.Context, lease Lease) bool {
 	job := lease.Job
 	if err := job.Validate(); err != nil {
-		// Never log lease.Token — it is an opaque lease credential (§16.1.1).
 		cfg.logf("embedqueue: invalid job for chunk %d: %v", job.ChunkID, err)
-		_ = cfg.Broker.Nack(ctx, lease.Token, cfg.retryAfter())
-		return preparedJob{}, false
+		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryEmbeddingFailure), "invalid embedding job: "+err.Error())
+		return false
 	}
 
 	// Per-job embed identity enforcement (SPEC §8.7.3 / §6.4): a worker whose
-	// embed identity does not match the job MUST NOT write a vector. This is a
-	// permanent mismatch for THIS worker, so Nack for redelivery to a matching
-	// worker (or eventual dead-lettering) — never embed.
+	// embed identity does not match the job MUST NOT write a vector.
 	if strings.TrimSpace(job.EmbedIdentity) != strings.TrimSpace(cfg.EmbedIdentity) {
 		cfg.logf("embedqueue: embed identity mismatch for chunk %d (job=%q worker=%q); rejecting",
 			job.ChunkID, job.EmbedIdentity, cfg.EmbedIdentity)
-		_ = cfg.Broker.Nack(ctx, lease.Token, cfg.retryAfter())
-		return preparedJob{}, false
+		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryEmbeddingFailure),
+			"embed identity mismatch: job was enqueued for a different embedding space than any worker in the pool provides")
+		return false
 	}
+	return true
+}
 
-	indexKind := strings.ToLower(strings.TrimSpace(job.IndexKind))
-	if indexKind == "" {
-		indexKind = "text"
-	}
-	emb, ok := cfg.Embedders[indexKind]
-	if !ok {
-		cfg.logf("embedqueue: no embedder for index_kind %q (chunk %d); rejecting", indexKind, job.ChunkID)
-		_ = cfg.Broker.Nack(ctx, lease.Token, cfg.retryAfter())
-		return preparedJob{}, false
-	}
-
-	// Load the authoritative task from the shared store. A tombstoned/missing
-	// chunk is a safe skip (tombstone safety, §8.7.3 / §6.6): Ack so the job is
-	// not redelivered for a chunk that no longer exists.
-	task, _, err := cfg.Fetcher.ChunkTaskByID(ctx, job.ChunkID)
+// routeToCurrentAxis loads the authoritative chunk and routes the job by what
+// that chunk is NOW, not by what the job said it was at enqueue time.
+//
+// A chunk_id survives an in-place re-ingest of the same (rep_id, ordinal) while
+// the text, the hash, the index_kind and the embedding status are all rewritten
+// under it. A job enqueued before such a rewrite therefore names a payload that
+// no longer exists. Executing it through the job's stale axis would write a
+// code-axis vector for what is now a text chunk AND mark the chunk embedded, so
+// the correct text-axis job is never created and a wrong-axis vector stays
+// searchable. Such a job is ACKED as superseded, not failed: nothing is broken,
+// the chunk is simply still pending and the coordinator will enqueue its current
+// form (#710).
+func (cfg Config) routeToCurrentAxis(ctx context.Context, lease Lease) (preparedJob, bool) {
+	job := lease.Job
+	// A tombstoned/missing chunk is a safe skip (tombstone safety, §8.7.3 / §6.6):
+	// Ack so the job is not redelivered for a chunk that no longer exists.
+	task, hash, err := cfg.Fetcher.ChunkTaskByID(ctx, job.ChunkID)
 	if err != nil {
 		if errors.Is(err, model.ErrNotFound) {
 			cfg.logf("embedqueue: chunk %d not found / tombstoned; acking (no-op)", job.ChunkID)
@@ -274,10 +374,104 @@ func (cfg Config) prepare(ctx context.Context, lease Lease) (preparedJob, bool) 
 			return preparedJob{}, false
 		}
 		cfg.logf("embedqueue: fetch chunk %d: %v; redelivering", job.ChunkID, err)
-		_ = cfg.Broker.Nack(ctx, lease.Token, cfg.retryAfter())
+		cfg.rejectJob(ctx, lease, string(store.ClassifyError(err)),
+			"could not read chunk from the shared metadata store: "+err.Error())
+		return preparedJob{}, false
+	}
+
+	if reason, superseded := supersededReason(job, task, hash); superseded {
+		cfg.logf("embedqueue: job for chunk %d is superseded (%s); acking without embedding", job.ChunkID, reason)
+		_ = cfg.Broker.Ack(ctx, lease.Token)
+		return preparedJob{}, false
+	}
+
+	// The axis comes from the TASK, never from the job: the two agree by the time
+	// we get here (supersededReason just proved it), and taking it from the task
+	// is what makes that guarantee structural rather than a convention a later
+	// edit could quietly drop.
+	indexKind := normalizeIndexKind(task.IndexKind)
+	emb, ok := cfg.Embedders[indexKind]
+	if !ok {
+		cfg.logf("embedqueue: no embedder for index_kind %q (chunk %d); rejecting", indexKind, job.ChunkID)
+		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryEmbeddingFailure),
+			"no embedder configured for index_kind "+indexKind)
 		return preparedJob{}, false
 	}
 	return preparedJob{lease: lease, task: task, indexKind: indexKind, embedder: emb}, true
+}
+
+// supersededReason reports whether a leased job still describes the chunk the
+// store holds, returning a short human-readable reason when it does not.
+//
+// An EMPTY hash on either side means "unknown", never "mismatch": jobs enqueued
+// by a build that predates payload identity are still sitting in durable SQLite
+// queues, and a chunk may legitimately carry no hash. Treating unknown as a
+// mismatch would ack every one of them unexecuted and stall the queue, so the
+// comparison is deliberately one-sided — it can only prove staleness, never
+// freshness.
+func supersededReason(job Job, task model.ChunkTask, storeHash string) (string, bool) {
+	jobKind, taskKind := normalizeIndexKind(job.IndexKind), normalizeIndexKind(task.IndexKind)
+	if jobKind != taskKind {
+		return "chunk is now index_kind " + taskKind + ", job names " + jobKind, true
+	}
+	jobHash := strings.TrimSpace(job.TextHash)
+	if jobHash != "" && strings.TrimSpace(storeHash) != "" && jobHash != strings.TrimSpace(storeHash) {
+		return "chunk text_hash changed since the job was enqueued", true
+	}
+	return "", false
+}
+
+// normalizeIndexKind folds an index kind to its canonical form; an unset kind is
+// "text" (SPEC §6.1), which is how both the coordinator and the store treat it.
+func normalizeIndexKind(kind string) string {
+	if k := strings.ToLower(strings.TrimSpace(kind)); k != "" {
+		return k
+	}
+	return "text"
+}
+
+// rejectJob returns a job this worker could not execute to the broker and, when
+// this delivery is the last the broker will make, records the failure against
+// the chunk (SPEC §8.7.3: dead-lettering is "surfaced as a per-chunk error").
+//
+// Recording it is what makes dead-lettering TERMINAL. Dead-lettering alone only
+// ends the JOB: the chunk stays `embedding_status=pending`, the coordinator's
+// next tick selects it again, and a brand-new job starts a brand-new retry
+// budget — a configuration mismatch then burns provider quota and broker rows
+// forever without ever converging (#709). A chunk in `error` leaves the pending
+// set, so no new job is minted, and the failure appears in `dir2mcp status` /
+// `doctor` with a category and a sample instead of only as a queue counter an
+// operator has no command to read.
+//
+// A failure that DESERVES a retry still gets every one it was budgeted: this
+// fires only on the final delivery, so a transient fault that clears within the
+// retry budget is redelivered and succeeds normally, and an operator who fixes
+// the underlying cause re-pends the chunk (`dir2mcp reindex`) to hand it back to
+// the queue.
+func (cfg Config) rejectJob(ctx context.Context, lease Lease, category, reason string) {
+	if lease.Final() {
+		cfg.failChunk(ctx, lease, category, reason)
+	}
+	_ = cfg.Broker.Nack(ctx, lease.Token, cfg.retryAfter())
+}
+
+// failChunk records the terminal per-chunk failure, or says loudly why it could
+// not. A worker with no StatusWriter cannot break the re-enqueue loop, and a
+// silent inability to do so is exactly the failure mode #709 describes, so it is
+// logged rather than ignored.
+func (cfg Config) failChunk(ctx context.Context, lease Lease, category, reason string) {
+	chunkID := lease.Job.ChunkID
+	if cfg.Status == nil {
+		cfg.logf("embedqueue: chunk %d exhausted its %d delivery attempts (%s) but no status writer is configured; "+
+			"it stays pending and will be re-enqueued", chunkID, lease.Attempts, category)
+		return
+	}
+	if err := cfg.Status.MarkFailedWithCategory(ctx, []uint64{chunkID}, category, store.SanitizeReason(reason)); err != nil {
+		cfg.logf("embedqueue: record terminal failure for chunk %d: %v", chunkID, err)
+		return
+	}
+	cfg.logf("embedqueue: chunk %d dead-lettered after %d attempts (%s); recorded as a terminal embedding error",
+		chunkID, lease.Attempts, category)
 }
 
 // embedGroup embeds a same-index_kind group of prepared jobs in ONE provider call
@@ -311,10 +505,13 @@ func (cfg Config) embedGroup(ctx context.Context, indexKind string, group []prep
 		if len(group) == 1 {
 			// EmbedAndIndex already records embedding_status=error for permanent
 			// failures (SPEC §5.3); Nack lets the broker redeliver up to its limit
-			// and then dead-letter, mirroring the in-process behavior.
+			// and then dead-letter, mirroring the in-process behavior. A TRANSIENT
+			// failure deliberately leaves the chunk pending (#412) so it is retried,
+			// which is also why the final delivery has to record it: otherwise a
+			// fault that outlives the retry budget loops forever (#709).
 			cfg.logf("embedqueue: embed chunk %d (%s): %v; redelivering",
 				group[0].lease.Job.ChunkID, indexKind, err)
-			_ = cfg.Broker.Nack(ctx, group[0].lease.Token, cfg.retryAfter())
+			cfg.rejectJob(ctx, group[0].lease, string(store.ClassifyError(err)), "embedding failed: "+err.Error())
 			return
 		}
 		cfg.logf("embedqueue: batch embed of %d chunk(s) (%s) failed: %v; isolating per-chunk",
@@ -356,7 +553,7 @@ func (cfg Config) embedOne(ctx context.Context, indexKind string, pj preparedJob
 	if _, err := pj.embedder.EmbedAndIndex(ctx, indexKind, []model.ChunkTask{pj.task}); err != nil {
 		cfg.logf("embedqueue: embed chunk %d (%s): %v; redelivering",
 			pj.lease.Job.ChunkID, indexKind, err)
-		_ = cfg.Broker.Nack(ctx, pj.lease.Token, cfg.retryAfter())
+		cfg.rejectJob(ctx, pj.lease, string(store.ClassifyError(err)), "embedding failed: "+err.Error())
 		return
 	}
 	if err := cfg.Broker.Ack(ctx, pj.lease.Token); err != nil {

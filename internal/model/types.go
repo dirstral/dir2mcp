@@ -764,6 +764,15 @@ type ChunkTask struct {
 	// corpus rel_path whose bytes the worker embeds. Empty/"text" for text.
 	Modality string
 	MediaRef string
+	// TextHash is the chunk's persisted content hash (SPEC §5.3). It is the
+	// chunk's PAYLOAD identity: chunk_id survives an in-place re-ingest of the
+	// same (rep_id, ordinal) while the text, the hash and the index_kind are all
+	// rewritten, so the id alone does not say WHICH bytes a task names. The
+	// distributed coordinator stamps it onto every job (SPEC §8.7.2) so a worker
+	// can tell a job for the chunk's current form from one enqueued for a form
+	// that has since been replaced. Empty when the producer did not supply one;
+	// consumers MUST treat empty as "unknown", never as a mismatch.
+	TextHash string
 	// Context is the chunk's generated document-aware context (SPEC §8.1.8,
 	// issue #330). It participates in EmbedInput ONLY: Text remains the raw
 	// chunk that snippets, reranking, and citations use, so the generated

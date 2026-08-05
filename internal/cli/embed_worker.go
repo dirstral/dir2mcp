@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
 	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // embedWorkerOptions holds the parsed flags for the standalone embed-worker
@@ -133,6 +134,27 @@ func (a *App) requireDistributedPrereqs(cfg config.Config, global globalOptions)
 	return exitSuccess
 }
 
+// requireSharedStoreCapabilities asserts the two optional store capabilities a
+// distributed worker cannot run without: read-by-id (ChunkTaskByID) so it can
+// load the authoritative chunk for a leased job (§8.7.4), and the chunk source
+// so EmbedAndIndex — and the terminal-failure path (#709) — can write status
+// back. Both are satisfied by the SQLite-backed metadata store.
+func (a *App) requireSharedStoreCapabilities(st model.Store, global globalOptions) (embedqueue.TaskFetcher, index.ChunkSource, int) {
+	fetcher, ok := st.(embedqueue.TaskFetcher)
+	if !ok {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			"CONFIG_INVALID: metadata store does not support ChunkTaskByID (required for distributed embedding)")
+		return nil, nil, exitConfigInvalid
+	}
+	chunkSource, ok := st.(index.ChunkSource)
+	if !ok {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			"CONFIG_INVALID: metadata store does not support the chunk source interface (required for distributed embedding)")
+		return nil, nil, exitConfigInvalid
+	}
+	return fetcher, chunkSource, exitSuccess
+}
+
 // runEmbedWorkerLoop opens the shared store, the Tier-C indices, the corpus
 // filesystem and the broker, builds per-axis embedders, and runs embedqueue.Run
 // until the context is cancelled. Setup failures are remediable config errors;
@@ -158,21 +180,9 @@ func (a *App) runEmbedWorkerLoop(ctx context.Context, cfg config.Config, global 
 		}
 	}()
 
-	// The shared store must expose read-by-id (ChunkTaskByID) so the worker can
-	// load the authoritative chunk for a leased job (§8.7.4), and the chunk
-	// source so EmbedAndIndex can write status back. Both are satisfied by the
-	// SQLite-backed metadata store.
-	fetcher, ok := st.(embedqueue.TaskFetcher)
-	if !ok {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
-			"CONFIG_INVALID: metadata store does not support ChunkTaskByID (required for distributed embedding)")
-		return exitConfigInvalid
-	}
-	chunkSource, ok := st.(index.ChunkSource)
-	if !ok {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
-			"CONFIG_INVALID: metadata store does not support the chunk source interface (required for distributed embedding)")
-		return exitConfigInvalid
+	fetcher, chunkSource, code := a.requireSharedStoreCapabilities(st, global)
+	if code != exitSuccess {
+		return code
 	}
 
 	embedder, _, textModel, codeModel := a.resolveModelClients(cfg)
@@ -205,11 +215,25 @@ func (a *App) runEmbedWorkerLoop(ctx context.Context, cfg config.Config, global 
 		return exitConfigInvalid
 	}
 
+	// The corpus binding comes from the SHARED metadata store this worker reads
+	// chunks out of, not from its own config, so a worker's identity and its data
+	// plane are the same fact. A standalone worker is the case #708 is really
+	// about: it is deployed against a broker built to be shared, and without a
+	// binding it will execute whatever it is handed against whichever corpus its
+	// store happens to be.
+	corpusID, err := resolveCorpusID(ctx, cfg, st)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("embed-worker: %v", err))
+		return exitConfigInvalid
+	}
+
 	identityStr := cfg.Providers().EmbedIdentity()
 	workerCfg := embedqueue.Config{
 		Broker:        broker,
 		Fetcher:       fetcher,
 		Embedders:     embedders,
+		CorpusID:      corpusID,
+		Status:        chunkSource,
 		EmbedIdentity: identityStr,
 		LeaseDuration: opts.leaseDuration,
 		PollInterval:  opts.pollInterval,

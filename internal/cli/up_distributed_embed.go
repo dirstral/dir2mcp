@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
+	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
@@ -68,6 +69,11 @@ func startDistributedEmbedding(
 		return errors.New("distributed embedding: embed identity could not be resolved")
 	}
 
+	corpusID, err := resolveCorpusID(ctx, cfg, st)
+	if err != nil {
+		return fmt.Errorf("distributed embedding: %w", err)
+	}
+
 	// Single-coordinator guard (issue #435 C3): refuse to start a second
 	// coordinator for this corpus. The default broker is in-process and cannot
 	// dedup across processes, so two daemons on one corpus would otherwise both
@@ -106,15 +112,23 @@ func startDistributedEmbedding(
 	coord := &embedqueue.Coordinator{
 		Source:        chunkSource,
 		Broker:        broker,
-		CorpusID:      rootDir,
+		CorpusID:      corpusID,
 		SourceKind:    cfg.Source.Kind,
 		EmbedIdentity: identityStr,
 	}
 
 	workerCfg := embedqueue.Config{
-		Broker:        broker,
-		Fetcher:       fetcher,
-		Embedders:     embedders,
+		Broker:    broker,
+		Fetcher:   fetcher,
+		Embedders: embedders,
+		// The coordinator and the worker resolve the corpus id from the SAME store,
+		// so the in-process pair is bound to one corpus by construction and a
+		// broker shared with another corpus cannot cross-wire them (#708).
+		CorpusID: corpusID,
+		// Terminal per-chunk failures go through the same store the in-process loop
+		// marks status on, so a dead-lettered job leaves the pending set instead of
+		// being re-enqueued on the next coordinator tick (#709).
+		Status:        chunkSource,
 		EmbedIdentity: identityStr,
 		// Lease/embed up to distributedEmbedBatchSize chunks per iteration so the
 		// distributed path batches through the provider like the in-process loop
@@ -165,6 +179,48 @@ func startDistributedEmbedding(
 		}
 	})
 	return nil
+}
+
+// resolveCorpusID returns the stable corpus identity (SPEC §5.5) that scopes
+// every distributed embedding job this process enqueues or executes, reading it
+// from — and seeding it into — the corpus's own metadata store.
+//
+// It replaces the root path the coordinator used to stamp onto jobs (#708). A
+// path is the wrong key three times over: it is not stable (moving or
+// re-mounting the corpus renames it), it is not unique for an object-store
+// corpus (S3FS ignores the local root, so two buckets launched from one
+// directory shared an identity — the same defect #737 fixed for the instance
+// name), and it is not safe to publish into a queue several corpora may share.
+// The persisted digest is all three.
+//
+// The key derivation is identity's, not a second implementation of it, so the
+// corpus id and the MCP instance name are derived from exactly the same notion
+// of "which corpus is this" and no credential can reach either.
+func resolveCorpusID(ctx context.Context, cfg config.Config, st model.Store) (string, error) {
+	settings, ok := st.(identity.SettingsStore)
+	if !ok {
+		return "", fmt.Errorf("store %T cannot persist %s; a shared broker cannot route this corpus's jobs safely",
+			st, identity.CorpusIDSettingKey)
+	}
+	corpusID, err := identity.ResolveCorpusID(ctx, settings, corpusIdentityKey(cfg))
+	if err != nil {
+		return "", fmt.Errorf("resolve corpus id: %w", err)
+	}
+	return corpusID, nil
+}
+
+// corpusIdentityKey returns the canonical key this corpus is identified by,
+// mirroring resolveServerName's source branch so one deployment can never be two
+// identities depending on which of the two asked.
+func corpusIdentityKey(cfg config.Config) string {
+	if sourceIsRemote(cfg) {
+		return identity.CorpusKeyForS3(cfg.Source.S3Bucket, cfg.Source.S3Prefix, cfg.Source.S3Endpoint)
+	}
+	abs, err := filepath.Abs(cfg.RootDir)
+	if err != nil {
+		abs = cfg.RootDir
+	}
+	return identity.CorpusKey(abs)
 }
 
 // runCoordinatorLoop enqueues pending chunks on a fixed interval until ctx is

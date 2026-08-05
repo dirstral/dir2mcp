@@ -30,26 +30,35 @@ type SQLiteBroker struct {
 	now         func() time.Time
 }
 
+var _ CorpusScopedBroker = (*SQLiteBroker)(nil)
+
 // NewSQLiteBroker opens (or creates) a SQLite-backed queue at path. maxAttempts
 // bounds redelivery before dead-lettering (non-positive defaults to 5).
 func NewSQLiteBroker(ctx context.Context, path string, maxAttempts int) (*SQLiteBroker, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout is a PER-CONNECTION setting, so it travels in the DSN and is
+	// in effect the moment database/sql opens any connection. Setting it with a
+	// single ExecContext (as this did) lands on whichever pooled connection
+	// served that one call: with several workers leasing concurrently, the pool
+	// opens further connections that never got it, and their reclaim-write-first
+	// Lease fails IMMEDIATELY with "database is locked" instead of waiting. That
+	// is the same defect #429 F11 fixed in internal/store, and the broker is
+	// where it bites hardest — a failed Ack under contention leaves the job
+	// in-flight until its lease expires. Surfaced by the multi-worker shared-queue
+	// test added for #708.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("embedqueue: open sqlite broker: %w", err)
 	}
-	// Order matters: busy_timeout MUST come before journal_mode (mirrors
-	// internal/store/sqlite_store.go). Under the multi-worker pool the
-	// reclaim-write-first Lease otherwise hits "database is locked" immediately
-	// instead of waiting; WAL further reduces read/write blocking across
-	// connections and processes.
-	for _, pragma := range []string{
-		`PRAGMA busy_timeout=5000;`,
-		`PRAGMA journal_mode=WAL;`,
-	} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("embedqueue: configure sqlite broker: %w", err)
-		}
+	// Every broker operation (Enqueue/Lease/Ack/Nack) writes, so concurrent
+	// connections to one SQLite file can only contend. Serializing them through a
+	// single connection is what internal/store does for the same reason.
+	db.SetMaxOpenConns(1)
+	// journal_mode is persistent and database-level, so one connection setting it
+	// is enough; it must come AFTER busy_timeout, because the switch itself can
+	// return SQLITE_BUSY when another process holds the lock.
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL;`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("embedqueue: configure sqlite broker: %w", err)
 	}
 	b, err := newSQLiteBroker(ctx, db, true, maxAttempts)
 	if err != nil {
@@ -110,6 +119,10 @@ CREATE TABLE IF NOT EXISTS embed_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_embed_jobs_state ON embed_jobs(state, not_before_ns);
 CREATE INDEX IF NOT EXISTS idx_embed_jobs_token ON embed_jobs(token);
+-- Serves both corpus-scoped claiming (LeaseForCorpus) and the corpus-scoped
+-- dedup probe Enqueue runs on every coordinator tick (#708).
+CREATE INDEX IF NOT EXISTS idx_embed_jobs_corpus ON embed_jobs(corpus_id, state, not_before_ns);
+CREATE INDEX IF NOT EXISTS idx_embed_jobs_dedup ON embed_jobs(corpus_id, chunk_id, index_kind, state);
 `
 	if _, err := b.db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("embedqueue: migrate broker schema: %w", err)
@@ -137,20 +150,26 @@ func (b *SQLiteBroker) Enqueue(ctx context.Context, job Job) error {
 		return err
 	}
 	// Dedup: do not insert when a LIVE (pending or in-flight) job already exists
-	// for this chunk_id+index_kind, so re-enqueuing the same still-pending head
-	// across coordinator ticks cannot pile up duplicate jobs (SPEC §8.7.3). A
-	// dead-lettered job does NOT block a fresh enqueue (a later retry is allowed).
+	// for this corpus_id+chunk_id+index_kind, so re-enqueuing the same
+	// still-pending head across coordinator ticks cannot pile up duplicate jobs
+	// (SPEC §8.7.3). A dead-lettered job does NOT block a fresh enqueue (a later
+	// retry is allowed).
+	//
+	// corpus_id belongs in the key because chunk ids are per-corpus SQLite
+	// rowids: two corpora pointed at one broker file both have a chunk 1, and
+	// without the corpus term the second corpus's enqueue was silently swallowed
+	// by the first corpus's live job (#708).
 	_, err := b.db.ExecContext(ctx, `
 INSERT INTO embed_jobs(corpus_id, source, chunk_id, index_kind, text_hash, modality,
   rel_path, span_kind, span_page, span_start_ms, span_end_ms, embed_identity, state)
 SELECT ?,?,?,?,?,?,?,?,?,?,?,?, 'pending'
 WHERE NOT EXISTS (
   SELECT 1 FROM embed_jobs
-   WHERE chunk_id = ? AND index_kind = ? AND state IN ('pending','inflight')
+   WHERE corpus_id = ? AND chunk_id = ? AND index_kind = ? AND state IN ('pending','inflight')
 )`,
 		job.CorpusID, job.Source, int64(job.ChunkID), job.IndexKind, job.TextHash, job.Modality,
 		job.RelPath, job.Span.Kind, job.Span.Page, job.Span.StartMS, job.Span.EndMS, job.EmbedIdentity,
-		int64(job.ChunkID), job.IndexKind)
+		job.CorpusID, int64(job.ChunkID), job.IndexKind)
 	if err != nil {
 		return fmt.Errorf("embedqueue: enqueue: %w", err)
 	}
@@ -186,8 +205,16 @@ func (b *SQLiteBroker) reclaimExpired(ctx context.Context, q execer, nowNS int64
 }
 
 // Lease reclaims expired leases, then atomically claims the oldest claimable
-// pending job.
+// pending job, from any corpus.
 func (b *SQLiteBroker) Lease(ctx context.Context, visibility time.Duration) (Lease, error) {
+	return b.LeaseForCorpus(ctx, "", visibility)
+}
+
+// LeaseForCorpus claims the oldest claimable pending job belonging to corpusID,
+// leaving every other corpus's jobs for the workers that serve them (SPEC
+// §8.7.2, §8.7.4). An empty corpusID claims from any corpus, which is what Lease
+// does.
+func (b *SQLiteBroker) LeaseForCorpus(ctx context.Context, corpusID string, visibility time.Duration) (Lease, error) {
 	if visibility <= 0 {
 		visibility = 30 * time.Second
 	}
@@ -199,31 +226,18 @@ func (b *SQLiteBroker) Lease(ctx context.Context, visibility time.Duration) (Lea
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Reclaim expired in-flight leases (SPEC §8.7.3 lease expiry).
+	// Reclaim expired in-flight leases (SPEC §8.7.3 lease expiry). Reclaim stays
+	// queue-wide rather than corpus-scoped: it is maintenance on rows this
+	// transaction is about to read past, and a corpus whose only worker died must
+	// not depend on another corpus's worker never running to get its jobs back.
 	if err := b.reclaimExpired(ctx, tx, nowNS); err != nil {
 		return Lease{}, err
 	}
 
-	var (
-		id  int64
-		job Job
-	)
-	row := tx.QueryRowContext(ctx, `
-SELECT id, corpus_id, source, chunk_id, index_kind, text_hash, modality, rel_path,
-       span_kind, span_page, span_start_ms, span_end_ms, embed_identity
-  FROM embed_jobs
- WHERE state='pending' AND not_before_ns <= ?
- ORDER BY id LIMIT 1`, nowNS)
-	var chunkID int64
-	if err := row.Scan(&id, &job.CorpusID, &job.Source, &chunkID, &job.IndexKind, &job.TextHash,
-		&job.Modality, &job.RelPath, &job.Span.Kind, &job.Span.Page, &job.Span.StartMS,
-		&job.Span.EndMS, &job.EmbedIdentity); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Lease{}, ErrNoJob
-		}
-		return Lease{}, fmt.Errorf("embedqueue: lease select: %w", err)
+	id, job, priorAttempts, err := b.claimableJob(ctx, tx, corpusID, nowNS)
+	if err != nil {
+		return Lease{}, err
 	}
-	job.ChunkID = uint64(chunkID)
 
 	token, err := newLeaseToken(id)
 	if err != nil {
@@ -238,7 +252,52 @@ SELECT id, corpus_id, source, chunk_id, index_kind, text_hash, modality, rel_pat
 	if err := tx.Commit(); err != nil {
 		return Lease{}, fmt.Errorf("embedqueue: lease commit: %w", err)
 	}
-	return Lease{Job: job, Token: token, Deadline: deadline}, nil
+	return Lease{
+		Job:      job,
+		Token:    token,
+		Deadline: deadline,
+		// The row read and the increment share one transaction, so the delivery
+		// count this lease represents is exactly one more than what was on disk.
+		Attempts:    priorAttempts + 1,
+		MaxAttempts: b.maxAttempts,
+	}, nil
+}
+
+// claimableJob selects the oldest claimable pending row, optionally restricted
+// to one corpus. Split out of LeaseForCorpus so the claim path stays within the
+// cyclomatic budget and the two SELECT variants sit next to each other.
+func (b *SQLiteBroker) claimableJob(ctx context.Context, tx *sql.Tx, corpusID string, nowNS int64) (int64, Job, int, error) {
+	const columns = `id, attempts, corpus_id, source, chunk_id, index_kind, text_hash, modality, rel_path,
+       span_kind, span_page, span_start_ms, span_end_ms, embed_identity`
+	query := `SELECT ` + columns + `
+  FROM embed_jobs
+ WHERE state='pending' AND not_before_ns <= ?
+ ORDER BY id LIMIT 1`
+	args := []any{nowNS}
+	if corpusID != "" {
+		query = `SELECT ` + columns + `
+  FROM embed_jobs
+ WHERE corpus_id = ? AND state='pending' AND not_before_ns <= ?
+ ORDER BY id LIMIT 1`
+		args = []any{corpusID, nowNS}
+	}
+
+	var (
+		id       int64
+		attempts int
+		job      Job
+		chunkID  int64
+	)
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&id, &attempts, &job.CorpusID, &job.Source, &chunkID,
+		&job.IndexKind, &job.TextHash, &job.Modality, &job.RelPath, &job.Span.Kind, &job.Span.Page,
+		&job.Span.StartMS, &job.Span.EndMS, &job.EmbedIdentity); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, Job{}, 0, ErrNoJob
+		}
+		return 0, Job{}, 0, fmt.Errorf("embedqueue: lease select: %w", err)
+	}
+	job.ChunkID = uint64(chunkID)
+	return id, job, attempts, nil
 }
 
 // Ack deletes the leased job. An unknown/expired token deletes nothing.

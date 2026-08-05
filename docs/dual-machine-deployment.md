@@ -380,6 +380,47 @@ Run as many `embed-worker` processes as your GPU(s) can feed. Because all worker
 write to the same Tier-C collection under the same embed identity, the result is a
 single coherent index.
 
+### 4.4 Sharing one broker between corpora
+
+Two corpora may point at the same `sqlite_path`. Each corpus is identified by a
+stable `corpus_id` (SPEC §5.5), derived on first use from the corpus root (or,
+for `source.kind: s3`, from bucket + prefix + endpoint) and persisted in that
+corpus's own metadata store. It is an opaque digest: it carries no path, bucket,
+endpoint or credential, so a queue file readable by both corpora discloses
+neither corpus's layout to the other.
+
+Every job carries its `corpus_id`, and it governs routing end to end:
+
+- the queue deduplicates jobs per corpus, so two corpora whose chunk ids collide
+  (they are per-corpus SQLite rowids, so this is normal, not exotic) each keep
+  their own job;
+- a worker leases only jobs for the corpus its metadata store belongs to, and
+  refuses to execute one for any other corpus even if a broker hands it over.
+
+Moving or re-mounting a corpus does not change its `corpus_id` — the persisted
+value wins over the derived one, so in-flight jobs and already-written vectors
+stay bound to the corpus they came from.
+
+### 4.5 When a job cannot succeed
+
+A job is redelivered up to `max_attempts` times and then dead-lettered. On that
+final attempt the chunk itself is recorded as `embedding_status=error` with a
+category, so:
+
+- it leaves the pending set and the coordinator stops minting new jobs for it —
+  a permanent misconfiguration (mismatched embed identity, an index axis no
+  worker serves) fails **bounded** instead of retrying forever;
+- it appears in `dir2mcp status` and `dir2mcp doctor` under the error-category
+  breakdown, alongside in-process embedding failures.
+
+A failure that clears within the retry budget is simply redelivered and succeeds;
+nothing is recorded. To retry a chunk that was recorded as failed — after fixing
+the cause — re-pend it with `dir2mcp reindex`.
+
+A job whose chunk changed after it was enqueued (re-ingested with different text,
+or moved to the other index axis) is acknowledged as **superseded** without being
+embedded, and the coordinator enqueues the chunk's current form on its next pass.
+
 ---
 
 ## 5. Caveats and current limitations
