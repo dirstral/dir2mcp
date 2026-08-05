@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
+	"github.com/dirstral/dir2mcp/internal/relpath"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
@@ -100,6 +101,12 @@ func (s *S3FS) MediaURL(ctx context.Context, relPath string) (string, bool, erro
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}
+	// Before the capability check, not after: a backend without a presigner
+	// would otherwise answer "no media URL" for a path that should have been
+	// refused outright, which is a different answer from Open and Localize.
+	if err := guardRel(relPath); err != nil {
+		return "", false, err
+	}
 	if s.presign == nil {
 		return "", false, nil
 	}
@@ -123,19 +130,65 @@ func normalizeS3Prefix(prefix string) string {
 }
 
 // keyForRel maps a corpus-relative path to a full S3 object key.
+// guardRel refuses a rel_path that is not inside the corpus.
+//
+// Discovery validates every key it emits, but a rel_path reaching Open,
+// Localize or MediaURL has usually come back through the store, an MCP
+// argument or a config file, and SPEC §7.8 requires the check on open and stat
+// as well as on list. keyForRel would otherwise strip a leading slash and
+// address a different object than the caller named.
+func guardRel(relPath string) error {
+	if _, err := relpath.Normalize(relPath); err != nil {
+		return fmt.Errorf("corpusfs: %q: %w", relPath, err)
+	}
+	return nil
+}
+
 func (s *S3FS) keyForRel(relPath string) string {
 	// No TrimSpace: Walk emits RelPath verbatim, so keys with leading/trailing
 	// spaces must round-trip exactly through keyForRel for Open/Localize.
 	return s.prefix + strings.TrimPrefix(filepath.ToSlash(relPath), "/")
 }
 
-// relForKey maps a full S3 object key to its corpus-relative path, or returns
-// ok=false when the key does not live under the configured prefix.
-func (s *S3FS) relForKey(key string) (string, bool) {
+// errKeyNotUnderPrefix marks a key outside the configured prefix. That is an
+// ordinary, expected outcome of listing (the prefix is a filter, not a
+// guarantee), and is distinct from a key that IS under the prefix but whose
+// relative name cannot be trusted.
+var errKeyNotUnderPrefix = errors.New("key is not under the configured prefix")
+
+// relForKey maps a full S3 object key to its corpus-relative path.
+//
+// Stripping the prefix as a raw string is not enough. A bucket is untrusted
+// input, and a key like `corpus/../outside.mp4` strips to `../outside.mp4`,
+// which then flows into code that joins it against the LOCAL root: video
+// recognition builds `RootDir + rel_path`, and so does TTML/SMIL export
+// probing. A leading-slash rel path does not even round-trip, because
+// keyForRel strips the slash and addresses a different object. SPEC §7.8
+// requires root/prefix isolation on every backend, so the relative name is
+// validated here, at the one place both callers pass through (#735).
+func (s *S3FS) relForKey(key string) (string, error) {
 	if !strings.HasPrefix(key, s.prefix) {
-		return "", false
+		return "", errKeyNotUnderPrefix
 	}
-	return strings.TrimPrefix(key, s.prefix), true
+	rel := strings.TrimPrefix(key, s.prefix)
+	// The prefix itself. In scope, simply not a file.
+	if rel == "" {
+		return rel, nil
+	}
+	// A directory placeholder is in scope and not a file, but its NAME still
+	// has to be inside the corpus: `corpus/../` is a placeholder shape and a
+	// traversal, and skipping it on shape alone would hide it from
+	// OnUnsafeKey. Validate what it points at, then let the caller skip it.
+	if strings.HasSuffix(rel, "/") {
+		if _, err := relpath.Normalize(strings.TrimSuffix(rel, "/")); err != nil {
+			return "", err
+		}
+		return rel, nil
+	}
+	// Normalize returns the path unchanged or refuses it, so a discovered
+	// rel_path is always the key's own bytes and maps back to the object it
+	// came from.
+	return relpath.Normalize(rel)
 }
 
 // Walk lists objects under the prefix and converts them to DiscoveredFile,
@@ -186,7 +239,7 @@ func (s *S3FS) listObjects(ctx context.Context, opts Options) ([]DiscoveredFile,
 		}
 		for _, obj := range out.Contents {
 			if opts.UseGitIgnore {
-				if rel, ok := s.relForKey(aws.ToString(obj.Key)); ok && path.Base(rel) == ".gitignore" {
+				if rel, err := s.relForKey(aws.ToString(obj.Key)); err == nil && path.Base(rel) == ".gitignore" {
 					gitignoreRels = append(gitignoreRels, rel)
 				}
 			}
@@ -287,8 +340,15 @@ func (s *S3FS) getGitIgnoreObject(ctx context.Context, rel string) ([]byte, erro
 // the object is skipped.
 func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options) (DiscoveredFile, bool) {
 	key := aws.ToString(obj.Key)
-	rel, ok := s.relForKey(key)
-	if !ok {
+	rel, err := s.relForKey(key)
+	if err != nil {
+		// Not under the prefix is the listing's own noise. A key that IS under
+		// it but is not a usable rel_path is a finding: report it rather than
+		// dropping it silently, so an operator can see the bucket carries keys
+		// dir2mcp refuses (#735).
+		if !errors.Is(err, errKeyNotUnderPrefix) && opts.OnUnsafeKey != nil {
+			opts.OnUnsafeKey(key, err)
+		}
 		return DiscoveredFile{}, false
 	}
 	// Skip "directory" placeholder keys (those ending in "/") and the prefix
@@ -343,6 +403,9 @@ func (s *S3FS) Open(ctx context.Context, relPath string) (io.ReadSeekCloser, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := guardRel(relPath); err != nil {
+		return nil, err
+	}
 	key := s.keyForRel(relPath)
 	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -378,6 +441,9 @@ func (s *S3FS) Open(ctx context.Context, relPath string) (io.ReadSeekCloser, err
 // a cleanup that removes the file.
 func (s *S3FS) Localize(ctx context.Context, relPath string) (string, func(), error) {
 	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	if err := guardRel(relPath); err != nil {
 		return "", nil, err
 	}
 	key := s.keyForRel(relPath)

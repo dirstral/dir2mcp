@@ -1688,6 +1688,16 @@ func (s *Service) runScan(ctx context.Context) error {
 			relPath, size, capMB,
 		)
 	}
+	// A bucket key that is not a usable rel_path is refused at discovery
+	// (#735). Logged rather than counted as a skip: it is not a corpus file
+	// dir2mcp declined to index, it is a key that could not be named safely,
+	// and an operator needs to see that their bucket contains such keys.
+	discoverOpts.OnUnsafeKey = func(key string, unsafeErr error) {
+		s.getLogger().Printf(
+			"discovery: refusing object key %q — it does not resolve inside the corpus root: %v",
+			key, unsafeErr,
+		)
+	}
 	discovered, err := s.corpusFS().Walk(ctx, s.cfg.RootDir, discoverOpts.corpusfsOptions())
 	if err != nil {
 		return err
