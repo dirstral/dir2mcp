@@ -118,29 +118,91 @@ func (a *App) resolveServiceContext(global globalOptions, nameOverride string) (
 	if err != nil {
 		return serviceContext{}, config.Config{}, fmt.Errorf("load config: %w", err)
 	}
-	sc, err := serviceContextFromConfig(cfg, nameOverride)
+	sc, err := serviceContextFromConfig(cfg, nameOverride, resolveConfigPath(global))
 	if err != nil {
 		return serviceContext{}, config.Config{}, err
 	}
 	return sc, cfg, nil
 }
 
+// absOrSelf returns the absolute form of p, falling back to p itself when the
+// working directory cannot be read (the historical behavior of every
+// filepath.Abs call on this path).
+func absOrSelf(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
+}
+
+// isExistingDir reports whether p names an existing directory.
+func isExistingDir(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
+// serviceWorkingDirBase picks the directory the supervised daemon is booted in.
+//
+// For a filesystem-backed corpus (local/nfs) this stays the absolute corpus
+// root, unchanged: that is where the operator's .dir2mcp.yaml and .env.local
+// live by convention, and both the config loader (relative ".dir2mcp.yaml") and
+// the dotenv loader (relative ".env.local") resolve against the process working
+// directory.
+//
+// For an object-store corpus there is no local root to boot in (SPEC §7.8), and
+// rendering the ignored RootDir as launchd's WorkingDirectory / systemd's
+// WorkingDirectory installs a unit that cannot start (#738). The config file's
+// own directory is used instead: it is the one local directory that is
+// guaranteed to be the source of the config the operator just installed from,
+// so the booted daemon rediscovers the same .dir2mcp.yaml and the same
+// .env.local (which is also where persistAndWarnCredentials writes the AWS
+// credentials, and what systemd renders as EnvironmentFile).
+func serviceWorkingDirBase(cfg config.Config, configPath string) string {
+	if !sourceIsRemote(cfg) {
+		return absOrSelf(cfg.RootDir)
+	}
+	p := strings.TrimSpace(configPath)
+	if p == "" {
+		p = defaultConfigFileName
+	}
+	return filepath.Dir(absOrSelf(p))
+}
+
+// resolveServiceDirs resolves the supervisor working directory and the absolute
+// state directory together, because they are coupled: a relative state_dir is
+// resolved by the booted daemon against its own working directory, so install
+// must resolve it against the same base or it would create (and log into) a
+// different directory than the daemon uses.
+//
+// When the config directory itself does not exist (an explicit --config naming a
+// path under a missing directory), the working directory falls back to the state
+// directory, which is always local (SPEC §7.8) and is created before the unit is
+// written.
+func resolveServiceDirs(cfg config.Config, configPath string) (workingDir, stateDir string) {
+	base := serviceWorkingDirBase(cfg, configPath)
+	stateDir = strings.TrimSpace(cfg.StateDir)
+	if stateDir == "" {
+		stateDir = filepath.Join(base, ".dir2mcp")
+	}
+	if !filepath.IsAbs(stateDir) {
+		stateDir = filepath.Join(base, stateDir)
+	}
+	workingDir = base
+	if sourceIsRemote(cfg) && !isExistingDir(base) {
+		workingDir = stateDir
+	}
+	return workingDir, stateDir
+}
+
 // serviceContextFromConfig derives the service context from an already-loaded
 // config, so callers holding a config (e.g. `down`) don't pay a redundant
 // config reload. nameOverride is assumed pre-validated by the caller.
-func serviceContextFromConfig(cfg config.Config, nameOverride string) (serviceContext, error) {
+// configPath is the config path the caller resolved (see resolveConfigPath); it
+// anchors the working directory when the corpus root is remote (#738).
+func serviceContextFromConfig(cfg config.Config, nameOverride, configPath string) (serviceContext, error) {
 	name := resolveClaudeServerName(&cfg, nameOverride)
-	abs, err := filepath.Abs(cfg.RootDir)
-	if err != nil {
-		abs = cfg.RootDir
-	}
-	stateDir := strings.TrimSpace(cfg.StateDir)
-	if stateDir == "" {
-		stateDir = filepath.Join(abs, ".dir2mcp")
-	}
-	if !filepath.IsAbs(stateDir) {
-		stateDir = filepath.Join(abs, stateDir)
-	}
+	workingDir, stateDir := resolveServiceDirs(cfg, configPath)
 	bin, err := os.Executable()
 	if err != nil {
 		return serviceContext{}, fmt.Errorf("locate dir2mcp executable: %w", err)
@@ -148,11 +210,33 @@ func serviceContextFromConfig(cfg config.Config, nameOverride string) (serviceCo
 	return serviceContext{
 		label:      serviceLabel(name),
 		serverName: name,
-		workingDir: abs,
+		workingDir: workingDir,
 		stateDir:   stateDir,
 		binaryPath: bin,
 		logPath:    filepath.Join(stateDir, "service.log"),
 	}, nil
+}
+
+// installServiceArgs builds the argv the supervisor launches, propagating the
+// operator's global flag overrides so the installed service restarts with the
+// exact same config/state-dir they used for install, rather than re-discovering
+// defaults from the working directory alone.
+//
+// Both propagated paths are made ABSOLUTE (#738). A relative --config was
+// previously copied verbatim into the unit and then re-resolved by the daemon
+// against its own working directory, which is not the directory the operator ran
+// install from — so the unit could point at a config that does not exist. The
+// state directory is taken from the already-resolved serviceContext, which is
+// the same directory install just created and writes service.log into.
+func installServiceArgs(global globalOptions, sc serviceContext) []string {
+	serviceArgs := []string{"up", "--foreground"}
+	if p := strings.TrimSpace(global.configPath); p != "" {
+		serviceArgs = append(serviceArgs, "--config", absOrSelf(p))
+	}
+	if p := strings.TrimSpace(global.stateDir); p != "" {
+		serviceArgs = append(serviceArgs, "--state-dir", sc.stateDir)
+	}
+	return serviceArgs
 }
 
 // runServiceInstall handles `dir2mcp service install`.
@@ -171,16 +255,7 @@ func (a *App) runServiceInstall(global globalOptions, args []string) int {
 	}
 	savedCreds, failedCreds := a.persistAndWarnCredentials(sc.workingDir, cfg, global.jsonOutput, global.quiet)
 
-	// Propagate global flag overrides so the installed service restarts
-	// with the exact same config/state-dir the operator used for install,
-	// rather than re-discovering defaults from the working directory alone.
-	serviceArgs := []string{"up", "--foreground"}
-	if p := strings.TrimSpace(global.configPath); p != "" {
-		serviceArgs = append(serviceArgs, "--config", p)
-	}
-	if p := strings.TrimSpace(global.stateDir); p != "" {
-		serviceArgs = append(serviceArgs, "--state-dir", p)
-	}
+	serviceArgs := installServiceArgs(global, sc)
 
 	unitPath, err := mgr.install(serviceSpec{
 		Label:      sc.label,

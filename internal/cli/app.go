@@ -1402,13 +1402,17 @@ func consumeGlobalFlagValue(flagName string, args []string) (string, int, error)
 	return value, 2, nil
 }
 
+// defaultConfigFileName is the config file `dir2mcp` discovers in the process
+// working directory when no --config is supplied.
+const defaultConfigFileName = ".dir2mcp.yaml"
+
 // resolveConfigPath returns the configured config path, defaulting to
 // ".dir2mcp.yaml" when none was supplied.
 func resolveConfigPath(global globalOptions) string {
 	if trimmed := strings.TrimSpace(global.configPath); trimmed != "" {
 		return trimmed
 	}
-	return ".dir2mcp.yaml"
+	return defaultConfigFileName
 }
 
 // applyGlobalPathOverrides overlays the --dir and --state-dir global flags

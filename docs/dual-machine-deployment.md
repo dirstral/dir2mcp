@@ -184,6 +184,17 @@ persisted** to the config file or the effective-config snapshot. With
 `source.kind: s3`, startup fails loudly (`CONFIG_INVALID`-style) if the bucket is
 missing or the access key + secret are not resolvable.
 
+**No local corpus directory is required for `s3`.** The bucket + prefix *is* the
+corpus root, so `root_dir` (the `--dir` root) is ignored by the S3 backend and
+does not have to exist. Only the **state directory** must be local
+(`dirstral-spec/docs/SPEC.md` §7.8) — that is where SQLite, the index and the
+caches live. `dir2mcp up` on an `s3` source therefore no longer fails with
+`root inaccessible` when no local corpus is present, and `dir2mcp service
+install` anchors the supervised daemon's working directory on the **directory
+holding your config file** (where `.dir2mcp.yaml` and `.env.local` live) instead
+of the ignored corpus root. `local`/`nfs` are unchanged: they still require an
+accessible root directory and still boot the service in it.
+
 `rel_path` (document identity) is stable across schemes: for `local`/`nfs` it is
 the path under the root; for `s3` it is the object key minus the configured
 prefix. A corpus can be relocated `local ⇄ nfs ⇄ s3` without forcing a reindex
