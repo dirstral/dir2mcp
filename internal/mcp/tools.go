@@ -21,12 +21,14 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
+	"github.com/dirstral/dir2mcp/internal/relpath"
 )
 
 // maxOpenFilePage caps the open_file page argument so a caller cannot request
@@ -1618,7 +1620,11 @@ func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]in
 		return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("requested clip duration %dms exceeds max %dms; request a shorter span", req.endMS-req.startMS, maxDurationMS), Retryable: false}
 	}
 
-	absPath, pathErr := s.resolveDocumentPath(req.relPath)
+	// The clip is cut from a real local path, so a non-local corpus materializes
+	// a temporary copy here; the cleanup runs on every path below, including the
+	// extraction-failure and clip-too-large returns (#759).
+	absPath, cleanup, pathErr := s.localizeDocument(ctx, req.relPath)
+	defer cleanup()
 	if pathErr != nil {
 		return toolCallResult{}, mapPathError(pathErr)
 	}
@@ -2375,10 +2381,15 @@ func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel st
 	if s.store == nil {
 		return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: "store not configured", Retryable: false}
 	}
-	absPath, pathErr := s.resolveDocumentPath(normalizedRel)
+	absPath, cleanup, pathErr := s.localizeDocument(ctx, normalizedRel)
+	defer cleanup()
 	if pathErr != nil {
 		return model.Document{}, mapPathError(pathErr)
 	}
+	// For a non-local corpus this stats the downloaded copy: its size is the
+	// object's size, but its mtime is the download time, not the object's
+	// LastModified. That only feeds the on-demand document row's MTimeUnix, which
+	// discovery overwrites with the backend's own value on the next scan.
 	info, statErr := os.Stat(absPath)
 	if statErr != nil {
 		return model.Document{}, mapFileAccessError(statErr)
@@ -2451,7 +2462,7 @@ func mapReadDocumentError(err error) *toolExecutionError {
 }
 
 func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, bool, *toolExecutionError) {
-	content, err := s.readDocumentContent(doc.RelPath)
+	content, err := s.readDocumentContent(ctx, doc.RelPath)
 	if err != nil {
 		return "", false, false, mapReadDocumentError(err)
 	}
@@ -2546,7 +2557,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		}
 		return text, ingest.RepTypeTranscript, nil
 	case "pdf", "image", "document":
-		content, err := s.readDocumentContent(doc.RelPath)
+		content, err := s.readDocumentContent(ctx, doc.RelPath)
 		if err != nil {
 			return "", "", annotationReadError(err)
 		}
@@ -2584,7 +2595,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		}
 		return text, ingest.RepTypeOCRMarkdown, nil
 	default:
-		content, err := s.readDocumentContent(doc.RelPath)
+		content, err := s.readDocumentContent(ctx, doc.RelPath)
 		if err != nil {
 			return "", "", annotationReadError(err)
 		}
@@ -2644,12 +2655,127 @@ func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
 	return nil
 }
 
-func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
-	targetReal, err := s.resolveDocumentPath(relPath)
+func (s *Server) readDocumentContent(ctx context.Context, relPath string) ([]byte, error) {
+	targetReal, cleanup, err := s.localizeDocument(ctx, relPath)
+	defer cleanup()
 	if err != nil {
 		return nil, err
 	}
 	return os.ReadFile(targetReal)
+}
+
+// noopCleanup is the cleanup returned whenever nothing was materialized, so the
+// on-demand callers can `defer cleanup()` unconditionally instead of nil-checking
+// on every error path.
+func noopCleanup() {}
+
+// corpusFSForOnDemand returns the CorpusFS the on-demand tool paths must read
+// through, or nil when they should keep the historical local resolution.
+//
+// Both conditions matter. The backend is used only when one was injected AND the
+// configured corpus source is non-local: a local corpus keeps resolveDocumentPath
+// because its containment guarantee is expressed in resolved symlinks (a symlink
+// inside the corpus whose real target is excluded is refused by the post-resolution
+// re-check), and an object store has no symlinks to resolve. Gating on the source
+// kind as well as on injection means an accidentally injected local backend can
+// never silently downgrade that guarantee.
+func (s *Server) corpusFSForOnDemand() corpusfs.CorpusFS {
+	if s.corpusFS == nil || !corpusSourceIsRemote(s.cfg) {
+		return nil
+	}
+	return s.corpusFS
+}
+
+// corpusSourceIsRemote reports whether the corpus lives on a backend with no
+// local file at RootDir/rel_path. It mirrors the CLI's sourceIsRemote.
+func corpusSourceIsRemote(cfg config.Config) bool {
+	return strings.EqualFold(strings.TrimSpace(cfg.Source.Kind), "s3")
+}
+
+// localizeDocument resolves relPath to a real local filesystem path the
+// on-demand tool paths can read (ffmpeg extraction, a bounded os.Stat+read),
+// plus a cleanup func the caller MUST invoke on EVERY path including errors.
+// The returned cleanup is never nil, so `defer cleanup()` immediately after the
+// call is always correct.
+//
+// For a local corpus this is exactly resolveDocumentPath: the in-root resolved
+// path, no copy, a no-op cleanup. For an object store it is a temporary download
+// through CorpusFS.Localize, because S3FS.Walk ignores RootDir and reports no
+// local path (DiscoveredFile.AbsPath == ""), so RootDir/rel_path names a file
+// that does not exist and every on-demand branch failed with ENOENT (#759).
+func (s *Server) localizeDocument(ctx context.Context, relPath string) (string, func(), error) {
+	fsys := s.corpusFSForOnDemand()
+	if fsys == nil {
+		resolved, err := s.resolveDocumentPath(relPath)
+		if err != nil {
+			return "", noopCleanup, err
+		}
+		return resolved, noopCleanup, nil
+	}
+	// Containment and the corpus path-exclusion policy are enforced BEFORE the
+	// fetch. Localize on an object store downloads the object, so checking after
+	// it would mean an operator-excluded file is pulled out of the bucket and
+	// written to the local cache before being refused.
+	normalized, err := s.checkRemoteDocumentPolicy(relPath)
+	if err != nil {
+		return "", noopCleanup, err
+	}
+	localPath, cleanup, err := fsys.Localize(ctx, normalized)
+	if err != nil {
+		// The contract is that a failed Localize materialized nothing, but call a
+		// non-nil cleanup anyway rather than trusting every backend to honour it.
+		if cleanup != nil {
+			cleanup()
+		}
+		return "", noopCleanup, mapCorpusFSError(err)
+	}
+	if cleanup == nil {
+		cleanup = noopCleanup
+	}
+	return localPath, cleanup, nil
+}
+
+// checkRemoteDocumentPolicy is the backend-independent half of
+// resolveDocumentPath: root containment plus the corpus path-exclusion policy
+// (#407), with no filesystem involved. It returns the rel_path to hand to the
+// backend, unchanged.
+//
+// Containment comes from relpath.Normalize (#735), which is the same rule S3
+// discovery applies to every key it emits, rather than from EvalSymlinks, which
+// means nothing for an object store. It is deliberately stricter than the local
+// branch's filepath.Clean: a rel_path whose cleaned form differs from itself
+// (`a//b.mp3`, `./a.mp3`, a trailing slash) is REFUSED rather than rewritten,
+// because an S3 key is an opaque byte string and cleaning it would both address
+// a different object than the caller named and let a path dodge an exclusion
+// glob that the un-cleaned form matches.
+func (s *Server) checkRemoteDocumentPolicy(relPath string) (string, error) {
+	// No TrimSpace: leading/trailing spaces are legal, meaningful bytes in an S3
+	// key, and trimming would address a different object than the corpus indexed
+	// (the same reason corpusfs.keyForRel does not trim).
+	normalized, err := relpath.Normalize(relPath)
+	if err != nil {
+		return "", model.ErrPathOutsideRoot
+	}
+	if ingest.MatchesAnyPathExclude(normalized, s.cfg.PathExcludes) {
+		return "", model.ErrForbidden
+	}
+	return normalized, nil
+}
+
+// mapCorpusFSError translates a CorpusFS failure into the sentinels the tool
+// error mappers (mapPathError/mapReadDocumentError/annotationReadError) already
+// understand, so a backend refusal reports PATH_OUTSIDE_ROOT rather than the
+// generic fallback. Backend errors are wrapped, never re-worded: they can carry
+// a bucket/key or a local cache path, and the mappers emit fixed messages.
+func mapCorpusFSError(err error) error {
+	switch {
+	case errors.Is(err, corpusfs.ErrPathEscapesRoot),
+		errors.Is(err, relpath.ErrOutsideRoot),
+		errors.Is(err, relpath.ErrNotRelative):
+		return model.ErrPathOutsideRoot
+	default:
+		return err
+	}
 }
 
 func (s *Server) resolveDocumentPath(relPath string) (string, error) {

@@ -29,6 +29,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
@@ -146,6 +147,13 @@ type Server struct {
 	// to avutil.ExtractSegment and is an injectable seam so tests can stub
 	// extraction without ffmpeg on PATH.
 	extractSegment func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)
+
+	// corpusFS supplies the bytes for the on-demand tool paths (open_media_clip,
+	// on-demand audio init, on-demand content reads) when the corpus lives on a
+	// non-local backend (#759). It is set once at construction and read-only
+	// thereafter. nil (the default) and a local corpus source both keep the
+	// historical local-filesystem resolution; see corpusFSForOnDemand.
+	corpusFS corpusfs.CorpusFS
 }
 
 type rpcRequest struct {
@@ -228,6 +236,21 @@ func WithTTS(tts TTSSynthesizer) ServerOption {
 func WithExtractSegment(fn func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)) ServerOption {
 	return func(s *Server) {
 		s.extractSegment = fn
+	}
+}
+
+// WithCorpusFS injects the corpus filesystem backend the on-demand tool paths
+// read through (issue #759). It matters only for a non-local corpus source: an
+// object store has no file at RootDir/rel_path, so open_media_clip, on-demand
+// audio init and on-demand content reads have to obtain the bytes through the
+// backend instead of joining a path that names nothing.
+//
+// A local/NFS corpus ignores it and keeps the filesystem-native resolution
+// (EvalSymlinks containment plus the symlink-target exclusion re-check), which
+// has no object-store analogue and must not be weakened by an injection.
+func WithCorpusFS(fsys corpusfs.CorpusFS) ServerOption {
+	return func(s *Server) {
+		s.corpusFS = fsys
 	}
 }
 

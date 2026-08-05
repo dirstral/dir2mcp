@@ -121,7 +121,19 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return !indexingState.Snapshot().Running
 	})
 
+	corpusFS, err := buildCorpusFS(ctx, cfg)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize corpus source: %v", err))
+		return exitConfigInvalid
+	}
+
 	serverOptions := buildMCPServerOptions(&cfg, st, indexingState, emitter)
+	// Route the on-demand tool paths (open_media_clip, on-demand audio init,
+	// on-demand content reads) through the corpus filesystem so they work on an
+	// object-store corpus, which has no file at RootDir/rel_path (#759). The
+	// server ignores it for a local/NFS corpus, which keeps its filesystem-native
+	// resolution.
+	serverOptions = append(serverOptions, mcp.WithCorpusFS(corpusFS))
 	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
 	ing, err := a.newIngestor(cfg, st)
 	if err != nil {
@@ -136,11 +148,6 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	})
 	wireDerivationCacheIdentities(ret, ing)
 
-	corpusFS, err := buildCorpusFS(ctx, cfg)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize corpus source: %v", err))
-		return exitConfigInvalid
-	}
 	setCorpusFSIfSupported(ing, corpusFS)
 	// Route retrieval-time reads (open_file raw text / OCR / transcript) through
 	// the corpus filesystem for object-store backends so open_file works on an S3
