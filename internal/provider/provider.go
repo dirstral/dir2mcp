@@ -343,7 +343,7 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 // a matching identity. Recording the resolved model closes that, and also makes
 // "set the model to the value already in effect" a no-op instead of a spurious
 // reindex (#440 F3). Recorded BLANK model fields from before this rule are
-// migrated by embedIdentityMatches, so no existing corpus re-embeds.
+// migrated by EmbedIdentityMatches, so no existing corpus re-embeds.
 //
 // contextual is the TERMINAL (9th) field: the EFFECTIVE contextual-retrieval
 // mode (8.1.8) — EmbedContextualOff when the feature is disabled OR enabled
