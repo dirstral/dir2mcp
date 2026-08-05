@@ -193,40 +193,15 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 // the asymmetry by construction and gives per-query metrics a truthful model
 // label instead of an empty string.
 //
-// Note: EmbedIdentity (SPEC 8.1.4) is intentionally derived from the RAW
-// profile field, not this resolved value, so making the effective model
-// explicit here never flips a recorded identity or forces a spurious reindex.
+// EmbedIdentity (SPEC 8.1.4) is derived from this SAME resolved value (issue
+// #705): the identity must name the model that actually produced the vectors,
+// so a raw blank field can no longer stand in for an adapter default. This
+// function is now a thin alias for provider.EffectiveEmbedModels, kept because
+// the CLI and this package's callers reach for it here; the resolution table
+// lives in the provider package so the identity can consult it without
+// depending on the HTTP clients.
 func EffectiveEmbedModels(p provider.Profile) (text, code string) {
-	def := kindDefaultEmbedModel(p.Kind)
-	text = strings.TrimSpace(p.EmbedTextModel)
-	if text == "" {
-		text = def
-	}
-	code = strings.TrimSpace(p.EmbedCodeModel)
-	if code == "" {
-		code = def
-	}
-	return text, code
-}
-
-// kindDefaultEmbedModel returns the embed model an adapter of kind k substitutes
-// when the profile leaves the model blank, mirroring the per-kind fallbacks in
-// Embedder and each client's Embed. Kinds with no embed capability (or none with
-// a defined default) return "" — the effective model is then just whatever the
-// profile carries.
-func kindDefaultEmbedModel(k provider.Kind) string {
-	switch k {
-	case provider.KindOpenAI:
-		return openai.DefaultEmbedModel
-	case provider.KindCohere:
-		return cohere.DefaultEmbedModel
-	case provider.KindGemini:
-		return gemini.DefaultEmbedModel
-	case provider.KindOmniEmbed:
-		return omniembed.DefaultModel
-	default:
-		return ""
-	}
+	return provider.EffectiveEmbedModels(p)
 }
 
 // Generator builds a model.Generator (kinds: openai, gemini, cohere,

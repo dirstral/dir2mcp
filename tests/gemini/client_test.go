@@ -267,13 +267,17 @@ func TestEmbed_OutputDimensionalityAndNormalize(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL)
-	c.EmbedTextDim = 768
+	// The requested dimension matches the stub's 2-component response: when a
+	// dimension is requested the adapter also REQUIRES the response to carry
+	// exactly that many components (issue #703), so a fixture that asks for 768
+	// and returns 2 is now (correctly) a malformed-provider-output error.
+	c.EmbedTextDim = 2
 	vecs, err := c.Embed(context.Background(), "m", model.EmbedDocument, []string{"x"})
 	if err != nil {
 		t.Fatalf("embed: %v", err)
 	}
-	if gotDim == nil || *gotDim != 768 {
-		t.Fatalf("outputDimensionality = %v, want 768", gotDim)
+	if gotDim == nil || *gotDim != 2 {
+		t.Fatalf("outputDimensionality = %v, want 2", gotDim)
 	}
 	// [3,4]/5 = [0.6,0.8]; norm must be ~1.
 	got := vecs[0]

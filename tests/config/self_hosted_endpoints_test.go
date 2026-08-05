@@ -50,7 +50,11 @@ func TestSelfHosted_EmbedBaseURLResolves(t *testing.T) {
 	// The embed identity must encode the self-hosted profile + custom base_url
 	// + model so a change to any is corpus-lifetime / reindex-bound (SPEC
 	// §8.1.4 / §8.5 / issue #560): the non-canonical endpoint is the 2nd field.
-	if id := r.EmbedIdentity(); id != "gpu-embed|http://gpu-vps:8080/v1|bge-m3||0|0|off|off|off" {
+	// The code axis records text-embedding-3-small, not "": the profile leaves
+	// embed_code_model blank, and a blank field means the kind:openai adapter
+	// default is what goes on the wire for the code axis, so that is what the
+	// identity must name (issue #705).
+	if id := r.EmbedIdentity(); id != "gpu-embed|http://gpu-vps:8080/v1|bge-m3|text-embedding-3-small|0|0|off|off|off" {
 		t.Fatalf("embed identity = %q", id)
 	}
 }

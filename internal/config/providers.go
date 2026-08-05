@@ -1070,7 +1070,8 @@ func (r ProviderResolution) EmbedContextual() string {
 
 // EmbedBaseURL is the normalized embed base_url component of the corpus-lifetime
 // identity (SPEC 8.1.4 / §6.4 `embed_base_url`), or "" if embed cannot be
-// resolved OR the endpoint is a native surface / canonical/default (rule 1/2).
+// resolved OR the endpoint is canonical/default (rule 2) — which includes the
+// HOSTED native gemini/cohere surface, but no longer a CUSTOM one (issue #702).
 // It is persisted alongside the recorded identity so operators can read the
 // endpoint that pins the vector space without parsing the composite identity.
 func (r ProviderResolution) EmbedBaseURL() string {

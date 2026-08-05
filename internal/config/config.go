@@ -1929,8 +1929,9 @@ func appendSnapshotEmbedIdentity(raw []byte, id string) []byte {
 // / §6.4 `embed_base_url`) alongside the composite embed identity so the
 // endpoint that pins the vector space is legible without parsing the identity.
 // It is the SAME normalized value already folded into embed_identity's 2nd
-// field; a canonical/default/native-surface endpoint normalizes to "" and the
-// line is omitted (nothing to disambiguate). A top-level scalar — ignored by
+// field; a canonical/default endpoint — including the HOSTED native
+// gemini/cohere surface, though no longer a custom one (issue #702) —
+// normalizes to "" and the line is omitted (nothing to disambiguate). A top-level scalar — ignored by
 // the flat config parser and the providers:/model: yaml subtree decode on
 // reload.
 func appendSnapshotEmbedBaseURL(raw []byte, baseURL string) []byte {

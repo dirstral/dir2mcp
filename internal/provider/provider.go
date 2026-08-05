@@ -317,11 +317,11 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 // provider|base_url|text_model|…) disambiguates two same-kind/same-model
 // profiles that point at DIFFERENT endpoints (issue #560/#440 F3): without it
 // they collapse to one identity and their vectors silently mix in one index.
-// It enters in NORMALIZED form (normalizeEmbedBaseURL): a not-meaningful kind
-// (native gemini/cohere) or a canonical/default/unset endpoint normalizes to
-// "" so that an existing hosted-default corpus — and any index built before
-// this rule — does NOT spuriously reindex; only an operator-overridden,
-// non-canonical endpoint yields a non-empty component.
+// It enters in NORMALIZED form (normalizeEmbedBaseURL): a canonical/default/
+// unset endpoint — including the hosted native gemini/cohere surface —
+// normalizes to "" so that an existing hosted-default corpus, and any index
+// built before this rule, does NOT spuriously reindex; only an
+// operator-overridden, non-canonical endpoint yields a non-empty component.
 //
 // lateChunking is the resolved value of ingest.late_chunking (config, not a
 // provider attribute). It enters the identity because late chunking, once its
@@ -332,6 +332,18 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 // it keys off the config flag, not the runtime TokenEmbedder capability (which
 // EmbedIdentity cannot observe), so toggling the flag re-derives even in a build
 // with no token-embedding provider — the safe direction.
+//
+// The two model fields are the EFFECTIVE models (EffectiveEmbedModels), i.e.
+// the concrete ids the adapter puts on the wire, NOT the raw profile fields
+// (issue #705). Built-in `openai`/`cohere`/`local`/`omniembed` profiles ship
+// with blank embed model fields, so recording the raw field named no model at
+// all: a corpus embedded with text-embedding-3-small recorded "", which would
+// still compare equal after a client default changed, or across distributed
+// workers whose binaries default differently — silent model-space mixing under
+// a matching identity. Recording the resolved model closes that, and also makes
+// "set the model to the value already in effect" a no-op instead of a spurious
+// reindex (#440 F3). Recorded BLANK model fields from before this rule are
+// migrated by embedIdentityMatches, so no existing corpus re-embeds.
 //
 // contextual is the TERMINAL (9th) field: the EFFECTIVE contextual-retrieval
 // mode (8.1.8) — EmbedContextualOff when the feature is disabled OR enabled
@@ -344,11 +356,12 @@ func Select(precedence []Profile, byName map[string]Profile, cap Capability, exp
 // no contextual notion records the identity a fresh non-contextual build
 // computes.
 func EmbedIdentity(p Profile, lateChunking bool, contextual string) string {
+	textModel, codeModel := EffectiveEmbedModels(p)
 	return fmt.Sprintf("%s|%s|%s|%s|%d|%d|%s|%s|%s",
 		strings.TrimSpace(p.Name),
 		normalizeEmbedBaseURL(p),
-		strings.TrimSpace(p.EmbedTextModel),
-		strings.TrimSpace(p.EmbedCodeModel),
+		textModel,
+		codeModel,
 		p.EmbedTextDim,
 		p.EmbedCodeDim,
 		NormalizeEmbedMultimodal(p.EmbedMultimodal),
@@ -366,9 +379,9 @@ func EmbedIdentity(p Profile, lateChunking bool, contextual string) string {
 // non-empty base_url component — a kind-wide set would instead collapse both to
 // "" and let vectors from two different backends silently share one index (the
 // exact mis-bind 8.1.4 exists to prevent). Native-surface kinds (gemini, cohere)
-// never consult this table (rule 1); self-hosted kinds (omniembed) and any
-// operator-named custom profile ship no canonical default, so any configured
-// endpoint is meaningful.
+// consult canonicalEmbedHostedByKind instead; self-hosted kinds (omniembed) and
+// any operator-named custom profile ship no canonical default, so any
+// configured endpoint is meaningful.
 //
 // MUST stay in sync with config.builtinProfiles. The `openai` built-in ships no
 // base_url; its client defaults to the OpenAI wire endpoint, recorded here so an
@@ -380,6 +393,37 @@ var canonicalEmbedBaseURLByBuiltin = map[string]string{
 	"local":      "http://localhost:11434/v1",    // credential-less
 }
 
+// canonicalEmbedHostedByKind maps a NATIVE-surface embed kind to the hosted
+// endpoint(s) its client uses by default, so only those normalize to "" while a
+// custom endpoint stays in the identity (issue #702 / dirstral-spec#72).
+//
+// SPEC 8.1.4 rule 1 used to declare base_url "not meaningful" for these kinds
+// on the grounds that each has a single canonical provider surface. Both
+// adapters, however, honor a configured base_url and send the actual embedding
+// request there — so a proxy/gateway/self-hosted endpoint A and endpoint B
+// produced BYTE-IDENTICAL identities and their (different) vector spaces could
+// silently mix in one index. These kinds are therefore folded into rule 2:
+// unset or hosted-default → "", any other endpoint → the canonicalized URL.
+//
+// Matching is per-KIND rather than per-profile-name (unlike
+// canonicalEmbedBaseURLByBuiltin): a native kind has exactly one hosted vendor
+// surface, so ANY profile of that kind pointed at it reaches the same vector
+// space, whatever the profile is named. Gemini lists two forms because its
+// client accepts the OpenAI-compatible base and derives the native embed base
+// from it by dropping the trailing "/openai" (gemini.nativeBaseURL) — both
+// denote the same hosted surface and must collapse identically.
+//
+// MUST stay in sync with the client defaults (internal/gemini defaultBaseURL /
+// geminiNativeBaseURL, internal/cohere defaultBaseURL); the drift guard lives
+// in tests/provider/embed_identity_native_base_url_702_test.go.
+var canonicalEmbedHostedByKind = map[Kind][]string{
+	KindGemini: {
+		"https://generativelanguage.googleapis.com/v1beta",        // native embed surface
+		"https://generativelanguage.googleapis.com/v1beta/openai", // OpenAI-compatible base the client derives it from
+	},
+	KindCohere: {"https://api.cohere.com"},
+}
+
 // NormalizeEmbedBaseURL renders the profile's embed base_url as the stable
 // component used in the embed identity (SPEC 8.1.4). See normalizeEmbedBaseURL;
 // exported so the config layer can persist the same normalized value alongside
@@ -388,24 +432,25 @@ func NormalizeEmbedBaseURL(p Profile) string { return normalizeEmbedBaseURL(p) }
 
 // normalizeEmbedBaseURL implements the SPEC 8.1.4 base_url normalization:
 //
-//   - Rule 1 (not meaningful): a kind whose embed endpoint is a single
-//     canonical provider surface (native gemini / cohere) → "". base_url does
-//     not participate.
 //   - Rule 2 (canonical/default): an unset base_url, or one equal to *this
 //     profile's own* built-in shipped default (canonicalEmbedBaseURLByBuiltin,
-//     matched by profile name), → "". Only an operator-overridden, non-canonical
-//     endpoint — including a built-in profile pointed at a *different* vendor's
-//     host — yields a non-empty component.
+//     matched by profile name) — or, for a native-surface kind, to that kind's
+//     hosted endpoint (canonicalEmbedHostedByKind) — → "". Only an
+//     operator-overridden, non-canonical endpoint — including a built-in profile
+//     pointed at a *different* vendor's host — yields a non-empty component.
 //   - Rule 3 (canonicalization, non-empty case): canonicalizeEmbedBaseURL.
+//
+// Rule 1 ("not meaningful" for native gemini/cohere) is deliberately NOT
+// implemented: both adapters honor a configured base_url, so collapsing every
+// custom native endpoint to "" let two different vector spaces compare
+// identity-equal (issue #702 / dirstral-spec#72). Those kinds run through rule 2
+// against their hosted default instead, which preserves the no-spurious-reindex
+// property for every hosted-default corpus.
 //
 // "" is a first-class value (not "unknown"): an index built before this rule
 // recorded no base_url and MUST stay valid against any provider that also
 // normalizes to "" — so no default-endpoint corpus spuriously reindexes.
 func normalizeEmbedBaseURL(p Profile) string {
-	switch p.Kind {
-	case KindGemini, KindCohere:
-		return "" // Rule 1: native single-surface embed.
-	}
 	raw := strings.TrimSpace(p.BaseURL)
 	if raw == "" {
 		return "" // Rule 2: unset → canonical/default.
@@ -416,6 +461,13 @@ func normalizeEmbedBaseURL(p Profile) string {
 	// foreign host stays distinct and cannot mix vector spaces.
 	if def, ok := canonicalEmbedBaseURLByBuiltin[strings.TrimSpace(p.Name)]; ok {
 		if norm == canonicalizeEmbedBaseURL(def) {
+			return ""
+		}
+	}
+	// Rule 2, native-surface kinds: the hosted vendor endpoint is a property of
+	// the KIND, so any profile of that kind sitting on it collapses to "".
+	for _, hosted := range canonicalEmbedHostedByKind[p.Kind] {
+		if norm == canonicalizeEmbedBaseURL(hosted) {
 			return ""
 		}
 	}
@@ -581,18 +633,17 @@ func NormalizeEmbedMultimodal(mode string) string {
 }
 
 // VerifyEmbedIdentity returns a *ConfigError when a recorded embed
-// identity differs from the current one (SPEC 8.1.4 — the server MUST
-// NOT silently mix vector spaces). An empty recorded identity (fresh
-// index) always passes. A legacy 3-field identity (pre-8.1.6, no
-// dimension) is normalized to the native "|0|0" form before comparison so
-// upgrading an existing native-dimension corpus does not force a spurious
-// reindex.
+// identity is not compatible with the current one (SPEC 8.1.4 — the server
+// MUST NOT silently mix vector spaces). Compatibility is EmbedIdentityMatches:
+// an empty recorded identity (fresh index) always passes, and a legacy
+// recording is migrated (field-count ladder + blank-model grace) before
+// comparison so upgrading an existing corpus never forces a spurious reindex.
 func VerifyEmbedIdentity(recorded, current string) error {
-	recorded = normalizeEmbedIdentity(strings.TrimSpace(recorded))
-	current = strings.TrimSpace(current)
-	if recorded == "" || recorded == current {
+	if EmbedIdentityMatches(recorded, current) {
 		return nil
 	}
+	recorded = normalizeEmbedIdentity(strings.TrimSpace(recorded))
+	current = strings.TrimSpace(current)
 	return &ConfigError{
 		Capability: CapEmbed,
 		Profile:    current,
@@ -600,6 +651,72 @@ func VerifyEmbedIdentity(recorded, current string) error {
 			"embed identity changed (index built with %q, configured %q); embeddings are corpus-lifetime — reindex to change the embed provider/model/dimension",
 			recorded, current),
 	}
+}
+
+// embedIdentityFields is the number of components in the current identity
+// tuple (provider|base_url|text|code|tdim|cdim|multimodal|late_chunking|contextual).
+const embedIdentityFields = 9
+
+// Field positions inside that tuple that carry an embed model id.
+const (
+	embedIdentityTextModelField = 2
+	embedIdentityCodeModelField = 3
+)
+
+// EmbedIdentityMatches reports whether an identity RECORDED by an index or a
+// config snapshot is compatible with the current one — i.e. whether the vectors
+// already in the corpus live in the same space the current config would produce
+// (SPEC 8.1.4). It is the single comparison used by VerifyEmbedIdentity (which
+// fails startup) and index.EnsureIdentity (which WIPES the index), so a
+// migration recognized by one can never be a silent full re-embed in the other.
+//
+// Two migrations make an older recording compare equal without re-embedding:
+//
+//   - the field-count ladder (normalizeEmbedIdentity), which appends the
+//     components that did not exist when the identity was recorded; and
+//   - the blank-model grace (issue #705): a recorded EMPTY model component
+//     matches whatever concrete model the current identity names. Before #705
+//     the identity copied the RAW profile field, and the built-in
+//     `openai`/`cohere`/`local`/`omniembed` profiles leave it empty — so those
+//     corpora recorded "" for a model that was, on the wire, the adapter
+//     default. Treating that "" as "the adapter default of the day" is the same
+//     first-class-empty rule 8.1.4 already applies to a pre-rule base_url, and
+//     it is what keeps the #705 fix from wiping every such corpus on upgrade.
+//     The grace is one-directional and legacy-only: it never lets a recorded
+//     CONCRETE model match a different one, and every identity recorded from now
+//     on names its model, so a future adapter-default change (or a distributed
+//     worker on a differently-defaulting binary) does mismatch loudly.
+func EmbedIdentityMatches(recorded, current string) bool {
+	recorded = normalizeEmbedIdentity(strings.TrimSpace(recorded))
+	current = strings.TrimSpace(current)
+	if recorded == "" || recorded == current {
+		return true
+	}
+	return blankModelIdentityMatches(recorded, current)
+}
+
+// blankModelIdentityMatches implements the #705 legacy blank-model grace: two
+// current-shape identities match when every component is equal except a model
+// component the RECORDING left empty. Anything else (a differing provider,
+// endpoint, dimension, mode — or a recorded model that names a DIFFERENT model)
+// is a real mismatch.
+func blankModelIdentityMatches(recorded, current string) bool {
+	rec := strings.Split(recorded, "|")
+	cur := strings.Split(current, "|")
+	if len(rec) != embedIdentityFields || len(cur) != embedIdentityFields {
+		return false
+	}
+	for i := range rec {
+		if rec[i] == cur[i] {
+			continue
+		}
+		isModelField := i == embedIdentityTextModelField || i == embedIdentityCodeModelField
+		if isModelField && rec[i] == "" {
+			continue // legacy blank: the adapter default produced these vectors.
+		}
+		return false
+	}
+	return true
 }
 
 // normalizeEmbedIdentity upgrades a legacy recorded identity to the current

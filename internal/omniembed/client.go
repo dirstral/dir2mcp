@@ -205,6 +205,12 @@ func (c *Client) embedAll(ctx context.Context, modelName string, inputs []string
 		}
 		out = append(out, vectors...)
 	}
+	// Reject empty / non-finite / zero-norm vectors at the provider boundary
+	// (issue #703) so they never reach an index. embedAll backs BOTH Embed and
+	// EmbedMedia, so text and media chunks are validated identically.
+	if err := model.ValidateEmbedVectors("OMNIEMBED_FAILED", 0, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

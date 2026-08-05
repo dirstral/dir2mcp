@@ -223,6 +223,16 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 			vectors[idx] = v[k]
 		}
 	}
+	// Last gate before the index (issue #703). Every shipped adapter already
+	// validates its own response, but the worker accepts ANY model.Embedder —
+	// including a distributed/self-hosted one this process does not own — and an
+	// empty, non-finite or zero-norm vector is unretrievable-but-indistinguishable
+	// once written. The error is non-transient and non-fatal, so embedIndexBatch
+	// bisects the batch: the offending chunk is marked embedding_status=error
+	// with this reason while its healthy siblings still embed (#399).
+	if err := model.ValidateEmbedVectors("EMBED_OUTPUT_INVALID", 0, vectors); err != nil {
+		return nil, err
+	}
 	return vectors, nil
 }
 
