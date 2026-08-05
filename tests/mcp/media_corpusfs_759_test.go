@@ -142,11 +142,13 @@ func newS3Corpus(t *testing.T, objects map[string][]byte) *s3Corpus {
 
 // seedDoc records an already-indexed document, the state an S3 corpus is in
 // after a successful scan (which is precisely when #759 bit: indexing worked,
-// the on-demand tools did not).
+// the on-demand tools did not). SourceType is "filesystem" for an S3 corpus too:
+// the store normalizes source_type to archive_member or filesystem, and there is
+// no per-backend value.
 func seedDoc(t *testing.T, st *store.SQLiteStore, relPath, docType string, size int) {
 	t.Helper()
 	if err := st.UpsertDocument(context.Background(), model.Document{
-		RelPath: relPath, DocType: docType, SourceType: "s3",
+		RelPath: relPath, DocType: docType, SourceType: "filesystem",
 		SizeBytes: int64(size), MTimeUnix: 1, ContentHash: "seed", Status: "ok",
 	}); err != nil {
 		t.Fatalf("upsert document %q: %v", relPath, err)

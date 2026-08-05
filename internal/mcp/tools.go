@@ -2749,9 +2749,12 @@ func (s *Server) localizeDocument(ctx context.Context, relPath string) (string, 
 // a different object than the caller named and let a path dodge an exclusion
 // glob that the un-cleaned form matches.
 func (s *Server) checkRemoteDocumentPolicy(relPath string) (string, error) {
-	// No TrimSpace: leading/trailing spaces are legal, meaningful bytes in an S3
-	// key, and trimming would address a different object than the corpus indexed
-	// (the same reason corpusfs.keyForRel does not trim).
+	// No TrimSpace here: leading/trailing spaces are legal, meaningful bytes in
+	// an S3 key, and trimming would address a different object than the caller
+	// named (the same reason corpusfs.keyForRel does not trim). It only means
+	// this check adds no trim of its own; a rel_path arriving through the store
+	// has already been trimmed by store.normalizeRelPath, so such a key cannot
+	// currently round-trip through the corpus at all.
 	normalized, err := relpath.Normalize(relPath)
 	if err != nil {
 		return "", model.ErrPathOutsideRoot
