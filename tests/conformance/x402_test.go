@@ -1,12 +1,14 @@
 package conformance
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/x402"
@@ -15,6 +17,34 @@ import (
 // TestX402_ModeOff_NoPaymentHeaders verifies that when mode=off, tools/call
 // succeeds without any payment header, and no PAYMENT-REQUIRED header is set
 // on the response.
+// validV2Signature builds a syntactically complete x402 v2 PAYMENT-SIGNATURE.
+//
+// The adapter spec makes the v2 primitives normative, and `required` mode now
+// enforces them adapter-side before calling the facilitator (#699). An opaque
+// fixture is therefore refused there by design. That matters for a CONFORMANCE
+// suite in particular: asserting that an opaque proof is accepted in required
+// mode was asserting the non-conformance this fixes.
+func validV2Signature(t *testing.T) string {
+	t.Helper()
+	now := time.Now().UTC().Unix()
+	raw, err := json.Marshal(map[string]interface{}{
+		"x402Version": 2,
+		"scheme":      "exact",
+		"network":     "eip155:8453",
+		"payload": map[string]interface{}{
+			"authorization": map[string]interface{}{
+				"nonce":       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				"validAfter":  now - 5,
+				"validBefore": now + 60,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal v2 payload: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 func TestX402_ModeOff_NoPaymentHeaders(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
@@ -163,7 +193,7 @@ func TestX402_ModeRequired_ValidPaymentAccepted(t *testing.T) {
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, sid, statsCallBody(6), map[string]string{
-		paymentSignatureHeader: "valid-sig",
+		paymentSignatureHeader: validV2Signature(t),
 	})
 	body := readBody(t, resp)
 

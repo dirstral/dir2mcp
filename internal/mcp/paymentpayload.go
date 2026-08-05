@@ -14,11 +14,14 @@ import (
 
 // parsedPaymentPayload carries the x402 v2 primitives the adapter enforces
 // server-side: the client's single-use authorization nonce and its
-// validAfter/validBefore validity window. These fields already exist in the
-// x402 v2 PaymentPayload wire format; this revision enforces them rather than
-// adding new fields. Fields are best-effort: an opaque or legacy PAYMENT-SIGNATURE
-// that carries no authorization leaves HasNonce/HasWindow false and the caller
-// falls back to a signature-derived nonce with no window check.
+// validAfter/validBefore validity window. Both already exist in the v2
+// PaymentPayload wire format; the adapter enforces them rather than adding new
+// fields.
+//
+// Parsing stays best-effort and reports what it found. Deciding whether an
+// absent primitive is fatal belongs to `v2ProofError`, because the answer
+// depends on the configured mode: `required` fails closed, `on` is documented
+// as fail-open on incomplete configuration and keeps the legacy tolerance.
 type parsedPaymentPayload struct {
 	Nonce       string
 	HasNonce    bool
@@ -113,11 +116,16 @@ func parseUnixSeconds(raw json.RawMessage) (int64, bool) {
 }
 
 // replayNonce returns the ledger key for a payment. When the payload carries an
-// authorization nonce it is used verbatim (single-use replay keys off the
-// client-signed nonce, per spec). Otherwise a deterministic signature-derived
-// fallback is used so an opaque/legacy signature is still single-use per its own
-// bytes (never keyed off the raw request bytes, so retry-vs-replay classification
-// still holds).
+// authorization nonce it is used verbatim, because the adapter spec requires
+// replay detection to key off the client-signed nonce and NOT the raw request
+// bytes.
+//
+// The signature-derived fallback below is for `x402.mode=on` only, and it is a
+// materially weaker guarantee: an opaque proof is single-use per its own bytes
+// rather than per a client-signed single-use value, and its ledger entry
+// expires on the local TTL rather than with the proof. In `required` mode
+// `v2ProofError` rejects a payload with no nonce before this is ever reached,
+// so required mode never keys a payment off a signature hash (#699).
 func replayNonce(paymentSignature string, parsed parsedPaymentPayload) string {
 	if parsed.HasNonce {
 		return "n:" + parsed.Nonce
@@ -126,13 +134,58 @@ func replayNonce(paymentSignature string, parsed parsedPaymentPayload) string {
 	return "s:" + hex.EncodeToString(sum[:])
 }
 
-// validityWindowError reports whether the payment's validity window fails to
-// cover now, or exceeds the matched maxTimeoutSeconds. It returns a non-empty
-// reason string when the proof must be rejected. When the payload carries no
-// window (legacy/opaque signature) it returns "" (no enforcement possible).
-func validityWindowError(parsed parsedPaymentPayload, maxTimeoutSeconds int, now time.Time) string {
+// v2ProofError reports why a payment proof must be rejected before the adapter
+// calls the facilitator, or "" when it may proceed.
+//
+// The adapter spec makes the v2 primitives normative: the authorization nonce
+// "MUST be treated as single-use", "Replay detection MUST key off the
+// authorization nonce", the adapter "MUST reject a proof whose
+// validAfter/validBefore window does not cover the current time", and it "MUST
+// enforce the matched PaymentRequirements.maxTimeoutSeconds as the maximum age
+// between challenge and PAYMENT-SIGNATURE" and "MUST NOT rely on the
+// facilitator alone for the time check".
+//
+// The implementation parsed all of that as optional. An opaque or partially
+// malformed payload left HasNonce/HasWindow false, the nonce fell back to
+// SHA-256 of the signature, the window check returned success, and the request
+// proceeded to Verify and to tool execution even in `required` mode. A
+// facilitator that approved a proof shape the adapter could not inspect
+// therefore bypassed every local control, and the signature-derived ledger
+// entry expired on the local TTL after which the identical timeless proof was
+// classified fresh and could execute again (#699).
+//
+// `strict` is `x402.mode=required`. `on` keeps the previous tolerance, because
+// fail-open on incomplete input is that mode's documented meaning; the
+// difference between the two modes is now real rather than nominal.
+//
+// On maxTimeoutSeconds: the spec bounds the AGE of the proof, not its remaining
+// life. The previous check measured `validBefore - now`, so a window that
+// opened arbitrarily far in the past but closes soon passed unimpeded, which is
+// exactly the shape a stale replayed proof has. Age is measured from
+// `validAfter`, which is the only signed statement in the payload about when
+// the authorization began, so strict mode requires it to be set: without it the
+// age the spec mandates cannot be computed at all, and pretending otherwise is
+// how the requirement stayed nominal.
+func v2ProofError(parsed parsedPaymentPayload, strict bool, maxTimeoutSeconds int, now time.Time) string {
+	if maxTimeoutSeconds <= 0 {
+		maxTimeoutSeconds = x402.DefaultMaxTimeoutSeconds
+	}
+	if strict {
+		if !parsed.HasNonce {
+			return "payment authorization is missing a nonce"
+		}
+		if !parsed.HasWindow {
+			return "payment authorization is missing a validity window"
+		}
+		if parsed.ValidAfter <= 0 {
+			return "payment authorization is missing validAfter"
+		}
+	}
 	if !parsed.HasWindow {
 		return ""
+	}
+	if parsed.ValidBefore <= parsed.ValidAfter {
+		return "payment authorization has an empty validity window"
 	}
 	nowUnix := now.UTC().Unix()
 	if nowUnix < parsed.ValidAfter {
@@ -141,15 +194,21 @@ func validityWindowError(parsed parsedPaymentPayload, maxTimeoutSeconds int, now
 	if nowUnix > parsed.ValidBefore {
 		return "payment authorization has expired"
 	}
-	if maxTimeoutSeconds <= 0 {
-		maxTimeoutSeconds = x402.DefaultMaxTimeoutSeconds
-	}
-	// Bound the remaining validity of the proof by the matched maxTimeoutSeconds:
-	// a client following the challenge sets validBefore ≈ now + maxTimeoutSeconds,
-	// so a window that stays valid far longer than the advertised maximum is
-	// rejected. Measured against validBefore (not validAfter) so the common
-	// validAfter=0 encoding is not false-rejected.
-	if parsed.ValidBefore-nowUnix > int64(maxTimeoutSeconds) {
+	// The age bound, per spec. Only computable when validAfter is set; in `on`
+	// mode a payload without it keeps the older remaining-time bound rather
+	// than going unchecked entirely.
+	if parsed.ValidAfter > 0 {
+		// Age only. A separate bound on the window's total LIFETIME was written
+		// first and removed: the spec mandates the age between challenge and
+		// signature and nothing about how long a client's window may span, and
+		// the extra rule rejected an ordinary `now-5 .. now+60` proof under a
+		// 300s maximum. The age check already refuses the shape #699 names — a
+		// window opened arbitrarily far in the past that closes soon — so the
+		// lifetime bound bought nothing and cost working payments.
+		if nowUnix-parsed.ValidAfter > int64(maxTimeoutSeconds) {
+			return "payment authorization is older than the maximum validity window"
+		}
+	} else if parsed.ValidBefore-nowUnix > int64(maxTimeoutSeconds) {
 		return "payment authorization exceeds the maximum validity window"
 	}
 	return ""

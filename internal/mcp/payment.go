@@ -122,10 +122,17 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 	now := time.Now().UTC()
 	parsed := parsePaymentPayload(paymentSignature)
 
-	// Validity window (bs-010): reject a proof whose validAfter/validBefore
-	// window does not cover now, or whose age exceeds maxTimeoutSeconds. This is
-	// enforced adapter-side and does not rely on the facilitator alone.
-	if reason := validityWindowError(parsed, s.x402Requirement.MaxTimeoutSeconds, now); reason != "" {
+	// The v2 primitives the adapter spec makes normative: a client-signed
+	// single-use nonce and a validity window whose age is bounded by the
+	// matched maxTimeoutSeconds. Checked BEFORE the facilitator call, because
+	// "MUST NOT rely on the facilitator alone for the time check" and because a
+	// facilitator that approves a proof the adapter cannot inspect would
+	// otherwise bypass every local control (#699).
+	//
+	// Strict only in `required` mode. `on` is documented as fail-open on
+	// incomplete input and keeps its previous tolerance.
+	strictProof := strings.EqualFold(strings.TrimSpace(s.cfg.X402.Mode), x402.ModeRequired)
+	if reason := v2ProofError(parsed, strictProof, s.x402Requirement.MaxTimeoutSeconds, now); reason != "" {
 		s.rejectPaymentWindow(w, id, reason)
 		return
 	}
