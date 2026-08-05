@@ -216,6 +216,12 @@ class NewsOverlayRecognizer:
             raise ValueError("a news recognizer needs at least one overlay role")
         if not 0.0 <= agreement <= 1.0:
             raise ValueError(f"agreement floor out of [0,1]: {agreement}")
+        # Checked here rather than at the first division: every timing this
+        # class derives is 1/fps or a multiple, so a zero raises deep inside a
+        # collapse and a negative one quietly produces cues that end before
+        # they start.
+        if fps <= 0:
+            raise ValueError(f"fps must be positive: {fps}")
         self.fps = fps
         self.agreement = agreement
         self.similarity = similarity
@@ -252,7 +258,11 @@ class NewsOverlayRecognizer:
     def recognize(self, media_path: Path) -> list[Cue]:
         cues: list[Cue] = []
         for role_reader in self._readers:
+            # Both, not just the sightings: a recognizer reused on a second
+            # file with no overlay would otherwise still report the band the
+            # PREVIOUS file answered from.
             role_reader.sightings.clear()
+            role_reader.answered = None
             # `closing` because the reader owns a worker pool and a scratch
             # directory for the length of the iteration: abandoning it part way
             # through has to shut them down now, not at collection.

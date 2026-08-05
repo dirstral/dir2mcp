@@ -236,3 +236,27 @@ def test_the_default_roles_look_where_broadcasters_put_overlays(bands):
             h_top, h_bottom = headline_band[1], headline_band[1] + headline_band[3]
             t_top, t_bottom = ticker_band[1], ticker_band[1] + ticker_band[3]
             assert h_bottom <= t_top or t_bottom <= h_top
+
+
+def test_a_recognizer_reused_on_a_second_file_does_not_report_the_first_ones_band(bands):
+    """`answered_regions` says where a role's reads came from. Reporting the
+    PREVIOUS file's band for a file with no overlay would turn "found nothing"
+    into "found it here", which is the opposite answer."""
+    bands({HEADLINE_BAND: HEADLINE})
+    recognizer = NewsOverlayRecognizer(workers=1)
+    assert recognizer.recognize(MEDIA)
+    assert recognizer.answered_regions()["headline"] == HEADLINE_BAND
+
+    bands({BACKGROUND: "чтото в кадре"})
+    assert recognizer.recognize(MEDIA) == []
+    assert set(recognizer.answered_regions().values()) == {None}
+
+
+def test_a_non_positive_fps_is_refused_at_construction():
+    """Every timing this class derives is 1/fps or a multiple of it, so zero
+    raises deep inside a collapse and a negative quietly produces cues that end
+    before they start."""
+    with pytest.raises(ValueError):
+        NewsOverlayRecognizer(fps=0)
+    with pytest.raises(ValueError):
+        NewsOverlayRecognizer(fps=-0.5)

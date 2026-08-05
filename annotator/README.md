@@ -104,6 +104,8 @@ roster; a news broadcast has no roster and no feed, so the words are the
 payload.
 
 ```python
+from pathlib import Path
+
 from dirstral_annotator.recognizers.news import NewsOverlayRecognizer
 
 cues = NewsOverlayRecognizer(lang="rus").recognize(Path("broadcast.mp4"))

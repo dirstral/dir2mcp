@@ -559,6 +559,11 @@ def collapse_text_sightings(
                                  anchor=tokens, best_text=stripped))
 
     trailing = frame_gap if cue_gap is None else cue_gap
+    if trailing < 0:
+        # A cue may not end before its last observation: with one sighting a
+        # negative extension puts end_s before start_s, which Cue refuses, and
+        # with several it silently claims a span the overlay had already left.
+        raise ValueError(f"cue_gap must not be negative: {trailing}")
     cues = [
         Cue(
             source=source,
