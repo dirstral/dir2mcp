@@ -214,13 +214,17 @@ func TestParityModeOff_NoPaymentHeaderPassesThrough(t *testing.T) {
 // facilitator, acceptance of a good payment — and an opaque fixture would now
 // exercise the proof check instead of the thing under test, which is exactly
 // the confusion that let the vulnerable behaviour read as a passing suite.
-func validV2Signature(t *testing.T) string {
+func validV2Signature(t *testing.T, cfg config.Config) string {
 	t.Helper()
 	now := time.Now().UTC().Unix()
+	// The proof's scheme/network must be the CONFIGURED ones. Hardcoding
+	// eip155:8453 against a Solana requirement produced a proof that does not
+	// match the requirement it is verified against, so the test would have
+	// passed for a reason unrelated to what it claims to check.
 	raw, err := json.Marshal(map[string]interface{}{
 		"x402Version": 2,
-		"scheme":      "exact",
-		"network":     "eip155:8453",
+		"scheme":      strings.TrimSpace(cfg.X402.Scheme),
+		"network":     strings.TrimSpace(cfg.X402.Network),
 		"payload": map[string]interface{}{
 			"authorization": map[string]interface{}{
 				"nonce":       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -531,7 +535,7 @@ func TestParityModeRequired_ValidPaymentAccepted(t *testing.T) {
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
 	resp := paritySendRPC(t, srv.URL+cfg.MCPPath, sid, toolsCallBody(10), map[string]string{
-		x402.HeaderPaymentSignature: validV2Signature(t),
+		x402.HeaderPaymentSignature: validV2Signature(t, cfg),
 	})
 	defer func() { _ = resp.Body.Close() }()
 
@@ -567,7 +571,7 @@ func TestParityModeRequired_FacilitatorUnavailableIsFailClosed(t *testing.T) {
 		// A real v2 proof, so the request actually reaches the unavailable
 		// facilitator. With an opaque one the adapter now refuses it first and
 		// the test would pass for the wrong reason.
-		x402.HeaderPaymentSignature: validV2Signature(t),
+		x402.HeaderPaymentSignature: validV2Signature(t, cfg),
 	})
 	defer func() { _ = resp.Body.Close() }()
 

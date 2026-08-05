@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/x402"
 )
@@ -24,13 +25,16 @@ import (
 // fixture is therefore refused there by design. That matters for a CONFORMANCE
 // suite in particular: asserting that an opaque proof is accepted in required
 // mode was asserting the non-conformance this fixes.
-func validV2Signature(t *testing.T) string {
+func validV2Signature(t *testing.T, cfg config.Config) string {
 	t.Helper()
 	now := time.Now().UTC().Unix()
+	// The CONFIGURED scheme/network, not a hardcoded pair: a proof that does
+	// not match the requirement it is verified against would make this pass for
+	// the wrong reason.
 	raw, err := json.Marshal(map[string]interface{}{
 		"x402Version": 2,
-		"scheme":      "exact",
-		"network":     "eip155:8453",
+		"scheme":      strings.TrimSpace(cfg.X402.Scheme),
+		"network":     strings.TrimSpace(cfg.X402.Network),
 		"payload": map[string]interface{}{
 			"authorization": map[string]interface{}{
 				"nonce":       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -193,7 +197,7 @@ func TestX402_ModeRequired_ValidPaymentAccepted(t *testing.T) {
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, sid, statsCallBody(6), map[string]string{
-		paymentSignatureHeader: validV2Signature(t),
+		paymentSignatureHeader: validV2Signature(t, cfg),
 	})
 	body := readBody(t, resp)
 

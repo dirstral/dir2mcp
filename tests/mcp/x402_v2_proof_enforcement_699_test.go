@@ -65,6 +65,26 @@ func v2Payload(t *testing.T, nonce string, validAfter, validBefore int64) string
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
+// v2PayloadRawAuth builds a payload whose authorization block is supplied
+// verbatim, so a test can put a WRONG-TYPED value where a timestamp belongs.
+// v2Payload can only omit a field or set an integer, and "malformed" is a
+// distinct case from "missing": the parser has to refuse a string, an object
+// and a float where it expects unix seconds, rather than silently reading them
+// as absent and falling through to the lenient path.
+func v2PayloadRawAuth(t *testing.T, auth map[string]interface{}) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]interface{}{
+		"x402Version": 2,
+		"scheme":      "exact",
+		"network":     "eip155:8453",
+		"payload":     map[string]interface{}{"authorization": auth},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 func freshNonce() string {
 	return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
@@ -148,6 +168,30 @@ func TestRequiredModeRejectsProofsMissingAV2Primitive(t *testing.T) {
 			// old remaining-time-only check let straight through.
 			name:      "stale window closing soon",
 			signature: v2Payload(t, freshNonce(), now-86400, now+30),
+		},
+		{
+			name: "validAfter is a string",
+			signature: v2PayloadRawAuth(t, map[string]interface{}{
+				"nonce": freshNonce(), "validAfter": "not-a-timestamp", "validBefore": now + 60,
+			}),
+		},
+		{
+			name: "validBefore is an object",
+			signature: v2PayloadRawAuth(t, map[string]interface{}{
+				"nonce": freshNonce(), "validAfter": now - 5, "validBefore": map[string]interface{}{},
+			}),
+		},
+		{
+			name: "validBefore is a bool",
+			signature: v2PayloadRawAuth(t, map[string]interface{}{
+				"nonce": freshNonce(), "validAfter": now - 5, "validBefore": true,
+			}),
+		},
+		{
+			name: "nonce is not a string",
+			signature: v2PayloadRawAuth(t, map[string]interface{}{
+				"nonce": 12345, "validAfter": now - 5, "validBefore": now + 60,
+			}),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
