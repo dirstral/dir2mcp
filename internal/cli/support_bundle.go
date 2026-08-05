@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
 // supportLogTailBytes caps how much of server.log is included in the
@@ -33,13 +35,20 @@ const supportLogTailBytes int64 = 2 * 1024 * 1024 // 2 MB
 // small set of files (effective config snapshot, server log tail,
 // status JSON, list-files JSON, version, OS info, routing decisions)
 // into a single tar.gz suitable for sharing with a maintainer when
-// diagnosing install/indexing problems. No secret values are included
-// — the effective config snapshot only carries `secret_sources:`
-// metadata (where each credential came from), not the credentials
-// themselves; server.log and the client bridge logs are run through the
-// secret redactor; and list-files.json (plus status.json's failure samples)
-// redact corpus paths/titles/error messages unless the operator opts in with
-// --include-content.
+// diagnosing install/indexing problems.
+//
+// Two privacy tiers govern what lands in it (see support_bundle_redact.go):
+//
+//   - Credentials are removed from EVERY artifact in EVERY mode. The effective
+//     config snapshot carries only `secret_sources:` metadata (where each
+//     credential came from), never the credentials; server.log, the client
+//     bridge logs, the snapshot and connection URLs all run through
+//     redactBundleSecrets, which strips bearer tokens, Authorization headers,
+//     token-style query parameters and URL userinfo.
+//   - Values naming the operator's machine or corpus — corpus paths and titles,
+//     extraction error messages, and the snapshot's paths, endpoints, hosts,
+//     prompts and hand-written lists — are removed unless the operator opts in
+//     with --include-content. That flag never re-enables credential disclosure.
 func (a *App) runSupportBundle(ctx context.Context, global globalOptions, args []string) int {
 	fs := flag.NewFlagSet("support-bundle", flag.ContinueOnError)
 	// Route flag-parse output through writeCLIError so JSON callers get
@@ -48,7 +57,7 @@ func (a *App) runSupportBundle(ctx context.Context, global globalOptions, args [
 	fs.SetOutput(io.Discard)
 	output := fs.String("output", "", "destination tar.gz path (default: ./dir2mcp-support-<timestamp>.tar.gz)")
 	includeContent := fs.Bool("include-content", false,
-		"include corpus paths/titles/extraction error messages in list-files.json and status.json failure samples (may disclose corpus content — review the bundle before sharing)")
+		"include corpus paths/titles/extraction error messages in list-files.json and status.json, and local paths/endpoints/prompts in config.snapshot.yaml (may disclose corpus content and local layout — review the bundle before sharing; credentials stay redacted either way)")
 	if err := fs.Parse(args); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("support-bundle: %v", err))
 		return exitConfigInvalid
@@ -129,7 +138,14 @@ func collectSupportArtifacts(ctx context.Context, a *App, cfg config.Config, inc
 	add("version.txt", []byte(buildinfo.Display()+"\n"), nil)
 	add("os.txt", []byte(fmt.Sprintf("GOOS=%s\nGOARCH=%s\n", runtime.GOOS, runtime.GOARCH)), nil)
 
+	// The snapshot used to be copied verbatim, which put absolute corpus/state
+	// paths and any URL-embedded credential into the default bundle (#720).
+	// redactConfigSnapshot applies both privacy tiers; see
+	// support_bundle_redact.go.
 	cfgBytes, cfgErr := readFileBest(config.EffectiveSnapshotPath(cfg.StateDir))
+	if cfgErr == nil {
+		cfgBytes = redactConfigSnapshot(cfgBytes, includeContent)
+	}
 	add("config.snapshot.yaml", cfgBytes, cfgErr)
 
 	// server.log is redirected daemon stdout/stderr and can carry query text,
@@ -148,7 +164,7 @@ func collectSupportArtifacts(ctx context.Context, a *App, cfg config.Config, inc
 	add("list-files.json", listBytes, listErr)
 	if includeContent {
 		warnings = append(warnings, errors.New(
-			"list-files.json/status.json: --include-content may include corpus paths/titles/error messages; review the bundle before sharing it"))
+			"list-files.json/status.json/config.snapshot.yaml: --include-content may include corpus paths/titles/error messages and local paths, endpoints and prompts; review the bundle before sharing it"))
 	}
 
 	routingBytes, routingErr := marshalRoutingJSON(cfg)
@@ -242,8 +258,12 @@ func marshalStatusJSON(ctx context.Context, a *App, cfg config.Config, includeCo
 	}
 	snapshot.Indexing.FailureSummary = redactFailureSamples(snapshot.Indexing.FailureSummary, includeContent)
 	return json.MarshalIndent(map[string]interface{}{
-		"source":    source,
-		"state_dir": cfg.StateDir,
+		"source": source,
+		// state_dir is an absolute local path, so it is the same disclosure
+		// #720 reports for the snapshot's state_dir and is gated identically.
+		// Redacting it only in config.snapshot.yaml would have achieved
+		// nothing: the reader would simply have read it out of here instead.
+		"state_dir": redactContentField(cfg.StateDir, includeContent),
 		"snapshot":  snapshot,
 	}, "", "  ")
 }
@@ -403,27 +423,51 @@ func marshalRoutingJSON(cfg config.Config) ([]byte, error) {
 	}, "", "  ")
 }
 
-// writeSupportBundle writes files as a single gzip-compressed tarball
-// at destPath. Directories in destPath must already exist. Mode 0o600
-// keeps the bundle owner-readable only — its contents include the
-// server log and diagnostic metadata that should not be exposed to
-// other local users by an unfavourable umask.
+// writeSupportBundle writes files as a single gzip-compressed tarball at
+// destPath. Directories in destPath must already exist.
+//
+// The archive is owner-only. It used to be written with
+// os.OpenFile(..., O_TRUNC, 0o600), but an open mode is only applied when the
+// file is CREATED: overwriting an existing 0644 bundle truncated it in place and
+// left it world-readable, so the stated privacy boundary held only for the first
+// write to a given path (#719). Routing through atomicWriteFile — the same
+// temp+sync+chmod+rename helper the rest of the CLI uses — fixes that
+// structurally: rename installs a fresh inode carrying the temp file's mode, so
+// the destination's PRIOR mode cannot survive and no chmod race exists.
+//
+// (statefs's "tighten only if wider" rule deliberately does not apply here.
+// That rule protects a pre-existing file an operator may have made stricter;
+// this path owns the temp file outright and wants exactly statefs.FileMode.)
+//
+// Atomicity is the second half of the fix: a failure mid-write now leaves a
+// previously valid bundle untouched instead of destroying it. The artifacts are
+// already fully in memory, so buffering the tarball costs nothing beyond the
+// (log-tail-capped) bundle size.
 func writeSupportBundle(destPath string, files []supportFile) error {
-	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := writeSupportTarGz(&buf, files); err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
-	gz := gzip.NewWriter(f)
-	defer func() { _ = gz.Close() }()
+	return atomicWriteFile(destPath, buf.Bytes(), statefs.FileMode)
+}
+
+// writeSupportTarGz streams files into w as a gzip-compressed tarball.
+//
+// Entries are 0o600 rather than 0o644: extracting a deliberately owner-only
+// archive must not re-create the exposure the archive mode exists to prevent.
+//
+// Both writers are closed explicitly and their errors returned. They used to be
+// deferred with the error discarded, which meant a failed gzip/tar flush
+// produced a silently truncated bundle.
+func writeSupportTarGz(w io.Writer, files []supportFile) error {
+	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
-	defer func() { _ = tw.Close() }()
 
 	now := time.Now()
 	for _, file := range files {
 		hdr := &tar.Header{
 			Name:    file.Name,
-			Mode:    0o644,
+			Mode:    0o600,
 			Size:    int64(len(file.Bytes)),
 			ModTime: now,
 		}
@@ -433,6 +477,12 @@ func writeSupportBundle(destPath string, files []supportFile) error {
 		if _, err := tw.Write(file.Bytes); err != nil {
 			return err
 		}
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("finalize tar: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("finalize gzip: %w", err)
 	}
 	return nil
 }
@@ -455,17 +505,42 @@ var bundleSecretRedactors = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`),
 	// token-style query parameters (?token=..., &access_token=..., &api_key=...).
 	regexp.MustCompile(`(?i)([?&](?:token|access_token|api_key|apikey|key)=)[^&\s"']+`),
+	// URL userinfo: the `user:password@` (or bare `user@`) component of any
+	// absolute URL — https://u:p@host, postgres://u:p@host/db, redis://:p@host
+	// (#720).
+	//
+	// This is deliberately keyed on the SHAPE of the value, not on a list of
+	// known key names. A name-keyed rule only covers the URL-bearing settings
+	// that exist today and silently leaks the next one somebody adds; a
+	// shape-keyed rule covers every URL in every artifact — the config snapshot,
+	// server.log, the client bridge logs, connection.json — including fields not
+	// yet invented.
+	//
+	// The whole userinfo goes, not just the password: for an S3-compatible
+	// endpoint the *username* is the access key ID, which is credential
+	// material in its own right.
+	//
+	// The excluded characters keep the match inside a single URL authority, so
+	// `https://example.com/a@b` (an @ in the path) and a bare email address in
+	// prose are both left alone.
+	regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@\[\]"']+@`),
 }
 
 // redactBundleSecrets masks credential material in text destined for the support
 // bundle. It is intentionally conservative (pattern-based) — the bundle is meant
 // to be shareable with a maintainer, so leaking a bearer token would defeat the
 // purpose.
+//
+// This is the bundle's TIER-1 filter: it removes credentials, and it runs over
+// every artifact in every mode. --include-content never disables it, because
+// consenting to disclose your own corpus is not consenting to disclose a
+// password.
 func redactBundleSecrets(s string) string {
 	out := s
 	out = bundleSecretRedactors[0].ReplaceAllString(out, "${1}[REDACTED]")
 	out = bundleSecretRedactors[1].ReplaceAllString(out, "Bearer [REDACTED]")
 	out = bundleSecretRedactors[2].ReplaceAllString(out, "${1}[REDACTED]")
+	out = bundleSecretRedactors[3].ReplaceAllString(out, "${1}[REDACTED]@")
 	return out
 }
 

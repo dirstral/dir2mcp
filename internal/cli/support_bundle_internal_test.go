@@ -36,6 +36,34 @@ func TestRedactBundleSecrets(t *testing.T) {
 			mustNot:  "supersecretquerytoken",
 			mustHave: "token=[REDACTED]",
 		},
+		// URL userinfo (#720). The whole userinfo goes, not just the password:
+		// for an S3-compatible endpoint the username IS the access key ID. The
+		// host survives, because knowing which endpoint was configured is the
+		// diagnostic and the host is not the credential.
+		{
+			name:     "https url userinfo",
+			in:       "source_s3_endpoint: https://audit-user:repro-only-secret@minio.internal:9000",
+			mustNot:  "repro-only-secret",
+			mustHave: "https://[REDACTED]@minio.internal:9000",
+		},
+		{
+			name:     "postgres dsn userinfo",
+			in:       "dial postgres://svc_ro:hunter2hunter2@db.internal:5432/vectors failed",
+			mustNot:  "hunter2hunter2",
+			mustHave: "postgres://[REDACTED]@db.internal:5432/vectors",
+		},
+		{
+			name:     "password only userinfo",
+			in:       "redis://:onlyapassword@cache.internal:6379",
+			mustNot:  "onlyapassword",
+			mustHave: "redis://[REDACTED]@cache.internal:6379",
+		},
+		{
+			name:     "username only userinfo",
+			in:       "https://AKIAIOSFODNN7EXAMPLE@s3.internal",
+			mustNot:  "AKIAIOSFODNN7EXAMPLE",
+			mustHave: "https://[REDACTED]@s3.internal",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,6 +73,32 @@ func TestRedactBundleSecrets(t *testing.T) {
 			}
 			if !strings.Contains(got, tc.mustHave) {
 				t.Fatalf("expected %q in redacted output, got %q", tc.mustHave, got)
+			}
+		})
+	}
+}
+
+// TestRedactBundleSecretsLeavesInnocuousTextIntact is the counterweight to the
+// shape-keyed URL-userinfo rule added for #720. A pattern that fires on an
+// ordinary URL, an @ in a path, or an email address in a log line would quietly
+// destroy the diagnostics the bundle exists to carry, so the false-positive
+// boundary is pinned as tightly as the true-positive one.
+func TestRedactBundleSecretsLeavesInnocuousTextIntact(t *testing.T) {
+	for _, in := range []string{
+		"http://localhost:8080/mcp",
+		"https://api.mistral.ai/v1/embeddings",
+		// @ in the path, not in the authority.
+		"https://example.com/users/alice@example.com/docs",
+		// A bare email address: no scheme, so no authority to redact.
+		"reported by alice@example.com",
+		// An IPv6 authority has brackets but no userinfo.
+		"http://[::1]:8080/mcp",
+		// scp-style remote, not a URL.
+		"git@github.com:dirstral/dir2mcp.git",
+	} {
+		t.Run(in, func(t *testing.T) {
+			if got := redactBundleSecrets(in); got != in {
+				t.Fatalf("redaction mangled innocuous text:\n got %q\nwant %q", got, in)
 			}
 		})
 	}
