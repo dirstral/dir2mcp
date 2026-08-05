@@ -3144,9 +3144,33 @@ func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string
 	}
 }
 
+// normalizeFileStatus projects a stored document status onto the three values
+// the published list_files schema allows (`ok|skipped|error`, SPEC §5.1 and
+// spec/tools/schemas/list_files.json).
+//
+// The projection has to be conservative, because the default arm is what a
+// caller is told about any status this function does not know. Reporting a
+// withheld file as `ok` tells an agent a sensitive document was indexed
+// successfully, which is the opposite of true and the opposite of what every
+// other surface says about the same row.
+//
+// `secret_excluded` is a skip, not a success (#712). A document withheld for
+// containing secrets has zero searchable chunks, and the rest of the codebase
+// already agrees: CorpusStats counts `status IN ('skipped','secret_excluded')`
+// as skipped, and skip_summary.go pairs them the same way twice. This function
+// was the only place that disagreed, so `stats` reported a skip while
+// `list_files` reported the same document healthy.
+//
+// The store also normalizes a `pending` document status, which would fall
+// through to `ok` here. It is left alone deliberately: nothing in production
+// writes that value (every `pending` in the store is a CHUNK's
+// embedding_status), and the published enum has no state that honestly
+// describes "not indexed yet" — `skipped` would be a different lie. If a
+// document ever does become pending, this needs a spec-first status extension
+// rather than a guess.
 func normalizeFileStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "skipped":
+	case "skipped", "secret_excluded":
 		return "skipped"
 	case "error":
 		return "error"
