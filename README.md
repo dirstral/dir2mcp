@@ -254,7 +254,7 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `embed-worker` | Run a standalone distributed embed worker (no MCP serving; requires a Tier-C store + broker) |
 | `export` | Render a transcript as VTT/SRT/TTML subtitles (`export --format vtt\|srt\|ttml <path>`) |
 | `bridge` | Run helper adapters (for example the ElevenLabs webhook bridge) |
-| `support-bundle` | Collect logs + config + status into a shareable `tar.gz` |
+| `support-bundle` | Collect logs + config + status into a shareable `tar.gz` (owner-only; credentials always redacted, local paths/endpoints redacted unless `--include-content` — see [What a support bundle discloses](#what-a-support-bundle-discloses)) |
 | `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys, where to store them (`.env.local` or the OS keychain), and a corpus profile, then writes/updates `.dir2mcp.yaml`. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
 | `config print` | Print effective config |
 | `config set-secret <ENV_VAR>` | Store a provider credential in the OS keychain (encrypted at rest) instead of a plaintext `.env.local` |
@@ -771,6 +771,31 @@ and `STATE_DIR`.
 - `--public` binds to `0.0.0.0` (unless explicit `--listen` is provided)
 - `--public` with `--auth none` is rejected unless `--force-insecure` is set
 - Browser origins are allowlisted (localhost defaults + explicit additions)
+
+### What a support bundle discloses
+
+`dir2mcp support-bundle` is meant to be pasted into a public issue, so it is
+filtered on two independent tiers:
+
+| Tier | What it covers | When it is removed |
+|---|---|---|
+| Credentials | bearer tokens, `Authorization` headers, the `user:pass@` userinfo of any URL, and the value of every URL query/fragment parameter | **always**, in every mode |
+| Local environment | corpus paths and titles, extraction error messages, and the config snapshot's paths, bind addresses, endpoints, prompts and operator-written glob/regex/word lists | by default; kept with `--include-content` |
+
+`--include-content` widens the second tier only. It never re-enables credential
+disclosure.
+
+What **remains** in a default bundle: the version and OS, the routing decisions
+(`routing.json`), and every closed-domain config setting — booleans, numbers,
+durations, enums, and provider/model names. That is the material a maintainer
+actually triages against. Removed values are marked `"[redacted]"` in
+`config.snapshot.yaml`, so an empty value still means "never configured" and the
+two cases stay distinguishable; a removed list also keeps its item count.
+
+The archive is written owner-only (`0600`) and atomically, so a failed run
+cannot leave a truncated or world-readable bundle behind. Redaction applies to
+the bundle's copy only — the snapshot on disk under the state directory is
+never rewritten.
 
 ## Optional x402 Mode
 
