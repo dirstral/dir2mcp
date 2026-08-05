@@ -344,6 +344,23 @@ func applyScalarOverrides(cfg *config.Config, opts upOptions) {
 // distinct entries in `claude mcp list` instead of colliding on the
 // same auto-derived name.
 func resolveServerName(cfg *config.Config) {
+	if t := strings.TrimSpace(cfg.ServerName); t != "" {
+		// An explicit name stays authoritative on every backend, and is
+		// resolved before the source branch so the two paths cannot disagree
+		// about what an override means.
+		cfg.ServerName = t
+		return
+	}
+	// A remote corpus is not identified by its local root. `S3FS.Walk` ignores
+	// that root, and an S3 deployment commonly leaves `root_dir` at its
+	// default, so deriving from it gave two different buckets launched from one
+	// directory the same server name, service label and client alias (#737).
+	if sourceIsRemote(*cfg) {
+		cfg.ServerName = identity.AutoServerNameForS3(
+			cfg.Source.S3Bucket, cfg.Source.S3Prefix, cfg.Source.S3Endpoint, buildinfo.IsDev(),
+		)
+		return
+	}
 	abs, err := filepath.Abs(cfg.RootDir)
 	if err != nil {
 		abs = cfg.RootDir

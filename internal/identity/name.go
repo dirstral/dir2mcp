@@ -61,13 +61,97 @@ func Resolve(rootAbs, override string, dev bool) string {
 // the caller's normalization.
 func AutoServerName(rootAbs string, dev bool) string {
 	clean := filepath.Clean(rootAbs)
-	slug := slugify(filepath.Base(clean))
-	sum := sha256.Sum256([]byte(clean))
+	return nameFromKey(clean, filepath.Base(clean), dev)
+}
+
+// AutoServerNameForS3 derives the name for a corpus that lives in an object
+// store, where the local root is not the corpus identity.
+//
+// `S3FS.Walk` ignores its root argument: bucket plus prefix IS the corpus root
+// (SPEC §7.8). The local `root_dir` an S3 deployment carries is incidental and
+// commonly left at its default, so deriving identity from it gave two different
+// buckets launched from one directory the same MCP server name, the same
+// service label and the same `claude mcp add` alias, letting the second install
+// collide with the first (#737).
+//
+// The key is `s3://[endpoint/]bucket/prefix`, and it deliberately contains:
+//
+//   - the bucket and the normalized prefix, which are what identify the corpus;
+//   - the endpoint host ONLY when one is configured, because two S3-compatible
+//     stores can host the same bucket name while AWS bucket names are globally
+//     unique. Including it unconditionally would change the identity of every
+//     existing AWS deployment.
+//
+// and deliberately omits:
+//
+//   - every credential. The key reaches diagnostics and `claude mcp list`.
+//   - the region. AWS bucket names are global, so it adds no uniqueness, and
+//     setting it later on an existing deployment would silently rename the
+//     instance.
+func AutoServerNameForS3(bucket, prefix, endpoint string, dev bool) string {
+	bucket = strings.ToLower(strings.TrimSpace(bucket))
+	prefix = normalizeS3Prefix(prefix)
+	key := "s3://"
+	if host := endpointHost(endpoint); host != "" {
+		key += host + "/"
+	}
+	key += bucket
+	if prefix != "" {
+		key += "/" + prefix
+	}
+	// The slug is the human-readable half. The bucket alone would make two
+	// prefixes of one bucket visually identical, so the last prefix segment is
+	// appended when there is one.
+	slugSource := bucket
+	if prefix != "" {
+		if idx := strings.LastIndex(prefix, "/"); idx >= 0 {
+			slugSource = bucket + "-" + prefix[idx+1:]
+		} else {
+			slugSource = bucket + "-" + prefix
+		}
+	}
+	return nameFromKey(key, slugSource, dev)
+}
+
+// nameFromKey builds `<prefix>-<slug>-<6-hex>` from a canonical identity key
+// and the string the human-readable slug is taken from. The key is what is
+// hashed, so two corpora differ in the suffix whenever their keys differ even
+// if their slugs collide after truncation.
+func nameFromKey(key, slugSource string, dev bool) string {
+	slug := slugify(slugSource)
+	sum := sha256.Sum256([]byte(key))
 	p := releasePrefix
 	if dev {
 		p = devPrefix
 	}
 	return p + "-" + slug + "-" + hex.EncodeToString(sum[:])[:hashLen]
+}
+
+// normalizeS3Prefix collapses the spellings of one prefix to a single form, so
+// `corpus`, `corpus/`, `/corpus/` and `corpus//` are one corpus and not four
+// instances. It is deliberately NOT filepath.Clean: an object key is
+// slash-separated on every platform, and Clean would rewrite `\` on Windows.
+func normalizeS3Prefix(prefix string) string {
+	trimmed := strings.Trim(strings.TrimSpace(prefix), "/")
+	if trimmed == "" {
+		return ""
+	}
+	segments := make([]string, 0, 4)
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment != "" {
+			segments = append(segments, segment)
+		}
+	}
+	return strings.Join(segments, "/")
+}
+
+// endpointHost reduces a configured endpoint to its host, so the same store
+// addressed as `https://minio.example:9000` and `minio.example:9000` is one
+// identity rather than two.
+func endpointHost(endpoint string) string {
+	host := strings.ToLower(strings.TrimSpace(endpoint))
+	host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+	return strings.Trim(host, "/")
 }
 
 // slugify lowercases s, replaces every non-[a-z0-9] rune with a single
