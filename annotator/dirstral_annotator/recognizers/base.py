@@ -481,6 +481,7 @@ def collapse_text_sightings(
     frame_gap: float,
     similarity: float = TEXT_RUN_SIMILARITY,
     min_tokens: int = MIN_MATCH_TOKENS,
+    cue_gap: float | None = None,
 ) -> list[Cue]:
     """Collapse per-frame (t, text, confidence) reads into per-passage cues.
 
@@ -520,6 +521,17 @@ def collapse_text_sightings(
     can be thousands of frames long, but it is the first thing to try if the
     carried text is ever the weak link.
 
+    `frame_gap` answers "how far apart may two reads be and still be the same
+    sighting", and by default it also sets how far a cue runs past its last
+    read. Those are the same number whenever reads arrive one sampling interval
+    apart, which is why they were one parameter until a caller turned up where
+    they differ. `OverlayReader` samples sparsely until its band search locks,
+    so a news reader has to tolerate joins across the SEARCH stride while cues
+    still end one FRAME later; passing `cue_gap` separates them. Widening
+    `frame_gap` alone would push every cue's end past the start of the next
+    one, which for a ticker means overlapping citations for consecutive
+    headlines.
+
     Unlike `collapse_sightings` this walks one chronological channel and does
     not track several entities at once: an overlay band shows one string per
     frame, so interleaved sightings of two different passages are two runs,
@@ -546,11 +558,17 @@ def collapse_text_sightings(
             runs.append(_TextRun(start_s=t, last_s=t, confidence=conf,
                                  anchor=tokens, best_text=stripped))
 
+    trailing = frame_gap if cue_gap is None else cue_gap
+    if trailing < 0:
+        # A cue may not end before its last observation: with one sighting a
+        # negative extension puts end_s before start_s, which Cue refuses, and
+        # with several it silently claims a span the overlay had already left.
+        raise ValueError(f"cue_gap must not be negative: {trailing}")
     cues = [
         Cue(
             source=source,
             start_s=run.start_s,
-            end_s=run.last_s + frame_gap,
+            end_s=run.last_s + trailing,
             event=event,
             entity_ids=(),
             confidence=round(run.confidence, 4),

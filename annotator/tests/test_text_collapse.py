@@ -394,3 +394,32 @@ def test_this_measure_is_steadier_than_a_substring_at_a_fixed_separation():
     assert max(ours) == pytest.approx(1.000, abs=0.001)
     assert max(substring) / min(substring) == pytest.approx(2.6, abs=0.05)
     assert max(ours) / min(ours) == pytest.approx(1.6, abs=0.05)
+
+
+def test_a_cue_may_not_end_before_its_last_observation():
+    """`cue_gap` is how far a cue runs past its last read. Negative is not a
+    shorter cue, it is a cue that ends before the overlay was last seen: with
+    one sighting `Cue` refuses it outright, and with several it silently claims
+    a span the text had already left."""
+    sightings = [(0.0, "Европейские лидеры обсуждают создание буферной зоны", 0.6)]
+    with pytest.raises(ValueError):
+        collapse_text_sightings(sightings, source="t", event="e", frame_gap=1.0,
+                                cue_gap=-1.0)
+
+
+def test_the_join_tolerance_and_the_trailing_extension_are_separable():
+    """They are the same number only when reads arrive one sampling interval
+    apart. A reader that samples sparsely while it searches needs to join
+    across the wider gap while its cues still end one frame later, or
+    consecutive passages carry overlapping spans."""
+    line = "Европейские лидеры обсуждают создание буферной зоны на линии фронта"
+    sightings = [(0.0, line, 0.6), (8.0, line, 0.6)]
+
+    (joined,) = collapse_text_sightings(sightings, source="t", event="e",
+                                        frame_gap=8.0, cue_gap=2.0)
+    assert joined.start_s == 0.0
+    assert joined.end_s == 10.0  # last read plus the FRAME, not the stride
+
+    # Without the wider join tolerance the same reads are two sightings.
+    assert len(collapse_text_sightings(sightings, source="t", event="e",
+                                       frame_gap=2.0)) == 2
