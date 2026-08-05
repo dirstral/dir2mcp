@@ -96,6 +96,49 @@ scorebug's:
   model returns `MCK` for Cyrillic `МСК`, so a Russian corpus may want both
   spellings in the table).
 
+### The news overlay interpreter
+
+`recognizers/news.py` is the corpus-side counterpart of the scorebug: same
+reader, different idea of what the text MEANS. Baseball resolves it against a
+roster; a news broadcast has no roster and no feed, so the words are the
+payload.
+
+```python
+from dirstral_annotator.recognizers.news import NewsOverlayRecognizer
+
+cues = NewsOverlayRecognizer(lang="rus").recognize(Path("broadcast.mp4"))
+# [Cue(source='news', event='headline', start_s=0.0, end_s=90.0,
+#      text='«ЯНДЕКС» ОШТРАФОВАЛИ ЗА ОТКАЗ ПРЕДОСТАВИТЬ ФСБ ДОСТУП К «АЛИСЕ»'), ...]
+```
+
+The interpreter has no vocabulary to check against, so what it counts as
+evidence is **agreement between the two preprocessing passes**. Real glyphs
+survive both renderings; noise is a property of the rendering and does not.
+Measured on 105 band reads of a TV Rain broadcast, comparing the two overlay
+bands against five background bands per frame:
+
+| population | median agreement | worst |
+|---|---|---|
+| overlay (30 reads) | 0.70 | 0.20 |
+| background (75 reads) | 0.00 | 0.00 |
+
+No background band agreed at all, so the default floor of 0.3 keeps 93% of
+overlay reads and admits none of the 75 background ones. It is a parameter
+regardless: one corpus is one corpus.
+
+A news frame carries several overlays at once, so each role gets its own reader
+over its own bands (the clock badge is `clock.py`, which has much stronger
+evidence in a parseable time next to a named zone). Frame extraction is shared,
+so a second role costs OCR on a second band, not a second decode.
+
+**Known limitation.** Ticker cues can carry a garbage prefix, and on the 90s
+sample one cue of ten is garbage throughout. It is stable across both passes,
+so it is real pixels being misread rather than noise the agreement floor can
+reject. A token-level cleaner was built and measured against this footage and
+is NOT shipped: it dropped real content (`220` from `около 220 тысяч`, the
+preposition `К`) while missing the actual garbage, which has perfectly ordinary
+character statistics.
+
 ## Run the backend
 
 ```bash
