@@ -79,8 +79,11 @@ test:
 # race detector so concurrency regressions (issue #419) are caught. It needs the
 # C toolchain (CGO_ENABLED=1); it is a separate target rather than folded into
 # `check` because `check`/`ci` run with CGO_ENABLED=0.
+# tests/mcp joins the list for #696: session lifetime transitions are ordered
+# across goroutines now, and the regression test for that ordering is only a
+# durable guard if it keeps running under the race detector.
 test-race:
-	CGO_ENABLED=1 go test -race ./internal/cli/... ./internal/index/... ./tests/cli ./tests/index ./tests/store
+	CGO_ENABLED=1 go test -race ./internal/cli/... ./internal/index/... ./tests/cli ./tests/index ./tests/mcp ./tests/store
 
 test-release-tools:
 	cd scripts && python3 -m unittest discover -p 'test_*.py'
