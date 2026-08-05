@@ -79,6 +79,34 @@ func TestLocalFSWalk_SpecDefaultDirNamesAsFilesStillDiscovered(t *testing.T) {
 	}
 }
 
+// TestLocalFSWalk_ExcludedDirNamesMatchExactly pins that the exclusion is an
+// exact name match. A directory called ` dist ` is a different directory than
+// `dist`, and nothing else in the pipeline would exclude its documents, so
+// trimming before the lookup would silently drop a legitimately-named tree.
+func TestLocalFSWalk_ExcludedDirNamesMatchExactly(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, " dist ", "keep.txt"), []byte("padded name"))
+	mustWrite(t, filepath.Join(root, "dist.old", "keep.txt"), []byte("different name"))
+	mustWrite(t, filepath.Join(root, "dist", "bundle.js"), []byte("excluded"))
+
+	got, err := corpusfs.NewLocalFS(root).Walk(context.Background(), root, corpusfs.DefaultOptions())
+	if err != nil {
+		t.Fatalf("LocalFS.Walk: %v", err)
+	}
+	rels := map[string]bool{}
+	for _, f := range got {
+		rels[f.RelPath] = true
+	}
+	for _, want := range []string{" dist /keep.txt", "dist.old/keep.txt"} {
+		if !rels[want] {
+			t.Errorf("%q must be discovered: only an exact `dist` directory is excluded; got %v", want, rels)
+		}
+	}
+	if rels["dist/bundle.js"] {
+		t.Errorf("dist/bundle.js must still be excluded; got %v", rels)
+	}
+}
+
 // TestS3FSWalk_ExcludesSpecDefaultDirs pins the same §7.1 defaults on the object
 // -store backend, where the "directory" is just a key segment (#716). LocalFS and
 // S3 must agree on the default ignore set or the same corpus indexes differently

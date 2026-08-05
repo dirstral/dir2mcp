@@ -13,7 +13,6 @@ import (
 	"context"
 	"io"
 	"io/fs"
-	"strings"
 )
 
 // defaultMaxFileSizeBytes mirrors the ingest discovery cap so a zero/negative
@@ -59,8 +58,14 @@ var defaultExcludedDirs = map[string]struct{}{
 // ordinary corpus document and must still be discovered, so callers must only
 // consult this for entries they already know are directories (the S3 backend
 // tests it against ancestor key segments only).
+//
+// The match is exact. The name is a real directory entry or object key segment,
+// and ` dist ` is a different directory than `dist`: the old TrimSpace here made
+// discovery skip a legitimately-named tree whose documents nothing else would
+// have excluded, which is the same silent over-exclusion this change set exists
+// to remove.
 func IsExcludedDir(name string) bool {
-	_, ok := defaultExcludedDirs[strings.TrimSpace(name)]
+	_, ok := defaultExcludedDirs[name]
 	return ok
 }
 
