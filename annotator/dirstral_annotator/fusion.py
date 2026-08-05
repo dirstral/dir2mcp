@@ -10,11 +10,17 @@ signals beat either alone, which is the entire point of the cascade.
 from __future__ import annotations
 
 from .model import Annotation, Cue
+from .recognizers.base import TEXT_RUN_SIMILARITY, text_overlap
 
 # Cues for the same claim can disagree slightly on boundaries (scorebug
 # appears a beat after the play-by-play timestamp); ranges closer than this
 # gap (seconds) still merge.
 MERGE_GAP_S = 2.0
+
+# How much two entity-free cues' text must overlap to count as the same claim.
+# The same threshold the run collapsing uses, because it is the same question:
+# these are two views of one passage, or they are two passages.
+TEXT_MERGE_SIMILARITY = TEXT_RUN_SIMILARITY
 
 
 def fuse(cues: list[Cue], min_confidence: float = 0.0) -> list[Annotation]:
@@ -50,9 +56,40 @@ def _belongs(group: list[Cue], cue: Cue) -> bool:
     entities = {e for g in group for e in g.entity_ids}
     if cue.entity_ids and entities and not entities.intersection(cue.entity_ids):
         return False
+    if not _same_claim_by_text(group, cue, entities):
+        return False
     start = min(g.start_s for g in group)
     end = max(g.end_s for g in group)
     return cue.start_s <= end + MERGE_GAP_S and cue.end_s >= start - MERGE_GAP_S
+
+
+def _same_claim_by_text(group: list[Cue], cue: Cue, entities: set[str]) -> bool:
+    """For cues nothing identifies but their words, whether the words agree.
+
+    The entity test above only REJECTS when both sides name entities and the
+    names disagree, so a pair of cues that name nobody skips it entirely and
+    falls through to the time test. That is right for the baseball cascade,
+    where every cue resolves a roster, and wrong for overlay text, which
+    resolves nothing: consecutive ticker passages share an event, carry no
+    entities and sit next to each other in time, so they all merged into one
+    annotation. On 90s of TV Rain that turned nine ticker cues into four, one
+    of which spanned 58 seconds and five separate stories while `_merge` kept
+    only the longest text and dropped the other four outright.
+
+    So when neither side names anyone and both carry text, the text decides.
+    Two ticker cues describing different stories are different claims, however
+    close together they ran. The same threshold as the run collapsing that
+    produced them, because it is the same question: is this the same passage?
+
+    Cues with no text on either side are unaffected, and so is every existing
+    caller: the baseball recognizers all resolve entities.
+    """
+    if cue.entity_ids or entities or not cue.text.strip():
+        return True
+    texts = [g.text for g in group if g.text.strip()]
+    if not texts:
+        return True
+    return any(text_overlap(text, cue.text) >= TEXT_MERGE_SIMILARITY for text in texts)
 
 
 def _merge(group: list[Cue]) -> Annotation:

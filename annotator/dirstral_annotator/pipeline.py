@@ -56,6 +56,8 @@ class Pipeline:
     games: dict[str, GameConfig] = field(default_factory=dict)
     scorebug: bool = False
     jersey: bool = False
+    news: bool = False
+    ocr_lang: str | None = None
     faces_bank: Path | None = None
     fps: float = 0.5
     min_confidence: float = 0.0
@@ -95,4 +97,12 @@ class Pipeline:
             from .recognizers.faces import FaceRecognizer
 
             try_recognizer(lambda: FaceRecognizer(self.roster, self.faces_bank, fps=self.fps))
+        if self.news:
+            # The only recognizer here that reads no roster: overlay text is
+            # the payload, not a name to resolve.
+            from .recognizers.news import NewsOverlayRecognizer
+
+            try_recognizer(
+                lambda: NewsOverlayRecognizer(lang=self.ocr_lang, fps=self.fps)
+            )
         return cues

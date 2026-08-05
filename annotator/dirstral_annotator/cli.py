@@ -3,8 +3,11 @@
     # Run the recognition backend dir2mcp connects to
     # (dir2mcp config: recognize.provider=serve, recognize.base_url=http://127.0.0.1:8765)
     dirstral-annotate serve --roster roster.json [--games games.json] \
-        [--scorebug] [--jersey] [--faces bank/] [--fps 0.5] [--min-confidence 0.3] \
-        [--host 127.0.0.1] [--port 8765]
+        [--scorebug] [--jersey] [--faces bank/] [--news] [--ocr-lang rus] \
+        [--fps 0.5] [--min-confidence 0.3] [--host 127.0.0.1] [--port 8765]
+
+    # A news archive resolves no roster, so it needs none:
+    dirstral-annotate serve --news --ocr-lang rus
 
     # Phase-1 accuracy gate against Statcast ground truth
     dirstral-annotate eval game7.mp4 --roster roster.json \
@@ -44,11 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
         c.add_argument("--scorebug", action="store_true", help="enable scorebug OCR")
         c.add_argument("--jersey", action="store_true", help="enable jersey-number OCR")
         c.add_argument("--faces", type=Path, help="roster image bank dir; enables face recognition")
+        c.add_argument("--news", action="store_true",
+                       help="enable news overlay text (headline banner + ticker); needs no roster")
+        c.add_argument("--ocr-lang", help="OCR language for the overlay readers (e.g. rus)")
         c.add_argument("--fps", type=float, default=0.5, help="frame sampling rate (default 0.5)")
         c.add_argument("--min-confidence", type=float, default=0.0)
 
     s = sub.add_parser("serve", help="run the recognition backend for dir2mcp")
-    s.add_argument("--roster", type=Path, required=True)
+    s.add_argument("--roster", type=Path,
+                   help="entity vocabulary; required unless the only recognizer is --news")
     s.add_argument("--games", type=Path, help="games.json: media basename -> play-by-play binding")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
@@ -70,12 +77,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _needs_roster(args) -> bool:
+    """Whether any enabled recognizer resolves names against a roster.
+
+    `eval` always does: it scores against a feed whose identities are roster
+    ids, so a run without one would report zero recall and look like a
+    recognition failure rather than a missing argument.
+    """
+    if args.command != "serve":
+        return True
+    return bool(args.scorebug or args.jersey or args.faces or args.games)
+
+
 def _pipeline(args, roster: Roster, games) -> Pipeline:
     return Pipeline(
         roster=roster,
         games=games,
         scorebug=args.scorebug,
         jersey=args.jersey,
+        news=args.news,
+        ocr_lang=args.ocr_lang,
         faces_bank=args.faces,
         fps=args.fps,
         min_confidence=args.min_confidence,
@@ -84,7 +105,18 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    roster = Roster.load(args.roster)
+    # A news archive has no roster, and inventing an empty one for the
+    # recognizers that DO read one would silently resolve nobody rather than
+    # say why. So the roster is optional exactly when nothing needs it.
+    if args.roster is None:
+        if _needs_roster(args):
+            raise SystemExit(
+                "--roster is required for --scorebug, --jersey, --faces and "
+                "play-by-play; only --news reads no roster"
+            )
+        roster = Roster([])
+    else:
+        roster = Roster.load(args.roster)
 
     if args.command == "serve":
         games = load_games(args.games) if args.games else {}

@@ -133,6 +133,17 @@ over its own bands (the clock badge is `clock.py`, which has much stronger
 evidence in a parseable time next to a named zone). Frame extraction is shared,
 so a second role costs OCR on a second band, not a second decode.
 
+Serving a news archive needs no roster, because nothing here resolves one:
+
+```bash
+dirstral-annotate serve --news --ocr-lang rus --port 8765
+```
+
+`--roster` stays required for `--scorebug`, `--jersey`, `--faces` and
+play-by-play, which all resolve names against it. Point dir2mcp at the backend
+as usual and each headline and ticker passage lands as a `recognition` chunk
+with a `time` span, which `ask`/`search` cite directly.
+
 **Known limitation.** Ticker cues can carry a garbage prefix, and on the 90s
 sample one cue of ten is garbage throughout. It is stable across both passes,
 so it is real pixels being misread rather than noise the agreement floor can
@@ -140,6 +151,12 @@ reject. A token-level cleaner was built and measured against this footage and
 is NOT shipped: it dropped real content (`220` from `около 220 тысяч`, the
 preposition `К`) while missing the actual garbage, which has perfectly ordinary
 character statistics.
+
+The consequence for retrieval is that a garbage span is citable: it carries
+text, a non-negative start and a well-ordered range, so the ingest filter
+accepts it. Confidence does not separate it either, because the garbage is
+stable across both passes and scores 0.90. A gate wants a measure nobody has
+taken yet, so there is no gate rather than a guessed one.
 
 ## Run the backend
 
