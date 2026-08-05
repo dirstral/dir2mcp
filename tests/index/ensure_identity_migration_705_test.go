@@ -84,7 +84,10 @@ func TestEnsureIdentity_RealChangeStillResets(t *testing.T) {
 		if err := index.EnsureIdentity(ctx, idx, current); err != nil {
 			t.Fatalf("EnsureIdentity: %v", err)
 		}
-		hits, _ := idx.Search(ctx, []float32{1, 0}, 10, model.Filter{})
+		hits, err := idx.Search(ctx, []float32{1, 0}, 10, model.Filter{})
+		if err != nil {
+			t.Fatalf("search after EnsureIdentity: %v", err)
+		}
 		if len(hits) != 0 {
 			t.Fatalf("recorded %q vs current %q: vectors from another space were kept: %v",
 				recorded, current, chunkIDs(hits))
