@@ -667,8 +667,8 @@ type Config struct {
 	// credits / watermark phrases stripped from transcript and subtitle text
 	// (config `media.filter_words`). Matching is case-insensitive substring
 	// removal; the same filter is applied during transcript chunking (so the
-	// phrases are never embedded) and on subtitle export (so VTT/SRT never
-	// contain them). Empty by default = off: behavior is unchanged everywhere
+	// phrases are never embedded) and on subtitle export in every format (so no
+	// exported VTT/SRT/TTML contains them). Empty by default = off: behavior is unchanged everywhere
 	// when no phrases are configured. There are NO built-in defaults — the list
 	// carries no language- or domain-specific phrases.
 	MediaFilterWords []string
@@ -706,44 +706,68 @@ type Config struct {
 	// subtitle.BuildBroadcastCues. "broadcast" needs word timings; a transcript/
 	// span without them falls back to the chunk builder, so behavior is unchanged
 	// when word timings are absent. Only affects VTT/SRT export, never ingest.
+	//
+	// This key is DELIBERATELY format-specific, unlike the editorial cleaning keys
+	// below (issue #729): it rewrites cue BOUNDARIES for VTT/SRT reading speed,
+	// whereas TTML cue regions are the alignment unit for bilingual packaging
+	// (§8.6.10) and must stay the stored transcript segment spans so both language
+	// runs remain traceable to the same span.
 	MediaSubtitlesSegmentation string
 
+	// The five media.subtitles.* keys below are the editorial cue-cleaning
+	// pipeline. They apply to EVERY exported subtitle format — VTT, SRT and TTML
+	// (plus its companion SMIL) — not to one format each: the spec describes
+	// media.subtitles.glossary in format-neutral, export-time terms (§8.6.2), and
+	// exporting the same transcript in two formats must not yield two different
+	// editorial results. TTML used to skip all five (issue #729).
+	//
+	// This is the export surface. Two of the five (drop_phrases, scrub_phrases)
+	// ALSO run at ingest, before chunks are embedded, so the retrieval index
+	// agrees with the exported sidecar (issue #545); the other three
+	// (glossary, collapse_repeats, drop_urls) are export-only and do not change
+	// what is indexed or cited. Each key notes which it is.
+
 	// MediaSubtitlesGlossary is an optional list of editorial term replacements
-	// applied to exported VTT/SRT cue text (config `media.subtitles.glossary`).
-	// Each entry is "pattern=>replacement" where pattern is a case-insensitive,
-	// ASCII-word-bounded regular expression (e.g. "Aju?bei=>Adzhubei" to
-	// normalize a transliterated name). Unlike media.filter_words (which deletes
-	// phrases) this REWRITES text and never drops a cue. Empty by default = off.
+	// applied to exported cue text in every format (config
+	// `media.subtitles.glossary`). Each entry is "pattern=>replacement" where
+	// pattern is a case-insensitive, ASCII-word-bounded regular expression (e.g.
+	// "Aju?bei=>Adzhubei" to normalize a transliterated name). Unlike
+	// media.filter_words (which deletes phrases) this REWRITES text and never
+	// drops a cue. Empty by default = off. Export-only: indexed/cited transcript
+	// text is not rewritten.
 	MediaSubtitlesGlossary []string
 
 	// MediaSubtitlesCollapseRepeats drops the Nth-and-later cue in a run of
-	// identical consecutive cues on export (config
+	// identical consecutive cues on export in every format (config
 	// `media.subtitles.collapse_repeats`), the whisper repetition-collapse
 	// artifact. A value < 2 disables the pass (the default 0 = off), so
-	// legitimate short repeats survive; a typical setting is 3.
+	// legitimate short repeats survive; a typical setting is 3. Export-only: the
+	// repeated cues remain in the retrieval index.
 	MediaSubtitlesCollapseRepeats int
 
 	// MediaSubtitlesDropURLs opts IN to dropping exported cues whose text is a
 	// hallucinated URL / bare domain / credit line (config
-	// `media.subtitles.drop_urls`). OFF by default. Only affects VTT/SRT export.
+	// `media.subtitles.drop_urls`), in every format. OFF by default. Export-only:
+	// the dropped cues remain in the retrieval index.
 	MediaSubtitlesDropURLs bool
 
 	// MediaSubtitlesDropPhrases is an optional list of regular expressions; an
 	// exported cue whose text is composed ENTIRELY of matches (plus punctuation)
-	// is dropped (config `media.subtitles.drop_phrases`). This removes whisper
-	// keyword-spam hallucinated over silence/music/B-roll that survives the
-	// URL-drop and consecutive-identical collapse passes, without harming real
-	// speech that merely mentions one of the words. Empty by default. Only affects
-	// VTT/SRT export.
+	// is dropped (config `media.subtitles.drop_phrases`), in every format. This
+	// removes whisper keyword-spam hallucinated over silence/music/B-roll that
+	// survives the URL-drop and consecutive-identical collapse passes, without
+	// harming real speech that merely mentions one of the words. Empty by
+	// default. Also applied at ingest, so the phrases are never embedded (#545).
 	MediaSubtitlesDropPhrases []string
 
 	// MediaSubtitlesScrubPhrases is an optional list of regular expressions
-	// EXCISED from exported cue text (config `media.subtitles.scrub_phrases`).
-	// Unlike drop_phrases (a whole-cue verdict), a scrub removes just the matched
-	// phrase from a cue that also carries real speech — for a hallucinated phrase
-	// that leaked into the same cue as genuine words. Configure with the full
-	// contiguous phrase so legitimate mentions of a single word are untouched. A
-	// cue that scrubs to empty is dropped. Empty by default. Only affects VTT/SRT.
+	// EXCISED from exported cue text in every format (config
+	// `media.subtitles.scrub_phrases`). Unlike drop_phrases (a whole-cue verdict),
+	// a scrub removes just the matched phrase from a cue that also carries real
+	// speech — for a hallucinated phrase that leaked into the same cue as genuine
+	// words. Configure with the full contiguous phrase so legitimate mentions of a
+	// single word are untouched. A cue that scrubs to empty is dropped. Empty by
+	// default. Also applied at ingest, so the phrases are never embedded (#545).
 	MediaSubtitlesScrubPhrases []string
 
 	// MediaTrimLeadingSilence opts IN to trimming leading silence from media
