@@ -80,6 +80,12 @@ type DiscoverOptions struct {
 	// size-cap drop observable instead of silent (issue #497); the file is still
 	// excluded. See corpusfs.Options.OnOversize.
 	OnOversize func(relPath string, size int64)
+	// OnUnsafeKey, when non-nil, is invoked once for each object key excluded
+	// because its corpus-relative name is not a usable rel_path (#735). Only
+	// the S3 backend can produce these: a local walk cannot hand back a path
+	// above the directory it was asked to walk, but a bucket is untrusted
+	// input and its keys are whatever someone put there.
+	OnUnsafeKey func(key string, err error)
 }
 
 // DefaultDiscoverOptions returns discovery defaults used by ingestion.
@@ -103,6 +109,7 @@ func (o DiscoverOptions) corpusfsOptions() corpusfs.Options {
 		FollowSymlinks: o.FollowSymlinks,
 		ScanCache:      o.ScanCache,
 		OnOversize:     o.OnOversize,
+		OnUnsafeKey:    o.OnUnsafeKey,
 	}
 }
 

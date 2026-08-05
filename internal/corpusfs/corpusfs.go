@@ -69,6 +69,16 @@ type Options struct {
 	// and size is the file's size in bytes. It must not block or panic; the walker
 	// calls it inline during the walk.
 	OnOversize func(relPath string, size int64)
+	// OnUnsafeKey, when non-nil, is invoked once for every object key excluded
+	// because its prefix-relative name is not a usable corpus-relative path:
+	// absolute, or carrying a `..` segment, or otherwise unable to round-trip
+	// (#735). SPEC §7.8 requires such keys to be rejected on every backend, and
+	// this makes the rejection observable instead of a silent skip, which is
+	// what an operator needs to notice a bucket that is not shaped the way they
+	// think it is. The key is the FULL object key, because the prefix-relative
+	// form is exactly what could not be trusted. It must not block or panic;
+	// the walker calls it inline.
+	OnUnsafeKey func(key string, err error)
 }
 
 // CachedDirEntry is a directory child's identity recorded in the scan cache: its
