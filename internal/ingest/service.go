@@ -2594,7 +2594,7 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 		return false, nil
 	}
 	defer cleanup()
-	members, truncated, err := extractArchiveMembers(localPath, f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff())
+	extraction, err := extractArchiveMembers(localPath, f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff())
 	if err != nil {
 		if errors.Is(err, errUnsupportedArchiveFormat) {
 			// #398: .xz/.7z/.rar (and any other classified-but-unextractable
@@ -2609,7 +2609,8 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 		// and its content_hash stays withheld so the next scan retries.
 		return false, nil
 	}
-	if truncated {
+	members := extraction.Members
+	if extraction.Truncated {
 		// #408 decompression-bomb guard: extraction stopped once the archive hit
 		// the member-count or aggregate-uncompressed-size cap. The members read
 		// before the cap are still ingested below; surface a clear warning so the
@@ -2619,6 +2620,7 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 			f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff(), len(members),
 		)
 	}
+	s.logArchiveMemberSkips(f.RelPath, extraction.Skips)
 	allMembersOK := true
 	for _, m := range members {
 		if err := ctx.Err(); err != nil {
@@ -2638,6 +2640,34 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 	// (that would re-extract on every scan forever with no benefit). Only genuine
 	// per-member failures leave the archive incomplete.
 	return allMembersOK, nil
+}
+
+// logArchiveMemberSkips surfaces members an archive declared but that did not
+// become documents (#718). A refused member is otherwise invisible: the archive
+// indexes fine, the member is simply absent, and nothing tells the operator the
+// difference between "the archive did not contain it" and "dir2mcp refused the
+// name". Log-only, matching the OnUnsafeKey precedent (#735): there is no usable
+// rel_path to key a skipped document row on (the unusable name IS the finding),
+// so this is not counted as a corpus skip either.
+//
+// Each member is named with its reason, up to the bounded sample the extractor
+// retained; the count is always exact.
+func (s *Service) logArchiveMemberSkips(archiveRelPath string, skips archiveSkips) {
+	if skips.Total == 0 {
+		return
+	}
+	details := make([]string, 0, len(skips.Entries))
+	for _, e := range skips.Entries {
+		details = append(details, fmt.Sprintf("%q (%s)", e.Name, e.Reason))
+	}
+	suffix := ""
+	if skips.Total > len(skips.Entries) {
+		suffix = fmt.Sprintf(" and %d more", skips.Total-len(skips.Entries))
+	}
+	s.getLogger().Printf(
+		"archive %s: %d member(s) not indexed: %s%s (#718)",
+		archiveRelPath, skips.Total, strings.Join(details, "; "), suffix,
+	)
 }
 
 // retainArchiveMembers adds all existing members of an unchanged archive to

@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/relpath"
 )
 
 const relPathErrorMessage = "rel_path must be a non-empty relative path without parent-traversal or absolute paths"
@@ -3781,6 +3782,18 @@ func bootstrapSettingsLocked(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// normalizeRelPath is the store's own containment check on a document key: no
+// absolute path, no parent traversal.
+//
+// The traversal test is by SEGMENT, not substring. The old `strings.Contains(
+// normalized, "/..")` test rejected ordinary filenames whose name merely starts
+// with two dots (`sub/...notes.md`, `sub/..draft.txt`), and since the caller
+// only sees an upsert error, the file was counted as an error with no document
+// row and no path in the log: a silent drop (#718, same defect the archive
+// member check had). Note the substring test could never catch a real traversal
+// the segment test misses: filepath.Clean hoists every surviving `..` to the
+// front of the path, so a `..` segment after the first is unreachable by
+// construction, and the leading case is already covered by the `../` prefix.
 func normalizeRelPath(relPath string) (string, error) {
 	normalized := strings.TrimSpace(relPath)
 	if filepath.IsAbs(normalized) {
@@ -3792,7 +3805,7 @@ func normalizeRelPath(relPath string) (string, error) {
 		normalized == "." ||
 		normalized == ".." ||
 		strings.HasPrefix(normalized, "../") ||
-		strings.Contains(normalized, "/..") {
+		relpath.HasDotDotSegment(normalized) {
 		return "", errors.New(relPathErrorMessage)
 	}
 

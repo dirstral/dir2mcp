@@ -388,7 +388,7 @@ func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options) (Discovere
 func keyHasExcludedDir(rel string) bool {
 	segs := strings.Split(rel, "/")
 	for _, seg := range segs[:len(segs)-1] {
-		if _, ok := defaultExcludedDirs[seg]; ok {
+		if IsExcludedDir(seg) {
 			return true
 		}
 	}

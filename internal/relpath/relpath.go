@@ -73,11 +73,11 @@ func Normalize(rel string) (string, error) {
 	if strings.HasPrefix(rel, "/") {
 		return "", ErrOutsideRoot
 	}
-	if hasDotDot(rel) {
+	if HasDotDotSegment(rel) {
 		return "", ErrOutsideRoot
 	}
 	cleaned := path.Clean(rel)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "/") || hasDotDot(cleaned) {
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "/") || HasDotDotSegment(cleaned) {
 		return "", ErrOutsideRoot
 	}
 	if cleaned != rel {
@@ -94,7 +94,20 @@ func Valid(rel string) bool {
 	return err == nil
 }
 
-func hasDotDot(p string) bool {
+// HasDotDotSegment reports whether p has a `..` path SEGMENT.
+//
+// It is exported because "is this traversal?" kept being re-implemented as a
+// substring test, and a substring test is wrong in the dangerous direction of
+// dropping data: `v1..v2.txt`, `draft..final/report.md`, and `sub/...notes.md`
+// are ordinary filenames, not traversal. Only a segment that is exactly `..`
+// walks up a level. Callers that need the full containment rule should use
+// Normalize; this is for the ones that clean first and only need the traversal
+// question answered (archive members, the store's document key check; #718).
+//
+// p is slash-separated. A caller holding a path that may contain backslashes
+// must reject or convert them first: on Windows `..\x` is traversal, and this
+// function will not say so.
+func HasDotDotSegment(p string) bool {
 	for _, segment := range strings.Split(p, "/") {
 		if segment == ".." {
 			return true

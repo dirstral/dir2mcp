@@ -26,12 +26,47 @@ func DefaultMaxFileSizeBytes() int64 {
 
 // defaultExcludedDirs are directory names skipped during discovery regardless of
 // backend. For S3 these are matched against path segments of the object key.
+//
+// SPEC §7.1 makes `.git/`, `node_modules/`, `dist/`, `build/`, `.venv/`, and
+// `.dir2mcp/` the normative default ignore list; `vendor/` and `__pycache__/`
+// are dir2mcp additions of the same kind (checked-in dependency trees and
+// generated caches). `dist`, `build`, and `.venv` were missing until #716, so a
+// default scan indexed generated bundles, build output, and entire Python
+// virtualenvs that operators had been told were ignored.
+//
+// This set is a hard floor: there is no config key that re-includes an excluded
+// directory (`security.path_excludes` only adds exclusions). Adding a name here
+// therefore removes documents from every existing corpus on the next reindex, so
+// it stays anchored to the spec rather than growing by taste.
 var defaultExcludedDirs = map[string]struct{}{
 	".git":         {},
 	".dir2mcp":     {},
 	"node_modules": {},
 	"vendor":       {},
 	"__pycache__":  {},
+	"dist":         {},
+	"build":        {},
+	".venv":        {},
+}
+
+// IsExcludedDir reports whether a DIRECTORY with this name is skipped by default
+// discovery. It is exported so the ingest file watcher applies the same list as
+// the initial scan: the watcher used to keep its own copy of the map, and the
+// copies drifted (#716).
+//
+// The rule is directory-only. A regular FILE named `dist` or `vendor` is an
+// ordinary corpus document and must still be discovered, so callers must only
+// consult this for entries they already know are directories (the S3 backend
+// tests it against ancestor key segments only).
+//
+// The match is exact. The name is a real directory entry or object key segment,
+// and ` dist ` is a different directory than `dist`: the old TrimSpace here made
+// discovery skip a legitimately-named tree whose documents nothing else would
+// have excluded, which is the same silent over-exclusion this change set exists
+// to remove.
+func IsExcludedDir(name string) bool {
+	_, ok := defaultExcludedDirs[name]
+	return ok
 }
 
 // DiscoveredFile holds metadata collected during corpus discovery.

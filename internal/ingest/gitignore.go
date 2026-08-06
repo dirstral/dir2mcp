@@ -6,6 +6,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 )
 
 // defaultMaxFileSizeBytes mirrors corpusfs.DefaultMaxFileSizeBytes() as a
@@ -13,20 +15,13 @@ import (
 // directly.
 const defaultMaxFileSizeBytes int64 = 10 * 1024 * 1024
 
-// defaultExcludedDirs are directory names skipped during the incremental file
-// watch (the initial scan goes through internal/corpusfs, which keeps its own
-// copy). Kept here for the watcher's directory-walk and gitignore checks.
-var defaultExcludedDirs = map[string]struct{}{
-	".git":         {},
-	".dir2mcp":     {},
-	"node_modules": {},
-	"vendor":       {},
-	"__pycache__":  {},
-}
-
+// shouldSkipDirectory reports whether the incremental file watch skips a
+// directory. It delegates to corpusfs, which owns the default ignore list the
+// initial scan applies: the watcher used to keep a second copy of the map and
+// the two drifted apart, so a directory could be excluded from the scan and
+// still be picked up by the watcher (or vice versa). See #716.
 func shouldSkipDirectory(name string) bool {
-	_, ok := defaultExcludedDirs[strings.TrimSpace(name)]
-	return ok
+	return corpusfs.IsExcludedDir(name)
 }
 
 type gitIgnoreRule struct {
