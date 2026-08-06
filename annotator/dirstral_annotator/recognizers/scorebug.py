@@ -103,6 +103,11 @@ CORROBORATION_S = 30.0
 # come from the surrounding frames or not at all.
 PITCHER_MEMORY_S = 90.0
 PITCH_CUE_PAD_S = 2.0
+# A count transition is weaker evidence than a speed graphic: the graphic is a
+# statement that a pitch was just thrown, while the count is an inference from
+# two readings of a number. Confident enough to report, not as confident as a
+# graphic (0.9), and above any floor an operator is likely to set.
+COUNT_PITCH_CONFIDENCE = 0.75
 PITCH_CONFIDENCE = 0.8
 # Readings this close together are the same graphic, not two pitches: no
 # pitcher works quicker than this, and the graphic itself lingers.
@@ -117,8 +122,12 @@ BATTER, PITCHER, UNKNOWN, LOOSE = "batter", "pitcher", "unknown", "loose"
 # The lookbehind rejects the right half of any hyphenated pair (a day line, a
 # ball-strike count) for the same reason.
 _LINEUP_RE = re.compile(r"(?<![0-9A-Z\-])([1-9])[.,:;]?([A-Z][A-Z'\-]{2,})")
-# "GRIFFIN  P: 50": the pitch count that trails the pitcher's name.
-_PITCH_COUNT_RE = re.compile(r"([A-Z][A-Z'\-]{2,})[^A-Z0-9]{0,6}P\s*[.,:;]\s*[0-9]{1,3}")
+# "GRIFFIN  P: 50": the pitch count that trails the pitcher's name. The digits
+# are captured, not just matched: the count increments by exactly one on every
+# pitch that pitcher throws and is on the bug continuously, which makes it a
+# per-pitch clock that does not depend on the speed graphic being shown. See
+# `_count_pitch_cues`.
+_PITCH_COUNT_RE = re.compile(r"([A-Z][A-Z'\-]{2,})[^A-Z0-9]{0,6}P\s*[.,:;]\s*([0-9]{1,3})")
 # "SLIDER 88 MPH", "FOUR SEAM 92 MPH": anchored on the literal speed unit,
 # which OCR noise does not invent.
 _VELOCITY_RE = re.compile(r"([A-Z][A-Z ]{2,20}?)\s*([0-9]{2,3})\s*(MPH|KPH|KM/H)")
@@ -161,6 +170,14 @@ class PitchRead:
 
 
 @dataclass(frozen=True)
+class PitchCountRead:
+    """The pitcher's cumulative pitch count as printed on the bug (`P: 90`)."""
+
+    name: str
+    count: int
+
+
+@dataclass(frozen=True)
 class _Fields:
     """What one band of one frame said, once the roster has had its say.
 
@@ -171,6 +188,7 @@ class _Fields:
 
     names: tuple[tuple[str, float, str], ...] = ()
     pitches: tuple[PitchRead, ...] = ()
+    counts: tuple[PitchCountRead, ...] = ()
 
 
 def parse_overlay(text: str) -> tuple[list[NameRead], list[PitchRead]]:
@@ -191,6 +209,7 @@ def parse_overlay(text: str) -> tuple[list[NameRead], list[PitchRead]]:
     """
     names: list[NameRead] = []
     pitches: list[PitchRead] = []
+    counts: list[PitchCountRead] = []
     seen: set[tuple[str, str]] = set()
 
     def add(name: str, role: str) -> None:
@@ -231,6 +250,7 @@ def parse_overlay(text: str) -> tuple[list[NameRead], list[PitchRead]]:
         for match in _PITCH_COUNT_RE.finditer(line):
             add(match.group(1), PITCHER)
             claimed.add(match.group(1))
+            counts.append(PitchCountRead(name=match.group(1), count=int(match.group(2))))
             structured = True
         for match in _LINEUP_RE.finditer(line):
             add(match.group(2), BATTER)
@@ -239,10 +259,12 @@ def parse_overlay(text: str) -> tuple[list[NameRead], list[PitchRead]]:
         for word in _WORD_RE.findall(line):
             if word not in claimed:
                 add(word, UNKNOWN if structured else LOOSE)
-    return names, _dedupe_pitches(pitches)
+    return names, _dedupe_pitches(pitches), counts
 
 
-def parse_bands(texts: Iterable[str]) -> tuple[list[NameRead], list[PitchRead]]:
+def parse_bands(
+    texts: Iterable[str],
+) -> tuple[list[NameRead], list[PitchRead], list[PitchCountRead]]:
     """Merge one band's preprocessing passes into one set of fields.
 
     The grey and thresholded passes disagree, and neither is reliably better:
@@ -252,15 +274,17 @@ def parse_bands(texts: Iterable[str]) -> tuple[list[NameRead], list[PitchRead]]:
     """
     names: list[NameRead] = []
     pitches: list[PitchRead] = []
+    counts: list[PitchCountRead] = []
     seen: set[tuple[str, str]] = set()
     for text in texts:
-        found_names, found_pitches = parse_overlay(text)
+        found_names, found_pitches, found_counts = parse_overlay(text)
         for read in found_names:
             if (read.name, read.role) not in seen:
                 seen.add((read.name, read.role))
                 names.append(read)
         pitches += found_pitches
-    return names, _dedupe_pitches(pitches)
+        counts += found_counts
+    return names, _dedupe_pitches(pitches), counts
 
 
 class ScorebugRecognizer:
@@ -305,6 +329,7 @@ class ScorebugRecognizer:
         pitchers: list[tuple[float, str, float]] = []
         loose: list[tuple[float, str, float]] = []
         graphics: list[tuple[float, PitchRead]] = []
+        counted: list[tuple[float, str, int]] = []
 
         # `closing` because the reader owns a worker pool and a scratch
         # directory for the length of the iteration: abandoning it part way
@@ -330,6 +355,10 @@ class ScorebugRecognizer:
                     # to put on screen.
                     appearances.append((t, pid, conf))
                 graphics += [(t, pitch) for pitch in fields.pitches]
+                for cr in fields.counts:
+                    hit = match_name(self._index, cr.name)
+                    if hit is not None:
+                        counted.append((t, hit[0], cr.count))
 
         gap = 1.0 / self.fps
         confirmed = batters + appearances
@@ -339,7 +368,9 @@ class ScorebugRecognizer:
             appearances, source=self.name, event="appearance", frame_gap=gap
         )
         if self.pitch_cues:
-            cues += self._pitch_cues(graphics, pitchers)
+            graphic_cues = self._pitch_cues(graphics, pitchers)
+            cues += graphic_cues
+            cues += _count_pitch_cues(counted, graphic_cues, self.name, gap)
         cues.sort(key=lambda c: (c.start_s, c.event, c.entity_ids))
         return cues
 
@@ -352,7 +383,7 @@ class ScorebugRecognizer:
         likely to have come out of the stands as off the bug, and letting it
         vote would let crowd texture win the band search.
         """
-        names, pitches = parse_bands(read.texts)
+        names, pitches, counts = parse_bands(read.texts)
         resolved: list[tuple[str, float, str]] = []
         hits = 0
         for name_read in names:
@@ -363,7 +394,7 @@ class ScorebugRecognizer:
             resolved.append((pid, conf, name_read.role))
             if name_read.role != LOOSE:
                 hits += 1
-        return _Fields(tuple(resolved), tuple(pitches)), hits + len(pitches)
+        return _Fields(tuple(resolved), tuple(pitches), tuple(counts)), hits + len(pitches)
 
     def _resolve(self, read: NameRead) -> tuple[str, float] | None:
         hit = match_name(self._index, read.name)
@@ -548,3 +579,78 @@ def _upper(text: str) -> str:
     """Fold to letters and spaces only: the form roster names are keyed by."""
     kept = [c if (c.isalpha() and c.isascii()) or c in " '-" else " " for c in _fold(text)]
     return " ".join("".join(kept).split())
+
+
+#: How close a count-derived pitch may sit to a graphic-derived one before it is
+#: treated as the same pitch. The metric's own tolerance, because two cues that
+#: both fall within tolerance of one ground-truth pitch are two claims about one
+#: event, and the second can only ever be a false positive.
+COUNT_PITCH_DEDUPE_S = 5.0
+
+
+def _count_pitch_cues(
+    counted: list[tuple[float, str, int]],
+    graphic_cues: list[Cue],
+    source: str,
+    gap: float,
+) -> list[Cue]:
+    """One `pitch` cue per observed increment of the bug's pitch count.
+
+    The speed graphic is shown for some pitches and not others: on the pilot
+    game it yielded 299 cues against 344 thrown, and every one of those 299 was
+    credited, so attribution was never the problem — finding the pitch was. The
+    count printed beside the pitcher's own name (`RAY  P: 90`) is on the bug
+    continuously and rises by exactly one per pitch, so a transition is a pitch
+    with a timestamp, already attributed to the pitcher whose field it sits in.
+    It was being matched to identify the pitcher and its digits thrown away.
+
+    Only a +1 step counts. A larger jump means frames were missed or a digit was
+    misread, and while pitches certainly happened, WHEN is unknown; emitting
+    them at the moment the jump was noticed would be inventing timing the bug
+    never showed. A decrease is a new pitcher or OCR noise and resets the
+    tracking for that pitcher, never emits.
+
+    Cues that land on a pitch a graphic already reported are dropped rather than
+    added. The scorecard matches at most one annotation per ground-truth pitch
+    and counts the rest as false positives, so a duplicate cannot raise recall
+    and can only cost precision, which is currently perfect.
+    """
+    cues: list[Cue] = []
+    last: dict[str, int] = {}
+    for t, pid, count in sorted(counted):
+        previous, seen = last.get(pid), pid in last
+        last[pid] = count
+        if not seen or previous is None:
+            continue  # first sighting establishes the baseline, claims nothing
+        if count != previous + 1:
+            continue
+        cues.append(
+            Cue(
+                source=source,
+                start_s=max(0.0, t - PITCH_CUE_PAD_S),
+                end_s=t + PITCH_CUE_PAD_S,
+                event="pitch",
+                entity_ids=(pid,),
+                confidence=COUNT_PITCH_CONFIDENCE,
+                text=f"pitch {count}",
+            )
+        )
+    return _drop_pitches_already_reported(cues, graphic_cues)
+
+
+def _drop_pitches_already_reported(cues: list[Cue], reported: list[Cue]) -> list[Cue]:
+    """Keep only cues that do not describe a pitch some other cue already did."""
+    kept: list[Cue] = []
+    for cue in cues:
+        midpoint = (cue.start_s + cue.end_s) / 2.0
+        duplicate = False
+        for other in reported:
+            if not set(cue.entity_ids).intersection(other.entity_ids):
+                continue
+            other_mid = (other.start_s + other.end_s) / 2.0
+            if abs(midpoint - other_mid) <= COUNT_PITCH_DEDUPE_S:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(cue)
+    return kept

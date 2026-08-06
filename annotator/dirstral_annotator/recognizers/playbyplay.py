@@ -56,6 +56,12 @@ class PlayByPlayRecognizer:
                 continue  # nobody on our roster is involved; skip, don't guess
             pitcher_name = pitcher.name if pitcher else ev.pitcher_name
             batter_name = batter.name if batter else ev.batter_name
+            # The inning is what makes a moment findable by the question a
+            # person actually asks ("bottom of the 9th", "in the 7th"). It was
+            # parsed from the feed and then dropped before the text, so no
+            # inning query could match anything (#741).
+            half = ev.half_inning()
+            where = f" ({half})" if half else ""
             desc = f" — {ev.description}" if ev.description else ""
             if pitcher is not None:
                 # A pitch thrown BY a rostered player — the event the phase-1
@@ -68,7 +74,7 @@ class PlayByPlayRecognizer:
                         event="pitch",
                         entity_ids=(pitcher.id,),
                         confidence=CONFIDENCE,
-                        text=f"Pitch: {pitcher_name} to {batter_name}{desc}",
+                        text=f"Pitch: {pitcher_name} to {batter_name}{where}{desc}",
                     )
                 )
             if batter is not None:
@@ -84,7 +90,7 @@ class PlayByPlayRecognizer:
                         event="at_bat",
                         entity_ids=(batter.id,),
                         confidence=CONFIDENCE,
-                        text=f"At bat: {batter_name} vs {pitcher_name}{desc}",
+                        text=f"At bat: {batter_name} vs {pitcher_name}{where}{desc}",
                     )
                 )
         return cues

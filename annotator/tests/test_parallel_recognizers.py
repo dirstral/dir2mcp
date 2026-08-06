@@ -272,7 +272,7 @@ def test_pooled_reader_reads_a_band_nobody_dispatched(roster, frames, tmp_path):
     frame = tmp_path / "frame-00000.jpg"
     with overlay._PooledReader(ocr, tmp_path, WORKERS) as reader:
         texts = reader.read(7, frame, WHOLE)
-    names, pitches = scorebug.parse_bands(texts)
+    names, pitches, _ = scorebug.parse_bands(texts)
     assert scorebug.NameRead("LILE", scorebug.BATTER) in names
     assert [p.speed for p in pitches] == []
 
