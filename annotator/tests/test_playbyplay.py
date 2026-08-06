@@ -100,3 +100,44 @@ def test_batter_appearance_is_not_a_precision_false_positive(roster):
     assert card.total_events == 2
     assert card.overall.recall == 1.0
     assert card.overall.precision == 1.0  # at-bats stay out of the pitch pool
+
+
+# --- the text a person's question has to match ------------------------------
+
+def test_cue_text_names_the_half_inning(roster):
+    """"Bottom of the 9th" is how a moment gets asked for. The inning was parsed
+    from the feed and dropped before the text, so no inning query could match
+    anything the index held (#741)."""
+    ev = PitchEvent(
+        game_pk=1, epoch_s=1000.0, pitcher_id=WEBB, pitcher_name="Logan Webb",
+        batter_id=RAMOS, batter_name="Heliot Ramos", inning=7, top_inning=False,
+        description="Heliot Ramos strikes out swinging.",
+    )
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(Path("g.mp4"))
+    pitch = next(c for c in cues if c.event == "pitch")
+    assert "bottom of the 7th" in pitch.text
+    # The outcome and both names survive alongside it: a query is as likely to
+    # be "Ray strikeout" as it is to be an inning.
+    assert "Logan Webb" in pitch.text and "Heliot Ramos" in pitch.text
+    assert "strikes out swinging" in pitch.text
+
+
+def test_the_ordinal_is_right_for_the_teens():
+    """Extra innings are ordinary in baseball, and 11th/12th/13th are exactly
+    where a naive ordinal says "11st"."""
+    from dirstral_annotator.eval.ground_truth import _ordinal
+    assert [_ordinal(n) for n in (1, 2, 3, 11, 12, 13, 21, 22)] == \
+        ["1st", "2nd", "3rd", "11th", "12th", "13th", "21st", "22nd"]
+
+
+def test_a_missing_inning_is_omitted_rather_than_guessed(roster):
+    """A feed without an inning should read as a moment with no inning stated,
+    not as "top of the 0th"."""
+    ev = PitchEvent(
+        game_pk=1, epoch_s=1000.0, pitcher_id=WEBB, pitcher_name="Logan Webb",
+        batter_id=RAMOS, batter_name="Heliot Ramos", inning=0,
+        description="Heliot Ramos grounds out.",
+    )
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(Path("g.mp4"))
+    pitch = next(c for c in cues if c.event == "pitch")
+    assert "0th" not in pitch.text and "(" not in pitch.text
