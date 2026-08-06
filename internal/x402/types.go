@@ -53,27 +53,50 @@ type Requirement struct {
 	MaxTimeoutSeconds int
 }
 
-// X402Payload represents the JSON object returned in the PAYMENT-REQUIRED header.
-// It mirrors the previous map structure but provides compile-time safety.
+// X402Payload is the JSON object returned in the PAYMENT-REQUIRED header: a
+// standard x402 v2 `PaymentRequired`.
 //
-// Consumers depend on the field names to match the existing keys, so the tags
-// are chosen accordingly.
+// It advertises `x402Version: 2`, so it has to BE a v2 object. It was not
+// (#700): `resource` sat inside each accept entry as a bare string and there
+// was no top-level resource at all, while the v2 SDK already vendored in this
+// module defines `PaymentRequired` as x402Version + a first-class
+// `resource *ResourceInfo` + `accepts []PaymentRequirements`, whose entries
+// carry no `resource` field. SPEC §18 requires the standard shape in as many
+// words: "first-class `resource` + `accepts[]` with `maxTimeoutSeconds`".
+//
+// A client parsing this header with the SDK's own types read no resource at
+// all, which matters because the adapter binds a proof to the challenge
+// `resource` and refuses one issued for a different route: the field a client
+// needs in order to comply was not where the format says it is.
 type X402Payload struct {
 	X402Version int           `json:"x402Version"`
+	Resource    *ResourceInfo `json:"resource,omitempty"`
 	Accept      []AcceptEntry `json:"accepts"`
 }
 
-// AcceptEntry describes a single acceptable payment requirement.
-// The json tags match the keys previously used in the map literal.
+// ResourceInfo describes the resource being paid for. Mirrors the SDK type;
+// only `url` is populated here, the rest are bazaar service metadata this
+// adapter does not emit.
+type ResourceInfo struct {
+	URL string `json:"url"`
+}
+
+// AcceptEntry is one entry of `accepts`, matching the SDK's
+// `PaymentRequirements`.
+//
+// No `resource`: it moved to the top level, where v2 puts it. `Extra` is the
+// SDK's own escape hatch and is where `maxAmountRequired` now lives — that
+// field is this adapter's, not the standard's (the canonical spec never
+// mentions it), and it is kept on the wire because the request fingerprint the
+// replay ledger binds to includes it.
 type AcceptEntry struct {
-	Scheme            string `json:"scheme"`
-	Network           string `json:"network"`
-	Amount            string `json:"amount"`
-	MaxAmountRequired string `json:"maxAmountRequired,omitempty"`
-	Asset             string `json:"asset"`
-	PayTo             string `json:"payTo"`
-	Resource          string `json:"resource"`
-	MaxTimeoutSeconds int    `json:"maxTimeoutSeconds"`
+	Scheme            string                 `json:"scheme"`
+	Network           string                 `json:"network"`
+	Amount            string                 `json:"amount"`
+	Asset             string                 `json:"asset"`
+	PayTo             string                 `json:"payTo"`
+	MaxTimeoutSeconds int                    `json:"maxTimeoutSeconds"`
+	Extra             map[string]interface{} `json:"extra,omitempty"`
 }
 
 const allowedSchemesText = "exact, upto"
@@ -147,20 +170,25 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 
 	// assemble a typed payload rather than a loose map; this aids
 	// compile-time checking and prevents inadvertent typos.
+	entry := AcceptEntry{
+		Scheme:            req.Scheme,
+		Network:           req.Network,
+		Amount:            req.Amount,
+		Asset:             req.Asset,
+		PayTo:             req.PayTo,
+		MaxTimeoutSeconds: req.MaxTimeoutSeconds,
+	}
+	if max := strings.TrimSpace(req.MaxAmountRequired); max != "" {
+		entry.Extra = map[string]interface{}{"maxAmountRequired": max}
+	}
 	p := X402Payload{
 		X402Version: X402Version,
-		Accept: []AcceptEntry{
-			{
-				Scheme:            req.Scheme,
-				Network:           req.Network,
-				Amount:            req.Amount,
-				MaxAmountRequired: req.MaxAmountRequired,
-				Asset:             req.Asset,
-				PayTo:             req.PayTo,
-				Resource:          req.Resource,
-				MaxTimeoutSeconds: req.MaxTimeoutSeconds,
-			},
-		},
+		Accept:      []AcceptEntry{entry},
+	}
+	// Only when the operator configured a resource base URL. An empty `url`
+	// would be a worse claim than an absent resource object.
+	if resource := strings.TrimSpace(req.Resource); resource != "" {
+		p.Resource = &ResourceInfo{URL: resource}
 	}
 
 	raw, err := json.Marshal(p)
