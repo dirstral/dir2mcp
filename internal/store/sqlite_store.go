@@ -2181,7 +2181,39 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	return doc, nil
 }
 
+// ListFiles is the model.Store listing: every non-deleted matching document,
+// hidden dot-paths included. It is a thin delegate so the interface signature
+// (and its ~30 callers) stay unchanged; callers that need the list_files
+// visibility policy applied inside the query call ListVisibleFiles directly.
 func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit, offset int) ([]model.Document, int64, error) {
+	return s.ListVisibleFiles(ctx, prefix, glob, limit, offset, true)
+}
+
+// ListVisibleFiles is ListFiles with the list_files hidden-path policy pushed
+// into SQL (#694).
+//
+// The MCP handler used to apply that policy in Go, which forced it to walk the
+// whole matching corpus from offset zero on every single call just to know how
+// many rows survived. The predicate is exactly "the normalized rel_path starts
+// with a dot": mcp.isListFilesNoisePath takes the FIRST '/'-delimited segment
+// and tests strings.HasPrefix(first, "."), and testing the first segment's
+// prefix is testing the whole string's prefix. rel_paths are stored
+// filepath.Clean'd and slash-normalized (see normalizeRelPath), with no leading
+// "./" and no "." or ".." components, so `rel_path NOT LIKE '.%'` is a
+// byte-for-byte equivalent — and '.' is not a LIKE metacharacter, so no ESCAPE
+// clause is needed.
+//
+// Adding it to `where` is what makes this worth doing: the same slice is
+// threaded through whereClause into the SQL LIMIT/OFFSET page query, into
+// countListFiles, and into the glob scan, so all three start operating on the
+// visible set and the caller can trust both the page AND the total without
+// re-filtering.
+//
+// The memo key must carry the visibility policy. Both listings share the same
+// prefix/glob filter but describe different result sets, so keying only on the
+// filter would let a hidden-excluding call serve its total to a
+// hidden-including one (and vice versa) for as long as no commit landed.
+func (s *SQLiteStore) ListVisibleFiles(ctx context.Context, prefix, glob string, limit, offset int, includeHidden bool) ([]model.Document, int64, error) {
 	// Read pool (#429 F11): SELECT-only, and the glob branch scans every matching
 	// row per page, so this is exactly the shape that should not block on ingest.
 	db, err := s.ensureReadDB(ctx)
@@ -2207,7 +2239,17 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 		where = append(where, `rel_path LIKE ? ESCAPE '\'`)
 		prefixArgs = append(prefixArgs, escapeLike(normalizedPrefix)+"%")
 	}
+	if !includeHidden {
+		where = append(where, `rel_path NOT LIKE '.%'`)
+	}
 	whereClause := " WHERE " + strings.Join(where, " AND ")
+
+	// Part of every memo key: the two visibility policies are two different
+	// listings over the same filter, and their totals must never be crossed.
+	visibility := "all"
+	if !includeHidden {
+		visibility = "visible"
+	}
 
 	// The `glob` filter uses the SAME canonical matcher as the search/ask
 	// `file_glob` filter (model.MatchGlob, issue #441): segment-aware `*`,
@@ -2216,7 +2258,8 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	// evaluate it in Go over the prefix-matched rows and paginate in Go. Without a
 	// glob the query keeps its efficient SQL LIMIT/OFFSET pagination unchanged.
 	if trimmedGlob == "" {
-		return s.listFilesSQLPaged(ctx, db, selectCols, whereClause, prefixArgs, normalizedPrefix, limit, offset)
+		key := "prefix\x00" + visibility + "\x00" + normalizedPrefix
+		return s.listFilesSQLPaged(ctx, db, selectCols, whereClause, prefixArgs, key, limit, offset)
 	}
 
 	matcher, err := model.CompileGlob(trimmedGlob)
@@ -2227,8 +2270,9 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	}
 
 	// The cache key is the full filter: whereClause/prefixArgs are a pure
-	// function of normalizedPrefix, so prefix plus glob identifies the listing.
-	key := "glob\x00" + normalizedPrefix + "\x00" + trimmedGlob
+	// function of normalizedPrefix and the visibility policy, so visibility plus
+	// prefix plus glob identifies the listing.
+	key := "glob\x00" + visibility + "\x00" + normalizedPrefix + "\x00" + trimmedGlob
 	return s.listFilesGlobPaged(ctx, db, selectCols, whereClause, prefixArgs, matcher, key, limit, offset)
 }
 
@@ -2256,7 +2300,7 @@ func (s *SQLiteStore) listFilesSQLPaged(
 	db *sql.DB,
 	selectCols, whereClause string,
 	prefixArgs []any,
-	normalizedPrefix string,
+	key string,
 	limit, offset int,
 ) ([]model.Document, int64, error) {
 	// Probe before the page query so a memo hit is pinned to a state no newer
@@ -2264,7 +2308,6 @@ func (s *SQLiteStore) listFilesSQLPaged(
 	probe := s.versionProbeDB()
 	epoch, cacheable := s.listCache.begin(ctx, probe)
 
-	key := "prefix\x00" + normalizedPrefix
 	var memo listFilesCacheEntry
 	memoized := false
 	if cacheable {

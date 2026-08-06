@@ -97,6 +97,25 @@ type Server struct {
 	// optional absolute lifetimes.
 	sessions map[string]sessionInfo
 
+	// sessionSeq orders session state transitions. It is allocated under
+	// sessionMu (see reserveSessionPersistLocked) so a token's order matches the
+	// order of the in-memory transition it describes, which is what lets the
+	// persistence layer tell an older write from a newer one (#696).
+	sessionSeq uint64
+
+	// sessionPersistMu serializes the store writes that mirror those in-memory
+	// transitions, and guards the two maps below. It is deliberately NOT
+	// sessionMu: sessionMu is taken on every request and must not be held across
+	// store I/O.
+	sessionPersistMu sync.Mutex
+	// sessionPersistSeq records, per session ID, the newest transition that has
+	// reached the store. A write carrying an older token is dropped.
+	sessionPersistSeq map[string]uint64
+	// sessionPersistInflight counts the reserved-but-not-yet-committed
+	// transitions per session ID, so the seq record can be dropped once nothing
+	// can still arrive late for that ID.
+	sessionPersistInflight map[string]int
+
 	rateLimiter *ipRateLimiter
 
 	x402Client      x402.FacilitatorClient
@@ -288,6 +307,10 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		retriever:       retriever,
 		sessions:        make(map[string]sessionInfo),
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
+
+		sessionPersistSeq:      make(map[string]uint64),
+		sessionPersistInflight: make(map[string]int),
+
 		paymentTTL:      paymentOutcomeTTL,
 		paymentMaxItems: paymentOutcomeMaxEntries,
 		nonceLedger:     make(map[string]nonceLedgerEntry),
@@ -642,15 +665,17 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	}
 	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
+		seq := s.reserveSessionPersistLocked(id)
 		s.sessionMu.Unlock()
-		s.deletePersistedSession(id)
+		s.deletePersistedSession(id, seq)
 		log.Printf("session %s expired due to inactivity", maskSessionID(id))
 		return false, "inactivity"
 	}
 	if maxLife > 0 && now.Sub(si.created) > maxLife {
 		delete(s.sessions, id)
+		seq := s.reserveSessionPersistLocked(id)
 		s.sessionMu.Unlock()
-		s.deletePersistedSession(id)
+		s.deletePersistedSession(id, seq)
 		log.Printf("session %s expired due to max lifetime", maskSessionID(id))
 		return false, "max-lifetime"
 	}
@@ -658,8 +683,9 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	// update lastSeen
 	si.lastSeen = now
 	s.sessions[id] = si
+	seq := s.reserveSessionPersistLocked(id)
 	s.sessionMu.Unlock()
-	s.persistSession(id, si)
+	s.persistSession(id, si, seq)
 	return true, ""
 }
 
@@ -668,8 +694,9 @@ func (s *Server) storeSession(id string, authScope string) {
 	si := sessionInfo{created: now, lastSeen: now, authScope: authScope}
 	s.sessionMu.Lock()
 	s.sessions[id] = si
+	seq := s.reserveSessionPersistLocked(id)
 	s.sessionMu.Unlock()
-	s.persistSession(id, si)
+	s.persistSession(id, si, seq)
 }
 
 // forgetSession removes a session from the in-memory map and the persistence
@@ -678,8 +705,69 @@ func (s *Server) storeSession(id string, authScope string) {
 func (s *Server) forgetSession(id string) {
 	s.sessionMu.Lock()
 	delete(s.sessions, id)
+	seq := s.reserveSessionPersistLocked(id)
 	s.sessionMu.Unlock()
-	s.deletePersistedSession(id)
+	s.deletePersistedSession(id, seq)
+}
+
+// reserveSessionPersistLocked allocates the ordering token for one session state
+// transition.
+//
+// It MUST be called with sessionMu held. That is the entire point: the token is
+// only meaningful because it is allocated inside the same critical section that
+// performs the in-memory transition it describes, so token order == transition
+// order. Allocating it after the unlock would reintroduce exactly the race this
+// machinery exists to close (#696).
+func (s *Server) reserveSessionPersistLocked(id string) uint64 {
+	s.sessionSeq++
+	seq := s.sessionSeq
+	s.sessionPersistMu.Lock()
+	s.sessionPersistInflight[id]++
+	s.sessionPersistMu.Unlock()
+	return seq
+}
+
+// commitSessionPersist runs apply only when seq is still the newest transition
+// for id, and holds sessionPersistMu across apply so a newer transition cannot
+// overtake an older one while the older one is mid-flight in the store.
+//
+// Both halves are load-bearing (#696). A check without holding the lock across
+// the store call does NOT fix the bug: the stale touch would pass the check,
+// then the DELETE would pass its own check and complete, and the touch would
+// still land last and resurrect the row. Holding the lock is what makes the
+// store's final state agree with the newest logical transition.
+//
+// Every reserveSessionPersistLocked must be paired with exactly one
+// commitSessionPersist, including when there is no persistence store to write
+// to, or the in-flight accounting leaks.
+func (s *Server) commitSessionPersist(id string, seq uint64, apply func()) {
+	s.sessionPersistMu.Lock()
+	defer s.sessionPersistMu.Unlock()
+	defer s.releaseSessionPersistLocked(id)
+
+	if seq <= s.sessionPersistSeq[id] {
+		// A newer transition for this ID already reached the store. This write
+		// describes a state the session has since left, so dropping it is the
+		// whole fix: it is the write that used to resurrect a deleted session.
+		return
+	}
+	s.sessionPersistSeq[id] = seq
+	apply()
+}
+
+// releaseSessionPersistLocked drops the ordering record for id once no
+// transition for it is still in flight. Callers hold sessionPersistMu.
+//
+// The record cannot be dropped any earlier: it is precisely what a late,
+// superseded write gets rejected against. It must be dropped eventually, or the
+// map grows without bound as sessions come and go over the life of the daemon.
+// The in-flight count reaching zero is the exact moment both are true.
+func (s *Server) releaseSessionPersistLocked(id string) {
+	s.sessionPersistInflight[id]--
+	if s.sessionPersistInflight[id] <= 0 {
+		delete(s.sessionPersistInflight, id)
+		delete(s.sessionPersistSeq, id)
+	}
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
@@ -742,23 +830,27 @@ func (s *Server) cleanupExpiredSessions(now time.Time) {
 	inactivity, maxLife := s.resolveSessionTimeouts()
 
 	s.sessionMu.Lock()
-	var toDelete []string
+	type expiredSession struct {
+		id  string
+		seq uint64
+	}
+	var toDelete []expiredSession
 	for id, si := range s.sessions {
-		if now.Sub(si.lastSeen) > inactivity {
-			toDelete = append(toDelete, id)
-			delete(s.sessions, id)
+		expired := now.Sub(si.lastSeen) > inactivity ||
+			(maxLife > 0 && now.Sub(si.created) > maxLife)
+		if !expired {
 			continue
 		}
-		if maxLife > 0 && now.Sub(si.created) > maxLife {
-			toDelete = append(toDelete, id)
-			delete(s.sessions, id)
-		}
+		delete(s.sessions, id)
+		// Reserve inside the same critical section as the in-memory delete, so a
+		// touch that raced this sweep cannot undo the expiry (#696).
+		toDelete = append(toDelete, expiredSession{id: id, seq: s.reserveSessionPersistLocked(id)})
 	}
 	s.sessionMu.Unlock()
 
 	// Perform I/O outside the lock
-	for _, id := range toDelete {
-		s.deletePersistedSession(id)
+	for _, expired := range toDelete {
+		s.deletePersistedSession(expired.id, expired.seq)
 	}
 }
 
@@ -837,24 +929,33 @@ func (s *Server) restorePaymentOutcomes(ctx context.Context) {
 	}
 }
 
-func (s *Server) persistSession(id string, si sessionInfo) {
-	store, ok := s.store.(sessionPersistenceStore)
-	if !ok || store == nil {
-		return
-	}
-	if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC(), si.authScope); err != nil {
-		log.Printf("warning: failed persisting session %s: %v", maskSessionID(id), err)
-	}
+// persistSession mirrors a session touch/creation into the store. seq comes
+// from reserveSessionPersistLocked and is what keeps this write from landing
+// after a delete that logically superseded it (#696).
+func (s *Server) persistSession(id string, si sessionInfo, seq uint64) {
+	s.commitSessionPersist(id, seq, func() {
+		store, ok := s.store.(sessionPersistenceStore)
+		if !ok || store == nil {
+			return
+		}
+		if err := store.UpsertMCPSession(context.Background(), id, si.created.UTC(), si.lastSeen.UTC(), si.authScope); err != nil {
+			log.Printf("warning: failed persisting session %s: %v", maskSessionID(id), err)
+		}
+	})
 }
 
-func (s *Server) deletePersistedSession(id string) {
-	store, ok := s.store.(sessionPersistenceStore)
-	if !ok || store == nil {
-		return
-	}
-	if err := store.DeleteMCPSession(context.Background(), id); err != nil {
-		log.Printf("warning: failed deleting persisted session %s: %v", maskSessionID(id), err)
-	}
+// deletePersistedSession removes a session from the store. seq orders it
+// against any concurrent touch for the same ID; see commitSessionPersist.
+func (s *Server) deletePersistedSession(id string, seq uint64) {
+	s.commitSessionPersist(id, seq, func() {
+		store, ok := s.store.(sessionPersistenceStore)
+		if !ok || store == nil {
+			return
+		}
+		if err := store.DeleteMCPSession(context.Background(), id); err != nil {
+			log.Printf("warning: failed deleting persisted session %s: %v", maskSessionID(id), err)
+		}
+	})
 }
 
 func (s *Server) runPaymentOutcomeCleanup(ctx context.Context) {
