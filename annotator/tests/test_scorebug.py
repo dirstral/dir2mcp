@@ -66,7 +66,7 @@ def index(roster):
 # --- overlay parsing -------------------------------------------------------
 
 def test_batter_and_pitcher_fields_get_their_roles():
-    names, _ = parse_overlay("5.LILE 1-2 RAY p: 87 “6 @@ 2-0")
+    names, _, _ = parse_overlay("5.LILE 1-2 RAY p: 87 “6 @@ 2-0")
     assert scorebug.NameRead("LILE", BATTER) in names
     assert scorebug.NameRead("RAY", PITCHER) in names
 
@@ -74,18 +74,18 @@ def test_batter_and_pitcher_fields_get_their_roles():
 def test_day_line_digit_is_not_read_as_a_lineup_slot():
     # Verbatim OCR of a frame that used to make the pitcher the batter: the
     # "1-2." day line sits between the two names, offering "2. RAY".
-    names, _ = parse_overlay('“5LILE 1-2. RAY me “6 00 1-0')
+    names, _, _ = parse_overlay('“5LILE 1-2. RAY me “6 00 1-0')
     assert scorebug.NameRead("RAY", BATTER) not in names
     assert scorebug.NameRead("LILE", BATTER) in names
 
 
 def test_lineup_slot_survives_a_missing_separator():
-    names, _ = parse_overlay("6YOUNG 0-2 RAY P: 90")
+    names, _, _ = parse_overlay("6YOUNG 0-2 RAY P: 90")
     assert scorebug.NameRead("YOUNG", BATTER) in names
 
 
 def test_pitch_graphic_with_a_readable_unit():
-    _, pitches = parse_overlay("5.LILE 1-2 SLIDER 88 MPH “6 @@ 2-0")
+    _, pitches, _ = parse_overlay("5.LILE 1-2 SLIDER 88 MPH “6 @@ 2-0")
     assert pitches == [scorebug.PitchRead("SLIDER", 88, "MPH")]
     assert pitches[0].describe() == "SLIDER 88 MPH"
 
@@ -93,12 +93,12 @@ def test_pitch_graphic_with_a_readable_unit():
 def test_pitch_graphic_when_the_unit_is_garbled():
     # "MPH" is set in small caps and comes back as noise more often than not;
     # the pitch type carries the read instead.
-    _, pitches = parse_overlay("5.LILE 1-2 FOURSEAM 92upeq “G @@ 2-0")
+    _, pitches, _ = parse_overlay("5.LILE 1-2 FOURSEAM 92upeq “G @@ 2-0")
     assert [(p.pitch_type, p.speed) for p in pitches] == [("FOURSEAM", 92)]
 
 
 def test_implausible_speeds_and_non_pitches_are_not_graphics():
-    _, pitches = parse_overlay("WSH 2 SF 0 ATTENDANCE 41213")
+    _, pitches, _ = parse_overlay("WSH 2 SF 0 ATTENDANCE 41213")
     assert pitches == []
 
 
@@ -106,20 +106,20 @@ def test_crowd_texture_is_never_more_than_a_loose_read():
     # A replay or crowd shot leaves no bug in the crop; tesseract still
     # returns pages of three-letter words, one of which is always a surname.
     noise = "Beir Lee GAS Pt atthe gL) TAT eM we PA) a pik wee Se bh\nFRR ahe ey Maes"
-    names, pitches = parse_overlay(noise)
+    names, pitches, _ = parse_overlay(noise)
     assert pitches == []
     assert names and {n.role for n in names} == {LOOSE}
 
 
 def test_bare_words_are_kept_only_alongside_structure():
-    names, _ = parse_overlay("0-2 SEYMOUR 5.VIVAS")
+    names, _, _ = parse_overlay("0-2 SEYMOUR 5.VIVAS")
     assert scorebug.NameRead("SEYMOUR", UNKNOWN) in names
 
 
 def test_both_preprocessing_passes_are_merged_not_chosen_between():
     """Neither pass is reliably better, so the union of the two is kept: 44 of
     215 readable pilot frames were readable only after thresholding."""
-    names, pitches = parse_bands([
+    names, pitches, _ = parse_bands([
         "5.LILE 1-2 RAY P: 87",          # the grey pass lost the pitch graphic
         "5.LILE 1-2 SLIDER 88 MPH",      # the binarised pass lost the pitcher
     ])
@@ -131,7 +131,7 @@ def test_both_preprocessing_passes_are_merged_not_chosen_between():
 
 
 def test_a_speed_read_twice_keeps_the_fuller_description():
-    _, pitches = parse_bands(["SLIDER 88", "SLIDER 88 MPH"])
+    _, pitches, _ = parse_bands(["SLIDER 88", "SLIDER 88 MPH"])
     assert [p.describe() for p in pitches] == ["SLIDER 88 MPH"]
 
 
@@ -272,7 +272,11 @@ def test_frames_without_a_bug_contribute_nothing(roster, fake_frames):
 def test_a_loose_read_is_admitted_once_confirmed(roster, fake_frames):
     ocr = fake_frames(["RAY P: 87 5.LILE", "a ray of ligh", "RAY P: 88 5.LILE"])
     cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
-    ray = [c for c in cues if c.entity_ids == ("player:robbie-ray",)]
+    # The appearance run is what this test is about. The fixture also steps the
+    # pitch count 87 -> 88, so it now yields a `pitch` cue as well; that is
+    # asserted on its own below rather than folded in here.
+    ray = [c for c in cues
+           if c.entity_ids == ("player:robbie-ray",) and c.event == "appearance"]
     assert len(ray) == 1 and ray[0].start_s == 0.0 and ray[0].end_s == 6.0
 
 
@@ -306,11 +310,11 @@ def test_velocity_branch_rejects_implausible_speeds():
     value."""
     from dirstral_annotator.recognizers import scorebug as sb
 
-    _, ok = sb.parse_overlay("SLIDER 88 MPH")
+    _, ok, _ = sb.parse_overlay("SLIDER 88 MPH")
     assert [p.speed for p in ok] == [88]
 
     for line in ("GARBLE 07 MPH", "NOISE 999 KPH", "XX 12 MPH"):
-        _, bad = sb.parse_overlay(line)
+        _, bad, _ = sb.parse_overlay(line)
         assert bad == [], f"accepted implausible speed: {line} -> {bad}"
 
 
@@ -322,3 +326,60 @@ def test_the_names_other_modules_import_from_here_still_resolve():
     assert scorebug.default_ocr is overlay.default_ocr
     assert scorebug.default_workers is overlay.default_workers
     assert scorebug.OcrFn is overlay.OcrFn
+
+
+# --- pitch cues from the bug's own pitch count ------------------------------
+
+def test_a_count_step_is_a_pitch(roster, fake_frames):
+    """The speed graphic is shown for some pitches and not others; on the pilot
+    game it yielded 299 cues against 344 thrown. The count printed beside the
+    pitcher's name is on the bug continuously and rises by exactly one per
+    pitch, so a transition is a pitch with a timestamp, already attributed."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 88", "RAY P: 89"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    pitches = [c for c in cues if c.event == "pitch"]
+    assert len(pitches) == 2  # 87->88 and 88->89; the first read is a baseline
+    assert all(c.entity_ids == ("player:robbie-ray",) for c in pitches)
+
+
+def test_the_first_count_seen_claims_nothing(roster, fake_frames):
+    """A single reading says a pitcher has thrown N pitches, not that he threw
+    one just now. Only a transition is evidence of timing."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 87", "RAY P: 87"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    assert [c for c in cues if c.event == "pitch"] == []
+
+
+def test_a_jump_larger_than_one_says_nothing(roster, fake_frames):
+    """Pitches certainly happened, but WHEN is unknown: emitting them at the
+    moment the jump was noticed would invent timing the bug never showed. This
+    is also the OCR-noise guard, since a misread digit looks exactly like a
+    jump."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 93"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    assert [c for c in cues if c.event == "pitch"] == []
+
+
+def test_a_count_that_goes_backwards_resets_rather_than_emits(roster, fake_frames):
+    """A new pitcher starts his own count, and OCR misreads a digit downward.
+    Neither is a pitch."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 12", "RAY P: 13"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    pitches = [c for c in cues if c.event == "pitch"]
+    assert len(pitches) == 1 and pitches[0].text == "pitch 13"
+
+
+def test_a_pitch_a_graphic_already_reported_is_not_reported_twice(roster, fake_frames):
+    """The scorecard matches at most one annotation per ground-truth pitch and
+    counts the rest as false positives, so a duplicate cannot raise recall and
+    can only cost precision — which is currently perfect on the pilot."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 88 SLIDER 88 MPH"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    pitches = [c for c in cues if c.event == "pitch"]
+    assert len(pitches) == 1, f"the same pitch was reported twice: {pitches}"
+
+
+def test_count_pitches_can_be_turned_off_with_the_graphic_ones(roster, fake_frames):
+    ocr = fake_frames(["RAY P: 87", "RAY P: 88"])
+    rec = ScorebugRecognizer(roster, ocr=ocr, pitch_cues=False, crop=WHOLE)
+    assert [c for c in rec.recognize(MEDIA) if c.event == "pitch"] == []
