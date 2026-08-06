@@ -107,3 +107,52 @@ def test_report_renders(events, roster):
     text = render(card, alignment, roster, title="game7.mp4")
     assert "Logan Webb" in text and "100.0%" in text
     assert "DRIFT" not in text
+
+
+# --- club names off the feed (#741 follow-up) --------------------------------
+
+def _feed_with_clubs(top_inning: bool) -> dict:
+    """A minimal GUMBO payload carrying both clubs and one pitch."""
+    return {
+        "gamePk": 1,
+        "gameData": {"teams": {
+            "away": {"name": "Washington Nationals"},
+            "home": {"name": "San Francisco Giants"},
+        }},
+        "liveData": {"plays": {"allPlays": [{
+            "matchup": {"pitcher": {"id": 1, "fullName": "P"},
+                        "batter": {"id": 2, "fullName": "B"}},
+            "about": {"inning": 3, "isTopInning": top_inning},
+            "result": {"description": ""},
+            "playEvents": [{
+                "isPitch": True,
+                "startTime": "2026-08-01T20:00:00Z",
+                "details": {"description": "Ball"},
+            }],
+        }]}},
+    }
+
+
+def test_parse_pitches_reads_both_clubs():
+    ev = ground_truth.parse_pitches(_feed_with_clubs(top_inning=True))[0]
+    assert ev.away_team == "Washington Nationals"
+    assert ev.home_team == "San Francisco Giants"
+
+
+def test_the_batting_club_follows_the_half_inning():
+    """The visitors bat in the top half. This is the whole derivation, so it
+    is worth pinning in both directions rather than trusting one case."""
+    top = ground_truth.parse_pitches(_feed_with_clubs(top_inning=True))[0]
+    assert top.batting_team() == "Washington Nationals"
+    assert top.pitching_team() == "San Francisco Giants"
+
+    bottom = ground_truth.parse_pitches(_feed_with_clubs(top_inning=False))[0]
+    assert bottom.batting_team() == "San Francisco Giants"
+    assert bottom.pitching_team() == "Washington Nationals"
+
+
+def test_a_feed_without_gameData_leaves_the_clubs_empty(events):
+    """The shared fixture has no `gameData`; every existing caller and payload
+    must stay valid, with no club rather than a guessed one."""
+    assert all(e.away_team == "" and e.home_team == "" for e in events)
+    assert all(e.batting_team() == "" and e.pitching_team() == "" for e in events)
