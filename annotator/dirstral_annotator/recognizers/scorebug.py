@@ -108,6 +108,15 @@ PITCH_CUE_PAD_S = 2.0
 # two readings of a number. Confident enough to report, not as confident as a
 # graphic (0.9), and above any floor an operator is likely to set.
 COUNT_PITCH_CONFIDENCE = 0.75
+#: How many consecutive readings must agree before a new count is believed.
+#:
+#: Measured, and the reason the first version of this failed: a +1 step is not
+#: only what a real pitch looks like, it is also the most likely OCR error, so
+#: one misread digit produced 87->88 (a phantom pitch), then 88->87, then
+#: 87->88 again. Requiring the new value to hold for two readings discards a
+#: single-frame flip while costing nothing real: at 0.5 fps the count sits on
+#: the bug for the whole at-bat, far longer than two frames.
+COUNT_STABLE_READS = 2
 PITCH_CONFIDENCE = 0.8
 # Readings this close together are the same graphic, not two pitches: no
 # pitcher works quicker than this, and the graphic itself lingers.
@@ -616,23 +625,34 @@ def _count_pitch_cues(
     and can only cost precision, which is currently perfect.
     """
     cues: list[Cue] = []
-    last: dict[str, int] = {}
+    committed: dict[str, int] = {}
+    pending: dict[str, tuple[int, float, int]] = {}  # pid -> (count, first_t, seen)
     for t, pid, count in sorted(counted):
-        previous, seen = last.get(pid), pid in last
-        last[pid] = count
-        if not seen or previous is None:
-            continue  # first sighting establishes the baseline, claims nothing
-        if count != previous + 1:
+        current = committed.get(pid)
+        if current is not None and count == current:
+            pending.pop(pid, None)  # the count simply has not moved
+            continue
+        candidate, first_t, seen = pending.get(pid, (count, t, 0))
+        if candidate != count:
+            candidate, first_t, seen = count, t, 0
+        seen += 1
+        if seen < COUNT_STABLE_READS:
+            pending[pid] = (candidate, first_t, seen)
+            continue
+        pending.pop(pid, None)
+        previous = current
+        committed[pid] = candidate
+        if previous is None or candidate != previous + 1:
             continue
         cues.append(
             Cue(
                 source=source,
-                start_s=max(0.0, t - PITCH_CUE_PAD_S),
-                end_s=t + PITCH_CUE_PAD_S,
+                start_s=max(0.0, first_t - PITCH_CUE_PAD_S),
+                end_s=first_t + PITCH_CUE_PAD_S,
                 event="pitch",
                 entity_ids=(pid,),
                 confidence=COUNT_PITCH_CONFIDENCE,
-                text=f"pitch {count}",
+                text=f"pitch {candidate}",
             )
         )
     return _drop_pitches_already_reported(cues, graphic_cues)
