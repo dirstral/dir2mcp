@@ -141,3 +141,95 @@ def test_a_missing_inning_is_omitted_rather_than_guessed(roster):
     cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(Path("g.mp4"))
     pitch = next(c for c in cues if c.event == "pitch")
     assert "0th" not in pitch.text and "(" not in pitch.text
+
+
+# --- club attribution (#741 follow-up; dirstral-spec design 0004 §6.1) -------
+#
+# The club a player is acting for rides in `entity_ids`, NOT in the cue text.
+# That is a measured decision, not a stylistic one: writing the club into the
+# text was tried on the pilot corpus and made retrieval worse, because every
+# statement names both clubs and the label then drags a team-scoped query onto
+# whichever role ranks first. As an entity it is exact, because `event`
+# already records the role the id is acting in.
+
+BOTH_CLUBS = {"away_team": "Washington Nationals", "home_team": "San Francisco Giants"}
+
+
+def _pitch_with_clubs(pitcher, batter, *, top_inning, **kw):
+    return PitchEvent(
+        game_pk=1, epoch_s=1000.0, pitcher_id=pitcher, pitcher_name="P",
+        batter_id=batter, batter_name="B", inning=1, top_inning=top_inning,
+        description="Ball", **{**BOTH_CLUBS, **kw},
+    )
+
+
+def test_the_pitch_carries_the_fielding_club_and_the_at_bat_the_batting_club(roster):
+    """Bottom half: the home side bats, so our rostered batter is a Giant and
+    the pitcher he faces is fielding for Washington."""
+    ev = _pitch_with_clubs(OPP_PITCHER, RAMOS, top_inning=False)
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+    at_bat = next(c for c in cues if c.event == "at_bat")
+    assert at_bat.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+
+
+def test_the_half_inning_decides_which_club_is_batting(roster):
+    """Top half: the visitors bat. Our rostered pitcher is therefore fielding
+    for the home club. Getting this backwards would attribute every moment to
+    the wrong side, which no amount of ranking could recover."""
+    ev = _pitch_with_clubs(WEBB, OPP_BATTER, top_inning=True)
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+    pitch = next(c for c in cues if c.event == "pitch")
+    assert pitch.entity_ids == ("player:webb-logan", "team:san-francisco-giants")
+
+    # ... and in the bottom half the same pitcher would be fielding for the
+    # visitors, so the club is genuinely derived rather than constant.
+    flipped = _pitch_with_clubs(WEBB, OPP_BATTER, top_inning=False)
+    pitch = next(
+        c for c in PlayByPlayRecognizer([flipped], 0.0, roster).recognize(MEDIA)
+        if c.event == "pitch"
+    )
+    assert pitch.entity_ids == ("player:webb-logan", "team:washington-nationals")
+
+
+def test_both_roles_in_one_pitch_get_opposite_clubs(roster):
+    """The case that makes the entity filter role-exact: one moment, two
+    annotations, each naming the club its own actor plays for."""
+    ev = _pitch_with_clubs(WEBB, RAMOS, top_inning=True)
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+    by_event = {c.event: c.entity_ids for c in cues}
+    assert by_event["pitch"] == ("player:webb-logan", "team:san-francisco-giants")
+    assert by_event["at_bat"] == ("player:ramos-heliot", "team:washington-nationals")
+
+
+def test_the_club_stays_out_of_the_cue_text(roster):
+    """The measured decision. If a club name ever appears in the text, the
+    retrieval regression that motivated this comes straight back."""
+    ev = _pitch_with_clubs(WEBB, RAMOS, top_inning=True)
+    for cue in PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA):
+        assert "Giants" not in cue.text
+        assert "Nationals" not in cue.text
+
+
+def test_a_feed_without_clubs_emits_exactly_what_it_did_before(roster):
+    """Back-compat: club names are optional, and a payload lacking them must
+    not produce a `team:` id with nothing in it."""
+    ev = _pitch(1000.0, WEBB, OPP_BATTER, pname="Logan Webb", bname="Opp Guy")
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+    assert cues[0].entity_ids == ("player:webb-logan",)
+
+
+def test_the_club_id_round_trips_through_the_emit_label_fallback():
+    """A club has no roster entry, so its label comes from the emit fallback
+    (`id.split(":")[-1].replace("-", " ").title()`). The slug has to survive
+    that trip, or the wire carries an id nobody can read."""
+    from dirstral_annotator.recognizers.playbyplay import team_id
+    tid = team_id("San Francisco Giants")
+    assert tid == "team:san-francisco-giants"
+    assert tid.split(":", 1)[-1].replace("-", " ").title() == "San Francisco Giants"
+
+
+def test_a_club_name_that_slugs_to_nothing_is_dropped():
+    from dirstral_annotator.recognizers.playbyplay import team_id
+    assert team_id("") == ""
+    assert team_id("   ") == ""
+    assert team_id("!!!") == ""
