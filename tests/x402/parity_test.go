@@ -10,6 +10,7 @@ package x402_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -205,6 +206,39 @@ func TestParityModeOff_NoPaymentHeaderPassesThrough(t *testing.T) {
 
 // TestParityModeOff_PaymentSignatureIsIgnored verifies that when mode=off,
 // a payment signature header is silently ignored (no facilitator call made).
+// validV2Signature builds a syntactically complete x402 v2 PAYMENT-SIGNATURE.
+//
+// `required` mode enforces the v2 primitives adapter-side before it calls the
+// facilitator (#699), so an opaque token is refused there by design. These
+// parity tests are about mode behaviour — fail-closed on an unavailable
+// facilitator, acceptance of a good payment — and an opaque fixture would now
+// exercise the proof check instead of the thing under test, which is exactly
+// the confusion that let the vulnerable behaviour read as a passing suite.
+func validV2Signature(t *testing.T, cfg config.Config) string {
+	t.Helper()
+	now := time.Now().UTC().Unix()
+	// The proof's scheme/network must be the CONFIGURED ones. Hardcoding
+	// eip155:8453 against a Solana requirement produced a proof that does not
+	// match the requirement it is verified against, so the test would have
+	// passed for a reason unrelated to what it claims to check.
+	raw, err := json.Marshal(map[string]interface{}{
+		"x402Version": 2,
+		"scheme":      strings.TrimSpace(cfg.X402.Scheme),
+		"network":     strings.TrimSpace(cfg.X402.Network),
+		"payload": map[string]interface{}{
+			"authorization": map[string]interface{}{
+				"nonce":       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				"validAfter":  now - 5,
+				"validBefore": now + 60,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal v2 payload: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 func TestParityModeOff_PaymentSignatureIsIgnored(t *testing.T) {
 	t.Parallel()
 	fac := newParityFacilitator()
@@ -501,7 +535,7 @@ func TestParityModeRequired_ValidPaymentAccepted(t *testing.T) {
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
 	resp := paritySendRPC(t, srv.URL+cfg.MCPPath, sid, toolsCallBody(10), map[string]string{
-		x402.HeaderPaymentSignature: "valid-sig",
+		x402.HeaderPaymentSignature: validV2Signature(t, cfg),
 	})
 	defer func() { _ = resp.Body.Close() }()
 
@@ -534,7 +568,10 @@ func TestParityModeRequired_FacilitatorUnavailableIsFailClosed(t *testing.T) {
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
 	resp := paritySendRPC(t, srv.URL+cfg.MCPPath, sid, toolsCallBody(11), map[string]string{
-		x402.HeaderPaymentSignature: "sig",
+		// A real v2 proof, so the request actually reaches the unavailable
+		// facilitator. With an opaque one the adapter now refuses it first and
+		// the test would pass for the wrong reason.
+		x402.HeaderPaymentSignature: validV2Signature(t, cfg),
 	})
 	defer func() { _ = resp.Body.Close() }()
 
