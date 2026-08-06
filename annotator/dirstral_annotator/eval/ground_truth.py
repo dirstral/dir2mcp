@@ -39,12 +39,24 @@ class PitchEvent:
     #: True for the top half. Carried because "bottom of the 9th" is how people
     #: ask for a moment, and an inning number alone cannot answer it.
     top_inning: bool = True
+    #: Club names as the feed spells them. Empty when the payload omits them,
+    #: which keeps every existing caller and fixture valid.
+    away_team: str = ""
+    home_team: str = ""
 
     def half_inning(self) -> str:
         """The half-inning phrased as a person would say it: "top of the 1st"."""
         if self.inning <= 0:
             return ""
         return f"{'top' if self.top_inning else 'bottom'} of the {_ordinal(self.inning)}"
+
+    def batting_team(self) -> str:
+        """The club at the plate. The visitors bat in the top half."""
+        return self.away_team if self.top_inning else self.home_team
+
+    def pitching_team(self) -> str:
+        """The club in the field."""
+        return self.home_team if self.top_inning else self.away_team
 
 
 def fetch_game(game_pk: int, timeout_s: float = 30.0) -> dict:
@@ -64,6 +76,11 @@ def load_game(path: str | Path) -> dict:
 def parse_pitches(feed: dict) -> list[PitchEvent]:
     game_pk = feed.get("gamePk", 0)
     events: list[PitchEvent] = []
+    # Which club bats follows from the half-inning, so the two club names are
+    # all that is needed; no per-player team lookup.
+    feed_teams = feed.get("gameData", {}).get("teams", {})
+    away_team = (feed_teams.get("away", {}) or {}).get("name", "")
+    home_team = (feed_teams.get("home", {}) or {}).get("name", "")
     plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
     for play in plays:
         matchup = play.get("matchup", {})
@@ -93,6 +110,8 @@ def parse_pitches(feed: dict) -> list[PitchEvent]:
                     batter_name=batter.get("fullName", ""),
                     inning=inning,
                     top_inning=top_inning,
+                    away_team=away_team,
+                    home_team=home_team,
                     description=(result_desc if is_last and result_desc else call),
                 )
             )

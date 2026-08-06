@@ -19,6 +19,7 @@ lives in eval.ground_truth so both uses share one implementation.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ..eval.ground_truth import PitchEvent
@@ -30,6 +31,40 @@ from ..roster import Roster
 PRE_ROLL_S = 3.0
 POST_ROLL_S = 5.0
 CONFIDENCE = 0.98  # official record, minus alignment slop
+
+_SLUG_SEP = re.compile(r"[^a-z0-9]+")
+
+
+def team_id(name: str) -> str:
+    """"San Francisco Giants" -> "team:san-francisco-giants".
+
+    The slug round-trips through the emit layer's label fallback
+    (`id.split(":")[-1].replace("-", " ").title()`), so a club needs no roster
+    entry to reach the wire with a readable label. Returns "" for a name that
+    slugs to nothing, so callers can drop it rather than emit `team:`.
+    """
+    slug = _SLUG_SEP.sub("-", name.strip().lower()).strip("-")
+    return f"team:{slug}" if slug else ""
+
+
+def _with_team(player_id: str, team: str) -> tuple[str, ...]:
+    """The acting player, plus the club they are acting for.
+
+    The club rides in `entity_ids` and deliberately NOT in the cue text.
+    Writing it into the text was measured on the pilot corpus and made
+    retrieval WORSE: every statement names both clubs, so the label cannot
+    discriminate between candidates, and it drags a team-scoped query onto
+    whichever role happens to rank first. "Giants home run" came back as a
+    Giants pitcher throwing balls (dirstral-spec design 0004 §6.1).
+
+    As an entity it is exact, because the cue's `event` already records which
+    role this id is acting in: `pitch` is keyed on the pitcher and carries the
+    fielding club, `at_bat` is keyed on the batter and carries the club at the
+    plate. Selecting on entity AND event is therefore role-correct, which no
+    amount of phrasing in the text can achieve.
+    """
+    tid = team_id(team)
+    return (player_id, tid) if tid else (player_id,)
 
 
 class PlayByPlayRecognizer:
@@ -72,7 +107,7 @@ class PlayByPlayRecognizer:
                         start_s=start,
                         end_s=end,
                         event="pitch",
-                        entity_ids=(pitcher.id,),
+                        entity_ids=_with_team(pitcher.id, ev.pitching_team()),
                         confidence=CONFIDENCE,
                         text=f"Pitch: {pitcher_name} to {batter_name}{where}{desc}",
                     )
@@ -88,7 +123,7 @@ class PlayByPlayRecognizer:
                         start_s=start,
                         end_s=end,
                         event="at_bat",
-                        entity_ids=(batter.id,),
+                        entity_ids=_with_team(batter.id, ev.batting_team()),
                         confidence=CONFIDENCE,
                         text=f"At bat: {batter_name} vs {pitcher_name}{where}{desc}",
                     )
