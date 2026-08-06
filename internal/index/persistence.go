@@ -3,10 +3,12 @@ package index
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/provider"
 )
 
 type IndexedFile struct {
@@ -163,12 +165,23 @@ func (m *PersistenceManager) SaveAll() error {
 
 // EnsureIdentity reconciles an index's recorded corpus-lifetime embed identity
 // (SPEC 8.1.4) with the configured one, per index (issue #247). When the index
-// is fresh (empty recorded identity) or the recorded identity differs from the
-// configured one, the index is Reset to the configured identity — discarding any
-// vectors built under a different embed provider/model/dimension so vector
-// spaces are never silently mixed. A match is a no-op. This complements the
-// process-level config.VerifyEmbedIdentity check, which fails the startup before
-// any index work when a populated corpus's snapshot identity changed.
+// is fresh (empty recorded identity) or the recorded identity is INCOMPATIBLE
+// with the configured one, the index is Reset to the configured identity —
+// discarding any vectors built under a different embed provider/model/endpoint/
+// dimension so vector spaces are never silently mixed. A compatible recording is
+// a no-op. This complements the process-level config.VerifyEmbedIdentity check,
+// which fails the startup before any index work when a populated corpus's
+// snapshot identity changed.
+//
+// Compatibility is provider.EmbedIdentityMatches — the SAME comparison
+// VerifyEmbedIdentity uses — not string equality (issue #705). The two must
+// agree: VerifyEmbedIdentity migrates a legacy recording (the 8.1.4 field-count
+// ladder, and the blank-model grace) and lets startup proceed, so a byte
+// comparison here would answer "different" for exactly those migrated corpora
+// and silently Reset — a full, unannounced re-embed of a corpus the operator was
+// just told was compatible. Reset stays reserved for a genuine mismatch, which
+// VerifyEmbedIdentity has already reported as CONFIG_INVALID, and for a fresh
+// index (recorded == ""), where Reset is what RECORDS the identity.
 func EnsureIdentity(ctx context.Context, idx model.Index, configuredIdentity string) error {
 	if idx == nil {
 		return nil
@@ -177,7 +190,7 @@ func EnsureIdentity(ctx context.Context, idx model.Index, configuredIdentity str
 	if err != nil {
 		return err
 	}
-	if recorded == configuredIdentity {
+	if strings.TrimSpace(recorded) != "" && provider.EmbedIdentityMatches(recorded, configuredIdentity) {
 		return nil
 	}
 	return idx.Reset(ctx, configuredIdentity)

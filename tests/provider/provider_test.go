@@ -236,13 +236,25 @@ func TestEmbedIdentity_BaseURL(t *testing.T) {
 		}
 	}
 
-	// Rule 1 — not meaningful: native gemini/cohere normalize to "" regardless
-	// of any configured base_url (single canonical provider surface).
-	for _, k := range []provider.Kind{provider.KindGemini, provider.KindCohere} {
-		p := provider.Profile{Name: string(k), Kind: k, BaseURL: "https://custom.example.com/v9",
+	// Native-surface kinds (gemini/cohere) collapse to "" at their HOSTED
+	// endpoint only — including an unset base_url, which is what the built-in
+	// profiles ship (issue #702; the custom-endpoint half lives in
+	// TestEmbedIdentity_NativeCustomBaseURL).
+	for _, tc := range []struct {
+		kind provider.Kind
+		base string
+	}{
+		{provider.KindGemini, ""},
+		{provider.KindGemini, "https://generativelanguage.googleapis.com/v1beta"},
+		{provider.KindGemini, "https://generativelanguage.googleapis.com/v1beta/openai"},
+		{provider.KindCohere, ""},
+		{provider.KindCohere, "https://api.cohere.com"},
+	} {
+		p := provider.Profile{Name: string(tc.kind), Kind: tc.kind, BaseURL: tc.base,
 			EmbedTextModel: "m"}
 		if got := baseURLOf(p); got != "" {
-			t.Errorf("kind %s: base_url must not participate (rule 1), got %q", k, got)
+			t.Errorf("kind %s @ %q: the hosted native surface must normalize to \"\", got %q",
+				tc.kind, tc.base, got)
 		}
 	}
 

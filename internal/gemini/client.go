@@ -346,6 +346,16 @@ func (c *Client) embedReqsNative(ctx context.Context, modelName string, dim int,
 		}
 		vectors[i] = vec
 	}
+	// Reject empty / non-finite / zero-norm vectors at the provider boundary
+	// (issue #703) so they never reach an index. This path backs BOTH Embed and
+	// EmbedMedia, so text and media vectors are validated identically. When a
+	// non-native output dimension was requested (SPEC 8.1.6) the response must
+	// also carry exactly that many components — l2Normalize cannot rescue a
+	// zero vector, and a short vector would silently change the corpus's
+	// dimension.
+	if err := model.ValidateEmbedVectors("GEMINI_FAILED", dim, vectors); err != nil {
+		return nil, err
+	}
 	return vectors, nil
 }
 
@@ -384,7 +394,9 @@ func (c *Client) doNativeJSON(ctx context.Context, path string, body []byte, tim
 // l2Normalize scales v to unit L2 length in place. MRL-truncated Gemini
 // vectors (outputDimensionality below the native size) are not
 // pre-normalized, and the index's cosine/IP scoring assumes unit vectors
-// (SPEC 8.1.6). A zero vector is left unchanged.
+// (SPEC 8.1.6). A zero vector is left unchanged — it has no direction to
+// preserve; the shared output validation (model.ValidateEmbedVectors, issue
+// #703) rejects it rather than letting an undirected vector be indexed.
 func l2Normalize(v []float32) {
 	var sum float64
 	for _, x := range v {

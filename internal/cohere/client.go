@@ -269,6 +269,11 @@ func (c *Client) Embed(ctx context.Context, modelName string, role model.EmbedRo
 		}
 		out = append(out, vectors...)
 	}
+	// Reject empty / non-finite / zero-norm vectors at the provider boundary
+	// (issue #703) so they never reach an index.
+	if err := model.ValidateEmbedVectors("COHERE_FAILED", 0, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
