@@ -25,6 +25,24 @@ type Lease struct {
 	// deadline has passed MUST treat its in-flight write as possibly raced by a
 	// redelivery (idempotency, keyed by chunk_id, makes that safe — §8.7.3).
 	Deadline time.Time
+
+	// Attempts is how many times this job has been delivered INCLUDING this
+	// delivery, and MaxAttempts is the broker's redelivery budget (0 = the broker
+	// does not bound it). Together they tell a worker whether a Nack it is about
+	// to issue will REDELIVER the job or DEAD-LETTER it, which is the difference
+	// between a failure the pool may still recover from and a terminal one the
+	// chunk has to record (SPEC §8.7.3 failure handling; #709). Without them a
+	// worker cannot distinguish the two and a permanently unexecutable job is
+	// retried, dead-lettered, and then enqueued again forever.
+	Attempts    int
+	MaxAttempts int
+}
+
+// Final reports whether this delivery is the last one the broker will make: a
+// Nack now dead-letters the job instead of redelivering it. A broker that does
+// not bound redelivery (MaxAttempts <= 0) is never final.
+func (l Lease) Final() bool {
+	return l.MaxAttempts > 0 && l.Attempts >= l.MaxAttempts
 }
 
 // Broker is the implementation-defined transport that carries embedding jobs
@@ -62,6 +80,28 @@ type Broker interface {
 
 	// Close releases any resources the broker holds.
 	Close() error
+}
+
+// CorpusScopedBroker is an OPTIONAL Broker capability: leasing only the jobs of
+// one corpus (SPEC §8.7.2 corpus reference, §8.7.4 corpus isolation on shared
+// infrastructure). Both built-in brokers implement it; the worker discovers it
+// by type assertion, exactly like the store's optional capabilities, so an
+// external adapter that predates it keeps working unchanged.
+//
+// Worker-side rejection of a foreign corpus's job (worker.prepare) is the
+// mandatory half of the isolation and stands on its own. This is the half that
+// keeps a shared queue EFFICIENT as well as correct: without it, a worker that
+// serves corpus B leases corpus A's jobs only to reject them, burning A's
+// redelivery budget and eventually dead-lettering work that nothing was wrong
+// with (#708).
+type CorpusScopedBroker interface {
+	Broker
+
+	// LeaseForCorpus claims the next available job whose CorpusID equals
+	// corpusID, ignoring every other corpus's jobs. An empty corpusID means "any
+	// corpus" and is identical to Lease. Returns ErrNoJob when this corpus has no
+	// claimable job, even if other corpora do.
+	LeaseForCorpus(ctx context.Context, corpusID string, visibility time.Duration) (Lease, error)
 }
 
 // Stats is a point-in-time view of the queue (SPEC §8.7.4 observability).

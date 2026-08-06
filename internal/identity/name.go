@@ -60,8 +60,8 @@ func Resolve(rootAbs, override string, dev bool) string {
 // over whatever was passed and identity is therefore only as stable as
 // the caller's normalization.
 func AutoServerName(rootAbs string, dev bool) string {
-	clean := filepath.Clean(rootAbs)
-	return nameFromKey(clean, filepath.Base(clean), dev)
+	key := CorpusKey(rootAbs)
+	return nameFromKey(key, filepath.Base(key), dev)
 }
 
 // AutoServerNameForS3 derives the name for a corpus that lives in an object
@@ -91,14 +91,7 @@ func AutoServerName(rootAbs string, dev bool) string {
 func AutoServerNameForS3(bucket, prefix, endpoint string, dev bool) string {
 	bucket = strings.ToLower(strings.TrimSpace(bucket))
 	prefix = normalizeS3Prefix(prefix)
-	key := "s3://"
-	if host := endpointHost(endpoint); host != "" {
-		key += host + "/"
-	}
-	key += bucket
-	if prefix != "" {
-		key += "/" + prefix
-	}
+	key := CorpusKeyForS3(bucket, prefix, endpoint)
 	// The slug is the human-readable half. The bucket alone would make two
 	// prefixes of one bucket visually identical, so the last prefix segment is
 	// appended when there is one.

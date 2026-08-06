@@ -22,8 +22,14 @@ type PendingSource interface {
 // It is opt-in: the in-process loop remains the default and this type is only
 // constructed when distributed mode is enabled.
 type Coordinator struct {
-	Source        PendingSource
-	Broker        Broker
+	Source PendingSource
+	Broker Broker
+	// CorpusID MUST be the corpus's stable persisted identity (SPEC §5.5 —
+	// identity.ResolveCorpusID), not a root path or any other incidental string.
+	// It is what namespaces this corpus's jobs inside a broker several corpora
+	// may share, and what a worker checks before it executes one. A coordinator
+	// that leaves it empty can only be used against a broker it does not share
+	// (#708).
 	CorpusID      string
 	SourceKind    string
 	EmbedIdentity string
@@ -39,8 +45,9 @@ type Coordinator struct {
 // interface has no offset cursor, so one call enqueues the head it observes — NOT
 // necessarily the entire backlog. The coordinator loop (runCoordinatorLoop) calls
 // this on a ticker, so as the head drains the next pending chunks are picked up;
-// the broker dedups by chunk_id+index_kind, so repeated ticks never pile up
-// duplicate live jobs (SPEC §8.7.3). Re-running is always safe: an already-
+// the broker dedups by corpus_id+chunk_id+index_kind, so repeated ticks never
+// pile up duplicate live jobs and a chunk id that collides with another corpus's
+// is still enqueued (SPEC §8.7.3, #708). Re-running is always safe: an already-
 // embedded chunk is no longer pending, and a duplicate job is idempotent at the
 // embed layer (vector writes keyed by chunk_id).
 func (c *Coordinator) EnqueuePending(ctx context.Context, indexKind string) (int, error) {
@@ -115,11 +122,15 @@ func (c *Coordinator) jobFromTask(t model.ChunkTask) Job {
 		Source:    c.SourceKind,
 		ChunkID:   id,
 		IndexKind: idxKind,
-		// TextHash (payload identity, §8.7.2) is left empty here: NextPending does
-		// not surface the chunk's text_hash, and it is not load-bearing for
-		// correctness — the worker re-reads the AUTHORITATIVE task (text, span,
-		// tombstone status) from the shared store by chunk_id (ChunkTaskByID), so
-		// a since-changed or tombstoned chunk is handled there.
+		// TextHash is the job's PAYLOAD identity (SPEC §8.7.2). Re-reading the
+		// authoritative task by chunk_id is not sufficient on its own, which is
+		// why this used to be left empty and no longer is (#710): a chunk_id is
+		// stable across an in-place re-ingest of the same (rep_id, ordinal) while
+		// the text, hash and index_kind are rewritten under it, so a worker that
+		// only re-read the task could not tell "the chunk this job named" from "a
+		// different chunk that inherited the id". The hash makes a superseded
+		// delivery recognisable instead of silently executable.
+		TextHash: t.TextHash,
 		Modality: t.Modality,
 		RelPath:  t.MediaRef,
 		Span: Span{

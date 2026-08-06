@@ -1940,6 +1940,10 @@ LEFT JOIN documents d ON d.rel_path = tc.rel_path`, int64(chunkID))
 	})
 	t.Modality = modality
 	t.MediaRef = mediaRef
+	// Payload identity (SPEC §5.3). It is also returned separately, which is the
+	// form the distributed worker compares against its leased job (#710); the
+	// field keeps a task loaded here interchangeable with one from NextPending.
+	t.TextHash = thash
 	// The generated context rides on the task's Context field only — Text stays
 	// the raw chunk, so a caller that renders a snippet/citation from this task
 	// (reranking, liveness) can never surface it (SPEC §8.1.8, #403). Only the
@@ -2687,7 +2691,7 @@ func nextPendingQuery(indexKind string, limit int) (string, []any) {
 		kindPredicate = " AND c.index_kind = ?"
 	}
 	query := `WITH filtered_chunks AS (
-	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind, c.modality, c.media_ref, c.language,
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.text_hash, c.index_kind, c.modality, c.media_ref, c.language,
 	                   c.chunk_context,
 	                   COALESCE(d.mtime_unix, 0) AS mtime_unix
 	            FROM chunks c
@@ -2697,7 +2701,7 @@ func nextPendingQuery(indexKind string, limit int) (string, []any) {
 	            ORDER BY c.chunk_id
 	            LIMIT ?
 	          )
-	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind, fc.modality, fc.media_ref, fc.language,
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.text_hash, fc.index_kind, fc.modality, fc.media_ref, fc.language,
 	                 fc.chunk_context,
 	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp."end", 0), COALESCE(sp.extra_json, ''), fc.mtime_unix
 	          FROM filtered_chunks fc
@@ -2783,6 +2787,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			docType   string
 			repType   string
 			text      string
+			textHash  string
 			idxKind   string
 			modality  string
 			mediaRef  string
@@ -2794,7 +2799,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			spanExtra string
 			mtimeUnix int64
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &modality, &mediaRef, &language, &chunkCtx, &spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &textHash, &idxKind, &modality, &mediaRef, &language, &chunkCtx, &spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -2816,6 +2821,10 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		})
 		task.Modality = modality
 		task.MediaRef = mediaRef
+		// Payload identity (SPEC §5.3/§8.7.2): the distributed coordinator stamps
+		// this onto the job it enqueues so a worker can recognise a job it leases
+		// for a chunk whose bytes have since been replaced in place (#710).
+		task.TextHash = textHash
 		// Contextual retrieval (SPEC §8.1.8): the generated context travels as a
 		// SEPARATE field so only the embed path (ChunkTask.EmbedInput) joins it to
 		// the chunk. Snippet above is built from the raw text, so nothing the
