@@ -132,6 +132,18 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 	if err := validateEmbedMultimodal(p); err != nil {
 		return nil, err
 	}
+	// Trim the model fields before any adapter sees them, so what RUNS is what
+	// the embed identity RECORDS.
+	//
+	// The branches below test `!= ""` while provider.EffectiveEmbedModels — the
+	// single source the identity is built from — trims first. A whitespace-only
+	// setting therefore passed straight through to the adapter as " " while the
+	// identity recorded the kind's built-in default, so the corpus was fenced
+	// against a vector space it was not actually using. Trimming here makes " "
+	// behave as unset on both paths, which is the value the identity already
+	// assumed.
+	p.EmbedTextModel = strings.TrimSpace(p.EmbedTextModel)
+	p.EmbedCodeModel = strings.TrimSpace(p.EmbedCodeModel)
 	switch p.Kind {
 	case provider.KindOpenAI:
 		c := openai.NewClient(p.BaseURL, p.APIKey)

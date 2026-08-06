@@ -66,3 +66,51 @@ func TestEffectiveEmbedModels_SingleResolutionPath(t *testing.T) {
 		}
 	}
 }
+
+// TestWhitespaceOnlyModelsAgreeBetweenAdapterAndIdentity pins the divergence
+// CodeRabbit found on #774: `Embedder` tested `p.EmbedTextModel != ""` while
+// `provider.EffectiveEmbedModels` — the single source the embed identity is
+// built from — trims first. A whitespace-only setting therefore reached the
+// adapter as " " while the identity recorded the kind's built-in default, so
+// the corpus was fenced against a vector space it was not actually using.
+//
+// That is the exact failure mode this PR exists to close, one layer down.
+func TestWhitespaceOnlyModelsAgreeBetweenAdapterAndIdentity(t *testing.T) {
+	for _, kind := range []provider.Kind{
+		provider.KindOpenAI, provider.KindGemini, provider.KindCohere,
+	} {
+		p := provider.Profile{
+			Name:           string(kind),
+			Kind:           kind,
+			APIKey:         "k",
+			EmbedTextModel: "   ",
+			EmbedCodeModel: "\t",
+		}
+		wantText, wantCode := provider.EffectiveEmbedModels(p)
+		if wantText == "" || wantCode == "" {
+			t.Fatalf("%s: resolver returned an empty model; the fixture is wrong", kind)
+		}
+
+		emb, err := providerfactory.Embedder(p)
+		if err != nil {
+			t.Fatalf("%s: Embedder: %v", kind, err)
+		}
+		// Read the model off the concrete adapter: what it will actually send.
+		var gotText string
+		switch c := emb.(type) {
+		case *openai.Client:
+			gotText = c.DefaultEmbedModel
+		case *gemini.Client:
+			gotText = c.DefaultEmbedModel
+		case *cohere.Client:
+			gotText = c.DefaultEmbedModel
+		default:
+			t.Fatalf("%s: unexpected adapter type %T", kind, emb)
+		}
+		if gotText != wantText {
+			t.Errorf("%s: adapter embeds with text model %q while the identity records %q",
+				kind, gotText, wantText)
+		}
+		_ = wantCode
+	}
+}
