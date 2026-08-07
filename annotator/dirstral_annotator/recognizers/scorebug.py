@@ -108,6 +108,15 @@ PITCH_CUE_PAD_S = 2.0
 # two readings of a number. Confident enough to report, not as confident as a
 # graphic (0.9), and above any floor an operator is likely to set.
 COUNT_PITCH_CONFIDENCE = 0.75
+#: How many consecutive readings must agree before a new count is believed.
+#:
+#: Measured, and the reason the first version of this failed: a +1 step is not
+#: only what a real pitch looks like, it is also the most likely OCR error, so
+#: one misread digit produced 87->88 (a phantom pitch), then 88->87, then
+#: 87->88 again. Requiring the new value to hold for two readings discards a
+#: single-frame flip while costing nothing real: at 0.5 fps the count sits on
+#: the bug for the whole at-bat, far longer than two frames.
+COUNT_STABLE_READS = 2
 PITCH_CONFIDENCE = 0.8
 # Readings this close together are the same graphic, not two pitches: no
 # pitcher works quicker than this, and the graphic itself lingers.
@@ -298,11 +307,20 @@ class ScorebugRecognizer:
         crop: Region | None = None,  # fraction box; None searches for the bug
         regions: Iterable[Region] | None = None,
         pitch_cues: bool = True,
+        # Off by default, and deliberately so: see `_count_pitch_cues`. Reading
+        # a pitch from the count's +1 transition finds pitches the graphic
+        # never announces, but it also invents some. Measured against the
+        # pilot's ground truth it moves recall 86.9% -> 90.1% and precision
+        # 100.0% -> 94.2%. For a product whose output is citations, spending
+        # perfect precision on recall is the operator's decision, not a
+        # default.
+        count_pitch_cues: bool = False,
         workers: int | None = None,  # None: default_workers(); 1: serial
         lang: str | None = None,  # OCR language; None: the reader's default
     ):
         self.roster = roster
         self.pitch_cues = pitch_cues
+        self.count_pitch_cues = count_pitch_cues
         self.reader = OverlayReader(
             ocr=ocr,
             fps=fps,
@@ -370,7 +388,8 @@ class ScorebugRecognizer:
         if self.pitch_cues:
             graphic_cues = self._pitch_cues(graphics, pitchers)
             cues += graphic_cues
-            cues += _count_pitch_cues(counted, graphic_cues, self.name, gap)
+            if self.count_pitch_cues:
+                cues += _count_pitch_cues(counted, graphic_cues, self.name, gap)
         cues.sort(key=lambda c: (c.start_s, c.event, c.entity_ids))
         return cues
 
@@ -616,23 +635,34 @@ def _count_pitch_cues(
     and can only cost precision, which is currently perfect.
     """
     cues: list[Cue] = []
-    last: dict[str, int] = {}
+    committed: dict[str, int] = {}
+    pending: dict[str, tuple[int, float, int]] = {}  # pid -> (count, first_t, seen)
     for t, pid, count in sorted(counted):
-        previous, seen = last.get(pid), pid in last
-        last[pid] = count
-        if not seen or previous is None:
-            continue  # first sighting establishes the baseline, claims nothing
-        if count != previous + 1:
+        current = committed.get(pid)
+        if current is not None and count == current:
+            pending.pop(pid, None)  # the count simply has not moved
+            continue
+        candidate, first_t, seen = pending.get(pid, (count, t, 0))
+        if candidate != count:
+            candidate, first_t, seen = count, t, 0
+        seen += 1
+        if seen < COUNT_STABLE_READS:
+            pending[pid] = (candidate, first_t, seen)
+            continue
+        pending.pop(pid, None)
+        previous = current
+        committed[pid] = candidate
+        if previous is None or candidate != previous + 1:
             continue
         cues.append(
             Cue(
                 source=source,
-                start_s=max(0.0, t - PITCH_CUE_PAD_S),
-                end_s=t + PITCH_CUE_PAD_S,
+                start_s=max(0.0, first_t - PITCH_CUE_PAD_S),
+                end_s=first_t + PITCH_CUE_PAD_S,
                 event="pitch",
                 entity_ids=(pid,),
                 confidence=COUNT_PITCH_CONFIDENCE,
-                text=f"pitch {count}",
+                text=f"pitch {candidate}",
             )
         )
     return _drop_pitches_already_reported(cues, graphic_cues)

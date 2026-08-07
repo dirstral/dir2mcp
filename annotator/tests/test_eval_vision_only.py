@@ -38,3 +38,28 @@ def test_the_feed_is_still_required_with_vision_only():
     )
     assert args.vision_only is True
     assert str(args.feed) == "gumbo.json"
+
+
+# --- the scorebug count reader is opt-in, end to end -------------------------
+
+def test_scorebug_pitch_counts_is_off_by_default():
+    assert parse("--scorebug").scorebug_pitch_counts is False
+
+
+def test_scorebug_pitch_counts_reaches_the_recognizer():
+    """A flag parsed but never threaded is the usual way an option silently
+    does nothing, so this follows it from argv into the built recognizer."""
+    from dirstral_annotator.cli import _pipeline
+    from dirstral_annotator.roster import Roster
+
+    args = parse("--scorebug", "--scorebug-pitch-counts")
+    assert args.scorebug_pitch_counts is True
+
+    pipeline = _pipeline(args, Roster([]), {})
+    assert pipeline.scorebug_pitch_counts is True
+
+    from dirstral_annotator.recognizers.scorebug import ScorebugRecognizer
+    built = ScorebugRecognizer(
+        pipeline.roster, fps=pipeline.fps, count_pitch_cues=pipeline.scorebug_pitch_counts
+    )
+    assert built.count_pitch_cues is True
