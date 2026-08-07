@@ -302,6 +302,23 @@ type Span struct {
 	// is byte-identical to today. Persisted in the "time" span's extra_json.
 	Speaker      string
 	SpeakerLabel string
+	// Entities and Event carry a recognition annotation's structured
+	// attribution on its "time" span (dirstral-spec design 0004 §7): the
+	// entity ids the annotation references, and the backend-declared event
+	// string describing what the annotation is about.
+	//
+	// They are what makes an entity filter role-exact. The wire shape has no
+	// per-entity role, so role lives in annotation granularity: a backend
+	// emits one annotation per role and distinguishes them with Event, and
+	// selecting on entity AND event recovers the role. Keeping the ids
+	// without the event recovers only half the query.
+	//
+	// Metadata only, exactly like Speaker: never changes chunk text or span
+	// bounds, empty for every representation that is not a recognition
+	// annotation, so behaviour is byte-identical where absent. Persisted in
+	// the "time" span's extra_json.
+	Entities []string
+	Event    string
 }
 
 // WordSpan is one per-word timestamp on a "time" span (spec §8.6.1). The JSON
@@ -490,6 +507,18 @@ type Filter struct {
 	// or LanguageMatchStrict (opt-in RFC 4647 Basic Filtering region/script
 	// narrowing). Inert unless Languages is non-empty.
 	LanguageMatch string
+	// Entities / Events restrict candidates to recognition annotations
+	// referencing any of the requested entity ids, and/or carrying any of the
+	// requested event values (design 0004 §7). OR within each field, AND
+	// across them. Empty disables the predicate.
+	//
+	// Unlike Speaker, which some backends carry as a flat payload field, the
+	// attribution exists only on the nested Span. A backend that does not
+	// persist the Span (Qdrant) therefore cannot evaluate this and declines
+	// push-down, leaving it to the retrieval service's post-materialisation
+	// re-check.
+	Entities []string
+	Events   []string
 }
 
 // IsZero reports whether the filter has no active predicate.
@@ -499,7 +528,9 @@ func (f Filter) IsZero() bool {
 		len(f.DocTypes) == 0 &&
 		!f.ExcludeOrphans &&
 		strings.TrimSpace(f.Speaker) == "" &&
-		len(f.Languages) == 0
+		len(f.Languages) == 0 &&
+		len(f.Entities) == 0 &&
+		len(f.Events) == 0
 }
 
 // Match reports whether the payload satisfies every active predicate. It
@@ -524,40 +555,88 @@ func (f Filter) Match(p IndexPayload) bool {
 			return false
 		}
 	}
-	if len(f.DocTypes) > 0 {
-		match := false
-		for _, dt := range f.DocTypes {
-			if strings.EqualFold(strings.TrimSpace(dt), strings.TrimSpace(p.DocType)) {
-				match = true
-				break
-			}
-		}
-		if !match {
-			return false
+	return f.matchesDocType(p) && f.matchesMetadata(p)
+}
+
+// matchesDocType is the case-insensitive doc_type set membership, split out of
+// Match to keep that function within the repo's cyclomatic budget.
+func (f Filter) matchesDocType(p IndexPayload) bool {
+	if len(f.DocTypes) == 0 {
+		return true
+	}
+	for _, dt := range f.DocTypes {
+		if strings.EqualFold(strings.TrimSpace(dt), strings.TrimSpace(p.DocType)) {
+			return true
 		}
 	}
-	// Speaker restricts to time-spanned transcript segments attributed to the
-	// requested stable speaker id (SPEC §8.6.8). A payload that carries no
-	// speaker (non-diarized transcript or any non-time chunk) never matches a
-	// non-empty speaker filter, so a corpus without diarized transcripts returns
-	// no speaker-filtered hits.
+	return false
+}
+
+// matchesMetadata evaluates the predicates that read a payload's recorded
+// metadata rather than its path: the diarized speaker (SPEC §8.6.8), the
+// recorded language (SPEC §9.5), and a recognition annotation's attribution
+// (design 0004 §7).
+//
+// Each shares the same shape: a payload that records nothing for a predicate
+// never matches a non-empty filter on it, so a corpus with no diarized
+// transcripts (respectively no recorded language, no annotations) returns
+// nothing rather than falling back to unfiltered results. An empty filter is a
+// no-op in every case.
+func (f Filter) matchesMetadata(p IndexPayload) bool {
 	if speaker := strings.TrimSpace(f.Speaker); speaker != "" {
 		if !strings.EqualFold(speaker, strings.TrimSpace(p.Speaker)) {
 			return false
 		}
 	}
-	// Languages restricts to representations recorded in any of the requested
-	// BCP-47 languages under the selected match mode (SPEC §9.5): primary-subtag
-	// by default, or opt-in region/script narrowing when LanguageMatch is
-	// "strict". A payload with no recorded language (unknown, §8.8) never matches
-	// a non-empty filter, so a corpus indexed before any language was recorded
-	// returns nothing for a specific language filter. Empty filter is a no-op.
 	if len(f.Languages) > 0 {
 		if !LanguageMatchesAnyMode(p.Language, f.Languages, f.LanguageMatch) {
 			return false
 		}
 	}
+	return f.MatchesAnnotation(p.Span)
+}
+
+// MatchesAnnotation evaluates the recognition entity/event predicate against a
+// span (design 0004 §7): OR within each field, AND across them, matched
+// literally because ids and event strings are backend-declared tokens rather
+// than prose. Exported so retrieval applies exactly this rule after
+// materialisation, where the hit's span is in hand, rather than restating it.
+func (f Filter) MatchesAnnotation(span Span) bool {
+	if len(f.Entities) > 0 && !MatchesAnyLiteral(f.Entities, span.Entities) {
+		return false
+	}
+	if len(f.Events) > 0 && !MatchesAnyLiteral(f.Events, []string{span.Event}) {
+		return false
+	}
 	return true
+}
+
+// MatchesAnyLiteral reports whether any requested value appears among the
+// candidate's values, after trimming. Literal rather than case-insensitive:
+// entity ids and event strings are opaque tokens declared by a backend, and
+// folding case could collide two the backend considers distinct.
+func MatchesAnyLiteral(requested, candidate []string) bool {
+	if len(requested) == 0 {
+		return true
+	}
+	have := make(map[string]struct{}, len(candidate))
+	for _, c := range candidate {
+		if c = strings.TrimSpace(c); c != "" {
+			have[c] = struct{}{}
+		}
+	}
+	if len(have) == 0 {
+		return false
+	}
+	for _, r := range requested {
+		if r = strings.TrimSpace(r); r == "" {
+			continue
+		}
+		if _, ok := have[r]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 type SearchQuery struct {
@@ -581,6 +660,21 @@ type SearchQuery struct {
 	// default ("" ⇒ LanguageMatchPrimary) or opt-in region/script narrowing
 	// (LanguageMatchStrict). Inert unless Languages is non-empty.
 	LanguageMatch string
+	// Entities / Events optionally restrict hits to recognition annotations
+	// (dirstral-spec design 0004 §7). Within a field the match is OR: a hit
+	// matches if its annotation references ANY requested entity id
+	// (respectively, if its event equals ANY requested value). Across the two
+	// fields, and against every other filter, the match is AND — so
+	// Entities=[team:x] with Events=[at_bat] is the role-exact selection that
+	// entity ids alone cannot express.
+	//
+	// Values are matched literally. Event strings are backend-declared, so
+	// this defines no vocabulary. Only annotation-derived hits carry these, so
+	// a hit from any other representation never matches a non-empty filter,
+	// mirroring how the media time-window filter admits only time-spanned
+	// hits. Absent/empty disables the filter (unchanged behavior).
+	Entities []string
+	Events   []string
 	// DateFrom / DateTo optionally restrict hits to a document-date window (SPEC
 	// §9.6), compared against each candidate's source-document calendar anchor
 	// (mtime_unix). Both are Unix seconds and both bounds are inclusive; 0 means

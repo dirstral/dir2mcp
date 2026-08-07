@@ -849,6 +849,7 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
+		"entities": {}, "events": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -883,7 +884,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
-	tw, toolErr := parseTemporalFilters(args)
+	tw, entities, events, toolErr := parseSearchScopeFilters(args)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -893,6 +894,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	sq := model.SearchQuery{
 		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
 		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
+		Entities: entities, Events: events,
 	}
 	// index_used MUST be the index the query was actually routed to (SPEC §15.2),
 	// not the requested name. Prefer AxisSearcher so the reported axis is read back
@@ -1092,6 +1094,7 @@ func mapRelatedError(err error) *toolExecutionError {
 func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
+		"entities": {}, "events": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -1133,8 +1136,13 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
+	askEntities, askEvents, toolErr := parseAnnotationFilters(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
 	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
-		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS}
+		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
+		Entities: askEntities, Events: askEvents}
 	if mode == "search_only" {
 		return s.runSearchOnlyMode(ctx, question, sq)
 	}
@@ -2053,6 +2061,57 @@ func parseSearchFilters(args map[string]interface{}) (pathPrefix, fileGlob strin
 // error — that is handled downstream by returning an empty hit list. The parsed
 // tags are returned verbatim (trimmed); the retrieval filter normalizes to the
 // primary subtag for case-insensitive matching.
+// parseAnnotationFilters parses the optional recognition entity/event filters
+// (dirstral-spec design 0004 §7). Both are string arrays, matched literally and
+// OR-wise within a field, AND across them. Absent/empty leaves the filter off.
+//
+// Values are NOT validated against a vocabulary: entity ids and event strings
+// are declared by the recognition backend, so the only thing that could be
+// checked here is non-emptiness. An id that exists nowhere in the corpus is a
+// legitimate query that returns nothing, exactly as for languages and dates.
+func parseAnnotationFilters(args map[string]interface{}) (entities, events []string, toolErr *toolExecutionError) {
+	entities, err := parseOptionalStringSlice(args, "entities")
+	if err != nil {
+		return nil, nil, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	events, err = parseOptionalStringSlice(args, "events")
+	if err != nil {
+		return nil, nil, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	for _, field := range []struct {
+		name   string
+		values []string
+	}{{"entities", entities}, {"events", events}} {
+		for _, v := range field.values {
+			if strings.TrimSpace(v) == "" {
+				return nil, nil, &toolExecutionError{
+					Code:      "INVALID_FIELD",
+					Message:   fmt.Sprintf("%s contains an empty value", field.name),
+					Retryable: false,
+				}
+			}
+		}
+	}
+	return entities, events, nil
+}
+
+// parseSearchScopeFilters parses the scope filters that narrow WHICH candidates
+// a query may return: the temporal window (SPEC §9.6/§9.8) and the recognition
+// entity/event attribution (design 0004 §7). Grouped into one call so the tool
+// handler stays within the repo's cyclomatic budget; each half is unchanged and
+// still validated independently.
+func parseSearchScopeFilters(args map[string]interface{}) (temporalFilters, []string, []string, *toolExecutionError) {
+	tw, toolErr := parseTemporalFilters(args)
+	if toolErr != nil {
+		return temporalFilters{}, nil, nil, toolErr
+	}
+	entities, events, toolErr := parseAnnotationFilters(args)
+	if toolErr != nil {
+		return temporalFilters{}, nil, nil, toolErr
+	}
+	return tw, entities, events, nil
+}
+
 func parseLanguagesArg(args map[string]interface{}) ([]string, *toolExecutionError) {
 	languages, err := parseOptionalStringSlice(args, "languages")
 	if err != nil {
@@ -3547,6 +3606,16 @@ func searchInputSchema() map[string]interface{} {
 				"default":     "primary",
 				"description": "Optional (SPEC §9.5): matching mode for languages. 'primary' (default) matches on the BCP-47 primary subtag (pt-BR matches pt); 'strict' opts into RFC 4647 region/script narrowing (pt-BR matches pt-BR/pt-BR-… but not bare pt or pt-PT).",
 			},
+			"entities": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (design 0004 §7): restrict hits to recognition annotations referencing ANY of these entity ids (logical OR), matched literally. Combine with `events` to select a role: an annotation names every participant, so the id alone cannot say which one acted. Only annotation-derived hits carry entities; an id absent from the corpus returns an empty result, not an error.",
+			},
+			"events": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (design 0004 §7): restrict hits to recognition annotations whose event equals ANY of these values (logical OR), matched literally. Event strings are declared by the recognition backend, so there is no fixed vocabulary here. AND-ed with `entities`.",
+			},
 			"date_from": map[string]interface{}{
 				"type":        "string",
 				"description": "Optional (SPEC §9.6): restrict hits to documents whose date (mtime) is on or after this bound (inclusive). Accepts an RFC 3339 timestamp (2026-04-01T00:00:00Z) or a bare YYYY-MM-DD date (start of that UTC day). Absent = open lower bound.",
@@ -3672,6 +3741,16 @@ func askInputSchema() map[string]interface{} {
 				"enum":        []string{"primary", "strict"},
 				"default":     "primary",
 				"description": "Optional (SPEC §9.5): matching mode for languages. 'primary' (default) matches on the BCP-47 primary subtag (pt-BR matches pt); 'strict' opts into RFC 4647 region/script narrowing (pt-BR matches pt-BR/pt-BR-… but not bare pt or pt-PT).",
+			},
+			"entities": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (design 0004 §7): restrict retrieved contexts to recognition annotations referencing ANY of these entity ids (logical OR), matched literally. Combine with `events` to select a role: an annotation names every participant, so the id alone cannot say which one acted. Only annotation-derived hits carry entities; an id absent from the corpus returns an empty result, not an error.",
+			},
+			"events": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (design 0004 §7): restrict retrieved contexts to recognition annotations whose event equals ANY of these values (logical OR), matched literally. Event strings are declared by the recognition backend, so there is no fixed vocabulary here. AND-ed with `entities`.",
 			},
 			"date_from": map[string]interface{}{
 				"type":        "string",

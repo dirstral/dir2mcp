@@ -248,6 +248,21 @@ type recognitionMeta struct {
 	ModelVersion string `json:"model_version,omitempty"`
 }
 
+// RecognitionSegments is the exported counterpart of recognitionSegments,
+// converting the unexported segment type to the public ChunkSegment. It exists
+// so tests in the tests/ tree can assert what an annotation actually carries
+// into persistence, which is where the entity attribution used to be silently
+// dropped (design 0004 §7). The derivation hash input is returned alongside so
+// a test can pin that a change in attribution re-derives the representation.
+func RecognitionSegments(anns []model.RecognizedAnnotation) ([]ChunkSegment, string) {
+	raw, hashInput := recognitionSegments(anns)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out, hashInput
+}
+
 // recognitionSegments filters a backend's annotations to the well-formed ones,
 // sorts them deterministically, and returns the time-spanned chunk segments plus
 // the canonical string the derivation rep_hash is computed over.
@@ -262,9 +277,11 @@ type recognitionMeta struct {
 // force a spurious re-derivation.
 func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, string) {
 	type validAnnotation struct {
-		startMS int
-		endMS   int
-		text    string
+		startMS  int
+		endMS    int
+		text     string
+		entities []string
+		event    string
 	}
 	valid := make([]validAnnotation, 0, len(anns))
 	for _, ann := range anns {
@@ -272,7 +289,14 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		if text == "" || ann.StartMS < 0 || ann.EndMS < ann.StartMS {
 			continue
 		}
-		valid = append(valid, validAnnotation{startMS: ann.StartMS, endMS: ann.EndMS, text: text})
+		valid = append(valid, validAnnotation{
+			startMS: ann.StartMS, endMS: ann.EndMS, text: text,
+			// Carried, not dropped: these are what an entity filter selects on
+			// (design 0004 §7). The backend is required to compute them, and
+			// persisting only the text made the filter unimplementable.
+			entities: ann.Entities,
+			event:    strings.TrimSpace(ann.Event),
+		})
 	}
 	sort.Slice(valid, func(i, j int) bool {
 		if valid[i].startMS != valid[j].startMS {
@@ -288,9 +312,17 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 	for _, v := range valid {
 		segments = append(segments, chunkSegment{
 			Text: v.text,
-			Span: model.Span{Kind: "time", StartMS: v.startMS, EndMS: v.endMS},
+			Span: model.Span{
+				Kind: "time", StartMS: v.startMS, EndMS: v.endMS,
+				Entities: v.entities, Event: v.event,
+			},
 		})
-		fmt.Fprintf(&hashInput, "%d|%d|%s\n", v.startMS, v.endMS, v.text)
+		// The attribution joins the derivation hash: a backend that changes
+		// which entities an annotation names has produced different content,
+		// and the representation must be re-derived rather than kept because
+		// the prose happens to match (§8.6.7).
+		fmt.Fprintf(&hashInput, "%d|%d|%s|%s|%s\n",
+			v.startMS, v.endMS, v.text, v.event, strings.Join(v.entities, ","))
 	}
 	return segments, hashInput.String()
 }
