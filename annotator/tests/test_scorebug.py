@@ -340,7 +340,7 @@ def test_a_count_step_is_a_pitch(roster, fake_frames):
     ocr = fake_frames(["RAY P: 87", "RAY P: 87",
                        "RAY P: 88", "RAY P: 88",
                        "RAY P: 89", "RAY P: 89"])
-    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
     pitches = [c for c in cues if c.event == "pitch"]
     assert len(pitches) == 2  # 87->88 and 88->89; the first read is a baseline
     assert all(c.entity_ids == ("player:robbie-ray",) for c in pitches)
@@ -370,7 +370,7 @@ def test_a_count_that_goes_backwards_resets_rather_than_emits(roster, fake_frame
     ocr = fake_frames(["RAY P: 87", "RAY P: 87",
                        "RAY P: 12", "RAY P: 12",
                        "RAY P: 13", "RAY P: 13"])
-    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
     pitches = [c for c in cues if c.event == "pitch"]
     assert len(pitches) == 1 and pitches[0].text == "pitch 13"
 
@@ -412,6 +412,43 @@ def test_a_real_step_survives_a_neighbouring_misread(roster, fake_frames):
     """The other half: noise must not suppress a genuine pitch either."""
     ocr = fake_frames(["RAY P: 87", "RAY P: 87", "RAY P: 99",
                        "RAY P: 88", "RAY P: 88", "RAY P: 88"])
-    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
     pitches = [c for c in cues if c.event == "pitch"]
     assert len(pitches) == 1 and pitches[0].text == "pitch 88"
+
+
+# --- the count reader is opt-in ---------------------------------------------
+#
+# Reading a pitch from the count's +1 transition buys recall and spends
+# precision: against the pilot's ground truth, recall 86.9% -> 90.1% and
+# precision 100.0% -> 94.2%. A citation product should not make that trade for
+# an operator silently, so the default stays off and these tests pin it.
+
+def test_count_pitches_are_off_by_default(roster, fake_frames):
+    ocr = fake_frames(["RAY P: 87", "RAY P: 87",
+                       "RAY P: 88", "RAY P: 88",
+                       "RAY P: 89", "RAY P: 89"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE).recognize(MEDIA)
+    assert [c for c in cues if c.event == "pitch"] == []
+
+
+def test_enabling_counts_does_not_disturb_the_graphic_pitches(roster, fake_frames):
+    """The two sources are independent: turning the count reader on must ADD
+    cues, never change what the speed graphic already reported. A regression
+    here would silently alter the default path's output."""
+    frames = ["RAY 95 MPH FASTBALL", "RAY 95 MPH FASTBALL"]
+    off = ScorebugRecognizer(roster, ocr=fake_frames(frames), crop=WHOLE).recognize(MEDIA)
+    on = ScorebugRecognizer(
+        roster, ocr=fake_frames(frames), crop=WHOLE, count_pitch_cues=True
+    ).recognize(MEDIA)
+    assert off == on
+
+
+def test_the_flag_is_inert_without_pitch_cues(roster, fake_frames):
+    """`pitch_cues=False` disables the whole pitch channel, so the count
+    reader must not smuggle pitches back in."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 87", "RAY P: 88", "RAY P: 88"])
+    cues = ScorebugRecognizer(
+        roster, ocr=ocr, crop=WHOLE, pitch_cues=False, count_pitch_cues=True
+    ).recognize(MEDIA)
+    assert [c for c in cues if c.event == "pitch"] == []

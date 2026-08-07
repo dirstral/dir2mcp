@@ -6,6 +6,10 @@
         [--scorebug] [--jersey] [--faces bank/] [--news] [--ocr-lang rus] \
         [--fps 0.5] [--min-confidence 0.3] [--host 127.0.0.1] [--port 8765]
 
+    # Scorebug pitch counts: more pitches found, some of them invented.
+    # Opt-in, because it spends precision (see ScorebugRecognizer).
+    dirstral-annotate serve --roster roster.json --scorebug --scorebug-pitch-counts
+
     # A news archive resolves no roster, so it needs none:
     dirstral-annotate serve --news --ocr-lang rus
 
@@ -45,6 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     def vision_flags(c):
         c.add_argument("--scorebug", action="store_true", help="enable scorebug OCR")
+        c.add_argument("--scorebug-pitch-counts", action="store_true",
+                       help="also read a pitch from each +1 of the bug's pitch count "
+                            "(more recall, less precision; needs --scorebug)")
         c.add_argument("--jersey", action="store_true", help="enable jersey-number OCR")
         c.add_argument("--faces", type=Path, help="roster image bank dir; enables face recognition")
         c.add_argument("--news", action="store_true",
@@ -100,6 +107,7 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         roster=roster,
         games=games,
         scorebug=args.scorebug,
+        scorebug_pitch_counts=args.scorebug_pitch_counts,
         jersey=args.jersey,
         news=args.news,
         ocr_lang=args.ocr_lang,

@@ -307,11 +307,20 @@ class ScorebugRecognizer:
         crop: Region | None = None,  # fraction box; None searches for the bug
         regions: Iterable[Region] | None = None,
         pitch_cues: bool = True,
+        # Off by default, and deliberately so: see `_count_pitch_cues`. Reading
+        # a pitch from the count's +1 transition finds pitches the graphic
+        # never announces, but it also invents some. Measured against the
+        # pilot's ground truth it moves recall 86.9% -> 90.1% and precision
+        # 100.0% -> 94.2%. For a product whose output is citations, spending
+        # perfect precision on recall is the operator's decision, not a
+        # default.
+        count_pitch_cues: bool = False,
         workers: int | None = None,  # None: default_workers(); 1: serial
         lang: str | None = None,  # OCR language; None: the reader's default
     ):
         self.roster = roster
         self.pitch_cues = pitch_cues
+        self.count_pitch_cues = count_pitch_cues
         self.reader = OverlayReader(
             ocr=ocr,
             fps=fps,
@@ -379,7 +388,8 @@ class ScorebugRecognizer:
         if self.pitch_cues:
             graphic_cues = self._pitch_cues(graphics, pitchers)
             cues += graphic_cues
-            cues += _count_pitch_cues(counted, graphic_cues, self.name, gap)
+            if self.count_pitch_cues:
+                cues += _count_pitch_cues(counted, graphic_cues, self.name, gap)
         cues.sort(key=lambda c: (c.start_s, c.event, c.entity_ids))
         return cues
 

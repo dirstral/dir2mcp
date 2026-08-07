@@ -55,6 +55,10 @@ class Pipeline:
     roster: Roster
     games: dict[str, GameConfig] = field(default_factory=dict)
     scorebug: bool = False
+    #: Opt-in: also read a pitch from each +1 transition of the scorebug's
+    #: pitch count. Trades precision for recall (see ScorebugRecognizer), so
+    #: it stays off unless an operator asks for it. Inert without `scorebug`.
+    scorebug_pitch_counts: bool = False
     jersey: bool = False
     news: bool = False
     ocr_lang: str | None = None
@@ -88,7 +92,9 @@ class Pipeline:
         if self.scorebug:
             from .recognizers.scorebug import ScorebugRecognizer
 
-            try_recognizer(lambda: ScorebugRecognizer(self.roster, fps=self.fps))
+            try_recognizer(lambda: ScorebugRecognizer(
+                self.roster, fps=self.fps, count_pitch_cues=self.scorebug_pitch_counts,
+            ))
         if self.jersey:
             from .recognizers.jersey import JerseyRecognizer
 
