@@ -49,6 +49,15 @@ func canFilter(filter model.Filter) bool {
 	if len(filter.Languages) != 0 {
 		return false
 	}
+	// Entities/Events (recognition annotation filter, design 0004 §7) live in
+	// the span's extra_json, which is not part of the vector payload at all, so
+	// there is nothing here to match against. Decline push-down and let the
+	// Go-side matchFilters re-check apply it once the span is materialised.
+	// Without this the default `return true` below would claim a predicate this
+	// backend cannot evaluate.
+	if len(filter.Entities) != 0 || len(filter.Events) != 0 {
+		return false
+	}
 	return true
 }
 

@@ -2939,6 +2939,10 @@ func filterFromQuery(q model.SearchQuery) model.Filter {
 		Speaker:       q.Speaker,
 		Languages:     q.Languages,
 		LanguageMatch: q.LanguageMatch,
+		// Carried so a filtering index can narrow its own candidate pool. The
+		// authoritative check still runs in matchFilters, which sees the span.
+		Entities: q.Entities,
+		Events:   q.Events,
 	}
 }
 
@@ -3896,6 +3900,19 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 		if !strings.EqualFold(speaker, strings.TrimSpace(hit.Span.Speaker)) {
 			return false
 		}
+	}
+
+	// Optional recognition entity/event filter (dirstral-spec design 0004 §7):
+	// restrict to annotation hits referencing any requested entity id, and/or
+	// carrying any requested event. OR within each field, AND across them, so
+	// entities=[team:x] + events=[at_bat] selects one ROLE — the distinction
+	// the wire shape cannot express per-entity and text matching cannot express
+	// at all. Values match literally; event strings are backend-declared, so no
+	// vocabulary is imposed here. A hit whose span carries no attribution —
+	// every non-annotation chunk — never matches a non-empty filter, mirroring
+	// the speaker filter above. Empty filters are a no-op.
+	if !(model.Filter{Entities: query.Entities, Events: query.Events}).MatchesAnnotation(hit.Span) {
+		return false
 	}
 
 	// Optional per-language filter (SPEC §9.5/§15.2-3): restrict to candidates
