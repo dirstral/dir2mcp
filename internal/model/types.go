@@ -611,6 +611,37 @@ func (f Filter) MatchesAnnotation(span Span) bool {
 	return true
 }
 
+// NormalizeEntityIDs trims, drops empties, and de-duplicates entity ids while
+// preserving first-seen order. Order is preserved because a backend emits the
+// acting entity first (design 0004 §8: role lives in annotation granularity).
+//
+// One rule shared by ingestion and persistence deliberately: the derivation
+// hash covers what is STORED, so if the two normalized differently a backend
+// that emitted a stray blank id would re-derive a representation whose stored
+// attribution is byte-identical.
+func NormalizeEntityIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // MatchesAnyLiteral reports whether any requested value appears among the
 // candidate's values, after trimming. Literal rather than case-insensitive:
 // entity ids and event strings are opaque tokens declared by a backend, and

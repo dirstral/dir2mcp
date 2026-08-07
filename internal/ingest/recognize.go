@@ -294,7 +294,7 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			// Carried, not dropped: these are what an entity filter selects on
 			// (design 0004 §7). The backend is required to compute them, and
 			// persisting only the text made the filter unimplementable.
-			entities: ann.Entities,
+			entities: model.NormalizeEntityIDs(ann.Entities),
 			event:    strings.TrimSpace(ann.Event),
 		})
 	}
@@ -321,8 +321,19 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		// which entities an annotation names has produced different content,
 		// and the representation must be re-derived rather than kept because
 		// the prose happens to match (§8.6.7).
-		fmt.Fprintf(&hashInput, "%d|%d|%s|%s|%s\n",
-			v.startMS, v.endMS, v.text, v.event, strings.Join(v.entities, ","))
+		//
+		// Every variable-length field is LENGTH-PREFIXED rather than delimited.
+		// Entity ids are opaque backend-declared tokens, so any delimiter can
+		// legitimately appear inside one: joining with commas would encode
+		// ["a,b", "c"] and ["a", "b,c"] identically, and two genuinely
+		// different attributions that hash the same would silently NOT
+		// re-derive. That is the exact failure this input exists to prevent.
+		fmt.Fprintf(&hashInput, "%d|%d|%d:%s|%d:%s|%d",
+			v.startMS, v.endMS, len(v.text), v.text, len(v.event), v.event, len(v.entities))
+		for _, id := range v.entities {
+			fmt.Fprintf(&hashInput, "|%d:%s", len(id), id)
+		}
+		hashInput.WriteByte('\n')
 	}
 	return segments, hashInput.String()
 }

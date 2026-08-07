@@ -3121,33 +3121,6 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 	return model.Span{Kind: "lines"}
 }
 
-// normalizeEntityIDs trims, drops empties, and de-duplicates entity ids while
-// preserving first-seen order. Order is preserved because a backend emits the
-// acting entity first (design 0004 §8: role lives in annotation granularity),
-// and de-duplication keeps a repeated id from inflating a stored annotation.
-func normalizeEntityIDs(ids []string) []string {
-	if len(ids) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(ids))
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		out = append(out, id)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 // annotationFromExtraJSON reconstructs a recognition annotation's structured
 // attribution (design 0004 §7) from a "time" span's stored extra_json. A
 // NULL/empty/malformed payload yields no entities and no event, so a span that
@@ -3164,7 +3137,7 @@ func annotationFromExtraJSON(extraJSON string) (entities []string, event string)
 	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil {
 		return nil, ""
 	}
-	return normalizeEntityIDs(payload.Entities), strings.TrimSpace(payload.Event)
+	return model.NormalizeEntityIDs(payload.Entities), strings.TrimSpace(payload.Event)
 }
 
 // wordsFromExtraJSON reconstructs per-word timing for a "time" span from its
@@ -4052,7 +4025,7 @@ func timeSpanExtraJSON(
 		// stored shape never carries a dangling speaker_label.
 		speakerLabel = ""
 	}
-	entities = normalizeEntityIDs(entities)
+	entities = model.NormalizeEntityIDs(entities)
 	event = strings.TrimSpace(event)
 	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" {
 		return "", nil

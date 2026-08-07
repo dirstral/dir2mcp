@@ -95,3 +95,74 @@ func TestChangedAttributionRedervesTheRepresentation(t *testing.T) {
 		t.Fatalf("hash input no longer covers the annotation text: %q", h0)
 	}
 }
+
+// TestDelimiterBearingEntityIdsCannotCollide is the regression for an ambiguous
+// hash encoding. Entity ids are opaque backend-declared tokens, so a delimiter
+// can legitimately appear inside one. Joining with commas encoded ["a,b","c"]
+// and ["a","b,c"] identically, so two genuinely different attributions produced
+// the same derivation input and the representation would NOT be re-derived —
+// the precise failure the hash exists to prevent.
+func TestDelimiterBearingEntityIdsCannotCollide(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b []string
+	}{
+		{"comma inside an id", []string{"a,b", "c"}, []string{"a", "b,c"}},
+		{"pipe inside an id", []string{"a|b"}, []string{"a", "b"}},
+		{"colon inside an id", []string{"team:x", "y"}, []string{"team", "x:y"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ha := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+				annotation("same text", "pitch", tc.a, 1, 2),
+			})
+			_, hb := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+				annotation("same text", "pitch", tc.b, 1, 2),
+			})
+			if ha == hb {
+				t.Fatalf("%v and %v hash identically: %q", tc.a, tc.b, ha)
+			}
+		})
+	}
+}
+
+// TestNormalisationMakesTheHashAgreeWithWhatIsStored: a blank or repeated id is
+// dropped before persistence, so it must also be dropped before hashing.
+// Otherwise a backend that emits a stray blank id re-derives a representation
+// whose stored attribution is byte-identical — work for no change.
+func TestNormalisationMakesTheHashAgreeWithWhatIsStored(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b []string
+	}{
+		{"a blank id is not a difference", []string{"a", ""}, []string{"a"}},
+		{"whitespace is trimmed", []string{" a "}, []string{"a"}},
+		{"a repeat is not a difference", []string{"a", "a"}, []string{"a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ha := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+				annotation("same text", "pitch", tc.a, 1, 2),
+			})
+			_, hb := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+				annotation("same text", "pitch", tc.b, 1, 2),
+			})
+			if ha != hb {
+				t.Fatalf("%v and %v hash differently (%q vs %q) but store identically", tc.a, tc.b, ha, hb)
+			}
+		})
+	}
+}
+
+// TestTextAndEventCannotBleedIntoEachOther: the same ambiguity applies to the
+// scalar fields, where a delimiter in the annotation text could otherwise
+// impersonate the start of the event field.
+func TestTextAndEventCannotBleedIntoEachOther(t *testing.T) {
+	_, ha := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+		annotation("text|pitch", "", nil, 1, 2),
+	})
+	_, hb := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+		annotation("text", "pitch", nil, 1, 2),
+	})
+	if ha == hb {
+		t.Fatalf("a delimiter in the text impersonated the event field: %q", ha)
+	}
+}
