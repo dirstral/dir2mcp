@@ -172,7 +172,20 @@ def default_ocr(psm: int | None = None, lang: str | None = None) -> OcrFn:
             ) from exc
         with Image.open(frame) as img:
             img.load()
-            return pytesseract.image_to_string(img, config=config, lang=language)
+            try:
+                return pytesseract.image_to_string(img, config=config, lang=language)
+            except pytesseract.TesseractNotFoundError as exc:
+                # The package installs from PyPI but the ENGINE is a separate
+                # native binary, so "installed but unusable" is an ordinary
+                # deployment state rather than an exotic one -- a CI runner
+                # with the `ocr` extra and no apt package is exactly it.
+                # TesseractNotFoundError is not RecognizerUnavailable, so
+                # without this the cascade aborts instead of skipping.
+                raise RecognizerUnavailable(
+                    "overlay OCR needs a tesseract binary on PATH; the "
+                    "pytesseract package is installed but the engine is not "
+                    "(apt install tesseract-ocr / brew install tesseract)"
+                ) from exc
 
     return ocr
 
