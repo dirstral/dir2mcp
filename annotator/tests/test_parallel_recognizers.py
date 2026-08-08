@@ -423,3 +423,60 @@ def test_jersey_hands_the_constructed_detector_to_the_first_worker():
 
     detectors = jersey._Detectors(factory, seed=seed)
     assert detectors.current() is seed
+
+
+
+# --- a missing vision stack degrades the RUN, not just the adapter ----------
+
+def _one_scripted_frame(monkeypatch, tmp_path):
+    """Put a single real file on the reader's frame path.
+
+    Frame extraction is ffmpeg's job and not what these assert, so it is
+    replaced; what matters is that the reader reaches the OCR call at all.
+    """
+    from dirstral_annotator.recognizers import overlay
+
+    frame = tmp_path / "frame-00000.jpg"
+    frame.write_bytes(b"stand-in; decoding is patched out too")
+    monkeypatch.setattr(overlay, "iter_frames", lambda *a, **k: iter([(0.0, frame)]))
+    # Hand the frame straight to the OCR call. Rendering the two preprocessing
+    # crops is Pillow's job and has its own contract test; patching it keeps
+    # this test about the ENGINE being missing rather than about whether a
+    # stand-in file happens to decode as a JPEG.
+    monkeypatch.setattr(overlay, "_prepared_crops", lambda f, region, work: iter([f]))
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_missing_engine_skips_the_recognizer_instead_of_failing_the_run(
+    monkeypatch, tmp_path, workers
+):
+    """The contract the adapter-level tests imply but do not reach: with no OCR
+    stack installed, the pipeline records a skip and the run continues.
+
+    This is what makes the engine's import site safe to move. The adapter now
+    raises on first read rather than at construction, so the raise happens
+    inside the reader — and, at workers>1, inside a pool. Both are covered
+    here: `Future.result()` re-raises in the calling thread, so the exception
+    type survives, and the pipeline wraps construction and recognition in one
+    try either way.
+    """
+    import sys
+
+    from dirstral_annotator.pipeline import Pipeline
+    from dirstral_annotator.roster import Roster
+
+    monkeypatch.setitem(sys.modules, "pytesseract", None)
+    _one_scripted_frame(monkeypatch, tmp_path)
+    monkeypatch.setenv("DIRSTRAL_ANNOTATOR_WORKERS", str(workers))
+
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"stand-in; frame extraction is patched out")
+
+    pipeline = Pipeline(roster=Roster([]), scorebug=True)
+    cues = pipeline.cues_for(media)
+
+    assert cues == []
+    assert pipeline.skipped, "a missing OCR stack produced no skip note"
+    note = " ".join(pipeline.skipped).lower()
+    assert "ocr" in note or "pytesseract" in note or "pillow" in note, \
+        f"the skip note does not say what is missing: {pipeline.skipped}"

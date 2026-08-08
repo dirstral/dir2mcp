@@ -147,20 +147,29 @@ def default_ocr(psm: int | None = None, lang: str | None = None) -> OcrFn:
     falls back to `DIRSTRAL_ANNOTATOR_OCR_LANG` and then to whatever the local
     tesseract defaults to. Non-Latin scripts need the matching traineddata
     installed (`tesseract-lang` on Homebrew, `tesseract-ocr-rus` on Debian).
-    """
-    try:
-        import pytesseract  # type: ignore
-        from PIL import Image  # type: ignore
-    except ImportError as exc:
-        raise RecognizerUnavailable(
-            "overlay OCR needs pytesseract + Pillow (pip install "
-            "'dirstral-annotator[ocr]') and a tesseract binary"
-        ) from exc
 
+    The engine is imported on FIRST READ, not here. Building the adapter is not
+    using it: a caller that supplies its own `read_band`, or that never reaches
+    a frame, needs no engine at all. Importing eagerly made CONSTRUCTING any
+    overlay recognizer fail without the `ocr` extra, which left the
+    backend-free interpretation tests unrunnable on a plain checkout even
+    though they never OCR anything. `RecognizerUnavailable` still carries the
+    same message, raised where the engine is actually needed; the pipeline
+    catches it identically either way, because it wraps construction and
+    recognition in one try.
+    """
     config = f"--psm {psm}" if psm is not None else ""
     language = default_lang() if lang is None else lang
 
     def ocr(frame: Path) -> str:
+        try:
+            import pytesseract  # type: ignore
+            from PIL import Image  # type: ignore
+        except ImportError as exc:
+            raise RecognizerUnavailable(
+                "overlay OCR needs pytesseract + Pillow (pip install "
+                "'dirstral-annotator[ocr]') and a tesseract binary"
+            ) from exc
         with Image.open(frame) as img:
             img.load()
             return pytesseract.image_to_string(img, config=config, lang=language)
