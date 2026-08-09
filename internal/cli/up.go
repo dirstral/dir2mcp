@@ -261,7 +261,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
 	}()
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh)
-	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, ing, logSink, &bgWG)
+	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, cfg.Source.Kind, ing, logSink, &bgWG)
 
 	// The server is now serving. A signal-triggered shutdown from here on is
 	// a normal, successful termination (a supervisor/`down`-requested stop),
@@ -1086,13 +1086,18 @@ type watchable interface {
 	Watch(context.Context) error
 }
 
-// startWatchWorker launches the filesystem watcher in the background when
+// startWatchWorker launches the continuous-sync worker in the background when
 // ingest.watch is enabled and the ingestor supports it. It runs concurrently
 // with the initial scan; processDocument hash-diffs, so any overlap is a cheap
 // no-op. Watcher failures are non-fatal — the watcher's own periodic safety
 // rescan reconciles drift — so a setup error is logged rather than terminating
 // the server.
-func startWatchWorker(runCtx context.Context, readOnly, enabled bool, ing interface {
+//
+// sourceKind is the configured source.kind. The worker still starts for a
+// remote source, but the ingestor runs a periodic reconcile instead of the
+// filesystem watcher (issue #695). The operator gets a warning here, because
+// the mechanism they asked for is not the mechanism they get.
+func startWatchWorker(runCtx context.Context, readOnly, enabled bool, sourceKind string, ing interface {
 	Run(context.Context) error
 }, stderr io.Writer, wg *sync.WaitGroup) {
 	if !enabled {
@@ -1108,6 +1113,7 @@ func startWatchWorker(runCtx context.Context, readOnly, enabled bool, ing interf
 	if !ok {
 		return
 	}
+	warnIfSourceHasNoFileWatch(sourceKind, stderr)
 	// Register on the drain group so the deferred cancel()+Wait() in runUp waits
 	// for this goroutine to exit before returning; its Watch error logging would
 	// otherwise race a caller reading the shared sink after return (issue #419).
@@ -1122,6 +1128,27 @@ func startWatchWorker(runCtx context.Context, readOnly, enabled bool, ing interf
 			_, _ = fmt.Fprintf(stderr, "watch: %v\n", err)
 		}
 	}()
+}
+
+// warnIfSourceHasNoFileWatch tells the operator that ingest.watch does not start
+// the filesystem watcher for the configured source, and says what runs instead.
+//
+// A remote corpus has no filesystem to watch. Before issue #695 the watcher
+// started anyway and rooted itself at the local root_dir, so a local edit or
+// delete could reprocess or tombstone the remote document with the same
+// relative path. The watcher is now gated, and the message keeps the change
+// visible: an operator who set ingest.watch expects a watcher, so the server
+// must not swap the mechanism in silence. The gate itself lives in
+// ingest.SourceSupportsFileWatch, so the CLI and the ingestor cannot disagree.
+func warnIfSourceHasNoFileWatch(sourceKind string, stderr io.Writer) {
+	if ingest.SourceSupportsFileWatch(sourceKind) {
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(sourceKind))
+	_, _ = fmt.Fprintf(stderr,
+		"warning: ingest.watch is enabled, but source.kind=%s has no filesystem to watch; "+
+			"the file watcher is disabled and the corpus reconciles on a periodic rescan instead\n",
+		kind)
 }
 
 // runEventLoop runs the main select loop until the server stops, context is

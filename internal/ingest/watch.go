@@ -25,10 +25,44 @@ const defaultWatchDebounce = 500 * time.Millisecond
 // deletes the watcher's per-path handler missed.
 const safetyRescanInterval = 10 * time.Minute
 
-// Watch runs a filesystem watcher that incrementally indexes added, changed,
-// and deleted files for the life of ctx. It is intended to run after the
-// initial Run() scan completes, turning a one-shot index into a continuously
-// maintained one.
+// remoteRescanInterval is how often a remote corpus (source.kind=s3)
+// reconciles while ingest.watch is on. A remote corpus has no filesystem event
+// source, so the reconcile is the only continuous-sync mechanism. It is a
+// separate constant from safetyRescanInterval on purpose: the two loops have
+// different semantics. safetyRescanInterval backstops a live fsnotify watcher;
+// this interval IS the sync. Debounce and overflow do not apply to it.
+const remoteRescanInterval = 10 * time.Minute
+
+// SourceSupportsFileWatch reports whether source.kind names a corpus that the
+// local filesystem watcher can observe.
+//
+// Only a real filesystem qualifies. "local" and "nfs" are both ordinary
+// directory trees under cfg.RootDir (SPEC §7.8), so an fsnotify event maps to
+// the true corpus path. An NFS mount sees fewer events than a local disk,
+// because inotify does not report a write made by another client. That is a
+// completeness limit, not a correctness one, and the safety rescan covers it.
+//
+// "s3" does not qualify. An S3 corpus is a set of objects under a bucket and
+// prefix. cfg.RootDir still defaults to ".", so the watcher would root itself
+// at an unrelated local directory and read local events as corpus events
+// (issue #695). Kind matching mirrors corpusfs.New: the comparison is
+// case-insensitive and an empty kind normalizes to local.
+func SourceSupportsFileWatch(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "", "local", "nfs":
+		return true
+	default:
+		return false
+	}
+}
+
+// Watch keeps the index in sync with the corpus for the life of ctx. It is
+// intended to run after the initial Run() scan completes, turning a one-shot
+// index into a continuously maintained one.
+//
+// The mechanism depends on source.kind (SPEC §7.8). A local or NFS corpus gets
+// the fsnotify watcher below. A remote corpus gets a periodic reconcile
+// through the configured CorpusFS instead. See watchRemote.
 //
 // Design notes:
 //   - Event draining (reading fsnotify events) is decoupled from per-document
@@ -49,6 +83,12 @@ const safetyRescanInterval = 10 * time.Minute
 func (s *Service) Watch(ctx context.Context) error {
 	if s.store == nil {
 		return nil
+	}
+	// The source-kind gate runs before the RootDir check. An S3 corpus does not
+	// need a local root at all (issue #738), so a non-empty RootDir must never
+	// decide which watch mechanism runs.
+	if !SourceSupportsFileWatch(s.cfg.Source.Kind) {
+		return s.watchRemote(ctx)
 	}
 	root := s.cfg.RootDir
 	if root == "" {
@@ -94,6 +134,39 @@ func (s *Service) Watch(ctx context.Context) error {
 		fire:     make(chan watchJob, 256),
 	}
 	return w.run(ctx)
+}
+
+// watchRemote keeps a remote corpus in sync with a periodic reconcile. It runs
+// instead of the fsnotify watcher when source.kind names a corpus that no local
+// filesystem event can describe (issue #695).
+//
+// The reconcile is a normal incremental scan. runScan enumerates through the
+// configured CorpusFS, so it reads the actual remote objects: a new or changed
+// object is ingested, and an object that is gone is tombstoned. Every mutation
+// therefore comes from the remote source itself. No local file event can reach
+// the store.
+//
+// This loop deliberately does NOT call MarkWatchActive. There is no fsnotify
+// watcher, so there is no kernel event buffer and no overflow to count. SPEC
+// §15.6 requires the server to omit watch_overflows when it does not run the
+// watcher, and a consumer must read that absence as "not applicable".
+//
+// Debounce does not apply either. ingest.watch_debounce coalesces editor write
+// bursts on a local disk; a scheduled full reconcile has no per-path bursts to
+// coalesce.
+func (s *Service) watchRemote(ctx context.Context) error {
+	ticker := time.NewTicker(remoteRescanInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := s.runScan(ctx); err != nil && ctx.Err() == nil {
+				s.getLogger().Printf("watch: remote corpus rescan: %v", err)
+			}
+		}
+	}
 }
 
 type watchJob struct {
