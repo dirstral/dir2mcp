@@ -67,7 +67,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		defer restoreLog()
 	}
 
-	st, textBuilt, codeBuilt, code := a.initStoreAndIndices(ctx, &cfg, opts.jsonOutput)
+	st, textBuilt, codeBuilt, code := a.openStateForServing(ctx, &cfg, opts.jsonOutput)
 	if code != exitSuccess {
 		return code
 	}
@@ -666,10 +666,136 @@ type indexLoadFailure struct {
 	hints    []string
 }
 
+// openStateForServing brings the corpus's on-disk state back to a known-good
+// generation and only then opens it for serving. It is `up`'s half of issue
+// #727: PR #761 taught `reindex` to finish the rollback a crashed run owed, so
+// an operator whose next move was another rebuild recovered. An operator whose
+// next move was simply restarting the daemon did not: they got the crashed run's
+// PARTIAL index served, with the complete one sitting untouched beside it in the
+// backup slot and nothing said about it (issue #764). That is the quieter
+// failure of the two: nothing errors, retrieval just returns less than it should.
+//
+// Policy: recover, exactly as `reindex` does, by calling the same two functions
+// rather than growing a second recovery path that can drift from the first.
+//
+//   - Serving the partial generation is the bug, so "warn and carry on" is not a
+//     fix; the operator would still be answering questions from a corpus that is
+//     missing documents.
+//   - Refusing to start is the safest-sounding option and the worst one here.
+//     `up` is what service managers restart unattended, so a refusal turns every
+//     crashed reindex into a corpus-wide outage that lasts until a human
+//     notices; and the only way out of it is `reindex`, which performs this very
+//     recovery and then rebuilds everything from scratch (hours of OCR and paid
+//     embedding calls) to arrive at the generation that was already on disk.
+//   - Recovering is a mutation the operator did not ask for, but it is not a new
+//     kind of one: startup already hardens the state tree, re-pends chunks whose
+//     vectors were lost to a crash (#402 A2), and rewrites the index snapshot on
+//     its autosave timer. Restoring a rename that a killed process never got to
+//     make is the same class of self-repair, and it lands the corpus in the
+//     state the operator last saw rather than in a new one.
+//
+// The cost is the same narrow window #761 accepted: a crash between the rebuild
+// becoming durable and commit deleting the backups makes us restore an older
+// complete generation over a newer complete one. Both are valid indices, the
+// restored hashes make the next ingest pass re-index anything that changed since,
+// and an older complete index is strictly better to serve than a partial one.
+//
+// Failure to recover IS fatal, because the only alternative left at that point is
+// to serve the partial generation. Two servers starting in the same instant, both
+// before either has claimed the pid file, are lock-free here (the ownership check
+// below sees no owner for either), but the failure mode is benign: the rename is
+// atomic, so the loser finds the backup already gone, reports that it could not
+// restore it, and exits without serving, which is the start the single-instance
+// lock was about to refuse anyway.
+//
+// A healthy corpus pays one os.ReadDir and one "does the snapshot table exist"
+// query, and nothing is written.
+//
+// --read-only does not exempt a corpus from this. That flag governs what the
+// server does to the corpus once it is open (no ingest, no embedding), not
+// whether the state directory may be repaired before it can be opened at all;
+// `up` already requires a writable state directory there (it creates and hardens
+// the tree). A read-only server is in fact the case that most needs the repair,
+// since it never re-indexes its way out of a partial generation.
+func (a *App) openStateForServing(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, builtIndex, builtIndex, int) {
+	// Never repair a corpus another daemon already owns: renaming an index file
+	// out from under its open handles is worse than anything repaired here. `up`
+	// claims the single-instance lock much further down (it needs the bound
+	// listener first), so the pid file is the only ownership signal available this
+	// early, and it is the one `reindex` guards itself with.
+	//
+	// A live owner is refused, not merely skipped. Skipping the repair and
+	// carrying on would reintroduce this issue through the back door: if the owner
+	// exits between this check and the lock claim, that claim SUCCEEDS (it
+	// reconciles a dead owner) and we would go on to serve a corpus we
+	// deliberately did not repair. Refusing costs nothing, because a live owner
+	// makes acquireSingleInstanceLock refuse this start anyway; it just says so
+	// before opening sqlite and rehydrating two snapshots, using that same
+	// contract's wording. A start refused this way recovers on its next attempt,
+	// once the pid file no longer names a live process.
+	//
+	// The daemon child is unaffected: its parent clears the pid file before
+	// forking and writes it only once the child reports ready.
+	if pid, ownership := classifyPIDFile(pidFilePath(cfg.StateDir)); ownership == pidLive {
+		writeCLIError(a.stderr, jsonOutput, exitGeneric,
+			fmt.Sprintf("%v for %s (pid %d)", errAlreadyRunning, cfg.StateDir, pid),
+			"Another dir2mcp server is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
+		)
+		return nil, builtIndex{}, builtIndex{}, exitGeneric
+	}
+	// Must run before the indices are loaded below: once a partial snapshot is
+	// rehydrated, the autosave timer will write it back over the live slot.
+	// prepareUpDirectories has already run, so the state tree (backups included)
+	// is hardened and a restored file keeps its owner-only mode across the rename.
+	recovered, err := recoverInterruptedReindex(cfg.StateDir)
+	if err != nil {
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure, fmt.Sprintf("recover interrupted reindex: %v", err),
+			"The last-known-good index generation is still on disk as *"+reindexBackupSuffix+" in the state directory; fix the error above, then start the server again or rebuild with `dir2mcp reindex`.")
+		return nil, builtIndex{}, builtIndex{}, exitIndexLoadFailure
+	}
+	if len(recovered) > 0 {
+		// Loud on purpose, and durable: teeServerLog is already installed, so this
+		// reaches <state_dir>/server.log and the support bundle, which is where an
+		// operator looks after the fact to explain a rebuild that never finished.
+		writef(a.stderr, "warning: an interrupted reindex left this corpus inconsistent; restored %d last-known-good index file(s) before serving: %s\n",
+			len(recovered), strings.Join(recovered, ", "))
+	}
+	st, textBuilt, codeBuilt, code := a.initStoreAndIndices(ctx, cfg, jsonOutput)
+	if code != exitSuccess {
+		return nil, builtIndex{}, builtIndex{}, code
+	}
+	// Detached from ctx for the same reason the reindex rollback is: a Ctrl-C
+	// during startup must not abandon the rollback half-done, leaving a restored
+	// index behind a cleared gate.
+	if err := restoreInterruptedReindexHashes(context.WithoutCancel(ctx), st); err != nil {
+		closeBuiltIndex(textBuilt)
+		closeBuiltIndex(codeBuilt)
+		_ = st.Close()
+		writeCLIError(a.stderr, jsonOutput, exitIndexLoadFailure,
+			fmt.Sprintf("recover interrupted reindex: restore content hashes: %v", err),
+			"An interrupted reindex left a content-hash snapshot this server could not roll back; rebuild with `dir2mcp reindex`.")
+		return nil, builtIndex{}, builtIndex{}, exitIndexLoadFailure
+	}
+	return st, textBuilt, codeBuilt, exitSuccess
+}
+
+// closeBuiltIndex closes a loaded index, tolerating the nil index a single-axis
+// configuration leaves behind (closing a nil model.Index would panic).
+func closeBuiltIndex(b builtIndex) {
+	if b.index != nil {
+		_ = b.index.Close()
+	}
+}
+
 // initStoreAndIndices initialises the metadata store and both vector indices,
 // dispatching on cfg.IndexBackend ("memory" default | "disk" | "qdrant" |
 // "pgvector"; issues #246, #268, #269). On success the caller is responsible for
 // closing all three.
+//
+// `up` reaches this through openStateForServing, which repairs an interrupted
+// reindex first. The distributed embed worker calls it directly, deliberately: a
+// worker starts BESIDE a live daemon that already has these files open, so it
+// must never rename one out from under it. The daemon owns that repair.
 func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, builtIndex, builtIndex, int) {
 	st := a.storeForConfig(*cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
