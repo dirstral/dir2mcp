@@ -90,7 +90,11 @@ func (a *App) downWithoutLiveDaemon(global globalOptions, stateDir, pidPath stri
 		reason, reportedPID = "recycled_pid", pid
 	}
 	if ownership != pidNoFile {
-		_ = removePIDFile(pidPath)
+		// Report a failed removal. The pid record names no live daemon, so the
+		// exit code stays 0, but the operator must know that residue remains.
+		if err := removePIDFile(pidPath); err != nil {
+			writef(a.stderr, "warning: remove pid file %s: %v\n", pidPath, err)
+		}
 	}
 	// No daemon owns this state directory, so any connection.json is residue
 	// from a crashed or already-stopped run. Clients and installers read that
