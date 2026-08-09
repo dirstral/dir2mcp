@@ -243,9 +243,10 @@ func TestUp_HealthyCorpus_IsUntouchedByRecovery(t *testing.T) {
 
 // TestUp_LiveDaemon_LeavesTheCorpusAlone pins the ownership guard: a second
 // server starting against a corpus a live daemon already owns must not rename
-// index files out from under that daemon's open handles. Its start is refused by
-// the single-instance lock either way, so the repair belongs to the process that
-// actually serves the corpus.
+// index files out from under that daemon's open handles, and must refuse rather
+// than carry on unrepaired: an owner that exits a moment later would otherwise
+// let this process take the corpus over and serve exactly the partial generation
+// this issue is about.
 func TestUp_LiveDaemon_LeavesTheCorpusAlone(t *testing.T) {
 	realToken := requireStartTokens(t)
 	tmp := t.TempDir()
@@ -258,9 +259,17 @@ func TestUp_LiveDaemon_LeavesTheCorpusAlone(t *testing.T) {
 		t.Fatalf("seed live pid file: %v", err)
 	}
 
-	code, stderr, _ := upStartupProbe(t, tmp)
+	code, stderr, indices := upStartupProbe(t, tmp)
 	if code == 0 {
 		t.Fatalf("up must refuse to start while a daemon owns the corpus; stderr=%q", stderr)
+	}
+	if !strings.Contains(stderr, "already running") {
+		t.Errorf("the refusal must use the single-instance contract's wording; stderr=%q", stderr)
+	}
+	// Refusing before the corpus is opened is the point: a process that got as far
+	// as loading the index would be one reconciled pid file away from serving it.
+	if len(indices) != 0 {
+		t.Errorf("the refusal must happen before any index is opened; built %d", len(indices))
 	}
 	if got := readFileString(t, live+crashBackupSuffix); got != crashGoodIndex {
 		t.Errorf("the backup slot must be untouched while another daemon owns the corpus; want %q got %q", crashGoodIndex, got)

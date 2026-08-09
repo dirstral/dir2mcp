@@ -701,9 +701,9 @@ type indexLoadFailure struct {
 // and an older complete index is strictly better to serve than a partial one.
 //
 // Failure to recover IS fatal, because the only alternative left at that point is
-// to serve the partial generation. Two servers starting against the same corpus
-// in the same instant are still lock-free here (see the pid check below for what
-// that does and does not cover), but the failure mode is benign: the rename is
+// to serve the partial generation. Two servers starting in the same instant, both
+// before either has claimed the pid file, are lock-free here (the ownership check
+// below sees no owner for either), but the failure mode is benign: the rename is
 // atomic, so the loser finds the backup already gone, reports that it could not
 // restore it, and exits without serving, which is the start the single-instance
 // lock was about to refuse anyway.
@@ -718,20 +718,30 @@ type indexLoadFailure struct {
 // the tree). A read-only server is in fact the case that most needs the repair,
 // since it never re-indexes its way out of a partial generation.
 func (a *App) openStateForServing(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, builtIndex, builtIndex, int) {
-	// Never repair a corpus another daemon is already serving: renaming an index
-	// file out from under its open handles is worse than anything repaired here.
-	// `up` claims the single-instance lock much further down (it needs the bound
-	// listener first), so the pid file is the only ownership signal available at
-	// this point, and it is the one `reindex` already guards itself with.
+	// Never repair a corpus another daemon already owns: renaming an index file
+	// out from under its open handles is worse than anything repaired here. `up`
+	// claims the single-instance lock much further down (it needs the bound
+	// listener first), so the pid file is the only ownership signal available this
+	// early, and it is the one `reindex` guards itself with.
 	//
-	// Skipping is safe rather than merely convenient: pidLive means the pid is
-	// alive, and acquireSingleInstanceLock refuses every start whose pid file
-	// names a live process. So this branch is only ever taken by a start that is
-	// about to be refused, never by one that goes on to serve the partial
-	// generation. The daemon child is unaffected: its parent clears the pid file
-	// before forking and writes it only once the child reports ready.
-	if _, ownership := classifyPIDFile(pidFilePath(cfg.StateDir)); ownership == pidLive {
-		return a.initStoreAndIndices(ctx, cfg, jsonOutput)
+	// A live owner is refused, not merely skipped. Skipping the repair and
+	// carrying on would reintroduce this issue through the back door: if the owner
+	// exits between this check and the lock claim, that claim SUCCEEDS (it
+	// reconciles a dead owner) and we would go on to serve a corpus we
+	// deliberately did not repair. Refusing costs nothing, because a live owner
+	// makes acquireSingleInstanceLock refuse this start anyway; it just says so
+	// before opening sqlite and rehydrating two snapshots, using that same
+	// contract's wording. A start refused this way recovers on its next attempt,
+	// once the pid file no longer names a live process.
+	//
+	// The daemon child is unaffected: its parent clears the pid file before
+	// forking and writes it only once the child reports ready.
+	if pid, ownership := classifyPIDFile(pidFilePath(cfg.StateDir)); ownership == pidLive {
+		writeCLIError(a.stderr, jsonOutput, exitGeneric,
+			fmt.Sprintf("%v for %s (pid %d)", errAlreadyRunning, cfg.StateDir, pid),
+			"Another dir2mcp server is already running for this state directory; check with `dir2mcp status` or stop it with `dir2mcp down`.",
+		)
+		return nil, builtIndex{}, builtIndex{}, exitGeneric
 	}
 	// Must run before the indices are loaded below: once a partial snapshot is
 	// rehydrated, the autosave timer will write it back over the live slot.
