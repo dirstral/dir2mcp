@@ -241,6 +241,38 @@ func TestUp_HealthyCorpus_IsUntouchedByRecovery(t *testing.T) {
 	}
 }
 
+// TestUp_LiveDaemon_LeavesTheCorpusAlone pins the ownership guard: a second
+// server starting against a corpus a live daemon already owns must not rename
+// index files out from under that daemon's open handles. Its start is refused by
+// the single-instance lock either way, so the repair belongs to the process that
+// actually serves the corpus.
+func TestUp_LiveDaemon_LeavesTheCorpusAlone(t *testing.T) {
+	realToken := requireStartTokens(t)
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	const relPath = "docs/a.md"
+	live := seedCrashedReindexState(t, stateDir, relPath)
+	// This process's pid with its real start-time token is, by the identity
+	// check, our own live daemon.
+	if err := cli.WritePIDRecordForTest(filepath.Join(stateDir, "server.pid"), os.Getpid(), realToken); err != nil {
+		t.Fatalf("seed live pid file: %v", err)
+	}
+
+	code, stderr, _ := upStartupProbe(t, tmp)
+	if code == 0 {
+		t.Fatalf("up must refuse to start while a daemon owns the corpus; stderr=%q", stderr)
+	}
+	if got := readFileString(t, live+crashBackupSuffix); got != crashGoodIndex {
+		t.Errorf("the backup slot must be untouched while another daemon owns the corpus; want %q got %q", crashGoodIndex, got)
+	}
+	if got := readFileString(t, live); got != crashPartialIndex {
+		t.Errorf("the live slot must be untouched while another daemon owns the corpus; want %q got %q", crashPartialIndex, got)
+	}
+	if got := readDocumentHash(t, stateDir, relPath); got != "" {
+		t.Errorf("the content-hash gate must be untouched while another daemon owns the corpus; want %q got %q", "", got)
+	}
+}
+
 // TestUp_RecoveryFailure_RefusesToServe pins the fallback: when the
 // last-known-good generation cannot be put back, the only thing left to serve is
 // the partial one, so the server must refuse to start rather than come up

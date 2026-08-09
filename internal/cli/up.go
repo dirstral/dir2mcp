@@ -701,7 +701,12 @@ type indexLoadFailure struct {
 // and an older complete index is strictly better to serve than a partial one.
 //
 // Failure to recover IS fatal, because the only alternative left at that point is
-// to serve the partial generation.
+// to serve the partial generation. Two servers starting against the same corpus
+// in the same instant are still lock-free here (see the pid check below for what
+// that does and does not cover), but the failure mode is benign: the rename is
+// atomic, so the loser finds the backup already gone, reports that it could not
+// restore it, and exits without serving, which is the start the single-instance
+// lock was about to refuse anyway.
 //
 // A healthy corpus pays one os.ReadDir and one "does the snapshot table exist"
 // query, and nothing is written.
@@ -713,6 +718,21 @@ type indexLoadFailure struct {
 // the tree). A read-only server is in fact the case that most needs the repair,
 // since it never re-indexes its way out of a partial generation.
 func (a *App) openStateForServing(ctx context.Context, cfg *config.Config, jsonOutput bool) (model.Store, builtIndex, builtIndex, int) {
+	// Never repair a corpus another daemon is already serving: renaming an index
+	// file out from under its open handles is worse than anything repaired here.
+	// `up` claims the single-instance lock much further down (it needs the bound
+	// listener first), so the pid file is the only ownership signal available at
+	// this point, and it is the one `reindex` already guards itself with.
+	//
+	// Skipping is safe rather than merely convenient: pidLive means the pid is
+	// alive, and acquireSingleInstanceLock refuses every start whose pid file
+	// names a live process. So this branch is only ever taken by a start that is
+	// about to be refused, never by one that goes on to serve the partial
+	// generation. The daemon child is unaffected: its parent clears the pid file
+	// before forking and writes it only once the child reports ready.
+	if _, ownership := classifyPIDFile(pidFilePath(cfg.StateDir)); ownership == pidLive {
+		return a.initStoreAndIndices(ctx, cfg, jsonOutput)
+	}
 	// Must run before the indices are loaded below: once a partial snapshot is
 	// rehydrated, the autosave timer will write it back over the live slot.
 	// prepareUpDirectories has already run, so the state tree (backups included)
