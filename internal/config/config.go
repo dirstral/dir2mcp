@@ -2588,21 +2588,6 @@ func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
 // applyIngestModesFileParsed copies the set ingest discovery/mode file
 // fields (gitignore, symlinks, size limit, per-type modes, extractor)
 // onto cfg.
-// applyIngestExcludeDirsFileParsed copies a set `ingest.exclude_dirs` onto cfg.
-// A present key replaces the default list in full (SPEC §7.1, #773), so the
-// merge is an assignment, not an append. It is split out of
-// applyIngestModesFileParsed to keep that function inside the cyclomatic budget.
-func applyIngestExcludeDirsFileParsed(cfg *Config, fc fileConfig) {
-	if fc.IngestExcludeDirs == nil {
-		return
-	}
-	resolved, warn := resolveExcludeDirs(normalizeStringSlice(fc.IngestExcludeDirs))
-	cfg.IngestExcludeDirs = resolved
-	if warn != nil {
-		cfg.Warnings = append(cfg.Warnings, warn)
-	}
-}
-
 func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestGitignore != nil {
 		cfg.IngestGitignore = *fc.IngestGitignore
@@ -2646,6 +2631,21 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.IngestWatchDebounce != nil {
 		cfg.IngestWatchDebounce = *fc.IngestWatchDebounce
+	}
+}
+
+// applyIngestExcludeDirsFileParsed copies a set `ingest.exclude_dirs` onto cfg.
+// A present key replaces the default list in full (SPEC §7.1, #773), so the
+// merge is an assignment, not an append. It is split out of
+// applyIngestModesFileParsed to keep that function inside the cyclomatic budget.
+func applyIngestExcludeDirsFileParsed(cfg *Config, fc fileConfig) {
+	if fc.IngestExcludeDirs == nil {
+		return
+	}
+	resolved, warn := resolveExcludeDirs(normalizeStringSlice(fc.IngestExcludeDirs))
+	cfg.IngestExcludeDirs = resolved
+	if warn != nil {
+		cfg.Warnings = append(cfg.Warnings, warn)
 	}
 }
 
