@@ -226,10 +226,17 @@ func (d *DropSet) Scrub(text string) string {
 	return strings.TrimSpace(strings.Trim(text, ",;:—- "))
 }
 
-// CleanOptions configures the export-time cue-cleaning pass (port of the pilot's
+// CleanOptions configures the cue-cleaning pass (port of the pilot's
 // clean_srt.py). All fields are additive and off by default, so a zero
-// CleanOptions leaves cues unchanged. It is applied AFTER WordFilter on export,
-// so filter_words removal and this cleanup compose.
+// CleanOptions leaves cues unchanged. It is applied AFTER WordFilter, so
+// filter_words removal and this cleanup compose.
+//
+// The same options value drives BOTH surfaces: the export pass (CleanCues over
+// built cues) and the ingest pass (internal/ingest applies the hallucination
+// filters to chunk segments before embedding, issue #765), so the index and the
+// exported sidecar agree cue-for-cue. Glossary is the one field ingest does NOT
+// set; see MediaSubtitlesGlossary in internal/config for why it stays
+// export-only.
 type CleanOptions struct {
 	// DropURLs drops any cue whose text looks like a hallucinated URL / domain /
 	// credit line (whisper emits these over silence or music).
@@ -269,24 +276,82 @@ func (o CleanOptions) Active() bool {
 // [\w-] label immediately abutting a letter-led TLD.
 var urlCueRE = regexp.MustCompile(`(?i)(https?://|www\.|\b[\w-]+\.[a-z]{2,24}\b)`)
 
-// CleanCues applies the configured cleanup passes to cues in order: drop empty
-// cues, drop URL/credit hallucinations, collapse identical-consecutive runs, and
-// rewrite text via the glossary (dropping any cue the rewrite empties). Surviving
-// cues are re-indexed gap-free (as FilterCues does). Timing is preserved verbatim.
-// A zero/empty CleanOptions returns cues unchanged.
+// IsURLCue reports whether text looks like a hallucinated URL / bare domain /
+// credit line (see urlCueRE). It is exported because the ingest pass makes the
+// same verdict on chunk segments before embedding (issue #765): sharing the one
+// regexp is what keeps the dropped-at-export and dropped-at-ingest sets
+// identical, instead of two pattern copies that drift apart.
+func IsURLCue(text string) bool {
+	return urlCueRE.MatchString(text)
+}
+
+// RepeatCollapser is the stateful half of the collapse_repeats pass: it walks a
+// cue (or chunk-segment) sequence in order and reports which entries fall in the
+// tail of a run of identical consecutive texts. It is exported for the same
+// reason as IsURLCue: ingest collapses the runs before embedding and must count
+// runs exactly the way export does (issue #765).
+//
+// A limit < 2 disables the pass, so legitimate short repeats ("Yes." "Yes.")
+// survive and only long identical runs (the whisper repetition-collapse
+// artifact) are collapsed.
+type RepeatCollapser struct {
+	limit  int
+	text   string
+	runLen int
+}
+
+// NewRepeatCollapser returns a collapser keeping the first limit-1 entries of
+// every identical-consecutive run. limit < 2 yields an inactive collapser whose
+// Drop is always false.
+func NewRepeatCollapser(limit int) *RepeatCollapser {
+	return &RepeatCollapser{limit: limit}
+}
+
+// Active reports whether the collapser drops anything. When false, Drop is
+// always false and callers can skip it.
+func (c *RepeatCollapser) Active() bool {
+	return c != nil && c.limit >= 2
+}
+
+// Drop advances the run state with the next text and reports whether that entry
+// should be dropped. Callers MUST pass every surviving entry, in order, even
+// when they ignore the verdict: the run counter is what makes "the Nth and later
+// identical entry" meaningful. The comparison anchor updates only when the text
+// changes, so a run of K identical entries keeps the first limit-1 and drops the
+// rest.
+func (c *RepeatCollapser) Drop(text string) bool {
+	if !c.Active() {
+		return false
+	}
+	if text == c.text {
+		c.runLen++
+		return c.runLen >= c.limit
+	}
+	c.text = text
+	c.runLen = 1
+	return false
+}
+
+// CleanCues applies the configured cleanup passes to cues in this order: drop
+// empty cues, drop URL/credit hallucinations, drop wholly-spam cues, scrub a
+// leaked phrase out of a real cue, collapse identical-consecutive runs, and
+// rewrite text via the glossary (dropping any cue the rewrite empties). The
+// order is load-bearing and is mirrored by the ingest pass (issue #765): see
+// applyCueCleaningToSegments in internal/ingest for the per-step reasoning.
+// Surviving cues are re-indexed gap-free (as FilterCues does). Timing is
+// preserved verbatim. A zero/empty CleanOptions returns cues unchanged.
 func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 	if !opts.Active() {
 		return cues
 	}
 	out := make([]Cue, 0, len(cues))
-	var runText string
-	var runLen int
+	collapse := NewRepeatCollapser(opts.CollapseRepeats)
 	for _, cue := range cues {
 		text := strings.TrimSpace(cue.Text)
 		if text == "" {
 			continue
 		}
-		if opts.DropURLs && urlCueRE.MatchString(text) {
+		if opts.DropURLs && IsURLCue(text) {
 			continue
 		}
 		if opts.Drop.IsSpam(text) {
@@ -301,20 +366,10 @@ func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 				continue
 			}
 		}
-		// Repetition-collapse compares the pre-glossary text so a rewrite cannot
-		// mask a collapse run. The comparison anchor (runText) updates only when
-		// the text changes, so a run of K identical cues keeps the first
-		// CollapseRepeats-1 and drops the rest.
-		if opts.CollapseRepeats >= 2 {
-			if text == runText {
-				runLen++
-				if runLen >= opts.CollapseRepeats {
-					continue
-				}
-			} else {
-				runText = text
-				runLen = 1
-			}
+		// Repetition-collapse compares the post-scrub, pre-glossary text so
+		// neither a leaked phrase nor a rewrite can mask a collapse run.
+		if collapse.Drop(text) {
+			continue
 		}
 		if opts.Glossary.Active() {
 			// Re-trim after the rewrite: a glossary rule may empty a cue (an empty

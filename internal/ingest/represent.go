@@ -1111,53 +1111,105 @@ func applyWordFilterToSegments(segs []chunkSegment, filter *subtitle.WordFilter)
 	return out
 }
 
-// applyDropScrubToSegments applies the configured subtitle drop/scrub cleaning
-// (config media.subtitles.drop_phrases / scrub_phrases) to each chunk segment's
-// text at INGEST, before embedding — mirroring applyWordFilterToSegments for
-// media.filter_words, so the same phrases that are stripped from the exported
-// sidecar are also stripped from what gets chunked and embedded (issue #545).
-// A segment whose text is composed ENTIRELY of drop phrases (DropSet.IsSpam) is
-// dropped, so whisper keyword-spam over non-speech is never embedded; a segment
-// carrying a leaked phrase glued to real speech is scrubbed (DropSet.Scrub) and
-// kept, and dropped only if the scrub empties it. Both sets are the exact same
-// subtitle primitives the export path invokes (subtitle.CleanCues →
-// DropSet.IsSpam/Scrub) built from the same config keys, so the index and the
-// exported sidecar agree cue-for-cue. Nil/inactive sets return segs unchanged,
-// so the empty-config path is a byte-for-byte no-op. Drop is applied before
-// scrub (matching CleanCues ordering); spans (timing) are preserved verbatim on
-// surviving segments.
-func applyDropScrubToSegments(segs []chunkSegment, drop, scrub *subtitle.DropSet) []chunkSegment {
-	if !drop.Active() && !scrub.Active() {
+// applyCueCleaningToSegments is the ingest-time cue-cleaning pass: it applies
+// the configured media.subtitles.* hallucination filters (drop_urls,
+// drop_phrases, scrub_phrases, collapse_repeats) to each chunk segment's text
+// before embedding, using the very same subtitle primitives the export pass
+// invokes (subtitle.IsURLCue, DropSet.IsSpam/Scrub, subtitle.RepeatCollapser).
+// #545 moved drop_phrases/scrub_phrases here; #765 moved drop_urls/
+// collapse_repeats, which had stayed export-only, so a hallucinated URL cue or a
+// repetition artifact was stripped from the exported sidecar and left embedded:
+// retrievable, and citable for a span where nobody said anything.
+//
+// The segment IS the cue unit on both sides, which is what makes "the index and
+// the exported sidecar agree cue-for-cue" literally true: export re-derives its
+// cues from these stored chunks (BuildCues over TranscriptSpanChunks), so a
+// verdict made per-segment here is a verdict made on exactly the text export
+// will clean. It also means a merged chunk is dropped whole when any of its cues
+// trips drop_urls, which is precisely what export does with the same chunk; both
+// passes are opt-in for that reason.
+//
+// Order is deliberate and mirrors subtitle.CleanCues step for step, because the
+// passes do NOT commute:
+//   - drop_urls first: it is a whole-segment verdict on the ORIGINAL text. Run
+//     after a scrub, an excision could remove the very token that identified the
+//     segment as a credit line, so the same segment would be dropped on export
+//     and kept in the index.
+//   - drop_phrases before scrub_phrases: a wholly-spam segment must be dropped
+//     outright rather than scrubbed down to a punctuation husk that then reads
+//     as an empty-but-present cue.
+//   - collapse_repeats LAST, on the post-scrub text: two segments that differ
+//     only by a leaked hallucination phrase are the same cue once scrubbed, and
+//     a run must be counted on the text that is actually stored. Counting first
+//     would miss that run in the index while export (which scrubs first) drops
+//     it, and the two would disagree.
+//
+// media.subtitles.glossary is deliberately NOT applied here: SPEC §8.6.2 pins it
+// as a deterministic, export-time find/replace on already-rendered cue text, so
+// rewriting indexed text with it is a spec change, not a bug fix. Were it ever
+// added, it would have to run AFTER the collapse (a rewrite can make two
+// distinct texts identical and fabricate a run), exactly as CleanCues orders it.
+//
+// Inactive options return segs unchanged, so the off-by-default path is a
+// byte-for-byte no-op. Spans (timing) are preserved verbatim on surviving
+// segments.
+func applyCueCleaningToSegments(segs []chunkSegment, opts subtitle.CleanOptions) []chunkSegment {
+	if !opts.Active() {
 		return segs
 	}
 	out := make([]chunkSegment, 0, len(segs))
+	collapse := subtitle.NewRepeatCollapser(opts.CollapseRepeats)
 	for _, seg := range segs {
-		if drop.IsSpam(seg.Text) {
+		cleaned, keep := cleanSegment(seg, opts)
+		if !keep {
 			continue
 		}
-		if scrub.Active() {
-			scrubbed := scrub.Scrub(seg.Text)
-			if strings.TrimSpace(scrubbed) == "" {
-				continue
-			}
-			// Only touch a segment the scrub actually changed. filterWordSpansToText
-			// is an approximate multiset token match, so re-running it on an
-			// UNCHANGED segment risks silently dropping a word timing on any
-			// tokenization/punctuation mismatch (numerals, contractions) — for every
-			// segment when scrub_phrases is set, not just scrubbed ones. An unchanged
-			// segment keeps its Text and Span.Words verbatim.
-			if scrubbed != seg.Text {
-				seg.Text = scrubbed
-				// Excise the scrubbed words from the per-word timings too: Span.Words is
-				// later rebuilt into broadcast cues / other word-level consumers, so
-				// leaving the removed phrase's words here would re-introduce the spam the
-				// scrub just removed from Text.
-				seg.Span.Words = filterWordSpansToText(seg.Span.Words, scrubbed)
-			}
+		// Every surviving segment must be fed to the collapser, in order, or the
+		// run counter loses track of which repeat is the Nth.
+		if collapse.Drop(cleaned.Text) {
+			continue
 		}
-		out = append(out, seg)
+		out = append(out, cleaned)
 	}
 	return out
+}
+
+// cleanSegment applies the per-segment half of the cleaning (the passes that
+// judge a segment on its own, independent of its neighbours) to one chunk
+// segment and reports whether it survives. The stateful collapse pass is the
+// caller's job. A segment no rule matched is returned verbatim, byte for byte.
+func cleanSegment(seg chunkSegment, opts subtitle.CleanOptions) (chunkSegment, bool) {
+	if strings.TrimSpace(seg.Text) == "" {
+		return seg, false
+	}
+	if opts.DropURLs && subtitle.IsURLCue(seg.Text) {
+		return seg, false
+	}
+	if opts.Drop.IsSpam(seg.Text) {
+		return seg, false
+	}
+	if !opts.Scrub.Active() {
+		return seg, true
+	}
+	scrubbed := opts.Scrub.Scrub(seg.Text)
+	if strings.TrimSpace(scrubbed) == "" {
+		return seg, false
+	}
+	// Only touch a segment the scrub actually changed. filterWordSpansToText
+	// is an approximate multiset token match, so re-running it on an
+	// UNCHANGED segment risks silently dropping a word timing on any
+	// tokenization/punctuation mismatch (numerals, contractions) — for every
+	// segment when scrub_phrases is set, not just scrubbed ones. An unchanged
+	// segment keeps its Text and Span.Words verbatim.
+	if scrubbed != seg.Text {
+		seg.Text = scrubbed
+		// Excise the scrubbed words from the per-word timings too: Span.Words is
+		// later rebuilt into broadcast cues / other word-level consumers, so
+		// leaving the removed phrase's words here would re-introduce the spam the
+		// scrub just removed from Text.
+		seg.Span.Words = filterWordSpansToText(seg.Span.Words, scrubbed)
+	}
+	return seg, true
 }
 
 // filterWordSpansToText drops per-word timings whose token is no longer present
@@ -1792,17 +1844,26 @@ func ChunkTranscriptByTimeWithWordsFiltered(content string, words []model.TimedW
 	return out
 }
 
-// ApplyDropScrubToSegments is the exported counterpart of
-// applyDropScrubToSegments, exposed for tests in the tests/ tree. It applies the
-// configured subtitle drop/scrub cleaning to chunk segments exactly as the ingest
-// path does after chunking (before persistence/embedding). Nil/inactive sets
-// return the input unchanged.
+// ApplyDropScrubToSegments applies just the drop_phrases/scrub_phrases half of
+// the ingest cue cleaning, exposed for tests in the tests/ tree. It is a thin
+// wrapper over ApplyCueCleaningToSegments so the drop/scrub coverage predating
+// #765 keeps exercising the production path. Nil/inactive sets return the input
+// unchanged.
 func ApplyDropScrubToSegments(segs []ChunkSegment, drop, scrub *subtitle.DropSet) []ChunkSegment {
+	return ApplyCueCleaningToSegments(segs, subtitle.CleanOptions{Drop: drop, Scrub: scrub})
+}
+
+// ApplyCueCleaningToSegments is the exported counterpart of
+// applyCueCleaningToSegments, exposed for tests in the tests/ tree. It applies
+// the configured media.subtitles.* cue cleaning to chunk segments exactly as the
+// ingest path does after chunking (before persistence/embedding). Inactive
+// options return the input unchanged.
+func ApplyCueCleaningToSegments(segs []ChunkSegment, opts subtitle.CleanOptions) []ChunkSegment {
 	raw := make([]chunkSegment, len(segs))
 	for i, seg := range segs {
 		raw[i] = chunkSegment(seg)
 	}
-	cleaned := applyDropScrubToSegments(raw, drop, scrub)
+	cleaned := applyCueCleaningToSegments(raw, opts)
 	out := make([]ChunkSegment, 0, len(cleaned))
 	for _, seg := range cleaned {
 		out = append(out, ChunkSegment(seg))

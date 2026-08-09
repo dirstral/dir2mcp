@@ -363,15 +363,18 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 	}
 	sort.Strings(langs)
 
-	// Build the drop/scrub sets once for all languages; they are config-derived
-	// and language-independent. They strip configured subtitle drop/scrub phrases
-	// from the chunk text before embedding (issue #545), the same cleaning the
-	// export path applies to the sidecar. Off by default (inactive sets = no-op).
-	dropSet, scrubSet := s.captionDropScrub()
+	// Build the cleaning options once for all languages; they are config-derived
+	// and language-independent. They apply the configured media.subtitles.*
+	// cleaning to the chunk text before embedding (issues #545, #765), the same
+	// cleaning the export path applies to the sidecar. Off by default (inactive
+	// options = no-op). The collapse-repeats run counter stays per language: each
+	// applyCueCleaningToSegments call builds a fresh collapser, so one language's
+	// trailing cue can never start a run in the next.
+	cleanOpts := s.captionCleanOptions()
 	ingested := false
 	for _, lang := range langs {
 		segments := chunkSubtitleCuesFiltered(groups[lang], s.captionWordFilter())
-		segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
+		segments = applyCueCleaningToSegments(segments, cleanOpts)
 		if len(segments) == 0 {
 			continue
 		}
