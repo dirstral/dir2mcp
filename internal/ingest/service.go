@@ -1039,6 +1039,8 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options := DefaultDiscoverOptions()
 	options.UseGitIgnore = cfg.IngestGitignore
 	options.FollowSymlinks = cfg.IngestFollowSymlinks
+	// One resolved list for the scan, the watcher, and the S3 lister (#773).
+	options.ExcludeDirs = append([]string(nil), cfg.IngestExcludeDirs...)
 	if cfg.IngestMaxFileMB > 0 {
 		options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * 1024 * 1024
 	}

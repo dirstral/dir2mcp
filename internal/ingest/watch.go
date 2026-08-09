@@ -65,7 +65,8 @@ func (s *Service) Watch(ctx context.Context) error {
 	}
 	defer func() { _ = watcher.Close() }()
 
-	if err := s.addWatchDirs(watcher, absRoot, DiscoverOptionsFromConfig(s.cfg).FollowSymlinks); err != nil {
+	discoverOpts := DiscoverOptionsFromConfig(s.cfg)
+	if err := s.addWatchDirs(watcher, absRoot, discoverOpts); err != nil {
 		// A failure to register some dirs is non-fatal — the safety rescan
 		// still catches changes there. Log and continue.
 		s.getLogger().Printf("watch: registering directories: %v", err)
@@ -86,7 +87,8 @@ func (s *Service) Watch(ctx context.Context) error {
 		watcher:  watcher,
 		absRoot:  absRoot,
 		secrets:  secrets,
-		opts:     DiscoverOptionsFromConfig(s.cfg),
+		opts:     discoverOpts,
+		excluded: discoverOpts.ExcludedDirs(),
 		debounce: debounce,
 		pending:  make(map[string]*time.Timer),
 		fire:     make(chan watchJob, 256),
@@ -100,11 +102,14 @@ type watchJob struct {
 }
 
 type fsWatchLoop struct {
-	svc      *Service
-	watcher  *fsnotify.Watcher
-	absRoot  string
-	secrets  []*regexp.Regexp
-	opts     DiscoverOptions
+	svc     *Service
+	watcher *fsnotify.Watcher
+	absRoot string
+	secrets []*regexp.Regexp
+	opts    DiscoverOptions
+	// excluded is the directory ignore set resolved from opts once, so every
+	// watch decision reads the list the initial scan read (#773).
+	excluded corpusfs.ExcludedDirSet
 	debounce time.Duration
 
 	mu      sync.Mutex
@@ -207,7 +212,7 @@ func (w *fsWatchLoop) handleEvent(ev fsnotify.Event) {
 		// since fsnotify is not recursive and the Create events for nested
 		// children were emitted before we were watching them.
 		if info, err := os.Stat(abs); err == nil && info.IsDir() {
-			if !shouldSkipDirectory(filepath.Base(abs)) {
+			if !shouldSkipDirectory(w.excluded, filepath.Base(abs)) {
 				w.registerNewTree(abs)
 			}
 			return
@@ -248,7 +253,7 @@ func (w *fsWatchLoop) registerNewTree(absDir string) {
 			)
 			return
 		}
-		walkWatchTree(absDir, rootResolved, map[string]struct{}{}, addDir, armFile)
+		walkWatchTree(absDir, rootResolved, w.excluded, map[string]struct{}{}, addDir, armFile)
 		return
 	}
 	_ = filepath.WalkDir(absDir, func(path string, d os.DirEntry, err error) error {
@@ -256,7 +261,7 @@ func (w *fsWatchLoop) registerNewTree(absDir string) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != absDir && shouldSkipDirectory(d.Name()) {
+			if path != absDir && shouldSkipDirectory(w.excluded, d.Name()) {
 				return filepath.SkipDir
 			}
 			addDir(path)
@@ -452,8 +457,10 @@ func matchesGitignoreForFile(absRoot, relPath string) (bool, error) {
 // fsnotify is not recursive, so each directory must be added individually. A
 // single unwatchable directory does not abort registration of its siblings;
 // per-directory failures are aggregated and returned.
-func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, followSymlinks bool) error {
+func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, opts DiscoverOptions) error {
 	var errs []error
+	followSymlinks := opts.FollowSymlinks
+	excluded := opts.ExcludedDirs()
 	add := func(path string) {
 		if addErr := watcher.Add(path); addErr != nil {
 			errs = append(errs, fmt.Errorf("watch %s: %w", path, addErr))
@@ -473,7 +480,7 @@ func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, follow
 		if _, ok := corpusfs.ResolveSymlinkWithinRoot(rootResolved, absRoot); !ok {
 			return fmt.Errorf("watch %s: corpus root did not resolve; no directories watched", absRoot)
 		}
-		walkWatchTree(absRoot, rootResolved, map[string]struct{}{}, add, nil)
+		walkWatchTree(absRoot, rootResolved, excluded, map[string]struct{}{}, add, nil)
 		return errors.Join(errs...)
 	}
 	_ = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
@@ -483,7 +490,7 @@ func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, follow
 		if !d.IsDir() {
 			return nil
 		}
-		if path != absRoot && shouldSkipDirectory(d.Name()) {
+		if path != absRoot && shouldSkipDirectory(excluded, d.Name()) {
 			return filepath.SkipDir
 		}
 		add(path)
@@ -504,7 +511,7 @@ func (s *Service) addWatchDirs(watcher *fsnotify.Watcher, absRoot string, follow
 // the root any more than a file link can — #717).
 // onDir/onFile receive the lexical path (through the symlink) so emitted fsnotify
 // events map back to a path under the watched root.
-func walkWatchTree(absDir, rootResolved string, visited map[string]struct{}, onDir func(string), onFile func(string)) {
+func walkWatchTree(absDir, rootResolved string, excluded corpusfs.ExcludedDirSet, visited map[string]struct{}, onDir func(string), onFile func(string)) {
 	resolved, ok := corpusfs.ResolveSymlinkWithinRoot(rootResolved, absDir)
 	if !ok {
 		return
@@ -525,10 +532,10 @@ func walkWatchTree(absDir, rootResolved string, visited map[string]struct{}, onD
 		child := filepath.Join(absDir, name)
 		switch {
 		case entry.IsDir():
-			if shouldSkipDirectory(name) {
+			if shouldSkipDirectory(excluded, name) {
 				continue
 			}
-			walkWatchTree(child, rootResolved, visited, onDir, onFile)
+			walkWatchTree(child, rootResolved, excluded, visited, onDir, onFile)
 		case entry.Type()&os.ModeSymlink != 0:
 			// Resolve the link to decide dir-vs-file; descend symlinked dirs
 			// (containment is enforced on entry) and arm symlinked regular files.
@@ -537,10 +544,10 @@ func walkWatchTree(absDir, rootResolved string, visited map[string]struct{}, onD
 				continue
 			}
 			if target.IsDir() {
-				if shouldSkipDirectory(name) {
+				if shouldSkipDirectory(excluded, name) {
 					continue
 				}
-				walkWatchTree(child, rootResolved, visited, onDir, onFile)
+				walkWatchTree(child, rootResolved, excluded, visited, onDir, onFile)
 			} else if onFile != nil && target.Mode().IsRegular() {
 				onFile(child)
 			}

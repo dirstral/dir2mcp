@@ -71,6 +71,13 @@ type DiscoverOptions struct {
 	UseGitIgnore   bool
 	FollowSymlinks bool
 	MediaVariants  MediaVariantOptions
+	// ExcludeDirs is the directory ignore list (config `ingest.exclude_dirs`,
+	// SPEC §7.1, issue #773). nil keeps the default list. A non-nil value
+	// REPLACES the default list in full. `.dir2mcp` is always kept.
+	//
+	// The initial scan and the file watcher both read this one value, so the
+	// watcher cannot judge a directory differently from the scan (#716).
+	ExcludeDirs []string
 	// ScanCache, when non-nil, is the optional directory-discovery cache (issue
 	// #267 item 5) passed through to the local-filesystem walker. nil = disabled
 	// (a full re-walk every run). See corpusfs.ScanCache.
@@ -112,11 +119,18 @@ func (o DiscoverOptions) corpusfsOptions() corpusfs.Options {
 		MaxSizeBytes:     o.MaxSizeBytes,
 		UseGitIgnore:     o.UseGitIgnore,
 		FollowSymlinks:   o.FollowSymlinks,
+		ExcludeDirs:      o.ExcludeDirs,
 		ScanCache:        o.ScanCache,
 		OnOversize:       o.OnOversize,
 		OnUnsafeKey:      o.OnUnsafeKey,
 		OnSkippedSymlink: o.OnSkippedSymlink,
 	}
+}
+
+// ExcludedDirs resolves the directory ignore set these options select. The
+// watcher calls it so it applies the very list the scan applies.
+func (o DiscoverOptions) ExcludedDirs() corpusfs.ExcludedDirSet {
+	return corpusfs.ResolveExcludedDirs(o.ExcludeDirs)
 }
 
 // DiscoverFiles walks rootDir and returns regular files that pass default

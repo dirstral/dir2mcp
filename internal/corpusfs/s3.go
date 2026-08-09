@@ -203,7 +203,7 @@ func (s *S3FS) Walk(ctx context.Context, _ string, opts Options) ([]DiscoveredFi
 		opts.MaxSizeBytes = defaultMaxFileSizeBytes
 	}
 
-	files, gitignoreRels, err := s.listObjects(ctx, opts)
+	files, gitignoreRels, err := s.listObjects(ctx, opts, ResolveExcludedDirs(opts.ExcludeDirs))
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,7 @@ func (s *S3FS) Walk(ctx context.Context, _ string, opts Options) ([]DiscoveredFi
 // listObjects paginates the bucket listing, converting in-scope objects to
 // DiscoveredFile and (when gitignore is enabled) collecting the corpus-relative
 // paths of any .gitignore objects so their rules can be loaded afterward.
-func (s *S3FS) listObjects(ctx context.Context, opts Options) ([]DiscoveredFile, []string, error) {
+func (s *S3FS) listObjects(ctx context.Context, opts Options, excluded ExcludedDirSet) ([]DiscoveredFile, []string, error) {
 	files := make([]DiscoveredFile, 0, 256)
 	var gitignoreRels []string
 	var token *string
@@ -243,7 +243,7 @@ func (s *S3FS) listObjects(ctx context.Context, opts Options) ([]DiscoveredFile,
 					gitignoreRels = append(gitignoreRels, rel)
 				}
 			}
-			if f, ok := s.discoveredFromObject(obj, opts); ok {
+			if f, ok := s.discoveredFromObject(obj, opts, excluded); ok {
 				files = append(files, f)
 			}
 		}
@@ -338,7 +338,7 @@ func (s *S3FS) getGitIgnoreObject(ctx context.Context, rel string) ([]byte, erro
 // discoveredFromObject converts a listed object into a DiscoveredFile, applying
 // the directory-key skip, excluded-dir, and size-cap policies. ok=false means
 // the object is skipped.
-func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options) (DiscoveredFile, bool) {
+func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options, excluded ExcludedDirSet) (DiscoveredFile, bool) {
 	key := aws.ToString(obj.Key)
 	rel, err := s.relForKey(key)
 	if err != nil {
@@ -356,7 +356,7 @@ func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options) (Discovere
 	if rel == "" || strings.HasSuffix(rel, "/") {
 		return DiscoveredFile{}, false
 	}
-	if keyHasExcludedDir(rel) {
+	if keyHasExcludedDir(rel, excluded) {
 		return DiscoveredFile{}, false
 	}
 	size := aws.ToInt64(obj.Size)
@@ -379,16 +379,18 @@ func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options) (Discovere
 	}, true
 }
 
-// keyHasExcludedDir reports whether the relative key lives under a
-// default-excluded directory (e.g. .git, node_modules). Only ancestor path
-// segments are tested — the final segment is the object's own basename, and
-// LocalFS excludes directories, not regular files, so a file whose name happens
-// to equal an excluded-dir name (e.g. a file literally named "vendor") must
-// still be discovered for the two backends to stay in parity.
-func keyHasExcludedDir(rel string) bool {
+// keyHasExcludedDir reports whether the relative key lives under an excluded
+// directory (e.g. .git, node_modules). The set is the one resolved from
+// Options.ExcludeDirs, so an operator list applies to a bucket exactly as it
+// applies to a local corpus. Only ancestor path segments are tested: the final
+// segment is the object's own basename, and LocalFS excludes directories, not
+// regular files, so a file whose name happens to equal an excluded-dir name
+// (e.g. a file literally named "vendor") must still be discovered for the two
+// backends to stay in parity.
+func keyHasExcludedDir(rel string, excluded ExcludedDirSet) bool {
 	segs := strings.Split(rel, "/")
 	for _, seg := range segs[:len(segs)-1] {
-		if IsExcludedDir(seg) {
+		if excluded.Has(seg) {
 			return true
 		}
 	}

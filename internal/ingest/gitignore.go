@@ -16,12 +16,14 @@ import (
 const defaultMaxFileSizeBytes int64 = 10 * 1024 * 1024
 
 // shouldSkipDirectory reports whether the incremental file watch skips a
-// directory. It delegates to corpusfs, which owns the default ignore list the
-// initial scan applies: the watcher used to keep a second copy of the map and
-// the two drifted apart, so a directory could be excluded from the scan and
-// still be picked up by the watcher (or vice versa). See #716.
-func shouldSkipDirectory(name string) bool {
-	return corpusfs.IsExcludedDir(name)
+// directory. The set comes from the same DiscoverOptions the initial scan uses
+// (DiscoverOptionsFromConfig), so the watcher applies the operator's
+// `ingest.exclude_dirs` list and cannot hold a second copy of it: the watcher
+// once kept its own map and the two drifted apart, so a directory could be
+// excluded from the scan and still be picked up by the watcher (or the reverse).
+// See #716 and #773.
+func shouldSkipDirectory(excluded corpusfs.ExcludedDirSet, name string) bool {
+	return excluded.Has(name)
 }
 
 type gitIgnoreRule struct {

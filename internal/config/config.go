@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/netutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
@@ -499,11 +500,40 @@ type Config struct {
 	IngestGitignore      bool
 	IngestFollowSymlinks bool
 	IngestMaxFileMB      int
-	IngestPDFMode        string
-	IngestImagesMode     string
-	IngestAudioMode      string
-	IngestArchivesMode   string
-	IngestExtractor      string
+	// IngestExcludeDirs is the directory ignore list applied by discovery
+	// (config `ingest.exclude_dirs`, SPEC §7.1, issue #773). Discovery does not
+	// descend into a directory whose NAME matches an entry. An entry is a plain
+	// directory name: it is not a path and it is not a glob, and it matches at
+	// any depth below the root.
+	//
+	// A present key REPLACES the default list in full. It does not add to it.
+	// That is the list behaviour of `security.path_excludes`, so there is one
+	// rule to learn and not two. An absent key keeps the default list
+	// (corpusfs.DefaultExcludedDirs), so an existing corpus does not change.
+	//
+	// `.dir2mcp` is always added back, even when the operator's list omits it.
+	// The state directory lives under root_dir, so to index it is
+	// self-referential: the walk would read the index the same run writes, and
+	// watch mode would feed its own writes back into ingest. The loader records
+	// a warning when it adds the name back.
+	//
+	// THE GATES ARE INDEPENDENT AND THEY COMPOSE BY AND. A file reaches the
+	// index only if this list, `security.path_excludes` and the optional
+	// `.gitignore` rules ALL admit it. Five names are in BOTH this default list
+	// and the default `security.path_excludes`: `.git`, `.dir2mcp`,
+	// `node_modules`, `vendor` and `__pycache__`. To re-index such a directory
+	// an operator MUST clear the name from EVERY gate that lists it. To clear
+	// this one alone changes nothing the operator can observe, because
+	// `security.path_excludes` drops the same file a moment later.
+	// `node_modules` is blocked in retrieval as well
+	// (internal/retrieval/service.go defaultPathExcludes), so it needs a third
+	// edit.
+	IngestExcludeDirs  []string
+	IngestPDFMode      string
+	IngestImagesMode   string
+	IngestAudioMode    string
+	IngestArchivesMode string
+	IngestExtractor    string
 	// IngestOnUnsupported is the §7.4.B.2 degradation mode for a format no active
 	// extraction engine can read: "lenient" (default) skips with a warning and
 	// names the gap in the honest coverage report, "strict" records a non-fatal
@@ -1141,6 +1171,7 @@ type fileConfig struct {
 	IngestGitignore                    *bool
 	IngestFollowSymlinks               *bool
 	IngestMaxFileMB                    *int
+	IngestExcludeDirs                  []string
 	IngestPDFMode                      *string
 	IngestImagesMode                   *string
 	IngestAudioMode                    *string
@@ -1303,6 +1334,7 @@ type persistedConfig struct {
 	IngestGitignore                    bool          `yaml:"ingest_gitignore"`
 	IngestFollowSymlinks               bool          `yaml:"ingest_follow_symlinks"`
 	IngestMaxFileMB                    int           `yaml:"ingest_max_file_mb"`
+	IngestExcludeDirs                  []string      `yaml:"ingest_exclude_dirs"`
 	IngestPDFMode                      string        `yaml:"ingest_pdf_mode"`
 	IngestImagesMode                   string        `yaml:"ingest_images_mode"`
 	IngestAudioMode                    string        `yaml:"ingest_audio_mode"`
@@ -1555,6 +1587,7 @@ func Default() Config {
 		IngestGitignore:           true,
 		IngestFollowSymlinks:      false,
 		IngestMaxFileMB:           20,
+		IngestExcludeDirs:         corpusfs.DefaultExcludedDirs(),
 		IngestPDFMode:             "ocr",
 		IngestImagesMode:          "ocr_auto",
 		IngestAudioMode:           "auto",
@@ -1723,6 +1756,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestGitignore:                    cfg.IngestGitignore,
 		IngestFollowSymlinks:               cfg.IngestFollowSymlinks,
 		IngestMaxFileMB:                    cfg.IngestMaxFileMB,
+		IngestExcludeDirs:                  append([]string(nil), cfg.IngestExcludeDirs...),
 		IngestPDFMode:                      cfg.IngestPDFMode,
 		IngestImagesMode:                   cfg.IngestImagesMode,
 		IngestAudioMode:                    cfg.IngestAudioMode,
@@ -2554,6 +2588,21 @@ func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
 // applyIngestModesFileParsed copies the set ingest discovery/mode file
 // fields (gitignore, symlinks, size limit, per-type modes, extractor)
 // onto cfg.
+// applyIngestExcludeDirsFileParsed copies a set `ingest.exclude_dirs` onto cfg.
+// A present key replaces the default list in full (SPEC §7.1, #773), so the
+// merge is an assignment, not an append. It is split out of
+// applyIngestModesFileParsed to keep that function inside the cyclomatic budget.
+func applyIngestExcludeDirsFileParsed(cfg *Config, fc fileConfig) {
+	if fc.IngestExcludeDirs == nil {
+		return
+	}
+	resolved, warn := resolveExcludeDirs(normalizeStringSlice(fc.IngestExcludeDirs))
+	cfg.IngestExcludeDirs = resolved
+	if warn != nil {
+		cfg.Warnings = append(cfg.Warnings, warn)
+	}
+}
+
 func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestGitignore != nil {
 		cfg.IngestGitignore = *fc.IngestGitignore
@@ -2564,6 +2613,7 @@ func applyIngestModesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestMaxFileMB != nil {
 		cfg.IngestMaxFileMB = *fc.IngestMaxFileMB
 	}
+	applyIngestExcludeDirsFileParsed(cfg, fc)
 	if fc.IngestPDFMode != nil {
 		cfg.IngestPDFMode = *fc.IngestPDFMode
 	}
@@ -2805,6 +2855,55 @@ func applyX402FileParsed(cfg *Config, fc fileConfig) {
 	if fc.X402PayTo != nil {
 		cfg.X402.PayTo = *fc.X402PayTo
 	}
+}
+
+// validateIngestExcludeDirs rejects an entry that is not a plain directory
+// name. SPEC §7.1 states that an entry is a name, not a path and not a glob,
+// and that it matches at any depth. A value such as `src/dist` or `dist/**`
+// therefore matches nothing. Rejecting it tells the operator at once, instead
+// of leaving them to wonder why the directory is still indexed.
+func (c *Config) validateIngestExcludeDirs() error {
+	for _, name := range c.IngestExcludeDirs {
+		switch {
+		case strings.ContainsAny(name, "/\\"):
+			return fmt.Errorf("ingest.exclude_dirs entry %q must be a plain directory name, not a path", name)
+		case strings.ContainsAny(name, "*?["):
+			return fmt.Errorf("ingest.exclude_dirs entry %q must be a plain directory name, not a glob", name)
+		case name == "." || name == "..":
+			return fmt.Errorf("ingest.exclude_dirs entry %q is not a directory name", name)
+		}
+	}
+	return nil
+}
+
+// resolveExcludeDirs applies the SPEC §7.1 resolution rules to an operator
+// directory ignore list. The caller has already established that the key is
+// present, so the returned list REPLACES the default list in full.
+//
+// `.dir2mcp` is added back when the list omits it, because the state directory
+// lives under root_dir: the walk would read the index that the same run writes,
+// and watch mode would feed its own writes back into ingest. The spec says an
+// implementation SHOULD say that it did this, so the second return value is a
+// warning the loader surfaces. Duplicates are dropped and the operator's order
+// is kept, so `print-config` shows what the operator wrote.
+func resolveExcludeDirs(names []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(names)+1)
+	resolved := make([]string, 0, len(names)+1)
+	for _, name := range names {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		resolved = append(resolved, name)
+	}
+	if _, ok := seen[corpusfs.StateDirName]; ok {
+		return resolved, nil
+	}
+	resolved = append(resolved, corpusfs.StateDirName)
+	return resolved, fmt.Errorf(
+		"config: ingest.exclude_dirs does not list %q; the name was added back. "+
+			"The state directory is under root_dir, so to index it is self-referential (SPEC 7.1)",
+		corpusfs.StateDirName)
 }
 
 // normalizeStringSlice trims each value and drops empties, returning nil
@@ -3058,6 +3157,7 @@ var configKeyAliases = map[string]string{
 	"security.auth.mode":                      "auth_mode",
 	"security.allowed_origins":                "allowed_origins",
 	"security.path_excludes":                  "path_excludes",
+	"ingest.exclude_dirs":                     "ingest_exclude_dirs",
 	"security.secret_patterns":                "secret_patterns",
 	"docling.command":                         "docling_command",
 	"ingest.docling.command":                  "docling_command",
@@ -3799,6 +3899,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendConfigListValue(&cfg.TrustedProxies, value)
 	case "path_excludes":
 		appendConfigListValue(&cfg.PathExcludes, value)
+	case "ingest_exclude_dirs":
+		appendConfigListValue(&cfg.IngestExcludeDirs, value)
 	case "secret_patterns":
 		appendConfigListValue(&cfg.SecretPatterns, value)
 	case "allowed_origins":
@@ -3841,7 +3943,7 @@ func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
 		return true
 	default:
 		return false
@@ -3864,6 +3966,16 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	}
 	writeBool := func(key string, value bool) {
 		writeScalar(key, strconv.FormatBool(value))
+	}
+	// writeComment emits YAML comment lines. The loader skips them (a line whose
+	// first non-space character is `#`), so they document the generated file for
+	// the operator without changing what is read back.
+	writeComment := func(lines ...string) {
+		for _, line := range lines {
+			b.WriteString("# ")
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
 	}
 	writeList := func(key string, values []string) {
 		b.WriteString(key)
@@ -3943,6 +4055,19 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("chunking_strategy", cfg.ChunkingStrategy)
 	writeInt("chunking_max_tokens", cfg.ChunkingMaxTokens)
 	writeInt("chunking_overlap_tokens", cfg.ChunkingOverlapTokens)
+	writeComment(
+		"ingest_exclude_dirs: directory names discovery does not descend into (SPEC 7.1).",
+		"A present key REPLACES this list in full. It does not add to it.",
+		"An entry is a plain directory name. It is not a path and it is not a glob.",
+		"`.dir2mcp` is always kept: the state directory is under root_dir, so to",
+		"index it is self-referential.",
+		"The gates compose by AND. A file is indexed only if this list,",
+		"path_excludes and the optional .gitignore rules all admit it. These five",
+		"names are in BOTH lists: .git, .dir2mcp, node_modules, vendor,",
+		"__pycache__. To re-index one of them, clear the name from BOTH keys.",
+		"Clearing one key alone changes nothing you can see.",
+	)
+	writeList("ingest_exclude_dirs", cfg.IngestExcludeDirs)
 	writeBool("ingest_gitignore", cfg.IngestGitignore)
 	writeBool("ingest_follow_symlinks", cfg.IngestFollowSymlinks)
 	writeInt("ingest_max_file_mb", cfg.IngestMaxFileMB)
@@ -4491,6 +4616,7 @@ func (c *Config) Validate() error {
 		c.validateMediaSubtitles,
 		c.validateMediaDiarize,
 		c.validateNumericBounds,
+		c.validateIngestExcludeDirs,
 		c.validateSource,
 		c.validateDistributedEmbed,
 		c.validateMediaBatch,
