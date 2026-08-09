@@ -116,6 +116,12 @@ type MCPPaymentOutcomeRecord struct {
 	Settled         bool
 	PaymentResponse string
 	UpdatedAt       time.Time
+	// ExpiresAt is the nonce-aligned lifetime of the outcome. The adapter keeps
+	// the outcome until this time, so an idempotent retry of the same
+	// (nonce, request) pair can get the recorded result for as long as the
+	// nonce ledger keeps the nonce consumed. A zero value means the row is from
+	// an older schema; the caller then uses the fixed TTL fallback (#697).
+	ExpiresAt time.Time
 }
 
 // MCPNonceLedgerRecord is the durable single-use replay ledger entry for an x402
@@ -757,6 +763,15 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// credential and made no request at all. Existing rows default to 0,
 		// which the aggregate reports as "unknown age" rather than as 1970.
 		`ALTER TABLE chunks ADD COLUMN embedding_failed_unix INTEGER NOT NULL DEFAULT 0`,
+		// expires_unix stores the nonce-aligned lifetime of a persisted x402
+		// payment outcome (issue #697). The in-memory outcome already carried
+		// this time, but the row did not, so a restart fell back to the fixed
+		// 10-minute TTL on UpdatedAt. The nonce ledger keeps a consumed nonce
+		// for at least 15 minutes, so a valid idempotent retry inside that gap
+		// found the outcome gone and got "nonce already used" instead of the
+		// result it had already paid for. Existing rows default to 0, which
+		// reads back as a zero time and keeps the old TTL fallback.
+		`ALTER TABLE mcp_payment_outcomes ADD COLUMN expires_unix INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -879,7 +894,8 @@ CREATE TABLE IF NOT EXISTS mcp_payment_outcomes (
   requires_settle INTEGER NOT NULL DEFAULT 0,
   settled INTEGER NOT NULL DEFAULT 0,
   payment_response TEXT NOT NULL DEFAULT '',
-  updated_unix INTEGER NOT NULL
+  updated_unix INTEGER NOT NULL,
+  expires_unix INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS mcp_nonce_ledger (
@@ -3423,8 +3439,8 @@ func (s *SQLiteStore) UpsertMCPPaymentOutcome(ctx context.Context, rec MCPPaymen
 		ctx,
 		`INSERT INTO mcp_payment_outcomes(
 			execution_key, status_code, result_json, rpc_error_json,
-			requires_settle, settled, payment_response, updated_unix
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+			requires_settle, settled, payment_response, updated_unix, expires_unix
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(execution_key) DO UPDATE SET
 			status_code=excluded.status_code,
 			result_json=excluded.result_json,
@@ -3432,7 +3448,8 @@ func (s *SQLiteStore) UpsertMCPPaymentOutcome(ctx context.Context, rec MCPPaymen
 			requires_settle=excluded.requires_settle,
 			settled=excluded.settled,
 			payment_response=excluded.payment_response,
-			updated_unix=excluded.updated_unix`,
+			updated_unix=excluded.updated_unix,
+			expires_unix=excluded.expires_unix`,
 		rec.ExecutionKey,
 		rec.StatusCode,
 		strings.TrimSpace(rec.ResultJSON),
@@ -3441,8 +3458,27 @@ func (s *SQLiteStore) UpsertMCPPaymentOutcome(ctx context.Context, rec MCPPaymen
 		boolToInt(rec.Settled),
 		strings.TrimSpace(rec.PaymentResponse),
 		rec.UpdatedAt.UTC().Unix(),
+		optionalUnix(rec.ExpiresAt),
 	)
 	return err
+}
+
+// optionalUnix encodes a time that may be unset. A zero time becomes 0, not the
+// year-1 Unix value, so a reader can tell "no time recorded" from a real time.
+func optionalUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UTC().Unix()
+}
+
+// timeFromOptionalUnix is the inverse of optionalUnix. A value of 0 or less
+// becomes a zero time, which every caller reads as "no time recorded".
+func timeFromOptionalUnix(unix int64) time.Time {
+	if unix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(unix, 0).UTC()
 }
 
 func (s *SQLiteStore) DeleteMCPPaymentOutcome(ctx context.Context, executionKey string) error {
@@ -3469,7 +3505,7 @@ func (s *SQLiteStore) ListMCPPaymentOutcomes(ctx context.Context) ([]MCPPaymentO
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT execution_key, status_code, result_json, rpc_error_json, requires_settle, settled, payment_response, updated_unix
+		`SELECT execution_key, status_code, result_json, rpc_error_json, requires_settle, settled, payment_response, updated_unix, expires_unix
 		 FROM mcp_payment_outcomes
 		 ORDER BY updated_unix DESC`,
 	)
@@ -3484,6 +3520,7 @@ func (s *SQLiteStore) ListMCPPaymentOutcomes(ctx context.Context) ([]MCPPaymentO
 			rec                     MCPPaymentOutcomeRecord
 			requiresSettle, settled int
 			updatedUnix             int64
+			expiresUnix             int64
 		)
 		if err := rows.Scan(
 			&rec.ExecutionKey,
@@ -3494,12 +3531,14 @@ func (s *SQLiteStore) ListMCPPaymentOutcomes(ctx context.Context) ([]MCPPaymentO
 			&settled,
 			&rec.PaymentResponse,
 			&updatedUnix,
+			&expiresUnix,
 		); err != nil {
 			return nil, err
 		}
 		rec.RequiresSettle = requiresSettle == 1
 		rec.Settled = settled == 1
 		rec.UpdatedAt = time.Unix(updatedUnix, 0).UTC()
+		rec.ExpiresAt = timeFromOptionalUnix(expiresUnix)
 		out = append(out, rec)
 	}
 	return out, rows.Err()
