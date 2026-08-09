@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/x402"
 )
 
 // v2PaymentSignature697 builds a minimal x402 v2 PAYMENT-SIGNATURE value. The
@@ -22,6 +24,33 @@ func v2PaymentSignature697(nonce string, now time.Time) string {
 		`{"x402Version":2,"scheme":"exact","payload":{"authorization":{"nonce":%q,"validAfter":%d,"validBefore":%d}}}`,
 		nonce, now.Add(-5*time.Second).Unix(), now.Add(5*time.Minute).Unix(),
 	)
+}
+
+// rpcPaymentError697 is the JSON-RPC error a payment rejection returns. The
+// `data` fields are the machine-readable contract a client acts on; the message
+// is human-facing text.
+type rpcPaymentError697 struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Code      string `json:"code"`
+		Retryable bool   `json:"retryable"`
+	} `json:"data"`
+}
+
+// decodeRPCPaymentError697 extracts the JSON-RPC error from a response body.
+func decodeRPCPaymentError697(t *testing.T, body []byte) rpcPaymentError697 {
+	t.Helper()
+	var parsed struct {
+		Error *rpcPaymentError697 `json:"error"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("decode the payment error: %v body=%s", err, string(body))
+	}
+	if parsed.Error == nil {
+		t.Fatalf("the response carries no JSON-RPC error: %s", string(body))
+	}
+	return *parsed.Error
 }
 
 // agePersistedPaymentOutcomes697 moves every persisted payment outcome's
@@ -174,7 +203,16 @@ func TestX402RestoredOutcomeStillRefusesReplay697(t *testing.T) {
 	if resp2.StatusCode != http.StatusPaymentRequired {
 		t.Fatalf("replay status=%d want=402 body=%s", resp2.StatusCode, string(body2))
 	}
-	if !strings.Contains(string(body2), "nonce already used") {
+	// Assert on the structured error first, because that is the contract a
+	// client reads. The message text is a secondary, human-facing check.
+	rejection := decodeRPCPaymentError697(t, body2)
+	if rejection.Data.Code != x402.CodePaymentInvalid {
+		t.Errorf("replay error code=%q, want %q", rejection.Data.Code, x402.CodePaymentInvalid)
+	}
+	if rejection.Data.Retryable {
+		t.Error("replay error is marked retryable; a reused nonce is a terminal rejection")
+	}
+	if !strings.Contains(rejection.Message, "nonce already used") {
 		t.Errorf("replay response does not name the reused nonce: %s", string(body2))
 	}
 	if got := fac.verifyCalls.Load(); got != verifyBefore {
