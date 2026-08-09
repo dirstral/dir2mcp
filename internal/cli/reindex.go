@@ -255,30 +255,36 @@ func (s *reindexStaging) backup(name string) error {
 }
 
 // recoverInterruptedReindex finishes the rollback that a crashed reindex never
-// got to run, and must be called before any new generation is staged.
+// got to run. `reindex` calls it before staging a new generation; `up` calls it
+// before opening the corpus to serve from it (issue #764), so the two commands
+// share one recovery path instead of two that can drift apart.
 //
 // A reindex that is killed (SIGKILL, OOM, power loss) leaves the previous,
 // complete index in stateDir/<name>+reindexBackupSuffix and its own partial
 // output live at stateDir/<name>. Nothing in-process cleans that up: rollback
 // only runs for handled failures and Ctrl-C. The backup slot is therefore the
 // last-known-good generation, and the next run must not treat it as its own
-// leftover to overwrite (issue #727).
+// leftover to overwrite (issue #727) nor serve what is beside it (issue #764).
 //
 // Policy: adopt. Every *.reindex-old file is renamed back over whatever is live
-// before staging starts, which is exactly the rollback the crashed run owed us.
-// This is safe by construction: a backup file is only ever produced by an
-// atomic rename of a file that was complete and live, so it is never partial,
-// while the live file after a crash may be anything. Restoring is a single
-// rename (not remove-then-rename) so a crash inside recovery itself can never
-// leave neither copy.
+// before staging (or serving) starts, which is exactly the rollback the crashed
+// run owed us. This is safe by construction: a backup file is only ever produced
+// by an atomic rename of a file that was complete and live, so it is never
+// partial, while the live file after a crash may be anything. Restoring is a
+// single rename (not remove-then-rename) so a crash inside recovery itself can
+// never leave neither copy.
 //
-// Recovery failure is fatal to the run: if the good generation cannot be put
-// back, staging would move the partial file into the recovery slot and destroy
-// it, so the caller aborts with the error instead.
-func recoverInterruptedReindex(stateDir string, stderr io.Writer) error {
+// Recovery failure is fatal to both callers: for `reindex` because staging would
+// then move the partial file into the recovery slot and destroy it, and for `up`
+// because the alternative is serving the partial generation, which is the bug.
+//
+// Returns the live basenames it restored so each caller can word its own warning
+// (the two commands do different things next), and so a caller can tell "nothing
+// to do" from "recovered" without re-scanning.
+func recoverInterruptedReindex(stateDir string) ([]string, error) {
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
-		return fmt.Errorf("scan state dir %s: %w", stateDir, err)
+		return nil, fmt.Errorf("scan state dir %s: %w", stateDir, err)
 	}
 	var recovered []string
 	for _, entry := range entries {
@@ -300,15 +306,30 @@ func recoverInterruptedReindex(stateDir string, stderr io.Writer) error {
 		}
 		live := strings.TrimSuffix(name, reindexBackupSuffix)
 		if err := os.Rename(filepath.Join(stateDir, name), filepath.Join(stateDir, live)); err != nil {
-			return fmt.Errorf("restore last-known-good index %s: %w", live, err)
+			return nil, fmt.Errorf("restore last-known-good index %s: %w", live, err)
 		}
 		recovered = append(recovered, live)
 	}
-	if len(recovered) > 0 {
-		writef(stderr, "warning: recovered %d index file(s) left by an interrupted reindex before rebuilding: %s\n",
-			len(recovered), strings.Join(recovered, ", "))
+	return recovered, nil
+}
+
+// restoreInterruptedReindexHashes is the store-side half of the rollback a
+// crashed reindex owed: it rolls the pre-clear documents.content_hash snapshot
+// back over the cleared gate and drops it.
+//
+// The file half (recoverInterruptedReindex) puts the last-known-good index back;
+// this puts back the hashes that describe it. Doing only the first would leave a
+// complete index behind a cleared gate, so the next ingest pass would re-OCR,
+// re-chunk and re-embed the whole corpus to arrive back where it already was.
+//
+// A no-op when the store does not support the capability or no snapshot exists
+// (the normal, non-crashed case), so both callers can call it unconditionally.
+func restoreInterruptedReindexHashes(ctx context.Context, st model.Store) error {
+	b, ok := interface{}(st).(contentHashBackuper)
+	if !ok {
+		return nil
 	}
-	return nil
+	return b.RestoreContentHashes(ctx)
 }
 
 // commit deletes the moved-aside backups after a durable rebuild.
@@ -359,10 +380,15 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 	// Complete an earlier crashed run's rollback BEFORE staging anything, or the
 	// staging below would move that run's partial output into the recovery slot
 	// and delete the only good generation (issue #727).
-	if err := recoverInterruptedReindex(cfg.StateDir, a.stderr); err != nil {
+	recovered, err := recoverInterruptedReindex(cfg.StateDir)
+	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("recover interrupted reindex: %v", err),
 			"The previous index generation is still on disk as *"+reindexBackupSuffix+" in the state directory; fix the error above and re-run `dir2mcp reindex`.")
 		return nil, nil, exitGeneric
+	}
+	if len(recovered) > 0 {
+		writef(a.stderr, "warning: recovered %d index file(s) left by an interrupted reindex before rebuilding: %s\n",
+			len(recovered), strings.Join(recovered, ", "))
 	}
 	st := a.storeForConfig(cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
@@ -415,14 +441,14 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 // gracefully (issue #418). Closes the store on failure; the caller owns it on
 // success.
 func (a *App) snapshotContentHashes(ctx context.Context, global globalOptions, st model.Store, staging *reindexStaging) int {
-	b, ok := interface{}(st).(contentHashBackuper)
-	if !ok {
-		return exitSuccess
-	}
-	if err := b.RestoreContentHashes(ctx); err != nil {
+	if err := restoreInterruptedReindexHashes(ctx, st); err != nil {
 		_ = st.Close()
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("recover interrupted reindex: restore content hashes: %v", err))
 		return exitGeneric
+	}
+	b, ok := interface{}(st).(contentHashBackuper)
+	if !ok {
+		return exitSuccess
 	}
 	if err := b.BackupContentHashes(ctx); err != nil {
 		_ = st.Close()
