@@ -237,6 +237,16 @@ func (w *discoverWalker) reportOversize(relPath string, size int64) {
 	}
 }
 
+// reportSkippedSymlink surfaces a symlink dropped because FollowSymlinks is off
+// to the caller-provided Options.OnSkippedSymlink hook (issue #781). Like
+// reportOversize it is a no-op when no hook is set, so which files discovery
+// returns is unchanged: only the caller's ability to see the drop changes.
+func (w *discoverWalker) reportSkippedSymlink(relPath string) {
+	if w.options.OnSkippedSymlink != nil {
+		w.options.OnSkippedSymlink(relPath)
+	}
+}
+
 // visitDir processes a single directory entry that is known to be a directory.
 func (w *discoverWalker) visitDir(ctx context.Context, fullPath, relPath, name string, rules []gitIgnoreRule) error {
 	if shouldSkipDirectory(name) {
@@ -360,6 +370,12 @@ func (w *discoverWalker) processFullEntry(ctx context.Context, absDir, relDir, n
 
 	if lstat.Mode()&os.ModeSymlink != 0 {
 		if !w.options.FollowSymlinks {
+			// Report before returning: this is the only place a not-followed link
+			// is dropped, and the drop is otherwise invisible to the caller (#781).
+			// It stays the single report point because the scan cache refuses to
+			// store a signature for a directory holding a symlink child, so such a
+			// directory is always re-read here rather than served from cache.
+			w.reportSkippedSymlink(relPath)
 			return CachedDirEntry{}, false, nil
 		}
 		if err := w.handleSymlink(ctx, fullPath, relPath, rules); err != nil {
