@@ -334,10 +334,20 @@ def test_a_reader_reports_the_language_it_settled_on(monkeypatch):
     assert OverlayReader(ocr=lambda p: "").lang is None
 
 
-def test_a_missing_engine_degrades_instead_of_aborting(monkeypatch):
+def test_a_missing_engine_degrades_instead_of_aborting(monkeypatch, tmp_path):
+    """A missing engine must surface as RecognizerUnavailable, which the
+    pipeline catches and records as a skip, rather than an unhandled
+    ImportError that takes the run down.
+
+    The raise happens on the first READ, not when the adapter is built:
+    building is not using it, and importing eagerly made constructing any
+    overlay recognizer fail without the `ocr` extra even when the caller
+    supplied its own reader and never OCR'd a frame.
+    """
     monkeypatch.setitem(sys.modules, "pytesseract", None)
+    ocr = overlay.default_ocr()  # building the adapter needs no engine
     with pytest.raises(RecognizerUnavailable):
-        overlay.default_ocr()
+        ocr(tmp_path / "frame.jpg")
 
 
 # --- preprocessing ---------------------------------------------------------
@@ -378,3 +388,34 @@ def test_missing_pillow_degrades_the_cascade(monkeypatch, tmp_path):
     frame.write_bytes(b"\xff\xd8\xff")
     with pytest.raises(RecognizerUnavailable):
         list(overlay._prepared_crops(frame, WHOLE, tmp_path))
+
+
+
+def _write_solid_png(path):
+    """A real, decodable one-pixel image, so the test reaches the OCR call
+    rather than failing in Pillow on the way there."""
+    from PIL import Image
+
+    Image.new("RGB", (4, 4), (0, 0, 0)).save(path)
+
+def test_an_installed_package_with_no_engine_also_degrades(monkeypatch, tmp_path):
+    """pytesseract installs from PyPI; tesseract is a separate native binary.
+    "Package present, engine absent" is an ordinary deployment state -- a CI
+    runner with the `ocr` extra and no apt package is exactly it -- and
+    TesseractNotFoundError is not RecognizerUnavailable, so without translation
+    the cascade aborts instead of skipping.
+    """
+    pytesseract = pytest.importorskip("pytesseract")
+    pytest.importorskip("PIL.Image")
+
+    def missing_engine(*args, **kwargs):
+        raise pytesseract.TesseractNotFoundError()
+
+    monkeypatch.setattr(pytesseract, "image_to_string", missing_engine)
+
+    frame = tmp_path / "band.png"
+    _write_solid_png(frame)
+
+    with pytest.raises(RecognizerUnavailable) as caught:
+        overlay.default_ocr()(frame)
+    assert "tesseract" in str(caught.value).lower()

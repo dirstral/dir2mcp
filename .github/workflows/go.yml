@@ -90,6 +90,29 @@ jobs:
       - name: Run govulncheck
         run: govulncheck ./...
 
+  # The reference recognition backend (design 0004) is Python, so `go test`
+  # never reaches it. Without this job a PR touching only annotator/ collected
+  # a full set of green checks that had not executed a line of the change --
+  # which is how an ungated precision regression shipped (#779/#787).
+  annotator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # This job installs and runs repository-controlled Python, and has no
+          # later authenticated git operation, so it has no use for the token
+          # checkout otherwise leaves in .git/config.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: annotator/pyproject.toml
+
+      - name: Run the annotator test suite
+        run: make test-annotator
+
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 5

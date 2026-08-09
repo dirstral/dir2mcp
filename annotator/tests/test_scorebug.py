@@ -298,10 +298,13 @@ def test_an_explicit_crop_pins_the_region(roster, fake_frames):
     assert rec.regions == ((0.0, 0.0, 0.5, 0.2),)
 
 
-def test_missing_ocr_backend_degrades_instead_of_aborting(monkeypatch):
+def test_missing_ocr_backend_degrades_instead_of_aborting(monkeypatch, tmp_path):
+    """As in test_overlay: RecognizerUnavailable, raised on the first read
+    rather than when the adapter is built."""
     monkeypatch.setitem(sys.modules, "pytesseract", None)
+    ocr = scorebug.default_ocr()
     with pytest.raises(RecognizerUnavailable):
-        scorebug.default_ocr()
+        ocr(tmp_path / "frame.jpg")
 
 
 def test_velocity_branch_rejects_implausible_speeds():

@@ -26,7 +26,7 @@ build-elevenlabs-bridge:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt vet lint cyclo ineffassign misspell test test-race check ci benchmark inspector-smoke conformance
+.PHONY: all clean clean-all help fmt vet lint cyclo ineffassign misspell test test-race test-annotator check ci benchmark inspector-smoke conformance
 
 all: check
 
@@ -90,6 +90,13 @@ test-release-tools:
 
 conformance:
 	go test ./tests/conformance/...
+
+# The reference recognition backend (design 0004) is Python and its suite is
+# not reachable from `go test`, so it needs its own target. Core is stdlib-only
+# by design; the `ocr` extra is installed as well so the vision recognizers'
+# tests run rather than skip (#787).
+test-annotator:
+	cd annotator && python3 -m pip install --quiet -e '.[test,ocr]' && python3 -m pytest -q
 
 check: fmt vet lint cyclo ineffassign misspell test test-release-tools build
 
