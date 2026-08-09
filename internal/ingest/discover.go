@@ -86,6 +86,11 @@ type DiscoverOptions struct {
 	// above the directory it was asked to walk, but a bucket is untrusted
 	// input and its keys are whatever someone put there.
 	OnUnsafeKey func(key string, err error)
+	// OnSkippedSymlink, when non-nil, is invoked once for each entry dropped
+	// because it is a symlink and FollowSymlinks is false (#781). The entry is
+	// still dropped; this only makes the drop visible, so a corpus made of links
+	// is distinguishable from an empty one. See corpusfs.Options.OnSkippedSymlink.
+	OnSkippedSymlink func(relPath string)
 }
 
 // DefaultDiscoverOptions returns discovery defaults used by ingestion.
@@ -104,12 +109,13 @@ func DefaultDiscoverOptions() DiscoverOptions {
 // corpusfsOptions converts ingest DiscoverOptions to corpusfs.Options.
 func (o DiscoverOptions) corpusfsOptions() corpusfs.Options {
 	return corpusfs.Options{
-		MaxSizeBytes:   o.MaxSizeBytes,
-		UseGitIgnore:   o.UseGitIgnore,
-		FollowSymlinks: o.FollowSymlinks,
-		ScanCache:      o.ScanCache,
-		OnOversize:     o.OnOversize,
-		OnUnsafeKey:    o.OnUnsafeKey,
+		MaxSizeBytes:     o.MaxSizeBytes,
+		UseGitIgnore:     o.UseGitIgnore,
+		FollowSymlinks:   o.FollowSymlinks,
+		ScanCache:        o.ScanCache,
+		OnOversize:       o.OnOversize,
+		OnUnsafeKey:      o.OnUnsafeKey,
+		OnSkippedSymlink: o.OnSkippedSymlink,
 	}
 }
 

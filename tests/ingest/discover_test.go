@@ -112,6 +112,42 @@ func TestDiscoverFilesWithOptions_OnOversize_NotCalledWhenAllFit(t *testing.T) {
 	}
 }
 
+// TestDiscoverFilesWithOptions_OnSkippedSymlink_IsPluggedThrough asserts the
+// ingest layer actually hands its hook to the walker (#781). The walker-level
+// behavior is covered in tests/corpusfs; what this pins is the plumbing, because
+// a dropped field in corpusfsOptions would silently restore the old
+// scanned=0/skipped=0 blindness with every corpusfs test still passing.
+func TestDiscoverFilesWithOptions_OnSkippedSymlink_IsPluggedThrough(t *testing.T) {
+	library := t.TempDir()
+	mustWriteFile(t, filepath.Join(library, "clip.mp4"), []byte("frames"))
+
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("hi"))
+	if err := os.Symlink(filepath.Join(library, "clip.mp4"), filepath.Join(root, "clip.mp4")); err != nil {
+		t.Skipf("filesystem cannot create symlinks (%v); nothing to observe", err)
+	}
+
+	var skipped []string
+	files, err := ingest.DiscoverFilesWithOptions(context.Background(), root, ingest.DiscoverOptions{
+		MaxSizeBytes:     1 << 20,
+		OnSkippedSymlink: func(relPath string) { skipped = append(skipped, relPath) },
+	})
+	if err != nil {
+		t.Fatalf("DiscoverFilesWithOptions failed: %v", err)
+	}
+
+	got := make([]string, 0, len(files))
+	for _, f := range files {
+		got = append(got, f.RelPath)
+	}
+	if !slices.Equal(got, []string{"keep.txt"}) {
+		t.Fatalf("expected only the regular file discovered, got %v", got)
+	}
+	if !slices.Equal(skipped, []string{"clip.mp4"}) {
+		t.Fatalf("OnSkippedSymlink saw %v, want [clip.mp4]", skipped)
+	}
+}
+
 func TestDiscoverFiles_ContextCancelled(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("x"))

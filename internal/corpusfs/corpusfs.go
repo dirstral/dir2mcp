@@ -114,6 +114,23 @@ type Options struct {
 	// form is exactly what could not be trusted. It must not block or panic;
 	// the walker calls it inline.
 	OnUnsafeKey func(key string, err error)
+	// OnSkippedSymlink, when non-nil, is invoked once for every directory entry
+	// dropped because it is a symlink and FollowSymlinks is false (#781).
+	//
+	// The refusal to follow links by default is not in question (#717 tightened
+	// containment for the case where following IS enabled); its invisibility was.
+	// A corpus populated with links into a media library walked to nothing and
+	// reported `scanned: 0, skipped: 0, errors: 0`, which is indistinguishable
+	// from an empty directory or a wrong root_dir. Same reasoning as OnOversize
+	// (#497) and OnUnsafeKey (#735): a policy drop the caller cannot see is a
+	// policy the operator cannot diagnose.
+	//
+	// relPath is the corpus-root-relative slash path of the LINK ITSELF, and it
+	// fires for links to directories as well as to files: with following
+	// disabled the walker never resolves the target, so it cannot tell the two
+	// apart without doing the very thing it was told not to do. It must not
+	// block or panic; the walker calls it inline during the walk.
+	OnSkippedSymlink func(relPath string)
 }
 
 // CachedDirEntry is a directory child's identity recorded in the scan cache: its

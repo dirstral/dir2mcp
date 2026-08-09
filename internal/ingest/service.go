@@ -1698,6 +1698,25 @@ func (s *Service) runScan(ctx context.Context) error {
 			key, unsafeErr,
 		)
 	}
+	// A symlink is dropped at discovery under the default
+	// ingest.follow_symlinks=false, which is right, but until #781 it was also
+	// silent: a corpus of links into a media library reported scanned=0,
+	// skipped=0, errors=0 and a ready daemon, exactly like an empty directory.
+	// Log-only, matching the OnUnsafeKey precedent (#735) rather than the
+	// OnOversize one (#497): the scanned/skipped counters cannot honestly absorb
+	// these yet. SPEC §15.2 closes the skip_reasons enum for a spec minor and
+	// §3.2 requires the file_skip event count to equal the run's terminal
+	// indexing.skipped, so every skipped bump must carry a reason from that enum.
+	// None of the eight describes a not-followed link, and borrowing
+	// path_excluded/ignore_rule would mislabel it in the honest-coverage
+	// aggregate. Counting these belongs behind a spec change that adds the
+	// reason; the log is what unblocks the operator today.
+	discoverOpts.OnSkippedSymlink = func(relPath string) {
+		s.getLogger().Printf(
+			"discovery: skipping %s (symlink); ingest.follow_symlinks is false, so links are not indexed. Set ingest.follow_symlinks: true to include it (a followed link must still resolve inside the corpus root)",
+			relPath,
+		)
+	}
 	discovered, err := s.corpusFS().Walk(ctx, s.cfg.RootDir, discoverOpts.corpusfsOptions())
 	if err != nil {
 		return err
