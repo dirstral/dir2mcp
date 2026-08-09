@@ -2596,11 +2596,16 @@ func dedupMediaCandidates(hits []model.SearchHit) []model.SearchHit {
 // (SPEC 9.1.1) and truncation to k — so the candidate POOL shrinks, preserving
 // the no-result-loss guarantee (a query MAY then return fewer than k hits).
 //
-// Grouping is by content_hash directly. Hits whose rel_path has no known (or an
-// empty) content_hash are passed through untouched and NEVER grouped together.
-// The first (best pre-rerank) survivor per group is kept and the relative order
-// of survivors is preserved, so the result is deterministic. When disabled or
-// when no hash map is loaded, this is a pass-through.
+// Grouping is by content_hash ACROSS DISTINCT documents: a hit is only ever
+// collapsed against a survivor from a different rel_path. A document is not a
+// duplicate of itself, so its own intra-document hits (transcript/recognition
+// time spans, pages, line ranges) all survive; grouping on the hash alone would
+// collapse a single-file corpus to exactly one hit (#782). Hits whose rel_path
+// has no known (or an empty) content_hash are passed through untouched and NEVER
+// grouped together. The first (best pre-rerank) survivor per group claims the
+// group and the relative order of survivors is preserved, so the result is
+// deterministic. When disabled or when no hash map is loaded, this is a
+// pass-through.
 func (s *Service) dedupCrossFileCandidates(hits []model.SearchHit) []model.SearchHit {
 	s.metaMu.RLock()
 	enabled := s.crossFileDedupEnabled
@@ -2611,7 +2616,9 @@ func (s *Service) dedupCrossFileCandidates(hits []model.SearchHit) []model.Searc
 		return hits
 	}
 
-	seen := make(map[string]struct{}, len(hits))
+	// content_hash → rel_path of the document that claimed the group. Storing
+	// the path (not just presence) is what keeps the dedup cross-FILE.
+	claimedBy := make(map[string]string, len(hits))
 	out := make([]model.SearchHit, 0, len(hits))
 	for _, h := range hits {
 		contentHash := groupKeyByRelPath[h.RelPath]
@@ -2620,11 +2627,20 @@ func (s *Service) dedupCrossFileCandidates(hits []model.SearchHit) []model.Searc
 			out = append(out, h)
 			continue
 		}
-		if _, dup := seen[contentHash]; dup {
+		owner, claimed := claimedBy[contentHash]
+		if claimed && owner != h.RelPath {
 			continue
 		}
-		seen[contentHash] = struct{}{}
+		if !claimed {
+			claimedBy[contentHash] = h.RelPath
+		}
 		out = append(out, h)
+	}
+	if collapsed := len(hits) - len(out); collapsed > 0 {
+		// Fewer than k hits is a legal SPEC 9.2 outcome, so candidate loss is
+		// otherwise invisible to an operator debugging thin results (#782).
+		// Same reasoning as OnOversize (#497) and OnUnsafeKey (#735).
+		s.logf("dedup: collapsed %d of %d cross-file duplicate candidates", collapsed, len(hits))
 	}
 	return out
 }

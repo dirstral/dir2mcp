@@ -1,7 +1,10 @@
 package tests
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/index"
@@ -128,6 +131,77 @@ func TestSearch_CrossFileDedup_NoMapIsPassThrough(t *testing.T) {
 	got := searchChunkIDs(t, svc, "alpha")
 	if len(got) != 2 {
 		t.Fatalf("no hash map must pass through; got %v", got)
+	}
+}
+
+// TestSearch_CrossFileDedup_SingleDocumentKeepsAllItsHits pins #782: cross-file
+// dedup groups across DISTINCT documents only. Every hit from one document maps
+// to that document's own content_hash, so grouping on the hash alone collapsed a
+// single-file corpus (the normal shape of a video corpus, whose retrievable
+// units are intra-document time spans) to exactly one hit.
+func TestSearch_CrossFileDedup_SingleDocumentKeepsAllItsHits(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.99, 0.01})
+	addVec(t, idx, 3, []float32{0.95, 0.05})
+
+	svc := newCrossFileDedupService(idx, true, []model.DocumentHash{
+		{RelPath: "game.mp4", ContentHash: "H1"},
+	})
+	// Three distinct moments in the same video: none is a duplicate of another.
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "game.mp4", Snippet: "struck out swinging",
+		Span: model.Span{Kind: "time", StartMS: 1000, EndMS: 2000}})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "game.mp4", Snippet: "walked",
+		Span: model.Span{Kind: "time", StartMS: 3000, EndMS: 4000}})
+	svc.SetChunkMetadata(3, model.SearchHit{RelPath: "game.mp4", Snippet: "grand slam",
+		Span: model.Span{Kind: "time", StartMS: 5000, EndMS: 6000}})
+
+	got := searchChunkIDs(t, svc, "at bat")
+
+	want := []uint64{1, 2, 3}
+	if len(got) != len(want) {
+		t.Fatalf("a document must never dedup against itself: want %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order/survivor mismatch: want %v, got %v", want, got)
+		}
+	}
+}
+
+// TestSearch_CrossFileDedup_AliasCollapsedButOriginalHitsSurvive pins the two
+// rules together: the alias document collapses away (SPEC 9.2) while every hit
+// from the surviving document is kept, including ones ranked below the alias.
+func TestSearch_CrossFileDedup_AliasCollapsedButOriginalHitsSurvive(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})       // a.md      (hash H1) - best
+	addVec(t, idx, 2, []float32{0.99, 0.01}) // copy/a.md (hash H1) - alias
+	addVec(t, idx, 3, []float32{0.95, 0.05}) // a.md      (hash H1) - second chunk
+
+	svc := newCrossFileDedupService(idx, true, []model.DocumentHash{
+		{RelPath: "a.md", ContentHash: "H1"},
+		{RelPath: "copy/a.md", ContentHash: "H1"},
+	})
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "a.md", Snippet: "alpha"})
+	svc.SetChunkMetadata(2, model.SearchHit{RelPath: "copy/a.md", Snippet: "alpha"})
+	svc.SetChunkMetadata(3, model.SearchHit{RelPath: "a.md", Snippet: "alpha again"})
+
+	var logbuf bytes.Buffer
+	svc.SetLogger(log.New(&logbuf, "", 0))
+
+	got := searchChunkIDs(t, svc, "alpha")
+
+	want := []uint64{1, 3}
+	if len(got) != len(want) {
+		t.Fatalf("want %v (alias 2 collapsed, both a.md chunks kept), got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order/survivor mismatch: want %v, got %v", want, got)
+		}
+	}
+	if !strings.Contains(logbuf.String(), "dedup: collapsed 1 of 3") {
+		t.Fatalf("collapsed candidates must be reported; log was %q", logbuf.String())
 	}
 }
 
