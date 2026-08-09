@@ -29,7 +29,32 @@ func loadFailureSummary(ctx context.Context, db *sql.DB, maxSamples int) (*model
 	if err != nil {
 		return nil, err
 	}
-	return &model.FailureSummary{Categories: categories, Samples: samples}, nil
+	lastFailure, err := loadLastFailureUnix(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return &model.FailureSummary{Categories: categories, Samples: samples, LastFailureUnix: lastFailure}, nil
+}
+
+// loadLastFailureUnix returns the newest embedding_failed_unix across the
+// chunks that are still in the error state, or 0 when none of them carries a
+// timestamp (a corpus whose failures predate the column). It is what lets a
+// consumer tell a stale, stranded failure set from one this run just produced
+// (issue #783) — the snapshot's own `ts` cannot, because it is stamped at
+// write time regardless of when the failures happened.
+func loadLastFailureUnix(ctx context.Context, db *sql.DB) (int64, error) {
+	var last sql.NullInt64
+	err := db.QueryRowContext(ctx, `
+		SELECT MAX(embedding_failed_unix)
+		FROM chunks
+		WHERE deleted = 0 AND embedding_status = 'error'`).Scan(&last)
+	if err != nil {
+		return 0, err
+	}
+	if !last.Valid {
+		return 0, nil
+	}
+	return last.Int64, nil
 }
 
 // loadFailureCategories returns a count of failed chunks per
@@ -72,7 +97,7 @@ func loadFailureSamples(ctx context.Context, db *sql.DB, maxSamples int) ([]mode
 		return nil, nil
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT rel_path, COALESCE(NULLIF(error_category, ''), 'unknown') AS category, embedding_error
+		SELECT rel_path, COALESCE(NULLIF(error_category, ''), 'unknown') AS category, embedding_error, embedding_failed_unix
 		FROM chunks
 		WHERE deleted = 0 AND embedding_status = 'error'
 		ORDER BY category, chunk_id
@@ -85,7 +110,7 @@ func loadFailureSamples(ctx context.Context, db *sql.DB, maxSamples int) ([]mode
 	out := make([]model.FailureSample, 0, maxSamples)
 	for rows.Next() {
 		var sample model.FailureSample
-		if err := rows.Scan(&sample.RelPath, &sample.Category, &sample.Message); err != nil {
+		if err := rows.Scan(&sample.RelPath, &sample.Category, &sample.Message, &sample.FailedUnix); err != nil {
 			return nil, err
 		}
 		out = append(out, sample)

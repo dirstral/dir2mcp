@@ -52,6 +52,113 @@ const (
 	ErrorCategoryQualityGate ErrorCategory = "quality_gate"
 )
 
+// allErrorCategories lists every category the classifier can produce, in a
+// stable order. It is the validation set for operator-supplied category names
+// (`reindex --embeddings-only --error-category=…`) so a typo is rejected with
+// the real vocabulary instead of silently matching nothing.
+var allErrorCategories = []ErrorCategory{
+	ErrorCategoryAuth,
+	ErrorCategoryRateLimit,
+	ErrorCategoryTransientNet,
+	ErrorCategoryUnknown,
+	ErrorCategoryPayloadTooLarge,
+	ErrorCategoryParseError,
+	ErrorCategoryEmbeddingFailure,
+	ErrorCategoryQualityGate,
+}
+
+// requeueableCategories is the set of failures a bare re-run of the embed step
+// can plausibly clear, with the chunk's stored bytes untouched (issue #783).
+//
+// The dividing line is WHERE the fault lives. auth / rate_limit /
+// transient_net are provider-side or environmental: the chunk was never the
+// problem, and a rotated credential, a quota window that rolled over, or an
+// upstream that came back turns the identical request into a success. The
+// categories left out — payload_too_large, parse_error, embedding_failure,
+// quality_gate — are properties of the input as stored, so re-sending the same
+// bytes to the same provider re-fails deterministically and only spends quota.
+// Those stay terminal until ingestion produces a different chunk.
+//
+// unknown is on the retryable side even though, by definition, we cannot say
+// where its fault lives. It is the classifier's universal default: it covers
+// every message the keyword table did not recognise (5xx-shaped provider
+// errors, provider-specific prose) plus every failure recorded through the
+// unclassified MarkFailed entry point or written before the category column
+// existed. Excluding it would leave that whole class permanently stranded —
+// the exact bug this distinction exists to fix — while including it costs at
+// most one re-failure that the operator explicitly asked for.
+var requeueableCategories = map[ErrorCategory]bool{
+	ErrorCategoryAuth:         true,
+	ErrorCategoryRateLimit:    true,
+	ErrorCategoryTransientNet: true,
+	ErrorCategoryUnknown:      true,
+}
+
+// NormalizeErrorCategory folds a persisted or operator-supplied category
+// string into the canonical enum value. An empty category (a legacy row, or
+// one written through MarkFailed without a classification) reads as
+// ErrorCategoryUnknown, matching how the failure aggregates in
+// loadFailureCategories normalize it in SQL — so "unknown" means the same
+// thing on both the reporting and the retry side.
+func NormalizeErrorCategory(raw string) ErrorCategory {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return ErrorCategoryUnknown
+	}
+	return ErrorCategory(trimmed)
+}
+
+// IsKnownErrorCategory reports whether raw names a category this binary can
+// produce. Used to reject a mistyped --error-category rather than run a retry
+// that would silently match zero rows.
+func IsKnownErrorCategory(raw string) bool {
+	category := NormalizeErrorCategory(raw)
+	for _, known := range allErrorCategories {
+		if known == category {
+			return true
+		}
+	}
+	return false
+}
+
+// IsRequeueableCategory reports whether a failed chunk in this category should
+// be moved back to pending by a plain embed retry. See requeueableCategories
+// for the reasoning behind the split.
+func IsRequeueableCategory(raw string) bool {
+	return requeueableCategories[NormalizeErrorCategory(raw)]
+}
+
+// RequeueableErrorCategories returns the default retry set as strings, in the
+// stable order of allErrorCategories.
+func RequeueableErrorCategories() []string {
+	return filterCategoryStrings(func(c ErrorCategory) bool { return requeueableCategories[c] })
+}
+
+// TerminalErrorCategories returns the categories a plain embed retry cannot
+// clear, in the stable order of allErrorCategories. Callers use it to explain
+// why a category was not retried.
+func TerminalErrorCategories() []string {
+	return filterCategoryStrings(func(c ErrorCategory) bool { return !requeueableCategories[c] })
+}
+
+// KnownErrorCategories returns every category this binary can produce, in a
+// stable order, for error messages that need to show the vocabulary.
+func KnownErrorCategories() []string {
+	return filterCategoryStrings(func(ErrorCategory) bool { return true })
+}
+
+// filterCategoryStrings projects allErrorCategories through a predicate,
+// preserving declaration order so CLI output is byte-identical across runs.
+func filterCategoryStrings(keep func(ErrorCategory) bool) []string {
+	out := make([]string, 0, len(allErrorCategories))
+	for _, c := range allErrorCategories {
+		if keep(c) {
+			out = append(out, string(c))
+		}
+	}
+	return out
+}
+
 // classifierRule pairs a category with the keyword set that triggers
 // it. Order matters: the first matching rule wins, so the more
 // specific categories (rate-limit, auth, payload) are listed before

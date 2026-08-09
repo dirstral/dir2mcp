@@ -280,7 +280,11 @@ func redactFailureSamples(fs *model.FailureSummary, includeContent bool) *model.
 	if fs == nil {
 		return nil
 	}
-	out := &model.FailureSummary{}
+	// LastFailureUnix is a timestamp, not corpus content, and it is the field
+	// that tells a maintainer reading the bundle whether the failures it reports
+	// are current or were stranded long before the bundle was taken (#783), so
+	// it is preserved in both modes.
+	out := &model.FailureSummary{LastFailureUnix: fs.LastFailureUnix}
 	if fs.Categories != nil {
 		out.Categories = make(map[string]int64, len(fs.Categories))
 		for k, v := range fs.Categories {
@@ -291,9 +295,10 @@ func redactFailureSamples(fs *model.FailureSummary, includeContent bool) *model.
 		out.Samples = make([]model.FailureSample, len(fs.Samples))
 		for i, s := range fs.Samples {
 			out.Samples[i] = model.FailureSample{
-				RelPath:  listFileRelPath(s.RelPath, includeContent),
-				Category: s.Category,
-				Message:  redactContentField(s.Message, includeContent),
+				RelPath:    listFileRelPath(s.RelPath, includeContent),
+				Category:   s.Category,
+				Message:    redactContentField(s.Message, includeContent),
+				FailedUnix: s.FailedUnix,
 			}
 		}
 	}

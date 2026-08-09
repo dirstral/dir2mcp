@@ -1023,9 +1023,23 @@ type SkipSample struct {
 // Categories is keyed by the string form of store.ErrorCategory (kept
 // as plain map[string]int64 here so the model package does not depend
 // on internal/store).
+//
+// It describes the chunks that are CURRENTLY in a failed state, not the
+// failures observed during the run that produced the enclosing snapshot. The
+// distinction used to be invisible and actively misleading: corpus.json stamps
+// each write with a fresh `ts`, so failures persisted hours earlier by a
+// different run read as if this run had just made (and lost) that many
+// provider calls. LastFailureUnix carries the age of the newest of those
+// failures so a reader can tell "stranded since yesterday" from "failing right
+// now" (issue #783).
 type FailureSummary struct {
 	Categories map[string]int64 `json:"categories"`
 	Samples    []FailureSample  `json:"samples,omitempty"`
+	// LastFailureUnix is when the most recent still-failed chunk was recorded
+	// (UTC unix seconds). Zero (omitted) means no failed chunk carries a
+	// timestamp — a corpus whose failures predate the embedding_failed_unix
+	// column — and must be read as "age unknown", never as 1970.
+	LastFailureUnix int64 `json:"last_failure_unix,omitempty"`
 }
 
 // FailureSample is one representative failed chunk: enough information
@@ -1034,6 +1048,11 @@ type FailureSample struct {
 	RelPath  string `json:"rel_path"`
 	Category string `json:"category"`
 	Message  string `json:"message"`
+	// FailedUnix is when this chunk was recorded as failed (UTC unix seconds),
+	// or 0 when it predates the timestamp column. Per-sample rather than
+	// summary-only so a mixed corpus (old stranded failures plus a fresh one)
+	// is readable instead of collapsing to a single newest-wins timestamp.
+	FailedUnix int64 `json:"failed_unix,omitempty"`
 }
 
 // MarshalJSON ensures that a nil DocCounts map is encoded as an empty object

@@ -25,9 +25,21 @@ import (
 const reindexProgressInterval = 5 * time.Second
 
 func (a *App) runReindex(ctx context.Context, global globalOptions, args []string) int {
-	if len(args) > 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("reindex command does not accept arguments: %s", strings.Join(args, " ")))
+	opts, positional, err := parseReindexOptions(args)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid reindex flags: %v", err))
 		return exitConfigInvalid
+	}
+	if len(positional) > 0 {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("reindex command does not accept arguments: %s", strings.Join(positional, " ")))
+		return exitConfigInvalid
+	}
+	// --embeddings-only is a different operation, not a narrower rebuild: it
+	// re-queues chunks a provider rejected and touches neither the extracted
+	// representations nor the on-disk index, so it skips the staging, the
+	// live-daemon refusal and the destructive-action prompt below (issue #783).
+	if opts.embeddingsOnly {
+		return a.runReindexEmbeddingsOnly(ctx, global, opts)
 	}
 
 	cfg, code := a.loadReindexConfig(global)

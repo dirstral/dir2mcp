@@ -450,8 +450,10 @@ func indexingFailureCheck(ctx context.Context, a *App, cfg config.Config) doctor
 func renderIndexingFailureCheck(stats model.CorpusStats) doctorCheck {
 	docErrors := stats.Errors
 	var chunkCategories map[string]int64
+	var lastFailureUnix int64
 	if stats.FailureSummary != nil {
 		chunkCategories = stats.FailureSummary.Categories
+		lastFailureUnix = stats.FailureSummary.LastFailureUnix
 	}
 	if docErrors == 0 && len(chunkCategories) == 0 {
 		return doctorCheck{Name: "indexing_failures", Status: doctorStatusOK, Detail: "0 failures"}
@@ -461,9 +463,36 @@ func renderIndexingFailureCheck(stats model.CorpusStats) doctorCheck {
 		parts = append(parts, fmt.Sprintf("%d document(s) failed extraction", docErrors))
 	}
 	if len(chunkCategories) > 0 {
-		parts = append(parts, "chunk failures: "+summarizeFailureCategories(chunkCategories))
+		chunkPart := "chunk failures: " + summarizeFailureCategories(chunkCategories)
+		// These counts are chunks CURRENTLY in a failed state, which may have
+		// been recorded by a long-past run. Say when the newest of them happened
+		// so the reader does not take a stale set for a live one (#783).
+		if lastFailureUnix > 0 {
+			chunkPart += fmt.Sprintf(" (latest %s)", time.Unix(lastFailureUnix, 0).UTC().Format(time.RFC3339))
+		}
+		parts = append(parts, chunkPart)
+		if hint := retryableFailureHint(chunkCategories); hint != "" {
+			parts = append(parts, hint)
+		}
 	}
 	return doctorCheck{Name: "indexing_failures", Status: doctorStatusWarn, Detail: strings.Join(parts, "; ")}
+}
+
+// retryableFailureHint names the recovery command when some of the failed
+// chunks are in a category a plain embed retry can clear (#783). Without it the
+// doctor reports the stranded chunks but leaves the operator to guess that the
+// only supported fix used to be a full re-ingest.
+func retryableFailureHint(categories map[string]int64) string {
+	var retryable int64
+	for category, n := range categories {
+		if store.IsRequeueableCategory(category) {
+			retryable += n
+		}
+	}
+	if retryable == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d retryable after fixing the provider: run `dir2mcp reindex --embeddings-only`", retryable)
 }
 
 // summarizeFailureCategories renders the failure-category map as a
