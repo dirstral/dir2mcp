@@ -1712,19 +1712,24 @@ func (s *Service) runScan(ctx context.Context) error {
 		)
 	}
 	// A symlink is dropped at discovery under the default
-	// ingest.follow_symlinks=false, which is right, but until #781 it was also
-	// silent: a corpus of links into a media library reported scanned=0,
-	// skipped=0, errors=0 and a ready daemon, exactly like an empty directory.
-	// Log-only, matching the OnUnsafeKey precedent (#735) rather than the
-	// OnOversize one (#497): the scanned/skipped counters cannot honestly absorb
-	// these yet. SPEC §15.2 closes the skip_reasons enum for a spec minor and
-	// §3.2 requires the file_skip event count to equal the run's terminal
-	// indexing.skipped, so every skipped bump must carry a reason from that enum.
-	// None of the eight describes a not-followed link, and borrowing
-	// path_excluded/ignore_rule would mislabel it in the honest-coverage
-	// aggregate. Counting these belongs behind a spec change that adds the
-	// reason; the log is what unblocks the operator today.
+	// ingest.follow_symlinks=false, which is right, but it used to be silent
+	// too: a corpus of links into a media library reported scanned=0,
+	// skipped=0, errors=0 and a ready daemon, exactly like an empty directory
+	// (#781). #792 added the log. This now also COUNTS the drop, which #792
+	// could not: SPEC §15.2 closes the skip_reasons enum for a spec minor, and
+	// none of the eight reasons then described a not-followed link. Borrowing
+	// path_excluded would have named a false cause in the honest-coverage
+	// aggregate, so the count waited for spec 0.46.0 to add symlink_ignored.
+	//
+	// Counted like OnOversize (#497) rather than logged like OnUnsafeKey
+	// (#735), because the two cases differ: an unsafe bucket key is not a
+	// corpus file dir2mcp declined to index, while a link IS a corpus entry
+	// with a deliberate policy applied to it.
+	symlinks := make(map[string]struct{})
 	discoverOpts.OnSkippedSymlink = func(relPath string) {
+		s.addScanned(1)
+		s.addSkipped(1)
+		symlinks[relPath] = struct{}{}
 		s.getLogger().Printf(
 			"discovery: skipping %s (symlink); ingest.follow_symlinks is false, so links are not indexed. Set ingest.follow_symlinks: true to include it (a followed link must still resolve inside the corpus root)",
 			relPath,
@@ -1779,6 +1784,7 @@ func (s *Service) runScan(ctx context.Context) error {
 	// Register size-capped drops as durable skipped rows before the pass(es)
 	// run so they survive markMissingAsDeleted and feed the coverage aggregate.
 	s.persistOversizeSkips(ctx, oversize, seen)
+	s.persistSymlinkSkips(ctx, symlinks, seen)
 
 	// Optional two-phase pass split (SPEC §8.6.11): run media ingest as two ordered
 	// passes over the corpus — a transcription pass (STT/sidecar → source
@@ -2891,6 +2897,43 @@ func (s *Service) persistOversizeSkips(ctx context.Context, oversize map[string]
 		// Emitted here rather than at the OnOversize counter bump so the event and
 		// the persisted row stay one-to-one; the oversize map is keyed by relPath,
 		// so no document raises it twice.
+		s.notifyDocumentSkip(doc)
+	}
+}
+
+// persistSymlinkSkips upserts a minimal skipped document row for each entry
+// dropped at discovery for being a symbolic link while ingest.follow_symlinks
+// is false (#781), stamping skip_reason=symlink_ignored so
+// CorpusStats.SkipSummary reports it and §3.2's "one file_skip event per
+// terminal skipped" invariant holds.
+//
+// It mirrors persistOversizeSkips step for step, including the seen
+// registration that stops markMissingAsDeleted from tombstoning the row it
+// just wrote, and the best-effort per-path error handling.
+//
+// SizeBytes is deliberately left zero. With following off the walker never
+// resolves the target, so the only size available is the link's own inode
+// size, which describes the path string rather than any content. Reporting
+// that as the document size would be worse than reporting nothing.
+func (s *Service) persistSymlinkSkips(ctx context.Context, symlinks map[string]struct{}, seen map[string]struct{}) {
+	for relPath := range symlinks {
+		seen[relPath] = struct{}{}
+		doc := model.Document{
+			RelPath:    relPath,
+			DocType:    ClassifyDocType(relPath),
+			Status:     "skipped",
+			SkipReason: model.SkipReasonSymlinkIgnored,
+		}
+		if err := s.store.UpsertDocument(ctx, doc); err != nil {
+			s.getLogger().Printf("discovery: persist symlink skip row for %s: %v", relPath, err)
+		}
+		// Emitted even when the upsert failed, matching the size-cap path. The
+		// skipped counter was already bumped at discovery, and SPEC §3.2 ties
+		// the file_skip event count to the terminal indexing.skipped value. To
+		// return early here would keep the count and drop the event, so a
+		// failed row would break that invariant instead of only costing the
+		// coverage aggregate one entry. The map is keyed by relPath, so one
+		// link never raises two events.
 		s.notifyDocumentSkip(doc)
 	}
 }
