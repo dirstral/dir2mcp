@@ -80,6 +80,12 @@ const (
 	// SkipReasonSizeCap: the file exceeded ingest.max_file_mb and was dropped
 	// at discovery.
 	SkipReasonSizeCap = "size_cap"
+	// SkipReasonSymlinkIgnored: a discovered entry is a symbolic link and
+	// ingest.follow_symlinks is false, so the walker does not follow the link
+	// and does not index the target. It covers a link to a file and a link to a
+	// directory alike: with following off the walker never resolves the target,
+	// so it cannot tell the two apart (SPEC §7.1/§15.2, spec 0.46.0).
+	SkipReasonSymlinkIgnored = "symlink_ignored"
 	// SkipReasonLanguageUncovered: media whose resolved source language is outside
 	// the selected STT model's declared stt_languages coverage, skipped under
 	// media.stt.on_uncovered_language=skip (SPEC §8.2.1) instead of transcribed to

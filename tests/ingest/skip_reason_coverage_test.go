@@ -35,6 +35,10 @@ func TestSkipReasonCoverage(t *testing.T) {
 	writeCorpusFile(t, root, "big.bin", bytes.Repeat([]byte("x"), 2*1024*1024))
 	// A path-excluded file -> counted in-run, NOT persisted.
 	writeCorpusFile(t, root, filepath.Join("skipdir", "ignored.txt"), []byte("excluded by glob"))
+	// A symlink under the default follow_symlinks=false -> skip_reason=symlink_ignored
+	// (#781, spec 0.46.0). Before the reason existed this drop was logged but
+	// never counted, so an all-symlink corpus reported a clean empty scan.
+	linkSkipped := writeCorpusSymlink(t, root, "notes.txt", "link-to-notes.txt")
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
@@ -60,6 +64,7 @@ func TestSkipReasonCoverage(t *testing.T) {
 	assertSkipReason(t, ctx, st, ".env", "skipped", model.SkipReasonIgnoreRule)
 	assertSkipReason(t, ctx, st, "creds.txt", "secret_excluded", model.SkipReasonSecretExcluded)
 	assertSkipReason(t, ctx, st, "big.bin", "skipped", model.SkipReasonSizeCap)
+	assertSymlinkSkip(t, ctx, st, linkSkipped)
 
 	// The ingestable file is NOT skipped and carries no skip_reason.
 	if doc, err := st.GetDocumentByPath(ctx, "notes.txt"); err != nil {
@@ -91,6 +96,7 @@ func TestSkipReasonCoverage(t *testing.T) {
 			t.Errorf("SkipSummary.Categories[%q] = %d, want %d (full=%+v)", reason, got, want, stats.SkipSummary.Categories)
 		}
 	}
+	assertSymlinkAggregate(t, stats, linkSkipped)
 	// path_excluded is NOT durable, so it must not appear in the store aggregate.
 	if got := stats.SkipSummary.Categories[model.SkipReasonPathExcluded]; got != 0 {
 		t.Errorf("SkipSummary should not contain path_excluded (non-persisted), got %d", got)
@@ -142,4 +148,42 @@ func emptyZip(t *testing.T) []byte {
 		t.Fatalf("close zip: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// writeCorpusSymlink creates a symbolic link inside the corpus and reports
+// whether it could. A filesystem that refuses symlinks (some CI containers,
+// Windows without privilege) must not fail the whole coverage test, so the
+// caller guards the symlink assertions on this instead.
+func writeCorpusSymlink(t *testing.T, root, target, name string) bool {
+	t.Helper()
+	if err := os.Symlink(filepath.Join(root, target), filepath.Join(root, name)); err != nil {
+		t.Logf("skipping the symlink case: this filesystem cannot create links: %v", err)
+		return false
+	}
+	return true
+}
+
+// assertSymlinkSkip checks the persisted row for a link dropped under the
+// default follow_symlinks=false (#781). Split out of TestSkipReasonCoverage so
+// that test stays inside the repo's gocyclo budget: the filesystem guard adds a
+// branch, and the test already carries one per skip class.
+func assertSymlinkSkip(t *testing.T, ctx context.Context, st *store.SQLiteStore, linkSkipped bool) {
+	t.Helper()
+	if !linkSkipped {
+		return
+	}
+	assertSkipReason(t, ctx, st, "link-to-notes.txt", "skipped", model.SkipReasonSymlinkIgnored)
+}
+
+// assertSymlinkAggregate checks the durable coverage aggregate counts the link.
+// Counting is the half #792 could not do: the reason did not exist until spec
+// 0.46.0, and borrowing another reason would have named a false cause.
+func assertSymlinkAggregate(t *testing.T, stats model.CorpusStats, linkSkipped bool) {
+	t.Helper()
+	if !linkSkipped {
+		return
+	}
+	if got := stats.SkipSummary.Categories[model.SkipReasonSymlinkIgnored]; got != 1 {
+		t.Errorf("SkipSummary.Categories[symlink_ignored] = %d, want 1 (full=%+v)", got, stats.SkipSummary.Categories)
+	}
 }
