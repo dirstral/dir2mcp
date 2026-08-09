@@ -363,8 +363,8 @@ func languageFromRepMeta(metaJSON string) string {
 func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType, language string) (int64, error) {
 	_, err := exec.ExecContext(
 		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, language, embedding_status, embedding_error, error_category, chunk_context, embedding_mode, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, language, embedding_status, embedding_error, error_category, embedding_failed_unix, chunk_context, embedding_mode, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -379,6 +379,7 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		   embedding_status=excluded.embedding_status,
 		   embedding_error=excluded.embedding_error,
 		   error_category=excluded.error_category,
+		   embedding_failed_unix=excluded.embedding_failed_unix,
 		   chunk_context=excluded.chunk_context,
 		   embedding_mode=excluded.embedding_mode,
 		   deleted=excluded.deleted`,
@@ -397,6 +398,11 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
 		strings.TrimSpace(chunk.EmbeddingError),
 		strings.TrimSpace(chunk.ErrorCategory),
+		// A chunk can be born failed: the output quality gate quarantines a
+		// degenerate transcript/OCR chunk at insert time. Stamp that the same
+		// way a mid-run failure is stamped so the failure aggregates can age it
+		// (issue #783).
+		embeddingFailureStamp(normalizeEmbeddingStatus(chunk.EmbeddingStatus), time.Now()),
 		chunk.Context,
 		model.NormalizeEmbeddingMode(chunk.EmbeddingMode),
 		boolToInt(chunk.Deleted),
@@ -742,6 +748,15 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// and its embed identity migrates to `…|off` — so no reindex.
 		`ALTER TABLE chunks ADD COLUMN chunk_context TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chunks ADD COLUMN embedding_mode TEXT NOT NULL DEFAULT 'disabled'`,
+		// embedding_failed_unix stamps WHEN a chunk entered embedding_status
+		// ='error' so the failure aggregates can say how old the failures they
+		// report are (issue #783). Without it corpus.json re-reported failures
+		// persisted hours earlier under this run's fresh `ts`, which reads as
+		// "this run just failed N times against the provider" — the worst
+		// possible signal for an operator who is mid-way through swapping a
+		// credential and made no request at all. Existing rows default to 0,
+		// which the aggregate reports as "unknown age" rather than as 1970.
+		`ALTER TABLE chunks ADD COLUMN embedding_failed_unix INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -826,6 +841,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   embedding_status TEXT NOT NULL DEFAULT 'pending',
   embedding_error TEXT NOT NULL DEFAULT '',
   error_category TEXT NOT NULL DEFAULT '',
+  embedding_failed_unix INTEGER NOT NULL DEFAULT 0,
   chunk_context TEXT NOT NULL DEFAULT '',
   embedding_mode TEXT NOT NULL DEFAULT 'disabled',
   deleted INTEGER NOT NULL DEFAULT 0,
@@ -1133,7 +1149,12 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 		   deleted=0,
 		   embedding_status='pending',
 		   embedding_error='',
-		   error_category=''`,
+		   error_category='',
+		   -- Clear the failure stamp alongside the error text it belongs to: a
+		   -- row moving back to pending is no longer failed, so leaving the
+		   -- timestamp behind would let a future aggregate age the new failure
+		   -- from the old one's clock (issue #783).
+		   embedding_failed_unix=0`,
 		int64(task.Label),
 		relPath,
 		defaultIfEmpty(task.Metadata.DocType, "unknown"),
@@ -3673,14 +3694,19 @@ func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, 
 	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx,
-		`UPDATE chunks SET embedding_status = ?, embedding_error = ?, error_category = ? WHERE chunk_id = ?`)
+		`UPDATE chunks SET embedding_status = ?, embedding_error = ?, error_category = ?, embedding_failed_unix = ? WHERE chunk_id = ?`)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stmt.Close() }()
 
+	// Stamp the failure time on the way into 'error' and clear it on the way
+	// out, so the value always describes the state the row is actually in: a
+	// chunk that later embeds (or is re-queued) must not keep advertising an
+	// old failure the aggregates would then report as current (issue #783).
+	failedUnix := embeddingFailureStamp(status, time.Now())
 	for _, label := range labels {
-		if _, err := stmt.ExecContext(ctx, status, reason, category, int64(label)); err != nil {
+		if _, err := stmt.ExecContext(ctx, status, reason, category, failedUnix, int64(label)); err != nil {
 			return err
 		}
 	}

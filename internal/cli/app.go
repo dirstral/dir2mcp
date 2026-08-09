@@ -660,6 +660,16 @@ func (a *App) printUsage() {
 	}
 	writeln(o)
 
+	writeln(o, s.sectionHeader("Reindex Flags")+" "+s.Dim.Render("(reindex)"))
+	reindexFlags := [][2]string{
+		{"--embeddings-only", "retry chunks that failed to embed, without re-running extraction"},
+		{"--error-category <csv>", "with --embeddings-only: which failure categories to retry"},
+	}
+	for _, f := range reindexFlags {
+		writef(o, "  %-30s %s\n", s.Accent.Render(f[0]), s.Dim.Render(f[1]))
+	}
+	writeln(o)
+
 	writeln(o, s.sectionHeader("Payment Flags")+" "+s.Dim.Render("(up, x402)"))
 	x402Flags := [][2]string{
 		{"--x402 <mode>", "payment gating: off | on | required"},

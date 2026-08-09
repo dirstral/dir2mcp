@@ -250,7 +250,7 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 | `search "<query>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
-| `reindex` | Force full re-ingestion |
+| `reindex` | Force full re-ingestion. `--embeddings-only` instead retries just the chunks that failed to embed (see [Recovering from a failed embed run](#recovering-from-a-failed-embed-run)) |
 | `embed-worker` | Run a standalone distributed embed worker (no MCP serving; requires a Tier-C store + broker) |
 | `export` | Render a transcript as VTT/SRT/TTML subtitles (`export --format vtt\|srt\|ttml <path>`) |
 | `bridge` | Run helper adapters (for example the ElevenLabs webhook bridge) |
@@ -269,6 +269,21 @@ DIR2MCP_DEMO_TOKEN="$(cat .dir2mcp/secret.token)" \
 
 Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.
 `ask`, `search`, `open-file`, and `list-files` are legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
+
+### Recovering from a failed embed run
+
+When the embedding provider rejects a request for a reason that is not the chunk's fault (a key revoked, rotated or billing-suspended mid-run, a quota that went hard-limit, an upstream outage), the affected chunks are recorded as failed and are **not** retried on their own. Restarting the daemon with a working credential does not help by itself: the chunks are in an error state, not a pending one, so `status` reports `embedded_pending=0, errors=N` and the worker sits idle.
+
+Fix the provider first, then re-queue the failed chunks:
+
+```bash
+dir2mcp reindex --embeddings-only                          # retry the provider-side failures
+dir2mcp reindex --embeddings-only --error-category auth    # or just one category
+```
+
+This re-runs only the embed step: extraction (OCR, transcription, media analysis) is **not** repeated, which is the whole point — extraction is usually the expensive half and its output has not changed. It is safe to run while the daemon is up; the running embed worker picks the chunks up on its next cycle. With no daemon running, start one with `dir2mcp up`.
+
+By default it retries the categories a provider fix can plausibly clear: `auth`, `rate_limit`, `transient_net`, and `unknown` (the catch-all for failures the classifier could not label). Failures that are a property of the stored input — `payload_too_large`, `parse_error`, `embedding_failure`, `quality_gate` — are left alone, because re-sending identical bytes to the same provider just fails again; those need a real re-ingest (`dir2mcp reindex`) after changing the input or the configuration. `dir2mcp doctor` names the retryable count when there is one.
 
 ### Auto-start at login (macOS)
 
