@@ -66,7 +66,13 @@ func newRemoteMCPClient(endpoint, authHeader string, connection remoteConnection
 		endpoint:   strings.TrimSpace(endpoint),
 		authHeader: strings.TrimSpace(authHeader),
 		connection: connection,
-		httpClient: &http.Client{Timeout: 45 * time.Second},
+		httpClient: &http.Client{
+			Timeout: 45 * time.Second,
+			// connection.json can hold any header, including a custom
+			// credential header that Go copies onto a redirect target. Stop at
+			// the 3xx instead (issue #704).
+			CheckRedirect: protocol.RefuseRedirect,
+		},
 	}
 }
 
@@ -133,9 +139,11 @@ func (c *remoteMCPClient) doRPC(ctx context.Context, reqBody rpcRequest, include
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	// The bound covers every status, so an over-limit error body is rejected
+	// before any decode runs (issue #704).
+	body, err := protocol.ReadLimitedResponseBody(resp.Body)
 	if err != nil {
-		return resp, nil, fmt.Errorf("read response: %w", err)
+		return resp, nil, err
 	}
 	return resp, body, nil
 }
