@@ -3313,19 +3313,15 @@ func normalizeFileStatus(status string) string {
 	}
 }
 
+// isListFilesNoisePath reports whether `list_files` hides a row when the caller
+// asks for `include_hidden=false`.
+//
+// The rule itself lives in relpath.IsHidden, next to the SQL form the store
+// pages with (relpath.NotHiddenSQL). Both listing paths must hide the same rows:
+// this Go form runs in the walk fallback, the SQL form runs in every production
+// listing, and a caller cannot tell which one served the page.
 func isListFilesNoisePath(relPath string) bool {
-	normalized := strings.TrimSpace(filepath.ToSlash(relPath))
-	if normalized == "" {
-		return false
-	}
-	first := normalized
-	if idx := strings.IndexByte(normalized, '/'); idx >= 0 {
-		first = normalized[:idx]
-	}
-	if strings.HasPrefix(first, ".") {
-		return true
-	}
-	return false
+	return relpath.IsHidden(filepath.ToSlash(relPath))
 }
 
 // looksLikeBinaryContent reports whether the payload is unsafe to surface as

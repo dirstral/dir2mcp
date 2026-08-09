@@ -2215,14 +2215,10 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 //
 // The MCP handler used to apply that policy in Go, which forced it to walk the
 // whole matching corpus from offset zero on every single call just to know how
-// many rows survived. The predicate is exactly "the normalized rel_path starts
-// with a dot": mcp.isListFilesNoisePath takes the FIRST '/'-delimited segment
-// and tests strings.HasPrefix(first, "."), and testing the first segment's
-// prefix is testing the whole string's prefix. rel_paths are stored
-// filepath.Clean'd and slash-normalized (see normalizeRelPath), with no leading
-// "./" and no "." or ".." components, so `rel_path NOT LIKE '.%'` is a
-// byte-for-byte equivalent — and '.' is not a LIKE metacharacter, so no ESCAPE
-// clause is needed.
+// many rows survived. The policy is "hide a path when ANY segment starts with a
+// dot" (#693), and relpath.NotHiddenSQL is that rule in SQL. It sits beside
+// relpath.IsHidden, the Go form the handler's walk fallback uses, so the two
+// cannot drift apart.
 //
 // Adding it to `where` is what makes this worth doing: the same slice is
 // threaded through whereClause into the SQL LIMIT/OFFSET page query, into
@@ -2261,7 +2257,7 @@ func (s *SQLiteStore) ListVisibleFiles(ctx context.Context, prefix, glob string,
 		prefixArgs = append(prefixArgs, escapeLike(normalizedPrefix)+"%")
 	}
 	if !includeHidden {
-		where = append(where, `rel_path NOT LIKE '.%'`)
+		where = append(where, relpath.NotHiddenSQL("rel_path"))
 	}
 	whereClause := " WHERE " + strings.Join(where, " AND ")
 

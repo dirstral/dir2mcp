@@ -36,7 +36,7 @@ func TestListVisibleFilesTotalIsNotCrossedBetweenVisibilityPolicies_694(t *testi
 	seed := []string{
 		"a.md",
 		"dir/sub/c.md",
-		"visible/.config/b.md", // dot in a LATER segment: visible
+		"visible/.config/b.md", // dot in a LATER segment: hidden since #693
 		".hidden/a.md",
 		".x",
 	}
@@ -47,7 +47,7 @@ func TestListVisibleFilesTotalIsNotCrossedBetweenVisibilityPolicies_694(t *testi
 			t.Fatalf("seed %s: %v", relPath, err)
 		}
 	}
-	const wantVisible, wantAll = 3, 5
+	const wantVisible, wantAll = 2, 5
 
 	for _, tc := range []struct {
 		name string
