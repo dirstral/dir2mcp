@@ -1638,7 +1638,13 @@ func (s *Service) generateGroundedAnswer(
 	// `hits` and `citations` built above are never mutated, so cited spans
 	// remain byte-for-byte identical to what was retrieved. usedIdx reports
 	// which hits actually reached the model's context window (issue #403 F1).
-	prompt, usedIdx := buildRAGPrompt(question, hits, s.contextTexts(ctx, hits), systemPrompt, maxContextChars, compressor)
+	// Group the candidates that report one moment before the model reads them
+	// (issue #784). A recognition backend reports one moment once per role, so
+	// two candidates can carry the same time span on the same file. One block
+	// per moment stops the generator from counting one event twice. Every
+	// member of a used moment stays citable; see moments.go.
+	moments := groupMoments(hits)
+	prompt, usedIdx := buildRAGPrompt(question, hits, moments, s.contextTexts(ctx, hits, moments), systemPrompt, maxContextChars, compressor)
 	var generated string
 	genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
 		var gErr error
@@ -3255,12 +3261,20 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 	lines := make([]string, 0, len(hits)+1)
 	lines = append(lines, fmt.Sprintf("Question: %s", question))
 	lines = append(lines, "Top context:")
-	limit := len(hits)
+	// List one line per moment, not one per hit (issue #784). Two annotations
+	// of one moment would otherwise fill two of the five lines, and a reader
+	// would count one event twice, exactly as the generator did.
+	moments := groupMoments(hits)
+	limit := len(moments)
 	if limit > 5 {
 		limit = 5
 	}
 	for i := 0; i < limit; i++ {
-		h := hits[i]
+		p := moments[i].primary()
+		if p < 0 || p >= len(hits) {
+			continue
+		}
+		h := hits[p]
 		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
 		if snippet == "" {
 			snippet = "(no snippet)"
@@ -3286,12 +3300,17 @@ const ragMinDocTextChars = 16
 // store lacks the capability, the chunk id is zero, the lookup fails, or the
 // chunk carries no text (a media chunk), and the builder then falls back to the
 // hit's Snippet. At most ragMaxContextDocs lookups run per ask.
-func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit) []string {
-	limit := len(hits)
+//
+// moments carries the answer-time grouping (issue #784). Only the primary
+// member of a moment reaches the prompt, so only a primary needs its text. The
+// returned slice stays indexed by HIT index, and an entry that no moment uses
+// stays empty.
+func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, moments []moment) []string {
+	limit := len(moments)
 	if limit > ragMaxContextDocs {
 		limit = ragMaxContextDocs
 	}
-	texts := make([]string, limit)
+	texts := make([]string, len(hits))
 	// Copy the store under the guard like every other accessor in this file
 	// (applyRecencyDecay, rerankPool): the field can be reassigned after
 	// construction, so an unguarded read races with that assignment.
@@ -3303,14 +3322,15 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit) []st
 		return texts
 	}
 	for i := 0; i < limit; i++ {
-		if hits[i].ChunkID == 0 {
+		p := moments[i].primary()
+		if p < 0 || p >= len(hits) || hits[p].ChunkID == 0 {
 			continue
 		}
-		task, _, err := fetcher.ChunkTaskByID(ctx, hits[i].ChunkID)
+		task, _, err := fetcher.ChunkTaskByID(ctx, hits[p].ChunkID)
 		if err != nil {
 			continue
 		}
-		texts[i] = strings.TrimSpace(task.Text)
+		texts[p] = strings.TrimSpace(task.Text)
 	}
 	return texts
 }
@@ -3331,7 +3351,16 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit) []st
 // match-centered window of that size (SPEC §9.4.2, issue #403 F5) rather than a
 // flat 300-rune head, so a clause past the head of a 2500-rune chunk still
 // reaches the model that cites it.
-func buildRAGPrompt(question string, hits []model.SearchHit, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
+//
+// moments groups the candidates that report one event (issue #784, see
+// moments.go). One block is emitted per moment, and the text of its best-ranked
+// member fills that block. The model therefore reads one moment once, and it
+// can no longer count a role-split recognition annotation as two events. The
+// returned indices name EVERY member of each moment that reached the context,
+// so provenance is unchanged: each member cites the same seconds of the same
+// file that the block quoted. A corpus without recognition annotations groups
+// one hit per moment, so the prompt is byte-identical to before.
+func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
 	systemPrompt = strings.TrimSpace(systemPrompt)
 	if systemPrompt == "" {
 		systemPrompt = defaultRAGSystemPrompt
@@ -3351,14 +3380,18 @@ func buildRAGPrompt(question string, hits []model.SearchHit, fullTexts []string,
 	b.WriteString("\n\nContext:\n")
 
 	remaining := maxContextChars
-	limit := len(hits)
+	limit := len(moments)
 	if limit > ragMaxContextDocs {
 		limit = ragMaxContextDocs
 	}
 	perDoc := maxContextChars / limitOrOne(limit)
-	used := make([]int, 0, limit)
+	used := make([]moment, 0, limit)
 	for i := 0; i < limit && remaining > 0; i++ {
-		block, ok := ragDocBlock(question, hits[i], docTextAt(fullTexts, i), perDoc, remaining, compressor)
+		p := moments[i].primary()
+		if p < 0 || p >= len(hits) {
+			continue
+		}
+		block, ok := ragDocBlock(question, hits[p], docTextAt(fullTexts, p), perDoc, remaining, compressor)
 		if !ok {
 			// The remaining budget cannot hold a complete, fenced block for this
 			// document. Stop rather than emit a partial one: a truncated block
@@ -3368,9 +3401,9 @@ func buildRAGPrompt(question string, hits []model.SearchHit, fullTexts []string,
 		}
 		b.WriteString(block)
 		remaining -= len([]rune(block))
-		used = append(used, i)
+		used = append(used, moments[i])
 	}
-	return b.String(), used
+	return b.String(), momentMemberIndices(used)
 }
 
 // limitOrOne guards the per-document division against a zero document count.
