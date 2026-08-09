@@ -1203,25 +1203,38 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 	return subtitle.NewWordFilter(s.cfg.MediaFilterWords)
 }
 
-// captionDropScrub builds the shared subtitle drop/scrub sets from
-// media.subtitles.drop_phrases / scrub_phrases (issue #545). The same sets clean
-// STT transcript chunks and sidecar-cue chunks before embedding, mirroring how
-// the export path (subtitle.CleanCues) cleans the exported sidecar — so a
-// wholly-spam chunk is never indexed and a chunk with a leaked phrase is embedded
-// scrubbed, keeping the index and sidecar in agreement. Empty config yields
-// inactive (nil) sets, which the cleaning treats as a no-op. The patterns were
-// already validated at config load (config.Validate → subtitle.NewDropSet), so a
-// compile error here is unexpected; it is logged and treated as no cleaning
-// (nil set) rather than failing ingestion.
-func (s *Service) captionDropScrub() (drop, scrub *subtitle.DropSet) {
-	var err error
-	if drop, err = subtitle.NewDropSet(s.cfg.MediaSubtitlesDropPhrases); err != nil {
+// captionCleanOptions builds the shared ingest-time cue cleaning from
+// media.subtitles.{drop_urls,drop_phrases,scrub_phrases,collapse_repeats}
+// (issues #545, #765). The same options clean STT transcript chunks, translated
+// transcript chunks and sidecar-cue chunks before embedding, and they are the
+// SAME subtitle.CleanOptions shape the export path builds (cli.newCuePipeline),
+// so a hallucinated URL, a wholly-spam chunk or a repetition run is neither
+// exported nor indexed, keeping the index and the sidecar in agreement rather
+// than leaving cues that are invisible in the sidecar but citable from the index.
+//
+// Glossary is deliberately left unset: SPEC §8.6.2 pins media.subtitles.glossary
+// as an export-time find/replace on already-rendered cue text, so rewriting
+// indexed text with it needs a spec change first, not a code fix. With every key
+// unset the options are inactive and the cleaning is a byte-for-byte no-op.
+//
+// The patterns were already validated at config load (config.Validate →
+// subtitle.NewDropSet), so a compile error here is unexpected; it is logged and
+// treated as no cleaning (nil set) rather than failing ingestion.
+func (s *Service) captionCleanOptions() subtitle.CleanOptions {
+	drop, err := subtitle.NewDropSet(s.cfg.MediaSubtitlesDropPhrases)
+	if err != nil {
 		s.getLogger().Printf("media.subtitles.drop_phrases invalid at ingest, ignoring: %v", err)
 	}
-	if scrub, err = subtitle.NewDropSet(s.cfg.MediaSubtitlesScrubPhrases); err != nil {
+	scrub, err := subtitle.NewDropSet(s.cfg.MediaSubtitlesScrubPhrases)
+	if err != nil {
 		s.getLogger().Printf("media.subtitles.scrub_phrases invalid at ingest, ignoring: %v", err)
 	}
-	return drop, scrub
+	return subtitle.CleanOptions{
+		DropURLs:        s.cfg.MediaSubtitlesDropURLs,
+		Drop:            drop,
+		Scrub:           scrub,
+		CollapseRepeats: s.cfg.MediaSubtitlesCollapseRepeats,
+	}
 }
 
 func sttExpectedLanguage(cfg config.Config) string {
@@ -4509,11 +4522,11 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	}
 
 	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
-	// Strip configured subtitle drop/scrub phrases from the chunk text BEFORE
-	// embedding (issue #545), so whisper keyword-spam never pollutes the index —
-	// the same cleaning the export path applies to the sidecar. Off by default.
-	dropSet, scrubSet := s.captionDropScrub()
-	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
+	// Apply the configured subtitle cue cleaning to the chunk text BEFORE
+	// embedding (issues #545, #765), so whisper keyword-spam, hallucinated URL /
+	// credit lines and repetition runs never pollute the index: the same cleaning
+	// the export path applies to the sidecar. Off by default.
+	segments = applyCueCleaningToSegments(segments, s.captionCleanOptions())
 	if len(segments) == 0 {
 		return false, false, nil
 	}
@@ -4897,10 +4910,10 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// English track. translatedWords is nil for the chat engine, leaving that path
 	// chunk-only as before.
 	segments := chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
-	// Strip configured subtitle drop/scrub phrases from the translated chunk text
-	// before embedding (issue #545), consistent with the source transcript path.
-	dropSet, scrubSet := s.captionDropScrub()
-	segments = applyDropScrubToSegments(segments, dropSet, scrubSet)
+	// Apply the configured subtitle cue cleaning to the translated chunk text
+	// before embedding (issues #545, #765), consistent with the source transcript
+	// path.
+	segments = applyCueCleaningToSegments(segments, s.captionCleanOptions())
 	// Bail BEFORE creating the representation when the translation was fully
 	// stripped (drop/scrub emptied every segment): otherwise we would leave a
 	// dangling rep row with no chunks and inflate the representation count. The

@@ -721,11 +721,21 @@ type Config struct {
 	// exporting the same transcript in two formats must not yield two different
 	// editorial results. TTML used to skip all five (issue #729).
 	//
-	// This is the export surface. Two of the five (drop_phrases, scrub_phrases)
-	// ALSO run at ingest, before chunks are embedded, so the retrieval index
-	// agrees with the exported sidecar (issue #545); the other three
-	// (glossary, collapse_repeats, drop_urls) are export-only and do not change
-	// what is indexed or cited. Each key notes which it is.
+	// This is the export surface. Four of the five (drop_urls, drop_phrases,
+	// scrub_phrases, collapse_repeats) ALSO run at ingest, before chunks are
+	// embedded, so the retrieval index agrees with the exported sidecar (issues
+	// #545, #765): they are hallucination filters, and a cue an operator
+	// configured away must not stay embedded and citable. glossary is export-only
+	// because SPEC §8.6.2 defines it as an export-time find/replace on
+	// already-rendered cue text. Each key notes which it is.
+	//
+	// The ingest half runs when a document is (re)indexed, so enabling or widening
+	// any of the four on an EXISTING corpus cleans the exported sidecar
+	// immediately but leaves already-embedded chunks as they were until the corpus
+	// is re-indexed (`dir2mcp reindex`). The derivation identity (§8.6.7)
+	// deliberately tracks provider/model provenance only, not operator cleaning
+	// preferences: folding these keys into it would re-run transcription (the
+	// transcript cache is keyed by that identity) for an editorial toggle.
 
 	// MediaSubtitlesGlossary is an optional list of editorial term replacements
 	// applied to exported cue text in every format (config
@@ -734,21 +744,30 @@ type Config struct {
 	// "Aju?bei=>Adzhubei" to normalize a transliterated name). Unlike
 	// media.filter_words (which deletes phrases) this REWRITES text and never
 	// drops a cue. Empty by default = off. Export-only: indexed/cited transcript
-	// text is not rewritten.
+	// text is not rewritten, because SPEC §8.6.2 pins this key as a deterministic,
+	// export-time find/replace on already-rendered cue text. The consequence is
+	// worth knowing: search matches the pre-glossary spelling while every exported
+	// artifact shows the post-glossary one (issue #765). Changing that is a spec
+	// change first, not a code change.
 	MediaSubtitlesGlossary []string
 
 	// MediaSubtitlesCollapseRepeats drops the Nth-and-later cue in a run of
 	// identical consecutive cues on export in every format (config
 	// `media.subtitles.collapse_repeats`), the whisper repetition-collapse
 	// artifact. A value < 2 disables the pass (the default 0 = off), so
-	// legitimate short repeats survive; a typical setting is 3. Export-only: the
-	// repeated cues remain in the retrieval index.
+	// legitimate short repeats survive; a typical setting is 3. Also applied at
+	// ingest, so a repetition artifact cannot dominate a document's chunks (#765).
 	MediaSubtitlesCollapseRepeats int
 
 	// MediaSubtitlesDropURLs opts IN to dropping exported cues whose text is a
 	// hallucinated URL / bare domain / credit line (config
-	// `media.subtitles.drop_urls`), in every format. OFF by default. Export-only:
-	// the dropped cues remain in the retrieval index.
+	// `media.subtitles.drop_urls`), in every format. OFF by default. Also applied
+	// at ingest, so a cue whisper hallucinated over silence is never embedded and
+	// can never be cited for a span where nobody said anything (#765). It is a
+	// whole-cue verdict on both surfaces: a stored chunk that merges several cues
+	// is dropped entirely when any of its text trips the URL pattern, which is
+	// exactly what the export pass does with the same chunk. That bluntness is why
+	// the key is opt-in.
 	MediaSubtitlesDropURLs bool
 
 	// MediaSubtitlesDropPhrases is an optional list of regular expressions; an

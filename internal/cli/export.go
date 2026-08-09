@@ -97,6 +97,14 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 // media.subtitles.* editorial cleaning passes (glossary, drop_phrases,
 // scrub_phrases, collapse_repeats, drop_urls).
 //
+// Four of the five cleaning keys (drop_urls, drop_phrases, scrub_phrases,
+// collapse_repeats) are ALSO applied at ingest, before chunks are embedded
+// (issues #545, #765), from the same subtitle.CleanOptions shape this builds.
+// Re-running them here is deliberate rather than redundant: under broadcast
+// segmentation the cues are rebuilt finer than the stored chunks, and a corpus
+// indexed before the keys were enabled still carries uncleaned chunks until it
+// is re-indexed. Only glossary is export-only (SPEC §8.6.2).
+//
 // It exists because TTML used to skip the cleaning half entirely (issue #729):
 // the same transcript exported as SRT and as TTML disagreed on every rule under
 // media.subtitles.*, and bilingual TTML aligned cue sets that the exports would
