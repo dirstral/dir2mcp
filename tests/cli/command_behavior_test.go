@@ -1046,3 +1046,123 @@ func TestVersionUsesBuildInfo(t *testing.T) {
 		t.Fatalf("version output=%q want=%q", strings.TrimSpace(stdout.String()), want)
 	}
 }
+
+// TestZeroOperandCommandsRejectExtraArgs pins issue #706: `version` and
+// `config print` take no operands. A trailing argument is a typo or a
+// concatenated command, so both must fail with CONFIG_INVALID (exit 2) instead
+// of printing normal output and exiting 0.
+func TestZeroOperandCommandsRejectExtraArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantText string
+	}{
+		{
+			name:     "version",
+			args:     []string{"version", "extra"},
+			wantText: "version command does not accept arguments: extra",
+		},
+		{
+			name:     "config print",
+			args:     []string{"config", "print", "extra"},
+			wantText: "config print does not accept arguments: extra",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			var stdout, stderr bytes.Buffer
+			app := cli.NewAppWithIO(&stdout, &stderr)
+
+			withWorkingDir(t, tmp, func() {
+				code := app.RunWithContext(context.Background(), tc.args)
+				if code != 2 {
+					t.Fatalf("exit code: got=%d want=2 stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+				}
+			})
+			if !strings.Contains(stderr.String(), tc.wantText) {
+				t.Fatalf("stderr=%q want it to contain %q", stderr.String(), tc.wantText)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout must stay empty on a rejected command, got %q", stdout.String())
+			}
+		})
+	}
+}
+
+// TestZeroOperandCommandsRejectExtraArgsJSON covers the same rejection under
+// --json: scripts get the structured CONFIG_INVALID envelope.
+func TestZeroOperandCommandsRejectExtraArgsJSON(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantText string
+	}{
+		{
+			name:     "version",
+			args:     []string{"--json", "version", "extra"},
+			wantText: "version command does not accept arguments",
+		},
+		{
+			name:     "version trailing json flag",
+			args:     []string{"version", "extra", "--json"},
+			wantText: "version command does not accept arguments",
+		},
+		{
+			name:     "config print",
+			args:     []string{"--json", "config", "print", "extra"},
+			wantText: "config print does not accept arguments",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			var stdout, stderr bytes.Buffer
+			app := cli.NewAppWithIO(&stdout, &stderr)
+
+			withWorkingDir(t, tmp, func() {
+				code := app.RunWithContext(context.Background(), tc.args)
+				if code != 2 {
+					t.Fatalf("exit code: got=%d want=2 stderr=%s", code, stderr.String())
+				}
+			})
+
+			var payload struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+				ExitCode int `json:"exit_code"`
+			}
+			if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+				t.Fatalf("unmarshal error payload: %v raw=%s", err, stderr.String())
+			}
+			if payload.Error.Code != "CONFIG_INVALID" || payload.ExitCode != 2 {
+				t.Fatalf("unexpected payload: %+v", payload)
+			}
+			if !strings.Contains(payload.Error.Message, tc.wantText) {
+				t.Fatalf("message=%q want it to contain %q", payload.Error.Message, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestConfigPrintZeroOperandFormStillWorks: the valid form is unchanged by the
+// stricter argument check.
+func TestConfigPrintZeroOperandFormStillWorks(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"config", "print"})
+		if code != 0 {
+			t.Fatalf("exit code: got=%d want=0 stderr=%s", code, stderr.String())
+		}
+	})
+	if !strings.Contains(stdout.String(), "root=") {
+		t.Fatalf("config print output=%q want it to contain root=", stdout.String())
+	}
+}

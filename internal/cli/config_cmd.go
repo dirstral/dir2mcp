@@ -113,35 +113,46 @@ func (a *App) runConfig(ctx context.Context, global globalOptions, args []string
 	case "secrets":
 		return a.runConfigListSecrets(global, args[1:])
 	case "print":
-		cfg, err := loadConfigWithGlobalOptions(global)
-		if err != nil {
-			writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
-			return exitConfigInvalid
-		}
-		if global.quiet {
-			return exitSuccess
-		}
-		embedProvider, embedReady := "none", false
-		embedBaseURL := ""
-		if ep, perr := cfg.Providers().Resolve(provider.CapEmbed); perr == nil {
-			embedProvider, embedReady = ep.Name, true
-			embedBaseURL = provider.NormalizeEmbedBaseURL(ep)
-		}
-		writef(
-			a.stdout,
-			"root=%s state_dir=%s listen=%s mcp_path=%s embed_provider=%s embed_base_url=%s embed_ready=%t\n",
-			cfg.RootDir,
-			cfg.StateDir,
-			cfg.ListenAddr,
-			cfg.MCPPath,
-			embedProvider,
-			embedBaseURL,
-			embedReady,
-		)
+		return a.runConfigPrint(global, args[1:])
 	default:
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("unknown config subcommand: %s", args[0]))
 		return exitConfigInvalid
 	}
+}
+
+// runConfigPrint prints the effective configuration. The subcommand takes no
+// operands. It rejects extra arguments so a typo does not look like a success
+// (#706).
+func (a *App) runConfigPrint(global globalOptions, args []string) int {
+	if len(args) > 0 {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("config print does not accept arguments: %s", strings.Join(args, " ")))
+		return exitConfigInvalid
+	}
+	cfg, err := loadConfigWithGlobalOptions(global)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
+		return exitConfigInvalid
+	}
+	if global.quiet {
+		return exitSuccess
+	}
+	embedProvider, embedReady := "none", false
+	embedBaseURL := ""
+	if ep, perr := cfg.Providers().Resolve(provider.CapEmbed); perr == nil {
+		embedProvider, embedReady = ep.Name, true
+		embedBaseURL = provider.NormalizeEmbedBaseURL(ep)
+	}
+	writef(
+		a.stdout,
+		"root=%s state_dir=%s listen=%s mcp_path=%s embed_provider=%s embed_base_url=%s embed_ready=%t\n",
+		cfg.RootDir,
+		cfg.StateDir,
+		cfg.ListenAddr,
+		cfg.MCPPath,
+		embedProvider,
+		embedBaseURL,
+		embedReady,
+	)
 	return exitSuccess
 }
 

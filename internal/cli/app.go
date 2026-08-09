@@ -521,6 +521,13 @@ func (a *App) runCommand(ctx context.Context, globalOpts globalOptions, remainin
 	case "down":
 		return a.runDown(ctx, globalOpts, remaining[1:])
 	case "version":
+		// version takes no operands. Reject extra arguments so a typo or a
+		// concatenated command does not look like a success (#706).
+		if extra := remaining[1:]; len(extra) > 0 {
+			writeCLIError(a.stderr, globalOpts.jsonOutput || jsonRequested, exitConfigInvalid,
+				fmt.Sprintf("version command does not accept arguments: %s", strings.Join(extra, " ")))
+			return exitConfigInvalid
+		}
 		if !globalOpts.quiet {
 			writeln(a.stdout, "dir2mcp "+buildinfo.Display())
 		}
