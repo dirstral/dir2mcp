@@ -61,6 +61,7 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 		rootAbs:      absRoot,
 		rootResolved: rootResolved,
 		options:      opts,
+		excluded:     ResolveExcludedDirs(opts.ExcludeDirs),
 		files:        &files,
 		visitedDirs:  map[string]struct{}{rootResolved: {}},
 	}
@@ -178,14 +179,18 @@ func ResolveSymlinkWithinRoot(rootResolved, linkPath string) (string, bool) {
 	return resolved, true
 }
 
-func shouldSkipDirectory(name string) bool {
-	return IsExcludedDir(name)
+// shouldSkipDirectory reports whether the walk descends into a directory with
+// this name. It reads the set resolved once per Walk from Options.ExcludeDirs,
+// so the local walker, the S3 lister, and the ingest watcher apply one list.
+func (w *discoverWalker) shouldSkipDirectory(name string) bool {
+	return w.excluded.Has(name)
 }
 
 type discoverWalker struct {
 	rootAbs      string
 	rootResolved string
 	options      Options
+	excluded     ExcludedDirSet
 	files        *[]DiscoveredFile
 	visitedDirs  map[string]struct{}
 }
@@ -249,7 +254,7 @@ func (w *discoverWalker) reportSkippedSymlink(relPath string) {
 
 // visitDir processes a single directory entry that is known to be a directory.
 func (w *discoverWalker) visitDir(ctx context.Context, fullPath, relPath, name string, rules []gitIgnoreRule) error {
-	if shouldSkipDirectory(name) {
+	if w.shouldSkipDirectory(name) {
 		return nil
 	}
 	if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, true) {
@@ -558,7 +563,7 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 	}
 
 	if stat.IsDir() {
-		if shouldSkipDirectory(path.Base(relPath)) {
+		if w.shouldSkipDirectory(path.Base(relPath)) {
 			return nil
 		}
 		if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, true) {

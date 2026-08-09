@@ -13,6 +13,7 @@ import (
 	"context"
 	"io"
 	"io/fs"
+	"sort"
 )
 
 // defaultMaxFileSizeBytes mirrors the ingest discovery cap so a zero/negative
@@ -24,23 +25,28 @@ func DefaultMaxFileSizeBytes() int64 {
 	return defaultMaxFileSizeBytes
 }
 
-// defaultExcludedDirs are directory names skipped during discovery regardless of
-// backend. For S3 these are matched against path segments of the object key.
+// StateDirName is the name of the state directory dir2mcp writes under the
+// corpus root. It is always part of the resolved directory ignore list: the
+// walk would otherwise read the index that the same run writes, and watch mode
+// would feed its own writes back into ingest (SPEC §7.1).
+const StateDirName = ".dir2mcp"
+
+// defaultExcludedDirs are the directory names skipped during discovery when the
+// operator sets no list. For S3 these are matched against path segments of the
+// object key.
 //
-// SPEC §7.1 makes `.git/`, `node_modules/`, `dist/`, `build/`, `.venv/`, and
-// `.dir2mcp/` the normative default ignore list; `vendor/` and `__pycache__/`
-// are dir2mcp additions of the same kind (checked-in dependency trees and
-// generated caches). `dist`, `build`, and `.venv` were missing until #716, so a
-// default scan indexed generated bundles, build output, and entire Python
-// virtualenvs that operators had been told were ignored.
+// SPEC §7.1 names these eight directories as the default ignore list. `dist`,
+// `build`, and `.venv` were missing until #716, so a default scan indexed
+// generated bundles, build output, and entire Python virtualenvs that operators
+// had been told were ignored.
 //
-// This set is a hard floor: there is no config key that re-includes an excluded
-// directory (`security.path_excludes` only adds exclusions). Adding a name here
-// therefore removes documents from every existing corpus on the next reindex, so
-// it stays anchored to the spec rather than growing by taste.
+// This list is the DEFAULT, not a floor. `ingest.exclude_dirs` replaces it in
+// full (#773), so adding a name here changes only the corpora that keep the
+// default. It still removes documents from each of those corpora on the next
+// reindex, so the list stays anchored to the spec rather than growing by taste.
 var defaultExcludedDirs = map[string]struct{}{
 	".git":         {},
-	".dir2mcp":     {},
+	StateDirName:   {},
 	"node_modules": {},
 	"vendor":       {},
 	"__pycache__":  {},
@@ -49,24 +55,84 @@ var defaultExcludedDirs = map[string]struct{}{
 	".venv":        {},
 }
 
-// IsExcludedDir reports whether a DIRECTORY with this name is skipped by default
-// discovery. It is exported so the ingest file watcher applies the same list as
-// the initial scan: the watcher used to keep its own copy of the map, and the
-// copies drifted (#716).
+// DefaultExcludedDirs returns the default directory ignore list in sorted
+// order. It is the value `internal/config` uses when `ingest.exclude_dirs` is
+// absent, so the default lives in one place only.
+func DefaultExcludedDirs() []string {
+	names := make([]string, 0, len(defaultExcludedDirs))
+	for name := range defaultExcludedDirs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ExcludedDirSet is a resolved directory ignore list: the names discovery does
+// not descend into. Build one with ResolveExcludedDirs.
+//
+// The zero value resolves to the default list, so a caller that forgets to pass
+// a set still excludes `.git/` and `.dir2mcp/` instead of indexing them.
 //
 // The rule is directory-only. A regular FILE named `dist` or `vendor` is an
 // ordinary corpus document and must still be discovered, so callers must only
-// consult this for entries they already know are directories (the S3 backend
+// consult the set for entries they already know are directories (the S3 backend
 // tests it against ancestor key segments only).
 //
 // The match is exact. The name is a real directory entry or object key segment,
-// and ` dist ` is a different directory than `dist`: the old TrimSpace here made
+// and ` dist ` is a different directory than `dist`: an old TrimSpace here made
 // discovery skip a legitimately-named tree whose documents nothing else would
-// have excluded, which is the same silent over-exclusion this change set exists
-// to remove.
-func IsExcludedDir(name string) bool {
-	_, ok := defaultExcludedDirs[name]
+// have excluded.
+type ExcludedDirSet struct {
+	names map[string]struct{}
+}
+
+// ResolveExcludedDirs returns the ignore set for the supplied names.
+//
+// A nil slice keeps the default list. A non-nil slice REPLACES the default list
+// in full; it does not add to it (SPEC §7.1). `.dir2mcp` is always added back,
+// because the state directory lives under the corpus root and to index it is
+// self-referential. Blank names are dropped.
+//
+// This is the single resolver. The local walker, the S3 lister, and the ingest
+// file watcher all read the set it returns, so the three cannot drift into
+// judging the same directory differently, which is what #716 fixed and what
+// keeping a second copy of the list would undo.
+func ResolveExcludedDirs(names []string) ExcludedDirSet {
+	if names == nil {
+		return ExcludedDirSet{}
+	}
+	resolved := make(map[string]struct{}, len(names)+1)
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		resolved[name] = struct{}{}
+	}
+	resolved[StateDirName] = struct{}{}
+	return ExcludedDirSet{names: resolved}
+}
+
+// Has reports whether a DIRECTORY with this name is skipped by discovery.
+func (s ExcludedDirSet) Has(name string) bool {
+	if s.names == nil {
+		_, ok := defaultExcludedDirs[name]
+		return ok
+	}
+	_, ok := s.names[name]
 	return ok
+}
+
+// Names returns the resolved directory names in sorted order.
+func (s ExcludedDirSet) Names() []string {
+	if s.names == nil {
+		return DefaultExcludedDirs()
+	}
+	names := make([]string, 0, len(s.names))
+	for name := range s.names {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // DiscoveredFile holds metadata collected during corpus discovery.
@@ -90,6 +156,11 @@ type Options struct {
 	MaxSizeBytes   int64
 	UseGitIgnore   bool
 	FollowSymlinks bool
+	// ExcludeDirs is the directory ignore list (config `ingest.exclude_dirs`,
+	// SPEC §7.1). nil keeps the default list. A non-nil value REPLACES the
+	// default list in full; it does not add to it. `.dir2mcp` is always kept.
+	// See ResolveExcludedDirs, which every backend calls to read this field.
+	ExcludeDirs []string
 	// ScanCache, when non-nil, is an optional directory-discovery cache (issue
 	// #267 item 5) consulted by the LocalFS walker. It lets an unchanged
 	// directory skip re-reading and re-sorting its entries while still detecting

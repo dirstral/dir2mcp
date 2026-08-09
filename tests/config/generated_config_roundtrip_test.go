@@ -112,6 +112,86 @@ func TestGeneratedConfig_EveryWrittenKeyIsReadable(t *testing.T) {
 	}
 }
 
+// TestGeneratedConfig_ExcludeDirsIsWrittenAndReadBack extends the guard above
+// to the `ingest.exclude_dirs` list key (#773). The guard above walks SCALAR
+// keys only, so a list key that SaveFile writes and LoadFile drops would pass
+// it unnoticed: this is the same writer/loader loop, closed for the list.
+//
+// It also pins the generated file's own documentation. SPEC §7.1 requires the
+// implementation to document that the gates compose by AND wherever it
+// documents the key, because an operator who clears only this list sees no
+// change for the five names that `security.path_excludes` also carries.
+func TestGeneratedConfig_ExcludeDirsIsWrittenAndReadBack(t *testing.T) {
+	dir := t.TempDir()
+	genPath := filepath.Join(dir, ".dir2mcp.yaml")
+	if err := config.SaveFile(genPath, config.Default()); err != nil {
+		t.Fatalf("SaveFile (what `config init` writes): %v", err)
+	}
+	raw, err := os.ReadFile(genPath)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	text := string(raw)
+
+	assertExcludeDirsIsDocumented(t, text)
+
+	// The default file loads back to the default list, with no warning.
+	base, err := config.LoadFile(genPath)
+	if err != nil {
+		t.Fatalf("LoadFile of the generated config: %v", err)
+	}
+	if !reflect.DeepEqual(base.IngestExcludeDirs, config.Default().IngestExcludeDirs) {
+		t.Errorf("the generated list must round-trip to the default list; got %v", base.IngestExcludeDirs)
+	}
+	if len(base.Warnings) != 0 {
+		t.Errorf("the generated config must load without warnings; got %v", base.Warnings)
+	}
+
+	// An operator edit reaches the loader: drop `dist` to index a static-site
+	// corpus (#773).
+	edited := strings.Replace(text, "  - dist\n", "", 1)
+	if edited == text {
+		t.Fatalf("expected a `dist` entry to remove; got:\n%s", text)
+	}
+	editedPath := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	if err := os.WriteFile(editedPath, []byte(edited), 0o600); err != nil {
+		t.Fatalf("write edited config: %v", err)
+	}
+	got, err := config.LoadFile(editedPath)
+	if err != nil {
+		t.Fatalf("LoadFile of the edited config: %v", err)
+	}
+	for _, name := range got.IngestExcludeDirs {
+		if name == "dist" {
+			t.Fatalf("`dist` must be gone after the operator removed it; got %v", got.IngestExcludeDirs)
+		}
+	}
+	if len(got.IngestExcludeDirs) != len(base.IngestExcludeDirs)-1 {
+		t.Errorf("only `dist` must go: got %v", got.IngestExcludeDirs)
+	}
+}
+
+// assertExcludeDirsIsDocumented checks that the generated config carries the
+// key, the whole default list, and the AND-composition warning SPEC §7.1
+// requires wherever the key is documented.
+func assertExcludeDirsIsDocumented(t *testing.T, text string) {
+	t.Helper()
+	if !strings.Contains(text, "ingest_exclude_dirs:") {
+		t.Fatalf("`config init` must write ingest_exclude_dirs; got:\n%s", text)
+	}
+	for _, name := range []string{".git", ".dir2mcp", "node_modules", "vendor", "__pycache__", "dist", "build", ".venv"} {
+		if !strings.Contains(text, "  - "+name+"\n") {
+			t.Errorf("the written list must carry the default name %q; got:\n%s", name, text)
+		}
+	}
+	// The trap: the gates are independent and compose by AND.
+	for _, phrase := range []string{"REPLACES", "AND", "path_excludes", "BOTH"} {
+		if !strings.Contains(text, phrase) {
+			t.Errorf("the generated config must document %q next to ingest_exclude_dirs; got:\n%s", phrase, text)
+		}
+	}
+}
+
 // topLevelScalar reports the key/value of lines[i] when it is a top-level
 // `key: value` scalar, skipping comments, blanks, indented children and the
 // header lines of nested sections/lists.
