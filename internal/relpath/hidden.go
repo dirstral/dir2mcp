@@ -19,10 +19,10 @@ import (
 //
 // The input is slash-separated, as every corpus rel_path is (see Normalize,
 // which rejects a backslash). The path is cleaned first, so `./docs/.env` and
-// `docs/x/../.env` give the same answer as `docs/.env`. An empty path, `.` and
-// `..` name no file, so they are not hidden. A path that still starts with
-// `../` after cleaning is hidden: it is not a valid rel_path at all, and a
-// listing filter must fail toward hiding.
+// `docs/x/../.env` give the same answer as `docs/.env`. An empty path and `.`
+// name no file, so they are not hidden. `..`, and any path that still starts
+// with `../` after cleaning, are hidden: they are not valid rel_paths at all,
+// and a listing filter must fail toward hiding.
 //
 // NotHiddenSQL is the SQL form of this rule. Change the two together.
 func IsHidden(rel string) bool {
