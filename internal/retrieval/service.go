@@ -1254,17 +1254,20 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// active it runs that pipeline once per query-language variant and RRF-fuses
 	// the result sets; when inactive it reduces to a single searchWithHyDE call,
 	// so the un-expanded path is unchanged.
-	hits, err := s.searchExpanded(ctx, query, poolK)
+	//
+	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7) runs inside this call:
+	// each `summary` candidate is replaced by the fine chunks its coverage names,
+	// deduped against the directly-retrieved hits, and the merged pool is
+	// reranked. It happens BEFORE decay / the floor / truncation so expanded
+	// children compete for top-k on equal terms. A `summary` that expands to
+	// nothing is dropped, so the wrapper re-retrieves a wider pool to refill the
+	// slot it took (#686). A pool with no summary candidates (every corpus with
+	// the feature off) makes exactly one retrieval call and returns unchanged, so
+	// the flat path is untouched.
+	hits, err := s.searchWithSummaryRefill(ctx, query, poolK)
 	if err != nil {
 		return nil, err
 	}
-	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): replace each `summary`
-	// candidate with the fine chunks its coverage names, dedup against the
-	// directly-retrieved hits, and rerank the merged pool. It runs BEFORE decay /
-	// the floor / truncation so expanded children compete for top-k on equal
-	// terms. A pool with no summary candidates — every corpus with the feature
-	// off — returns unchanged, so the flat path is untouched.
-	hits = s.expandHierarchical(ctx, query, hits, poolK)
 	// Apply the opt-in recency time-decay just BEFORE the relevance floor: it
 	// re-scores each hit by its source-document age, so the floor compares the
 	// decayed score and newer content survives a tie. Config-only; default 0 ⇒
