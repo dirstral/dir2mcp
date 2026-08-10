@@ -45,9 +45,12 @@ type summaryExpander interface {
 // only stops a pathological corpus from re-querying the index for ever.
 const summaryRefillMaxRounds = 3
 
-// summaryRefillMaxPool caps the widened pool, so a corpus made almost entirely
-// of summary vectors cannot turn one search into an unbounded index scan.
-const summaryRefillMaxPool = 200
+// summaryRefillMaxMargin caps how many EXTRA candidates a refill round may ask
+// for on top of the caller's own pool, so a corpus made almost entirely of
+// summary vectors cannot turn one search into an unbounded index scan. The cap
+// is on the margin, never on the pool, so a widened round always asks for at
+// least as many candidates as the round it repairs.
+const summaryRefillMaxMargin = 200
 
 // searchWithSummaryRefill retrieves the candidate pool and applies the §9.7
 // expand step. It re-retrieves a WIDER pool when dropped `summary` hits left the
@@ -78,10 +81,7 @@ func (s *Service) searchWithSummaryRefill(ctx context.Context, query model.Searc
 		if !needSummaryRefill(len(hits), poolK, summaries, len(raw), fetchK, round) {
 			return hits, nil
 		}
-		fetchK = poolK + summaries
-		if fetchK > summaryRefillMaxPool {
-			fetchK = summaryRefillMaxPool
-		}
+		fetchK = poolK + summaryRefillMargin(summaries)
 	}
 }
 
@@ -102,7 +102,18 @@ func needSummaryRefill(got, poolK, summaries, rawLen, fetchK, round int) bool {
 	if round+1 >= summaryRefillMaxRounds {
 		return false
 	}
-	return poolK+summaries > fetchK && fetchK < summaryRefillMaxPool
+	// Only widen when the next request would really be larger than this one.
+	return poolK+summaryRefillMargin(summaries) > fetchK
+}
+
+// summaryRefillMargin is the number of extra candidates a refill round adds to
+// the caller's pool: one per summary that took a slot, bounded by
+// summaryRefillMaxMargin.
+func summaryRefillMargin(summaries int) int {
+	if summaries > summaryRefillMaxMargin {
+		return summaryRefillMaxMargin
+	}
+	return summaries
 }
 
 // countSummaryHits reports how many `summary` candidates the pool holds. Every

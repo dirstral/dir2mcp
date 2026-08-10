@@ -26,7 +26,8 @@ func TestNeedSummaryRefill(t *testing.T) {
 		{"index exhausted", 1, 2, 1, 2, 3, 1, false},
 		{"round cap reached", 1, 2, 1, 3, 3, 2, false},
 		{"widened pool would not grow", 1, 2, 1, 3, 3, 1, false},
-		{"pool already at the cap", 1, 300, 5, summaryRefillMaxPool, summaryRefillMaxPool, 0, false},
+		{"margin already at the cap", 1, 10, summaryRefillMaxMargin + 5, 10 + summaryRefillMaxMargin, 10 + summaryRefillMaxMargin, 0, false},
+		{"a large k still refills", 1, 300, 4, 300, 300, 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,6 +37,22 @@ func TestNeedSummaryRefill(t *testing.T) {
 					tc.got, tc.poolK, tc.summaries, tc.rawLen, tc.fetchK, tc.round, got, tc.wantRefill)
 			}
 		})
+	}
+}
+
+// A refill round must never ask the index for LESS than the round it repairs,
+// so the cap sits on the extra margin and never on the caller's own pool.
+func TestSummaryRefillMarginNeverNarrowsThePool(t *testing.T) {
+	for _, poolK := range []int{1, 15, 50, 500} {
+		for _, summaries := range []int{0, 1, 7, summaryRefillMaxMargin + 100} {
+			fetchK := poolK + summaryRefillMargin(summaries)
+			if fetchK < poolK {
+				t.Fatalf("poolK=%d summaries=%d: widened pool %d is narrower than the caller's pool", poolK, summaries, fetchK)
+			}
+			if fetchK-poolK > summaryRefillMaxMargin {
+				t.Fatalf("poolK=%d summaries=%d: margin %d exceeds the cap %d", poolK, summaries, fetchK-poolK, summaryRefillMaxMargin)
+			}
+		}
 	}
 }
 
