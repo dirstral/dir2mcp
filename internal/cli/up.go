@@ -78,7 +78,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// the concurrent phase (embed workers, corpus writer, watch worker, the
 	// persistence autosave callback, and the event loop). Without it, direct
 	// writef(stderr, ...) writes race the embed worker's *log.Logger writes on the
-	// same underlying sink (a bytes.Buffer under `go test -race`) — issue #419.
+	// same underlying sink (a bytes.Buffer under `go test -race`); see issue #419.
 	//
 	// It is created here, before the first shutdown defer, because the shutdown
 	// writers need it too: when the drain gives up, a background goroutine can
