@@ -248,6 +248,9 @@ func TestArchiveUnreadableMember658_TruncatedTarMarksContainerError(t *testing.T
 	truncated := full[:len(full)-64]
 	st := runArchiveIngest(t, "broken.tar.gz", truncated)
 
+	if !docPaths(t, st)["broken.tar.gz/good.txt"] {
+		t.Error("the member read before the break must still be indexed (best-effort ingestion is preserved)")
+	}
 	container := documentByPath(t, st, "broken.tar.gz")
 	if container.Status != "error" {
 		t.Fatalf("container status = %q, want \"error\" (a truncated tar is an incomplete read)", container.Status)
