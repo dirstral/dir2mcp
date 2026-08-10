@@ -2004,37 +2004,30 @@ func isBinaryDocType(relPath string) bool {
 	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext)
 }
 
-// readSourceBytes returns the full byte content of the corpus document at
-// relPath. When a CorpusFS backend is injected (object stores such as S3) the
-// read routes through its Open seam — the same seam the media/embedding paths
-// use — so remote corpora return content instead of failing on a missing local
-// path (#432). With no backend it preserves the historical local read exactly:
-// a directory target maps to the actionable DOC_TYPE_UNSUPPORTED rather than an
-// opaque OS error, then readFileBounded returns the bytes. The bool mirrors
-// readFileBounded's truncation flag (always false here since the read is
-// unbounded; open_file applies its own maxChars downstream).
-func (s *Service) readSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) ([]byte, bool, error) {
+// openSource opens the corpus document at relPath for streaming. When a
+// CorpusFS backend is injected (object stores such as S3) the read routes
+// through its Open seam, the same seam the media and embedding paths use, so
+// remote corpora return content instead of failing on a missing local path
+// (#432). With no backend it preserves the historical local behavior: a
+// directory target maps to the actionable DOC_TYPE_UNSUPPORTED rather than an
+// opaque OS error.
+//
+// The function returns a reader, never the bytes. open_file answers at most
+// max_chars runes, so the caller streams the source and keeps only the window
+// it returns (issue #690).
+func (s *Service) openSource(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) (io.ReadCloser, error) {
 	if corpusFS != nil {
-		rc, err := corpusFS.Open(ctx, relPath)
-		if err != nil {
-			return nil, false, err
-		}
-		defer func() { _ = rc.Close() }()
-		data, readErr := io.ReadAll(rc)
-		if readErr != nil {
-			return nil, false, readErr
-		}
-		return data, false, nil
+		return corpusFS.Open(ctx, relPath)
 	}
 
 	info, err := os.Stat(resolvedAbs)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if info.IsDir() {
-		return nil, false, model.ErrDocTypeUnsupported
+		return nil, model.ErrDocTypeUnsupported
 	}
-	return readFileBounded(resolvedAbs, 0)
+	return os.Open(resolvedAbs)
 }
 
 // hashSourceBytes computes the sha256 hex digest of the corpus document at
@@ -2273,24 +2266,64 @@ func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, ma
 	return out, truncated, true, nil
 }
 
+// openFileFromResolvedPath serves the raw source of a text-native document. It
+// streams the source and retains at most one read budget of bytes, so memory
+// stays bounded by max_chars and not by the size of the file or object (issue
+// #690). The published tool contract is unchanged: a caller that asks for a
+// legitimate window still gets that window.
+//
+// The secret policy applies to every byte the request reads, which is the
+// answer window, everything before it, and a fixed margin past it. Three
+// properties follow, and together they satisfy SPEC 15.4:
+//
+//  1. Every returned byte was scanned.
+//  2. The read always starts at the first byte of the source, so no answer can
+//     begin after an unscanned region. A caller cannot step over a secret to
+//     reach the text behind it.
+//  3. The scan always covers at least the head bytes that ingest samples
+//     (internal/ingest.secretScanSampleBytes), so a document that ingest
+//     withholds can never be served by this tool.
+//
+// The buffered path scanned the whole source, so it also refused the head of a
+// document whose only secret sat far past the answer. Reproducing that would
+// mean reading the whole source on every request, which is the cost this fix
+// removes, and it would still be weaker than it looks, because ingest itself
+// decides on a 64 KiB sample.
 func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, span model.Span, maxChars int) (string, bool, error) {
-	raw, readTruncated, err := s.readSourceBytes(ctx, corpusFS, resolvedAbs, relPath)
+	rc, err := s.openSource(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
 		return "", false, err
 	}
-	content := string(raw)
+	defer func() { _ = rc.Close() }()
 
-	if hasSecretMatch(secretPatterns, content) {
-		return "", false, model.ErrForbidden
+	scanner := newSecretScanner(secretPatterns)
+	source := &scanningReader{r: &ctxReader{ctx: ctx, r: rc}, scanner: scanner}
+
+	selection, selErr := selectSpan(source, kind, span, openFileReadBudgetBytes(maxChars))
+	// The buffered path refused a secret-bearing document before it looked at
+	// the span, so a secret outranks an unsatisfiable span. Keep that order:
+	// finish the scan before reporting that the span does not exist.
+	if selErr == nil || errors.Is(selErr, model.ErrDocTypeUnsupported) {
+		if marginErr := scanner.scanMargin(source); marginErr != nil {
+			return "", false, mapSourceReadError(marginErr)
+		}
+	}
+	if selErr != nil {
+		return "", false, mapSourceReadError(selErr)
 	}
 
-	selected, err := sliceContentBySpan(content, kind, span)
-	if err != nil {
-		return "", false, err
-	}
+	out, outTruncated := truncateRunesWithFlag(selection.text, maxChars)
+	return out, selection.truncated || outTruncated, nil
+}
 
-	out, outTruncated := truncateRunesWithFlag(selected, maxChars)
-	return out, readTruncated || outTruncated, nil
+// mapSourceReadError converts a streaming read failure into the open_file error
+// contract. A secret match becomes the published ErrForbidden; every other
+// error passes through unchanged.
+func mapSourceReadError(err error) error {
+	if errors.Is(err, errSecretMatch) {
+		return model.ErrForbidden
+	}
+	return err
 }
 
 // hasSecretMatch reports whether any of the compiled secret patterns matches s.
@@ -2364,55 +2397,8 @@ func resolveSymlinkInRoot(targetAbs, realRoot string, pathExcludes []string, s *
 	return resolvedAbs, nil
 }
 
-// sliceContentBySpan extracts the portion of content identified by the given
-// span kind. An empty kind or "lines" applies line-range slicing; "page" and
-// "time" select the relevant page/time segment.
-func sliceContentBySpan(content, kind string, span model.Span) (string, error) {
-	switch kind {
-	case "", "lines":
-		if kind == "lines" || span.StartLine > 0 || span.EndLine > 0 {
-			return sliceLines(content, span.StartLine, span.EndLine), nil
-		}
-		return content, nil
-	case "page":
-		page := span.Page
-		if page <= 0 {
-			page = 1
-		}
-		// metadata-backed OCR handled above; fall back to slicing pages directly
-		paged, ok := slicePage(content, page)
-		if !ok {
-			return "", model.ErrDocTypeUnsupported
-		}
-		return paged, nil
-	case "time":
-		return sliceTimeSpan(content, span)
-	default:
-		return "", model.ErrDocTypeUnsupported
-	}
-}
-
-// sliceTimeSpan normalises the time boundaries and extracts the matching
-// transcript segment from content.
-func sliceTimeSpan(content string, span model.Span) (string, error) {
-	startMS := span.StartMS
-	endMS := span.EndMS
-	if startMS < 0 {
-		startMS = 0
-	}
-	if endMS < 0 {
-		endMS = 0
-	}
-	if endMS > 0 && endMS < startMS {
-		endMS = startMS
-	}
-	// metadata-backed slices for time spans are handled earlier; just extract
-	timeSlice, ok := sliceTime(content, startMS, endMS)
-	if !ok {
-		return "", model.ErrDocTypeUnsupported
-	}
-	return timeSlice, nil
-}
+// Span selection lives in open_file_stream.go. It runs over a stream instead of
+// a buffered string, so open_file never holds a whole source in memory.
 
 func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
 	if err := ctx.Err(); err != nil {
@@ -4257,26 +4243,6 @@ func globToRegexp(glob string) string {
 	return b.String()
 }
 
-func sliceLines(content string, start, end int) string {
-	lines := strings.Split(content, "\n")
-	if start <= 0 {
-		start = 1
-	}
-	if end <= 0 {
-		end = start
-	}
-	if start > len(lines) {
-		return ""
-	}
-	if end > len(lines) {
-		end = len(lines)
-	}
-	if end < start {
-		end = start
-	}
-	return strings.Join(lines[start-1:end], "\n")
-}
-
 func truncateRunesWithFlag(s string, max int) (string, bool) {
 	if max <= 0 {
 		return s, false
@@ -4286,26 +4252,6 @@ func truncateRunesWithFlag(s string, max int) (string, bool) {
 		return s, false
 	}
 	return string(r[:max]), true
-}
-
-func readFileBounded(path string, maxBytes int) ([]byte, bool, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, false, err
-	}
-	defer func() { _ = f.Close() }()
-
-	if maxBytes <= 0 {
-		data, readErr := io.ReadAll(f)
-		return data, false, readErr
-	}
-
-	lim := io.LimitReader(f, int64(maxBytes))
-	data, readErr := io.ReadAll(lim)
-	if readErr != nil {
-		return nil, false, readErr
-	}
-	return data, len(data) == maxBytes, nil
 }
 
 func (s *Service) sliceFromMetadata(relPath string, requested model.Span) (string, bool) {
@@ -4388,64 +4334,6 @@ func overlapsTime(aStart, aEnd, bStart, bEnd int) bool {
 		bEnd = bStart
 	}
 	return aStart <= bEnd && bStart <= aEnd
-}
-
-func slicePage(content string, page int) (string, bool) {
-	if page <= 0 {
-		page = 1
-	}
-	parts := strings.Split(content, "\f")
-	// A form-feed terminator on the final page yields a trailing empty segment
-	// (e.g. "p1\fp2\f" splits into 3 parts), which would otherwise present a
-	// phantom empty page beyond the last real one — open_file page=3 on a
-	// 2-page doc returning "" with ok=true. Drop it so the page count reflects
-	// real pages and an out-of-range index errors instead (#427).
-	if len(parts) > 1 && parts[len(parts)-1] == "" {
-		parts = parts[:len(parts)-1]
-	}
-	if len(parts) > 1 {
-		if page > len(parts) {
-			return "", false
-		}
-		return strings.Trim(parts[page-1], "\n"), true
-	}
-	if page == 1 {
-		// parts[0], not content: a single-page doc ending in a form-feed splits to
-		// ["text", ""] and the trailing-empty drop above leaves ["text"], so
-		// returning content would re-attach the stripped \f (#427 review).
-		return parts[0], true
-	}
-	return "", false
-}
-
-func sliceTime(content string, startMS, endMS int) (string, bool) {
-	lines := strings.Split(content, "\n")
-	out := make([]string, 0, len(lines))
-	foundTimestamp := false
-
-	for _, line := range lines {
-		m := timePrefixRe.FindStringSubmatch(line)
-		if len(m) == 0 {
-			continue
-		}
-		foundTimestamp = true
-		tsMS := parseTimestampMS(m[1], m[2], m[3])
-		if tsMS < startMS {
-			continue
-		}
-		if endMS > 0 && tsMS > endMS {
-			continue
-		}
-		out = append(out, line)
-	}
-
-	if !foundTimestamp {
-		return "", false
-	}
-	if len(out) == 0 {
-		return "", true
-	}
-	return strings.Join(out, "\n"), true
 }
 
 func parseTimestampMS(a, b, c string) int {
