@@ -464,25 +464,31 @@ func (c *Client) wait(ctx context.Context, d time.Duration) error {
 }
 
 func (c *Client) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
-	// the public entrypoint simply delegates to a retry-capable helper. the
-	// retry logic mirrors embedBatchWithRetry so that network/rate-limit/5xx
-	// conditions are automatically retried up to configured limits.
+	// The public entrypoint delegates to a retry-capable helper. The retry
+	// logic counts attempts the same way embedBatchWithRetry does, so a
+	// network, rate-limit or 5xx condition gets the same number of retries
+	// here as it gets for an embedding.
 	return c.extractWithRetry(ctx, relPath, data)
 }
 
-// extractWithRetry wraps extractOnce with retry logic similar to
-// embedBatchWithRetry.  Only provider errors marked Retryable will be
-// retried, up to Client.MaxRetries attempts with exponential backoff.
-// The helper intentionally mirrors the structure of embedBatchWithRetry so
-// behaviour is consistent between embedding and OCR operations.
+// extractWithRetry wraps extractOnce with retry logic. Only a provider error
+// marked Retryable is retried, and the operation makes one attempt plus
+// Client.MaxRetries retries, with exponential backoff.
+//
+// This helper counts the same way embedBatchWithRetry, transcribeWithRetry and
+// the generation path count. It did not: it read MaxRetries as a TOTAL attempt
+// count and looped below it, so MaxRetries=1 disabled OCR retry while it gave
+// every other Mistral operation one retry, and the default 3 gave OCR three
+// attempts against their four (#698). A caller who set the most intuitive
+// value got the one operation with no retry at all.
 func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []byte) (string, error) {
-	maxAttempts := c.MaxRetries
-	if maxAttempts <= 0 {
-		maxAttempts = 1
+	maxRetries := c.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		out, err := c.extractOnce(ctx, relPath, data)
 		if err == nil {
 			return out, nil
@@ -490,7 +496,7 @@ func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []by
 		lastErr = err
 
 		var providerErr *model.ProviderError
-		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxAttempts-1 {
+		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxRetries {
 			return "", err
 		}
 
