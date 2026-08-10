@@ -114,7 +114,13 @@ const daemonShutdownPoll = 200 * time.Millisecond
 
 // daemonShutdownGrace is the maximum time `down` waits for a SIGTERM-ed
 // process to exit before escalating to SIGKILL.
-const daemonShutdownGrace = 5 * time.Second
+//
+// It is derived from serverShutdownBudget, the worst-case wall time of a
+// graceful stop (issue #688). The two must not drift apart. A grace period
+// shorter than the budget makes the daemon's own drain theatre: `down` would
+// SIGKILL a server that is still finishing an MCP request or writing its final
+// index snapshot. The extra second covers process teardown after runUp returns.
+const daemonShutdownGrace = serverShutdownBudget + time.Second
 
 // serverLogRotateBytes is the size threshold at which the parent rotates
 // the existing server.log to server.log.1 when opening a new daemon.

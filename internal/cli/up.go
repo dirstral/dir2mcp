@@ -74,8 +74,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() { _ = st.Close() }()
 	textIx, textIndexPath := textBuilt.index, textBuilt.path
 	codeIx, codeIndexPath := codeBuilt.index, codeBuilt.path
-	defer func() { _ = textIx.Close() }()
-	defer func() { _ = codeIx.Close() }()
+	// Step 4 of the shutdown order in up_shutdown.go. The fence keeps the
+	// indexes open when a periodic save still owns them (issue #689); the
+	// persistence stop below raises it.
+	indexFence := &indexCloseFence{}
+	defer func() { indexFence.closeIndexesAfterPersistence(a.stderr, codeIx, textIx) }()
 
 	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
 	ret := retrieval.NewService(st, textIx, embedder, generator)
@@ -195,19 +198,19 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		func(saveErr error) { writef(logSink, "index autosave warning: %v\n", saveErr) },
 	)
 	persistence.Start(runCtx)
-	defer a.stopPersistenceWithLog(persistence)
+	// Step 3 of the shutdown order in up_shutdown.go.
+	defer func() { a.stopPersistenceWithLog(persistence, indexFence) }()
 
-	// Drain every long-lived background goroutine before runUp returns: the embed
-	// workers (or, in distributed mode, the coordinator/worker/broker-closer), the
-	// corpus writer, and the watch worker. These are the goroutines whose
-	// unconditional startup/progress logging outlives the call otherwise, racing a
-	// caller that reads the sink after return (issue #419); waiting also stops them
-	// from touching the store/indices the deferred Close calls below tear down.
+	// Steps 1 and 2 of the shutdown order in up_shutdown.go. The drain group
+	// holds every long-lived background goroutine: the MCP transport, the
+	// initial ingest, the embed workers (or, in distributed mode, the
+	// coordinator/worker/broker-closer), the corpus writer, and the watch
+	// worker. Waiting for them stops their logging from outliving the call and
+	// racing a caller that reads the sink after return (issue #419), and stops
+	// them from touching the store or the indexes that the deferred Close calls
+	// below tear down (issue #688).
 	var bgWG sync.WaitGroup
-	defer func() {
-		cancel()
-		bgWG.Wait()
-	}()
+	defer func() { drainBackgroundWorkers(cancel, &bgWG, a.stderr) }()
 	// Startup reconciliation (#402 A2): re-pend chunks sqlite counts embedded but
 	// whose vectors were lost to an ungraceful crash before the in-memory index's
 	// periodic snapshot. Must run before the embed worker so the re-pended chunks
@@ -233,10 +236,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	transport := mcp.NewSDKTransport(mcpServer, ln, tlsCertFile, tlsKeyFile)
 
-	serverErrCh := make(chan error, 1)
-	go func() {
-		serverErrCh <- transport.Serve(runCtx, mcpServer.Handler())
-	}()
+	serverErrCh := startTransportWorker(runCtx, transport, mcpServer.Handler(), &bgWG)
 
 	emitter.Emit("info", "server_started", map[string]interface{}{
 		"url":         mcpURL,
@@ -260,7 +260,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		defer bgWG.Done()
 		runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
 	}()
-	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh)
+	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh, &bgWG)
 	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, cfg.Source.Kind, ing, logSink, &bgWG)
 
 	// The server is now serving. A signal-triggered shutdown from here on is
@@ -1059,14 +1059,25 @@ func startStdinQuitListener(nonInteractiveMode, jsonOutput bool) chan struct{} {
 
 // startIngestWorker launches the ingest goroutine (or closes the channel
 // immediately when readOnly is true).
+//
+// The goroutine joins the shutdown drain group (issue #688). The initial scan
+// writes to the same store and the same indexes that runUp closes on the way
+// out, so shutdown must wait for it. Without the wait, a cancelled scan can
+// still be inside a store write when st.Close runs.
 func startIngestWorker(runCtx context.Context, readOnly bool, ing interface {
 	Run(context.Context) error
-}, indexingState *appstate.IndexingState, ingestErrCh chan error) {
+}, indexingState *appstate.IndexingState, ingestErrCh chan error, bgWG *sync.WaitGroup) {
 	if readOnly {
 		close(ingestErrCh)
 		return
 	}
+	if bgWG != nil {
+		bgWG.Add(1)
+	}
 	go func() {
+		if bgWG != nil {
+			defer bgWG.Done()
+		}
 		defer close(ingestErrCh)
 		// mode is already set at creation time; just mark running state
 		indexingState.SetRunning(true)
@@ -1624,16 +1635,6 @@ func newFileSkipEmitter(emitter *ndjsonEmitter) func(relPath, docType, reason st
 			"doc_type": docType,
 			"reason":   reason,
 		})
-	}
-}
-
-// stopPersistenceWithLog stops the persistence manager and logs any non-cancel
-// errors to stderr.
-func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager) {
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer stopCancel()
-	if stopErr := persistence.StopAndSave(stopCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
-		writef(a.stderr, "final index save warning: %v\n", stopErr)
 	}
 }
 

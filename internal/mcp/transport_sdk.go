@@ -24,21 +24,40 @@ import (
 // routed through the existing payment-aware path so that payment headers and
 // replay behavior stay identical to the legacy implementation.
 type SDKTransport struct {
-	server   *Server
-	listener net.Listener
-	certFile string
-	keyFile  string
+	server        *Server
+	listener      net.Listener
+	certFile      string
+	keyFile       string
+	shutdownGrace time.Duration
 }
+
+// DefaultShutdownGrace is how long Serve waits for in-flight MCP requests to
+// finish after its context is cancelled.
+const DefaultShutdownGrace = 5 * time.Second
 
 // NewSDKTransport constructs an SDKTransport. certFile and keyFile are
 // optional; both must be non-empty to enable TLS.
 func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile string) *SDKTransport {
 	return &SDKTransport{
-		server:   server,
-		listener: listener,
-		certFile: certFile,
-		keyFile:  keyFile,
+		server:        server,
+		listener:      listener,
+		certFile:      certFile,
+		keyFile:       keyFile,
+		shutdownGrace: DefaultShutdownGrace,
 	}
+}
+
+// SetShutdownGrace sets how long Serve waits for in-flight MCP requests after
+// its context is cancelled. A value of zero or less keeps the current value.
+//
+// The caller owns the shutdown budget (issue #688). It must wait for Serve to
+// return before it closes the index or the store that the in-flight handlers
+// still read, so it also needs to know when Serve stops waiting.
+func (t *SDKTransport) SetShutdownGrace(d time.Duration) {
+	if t == nil || d <= 0 {
+		return
+	}
+	t.shutdownGrace = d
 }
 
 // newMCPHTTPServer builds the http.Server for the MCP endpoint with timeouts
@@ -114,7 +133,15 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Shutdown stops accepting new connections first, then waits for the
+		// active handlers. Serve returns only after that wait, so the caller
+		// can treat "Serve returned" as "no MCP handler still uses the index
+		// or the store" (issue #688).
+		grace := t.shutdownGrace
+		if grace <= 0 {
+			grace = DefaultShutdownGrace
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	case err := <-errCh:
