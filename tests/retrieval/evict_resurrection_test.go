@@ -194,8 +194,10 @@ func TestEvictDocuments_HidesDocumentWhenBackendDeleteFails(t *testing.T) {
 
 	svc.EvictDocument("docs/deleted.md")
 
-	if idx.calls == 0 {
-		t.Fatal("expected eviction to ask the backend to delete the vector")
+	// The service points the text and code axis at one index, so the eviction
+	// issues exactly one delete for it.
+	if idx.calls != 1 {
+		t.Fatalf("expected exactly 1 backend delete, got %d", idx.calls)
 	}
 	if got := evictSearchPaths(t, svc, "content"); len(got) != 0 {
 		t.Fatalf("evicted document returned after a failed backend delete: %v", got)

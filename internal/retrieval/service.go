@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -83,12 +84,14 @@ const (
 	defaultOverfetchMultiplier = 5
 	maxOverfetchMultiplier     = 100
 
-	// evictDeleteTimeout bounds one vector-delete call made by an eviction. The
-	// eviction runs on the ingest or watcher loop, so an external backend that
-	// hangs would otherwise stall indexing for an unbounded time. A timeout
-	// degrades to the logged-failure path, where the metadata and the path
-	// tombstone still hide the chunks.
-	evictDeleteTimeout = 30 * time.Second
+	// evictDeleteTimeout bounds one vector-delete call made by an eviction. An
+	// external backend that hangs would otherwise block the caller for an
+	// unbounded time. The caller is the ingest or watcher loop for a document
+	// eviction, but it is the query goroutine for the liveness prune
+	// (pruneTombstonedHits calls EvictChunks), so the bound is kept short. A
+	// timeout degrades to the logged-failure path, where the in-memory metadata
+	// and the path tombstone still hide the chunks.
+	evictDeleteTimeout = 10 * time.Second
 
 	defaultRAGSystemPrompt = "Answer the question using only the provided context.\n" +
 		"Include concise source attributions in the form [rel_path].\n" +
@@ -1028,6 +1031,22 @@ func (s *Service) labelsForRelPaths(normalized map[string]struct{}) []uint64 {
 	return labels
 }
 
+// sameIndex reports whether two index handles are the same object. It compares
+// pointers through reflection rather than with ==, because == on two interface
+// values of the same non-comparable dynamic type panics at run time, and this
+// runs on the delete path of a live daemon. A backend held by value reports
+// false, so the caller falls back to one call per axis, which is always correct.
+func sameIndex(a, b model.Index) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
+	if av.Kind() != reflect.Pointer || bv.Kind() != reflect.Pointer {
+		return false
+	}
+	return av.Pointer() == bv.Pointer()
+}
+
 // dropLabels removes the labels from the in-memory metadata and deletes their
 // vectors from the text and code indexes. It is the shared body of
 // EvictDocuments and EvictChunks.
@@ -1054,6 +1073,12 @@ func (s *Service) deleteVectors(textIndex, codeIndex model.Index, labels []uint6
 		name string
 		idx  model.Index
 	}{{"text", textIndex}, {"code", codeIndex}}
+	if sameIndex(textIndex, codeIndex) {
+		// The default wiring points both axes at one index, so one call does the
+		// whole job. Skipping the second call halves the backend round trips and
+		// the worst-case wait.
+		axes = axes[:1]
+	}
 	for _, axis := range axes {
 		if axis.idx == nil {
 			continue
