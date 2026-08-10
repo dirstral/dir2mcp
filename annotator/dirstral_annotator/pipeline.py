@@ -61,6 +61,11 @@ class Pipeline:
     scorebug_pitch_counts: bool = False
     jersey: bool = False
     news: bool = False
+    #: Readability gate on the news overlay cues. None keeps the recognizer's
+    #: measured defaults, which are ON: see `READABLE_MIN_CHARS`. An operator
+    #: who wants the ungated stream passes 0 to both.
+    news_min_chars: int | None = None
+    news_min_agreement: float | None = None
     ocr_lang: str | None = None
     faces_bank: Path | None = None
     fps: float = 0.5
@@ -108,7 +113,16 @@ class Pipeline:
             # the payload, not a name to resolve.
             from .recognizers.news import NewsOverlayRecognizer
 
+            # Only the floors an operator actually set are forwarded, so the
+            # measured defaults stay in one place: the recognizer.
+            gate = {}
+            if self.news_min_chars is not None:
+                gate["readable_chars"] = self.news_min_chars
+            if self.news_min_agreement is not None:
+                gate["readable_agreement"] = self.news_min_agreement
             try_recognizer(
-                lambda: NewsOverlayRecognizer(lang=self.ocr_lang, fps=self.fps)
+                lambda: NewsOverlayRecognizer(
+                    lang=self.ocr_lang, fps=self.fps, **gate
+                )
             )
         return cues
