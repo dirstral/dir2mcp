@@ -839,12 +839,12 @@ func (s *Server) canResolveRoot() bool {
 // candidate target are compared in their symlink-resolved form so equivalent
 // symlinked paths match.
 func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bool {
-	if isArchiveMemberSource(doc) {
-		return true
-	}
 	normalized, ok := normalizedListRelPath(doc.RelPath)
 	if !ok {
 		return false
+	}
+	if isArchiveMemberSource(doc) {
+		return true
 	}
 	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
 	targetReal, err := filepath.EvalSymlinks(absPath)
@@ -875,20 +875,18 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 // (issue #684). No local file exists at RootDir/rel_path for such a corpus, so
 // the local existence check of isResolvableSourceWithRoot cannot say anything
 // about a remote object and must not run. What survives is the part that needs
-// no filesystem: archive members stay listable, and an affirmatively malformed
-// rel_path (traversal or absolute) stays excluded, because it can never
-// round-trip through open_file on any backend.
+// no filesystem: an affirmatively malformed rel_path (traversal or absolute)
+// stays excluded, because it can never round-trip through open_file on any
+// backend. Archive members keep passing, exactly as they do on a local corpus,
+// because their virtual path is a well-formed rel_path.
 func isListableRemoteSource(doc model.Document) bool {
-	if isArchiveMemberSource(doc) {
-		return true
-	}
 	_, ok := normalizedListRelPath(doc.RelPath)
 	return ok
 }
 
 // isArchiveMemberSource reports whether doc is a member of an archive. Such a
-// path is virtual (the backing file is the archive itself), so no per-document
-// source resolution applies to it.
+// path is virtual (the backing file is the archive itself), so the local
+// existence check does not apply to it.
 func isArchiveMemberSource(doc model.Document) bool {
 	return strings.EqualFold(strings.TrimSpace(doc.SourceType), "archive_member")
 }
@@ -896,9 +894,15 @@ func isArchiveMemberSource(doc model.Document) bool {
 // normalizedListRelPath cleans relPath into slash form and reports whether it is
 // a well-formed corpus-relative path. A traversal or absolute path is rejected:
 // it can never round-trip through open_file, so list_files must not emit it.
+//
+// The absolute test runs on the TRIMMED path, the same string every other test
+// here runs on. A padded value such as " /etc/passwd" passes the store's own
+// rel_path validation, so the untrimmed test let it through as a relative path
+// and the listing then advertised an absolute-looking path.
 func normalizedListRelPath(relPath string) (string, bool) {
-	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
-	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
+	trimmed := strings.TrimSpace(relPath)
+	normalized := filepath.ToSlash(filepath.Clean(trimmed))
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(trimmed) {
 		return "", false
 	}
 	return normalized, true

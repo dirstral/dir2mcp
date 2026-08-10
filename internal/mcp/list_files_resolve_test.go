@@ -102,12 +102,73 @@ func TestIsResolvableSourceWithRoot(t *testing.T) {
 			doc:  model.Document{RelPath: filepath.Join(rootAbs, realName), SourceType: "filesystem"},
 			want: false,
 		},
+		{
+			name: "padded absolute path rejected",
+			doc:  model.Document{RelPath: " /etc/passwd", SourceType: "filesystem"},
+			want: false,
+		},
+		{
+			name: "archive member with a malformed path rejected",
+			doc:  model.Document{RelPath: "../escape.zip/inner.txt", SourceType: "archive_member"},
+			want: false,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isResolvableSourceWithRoot(tc.doc, rootAbs, rootReal); got != tc.want {
 				t.Fatalf("isResolvableSourceWithRoot(%+v)=%v want=%v", tc.doc, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsListableRemoteSource covers the object-store gate of issue #684. An S3
+// corpus has no local file at RootDir/rel_path, so the gate must pass a
+// well-formed rel_path without touching disk, and must still refuse a path that
+// can never round-trip through open_file.
+func TestIsListableRemoteSource(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  model.Document
+		want bool
+	}{
+		{
+			name: "remote object with no local file is listable",
+			doc:  model.Document{RelPath: "docs/a.md", SourceType: "filesystem"},
+			want: true,
+		},
+		{
+			name: "archive member is listable",
+			doc:  model.Document{RelPath: "bundle.zip/inner/note.md", SourceType: "archive_member"},
+			want: true,
+		},
+		{
+			name: "traversal rejected",
+			doc:  model.Document{RelPath: "../escape.md", SourceType: "filesystem"},
+			want: false,
+		},
+		{
+			name: "absolute path rejected",
+			doc:  model.Document{RelPath: "/etc/passwd", SourceType: "filesystem"},
+			want: false,
+		},
+		{
+			name: "padded absolute path rejected",
+			doc:  model.Document{RelPath: " /etc/passwd", SourceType: "filesystem"},
+			want: false,
+		},
+		{
+			name: "empty path rejected",
+			doc:  model.Document{RelPath: "  ", SourceType: "filesystem"},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isListableRemoteSource(tc.doc); got != tc.want {
+				t.Fatalf("isListableRemoteSource(%+v)=%v want=%v", tc.doc, got, tc.want)
 			}
 		})
 	}
