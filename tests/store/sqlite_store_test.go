@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -292,8 +293,12 @@ func TestSQLiteStore_ContentHashBackupRestore(t *testing.T) {
 	const original = "hash-original"
 	setHash(original)
 
-	// Restore with no snapshot present is a safe no-op.
-	mustNoErr(t, "restore (no backup)", st.RestoreContentHashes(ctx))
+	// Restore with no snapshot present leaves the hash alone. Since #807 it
+	// also SAYS that there was nothing to restore, instead of returning a
+	// silent nil that a caller could not tell from a real restore.
+	if err := st.RestoreContentHashes(ctx); !errors.Is(err, store.ErrNoContentHashSnapshot) {
+		t.Fatalf("restore with no backup should report absence, got %v", err)
+	}
 	wantHash("no-op restore", original)
 
 	// Snapshot -> clear -> restore must bring the original hash back.
@@ -303,8 +308,11 @@ func TestSQLiteStore_ContentHashBackupRestore(t *testing.T) {
 	mustNoErr(t, "RestoreContentHashes", st.RestoreContentHashes(ctx))
 	wantHash("after restore", original)
 
-	// After restore the snapshot is consumed: a second restore is a no-op.
-	mustNoErr(t, "second restore", st.RestoreContentHashes(ctx))
+	// After restore the snapshot is consumed, so a second restore finds nothing
+	// and reports it (#807). The hash must be untouched either way.
+	if err := st.RestoreContentHashes(ctx); !errors.Is(err, store.ErrNoContentHashSnapshot) {
+		t.Fatalf("second restore should report absence, got %v", err)
+	}
 	wantHash("second restore", original)
 
 	// Snapshot -> discard: a later restore must NOT resurrect the old snapshot,
@@ -313,7 +321,11 @@ func TestSQLiteStore_ContentHashBackupRestore(t *testing.T) {
 	const rebuilt = "hash-rebuilt"
 	setHash(rebuilt)
 	mustNoErr(t, "DiscardContentHashBackup", st.DiscardContentHashBackup(ctx))
-	mustNoErr(t, "restore after discard", st.RestoreContentHashes(ctx))
+	// A discarded snapshot is gone, so this reports absence rather than
+	// resurrecting the pre-clear hash (#807).
+	if err := st.RestoreContentHashes(ctx); !errors.Is(err, store.ErrNoContentHashSnapshot) {
+		t.Fatalf("restore after discard should report absence, got %v", err)
+	}
 	wantHash("after discard+restore", rebuilt)
 
 	// Discard with nothing to drop is idempotent.

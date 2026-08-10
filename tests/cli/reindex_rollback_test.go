@@ -167,8 +167,11 @@ func TestReindex_DiscardsContentHashBackupOnSuccess(t *testing.T) {
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("post Init: %v", err)
 	}
-	if err := st.RestoreContentHashes(ctx); err != nil {
-		t.Fatalf("post-commit RestoreContentHashes should be a no-op: %v", err)
+	// "Nothing to restore" is now a named sentinel rather than a silent nil
+	// (#807), so this asserts WHICH no-op happened instead of only that the
+	// call did not error.
+	if err := st.RestoreContentHashes(ctx); !errors.Is(err, store.ErrNoContentHashSnapshot) {
+		t.Fatalf("post-commit restore should report that no snapshot remains, got %v", err)
 	}
 	if got := readDocumentHash(t, stateDir, relPath); got != rebuilt {
 		t.Errorf("no-op restore must not resurrect the pre-clear hash; want %q got %q", rebuilt, got)

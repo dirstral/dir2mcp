@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/statefs"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // reindexProgressInterval is how often the reindex command prints a
@@ -208,7 +209,18 @@ func (s *reindexStaging) restoreContentHashes(ctx context.Context, stderr io.Wri
 	}
 	b := s.hashBackup
 	s.hashBackup = nil
-	if err := b.RestoreContentHashes(context.WithoutCancel(ctx)); err != nil {
+	// The hashes were cleared before the rebuild, so a restore that puts nothing
+	// back leaves the corpus with NO content hashes: the next scan re-extracts
+	// and re-embeds every document, which costs real provider money. Both
+	// "no snapshot" and "restored nothing" are therefore failures here, not the
+	// no-ops they are at startup, and they used to be invisible (#807).
+	switch err := b.RestoreContentHashes(context.WithoutCancel(ctx)); {
+	case err == nil:
+	case errors.Is(err, store.ErrNoContentHashSnapshot), errors.Is(err, store.ErrEmptyContentHashSnapshot):
+		writef(stderr,
+			"warning: reindex rollback: the content-hash snapshot did not restore (%v); "+
+				"the corpus now has no content hashes, so the next scan will reprocess every document\n", err)
+	default:
 		writef(stderr, "warning: reindex rollback: restore content hashes: %v\n", err)
 	}
 }
@@ -329,7 +341,20 @@ func restoreInterruptedReindexHashes(ctx context.Context, st model.Store) error 
 	if !ok {
 		return nil
 	}
-	return b.RestoreContentHashes(ctx)
+	err := b.RestoreContentHashes(ctx)
+	if errors.Is(err, store.ErrNoContentHashSnapshot) {
+		// No snapshot means no interrupted run to finish, which is the ordinary
+		// state on a healthy corpus.
+		return nil
+	}
+	if errors.Is(err, store.ErrEmptyContentHashSnapshot) {
+		// A snapshot existed and matched nothing. The hashes stay as the
+		// crashed run left them, so the next scan reprocesses the corpus. That
+		// is recoverable but expensive, and it used to happen in silence (#807).
+		return fmt.Errorf(
+			"the interrupted run's content-hash snapshot restored no rows, so the corpus will be reprocessed in full: %w", err)
+	}
+	return err
 }
 
 // commit deletes the moved-aside backups after a durable rebuild.

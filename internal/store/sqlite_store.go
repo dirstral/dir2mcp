@@ -1283,9 +1283,30 @@ func (s *SQLiteStore) BackupContentHashes(ctx context.Context) error {
 	}
 	defer s.ReleaseDB()
 
-	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable); err != nil {
+	present, err := reindexHashBackupPresent(ctx, db)
+	if err != nil {
 		return err
 	}
+	if present {
+		// Refuse rather than clobber, which is the rule the FILE half of the
+		// same staging already follows (reindexStaging.backup). Its comment
+		// records why: it used to remove the destination first, "which is
+		// exactly how the last-known-good generation got destroyed".
+		//
+		// The SQL half kept doing that. A snapshot is expected to find the slot
+		// free, because RestoreContentHashes consumes any earlier one first. A
+		// backup still present here means recovery did not run, and the table
+		// by construction holds a COMPLETE pre-clear generation while
+		// documents.content_hash may already be cleared by the run that
+		// crashed. Overwriting therefore replaced the good snapshot with empty
+		// strings, and the next restore put those empty strings back (#807).
+		return fmt.Errorf(
+			"refusing to overwrite the existing content-hash snapshot in %s: "+
+				"it holds an unrecovered generation, so run `dir2mcp reindex` to finish the interrupted recovery first",
+			reindexHashBackupTable)
+	}
+	// One statement, so the snapshot can never be half-taken. The previous
+	// drop-then-create pair had a window in which no snapshot existed at all.
 	_, err = db.ExecContext(ctx,
 		`CREATE TABLE `+reindexHashBackupTable+` AS SELECT doc_id, content_hash FROM documents`)
 	return err
@@ -1303,21 +1324,47 @@ func (s *SQLiteStore) RestoreContentHashes(ctx context.Context) error {
 	defer s.ReleaseDB()
 
 	present, err := reindexHashBackupPresent(ctx, db)
-	if err != nil || !present {
+	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx,
+	if !present {
+		// No snapshot to restore. This is legitimate when none was ever taken,
+		// and it is a FAILURE when a clear has run, because the corpus is then
+		// left with no content hashes at all. The caller knows which case it is
+		// in, so report the count rather than decide here (#807).
+		return ErrNoContentHashSnapshot
+	}
+	res, err := db.ExecContext(ctx,
 		`UPDATE documents
 		    SET content_hash = (
 		        SELECT b.content_hash FROM `+reindexHashBackupTable+` b
 		        WHERE b.doc_id = documents.doc_id
 		    )
-		  WHERE doc_id IN (SELECT doc_id FROM `+reindexHashBackupTable+`)`); err != nil {
+		  WHERE doc_id IN (SELECT doc_id FROM `+reindexHashBackupTable+`)`)
+	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable)
-	return err
+	restored, _ := res.RowsAffected()
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+reindexHashBackupTable); err != nil {
+		return err
+	}
+	if restored == 0 {
+		// A snapshot existed and matched nothing. That is not a no-op, it is a
+		// restore that failed to restore, and it used to exit 0 in silence.
+		return ErrEmptyContentHashSnapshot
+	}
+	return nil
 }
+
+// ErrNoContentHashSnapshot and ErrEmptyContentHashSnapshot let a caller tell
+// "there was nothing to restore" apart from "the restore did nothing", which
+// the previous silent nil could not express. Both are sentinels rather than
+// hard failures: a caller that never took a snapshot treats the first as
+// success, while a caller that cleared the hashes must treat either as loud.
+var (
+	ErrNoContentHashSnapshot    = errors.New("no content-hash snapshot to restore")
+	ErrEmptyContentHashSnapshot = errors.New("the content-hash snapshot restored no rows")
+)
 
 // DiscardContentHashBackup drops the snapshot taken by BackupContentHashes after
 // a durable reindex. Idempotent and safe when no snapshot exists.
