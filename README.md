@@ -791,6 +791,12 @@ and `STATE_DIR`.
 - `--public` binds to `0.0.0.0` (unless explicit `--listen` is provided)
 - `--public` with `--auth none` is rejected unless `--force-insecure` is set
 - Browser origins are allowlisted (localhost defaults + explicit additions)
+- The MCP clients (the `ask`/`search`/`open-file`/`list-files` shims and the
+  ElevenLabs bridge) buffer at most 64 MiB of one upstream response. A larger
+  response fails with an error that names the limit. The client never proxies
+  the oversized body
+- These MCP clients do not follow HTTP redirects. A 3xx from the endpoint is
+  reported as a failure, so connection headers stay on the configured host
 
 ### What a support bundle discloses
 

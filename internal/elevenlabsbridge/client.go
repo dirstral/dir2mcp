@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -106,7 +105,8 @@ func NewClient(endpoint, token string) *Client {
 		endpoint: strings.TrimSpace(endpoint),
 		token:    strings.TrimSpace(token),
 		httpClient: &http.Client{
-			Timeout: 45 * time.Second,
+			Timeout:       45 * time.Second,
+			CheckRedirect: protocol.RefuseRedirect,
 		},
 	}
 }
@@ -175,9 +175,12 @@ func (c *Client) doRPC(ctx context.Context, payload rpcRequest, includeSession b
 		}
 	}()
 
-	raw, readErr := io.ReadAll(resp.Body)
+	// The bound covers every status. An over-limit error body is rejected here,
+	// so it never reaches HTTPError and the bridge never proxies it downstream
+	// (issue #711).
+	raw, readErr := protocol.ReadLimitedResponseBody(resp.Body)
 	if readErr != nil {
-		return resp, nil, fmt.Errorf("read rpc response: %w", readErr)
+		return resp, nil, readErr
 	}
 	return resp, raw, nil
 }
@@ -247,9 +250,17 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 
 	resp, body, err := c.doRPC(ctx, call, true)
 	if err != nil {
+		// A read failure or an over-limit body hides the JSON-RPC payload, so
+		// only the status and the headers are left. Drop the session on an auth
+		// status or on an expired-session header. Otherwise the bridge would
+		// keep a dead session for good. The body is nil here, so the check uses
+		// the header alone.
+		if isAuthStatus(resp) || isSessionExpired(resp, nil) {
+			c.clearSession()
+		}
 		return ToolResult{}, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || isSessionExpired(resp, body) {
+	if isAuthStatus(resp) || isSessionExpired(resp, body) {
 		c.clearSession()
 		return ToolResult{}, &HTTPError{StatusCode: resp.StatusCode, Body: body}
 	}
@@ -273,6 +284,15 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 		return ToolResult{}, fmt.Errorf("decode tool result: %w", err)
 	}
 	return result, nil
+}
+
+// isAuthStatus reports whether the upstream refused the request for an
+// authentication or authorization reason.
+func isAuthStatus(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
 }
 
 func isSessionExpired(resp *http.Response, body []byte) bool {
