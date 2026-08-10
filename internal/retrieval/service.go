@@ -1667,21 +1667,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	// all and what k to use; when disabled this is a no-op so the fixed-k path
 	// below is unchanged. The gate uses the question text (the effective query)
 	// and never alters the MCP tool contract.
-	skipRetrieval := false
-	s.metaMu.RLock()
-	adaptiveEnabled := s.adaptiveEnabled
-	adaptiveKMin := s.adaptiveKMin
-	adaptiveKMax := s.adaptiveKMax
-	s.metaMu.RUnlock()
-	if adaptiveEnabled {
-		decision := adaptiveGate(query.Query, query.K, adaptiveKMin, adaptiveKMax)
-		s.logf("adaptive gate: class=%s retrieve=%t k=%d", decision.Class, decision.Retrieve, decision.K)
-		if decision.Retrieve {
-			query.K = decision.K
-		} else {
-			skipRetrieval = true
-		}
-	}
+	skipRetrieval := s.applyAdaptiveGate(question, &query)
 
 	var (
 		hits []model.SearchHit

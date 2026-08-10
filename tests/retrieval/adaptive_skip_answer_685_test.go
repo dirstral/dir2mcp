@@ -159,6 +159,52 @@ func TestAdaptiveSkip685_StripsFabricatedSources(t *testing.T) {
 	}
 }
 
+// TestAdaptiveSkip685_SubstantiveQuestionNeverSkips pins the guard on the
+// no-retrieval path. A caller can set the retrieval query apart from the
+// question. A trivial query override must not remove the evidence from a real
+// question: the server must still retrieve, and the generator must not answer
+// the question with no document.
+func TestAdaptiveSkip685_SubstantiveQuestionNeverSkips(t *testing.T) {
+	gen := &fakeGenerator{out: "x402 is a payment challenge protocol."}
+	svc, idx, emb := newSkipService685(t, gen)
+
+	res, err := svc.Ask(
+		context.Background(),
+		"how does the x402 payment challenge work?",
+		model.SearchQuery{Index: "text", Query: "hi"},
+	)
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if idx.lastK == -1 {
+		t.Fatalf("a substantive question must still query the index, even with a trivial query override")
+	}
+	if emb.calls == 0 {
+		t.Fatalf("a substantive question must still embed the query")
+	}
+	if gen.lastPrompt != "" {
+		t.Fatalf("a zero-hit retrieved ask must not call the generator")
+	}
+	if res.Answer != noContextFallback685 {
+		t.Fatalf("answer = %q, want the empty-corpus fallback for a zero-hit retrieved ask", res.Answer)
+	}
+}
+
+// TestAdaptiveSkip685_TrivialQuestionWithRichQueryRetrieves pins the other half
+// of the guard. The k decision still follows the retrieval query, so a rich
+// query override keeps its retrieval and its widened k.
+func TestAdaptiveSkip685_TrivialQuestionWithRichQueryRetrieves(t *testing.T) {
+	svc, idx, _ := newSkipService685(t, nil)
+
+	hard := "compare and contrast the performance and reliability tradeoffs between approach one and approach two in detail"
+	if _, err := svc.Ask(context.Background(), "hi", model.SearchQuery{Index: "text", Query: hard}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if idx.lastK != 30 {
+		t.Fatalf("a hard query override must still widen k to k_max=30, got %d", idx.lastK)
+	}
+}
+
 // TestAdaptiveSkip685_RetrievedAskUnchanged pins the scope of the fix. A real
 // question still retrieves, still generates from the retrieved context, and
 // still returns its citations.

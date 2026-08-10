@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
@@ -178,6 +179,45 @@ func normalizeAdaptiveBounds(kMin, kMax int) (int, int) {
 		kMax = kMin
 	}
 	return kMin, kMax
+}
+
+// applyAdaptiveGate resolves the opt-in adaptive retrieval verdict for one ask
+// (config retrieval.adaptive.*). It reports whether retrieval must be skipped
+// and it writes the effective k into query when retrieval runs. With the gate
+// disabled it is a no-op, so the fixed-k path is unchanged.
+//
+// An ask carries two texts. `query.Query` is the retrieval query. `question` is
+// the text the answer must satisfy. Ask copies the question into an empty query,
+// so the two agree unless a caller overrides the query. The gate keeps its k
+// decision on the retrieval query, because k bounds that search. A SKIP verdict
+// needs more care: it removes the evidence from an answer, so the answered
+// question must carry no information need either. A caller that pairs a
+// substantive question with a trivial query override would otherwise get an
+// ungrounded answer to a real question (#685). The gate therefore re-classifies
+// the question before it skips, and it retrieves when the question asks for
+// something.
+func (s *Service) applyAdaptiveGate(question string, query *model.SearchQuery) bool {
+	s.metaMu.RLock()
+	enabled := s.adaptiveEnabled
+	kMin := s.adaptiveKMin
+	kMax := s.adaptiveKMax
+	s.metaMu.RUnlock()
+	if !enabled {
+		return false
+	}
+	decision := adaptiveGate(query.Query, query.K, kMin, kMax)
+	s.logf("adaptive gate: class=%s retrieve=%t k=%d", decision.Class, decision.Retrieve, decision.K)
+	if decision.Retrieve {
+		query.K = decision.K
+		return false
+	}
+	asked := adaptiveGate(question, query.K, kMin, kMax)
+	if !asked.Retrieve {
+		return true
+	}
+	s.logf("adaptive gate: skip on the query, class=%s on the question; retrieving with k=%d", asked.Class, asked.K)
+	query.K = asked.K
+	return false
 }
 
 // The no-retrieval answer path (issue #685).
