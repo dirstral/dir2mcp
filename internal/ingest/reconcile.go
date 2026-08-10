@@ -3,7 +3,9 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -147,10 +149,23 @@ func (s *Service) beginOutputReconciliation(ctx context.Context, forceReindex bo
 		s.getLogger().Printf("output reconciliation: read pipeline output identity failed, skipping this scan: %v", err)
 		return
 	}
-	s.pendingOutputIdentity = active
+	// The identity may be recorded only when this scan can decide the WHOLE
+	// desired set. An unresolved translator or summarizer makes its half UNKNOWN,
+	// so the pass retires nothing for it. Recording the new identity anyway would
+	// mark the cleanup as done, and every later scan would then find the recorded
+	// identity already equal to the active one and never look again. Leaving the
+	// identity unrecorded costs one more armed pass; recording it early loses the
+	// cleanup permanently.
+	_, langsKnown := s.desiredTranslationTargets()
+	_, summariesKnown := s.desiredSummaryOutputs()
+	if langsKnown && summariesKnown {
+		s.pendingOutputIdentity = active
+	}
 	if recorded == active && !forceReindex {
 		return
 	}
+	// The pass is still armed when only one half is unknown: the KNOWN half is
+	// reconciled now, and the unknown half is retried on the next scan.
 	s.reconcileOutputs = true
 	s.getLogger().Printf(
 		"output reconciliation: pipeline outputs changed (recorded %q, active %q); retiring representations the current configuration no longer produces (#692)",
@@ -200,7 +215,10 @@ func (s *Service) reconcileDocumentOutputs(ctx context.Context, relPath string) 
 	reps, err := lister.ActiveRepresentations(ctx, relPath)
 	if err != nil {
 		// A missing document is normal here (a skipped or path-excluded asset), so
-		// this is logged at the same low stakes as any other cleanup miss.
+		// it stays silent. Any other error is a real cleanup miss and is logged.
+		if !errors.Is(err, os.ErrNotExist) {
+			s.getLogger().Printf("output reconciliation: list representations for %s failed: %v", relPath, err)
+		}
 		return
 	}
 	obsolete := s.obsoleteRepresentations(reps)

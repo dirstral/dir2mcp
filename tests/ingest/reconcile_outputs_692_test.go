@@ -177,11 +177,21 @@ func TestReconcile_DisablingTranslationRetiresEveryTranslation(t *testing.T) {
 	}
 }
 
-// TestReconcile_UnresolvedTranslatorKeepsTranslations is the cost guard. A
-// missing credential leaves translation enabled but unwired. That is NOT the
-// operator asking for the translations to go away, and re-deriving them costs a
-// paid provider call, so every existing translation must survive.
-func TestReconcile_UnresolvedTranslatorKeepsTranslations(t *testing.T) {
+// TestReconcile_UnresolvedTranslatorDefersCleanup is the cost guard. A missing
+// credential leaves translation enabled but unwired. That is NOT the operator
+// asking for the translations to go away, and re-deriving them costs a paid
+// provider call, so every existing translation must survive.
+//
+// The second scan also REMOVES a target, so the pipeline output identity changes
+// and the reconciliation pass is genuinely armed. That is what proves the
+// translations survive through the "desired set unknown" decision rather than
+// because the pass never ran.
+//
+// The third scan then resolves the translator, and the deferred cleanup must
+// still happen. Without it, an unresolved scan would record the new identity,
+// every later scan would see it already matching, and the removed target's
+// transcript would stay live forever.
+func TestReconcile_UnresolvedTranslatorDefersCleanup(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	stateDir := t.TempDir()
@@ -194,8 +204,8 @@ func TestReconcile_UnresolvedTranslatorKeepsTranslations(t *testing.T) {
 		t.Fatalf("first scan: %v", err)
 	}
 
-	// Second scan: translation still enabled, but the translator failed to build.
-	second := mustNewIngestService(t, translateConfig(root, stateDir, "en", "es"), st)
+	// Second scan: "es" removed, but the translator failed to build.
+	second := mustNewIngestService(t, translateConfig(root, stateDir, "en"), st)
 	second.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
 	second.SetSTTIdentity("whisper", "whisper-large-v3")
 	second.SetTranscriptLanguage("de")
@@ -206,8 +216,22 @@ func TestReconcile_UnresolvedTranslatorKeepsTranslations(t *testing.T) {
 	types := activeRepTypes(t, st, "talk.mp3")
 	for _, want := range []string{ingest.TranscriptRepType("en"), ingest.TranscriptRepType("es")} {
 		if !types[want] {
-			t.Errorf("%q was retired because the translator did not resolve; paid output must survive a wiring failure (have %v)", want, types)
+			t.Fatalf("%q was retired while the translator did not resolve; paid output must survive a wiring failure (have %v)", want, types)
 		}
+	}
+
+	// Third scan: the translator resolves, so the deferred cleanup must run.
+	third := translatingService(t, translateConfig(root, stateDir, "en"), st)
+	if err := third.Run(ctx); err != nil {
+		t.Fatalf("third scan: %v", err)
+	}
+
+	types = activeRepTypes(t, st, "talk.mp3")
+	if types[ingest.TranscriptRepType("es")] {
+		t.Errorf("the deferred cleanup never ran: transcript-es is still live (have %v)", types)
+	}
+	if !types[ingest.TranscriptRepType("en")] {
+		t.Errorf("transcript-en was retired, but en is still a configured target (have %v)", types)
 	}
 }
 
