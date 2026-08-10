@@ -5,9 +5,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -188,6 +192,44 @@ func TestArchiveOversizeMember683_ContainerStaysFinalized(t *testing.T) {
 	if container.ContentHash == "" {
 		t.Error("container content_hash is blank; a deterministic cap must not force a re-extract on every scan")
 	}
+}
+
+// TestArchiveOversizeMember683_SkipRowSurvivesSecondScan pins that the durable
+// record is durable. The second scan sees an unchanged archive and re-extracts
+// nothing, so the size_cap row must be retained rather than tombstoned as a
+// missing document. A coverage gap that only lasts one run is not honest
+// coverage.
+func TestArchiveOversizeMember683_SkipRowSurvivesSecondScan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	data := buildZipSized683(t, []sizedMember683{
+		{name: "small.txt", body: []byte("a small member")},
+		{name: "huge.txt", body: oversizePayload683()},
+	})
+	if err := os.WriteFile(filepath.Join(root, "docs.zip"), data, 0o600); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	svc := mustNewIngestService(t, cfg, st)
+	for i := 1; i <= 2; i++ {
+		if err := svc.Run(ctx); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+
+	doc := documentByPath(t, st, "docs.zip/huge.txt")
+	if doc.Deleted {
+		t.Error("the size_cap row was tombstoned on the second scan; the coverage gap must outlive the run that found it")
+	}
+	assertSizeCapSkip683(t, st, "docs.zip/huge.txt")
 }
 
 // corruptStoredZip658 builds a zip whose single member is stored uncompressed
