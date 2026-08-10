@@ -1905,6 +1905,17 @@ func (s *SQLiteStore) ChunkMediaSpanByID(ctx context.Context, chunkID int64) (re
 // as a safe skip, honoring the tombstone so a job cannot resurrect a deleted
 // chunk (SPEC §6.6, §8.7.3 tombstone safety). textHash is returned separately so
 // a worker can detect a job enqueued for a since-changed chunk.
+//
+// A chunk whose parent document is tombstoned or in the error state is also
+// reported as model.ErrNotFound (liveParentDocument, #707). This method is what
+// retrieval uses to test whether a vector hit is still live, so the predicate
+// keeps a failed document's earlier chunks out of search results, out of the
+// related-document neighbours, and out of the answer context. The retrieval
+// liveness pass also evicts each such chunk from the in-memory vector index, so
+// the hit does not come back on the next query. A document that indexes again
+// gets a fresh set of chunks, which the same pass then admits again. The embed
+// worker sees the same answer, which matches NextPending: it does not embed a
+// chunk of a failed document.
 func (s *SQLiteStore) ChunkTaskByID(ctx context.Context, chunkID uint64) (task model.ChunkTask, textHash string, err error) {
 	if chunkID == 0 {
 		return model.ChunkTask{}, "", model.ErrNotFound
@@ -1931,7 +1942,8 @@ SELECT tc.chunk_id, tc.rel_path, tc.doc_type, tc.rep_type, tc.text, tc.text_hash
        COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''), COALESCE(d.mtime_unix, 0)
 FROM the_chunk tc
 LEFT JOIN ranked_spans sp ON sp.chunk_id = tc.chunk_id AND sp.rn = 1
-LEFT JOIN documents d ON d.rel_path = tc.rel_path`, int64(chunkID))
+LEFT JOIN documents d ON d.rel_path = tc.rel_path
+WHERE `+liveParentDocument, int64(chunkID))
 
 	var (
 		cid       int64
@@ -1996,6 +2008,11 @@ LEFT JOIN documents d ON d.rel_path = tc.rel_path`, int64(chunkID))
 // them from the neighbours (a document is never related to itself). A rel_path
 // that resolves to no embedded chunk returns an empty slice (the tool maps that
 // to INVALID_FIELD — the source could not be located).
+//
+// The chunks must also have a live parent document (liveParentDocument, #707).
+// A document that is tombstoned or in the error state therefore returns no
+// chunks, so it cannot seed a related-document query with content that the
+// corpus reports as failed.
 func (s *SQLiteStore) EmbeddedChunksByPath(ctx context.Context, relPath string) ([]model.ChunkTask, error) {
 	normalizedPath, err := normalizeRelPath(relPath)
 	if err != nil {
@@ -2025,6 +2042,7 @@ SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kin
 FROM filtered_chunks fc
 LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1
 LEFT JOIN documents d ON d.rel_path = fc.rel_path
+WHERE `+liveParentDocument+`
 ORDER BY fc.chunk_id`, normalizedPath)
 	if err != nil {
 		return nil, err
@@ -2773,7 +2791,7 @@ func nextPendingQuery(indexKind string, limit int) (string, []any) {
 	            FROM chunks c
 	            LEFT JOIN documents d ON d.rel_path = c.rel_path
 	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
-	              AND (d.rel_path IS NULL OR (d.deleted = 0 AND d.status != 'error'))` + kindPredicate + `
+	              AND ` + liveParentDocument + kindPredicate + `
 	            ORDER BY c.chunk_id
 	            LIMIT ?
 	          )

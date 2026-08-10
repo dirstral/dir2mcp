@@ -33,6 +33,12 @@ import (
 // embedding_status='error'. They must not surface via the lexical/hybrid path,
 // so the WHERE clause excludes them (embedding_status != 'error'). 'pending'
 // chunks remain searchable lexically (they need no embedding to match BM25).
+//
+// Parent filter (#707): a chunk is live only while its document is live, so the
+// WHERE clause also applies liveParentDocument. A document that failed a later
+// scan carries status='error' and keeps the chunks it embedded on an earlier
+// good run. Those chunks stay in the FTS index, so only this query-time filter
+// stops them from being searched and cited while the document is broken.
 func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, indexKind string) ([]model.SearchHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -76,7 +82,8 @@ func (s *SQLiteStore) SearchBM25(ctx context.Context, query string, k int, index
 	         LEFT JOIN (SELECT chunk_id, span_kind, start, "end", extra_json
 	                    FROM spans GROUP BY chunk_id) sp ON sp.chunk_id = c.chunk_id
 	         WHERE chunks_fts MATCH ? AND c.deleted = 0
-	               AND c.embedding_status != 'error'`
+	               AND c.embedding_status != 'error'
+	               AND ` + liveParentDocument
 	if kind := strings.TrimSpace(indexKind); kind != "" {
 		stmt += ` AND c.index_kind = ?`
 		args = append(args, kind)
