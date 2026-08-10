@@ -53,6 +53,12 @@ type memberAccumulator struct {
 	seen map[string]struct{}
 	// skips is the observable record of members this archive did not yield.
 	skips archiveSkips
+	// excluded lists members the per-member size cap deliberately left out (#683).
+	// See excludeOversize.
+	excluded []archiveMemberExclusion
+	// unreadable counts members (or whole entry streams) the archive declared but
+	// that could not be read (#658). See recordUnreadable/recordStreamFailure.
+	unreadable int
 }
 
 func newMemberAccumulator(maxMembers int, maxTotalBytes int64) *memberAccumulator {
@@ -96,6 +102,64 @@ func (a *memberAccumulator) add(relPath string, content []byte) (stop bool) {
 	return false
 }
 
+// excludeOversize records a member the per-member size cap deliberately left
+// out (#683).
+//
+// It is deliberately NOT the same thing as a refused name. A refused name has
+// no usable rel_path, so the unusable name IS the whole finding and a log line
+// is all it can be. An oversized member has a perfectly good rel_path: the
+// archive named it, the name passed the path rule, and only its size stopped
+// it. That means the caller CAN key a durable status=skipped row on it, so the
+// corpus reports the member as known-and-not-indexed instead of reporting
+// coverage it does not have.
+//
+// sizeBytes is the size the archive declared, or 0 when the format does not
+// declare one (a bare gzip/bzip2 payload is only known to be over the cap).
+// The member is also recorded in skips so the operator log names it.
+//
+// The retained list is bounded by the same member-count cap that bounds
+// ingestion: one durable row per excluded member is honest, but an archive
+// declaring millions of oversized entries must not turn a coverage record into
+// a memory problem. skips.Total stays exact either way.
+func (a *memberAccumulator) excludeOversize(declaredName, relPath string, sizeBytes int64) {
+	if len(a.excluded) < a.maxMembers {
+		a.excluded = append(a.excluded, archiveMemberExclusion{RelPath: relPath, SizeBytes: sizeBytes})
+	}
+	a.skips.record(declaredName, fmt.Sprintf("member exceeds the %d-byte per-member cap; recorded as a size_cap skip", int64(archiveMemberMaxBytes)))
+}
+
+// recordUnreadable records a member the archive declared but that could not be
+// opened or read (#658): a corrupt entry, a truncated stream, an encrypted zip
+// member. Unlike an oversized member this is a FAILURE, not a policy decision.
+// Re-reading the archive later may well succeed (the bytes may be repaired, the
+// transfer may be completed), so the caller must leave the container's done
+// marker withheld and retry rather than record a permanent skip.
+func (a *memberAccumulator) recordUnreadable(name, reason string) {
+	a.unreadable++
+	a.skips.record(name, reason)
+}
+
+// recordStreamFailure records a failure that ended the read of the archive
+// itself rather than of one named member: a corrupt tar entry header, for
+// example. No member name is available, because the entry the reader choked on
+// was never decoded, and every entry after it is unreachable too. The count is
+// therefore a floor of at least one, never an exact tally.
+func (a *memberAccumulator) recordStreamFailure(reason string) {
+	a.recordUnreadable("<archive stream>", reason)
+}
+
+// archiveMemberExclusion names one member that has a usable rel_path but that a
+// deterministic cap deliberately kept out of the corpus (#683). The caller turns
+// it into a durable status=skipped document row.
+type archiveMemberExclusion struct {
+	// RelPath is the corpus-relative path the member would have been stored
+	// under, already prefixed with the archive's own rel_path.
+	RelPath string
+	// SizeBytes is the size the archive declared for the member, or 0 when the
+	// format declares none.
+	SizeBytes int64
+}
+
 // archiveMemberSkip names one member an archive declared that did not become a
 // document, and why.
 type archiveMemberSkip struct {
@@ -135,6 +199,29 @@ type archiveExtraction struct {
 	Members   []archiveMember
 	Skips     archiveSkips
 	Truncated bool
+	// Excluded lists members a deterministic cap deliberately kept out (#683).
+	// The caller persists one durable status=skipped row per entry, so a
+	// container whose largest member was dropped never reports full coverage.
+	Excluded []archiveMemberExclusion
+	// Unreadable counts members, or whole entry streams, that could not be read
+	// (#658). It is a floor, not an exact tally: a corrupt tar header hides every
+	// entry behind it. A non-zero value means extraction did NOT complete, so the
+	// caller must not stamp the container's done marker.
+	Unreadable int
+}
+
+// result converts the accumulator into the extractor's return value. Every
+// extractor ends the same way, so the field-by-field copy lives in one place:
+// a new observable field added to the accumulator cannot then be plumbed
+// through one format and forgotten on another.
+func (a *memberAccumulator) result() archiveExtraction {
+	return archiveExtraction{
+		Members:    a.members,
+		Skips:      a.skips,
+		Truncated:  a.truncated,
+		Excluded:   a.excluded,
+		Unreadable: a.unreadable,
+	}
 }
 
 // errUnsupportedArchiveFormat is returned by extractArchiveMembers when a path
@@ -143,6 +230,18 @@ type archiveExtraction struct {
 // per-document diagnostic instead of silently ingesting an empty skipped
 // document (#398).
 var errUnsupportedArchiveFormat = errors.New("unsupported archive format")
+
+// errArchiveUnreadable is returned by processArchiveMembers when the archive
+// could not be read in full: the container itself failed to open or decompress,
+// or one or more declared members could not be opened or read (#658).
+//
+// It is a DURABLE per-document failure, like errUnsupportedArchiveFormat. The
+// members that did read are still ingested, but the container is persisted as
+// status="error" with a redacted message and keeps an empty content_hash, so the
+// gap is visible in status queries and the next incremental scan retries it.
+// Without this signal a corrupt archive looked healthy: the good members landed,
+// the bad ones vanished, and nothing said so.
+var errArchiveUnreadable = errors.New("archive could not be read in full")
 
 // archiveMember holds extracted content from a single archive entry.
 // RelPath is the virtual path "<archiveRelPath>/<memberPath>" used as the
@@ -266,11 +365,13 @@ func archiveFormat(relPath string) string {
 }
 
 // extractArchiveMembers dispatches to the correct extractor based on archiveFormat.
-// Members that fail the path rule or exceed archiveMemberMaxBytes are dropped and
-// recorded in the result's Skips so the caller can surface them (#718); corrupted
-// archives return whatever members were read before the error. An unrecognised
-// format returns errUnsupportedArchiveFormat so the caller can surface a
-// diagnostic instead of silently dropping the document.
+// Members that fail the path rule are dropped and recorded in the result's Skips
+// so the caller can surface them (#718). Members over archiveMemberMaxBytes are
+// additionally returned in Excluded, so the caller turns each one into a durable
+// size_cap skip row (#683). Corrupted archives return whatever members were read
+// before the error, with Unreadable>0 so the caller knows the read did not
+// complete (#658). An unrecognised format returns errUnsupportedArchiveFormat so
+// the caller can surface a diagnostic instead of silently dropping the document.
 //
 // maxMembers and maxTotalBytes bound the member-count and aggregate-uncompressed
 // fan-out (#408); pass 0 for the package defaults. The returned Truncated flag is
@@ -333,12 +434,6 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string, maxMe
 		return archiveExtraction{}, fmt.Errorf("decompress %s: %w", archiveRelPath, err)
 	}
 	acc := newMemberAccumulator(maxMembers, maxTotalBytes)
-	if int64(len(content)) > archiveMemberMaxBytes {
-		// Payload exceeds the per-member cap: skipped, but recorded so the drop is
-		// visible rather than an empty archive with no explanation (#718).
-		acc.skips.record(filepath.Base(archiveRelPath), fmt.Sprintf("decompressed payload exceeds the %d-byte per-member cap", int64(archiveMemberMaxBytes)))
-		return archiveExtraction{Skips: acc.skips}, nil
-	}
 
 	base := filepath.Base(archiveRelPath)
 	memberName := strings.TrimSuffix(base, filepath.Ext(base))
@@ -354,11 +449,22 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string, maxMe
 		acc.skips.record(memberName, "derived member name is not a usable path segment; stored as \"member\"")
 		memberName = "member"
 	}
+	memberRelPath := archiveRelPath + "/" + memberName
+
+	if int64(len(content)) > archiveMemberMaxBytes {
+		// Payload exceeds the per-member cap. The name is resolved above, so this
+		// is an excluded member with a usable rel_path, not an unnameable drop:
+		// the caller persists a durable size_cap skip row for it (#683). The
+		// declared size is unknown, because the read stopped one byte past the cap
+		// (see archiveMemberExclusion.SizeBytes).
+		acc.excludeOversize(base, memberRelPath, 0)
+		return acc.result(), nil
+	}
 	// Route through the shared accumulator so the aggregate-size cap is enforced
 	// consistently with the zip/tar paths: if the single decoded member exceeds
 	// maxTotalBytes, it is refused and truncated=true is surfaced (#408).
-	acc.add(archiveRelPath+"/"+memberName, content)
-	return archiveExtraction{Members: acc.members, Skips: acc.skips, Truncated: acc.truncated}, nil
+	acc.add(memberRelPath, content)
+	return acc.result(), nil
 }
 
 func extractZipMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) (archiveExtraction, error) {
@@ -378,30 +484,35 @@ func extractZipMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 			acc.skips.record(f.Name, err.Error()) // zip-slip and friends
 			continue
 		}
+		memberRelPath := archiveRelPath + "/" + memberRel
 		if f.UncompressedSize64 > archiveMemberMaxBytes {
-			acc.skips.record(f.Name, fmt.Sprintf("member exceeds the %d-byte per-member cap", int64(archiveMemberMaxBytes)))
+			acc.excludeOversize(f.Name, memberRelPath, int64(f.UncompressedSize64))
 			continue
 		}
 		rc, err := f.Open()
 		if err != nil {
-			acc.skips.record(f.Name, fmt.Sprintf("open failed: %v", err))
+			// Encrypted, or a corrupt local header. Not a policy skip: the member
+			// may read on a later scan, so it must leave extraction incomplete.
+			acc.recordUnreadable(f.Name, fmt.Sprintf("open failed: %v", err))
 			continue
 		}
 		content, readErr := io.ReadAll(io.LimitReader(rc, archiveMemberMaxBytes+1))
 		_ = rc.Close()
 		if readErr != nil {
-			acc.skips.record(f.Name, fmt.Sprintf("read failed: %v", readErr))
+			acc.recordUnreadable(f.Name, fmt.Sprintf("read failed: %v", readErr))
 			continue
 		}
 		if int64(len(content)) > archiveMemberMaxBytes {
-			acc.skips.record(f.Name, fmt.Sprintf("member exceeds the %d-byte per-member cap", int64(archiveMemberMaxBytes)))
+			// The central directory understated the member. The cap still applies,
+			// and the true size is unknown, so report the declared one.
+			acc.excludeOversize(f.Name, memberRelPath, int64(f.UncompressedSize64))
 			continue
 		}
-		if acc.add(archiveRelPath+"/"+memberRel, content) {
+		if acc.add(memberRelPath, content) {
 			break // member-count or aggregate-size cap hit (#408)
 		}
 	}
-	return archiveExtraction{Members: acc.members, Skips: acc.skips, Truncated: acc.truncated}, nil
+	return acc.result(), nil
 }
 
 func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) (archiveExtraction, error) {
@@ -432,7 +543,11 @@ func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 			break
 		}
 		if err != nil {
-			break // corrupted entry: return what we have
+			// A corrupt or truncated entry header ends the stream. Every entry
+			// behind it is unreachable, so this is an incomplete read, not a clean
+			// end of archive (#658). Record it and return the members read so far.
+			acc.recordStreamFailure(fmt.Sprintf("entry stream failed: %v; the remaining entries could not be read", err))
+			break
 		}
 		if hdr.Typeflag == tar.TypeDir {
 			continue
@@ -442,22 +557,25 @@ func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 			acc.skips.record(hdr.Name, err.Error())
 			continue
 		}
+		memberRelPath := archiveRelPath + "/" + memberRel
 		if hdr.Size > archiveMemberMaxBytes {
-			acc.skips.record(hdr.Name, fmt.Sprintf("member exceeds the %d-byte per-member cap", int64(archiveMemberMaxBytes)))
+			acc.excludeOversize(hdr.Name, memberRelPath, hdr.Size)
 			continue
 		}
 		content, readErr := io.ReadAll(io.LimitReader(tr, archiveMemberMaxBytes+1))
 		if readErr != nil {
-			acc.skips.record(hdr.Name, fmt.Sprintf("read failed: %v", readErr))
+			acc.recordUnreadable(hdr.Name, fmt.Sprintf("read failed: %v", readErr))
 			continue
 		}
 		if int64(len(content)) > archiveMemberMaxBytes {
-			acc.skips.record(hdr.Name, fmt.Sprintf("member exceeds the %d-byte per-member cap", int64(archiveMemberMaxBytes)))
+			// The header understated the member. The cap still applies, and the true
+			// size is unknown, so report the declared one.
+			acc.excludeOversize(hdr.Name, memberRelPath, hdr.Size)
 			continue
 		}
-		if acc.add(archiveRelPath+"/"+memberRel, content) {
+		if acc.add(memberRelPath, content) {
 			break // member-count or aggregate-size cap hit (#408)
 		}
 	}
-	return archiveExtraction{Members: acc.members, Skips: acc.skips, Truncated: acc.truncated}, nil
+	return acc.result(), nil
 }

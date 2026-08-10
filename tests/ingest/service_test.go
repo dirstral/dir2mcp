@@ -26,7 +26,10 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
 	mustWriteFile(t, filepath.Join(root, "code", "main.go"), []byte("package main\n"))
-	mustWriteFile(t, filepath.Join(root, "archive.zip"), []byte("PK\x03\x04"))
+	// A REAL (if empty) zip. This fixture stands for "an archive container is
+	// skipped", so it must be readable: since #658 an archive whose bytes cannot
+	// be opened is a durable status="error", not a skip.
+	mustWriteFile(t, filepath.Join(root, "archive.zip"), buildZip(t, nil))
 	mustWriteFile(t, filepath.Join(root, "secret.txt"), []byte("Authorization: Bearer abcdefgh.ijklmnop.qrstuvwx\n"))
 	mustWriteFile(t, filepath.Join(root, "exclude", "private.txt"), []byte("should be excluded"))
 
@@ -70,7 +73,8 @@ func TestServiceRun_CountersResetPerScan(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
 	mustWriteFile(t, filepath.Join(root, "code", "main.go"), []byte("package main\n"))
-	mustWriteFile(t, filepath.Join(root, "archive.zip"), []byte("PK\x03\x04"))
+	// A REAL (if empty) zip; see the fixture note in the test above.
+	mustWriteFile(t, filepath.Join(root, "archive.zip"), buildZip(t, nil))
 	mustWriteFile(t, filepath.Join(root, "secret.txt"), []byte("Authorization: Bearer abcdefgh.ijklmnop.qrstuvwx\n"))
 
 	st := newMemoryStore()
