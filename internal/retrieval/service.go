@@ -1711,7 +1711,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	}
 
 	answer := buildFallbackAnswer(question, hits)
-	if s.gen != nil && len(hits) > 0 {
+	switch {
+	case skipRetrieval:
+		// The adaptive gate found no information need, so no lookup ran and the
+		// zero-hit fallback would misreport a corpus result the server never
+		// obtained (#685). Answer without retrieval and keep citations empty.
+		answer = s.answerWithoutRetrieval(ctx, question)
+	case s.gen != nil && len(hits) > 0:
 		answer, citations = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
 	}
 	answer = ensureAnswerAttributions(answer, citations)

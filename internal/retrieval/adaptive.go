@@ -1,8 +1,11 @@
 package retrieval
 
 import (
+	"context"
 	"regexp"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 // adaptiveDecision is the verdict of the training-free retrieval gate for a
@@ -175,6 +178,91 @@ func normalizeAdaptiveBounds(kMin, kMax int) (int, int) {
 		kMax = kMin
 	}
 	return kMin, kMax
+}
+
+// The no-retrieval answer path (issue #685).
+//
+// A "skip" verdict means the gate found no information need in the message, so
+// it spends neither an embedding nor an index search on it. Skip is NOT the
+// insufficient-evidence abstention of SPEC §9.4.3: that one runs AFTER
+// retrieval, judges an eligible hit set that exists, and reports that the
+// corpus material is too weak. Here retrieval never ran, so the server knows
+// nothing about the corpus and must not report anything about it. Returning the
+// zero-hit fallback ("No relevant context found in the indexed corpus.") states
+// a corpus result the server never obtained, which is why the skip verdict gets
+// its own answer path.
+//
+// The path stays inside the grounding rules of SPEC §9.4.1: the model receives
+// no document, so the answer carries an EMPTY citations array, and Ask strips
+// every file tag and any Sources footer the model invents.
+const (
+	// noRetrievalFallbackAnswer is the deterministic reply used when no
+	// generator is configured, when generation fails, or when the model
+	// returns nothing. It reports the server state truthfully: no lookup ran.
+	noRetrievalFallbackAnswer = "No corpus lookup was needed for this message. " +
+		"Ask a question about the indexed documents to search them."
+
+	// noRetrievalSystemPrompt instructs a short, source-free reply. The model
+	// gets no document here, so every corpus claim it could make would be
+	// ungrounded by construction.
+	noRetrievalSystemPrompt = "You are the assistant of a document search server.\n" +
+		"The message below carries no information need, so no document was retrieved.\n" +
+		"Reply in one or two short sentences.\n" +
+		"State no fact about the indexed documents.\n" +
+		"Write no file name, no source and no citation.\n" +
+		"You can offer to search the indexed documents."
+
+	// noRetrievalMaxQuestionRunes bounds the message copied into the prompt.
+	// The gate only skips very short messages, but the raw string can still
+	// hold long punctuation runs, so the bound is explicit.
+	noRetrievalMaxQuestionRunes = 512
+
+	// noRetrievalMaxTokens bounds the completion. A conversational reply needs
+	// very few tokens, and the bound keeps a skip verdict cheap.
+	noRetrievalMaxTokens = 128
+)
+
+// noRetrievalPrompt builds the bounded, non-RAG prompt for a skip verdict. It
+// contains no document fence because no document is sent.
+func noRetrievalPrompt(question string) string {
+	return noRetrievalSystemPrompt +
+		"\n\nMessage: " + truncateSnippet(question, noRetrievalMaxQuestionRunes) +
+		"\nReply:"
+}
+
+// answerWithoutRetrieval produces the answer text for an adaptive skip verdict.
+// It calls the configured generator with noRetrievalPrompt and falls back to
+// noRetrievalFallbackAnswer when no generator exists, when the call fails, or
+// when the reply is blank. It never returns citations or hits: the caller keeps
+// both empty.
+func (s *Service) answerWithoutRetrieval(ctx context.Context, question string) string {
+	if s.gen == nil {
+		return noRetrievalFallbackAnswer
+	}
+	var generated string
+	genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
+		var gErr error
+		generated, gErr = boundedGenerate(ctx, s.gen, noRetrievalPrompt(question), noRetrievalMaxTokens)
+		return gErr
+	})
+	if genErr != nil {
+		// Log the failure without the full message, which can hold sensitive
+		// text, exactly as the grounded path does.
+		s.logf("no-retrieval generator error for question %q: %v", truncateQuestion(question), genErr)
+		return noRetrievalFallbackAnswer
+	}
+	trimmed := strings.TrimSpace(generated)
+	if trimmed == "" {
+		return noRetrievalFallbackAnswer
+	}
+	// The model saw no document, so the allowed citation set is empty and every
+	// file tag it wrote is ungrounded (§9.4.1). Ask removes any Sources footer
+	// separately through ensureAnswerAttributions.
+	trimmed = strings.TrimSpace(stripHallucinatedCitations(trimmed, nil))
+	if trimmed == "" {
+		return noRetrievalFallbackAnswer
+	}
+	return trimmed
 }
 
 // clampInt clamps v into [lo, hi] (assumes lo <= hi).
