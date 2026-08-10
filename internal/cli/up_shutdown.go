@@ -137,7 +137,10 @@ func (f *indexCloseFence) closeIndexesAfterPersistence(stderr io.Writer, indexes
 //
 // When the wait expires the autosave still owns the indexes, so the function
 // raises the fence and the caller keeps them open.
-func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager, fence *indexCloseFence) {
+//
+// stderr must be the synchronized sink, not the raw writer: a drain that gave
+// up leaves background goroutines writing to that same sink (issue #419).
+func stopPersistenceWithLog(persistence *index.PersistenceManager, fence *indexCloseFence, stderr io.Writer) {
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), persistenceStopBudget)
 	defer stopCancel()
 
@@ -151,7 +154,7 @@ func (a *App) stopPersistenceWithLog(persistence *index.PersistenceManager, fenc
 	if errors.Is(stopErr, context.Canceled) {
 		return
 	}
-	writef(a.stderr, "final index save warning: %v\n", stopErr)
+	writef(stderr, "final index save warning: %v\n", stopErr)
 }
 
 // startTransportWorker launches the MCP transport on the shutdown drain group

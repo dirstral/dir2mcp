@@ -74,11 +74,22 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() { _ = st.Close() }()
 	textIx, textIndexPath := textBuilt.index, textBuilt.path
 	codeIx, codeIndexPath := codeBuilt.index, codeBuilt.path
+	// One mutex-guarded sink shared by every goroutine that logs to stderr during
+	// the concurrent phase (embed workers, corpus writer, watch worker, the
+	// persistence autosave callback, and the event loop). Without it, direct
+	// writef(stderr, ...) writes race the embed worker's *log.Logger writes on the
+	// same underlying sink (a bytes.Buffer under `go test -race`) — issue #419.
+	//
+	// It is created here, before the first shutdown defer, because the shutdown
+	// writers need it too: when the drain gives up, a background goroutine can
+	// still be writing to this sink while the teardown reports the forced end.
+	logSink := NewSyncWriter(a.stderr)
+
 	// Step 4 of the shutdown order in up_shutdown.go. The fence keeps the
 	// indexes open when a periodic save still owns them (issue #689); the
 	// persistence stop below raises it.
 	indexFence := &indexCloseFence{}
-	defer func() { indexFence.closeIndexesAfterPersistence(a.stderr, codeIx, textIx) }()
+	defer func() { indexFence.closeIndexesAfterPersistence(logSink, codeIx, textIx) }()
 
 	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
 	ret := retrieval.NewService(st, textIx, embedder, generator)
@@ -182,13 +193,6 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return code
 	}
 
-	// One mutex-guarded sink shared by every goroutine that logs to stderr during
-	// the concurrent phase (embed workers, corpus writer, watch worker, the
-	// persistence autosave callback, and the event loop). Without it, direct
-	// writef(stderr, ...) writes race the embed worker's *log.Logger writes on the
-	// same underlying sink (a bytes.Buffer under `go test -race`) — issue #419.
-	logSink := NewSyncWriter(a.stderr)
-
 	persistence := index.NewPersistenceManager(
 		[]index.IndexedFile{
 			{Path: textIndexPath, Index: textIx},
@@ -199,7 +203,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	)
 	persistence.Start(runCtx)
 	// Step 3 of the shutdown order in up_shutdown.go.
-	defer func() { a.stopPersistenceWithLog(persistence, indexFence) }()
+	defer func() { stopPersistenceWithLog(persistence, indexFence, logSink) }()
 
 	// Steps 1 and 2 of the shutdown order in up_shutdown.go. The drain group
 	// holds every long-lived background goroutine: the MCP transport, the
@@ -210,7 +214,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// them from touching the store or the indexes that the deferred Close calls
 	// below tear down (issue #688).
 	var bgWG sync.WaitGroup
-	defer func() { drainBackgroundWorkers(cancel, &bgWG, a.stderr) }()
+	defer func() { drainBackgroundWorkers(cancel, &bgWG, logSink) }()
 	// Startup reconciliation (#402 A2): re-pend chunks sqlite counts embedded but
 	// whose vectors were lost to an ungraceful crash before the in-memory index's
 	// periodic snapshot. Must run before the embed worker so the re-pended chunks
