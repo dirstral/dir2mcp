@@ -157,8 +157,23 @@ type Service struct {
 	// so the previous per-index split (chunkByIndex) held a redundant second copy
 	// of every SearchHit; it was collapsed into this one map (issue #429 F4/D1).
 	chunkByLabel map[uint64]model.SearchHit
-	rootDir      string
-	stateDir     string
+	// tombstonedRelPaths holds the normalized path of every document evicted in
+	// this session (EvictDocuments). It is the read-time tombstone SPEC §6.6
+	// requires: a tombstoned chunk MUST NOT appear in results even when the
+	// backend's own deletion did not propagate. Two cases need it. A backend
+	// Delete can fail, and a payload-only backend holds no in-memory metadata,
+	// so eviction can resolve no chunk_id for the path. Registration of metadata
+	// for a path clears its tombstone, because a re-created file is a new live
+	// document (issue #687).
+	tombstonedRelPaths map[string]struct{}
+	// metadataRegistered latches true on the first SetChunkMetadata* call. It is
+	// the explicit "the in-memory metadata is authoritative" state that payload
+	// fallback consults. The previous predicate was len(chunkByLabel) > 0, which
+	// flipped back to false when eviction removed the last entry, and the deleted
+	// document then came back from the backend payload (issue #687).
+	metadataRegistered bool
+	rootDir            string
+	stateDir           string
 	// ocrCacheIdentity / transcriptCacheIdentity are the ACTIVE OCR-extraction and
 	// STT(+diarize) derivation identities (SPEC §8.6.7) of the ingest pipeline,
 	// plumbed in via SetDerivationCacheIdentities so open_file's OCR/transcript
@@ -351,6 +366,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		ragSystemPrompt:     defaultRAGSystemPrompt,
 		ragMaxContextChars:  defaultRAGMaxContext,
 		chunkByLabel:        make(map[uint64]model.SearchHit),
+		tombstonedRelPaths:  make(map[string]struct{}),
 		rootDir:             ".",
 		stateDir:            filepath.Join(".", ".dir2mcp"),
 		protocolVersion:     "2025-11-25",
@@ -911,8 +927,21 @@ func (s *Service) SetSecretPatterns(patterns []string) error {
 }
 
 func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
+	s.registerChunkMetadata(label, metadata)
+}
+
+// registerChunkMetadata stores one chunk's metadata. It also latches
+// metadataRegistered and clears any tombstone on the chunk's path: the chunk is
+// live, so a document re-created under an evicted path becomes visible again
+// (issue #687).
+func (s *Service) registerChunkMetadata(label uint64, metadata model.SearchHit) {
+	relPath := normalizeEvictPath(metadata.RelPath)
 	s.metaMu.Lock()
 	s.chunkByLabel[label] = metadata
+	s.metadataRegistered = true
+	if relPath != "" {
+		delete(s.tombstonedRelPaths, relPath)
+	}
 	s.metaMu.Unlock()
 }
 
@@ -921,50 +950,111 @@ func (s *Service) EvictDocument(relPath string) {
 	s.EvictDocuments([]string{relPath})
 }
 
-// EvictDocuments removes all in-memory chunk metadata for the given
-// documents. It is called when documents are tombstoned in the store so that
-// their chunks no longer appear in search results for the remainder of the
-// server session. The HNSW vector index has no delete support, so evicted
-// labels will still be returned by the ANN search, but matchFilters will
-// discard them because searchHitForLabel falls back to a stub with an empty
-// RelPath.
+// EvictDocuments removes the given documents from the live retrieval state. It
+// runs when the store tombstones the documents, so their chunks must not appear
+// in search results again. It does three things for each document: it records a
+// read-time tombstone for the path, it drops the in-memory metadata of the
+// document's chunks, and it deletes those chunks' vectors from the text and code
+// indexes.
+//
+// SPEC §6.6 makes the store tombstone the source of truth: a tombstoned chunk_id
+// MUST NOT appear in results even when the backend's own deletion did not
+// propagate. Delete is part of the model.Index contract and all four backends
+// (HNSW, disk, Qdrant, pgvector) implement it, so the vectors go away in the
+// normal case. The path tombstone covers the two remaining cases: a backend
+// Delete that fails, and a payload-only backend that holds no in-memory metadata,
+// where no chunk_id can be resolved for the path (issue #687).
 func (s *Service) EvictDocuments(relPaths []string) {
-	if len(relPaths) == 0 {
-		return
-	}
-	normalized := make(map[string]struct{}, len(relPaths))
-	for _, relPath := range relPaths {
-		norm := strings.TrimSpace(filepath.ToSlash(relPath))
-		if norm == "" {
-			continue
-		}
-		normalized[norm] = struct{}{}
-	}
+	normalized := normalizeEvictPaths(relPaths)
 	if len(normalized) == 0 {
 		return
 	}
-
-	// First, scan under a read lock to find labels to delete without blocking
-	// concurrent readers for the duration of the O(totalChunks) scan.
-	s.metaMu.RLock()
-	var labelsToDelete []uint64
-	for label, hit := range s.chunkByLabel {
-		if _, ok := normalized[strings.TrimSpace(filepath.ToSlash(hit.RelPath))]; ok {
-			labelsToDelete = append(labelsToDelete, label)
-		}
-	}
-	s.metaMu.RUnlock()
-
-	if len(labelsToDelete) == 0 {
+	s.tombstoneRelPaths(normalized)
+	labels := s.labelsForRelPaths(normalized)
+	if len(labels) == 0 {
 		return
 	}
+	s.dropLabels(labels)
+}
 
-	// Now take the write lock only for the actual deletions.
+// normalizeEvictPath returns the key form of one document path. Eviction,
+// tombstone lookup and metadata matching all use it, so they always agree.
+func normalizeEvictPath(relPath string) string {
+	return strings.TrimSpace(filepath.ToSlash(relPath))
+}
+
+// normalizeEvictPaths returns the set of non-empty normalized paths in relPaths.
+func normalizeEvictPaths(relPaths []string) map[string]struct{} {
+	if len(relPaths) == 0 {
+		return nil
+	}
+	normalized := make(map[string]struct{}, len(relPaths))
+	for _, relPath := range relPaths {
+		if norm := normalizeEvictPath(relPath); norm != "" {
+			normalized[norm] = struct{}{}
+		}
+	}
+	return normalized
+}
+
+// tombstoneRelPaths records the paths as evicted for the rest of the session.
+func (s *Service) tombstoneRelPaths(normalized map[string]struct{}) {
 	s.metaMu.Lock()
-	for _, label := range labelsToDelete {
+	for relPath := range normalized {
+		s.tombstonedRelPaths[relPath] = struct{}{}
+	}
+	s.metaMu.Unlock()
+}
+
+// labelsForRelPaths returns the labels of every registered chunk that belongs to
+// one of the given paths. The O(totalChunks) scan runs under a read lock, so it
+// does not block concurrent searches.
+func (s *Service) labelsForRelPaths(normalized map[string]struct{}) []uint64 {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	var labels []uint64
+	for label, hit := range s.chunkByLabel {
+		if _, ok := normalized[normalizeEvictPath(hit.RelPath)]; ok {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
+// dropLabels removes the labels from the in-memory metadata and deletes their
+// vectors from the text and code indexes. It is the shared body of
+// EvictDocuments and EvictChunks.
+func (s *Service) dropLabels(labels []uint64) {
+	s.metaMu.Lock()
+	textIndex := s.textIndex
+	codeIndex := s.codeIndex
+	for _, label := range labels {
 		delete(s.chunkByLabel, label)
 	}
 	s.metaMu.Unlock()
+	s.deleteVectors(textIndex, codeIndex, labels)
+}
+
+// deleteVectors drops the labels from both index axes. Delete ignores unknown
+// ids, so a call to both axes is safe whichever one held a given label. A fresh
+// context is used, so the deletion still completes when the triggering query's
+// context was canceled. A failure is logged rather than swallowed; the in-memory
+// metadata and the path tombstone still hide the chunks, so the failure costs
+// index space, not correctness.
+func (s *Service) deleteVectors(textIndex, codeIndex model.Index, labels []uint64) {
+	axes := []struct {
+		name string
+		idx  model.Index
+	}{{"text", textIndex}, {"code", codeIndex}}
+	for _, axis := range axes {
+		if axis.idx == nil {
+			continue
+		}
+		if err := axis.idx.Delete(context.Background(), labels); err != nil {
+			s.logf("evict: %s index delete of %d chunk(s) failed; the chunks stay hidden but their vectors remain: %v",
+				axis.name, len(labels), err)
+		}
+	}
 }
 
 // chunkByIDer is an optional store capability: it resolves a chunk by id,
@@ -993,24 +1083,9 @@ func (s *Service) EvictChunks(labels []uint64) {
 	if len(labels) == 0 {
 		return
 	}
-	s.metaMu.Lock()
-	textIndex := s.textIndex
-	codeIndex := s.codeIndex
-	for _, label := range labels {
-		delete(s.chunkByLabel, label)
-	}
-	s.metaMu.Unlock()
-
-	// Also drop the vectors so the ANN scan stops returning the tombstoned labels
-	// as candidates. Delete ignores unknown ids, so issuing to both indexes is
-	// safe regardless of which one held a given label. A fresh context is used so
-	// the eviction still completes if the triggering query's context was canceled.
-	if textIndex != nil {
-		_ = textIndex.Delete(context.Background(), labels)
-	}
-	if codeIndex != nil {
-		_ = codeIndex.Delete(context.Background(), labels)
-	}
+	// The vectors are dropped as well, so the ANN scan stops returning the
+	// tombstoned labels as candidates.
+	s.dropLabels(labels)
 }
 
 // pruneTombstonedHits drops (and evicts) hits whose chunk was soft-deleted in the
@@ -1053,9 +1128,7 @@ func (s *Service) pruneTombstonedHits(ctx context.Context, hits []model.SearchHi
 // chunk_id belongs to exactly one axis in production, so metadata is kept once in
 // chunkByLabel (issue #429 D1).
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
-	s.metaMu.Lock()
-	s.chunkByLabel[label] = metadata
-	s.metaMu.Unlock()
+	s.registerChunkMetadata(label, metadata)
 }
 
 func (s *Service) SetRAGSystemPrompt(prompt string) {
@@ -3053,10 +3126,12 @@ func (s *Service) searchHitFromIndexHit(indexName string, h model.IndexHit) mode
 	// The in-memory chunk metadata is authoritative for the default HNSW path:
 	// a missing entry there is the eviction/orphan signal (EvictDocuments
 	// deletes the entry), so we must NOT resurrect such a chunk from the backend
-	// payload. Only fall back to the payload when the service holds no in-memory
-	// metadata at all — i.e. a non-default backend is the sole source of truth.
-	if strings.TrimSpace(hit.RelPath) == "" && !s.hasInMemoryMetadata() {
-		if payloadHit := h.Payload.ToSearchHit(); strings.TrimSpace(payloadHit.RelPath) != "" {
+	// payload. Only fall back to the payload when the service never held any
+	// in-memory metadata (a non-default backend is then the sole source of
+	// truth) and the payload's document is not tombstoned.
+	if strings.TrimSpace(hit.RelPath) == "" {
+		if payloadHit := h.Payload.ToSearchHit(); strings.TrimSpace(payloadHit.RelPath) != "" &&
+			s.payloadFallbackAllowed(payloadHit.RelPath) {
 			hit = payloadHit
 			hit.ChunkID = h.ChunkID
 		}
@@ -3072,15 +3147,27 @@ func (s *Service) searchHitFromIndexHit(indexName string, h model.IndexHit) mode
 	return hit
 }
 
-// hasInMemoryMetadata reports whether any chunk metadata has been registered in
-// the service (via SetChunkMetadata*). When true the in-memory maps are the
-// authoritative source for materialising hits; when false (e.g. an external
-// backend that never populated them) hits are materialised from the backend
-// payload instead.
-func (s *Service) hasInMemoryMetadata() bool {
+// payloadFallbackAllowed reports whether a hit with no in-memory metadata may be
+// materialised from the backend payload of relPath. Two conditions must hold.
+//
+// First, the service must never have registered chunk metadata. Metadata makes
+// the in-memory map authoritative, so a missing entry is the eviction or orphan
+// signal, not a gap to fill from the payload. The test is the metadataRegistered
+// latch, not the size of the map. Eviction of the last document empties the map,
+// so a size test made the deleted document visible again (issue #687).
+//
+// Second, the document must not be tombstoned. A payload-only backend registers
+// no metadata, so eviction can drop no label for it; the path tombstone is the
+// only state that hides the document until the backend deletion propagates
+// (SPEC §6.6).
+func (s *Service) payloadFallbackAllowed(relPath string) bool {
 	s.metaMu.RLock()
 	defer s.metaMu.RUnlock()
-	return len(s.chunkByLabel) > 0
+	if s.metadataRegistered {
+		return false
+	}
+	_, tombstoned := s.tombstonedRelPaths[normalizeEvictPath(relPath)]
+	return !tombstoned
 }
 
 // collectFilteredHits walks one batch of index hits and appends matching hits to

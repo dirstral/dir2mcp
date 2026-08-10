@@ -113,22 +113,23 @@ func TestSearch_PushDownExcludesNonMatchingPaths(t *testing.T) {
 
 // TestSearch_PushDownWidensPastEvictedChunks is a regression test for the
 // push-down under-fetch bug: the real HNSW index reports CanFilter true, so the
-// filter is pushed down, but in-memory eviction (EvictDocuments) removes only
-// the service's chunk metadata — the vector + payload stay in the HNSW. The
-// post-materialization matchFilters re-check drops those evicted chunks (their
-// in-memory rel_path is gone), so the search must widen the candidate pool to
-// still return k valid hits rather than letting evicted-but-indexed chunks
+// filter is pushed down. The index here refuses every delete, so eviction leaves
+// the vector + payload in the HNSW and only the service's chunk metadata goes
+// away. The post-materialization matchFilters re-check drops those evicted chunks
+// (their in-memory rel_path is gone), so the search must widen the candidate pool
+// to still return k valid hits rather than letting evicted-but-indexed chunks
 // silently shrink the result set below k.
 func TestSearch_PushDownWidensPastEvictedChunks(t *testing.T) {
 	ctx := context.Background()
-	idx := index.NewHNSWIndex("")
+	inner := index.NewHNSWIndex("")
+	idx := &deleteRefusingIndex{HNSWIndex: inner}
 	// 5 chunks under docs/, all matching the path-prefix filter. The first two
 	// (highest-scoring) will be evicted in-memory after indexing.
-	addVecP(t, idx, 1, []float32{1, 0}, "docs/a.md", "md")
-	addVecP(t, idx, 2, []float32{0.99, 0.01}, "docs/b.md", "md")
-	addVecP(t, idx, 3, []float32{0.98, 0.02}, "docs/c.md", "md")
-	addVecP(t, idx, 4, []float32{0.97, 0.03}, "docs/d.md", "md")
-	addVecP(t, idx, 5, []float32{0.96, 0.04}, "docs/e.md", "md")
+	addVecP(t, inner, 1, []float32{1, 0}, "docs/a.md", "md")
+	addVecP(t, inner, 2, []float32{0.99, 0.01}, "docs/b.md", "md")
+	addVecP(t, inner, 3, []float32{0.98, 0.02}, "docs/c.md", "md")
+	addVecP(t, inner, 4, []float32{0.97, 0.03}, "docs/d.md", "md")
+	addVecP(t, inner, 5, []float32{0.96, 0.04}, "docs/e.md", "md")
 
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
