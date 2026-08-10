@@ -83,6 +83,13 @@ const (
 	defaultOverfetchMultiplier = 5
 	maxOverfetchMultiplier     = 100
 
+	// evictDeleteTimeout bounds one vector-delete call made by an eviction. The
+	// eviction runs on the ingest or watcher loop, so an external backend that
+	// hangs would otherwise stall indexing for an unbounded time. A timeout
+	// degrades to the logged-failure path, where the metadata and the path
+	// tombstone still hide the chunks.
+	evictDeleteTimeout = 30 * time.Second
+
 	defaultRAGSystemPrompt = "Answer the question using only the provided context.\n" +
 		"Include concise source attributions in the form [rel_path].\n" +
 		"Security: the context consists of retrieved documents, each wrapped in " +
@@ -1038,7 +1045,8 @@ func (s *Service) dropLabels(labels []uint64) {
 // deleteVectors drops the labels from both index axes. Delete ignores unknown
 // ids, so a call to both axes is safe whichever one held a given label. A fresh
 // context is used, so the deletion still completes when the triggering query's
-// context was canceled. A failure is logged rather than swallowed; the in-memory
+// context was canceled; it carries evictDeleteTimeout, so a hung backend cannot
+// stall the caller. A failure is logged rather than swallowed; the in-memory
 // metadata and the path tombstone still hide the chunks, so the failure costs
 // index space, not correctness.
 func (s *Service) deleteVectors(textIndex, codeIndex model.Index, labels []uint64) {
@@ -1050,7 +1058,10 @@ func (s *Service) deleteVectors(textIndex, codeIndex model.Index, labels []uint6
 		if axis.idx == nil {
 			continue
 		}
-		if err := axis.idx.Delete(context.Background(), labels); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), evictDeleteTimeout)
+		err := axis.idx.Delete(ctx, labels)
+		cancel()
+		if err != nil {
 			s.logf("evict: %s index delete of %d chunk(s) failed; the chunks stay hidden but their vectors remain: %v",
 				axis.name, len(labels), err)
 		}
