@@ -111,9 +111,9 @@ func TestListFilesDeepPageDoesNotRestartFromZero_694(t *testing.T) {
 }
 
 // TestListFilesHiddenFilteringSurvivesTheSQLPushdown_694 pins the translation
-// itself. The Go predicate looks at the FIRST path segment only, so
-// `visible/.config/b.md` is NOT hidden — which is exactly what a naive SQL
-// translation ("rel_path LIKE '%/.%'", or a per-segment test) gets wrong.
+// itself: the SQL form must hide exactly the rows the Go form hides. Since #693
+// the rule is "any segment that starts with a dot", so `visible/.config/b.md`
+// is hidden too.
 func TestListFilesHiddenFilteringSurvivesTheSQLPushdown_694(t *testing.T) {
 	tmp := t.TempDir()
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
@@ -134,10 +134,10 @@ func TestListFilesHiddenFilteringSurvivesTheSQLPushdown_694(t *testing.T) {
 	excluded := listFilesPage694(t, tmp, root, st, `"limit":50,"offset":0,"include_hidden":false`)
 	included := listFilesPage694(t, tmp, root, st, `"limit":50,"offset":0,"include_hidden":true`)
 
-	// Exactly the set the Go predicate isListFilesNoisePath produces: a
-	// dot-prefixed FIRST segment, and nothing else.
-	wantVisible := []string{"a.md", "dir/sub/c.md", "visible/.config/b.md"}
-	wantAll := append([]string{".hidden/a.md", ".x"}, wantVisible...)
+	// Exactly the set the Go predicate isListFilesNoisePath produces: no
+	// segment that starts with a dot.
+	wantVisible := []string{"a.md", "dir/sub/c.md"}
+	wantAll := append([]string{".hidden/a.md", ".x", "visible/.config/b.md"}, wantVisible...)
 
 	assertRelPathSet694(t, "include_hidden=false", excluded, wantVisible)
 	assertRelPathSet694(t, "include_hidden=true", included, wantAll)

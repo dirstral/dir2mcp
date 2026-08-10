@@ -123,6 +123,10 @@ func seedCorpus(t *testing.T, st *store.SQLiteStore, root string, docs []model.D
 // rel_path -> status. Going through the tool rather than the helper is the
 // point: the defect was in the projection the tool applies, and a unit test on
 // the store would have shown the correct `secret_excluded` all along.
+//
+// It asks for hidden paths as well. The subject here is the status projection,
+// and a secret-bearing file is very often a dotfile (`config/.env`), which the
+// default listing hides since #693.
 func listFileStatuses(t *testing.T, stateDir, root string, st *store.SQLiteStore) map[string]string {
 	t.Helper()
 	cfg := config.Default()
@@ -136,7 +140,7 @@ func listFileStatuses(t *testing.T, stateDir, root string, st *store.SQLiteStore
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID,
-		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":50,"offset":0}}}`)
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"dir2mcp_list_files","arguments":{"limit":50,"offset":0,"include_hidden":true}}}`)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
