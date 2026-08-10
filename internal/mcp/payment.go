@@ -702,6 +702,13 @@ func paymentOutcomeToRecord(key string, outcome paymentExecutionOutcome) (storep
 		Settled:         outcome.Settled,
 		PaymentResponse: strings.TrimSpace(outcome.PaymentResponse),
 		UpdatedAt:       updatedAt,
+		// Persist the nonce-aligned expiry too. Without it a restart restored the
+		// outcome with a zero ExpiresAt, so pruning fell back to the fixed
+		// paymentOutcomeTTL and dropped an outcome whose nonce was still consumed
+		// in the ledger. A valid idempotent retry then got "nonce already used"
+		// instead of the result it had already paid for (#697). A zero value stays
+		// zero and keeps the fallback.
+		ExpiresAt: outcome.ExpiresAt.UTC(),
 	}, true
 }
 
@@ -715,6 +722,12 @@ func paymentOutcomeFromRecord(rec storepkg.MCPPaymentOutcomeRecord) (paymentExec
 	outcome.Settled = rec.Settled
 	outcome.PaymentResponse = strings.TrimSpace(rec.PaymentResponse)
 	outcome.UpdatedAt = rec.UpdatedAt.UTC()
+	// A row written before the expires_unix column existed reads back as a zero
+	// time. Pruning then uses the UpdatedAt plus TTL fallback, which is the
+	// behavior those rows already had, so an old database still loads (#697).
+	if !rec.ExpiresAt.IsZero() {
+		outcome.ExpiresAt = rec.ExpiresAt.UTC()
+	}
 	if strings.TrimSpace(rec.ResultJSON) != "" {
 		var result toolCallResult
 		if err := json.Unmarshal([]byte(rec.ResultJSON), &result); err != nil {
