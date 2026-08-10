@@ -466,7 +466,12 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 // gracefully (issue #418). Closes the store on failure; the caller owns it on
 // success.
 func (a *App) snapshotContentHashes(ctx context.Context, global globalOptions, st model.Store, staging *reindexStaging) int {
-	if err := restoreInterruptedReindexHashes(ctx, st); err != nil {
+	// context.WithoutCancel for the same reason the rollback path uses it: this
+	// is CLEANUP of an earlier run, so it must not be cancellable by whatever
+	// interrupts the current one. A cancelled restore leaves the corpus with no
+	// content hashes, which is the state this recovery exists to repair. CI has
+	// been seen losing a restore to SQLITE_INTERRUPT (#807).
+	if err := restoreInterruptedReindexHashes(context.WithoutCancel(ctx), st); err != nil {
 		_ = st.Close()
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("recover interrupted reindex: restore content hashes: %v", err))
 		return exitGeneric
