@@ -357,6 +357,22 @@ type Service struct {
 	// even when a document produces several (transcript + per-language translations).
 	quarantinedThisDoc bool
 
+	// reconcileOutputs arms the per-document output-set reconciliation (#692) for
+	// the scan currently running. It is set once per scan by
+	// beginOutputReconciliation, when the recorded pipeline output identity no
+	// longer matches the active one (or the operator forced a reindex), and read
+	// by reconcileDocumentOutputs on every asset the scan visits. Keeping it as
+	// per-run state is what makes a steady-state scan free: with no pipeline
+	// change there is one settings read for the whole run and no per-document
+	// query at all.
+	reconcileOutputs bool
+
+	// pendingOutputIdentity holds the pipeline output identity (#692) this scan is
+	// entitled to record when it completes. It is set only when the recorded value
+	// was read successfully, so a scan that could not compare identities records
+	// nothing and leaves the comparison to the next run.
+	pendingOutputIdentity string
+
 	// deferGateDocError suppresses the EAGER per-document status=error marking that
 	// the output quality gate normally applies (recordQualityGateDocError), scoping a
 	// gate rejection to the failing TRACK instead of the whole document (SPEC
@@ -1763,6 +1779,13 @@ func (s *Service) runScan(ctx context.Context) error {
 
 	forceReindex := s.indexingState != nil && s.indexingState.Snapshot().Mode == appstate.ModeFull
 
+	// Arm the output-set reconciliation for this scan (#692) when the pipeline's
+	// desired output SET changed since the last completed scan. This is what makes
+	// an UNCHANGED document eligible for cleanup: the content gate would skip it,
+	// so a removed translation target or a disabled summary level would otherwise
+	// stay searchable forever. It is a no-op on a steady-state scan.
+	s.beginOutputReconciliation(ctx, forceReindex)
+
 	// Optional batch-ergonomics run (SPEC §8.6.11): a JSONL run manifest and/or a
 	// side-channel progress reporter. nil (and inert) unless a media.batch feature
 	// is enabled, so the default ingest path is unchanged.
@@ -1804,13 +1827,26 @@ func (s *Service) runScan(ctx context.Context) error {
 		if err := s.scanPass(ctx, passDerivation, discovered, compiledSecrets, forceReindex, seen); err != nil {
 			return err
 		}
-		return s.markMissingAsDeleted(ctx, existing, seen)
+		return s.finishScan(ctx, existing, seen)
 	}
 
 	if err := s.scanPass(ctx, passSingle, discovered, compiledSecrets, forceReindex, seen); err != nil {
 		return err
 	}
-	return s.markMissingAsDeleted(ctx, existing, seen)
+	return s.finishScan(ctx, existing, seen)
+}
+
+// finishScan closes out a completed scan: it tombstones the documents that are
+// no longer present, then records the pipeline output identity this scan
+// reconciled the corpus against (#692). The identity is recorded LAST, and only
+// on success, so an interrupted scan reconciles again next run rather than
+// claiming a cleanup it did not finish.
+func (s *Service) finishScan(ctx context.Context, existing, seen map[string]struct{}) error {
+	if err := s.markMissingAsDeleted(ctx, existing, seen); err != nil {
+		return err
+	}
+	s.commitOutputReconciliation(ctx)
+	return nil
 }
 
 // scanPass processes every discovered asset once under the given pass (SPEC
@@ -2008,6 +2044,11 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 // representations are still valid. Counters mirror the unchanged-content path so
 // status totals stay consistent across runs.
 func (s *Service) skipUnchangedRemoteDocument(ctx context.Context, f DiscoveredFile, existing model.Document, seen map[string]struct{}) {
+	// The remote fast path returns before processDocument's own reconciliation
+	// call sites, so reconcile here too (#692). Without this, an object-store
+	// corpus would never retire an obsolete output on the path it takes for every
+	// unchanged object.
+	s.reconcileDocumentOutputs(ctx, f.RelPath)
 	switch existing.Status {
 	case "ok":
 		s.addIndexed(1)
@@ -2163,6 +2204,12 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		// No representation work performed this run (cache hit / unchanged content
 		// / non-ok status): record it as skipped for the batch manifest (§8.6.11).
 		// An ok cache hit is still a durably-indexed document, so credit it.
+		//
+		// This is the incremental path #692 is about. The document is unchanged, so
+		// nothing is re-derived, but the outputs a previous pipeline left on it are
+		// still retired. Retiring costs nothing to undo: both covered outputs are
+		// backed by an on-disk derivation cache.
+		s.reconcileDocumentOutputs(ctx, doc.RelPath)
 		s.creditIndexed(indexedPending)
 		s.markActiveSkipped()
 		return nil
@@ -2184,6 +2231,14 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// returns an error, so an absent summary leaves the document fully indexed and
 	// flat-retrievable, and the next scan retries.
 	s.GenerateDocumentSummaries(ctx, doc)
+	// Every output this pipeline produces for the document has now committed, so
+	// it is safe to retire the ones it no longer produces (#692). Running the
+	// reconciliation AFTER the generation pass is what guarantees a representation
+	// is never destroyed before the output that supersedes it exists, and it is
+	// also what makes the batch manifest's `outputs` report the FINAL active set:
+	// recordAssetOutputs reads the representation types after processDocument
+	// returns.
+	s.reconcileDocumentOutputs(ctx, doc.RelPath)
 	// Stamp the withheld #402 done marker now that the
 	// chunks are durably written. finalizeContentHash re-reads the row, so a
 	// document a soft-error path persisted as status="error" is left unmarked and
