@@ -3266,10 +3266,15 @@ func isSizeCapSkip(doc model.Document) bool {
 // dropped by the discovery stat never reaches that branch, and this one must not
 // either.
 //
-// The order is load-bearing. Representations are retired FIRST, so an ungraceful
-// death between the two writes leaves a document with nothing searchable rather
-// than one whose row reads "skipped for size_cap" while its chunks are still being
-// served. It is the same rule the #681 withhold follows.
+// The order is load-bearing, and so is the refusal to continue past a failed
+// retirement. Representations are retired FIRST, so an ungraceful death between the
+// two writes leaves a document with nothing searchable rather than one whose row
+// reads "skipped for size_cap" while its chunks are still being served. A store
+// that REFUSES the retirement would produce that same contradiction deliberately,
+// so the row is not written at all: the document keeps the consistent state it
+// already had, the run reports one error, and the next scan retries. The verdict is
+// reproducible (the file is still over the cap, or it is not), so a retry costs a
+// re-read and nothing more.
 //
 // The counters are the ones creditInitialStatus would have applied to a skipped
 // document, with one difference that is the point of doing it here: the event is
@@ -3283,7 +3288,9 @@ func isSizeCapSkip(doc model.Document) bool {
 // pendingOversize path). A plain, codeless skip would leave the manifest unable to
 // tell this asset from a cache hit.
 func (s *Service) settleSizeCapSkip(ctx context.Context, doc model.Document) error {
-	s.retireRepresentationsForPath(ctx, doc.RelPath, "size cap")
+	if err := s.retireRepresentationsForPath(ctx, doc.RelPath, "size cap"); err != nil {
+		return err
+	}
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
@@ -3310,10 +3317,23 @@ func (s *Service) settleSizeCapSkip(ctx context.Context, doc model.Document) err
 // content. That is the same contradiction the read-time path avoids, so both
 // paths resolve it the same way. It is a no-op (one empty list query) for a file
 // that was never indexed, which is the common case.
+//
+// A REFUSED retirement skips the row for that path rather than writing the
+// contradiction on purpose. The path keeps the consistent state it already had,
+// and it stays in `seen`, so markMissingAsDeleted does not tombstone it either.
+// The cap is deterministic, so the next scan drops the same file again and writes
+// the row once the store accepts the retirement. Retrying until the record lands
+// is the same choice persistArchiveMemberSizeCapSkips makes for its own rows.
 func (s *Service) persistOversizeSkips(ctx context.Context, oversize map[string]int64, seen map[string]struct{}) {
 	for relPath, size := range oversize {
 		seen[relPath] = struct{}{}
-		s.retireRepresentationsForPath(ctx, relPath, "size cap")
+		if err := s.retireRepresentationsForPath(ctx, relPath, "size cap"); err != nil {
+			s.getLogger().Printf(
+				"discovery: leaving %s as it was; its representations could not be retired, and a size_cap row beside live chunks would misreport coverage: %v",
+				relPath, err,
+			)
+			continue
+		}
 		doc := model.Document{
 			RelPath:    relPath,
 			DocType:    ClassifyDocType(relPath),

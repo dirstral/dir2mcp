@@ -2,7 +2,9 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -236,8 +238,8 @@ func TestSizeCapRead_UnderReportingSourceIsBoundedAndSkipped(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if served := fs.bytesServed.Load(); served > readCapBytes682+1 {
-		t.Errorf("the scan pulled %d bytes from a source that reported %d; the bound is %d (cap+1)", served, fs.reportedLen, readCapBytes682+1)
+	if served := fs.bytesServed.Load(); served != readCapBytes682+1 {
+		t.Errorf("the scan pulled %d bytes from a source that reported %d; want exactly %d (cap+1): the bound must stop there, and must not stop short either", served, fs.reportedLen, readCapBytes682+1)
 	}
 	assertSizeCapSkip682(t, st, "liar.txt")
 }
@@ -264,8 +266,8 @@ func TestSizeCapRead_LocalGrowthAfterDiscoveryIsBoundedAndSkipped(t *testing.T) 
 		t.Fatalf("Run: %v", err)
 	}
 
-	if served := fs.bytesServed.Load(); served > readCapBytes682+1 {
-		t.Errorf("the scan pulled %d bytes from a file discovery measured at 12; the bound is %d (cap+1)", served, readCapBytes682+1)
+	if served := fs.bytesServed.Load(); served != readCapBytes682+1 {
+		t.Errorf("the scan pulled %d bytes from a file discovery measured at 12; want exactly %d (cap+1): the bound must stop there, and must not stop short either", served, readCapBytes682+1)
 	}
 	assertSizeCapSkip682(t, st, "notes.txt")
 }
@@ -391,8 +393,8 @@ func TestSizeCapRead_OverCapArchiveIsNotExpanded(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if served := fs.bytesServed.Load(); served > readCapBytes682+1 {
-		t.Errorf("the scan pulled %d bytes from the container; the bound is %d (cap+1)", served, readCapBytes682+1)
+	if served := fs.bytesServed.Load(); served != readCapBytes682+1 {
+		t.Errorf("the scan pulled %d bytes from the container; want exactly %d (cap+1): the bound must stop there, and must not stop short either", served, readCapBytes682+1)
 	}
 	doc, err := st.GetDocumentByPath(context.Background(), "bundle.zip")
 	if err != nil {
@@ -478,6 +480,108 @@ func TestSizeCapRead_ManifestCarriesFileTooLarge(t *testing.T) {
 	}
 	if got := recs[0]["error_code"]; got != "FILE_TOO_LARGE" {
 		t.Errorf("manifest error_code = %v, want FILE_TOO_LARGE", got)
+	}
+}
+
+// retireFailingStore682 is a real SQLite store whose representation retirement can
+// be made to fail on demand. It is the only way to reach the branch where the
+// store HAS the retirement capability and refuses to use it, which is different
+// from a store that does not implement it at all.
+type retireFailingStore682 struct {
+	*store.SQLiteStore
+	fail atomic.Bool
+}
+
+func (s *retireFailingStore682) SoftDeleteRepresentations(ctx context.Context, relPath string, repIDs []int64) (int, error) {
+	if s.fail.Load() {
+		return 0, errors.New("store refused the retirement")
+	}
+	return s.SQLiteStore.SoftDeleteRepresentations(ctx, relPath, repIDs)
+}
+
+// TestSizeCapRead_RefusedRetirementLeavesTheDocumentAsItWas pins that the two
+// writes are not allowed to come apart. If the store cannot retire the stale
+// representations, writing the `size_cap` row anyway would create exactly the
+// contradiction this change exists to remove: a row saying "not indexed" beside
+// chunks that still answer `search`.
+//
+// So the row is not written. The document keeps the consistent state it already
+// had, the run reports one error, and the next scan retries: the cap verdict is
+// reproducible, so a retry costs a re-read and nothing more.
+func TestSizeCapRead_RefusedRetirementLeavesTheDocumentAsItWas(t *testing.T) {
+	root := t.TempDir()
+	stateDir := t.TempDir()
+	writeFile(t, filepath.Join(root, "notes.txt"), "small so far")
+	st := &retireFailingStore682{SQLiteStore: newRealStore(t)}
+	cfg := capConfig682(root, stateDir)
+
+	first := mustNewIngestService(t, cfg, st)
+	if err := first.Run(context.Background()); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if got := liveRepTypes682(t, st.SQLiteStore, "notes.txt"); len(got) == 0 {
+		t.Fatalf("first scan indexed no representation; the fixture is wrong")
+	}
+
+	// The read now trips the cap, and the store refuses to retire.
+	st.fail.Store(true)
+	second := mustNewIngestService(t, cfg, st)
+	second.SetCorpusFS(&growOnOpenFS682{
+		inner:  corpusfs.NewLocalFS(root),
+		root:   root,
+		target: "notes.txt",
+		extra:  overCapBytes682,
+	})
+	state := appstate.NewIndexingState(appstate.ModeIncremental)
+	second.SetIndexingState(state)
+	if err := second.Run(context.Background()); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	doc, err := st.GetDocumentByPath(context.Background(), "notes.txt")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath: %v", err)
+	}
+	if doc.SkipReason == model.SkipReasonSizeCap {
+		t.Errorf("a size_cap row was written although the retirement failed; the row and the live chunks now disagree")
+	}
+	if doc.Status != "ok" {
+		t.Errorf("status = %q, want the previous ok row preserved", doc.Status)
+	}
+	if got := liveRepTypes682(t, st.SQLiteStore, "notes.txt"); len(got) == 0 {
+		t.Errorf("representations were retired after all; the failure path must change nothing")
+	}
+	if got := state.Snapshot().Errors; got != 1 {
+		t.Errorf("errors = %d, want 1: a refused retirement must be visible, not silent", got)
+	}
+}
+
+// TestSizeCapRead_AbsurdCapIsClampedNotOverflowed pins the resolver against an
+// operator typo. `ingest.max_file_mb` is only validated as non-negative, so a
+// pasted digit too many reaches the resolver, and MB-to-bytes would overflow int64
+// into a NEGATIVE cap. That is the worst direction: a negative limit lets through
+// one byte, every file then measures as past the cap, and the whole corpus is
+// skipped as size_cap. Clamping keeps a nonsense value harmless.
+func TestSizeCapRead_AbsurdCapIsClampedNotOverflowed(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "notes.txt"), "ordinary small file")
+	st := newRealStore(t)
+
+	cfg := capConfig682(root, t.TempDir())
+	// Past the largest MB value that converts to bytes without overflowing.
+	cfg.IngestMaxFileMB = math.MaxInt/(1024*1024) + 5
+
+	svc := mustNewIngestService(t, cfg, st)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	doc, err := st.GetDocumentByPath(context.Background(), "notes.txt")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath: %v", err)
+	}
+	if doc.Status != "ok" {
+		t.Errorf("status = %q (skip_reason %q), want ok: an absurd cap must not skip an ordinary file", doc.Status, doc.SkipReason)
 	}
 }
 

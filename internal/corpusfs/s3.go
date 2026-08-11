@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -80,11 +81,21 @@ type S3Config struct {
 // resolveMaxBytes turns a configured per-object cap into the positive value the
 // backend enforces. A zero or negative input selects the 10 MiB default rather
 // than disabling the bound, so a caller that forgets the field still gets one.
+//
+// The upper clamp keeps `maxBytes+1` representable. Every bound in this file is a
+// limit+1, and math.MaxInt64 would overflow that sum to a negative number, which
+// io.LimitReader reads as "zero bytes allowed": Localize would then write an empty
+// file and report SUCCESS, and a read would return an empty document. S3Config is
+// exported, so this invariant is enforced here rather than trusted to the caller.
 func resolveMaxBytes(configured int64) int64 {
-	if configured > 0 {
+	switch {
+	case configured <= 0:
+		return defaultMaxFileSizeBytes
+	case configured > math.MaxInt64-1:
+		return math.MaxInt64 - 1
+	default:
 		return configured
 	}
-	return defaultMaxFileSizeBytes
 }
 
 // NewS3FS constructs an S3FS over the provided client and config. The client is

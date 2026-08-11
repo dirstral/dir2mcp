@@ -5,10 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 )
+
+// maxSafeFileCapMB is the largest `ingest.max_file_mb` that still converts to
+// bytes without overflowing int64. Config validation only requires the value to be
+// non-negative, so a nonsense setting (a pasted digit too many) is reachable, and
+// an overflowed product would come out NEGATIVE. That is the worst possible
+// direction here: every limit+1 read would then ask for one byte, every file would
+// measure as past the cap, and a whole corpus would be skipped as size_cap. A cap
+// this large is unbounded in every practical sense anyway, so clamping to it loses
+// nothing.
+const maxSafeFileCapMB = math.MaxInt64 / (1024 * 1024)
 
 // ResolvedMaxFileBytes returns the effective `ingest.max_file_mb` cap in bytes.
 //
@@ -16,12 +27,17 @@ import (
 // object-store backend, and the on-demand MCP tool paths all read it here, so the
 // four cannot drift into enforcing different numbers for the same setting. A
 // zero or negative configured value selects the 10 MiB default rather than
-// disabling the cap.
+// disabling the cap, and an absurdly large one is clamped rather than allowed to
+// overflow into a negative limit.
 func ResolvedMaxFileBytes(cfg config.Config) int64 {
-	if cfg.IngestMaxFileMB > 0 {
-		return int64(cfg.IngestMaxFileMB) * 1024 * 1024
+	mb := int64(cfg.IngestMaxFileMB)
+	if mb <= 0 {
+		return corpusfs.DefaultMaxFileSizeBytes()
 	}
-	return corpusfs.DefaultMaxFileSizeBytes()
+	if mb > maxSafeFileCapMB {
+		mb = maxSafeFileCapMB
+	}
+	return mb * 1024 * 1024
 }
 
 // sourceReadCapBytes is ResolvedMaxFileBytes for this service's configuration.

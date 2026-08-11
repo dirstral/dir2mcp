@@ -167,8 +167,8 @@ func TestS3FSLocalize_BoundsTheDownloadWhenTheObjectLies(t *testing.T) {
 	if err == nil {
 		t.Errorf("Localize succeeded for an object that served %d bytes under a %d-byte cap; want a refusal (localized to %q)", bodyBytes682, capBytes682, localPath)
 	}
-	if served := stub.bytesServed.Load(); served > capBytes682+1 {
-		t.Errorf("Localize pulled %d bytes from the body; the bound is %d (cap+1)", served, capBytes682+1)
+	if served := stub.bytesServed.Load(); served != capBytes682+1 {
+		t.Errorf("Localize pulled %d bytes from the body; want exactly %d (cap+1): the bound must stop there, and must not stop short either", served, capBytes682+1)
 	}
 	if left := cacheDirBytes682(t, cacheDir); left != 0 {
 		t.Errorf("cache dir still holds %d bytes after the refused download; a partial file must be removed", left)
@@ -201,8 +201,8 @@ func TestS3FSOpen_BoundsAWholeObjectReadWhenHeadDisagreesWithDiscovery(t *testin
 	if int64(len(got)) > capBytes682+1 {
 		t.Errorf("read returned %d bytes under a %d-byte cap; the bound is cap+1", len(got), capBytes682)
 	}
-	if served := stub.bytesServed.Load(); served > capBytes682+1 {
-		t.Errorf("read pulled %d bytes from the body; the bound is %d (cap+1)", served, capBytes682+1)
+	if served := stub.bytesServed.Load(); served != capBytes682+1 {
+		t.Errorf("read pulled %d bytes from the body; want exactly %d (cap+1): the bound must stop there, and must not stop short either", served, capBytes682+1)
 	}
 }
 
@@ -231,8 +231,8 @@ func TestS3FSOpen_BoundsAWholeObjectReadWithNoReportedLength(t *testing.T) {
 	if int64(len(got)) > capBytes682+1 {
 		t.Errorf("read returned %d bytes under a %d-byte cap; the bound is cap+1", len(got), capBytes682)
 	}
-	if served := stub.bytesServed.Load(); served > capBytes682+1 {
-		t.Errorf("read pulled %d bytes from the body; the bound is %d (cap+1)", served, capBytes682+1)
+	if served := stub.bytesServed.Load(); served != capBytes682+1 {
+		t.Errorf("read pulled %d bytes from the body; want exactly %d (cap+1): the bound must stop there, and must not stop short either", served, capBytes682+1)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"testing"
 
@@ -40,8 +41,8 @@ func TestS3FSLocalize_HonorsTheConfiguredCap(t *testing.T) {
 	if !errors.Is(err, corpusfs.ErrObjectTooLarge) {
 		t.Fatalf("Localize error = %v, want ErrObjectTooLarge", err)
 	}
-	if served := stub.bytesServed.Load(); served > cap682+1 {
-		t.Errorf("Localize pulled %d bytes; the bound is %d (cap+1)", served, cap682+1)
+	if served := stub.bytesServed.Load(); served != cap682+1 {
+		t.Errorf("Localize pulled %d bytes; want exactly %d (cap+1)", served, cap682+1)
 	}
 	if left := cacheDirBytes682(t, cacheDir); left != 0 {
 		t.Errorf("cache dir still holds %d bytes after the refused download", left)
@@ -153,6 +154,40 @@ func TestS3FSLocalize_ObjectOfExactlyTheCapDownloadsCleanly(t *testing.T) {
 	}
 }
 
+// TestS3FSCapClampsAnAbsurdValue pins the upper clamp on the configured cap. Every
+// bound in the backend is a limit+1, so math.MaxInt64 would overflow that sum to a
+// negative number, and io.LimitReader reads a negative limit as "no bytes allowed".
+// The failure that produces is the dangerous kind: Localize writes an EMPTY file and
+// reports success, so a caller gets a valid path to a truncated object. S3Config is
+// exported, so the invariant is enforced in the backend rather than trusted to the
+// caller.
+func TestS3FSCapClampsAnAbsurdValue(t *testing.T) {
+	const size = 4096
+	head := int64(size)
+	stub := &lyingS3For682{key: "corpus/small.bin", listSize: size, headSize: &head, bodySize: size}
+	fsys, err := corpusfs.NewS3FS(stub, corpusfs.S3Config{
+		Bucket: "bkt", Prefix: "corpus/", CacheDir: t.TempDir(), MaxBytes: math.MaxInt64,
+	})
+	if err != nil {
+		t.Fatalf("NewS3FS: %v", err)
+	}
+
+	localPath, cleanup, err := fsys.Localize(context.Background(), "small.bin")
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		t.Fatalf("Localize: %v", err)
+	}
+	info, statErr := os.Stat(localPath)
+	if statErr != nil {
+		t.Fatalf("stat localized file: %v", statErr)
+	}
+	if info.Size() != size {
+		t.Errorf("localized file is %d bytes, want the whole %d-byte object", info.Size(), size)
+	}
+}
+
 // TestS3FSCapDefaultsWhenUnset pins that an unset (or zero) MaxBytes resolves to
 // the 10 MiB default rather than to "unbounded". A caller that forgets the field
 // must still get a bound; there is deliberately no unlimited setting.
@@ -173,7 +208,7 @@ func TestS3FSCapDefaultsWhenUnset(t *testing.T) {
 	if !errors.Is(err, corpusfs.ErrObjectTooLarge) {
 		t.Fatalf("Localize error = %v, want ErrObjectTooLarge under the default cap", err)
 	}
-	if served := stub.bytesServed.Load(); served > corpusfs.DefaultMaxFileSizeBytes()+1 {
-		t.Errorf("Localize pulled %d bytes; the default bound is %d (cap+1)", served, corpusfs.DefaultMaxFileSizeBytes()+1)
+	if served := stub.bytesServed.Load(); served != corpusfs.DefaultMaxFileSizeBytes()+1 {
+		t.Errorf("Localize pulled %d bytes; want exactly %d (default cap+1)", served, corpusfs.DefaultMaxFileSizeBytes()+1)
 	}
 }
