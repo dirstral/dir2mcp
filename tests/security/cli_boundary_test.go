@@ -217,6 +217,8 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"up_daemon.go":                           {},
 		"up_distributed_embed.go":                {},
 		"up_graceful_stop_test.go":               {},
+		"up_shutdown.go":                         {},
+		"up_shutdown_test.go":                    {},
 		"watch_source_gate_695_test.go":          {},
 	}
 

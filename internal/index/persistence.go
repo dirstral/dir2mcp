@@ -39,6 +39,15 @@ type PersistenceManager struct {
 	wg      sync.WaitGroup
 }
 
+// ErrSaveInFlight reports that StopAndSave stopped waiting while a periodic
+// save still used the indices (issue #689).
+//
+// The caller MUST NOT close the indices after this error. The save owns them
+// until it returns, so a Close here races the writer and can leave a truncated
+// or partly-written snapshot on disk. Leaking the file handles until the
+// process exits is the safe option; the operating system reclaims them.
+var ErrSaveInFlight = errors.New("index persistence: a periodic save was still in flight at shutdown")
+
 func NewPersistenceManager(indices []IndexedFile, interval time.Duration, onError func(error)) *PersistenceManager {
 	if interval <= 0 {
 		interval = 15 * time.Second
@@ -111,7 +120,13 @@ type AutosaveTicker interface {
 // AutosaveTicker capability when available, so a long ingest doesn't rewrite the
 // whole index on every tick (issue #429 C-a). It shares saveMu with SaveAll/Load
 // so saves never overlap.
-func (m *PersistenceManager) autosaveTick() error {
+//
+// ctx is the manager lifetime context, not context.Background() (issue #689).
+// StopAndSave cancels it, so a save that is already running observes shutdown
+// and can abandon its temporary file. That is the safe outcome: the previous
+// good snapshot stays on disk, and the sqlite store keeps the source of truth,
+// so startup reconciliation rebuilds the lost tail.
+func (m *PersistenceManager) autosaveTick(ctx context.Context) error {
 	m.saveMu.Lock()
 	defer m.saveMu.Unlock()
 
@@ -124,11 +139,19 @@ func (m *PersistenceManager) autosaveTick() error {
 		if !ok {
 			continue
 		}
+		// Do not start a new backend save after shutdown began. The tick can
+		// hold saveMu across several indices, so the context can expire part
+		// way through the loop.
+		select {
+		case <-ctx.Done():
+			return combined
+		default:
+		}
 		var err error
 		if t, ok := idx.Index.(AutosaveTicker); ok {
-			err = t.AutosaveTick(context.Background(), idx.Path)
+			err = t.AutosaveTick(ctx, idx.Path)
 		} else {
-			err = p.Save(context.Background(), idx.Path)
+			err = p.Save(ctx, idx.Path)
 		}
 		if err != nil {
 			combined = errors.Join(combined, err)
@@ -137,7 +160,14 @@ func (m *PersistenceManager) autosaveTick() error {
 	return combined
 }
 
+// SaveAll forces a save of every persistable index. The save is not bounded by
+// a context; use saveAll if you need to bound it.
 func (m *PersistenceManager) SaveAll() error {
+	return m.saveAll(context.Background())
+}
+
+// saveAll is the forced save path shared by SaveAll and StopAndSave.
+func (m *PersistenceManager) saveAll(ctx context.Context) error {
 	// protect against concurrent callers; the underlying model.Index
 	// implementations are not required to be goroutine‑safe so we serialize
 	// accesses here. callers such as the ticker goroutine and external
@@ -156,7 +186,7 @@ func (m *PersistenceManager) SaveAll() error {
 		if !ok {
 			continue
 		}
-		if err := p.Save(context.Background(), idx.Path); err != nil {
+		if err := p.Save(ctx, idx.Path); err != nil {
 			combined = errors.Join(combined, err)
 		}
 	}
@@ -231,7 +261,7 @@ func (m *PersistenceManager) Start(ctx context.Context) {
 			case <-runCtx.Done():
 				return
 			case <-ticker.C:
-				if err := m.autosaveTick(); err != nil {
+				if err := m.autosaveTick(runCtx); err != nil {
 					m.emitError(err)
 				}
 			}
@@ -240,10 +270,23 @@ func (m *PersistenceManager) Start(ctx context.Context) {
 }
 
 // StopAndSave cancels any running autosave goroutine and waits for it
-// to exit before performing a final SaveAll. The provided context is used to
-// bound the wait; if it expires the method returns ctx.Err() and the final
-// save may not occur. This prevents callers (such as CLI shutdown hooks)
-// from blocking forever on uncooperative indices or hung goroutines.
+// to exit before performing a final forced save. The provided context bounds
+// the whole operation: the wait for the autosave goroutine AND the final save.
+// This prevents callers (such as CLI shutdown hooks) from blocking forever on
+// uncooperative indices or hung goroutines.
+//
+// Shutdown order (issue #689):
+//
+//  1. Cancel the manager lifetime context. A periodic save that is already
+//     running observes the cancellation and can stop early.
+//  2. Wait for the autosave goroutine to exit, bounded by ctx.
+//  3. Run the final forced save, bounded by the same ctx.
+//
+// If step 2 runs out of time, the returned error wraps ErrSaveInFlight and the
+// final save is skipped. The caller must then leave the indices open: a
+// periodic save still owns them, and closing an index underneath its own writer
+// is the corruption this method exists to prevent. The abandoned save keeps
+// running until the backend returns or the process exits.
 func (m *PersistenceManager) StopAndSave(ctx context.Context) error {
 	m.stateMu.Lock()
 	cancel := m.cancel
@@ -264,10 +307,10 @@ func (m *PersistenceManager) StopAndSave(ctx context.Context) error {
 	case <-done:
 		// normal
 	case <-ctx.Done():
-		return ctx.Err()
+		return errors.Join(ctx.Err(), ErrSaveInFlight)
 	}
 
-	return m.SaveAll()
+	return m.saveAll(ctx)
 }
 
 func (m *PersistenceManager) emitError(err error) {

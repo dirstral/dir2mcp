@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -897,6 +898,11 @@ func renderLaunchdPlist(spec serviceSpec) string {
 	// deterministically at boot (e.g. a missing credential) backs off instead
 	// of hot-looping.
 	b.WriteString("  <key>ThrottleInterval</key>\n  <integer>30</integer>\n")
+	// Give the daemon its full graceful-stop budget before launchd escalates to
+	// SIGKILL (issue #688). The launchd default is 20 seconds, but it is a
+	// default: state it so the drain cannot be cut short by a changed default.
+	b.WriteString("  <key>ExitTimeOut</key>\n  <integer>" +
+		strconv.Itoa(serviceStopTimeoutSeconds) + "</integer>\n")
 	writePlistString(&b, "ProcessType", "Background")
 	b.WriteString("</dict>\n</plist>\n")
 	return b.String()
@@ -952,7 +958,11 @@ func renderSystemdUnit(spec serviceSpec) string {
 	b.WriteString("StandardOutput=append:" + iniEscape(spec.LogPath) + "\n")
 	b.WriteString("StandardError=append:" + iniEscape(spec.LogPath) + "\n")
 	b.WriteString("Restart=on-failure\n")
-	b.WriteString("RestartSec=30\n\n")
+	b.WriteString("RestartSec=30\n")
+	// Give the daemon its full graceful-stop budget before systemd escalates to
+	// SIGKILL (issue #688). The systemd default is DefaultTimeoutStopSec, which
+	// a distribution can lower below the budget, so state the value here.
+	b.WriteString("TimeoutStopSec=" + strconv.Itoa(serviceStopTimeoutSeconds) + "\n\n")
 
 	b.WriteString("[Install]\n")
 	b.WriteString("WantedBy=default.target\n")
