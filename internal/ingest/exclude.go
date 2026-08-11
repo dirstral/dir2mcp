@@ -8,7 +8,43 @@ import (
 	"strings"
 )
 
+// secretScanSampleBytes is the head-sample budget for a source whose searchable
+// text is NOT its raw bytes: a PDF, an image, an office document, audio, video.
+// Scanning a container's compressed or encoded bytes past the head buys nothing,
+// because a credential inside such a file only becomes readable text after
+// extraction, OCR, or transcription. Those DERIVED texts are scanned in full
+// before they are persisted (see Service.screenDerivedSecrets), so the head
+// sample is a cheap early-out, not the security boundary.
+//
+// A source whose raw bytes ARE the searchable text (text, code, markdown, data,
+// html) is scanned in FULL instead; see secretScanBytes. #681: the head sample
+// used to be the only scan for every source, so a credential past 64 KiB was
+// indexed and reachable through `search`.
 const secretScanSampleBytes int64 = 64 * 1024
+
+// secretScanBytes returns the bytes of a source document that the ingest secret
+// policy scans, given the document's classified doc_type.
+//
+// The rule is "scan what becomes searchable":
+//
+//   - a raw-text doc_type (text/code/md/data/html) is chunked and embedded from
+//     these very bytes, so every byte is scanned. There is no offset past which
+//     a credential stops being indexed, so there must be none past which it
+//     stops being scanned.
+//   - every other doc_type reaches the index only through a derived text
+//     (extraction, OCR, transcription, annotation, recognition, a subtitle
+//     sidecar). Its raw bytes are a container, so only the head sample is
+//     scanned here and the derived text carries the full scan.
+//
+// The doc_type split is what keeps the cost proportionate: it never runs the
+// regex set over the bytes of a 10 MiB video, which no pattern could usefully
+// match anyway.
+func secretScanBytes(docType string, content []byte) []byte {
+	if ShouldGenerateRawText(docType) {
+		return content
+	}
+	return contentSample(content)
+}
 
 func compileSecretPatterns(patterns []string) ([]*regexp.Regexp, error) {
 	return CompileSecretPatterns(patterns)

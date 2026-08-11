@@ -457,6 +457,15 @@ func (s *Service) persistSidecarTranscript(ctx context.Context, doc model.Docume
 	// the same value (no padded/non-canonical language stored alongside a trimmed
 	// provenance decision).
 	lang = strings.TrimSpace(lang)
+
+	// #681: a subtitle sidecar becomes the media document's searchable transcript,
+	// so its cue text is screened before persistence exactly like an STT
+	// transcript. The scan runs over the cleaned segment texts, which are the
+	// strings that are chunked and embedded.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindSidecar, joinSegmentTexts(segments)) {
+		return nil
+	}
+
 	meta := transcriptMeta{Source: sidecarSource, Language: lang, Timestamps: true}
 	// A sidecar's language is asserted by the source itself — the filename suffix
 	// (clip.en.vtt §8.6.4) or a TTML xml:lang — so its provenance is "declared"

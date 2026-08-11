@@ -46,11 +46,17 @@ const (
 	// and continues past its end, and it holds the scan to a fixed cost instead
 	// of the size of the source.
 	//
-	// The value matches the ingest-time secret sample (64 KiB, see
+	// The value matches the ingest-time head sample (64 KiB, see
 	// internal/ingest.secretScanSampleBytes). open_file always reads from the
 	// first byte of the source, so every request scans at least the same head
-	// bytes that ingest scans. A document that ingest withholds can therefore
-	// never be served by the tool, which is what SPEC 15.4 requires.
+	// bytes that ingest scans.
+	//
+	// Since #681 that head sample is ingest's FLOOR, not its whole policy: a text
+	// source is scanned in full at ingest time. So a document ingest withholds can
+	// still have a clean early window served here. What SPEC 15.4 requires is
+	// preserved either way, because every byte this tool returns was scanned and
+	// found clean: the credential itself is never served, and neither is anything
+	// behind it. See the note on openFileFromResolvedPath.
 	secretScanMarginBytes = 64 << 10
 )
 
