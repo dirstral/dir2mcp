@@ -118,14 +118,20 @@ func TestWatchQueueFull_ReconcileReportsTheBurstSize(t *testing.T) {
 	waitForRescanRequests(t, rescans, burst)
 
 	// Drive the worker over one queued rescan request. The service holds no
-	// store, so the scan itself fails at once; the report must already be out.
+	// store, so the scan fails; the report must already be out before it runs.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rescanReq := make(chan struct{}, 1)
 	rescanReq <- struct{}{}
 	done := make(chan struct{})
 	go w.worker(ctx, rescanReq, done)
-	waitForLog(t, logs, "reconciles 7 change(s)")
+	waitForLog(t, logs, "rescan starting to reconcile 7 change(s)")
+
+	// The scan failed, so the 7 changes are still unreconciled. The next rescan
+	// must report them again rather than drop them from the ledger.
+	waitForLog(t, logs, "watch: safety rescan:")
+	rescanReq <- struct{}{}
+	waitForLogCount(t, logs, "rescan starting to reconcile 7 change(s)", 2)
 	cancel()
 	<-done
 }
@@ -186,6 +192,22 @@ func waitForLog(t *testing.T, logs *syncBuffer, want string) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("log never reported %q; log was %q", want, got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitForLogCount waits until the captured log holds want at least n times.
+func waitForLogCount(t *testing.T, logs *syncBuffer, want string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := logs.String()
+		if len(logLinesWith(got, want)) >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log reported %q fewer than %d times; log was %q", want, n, got)
 		}
 		time.Sleep(time.Millisecond)
 	}

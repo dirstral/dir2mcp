@@ -311,9 +311,13 @@ func (w *fsWatchLoop) worker(ctx context.Context, rescanReq <-chan struct{}, don
 		case job := <-w.fire:
 			w.process(ctx, job)
 		case <-rescanReq:
-			w.reportDropsUnderReconcile()
+			dropped := w.reportDropsUnderReconcile()
 			if err := w.svc.runScan(ctx); err != nil && ctx.Err() == nil {
 				w.svc.getLogger().Printf("watch: safety rescan: %v", err)
+				// The scan did not reconcile them after all, so give the drops
+				// back. The next scan then reports the true outstanding number
+				// instead of losing this burst from the ledger.
+				w.returnUnreconciledDrops(dropped)
 			}
 		}
 	}
@@ -473,15 +477,15 @@ func (w *fsWatchLoop) recordDroppedJob(now time.Time) (int64, bool) {
 }
 
 // reportDropsUnderReconcile logs the size of the burst a starting reconcile has
-// to repair (issue #679). It runs before every rescan the worker performs and
-// says nothing when no job was dropped, so a periodic or rule-driven rescan logs
-// as it did before.
+// to repair and returns that count (issue #679). It runs before every rescan the
+// worker performs and says nothing when no job was dropped, so a periodic or
+// rule-driven rescan logs as it did before.
 //
 // The line closes the report the drop path opened: the drop path says a change
 // was lost, this one says how many the reconcile covers. Taking the count also
 // clears the rate limit, so the first drop of the NEXT burst reports at once
 // instead of waiting out the interval.
-func (w *fsWatchLoop) reportDropsUnderReconcile() {
+func (w *fsWatchLoop) reportDropsUnderReconcile() int64 {
 	w.dropMu.Lock()
 	pending := w.unreconciledDrops
 	if pending > 0 {
@@ -490,12 +494,25 @@ func (w *fsWatchLoop) reportDropsUnderReconcile() {
 	}
 	w.dropMu.Unlock()
 	if pending == 0 {
-		return
+		return 0
 	}
 	w.svc.getLogger().Printf(
-		"watch: rescan starting; it reconciles %d change(s) that the full internal job queue (%d jobs) dropped",
+		"watch: rescan starting to reconcile %d change(s) that the full internal job queue (%d jobs) dropped",
 		pending, cap(w.fire),
 	)
+	return pending
+}
+
+// returnUnreconciledDrops puts drops back on the outstanding count after the
+// rescan that claimed them failed. The count then stays true: the next rescan
+// reports this burst again, together with anything dropped since.
+func (w *fsWatchLoop) returnUnreconciledDrops(count int64) {
+	if count <= 0 {
+		return
+	}
+	w.dropMu.Lock()
+	defer w.dropMu.Unlock()
+	w.unreconciledDrops += count
 }
 
 // askForRescan queues a coalesced reconcile and reports whether it could. run()
