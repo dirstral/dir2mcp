@@ -309,6 +309,49 @@ func TestSecretScan_AnnotationIsRefusedWithoutTouchingTheDocument(t *testing.T) 
 	}
 }
 
+// TestSecretScan_WithheldVideoIsNotAlsoBrandedAnError guards the interaction with
+// the #398/#495 unsearchable-video verdict. A video whose only text source is its
+// transcript produces nothing once that transcript is withheld, which looks
+// exactly like "no representation produced". It must not be stamped
+// status="error" on top: that would overwrite the secret_excluded row and count
+// one document as both a skip and an error. A withheld document is unsearchable
+// by design, not by failure.
+func TestSecretScan_WithheldVideoIsNotAlsoBrandedAnError(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	stateDir := t.TempDir()
+	writeFile(t, filepath.Join(root, "briefing.mp4"), "fake-video")
+	// The sidecar is the video's only text source, and it carries the credential.
+	// It also keeps the fixture off ffmpeg, which a synthetic video cannot satisfy.
+	writeFile(t, filepath.Join(root, "briefing.vtt"),
+		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nthe key is aws_key = "+secret681+"\n")
+	st := newRealStore(t)
+
+	svc := mustNewIngestService(t, secretScanConfig(root, stateDir), st)
+	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc.SetIndexingState(indexState)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	assertWithheld681(t, st, "briefing.mp4")
+	if doc := docFor681(t, st, "briefing.mp4"); doc.ErrorMessage != "" {
+		t.Errorf("briefing.mp4 error_message = %q, want empty on a withheld document", doc.ErrorMessage)
+	}
+	// The corpus holds two files: the withheld video and its sidecar, which is
+	// itself never indexed. So both count as skips, neither as an error, and the
+	// #426 identity still balances.
+	snap := indexState.Snapshot()
+	if snap.Errors != 0 || snap.Indexed != 0 {
+		t.Fatalf("counters = indexed:%d skipped:%d errors:%d, want indexed 0 and errors 0",
+			snap.Indexed, snap.Skipped, snap.Errors)
+	}
+	if snap.Indexed+snap.Skipped+snap.Errors != snap.Scanned {
+		t.Fatalf("indexed:%d + skipped:%d + errors:%d != scanned:%d (#426)",
+			snap.Indexed, snap.Skipped, snap.Errors, snap.Scanned)
+	}
+}
+
 // TestSecretScan_DerivedVerdictSurvivesTheNextScan guards the incremental gate. A
 // derived verdict cannot be recomputed from the source bytes, so it has to be
 // carried on the row. Without the carry the second scan rebuilds the document as

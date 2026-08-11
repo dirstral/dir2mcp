@@ -3761,6 +3761,13 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	if err != nil {
 		return false, err
 	}
+	// #681: the extracted text was withheld, so the document is already terminal.
+	// Stop before the transcript and recognition steps, and report no soft error:
+	// the caller settles it as secret_excluded, and a document counted as a skip
+	// must not also be counted as an error.
+	if s.secretExcludedThisDoc {
+		return false, nil
+	}
 	if nonFatalErrored {
 		// #394/#584: the extractor degraded an unsupported format and already
 		// recorded it — as status="error" (strict) or a durable status="skipped"
@@ -3780,6 +3787,14 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		if err != nil {
 			return nonFatalErrored, err
 		}
+	}
+	// #681: the transcript or the sidecar was withheld. Without this the media would
+	// fall into the "#398/#495 no representation produced" verdict below and be
+	// stamped status="error", which would overwrite the secret_excluded row and
+	// count the same document as both a skip and an error. A withheld document is
+	// unsearchable by DESIGN, not by failure, so it is neither.
+	if s.secretExcludedThisDoc {
+		return false, nil
 	}
 
 	return s.recognizeAndFinalizeMedia(ctx, doc, secretPatterns, noVideoRep, nonFatalErrored)
@@ -3813,6 +3828,12 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
 	if err != nil {
 		return transcriptSoftFailed, err
+	}
+	// #681: recognition itself was withheld, so the document is terminal. Same
+	// reasoning as the transcript guard: a withheld document must not also be
+	// branded an unsearchable-video error.
+	if s.secretExcludedThisDoc {
+		return false, nil
 	}
 	if noVideoRep && !recognized {
 		// Only now is the verdict final: no sidecar, no derived transcript, no
@@ -3912,6 +3933,13 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 			return false, false, err
 		}
 		if ingested {
+			return false, false, nil
+		}
+		// #681: the sidecar's cues matched a configured secret pattern, so nothing
+		// was ingested AND the document is now withheld. Stop here rather than fall
+		// through to STT, which would transcribe the same media and could brand the
+		// withheld document with a provider error.
+		if s.secretExcludedThisDoc {
 			return false, false, nil
 		}
 	} else if err := s.retireStaleSidecarTranscripts(ctx, doc); err != nil {

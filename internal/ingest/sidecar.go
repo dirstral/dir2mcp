@@ -381,6 +381,13 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 		if err := s.persistSidecarTranscript(ctx, doc, lang, groups[lang], segments); err != nil {
 			return ingested, err
 		}
+		// #681: this language's cues matched a configured secret pattern, so nothing
+		// was persisted and the whole document is now withheld. Stop before counting
+		// a representation that does not exist, and do not read the remaining
+		// languages: the document is already terminal.
+		if s.secretExcludedThisDoc {
+			return ingested, nil
+		}
 		s.addRepresentations(1)
 		ingested = true
 	}
