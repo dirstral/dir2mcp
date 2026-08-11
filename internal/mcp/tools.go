@@ -635,12 +635,15 @@ type visibleFilesLister interface {
 //     listing. This is a pure function of rel_path, so the store evaluates it in
 //     SQL (SQLiteStore.ListVisibleFiles) and the page, the COUNT and the glob
 //     scan all agree on it for free.
-//   - filesystem-source documents whose rel_path no longer resolves to a real
+//   - on a LOCAL corpus, documents whose rel_path no longer resolves to a real
 //     file under the configured root are dropped. Without this, stale rows left
 //     behind by older buggy ingest paths or manual edits would surface here and
 //     then 404 on the round-trip through open_file (issue #176). This one needs
 //     the filesystem, so it can only run in Go — but it now runs over the rows
-//     of the RETURNED PAGE, not over the corpus.
+//     of the RETURNED PAGE, not over the corpus. On an object-store corpus the
+//     backing object is not on the local filesystem at all, so only the
+//     path-shape part of the check applies (issue #684, see
+//     listFilesSourceGate).
 //
 // Before #694 the handler pulled the entire matching corpus in 500-row store
 // pages on every call and stat'ed every row, because it wanted a `total` that
@@ -679,23 +682,56 @@ func (s *Server) listFilesFiltered(ctx context.Context, pathPrefix, glob string,
 }
 
 // dropUnresolvableSources applies the #176 round-trip gate to the rows of a
-// single page. The root is resolved once for the page: the per-document gate
-// would otherwise re-run filepath.Abs + EvalSymlinks(root) per row. When the
-// configured root does not resolve at all the gate is skipped entirely, so a
-// misconfigured deployment still returns what the store has rather than an
-// empty list.
+// single page. The gate is built once for the page: the per-document check
+// would otherwise re-run filepath.Abs + EvalSymlinks(root) per row. A nil gate
+// means "keep everything", so a misconfigured deployment still returns what the
+// store has rather than an empty list.
 func (s *Server) dropUnresolvableSources(docs []model.Document) []model.Document {
-	rootAbs, rootReal, ok := s.resolveRoot()
-	if !ok {
+	gate := s.listFilesSourceGate()
+	if gate == nil {
 		return docs
 	}
 	kept := make([]model.Document, 0, len(docs))
 	for _, doc := range docs {
-		if isResolvableSourceWithRoot(doc, rootAbs, rootReal) {
+		if gate(doc) {
 			kept = append(kept, doc)
 		}
 	}
 	return kept
+}
+
+// listFilesSourceGate builds the per-document predicate that list_files applies
+// to the rows of a page, or nil when no gate applies.
+//
+// The gate depends on where the corpus lives (issue #684). A local corpus keeps
+// the #176 filesystem round-trip check: a row whose rel_path is gone under the
+// configured root must not be listed, because open_file would 404 on it. An
+// object-store corpus has NO local file at RootDir/rel_path at all (S3FS.Walk
+// ignores RootDir and reports no local path, the same asymmetry that broke the
+// on-demand media paths in #759), so that check condemns every remote document
+// and the tool reports an empty inventory for a corpus that indexes and
+// searches correctly.
+//
+// The source of truth is the live cfg.Source.Kind, not the persisted
+// source_type: the store normalizes source_type to filesystem or archive_member
+// only, and widening that vocabulary is a spec decision (dirstral-spec #63)
+// that has not landed. Gating on the running configuration needs no schema
+// change and no contract change.
+//
+// The remote gate is NOT "no gate": malformed rel_paths (traversal, absolute)
+// can never round-trip through open_file, so they stay excluded for every
+// backend.
+func (s *Server) listFilesSourceGate() func(model.Document) bool {
+	if corpusSourceIsRemote(s.cfg) {
+		return isListableRemoteSource
+	}
+	rootAbs, rootReal, ok := s.resolveRoot()
+	if !ok {
+		return nil
+	}
+	return func(doc model.Document) bool {
+		return isResolvableSourceWithRoot(doc, rootAbs, rootReal)
+	}
 }
 
 // listFilesFilteredByWalk is the pre-#694 implementation, kept as the fallback
@@ -710,19 +746,10 @@ func (s *Server) listFilesFilteredByWalk(ctx context.Context, pathPrefix, glob s
 	storeOffset := 0
 	var storeTotal int64
 
-	// Resolve root once up front. On large corpora the per-document gate would
-	// otherwise re-run filepath.Abs + EvalSymlinks(root) for every row, which
-	// is syscall-heavy enough to show up on `list_files`.
-	var (
-		rootResolvable bool
-		rootAbs        string
-		rootReal       string
-	)
-	if abs, resolved, ok := s.resolveRoot(); ok {
-		rootResolvable = true
-		rootAbs = abs
-		rootReal = resolved
-	}
+	// Build the source gate once up front. On large corpora the per-document
+	// check would otherwise re-run filepath.Abs + EvalSymlinks(root) for every
+	// row, which is syscall-heavy enough to show up on `list_files`.
+	gate := s.listFilesSourceGate()
 
 	for {
 		docs, total, err := s.store.ListFiles(ctx, pathPrefix, glob, pageSize, storeOffset)
@@ -737,7 +764,7 @@ func (s *Server) listFilesFilteredByWalk(ctx context.Context, pathPrefix, glob s
 			if !includeHidden && isListFilesNoisePath(doc.RelPath) {
 				continue
 			}
-			if rootResolvable && !isResolvableSourceWithRoot(doc, rootAbs, rootReal) {
+			if gate != nil && !gate(doc) {
 				continue
 			}
 			if visibleSeen >= offset && len(collected) < limit {
@@ -812,14 +839,12 @@ func (s *Server) canResolveRoot() bool {
 // candidate target are compared in their symlink-resolved form so equivalent
 // symlinked paths match.
 func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bool {
-	if strings.EqualFold(strings.TrimSpace(doc.SourceType), "archive_member") {
-		return true
-	}
-	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(doc.RelPath)))
-	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(doc.RelPath) {
-		// An affirmatively malformed rel_path (traversal / absolute) can never
-		// round-trip through open_file, so excluding it is safe.
+	normalized, ok := normalizedListRelPath(doc.RelPath)
+	if !ok {
 		return false
+	}
+	if isArchiveMemberSource(doc) {
+		return true
 	}
 	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
 	targetReal, err := filepath.EvalSymlinks(absPath)
@@ -844,6 +869,43 @@ func isResolvableSourceWithRoot(doc model.Document, rootAbs, rootReal string) bo
 		return false
 	}
 	return true
+}
+
+// isListableRemoteSource is the list_files gate for an object-store corpus
+// (issue #684). No local file exists at RootDir/rel_path for such a corpus, so
+// the local existence check of isResolvableSourceWithRoot cannot say anything
+// about a remote object and must not run. What survives is the part that needs
+// no filesystem: an affirmatively malformed rel_path (traversal or absolute)
+// stays excluded, because it can never round-trip through open_file on any
+// backend. Archive members keep passing, exactly as they do on a local corpus,
+// because their virtual path is a well-formed rel_path.
+func isListableRemoteSource(doc model.Document) bool {
+	_, ok := normalizedListRelPath(doc.RelPath)
+	return ok
+}
+
+// isArchiveMemberSource reports whether doc is a member of an archive. Such a
+// path is virtual (the backing file is the archive itself), so the local
+// existence check does not apply to it.
+func isArchiveMemberSource(doc model.Document) bool {
+	return strings.EqualFold(strings.TrimSpace(doc.SourceType), "archive_member")
+}
+
+// normalizedListRelPath cleans relPath into slash form and reports whether it is
+// a well-formed corpus-relative path. A traversal or absolute path is rejected:
+// it can never round-trip through open_file, so list_files must not emit it.
+//
+// The absolute test runs on the TRIMMED path, the same string every other test
+// here runs on. A padded value such as " /etc/passwd" passes the store's own
+// rel_path validation, so the untrimmed test let it through as a relative path
+// and the listing then advertised an absolute-looking path.
+func normalizedListRelPath(relPath string) (string, bool) {
+	trimmed := strings.TrimSpace(relPath)
+	normalized := filepath.ToSlash(filepath.Clean(trimmed))
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(trimmed) {
+		return "", false
+	}
+	return normalized, true
 }
 
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
