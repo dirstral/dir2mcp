@@ -101,18 +101,40 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	}
 	// Resolve the content-hash snapshot while the store (meta.sqlite) is still
 	// open: discard it on a durable rebuild, restore it on any failure so the
-	// incremental gate survives an interrupted reindex (issue #418). The index
-	// files, by contrast, are committed/rolled back AFTER the store is closed so
-	// a persist-on-close cannot clobber a rolled-back index.
+	// incremental gate survives an interrupted reindex (issue #418). A failed
+	// rebuild still rolls the index files back AFTER the store is closed, so a
+	// persist-on-close cannot clobber the restored generation.
 	if reindexErr == nil {
+		// Commit the index files BEFORE dropping the hash snapshot (issue #796).
+		//
+		// The two artifacts are undo records for the two halves of one change:
+		// *.reindex-old undoes the index move, the snapshot undoes the cleared
+		// content-hash gate. A crash between them decides which half recovery
+		// sees, so the order decides which way the corpus is wrong.
+		//
+		// Dropping the snapshot first left this window: hashes already say
+		// "new", the index backup still says "roll me back". recoverInterrupted-
+		// Reindex adopts that backup, so the corpus serves the PREVIOUS index
+		// generation while its hashes assert the new content is already
+		// ingested. The gate then skips those documents on every later run, so
+		// nothing re-ingests them and nothing reports it.
+		//
+		// Committing first inverts the failure. A crash in the window leaves no
+		// index backup and a snapshot that still holds the old hashes, so
+		// recovery restores hashes that under-state the corpus. The next scan
+		// re-ingests work it did not strictly need to redo (the #764 direction)
+		// and converges on its own. Redundant work is recoverable; a gate set
+		// too far ahead is not.
+		//
+		// commit() only unlinks the moved-aside backups, so running it while the
+		// store is open is safe: a persist-on-close writes the live slot, never
+		// the backup slot.
+		staging.commit()
 		staging.discardContentHashBackup(ctx, a.stderr)
+		a.closeStoreWithLog(st)
 	} else {
 		staging.restoreContentHashes(ctx, a.stderr)
-	}
-	a.closeStoreWithLog(st)
-	if reindexErr == nil {
-		staging.commit()
-	} else {
+		a.closeStoreWithLog(st)
 		// Any non-success — a real error, ctx cancellation from Ctrl-C, or an
 		// unimplemented pipeline — means the rebuild is not durable, so put the
 		// previous index back (issue #418).
