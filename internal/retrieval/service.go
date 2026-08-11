@@ -2917,10 +2917,10 @@ func (s *Service) hybridVectorCandidateLimit(k int, idx model.Index) int {
 // of the pool, keeps the pre-rerank order. A response that scores only part of
 // the pool keeps the unscored candidates instead of dropping them, so the
 // result count never falls below the pre-rerank count for the same k
-// (issue #669). Output is
-// deterministically ordered (relevance desc, then chunk_id asc) so ties
-// don't depend on provider response ordering (SPEC 9.1.1). Extracted
-// from the search paths to keep their cyclomatic complexity in budget.
+// (issue #669). Output is deterministically ordered (relevance desc, then
+// chunk_id asc) so ties don't depend on provider response ordering
+// (SPEC 9.1.1). Extracted from the search paths to keep their cyclomatic
+// complexity in budget.
 func (s *Service) rerankPool(ctx context.Context, query string, hits []model.SearchHit, k int) []model.SearchHit {
 	s.metaMu.RLock()
 	enabled := s.rerankEnabled
