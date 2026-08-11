@@ -3190,24 +3190,32 @@ func (s *Service) markMissingAsDeleted(ctx context.Context, existing, seen map[s
 		s.addDeleted(1)
 		deletedPaths = append(deletedPaths, relPath)
 	}
-	if len(deletedPaths) == 0 {
-		return nil
+	s.notifyDocumentsDeleted(deletedPaths)
+	return nil
+}
+
+// notifyDocumentsDeleted raises the onDocumentsDeleted callback once for a
+// batch of tombstoned paths, so the retrieval layer can evict them in one pass.
+// An empty batch and an unset callback are both no-ops. A panic in the callback
+// is contained and counted, because a bad consumer must not abort a scan or a
+// watch loop.
+func (s *Service) notifyDocumentsDeleted(relPaths []string) {
+	if len(relPaths) == 0 {
+		return
 	}
 	s.onDocumentsDeletedMu.RLock()
 	onDeleted := s.onDocumentsDeleted
 	s.onDocumentsDeletedMu.RUnlock()
-	if onDeleted != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					s.addErrors(1)
-					s.getLogger().Printf("onDocumentsDeleted panic for %d paths (%s)", len(deletedPaths), safePanicValue(r))
-				}
-			}()
-			onDeleted(append([]string(nil), deletedPaths...))
-		}()
+	if onDeleted == nil {
+		return
 	}
-	return nil
+	defer func() {
+		if r := recover(); r != nil {
+			s.addErrors(1)
+			s.getLogger().Printf("onDocumentsDeleted panic for %d paths (%s)", len(relPaths), safePanicValue(r))
+		}
+	}()
+	onDeleted(append([]string(nil), relPaths...))
 }
 
 func safePanicValue(r interface{}) string {
