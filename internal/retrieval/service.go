@@ -1667,21 +1667,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	// all and what k to use; when disabled this is a no-op so the fixed-k path
 	// below is unchanged. The gate uses the question text (the effective query)
 	// and never alters the MCP tool contract.
-	skipRetrieval := false
-	s.metaMu.RLock()
-	adaptiveEnabled := s.adaptiveEnabled
-	adaptiveKMin := s.adaptiveKMin
-	adaptiveKMax := s.adaptiveKMax
-	s.metaMu.RUnlock()
-	if adaptiveEnabled {
-		decision := adaptiveGate(query.Query, query.K, adaptiveKMin, adaptiveKMax)
-		s.logf("adaptive gate: class=%s retrieve=%t k=%d", decision.Class, decision.Retrieve, decision.K)
-		if decision.Retrieve {
-			query.K = decision.K
-		} else {
-			skipRetrieval = true
-		}
-	}
+	skipRetrieval := s.applyAdaptiveGate(question, &query)
 
 	var (
 		hits []model.SearchHit
@@ -1711,7 +1697,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	}
 
 	answer := buildFallbackAnswer(question, hits)
-	if s.gen != nil && len(hits) > 0 {
+	switch {
+	case skipRetrieval:
+		// The adaptive gate found no information need, so no lookup ran and the
+		// zero-hit fallback would misreport a corpus result the server never
+		// obtained (#685). Answer without retrieval and keep citations empty.
+		answer = s.answerWithoutRetrieval(ctx, question)
+	case s.gen != nil && len(hits) > 0:
 		answer, citations = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
 	}
 	answer = ensureAnswerAttributions(answer, citations)
