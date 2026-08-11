@@ -150,6 +150,38 @@ func TestSecretScan_CleanLargeFile_StaysIndexed(t *testing.T) {
 	}
 }
 
+// TestSecretScan_BinaryPayloadInATextDocType_IsNotIndexed pins the one case that
+// sits between the two scan targets. A binary payload can classify into a
+// text-oriented doc_type (a .parquet reaches "data"), and #398 already refuses to
+// put such content on the raw-text path, so it is never chunked and never
+// indexed. It therefore keeps the cheap head sample instead of paying for a full
+// scan that could not protect anything. What matters for #681 is the outcome: no
+// searchable text either way.
+func TestSecretScan_BinaryPayloadInATextDocType_IsNotIndexed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	stateDir := t.TempDir()
+	// A NUL byte in the head is the #398 binary signal; the credential sits far
+	// past the head sample.
+	writeFile(t, filepath.Join(root, "export.parquet"),
+		"PAR1\x00binary column data\n"+filler681(100*1024)+"\naws_key = "+secret681+"\n")
+	st := newRealStore(t)
+
+	svc := mustNewIngestService(t, secretScanConfig(root, stateDir), st)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	reps, err := st.ActiveRepresentations(context.Background(), "export.parquet")
+	if err != nil {
+		t.Fatalf("ActiveRepresentations: %v", err)
+	}
+	if len(reps) != 0 {
+		t.Errorf("export.parquet has %d live representation(s) %+v; binary content must never be indexed as text",
+			len(reps), reps)
+	}
+}
+
 // TestSecretScan_OnlyInExtractedText_WithholdsTheDocument is the second half of
 // #681, in its most ordinary form: a scanned contract or a screenshot. The source
 // bytes hold no readable credential; only the extractor's output does, so on

@@ -39,8 +39,14 @@ const secretScanSampleBytes int64 = 64 * 1024
 // The doc_type split is what keeps the cost proportionate: it never runs the
 // regex set over the bytes of a 10 MiB video, which no pattern could usefully
 // match anyway.
+//
+// One case sits between the two: a binary payload that classified into a
+// text-oriented doc_type, such as a .parquet reaching "data". #398 already
+// refuses to put such content on the raw-text path, so it is never chunked and
+// never indexed. It therefore takes the head sample too: a full scan of it would
+// be the whole cost of the change with none of the benefit.
 func secretScanBytes(docType string, content []byte) []byte {
-	if ShouldGenerateRawText(docType) {
+	if ShouldGenerateRawText(docType) && !looksLikeBinaryContent(content) {
 		return content
 	}
 	return contentSample(content)
