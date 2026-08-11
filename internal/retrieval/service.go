@@ -2276,14 +2276,23 @@ func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, ma
 //     begin after an unscanned region. A caller cannot step over a secret to
 //     reach the text behind it.
 //  3. The scan always covers at least the head bytes that ingest samples
-//     (internal/ingest.secretScanSampleBytes), so a document that ingest
-//     withholds can never be served by this tool.
+//     (internal/ingest.secretScanSampleBytes).
 //
 // The buffered path scanned the whole source, so it also refused the head of a
 // document whose only secret sat far past the answer. Reproducing that would
 // mean reading the whole source on every request, which is the cost this fix
-// removes, and it would still be weaker than it looks, because ingest itself
-// decides on a 64 KiB sample.
+// removes.
+//
+// #681 narrowed what property 3 buys. Ingest now scans a text source in FULL, so
+// a credential past the head sample withholds the whole document from the index;
+// it is no longer true that "a document ingest withholds can never be served
+// here". What still holds is the property SPEC 15.4 actually asks for: the tool
+// never returns the secret. Every byte it returns was scanned and found clean, so
+// the most a caller can obtain from a withheld document is a clean early window,
+// never the credential and never the text behind it. Closing that last gap would
+// require the whole-source read this fix removed, so it is a deliberate trade.
+// The derived-text path (openFileFromOCRCache) has no such gap: it reads its
+// whole cache file and scans all of it.
 func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, span model.Span, maxChars int) (string, bool, error) {
 	rc, err := s.openSource(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {

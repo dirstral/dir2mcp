@@ -371,11 +371,39 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 	// applyCueCleaningToSegments call builds a fresh collapser, so one language's
 	// trailing cue can never start a run in the next.
 	cleanOpts := s.captionCleanOptions()
-	ingested := false
+
+	// Chunk every language BEFORE persisting any of them, so the #681 secret screen
+	// below sees the whole document's sidecar text at once. Screening per language
+	// inside the persist loop would let a clean first language commit (and count a
+	// representation) before a later language withheld the document and retired it
+	// again, which would leave the run's representation counter describing a
+	// representation that no longer exists.
+	perLang := make(map[string][]chunkSegment, len(langs))
+	var allText strings.Builder
 	for _, lang := range langs {
 		segments := chunkSubtitleCuesFiltered(groups[lang], s.captionWordFilter())
 		segments = applyCueCleaningToSegments(segments, cleanOpts)
 		if len(segments) == 0 {
+			continue
+		}
+		perLang[lang] = segments
+		if allText.Len() > 0 {
+			allText.WriteByte('\n')
+		}
+		allText.WriteString(joinSegmentTexts(segments))
+	}
+	// #681: a sidecar becomes the media document's searchable transcript, so its
+	// cue text is screened exactly like an STT transcript, over the cleaned strings
+	// that are chunked and embedded. On a match the document is already withheld
+	// and nothing below runs.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindSidecar, allText.String()) {
+		return false, nil
+	}
+
+	ingested := false
+	for _, lang := range langs {
+		segments, ok := perLang[lang]
+		if !ok {
 			continue
 		}
 		if err := s.persistSidecarTranscript(ctx, doc, lang, groups[lang], segments); err != nil {

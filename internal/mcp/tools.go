@@ -1565,6 +1565,18 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, &toolExecutionError{Code: "CONFIG_INVALID", Message: err.Error(), Retryable: false}
 	}
 	preview, persistErr := ing.StoreAnnotationRepresentations(ctx, doc, annotationObj, indexFlattenedText)
+	if errors.Is(persistErr, ingest.ErrSecretExcluded) {
+		// #681: the generated annotation matched a configured
+		// security.secret_patterns entry. It was not stored, and it is NOT echoed
+		// back in the result either. Answering FORBIDDEN with the sentinel's own
+		// content-free message is what §15.4's "tool-level bypass of ingestion
+		// filters is impossible" means on this surface.
+		return toolCallResult{}, &toolExecutionError{
+			Code:      protocol.ErrorCodeForbidden,
+			Message:   persistErr.Error(),
+			Retryable: false,
+		}
+	}
 	if persistErr != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: persistErr.Error(), Retryable: false}
 	}

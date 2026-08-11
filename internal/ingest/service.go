@@ -357,6 +357,26 @@ type Service struct {
 	// even when a document produces several (transcript + per-language translations).
 	quarantinedThisDoc bool
 
+	// docSecretPatterns holds the compiled security.secret_patterns set for the
+	// document currently being processed. It is the SAME slice the caller passes
+	// down the raw-byte path, captured at the document entry points
+	// (processDocument / processDocumentFromContent) by beginDocumentSecretScope,
+	// so the source scan and the derived-text scan can never disagree about which
+	// patterns are active. It exists because the derived-text producers sit many
+	// frames below those entry points (OCR, pandoc, docling, STT, translation,
+	// annotation, recognition, sidecar) and threading one more argument through all
+	// of them would say nothing the existing per-document Service state does not
+	// already say: the scan loop is sequential, at most one asset is in flight.
+	docSecretPatterns []*regexp.Regexp
+
+	// secretExcludedThisDoc records that a DERIVED text of the document currently
+	// being processed matched a configured secret pattern (#681), so the document
+	// is withheld as status="secret_excluded" and must count as exactly one skip,
+	// never as indexed. Per-document state with the same lifetime and the same
+	// sequential-scan justification as quarantinedThisDoc; reset by
+	// beginDocumentSecretScope at each document entry point.
+	secretExcludedThisDoc bool
+
 	// reconcileOutputs arms the per-document output-set reconciliation (#692) for
 	// the scan currently running. It is set once per scan by
 	// beginOutputReconciliation, when the recorded pipeline output identity no
@@ -2138,6 +2158,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// sequential archive members, which run as separate processDocumentFromContent
 	// calls under a single processDocument entry.
 	s.quarantinedThisDoc = false
+	// Open the per-document secret scope (#681) at the same authoritative point,
+	// and before any branch below can produce a derived text. It captures the
+	// pattern set this call was given, so the derived-text scan always uses the
+	// same patterns as the raw-byte scan in buildDocumentWithContent.
+	s.beginDocumentSecretScope(secretPatterns)
 
 	// Two-phase derivation pass (SPEC §8.6.11): the transcription pass already did
 	// all document building, upserting, counting, and source-transcript work for
@@ -2169,6 +2194,12 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if isUnexpectedStoreErr(err) {
 		return fmt.Errorf("get existing document: %w", err)
 	}
+
+	// #681: a secret found in DERIVED text is not reproducible from the source
+	// bytes, so the verdict is carried on the row rather than recomputed. Applied
+	// before the gate and the upsert so an unchanged withheld document stays
+	// withheld instead of being written back as "ok".
+	carrySecretExclusion(&doc, existingDoc)
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
@@ -2225,12 +2256,37 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
 	}
-	// Representations committed: derive the optional document-level `summary`
-	// representation over them (SPEC §5.2/§9.7). It runs AFTER the fine chunks are
-	// written (it summarizes them) and is fail-open by construction — it never
-	// returns an error, so an absent summary leaves the document fully indexed and
+	// #681: a derived text of this document matched a configured secret pattern, so
+	// the document was withheld as secret_excluded and its representations were
+	// retired. Return before the summary step, which would summarize the very text
+	// that is being withheld, and before the "ok" finalize, which the #413 guard
+	// would refuse anyway. The skip is already counted, so the pending indexed
+	// credit is simply never taken.
+	if s.secretExcludedThisDoc {
+		return s.finalizeSecretExcluded(ctx, &doc, finalContentHash)
+	}
+	return s.settleProcessedDocument(ctx, &doc, willGenerateReps, finalContentHash, nonFatalErrored, indexedPending)
+}
+
+// settleProcessedDocument runs the post-generation steps for a document whose
+// representations committed: the optional document-level summary, the #692 output
+// reconciliation, the #402 done-marker stamp, and the #426 indexed credit. Split
+// out of processDocument so that function stays within the cyclomatic-complexity
+// budget; the order of the steps is unchanged and is load-bearing (see the
+// comments on each step).
+func (s *Service) settleProcessedDocument(
+	ctx context.Context,
+	doc *model.Document,
+	willGenerateReps bool,
+	finalContentHash string,
+	nonFatalErrored, indexedPending bool,
+) error {
+	// Derive the optional document-level `summary` representation over the
+	// committed chunks (SPEC §5.2/§9.7). It runs AFTER the fine chunks are written
+	// (it summarizes them) and is fail-open by construction: it never returns an
+	// error, so an absent summary leaves the document fully indexed and
 	// flat-retrievable, and the next scan retries.
-	s.GenerateDocumentSummaries(ctx, doc)
+	s.GenerateDocumentSummaries(ctx, *doc)
 	// Every output this pipeline produces for the document has now committed, so
 	// it is safe to retire the ones it no longer produces (#692). Running the
 	// reconciliation AFTER the generation pass is what guarantees a representation
@@ -2243,7 +2299,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// chunks are durably written. finalizeContentHash re-reads the row, so a
 	// document a soft-error path persisted as status="error" is left unmarked and
 	// retried next run rather than recorded as fully indexed.
-	if err := s.finalizeIfGenerated(ctx, &doc, willGenerateReps, finalContentHash); err != nil {
+	if err := s.finalizeIfGenerated(ctx, doc, willGenerateReps, finalContentHash); err != nil {
 		return err
 	}
 	if s.suppressIndexedCredit(nonFatalErrored) {
@@ -2421,8 +2477,12 @@ func (s *Service) creditIndexed(indexed bool) {
 // provider failure) returned by generateRepresentations; (2) quarantinedThisDoc —
 // an output quality gate (§8.6.6) that rejected a generated OCR/transcript/
 // translation output. Either way the document counts solely as an error.
+// (3) secretExcludedThisDoc: a derived text matched a configured secret pattern
+// (#681), so the document was withheld and counted as a skip. processDocument
+// returns before this on that path, so the guard here is a belt-and-braces
+// statement of the same rule for any future caller.
 func (s *Service) suppressIndexedCredit(nonFatalErrored bool) bool {
-	return nonFatalErrored || s.quarantinedThisDoc
+	return nonFatalErrored || s.quarantinedThisDoc || s.secretExcludedThisDoc
 }
 
 // deriveDocument runs the derivation pass for a single asset under the two-phase
@@ -2919,19 +2979,25 @@ func (s *Service) retainArchiveMembers(ctx context.Context, archiveRelPath strin
 	}
 }
 
-// processDocumentFromContent ingests a document whose content is already in
-// memory (e.g. an archive member). relPath is the virtual path stored in the
-// documents table; mtimeUnix is inherited from the parent archive.
-func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns []*regexp.Regexp, forceReindex bool) error {
-	docType := ClassifyDocType(relPath)
-	// Never ingest binary or ignored artifacts from inside archives.
-	if docType == "binary_ignored" || docType == "ignore" {
-		return nil
-	}
-	// Nested archive files are persisted as skipped document rows, but are not
-	// recursively extracted.
-	skipExtraction := docType == "archive"
-
+// buildArchiveMemberDocument assembles the document row for one extracted
+// archive member and applies the two terminal statuses decided from the member's
+// own bytes: a nested archive is a `skipped` container, and a member whose
+// scanned bytes match a configured secret pattern is `secret_excluded`.
+//
+// The scan target follows the same "scan what becomes searchable" rule as the
+// top-level path (secretScanBytes): a member whose raw bytes are its indexable
+// text is scanned in full, and a member that reaches the index through a derived
+// text is head-sampled here and scanned in full when that text is produced.
+//
+// Split out of processDocumentFromContent to keep that function within the
+// cyclomatic-complexity budget.
+func buildArchiveMemberDocument(
+	relPath, docType string,
+	content []byte,
+	mtimeUnix int64,
+	skipExtraction bool,
+	secretPatterns []*regexp.Regexp,
+) model.Document {
 	doc := model.Document{
 		RelPath:     relPath,
 		DocType:     docType,
@@ -2944,17 +3010,42 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	if skipExtraction {
 		doc.Status = "skipped"
 		doc.SkipReason = skipReasonForDocType(docType)
+		return doc
 	}
-
-	if !skipExtraction && hasSecretMatch(contentSample(content), secretPatterns) {
+	if hasSecretMatch(secretScanBytes(docType, content), secretPatterns) {
 		doc.Status = "secret_excluded"
 		doc.SkipReason = model.SkipReasonSecretExcluded
 	}
+	return doc
+}
+
+// processDocumentFromContent ingests a document whose content is already in
+// memory (e.g. an archive member). relPath is the virtual path stored in the
+// documents table; mtimeUnix is inherited from the parent archive.
+func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+	// Each archive member is an independent document, so it opens its own
+	// per-document secret scope (#681) even though the members of one archive run
+	// under a single processDocument entry.
+	s.beginDocumentSecretScope(secretPatterns)
+	docType := ClassifyDocType(relPath)
+	// Never ingest binary or ignored artifacts from inside archives.
+	if docType == "binary_ignored" || docType == "ignore" {
+		return nil
+	}
+	// Nested archive files are persisted as skipped document rows, but are not
+	// recursively extracted.
+	skipExtraction := docType == "archive"
+
+	doc := buildArchiveMemberDocument(relPath, docType, content, mtimeUnix, skipExtraction, secretPatterns)
 
 	existingDoc, err := s.store.GetDocumentByPath(ctx, relPath)
 	if err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("get existing document: %w", err)
 	}
+	// #681: same carry as the top-level path, for the same reason. A member
+	// withheld for a secret in its DERIVED text must not be written back as "ok"
+	// when the container is re-extracted with the member's bytes unchanged.
+	carrySecretExclusion(&doc, existingDoc)
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 
 	// Withhold the content_hash done marker until representations commit so an
@@ -2985,6 +3076,12 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
+	}
+	// #681: a derived text of this member matched a configured secret pattern, so
+	// it is withheld as secret_excluded. Settle it under that status instead of the
+	// "ok" one, which the #413 guard would refuse.
+	if s.secretExcludedThisDoc {
+		return s.finalizeSecretExcluded(ctx, &doc, finalContentHash)
 	}
 	// Stamp the withheld #402 done marker now the archive member's reps commit.
 	if err := s.finalizeIfGenerated(ctx, &doc, willGenerateReps, finalContentHash); err != nil {
@@ -3040,7 +3137,7 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 		return doc, content, nil
 	}
 
-	if hasSecretMatch(contentSample(content), secretPatterns) {
+	if hasSecretMatch(secretScanBytes(docType, content), secretPatterns) {
 		doc.Status = "secret_excluded"
 		doc.SkipReason = model.SkipReasonSecretExcluded
 	}
@@ -3672,6 +3769,13 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	if err != nil {
 		return false, err
 	}
+	// #681: the extracted text was withheld, so the document is already terminal.
+	// Stop before the transcript and recognition steps, and report no soft error:
+	// the caller settles it as secret_excluded, and a document counted as a skip
+	// must not also be counted as an error.
+	if s.secretExcludedThisDoc {
+		return false, nil
+	}
 	if nonFatalErrored {
 		// #394/#584: the extractor degraded an unsupported format and already
 		// recorded it — as status="error" (strict) or a durable status="skipped"
@@ -3691,6 +3795,14 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		if err != nil {
 			return nonFatalErrored, err
 		}
+	}
+	// #681: the transcript or the sidecar was withheld. Without this the media would
+	// fall into the "#398/#495 no representation produced" verdict below and be
+	// stamped status="error", which would overwrite the secret_excluded row and
+	// count the same document as both a skip and an error. A withheld document is
+	// unsearchable by DESIGN, not by failure, so it is neither.
+	if s.secretExcludedThisDoc {
+		return false, nil
 	}
 
 	return s.recognizeAndFinalizeMedia(ctx, doc, secretPatterns, noVideoRep, nonFatalErrored)
@@ -3724,6 +3836,12 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
 	if err != nil {
 		return transcriptSoftFailed, err
+	}
+	// #681: recognition itself was withheld, so the document is terminal. Same
+	// reasoning as the transcript guard: a withheld document must not also be
+	// branded an unsearchable-video error.
+	if s.secretExcludedThisDoc {
+		return false, nil
 	}
 	if noVideoRep && !recognized {
 		// Only now is the verdict final: no sidecar, no derived transcript, no
@@ -3823,6 +3941,13 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 			return false, false, err
 		}
 		if ingested {
+			return false, false, nil
+		}
+		// #681: the sidecar's cues matched a configured secret pattern, so nothing
+		// was ingested AND the document is now withheld. Stop here rather than fall
+		// through to STT, which would transcribe the same media and could brand the
+		// withheld document with a provider error.
+		if s.secretExcludedThisDoc {
 			return false, false, nil
 		}
 	} else if err := s.retireStaleSidecarTranscripts(ctx, doc); err != nil {
@@ -4111,6 +4236,13 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 		return nil
 	}
 
+	// #681: screen the extracted text BEFORE the title heuristic and before any
+	// persistence. A credential that is only pixels in the source PDF or image is
+	// plain text here, and this is the first point at which it could be indexed.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindExtraction, ocrText) {
+		return nil
+	}
+
 	s.persistTitleIfFound(ctx, doc, ocrText)
 
 	decision := s.screenOutputQuality(ctx, doc, qualityKindOCR, ocrText, quality.Context{
@@ -4148,6 +4280,12 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 func (s *Service) persistStructuredRepresentation(ctx context.Context, doc model.Document, res StructuredExtraction) error {
 	md := strings.TrimSpace(res.Markdown)
 	if md == "" {
+		return nil
+	}
+
+	// #681: the rendered Markdown is the text this document will be searched by, so
+	// it is screened before the title and before any persistence.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindExtraction, md) {
 		return nil
 	}
 
@@ -4319,6 +4457,13 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 	}
 	md = strings.TrimSpace(md)
 	if md == "" {
+		return nil
+	}
+
+	// #681: pandoc converts a container format (docx, epub, odt) into the text this
+	// document will be searched by, so it is screened before the title and before
+	// any persistence.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindExtraction, md) {
 		return nil
 	}
 
@@ -4698,6 +4843,26 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 	return producedAny, nil
 }
 
+// shiftSegmentsForLeadingSilence applies the optional leading-silence trim
+// (dir2mcp#258) to a transcript's time spans and returns the offset it used, in
+// milliseconds. It returns 0, leaving the spans untouched, when the trim is
+// disabled, when ffmpeg is absent, or when no dead air was detected. The caller
+// reuses the returned offset for the translated transcripts of the same track so
+// source and translated time windows stay aligned. Split out of
+// transcribeAndPersistTrack to keep it within the complexity budget.
+func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.Document, segments []chunkSegment) int {
+	if !s.cfg.MediaTrimLeadingSilence {
+		return 0
+	}
+	offset := s.detectLeadingSilence(ctx, doc)
+	if offset <= 0 {
+		return 0
+	}
+	trimOffsetMS := int(offset.Milliseconds())
+	shiftTranscriptSpans(segments, trimOffsetMS)
+	return trimOffsetMS
+}
+
 // transcribeAndPersistTrack transcribes ONE selected audio track and persists its
 // source transcript representation (plus, in single-pass mode, its translations).
 // It returns (produced, gateRejected, err): produced is true when a representation
@@ -4723,6 +4888,15 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
+		return false, false, nil
+	}
+
+	// #681: a credential spoken on a call, or read out in a screen share, is audio
+	// in the source file and plain text only here. Screen it before the quality
+	// gate and before any persistence. The document is already withheld on return,
+	// so this reports "no transcript produced" without a soft error: the run must
+	// not also count the withheld document as an error.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindTranscript, transcriptText) {
 		return false, false, nil
 	}
 
@@ -4788,13 +4962,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// untouched; ffmpeg absent / detection failure -> 0 offset -> no change. The
 	// offset is captured so the SAME shift is applied to any translated
 	// transcripts below, keeping source/translated time windows aligned.
-	trimOffsetMS := 0
-	if s.cfg.MediaTrimLeadingSilence {
-		if offset := s.detectLeadingSilence(ctx, doc); offset > 0 {
-			trimOffsetMS = int(offset.Milliseconds())
-			shiftTranscriptSpans(segments, trimOffsetMS)
-		}
-	}
+	trimOffsetMS := s.shiftSegmentsForLeadingSilence(ctx, doc, segments)
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
 		return false, false, fmt.Errorf("persist transcript chunks: %w", err)
 	}
@@ -5117,6 +5285,13 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		return nil
 	}
 
+	// #681: a translation is model output over the transcript, and a credential
+	// survives translation verbatim. Screen it before the quality gate and before
+	// any persistence.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindTranslation, translated) {
+		return nil
+	}
+
 	// A translated transcript is model output, so it routes through the output
 	// quality gate exactly like an STT transcript (anti-hallucination). The
 	// expected language is the TARGET language: the gate's language detector
@@ -5208,6 +5383,51 @@ func (s *Service) GenerateTranscriptRepresentation(ctx context.Context, doc mode
 	return err
 }
 
+// annotationPreview bounds the flattened annotation text returned to the caller
+// as a preview, cutting on a rune boundary so a multi-byte character is never
+// split.
+func annotationPreview(flattened string) string {
+	const maxPreviewRunes = 240
+	if runes := []rune(flattened); len(runes) > maxPreviewRunes {
+		return string(runes[:maxPreviewRunes]) + "..."
+	}
+	return flattened
+}
+
+// screenAnnotationForSecrets refuses an annotation whose JSON or flattened text
+// matches a configured secret pattern (#681). Both forms are chunked and
+// embedded, so both are screened before the persisting transaction opens. The
+// JSON text contains the flattened text's values, but it is screened in its own
+// right because it carries the keys and structure too, and because it is indexed
+// even when indexFlattenedText is false.
+//
+// Two things differ from the ingest producers. First, this is a standalone MCP
+// entry point (`dir2mcp_annotate`), not a step in a scan, so it opens its own
+// per-document secret scope from configuration. Second, it REFUSES the annotation
+// without withholding the source document: the annotation is model output ABOUT
+// an already-scanned document, so a match here says the model wrote a credential
+// shape, not that the corpus file holds one. Retiring a healthy document's
+// representations on that evidence would be wrong.
+//
+// The refusal is an error, not an empty preview: this tool otherwise answers
+// "stored": true and echoes the annotation back to the caller. The returned
+// sentinel and its message carry no part of the matched text.
+func (s *Service) screenAnnotationForSecrets(doc model.Document, jsonText, flattened string) error {
+	patterns, err := compileSecretPatterns(s.cfg.SecretPatterns)
+	if err != nil {
+		return fmt.Errorf("compile secret patterns: %w", err)
+	}
+	s.beginDocumentSecretScope(patterns)
+	if !s.derivedTextHasSecret(jsonText) && !s.derivedTextHasSecret(flattened) {
+		return nil
+	}
+	s.getLogger().Printf(
+		"secret policy: refusing to store the annotation for %s; it matched a configured security.secret_patterns entry",
+		doc.RelPath,
+	)
+	return ErrSecretExcluded
+}
+
 // StoreAnnotationRepresentations persists a structured annotation JSON payload
 // for a document and optionally stores a flattened text representation to make
 // annotation fields retrievable through semantic search.
@@ -5230,10 +5450,11 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 
 	flattened := s.flattenJSONForIndexing(annotation)
 	trimmed := strings.TrimSpace(flattened)
-	preview := flattened
-	if runes := []rune(preview); len(runes) > 240 {
-		preview = string(runes[:240]) + "..."
+
+	if err := s.screenAnnotationForSecrets(doc, jsonText, trimmed); err != nil {
+		return "", err
 	}
+	preview := annotationPreview(flattened)
 
 	err = s.repGen.store.WithTx(ctx, func(tx model.RepresentationStore) error {
 		jsonRep := model.Representation{

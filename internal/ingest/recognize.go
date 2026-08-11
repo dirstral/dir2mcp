@@ -402,6 +402,15 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 		return false, nil
 	}
 
+	// #681: recognition statements are text this daemon derives from the media and
+	// then indexes, so they are screened before persistence. The scan runs over the
+	// segment texts exactly as they will be chunked, not over hashInput, which
+	// interleaves length prefixes for a different purpose. On a match the document
+	// is already withheld, so this reports "nothing recognized".
+	if s.screenDerivedSecrets(ctx, doc, derivedKindRecognition, joinSegmentTexts(segments)) {
+		return false, nil
+	}
+
 	meta, err := json.Marshal(recognitionMeta{
 		Source:       recognizeSource,
 		Provider:     s.cfg.RecognizeProvider,
