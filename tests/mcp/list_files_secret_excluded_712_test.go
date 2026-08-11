@@ -30,9 +30,11 @@ import (
 // skip for the very row `list_files` called healthy. It also undid the
 // operator-facing audit value #425 restored by persisting the state at all.
 //
-// The published schema (spec/tools/schemas/list_files.json) pins status to
-// `ok|skipped|error`, so `skipped` is the conforming honest projection and no
-// spec change is needed.
+// The published schema (spec/tools/schemas/list_files.json) pinned status to
+// `ok|skipped|error`, so `skipped` was the conforming honest projection and no
+// spec change was needed. SPEC 0.48.0 later made that mapping normative rather
+// than merely conforming, and added `pending` for the other half of the same
+// audit (#676).
 
 func TestListFilesReportsASecretExcludedDocumentAsSkipped(t *testing.T) {
 	tmp := t.TempDir()
@@ -70,7 +72,8 @@ func TestListFilesReportsASecretExcludedDocumentAsSkipped(t *testing.T) {
 
 // TestListFilesStatusesStayInsideThePublishedEnum guards the projection itself
 // rather than one value: whatever the store grows next, this tool may only emit
-// the three states its schema advertises.
+// the states its schema advertises. The set grew by one in SPEC 0.48.0, which
+// added `pending` for a document that is known and not yet retrievable (#676).
 func TestListFilesStatusesStayInsideThePublishedEnum(t *testing.T) {
 	tmp := t.TempDir()
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
@@ -91,10 +94,10 @@ func TestListFilesStatusesStayInsideThePublishedEnum(t *testing.T) {
 	root := filepath.Join(tmp, "corpus")
 	seedCorpus(t, st, root, docs)
 
-	allowed := map[string]bool{"ok": true, "skipped": true, "error": true}
+	allowed := map[string]bool{"ok": true, "skipped": true, "pending": true, "error": true}
 	for relPath, status := range listFileStatuses(t, tmp, root, st) {
 		if !allowed[status] {
-			t.Fatalf("%s reported status %q, outside the published enum ok|skipped|error", relPath, status)
+			t.Fatalf("%s reported status %q, outside the published enum ok|skipped|pending|error", relPath, status)
 		}
 	}
 }

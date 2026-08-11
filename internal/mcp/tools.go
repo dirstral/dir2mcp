@@ -3340,8 +3340,8 @@ func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string
 	}
 }
 
-// normalizeFileStatus projects a stored document status onto the three values
-// the published list_files schema allows (`ok|skipped|error`, SPEC §5.1 and
+// normalizeFileStatus projects a stored document status onto the values
+// the published list_files schema allows (`ok|skipped|pending|error`, SPEC §5.1 and
 // spec/tools/schemas/list_files.json).
 //
 // The projection has to be conservative, because the default arm is what a
@@ -3357,17 +3357,24 @@ func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string
 // was the only place that disagreed, so `stats` reported a skip while
 // `list_files` reported the same document healthy.
 //
-// The store also normalizes a `pending` document status, which would fall
-// through to `ok` here. It is left alone deliberately: nothing in production
-// writes that value (every `pending` in the store is a CHUNK's
-// embedding_status), and the published enum has no state that honestly
-// describes "not indexed yet" — `skipped` would be a different lie. If a
-// document ever does become pending, this needs a spec-first status extension
-// rather than a guess.
+// A `pending` document now has a published state of its own. It used to fall
+// through to `ok`, which told a caller the document was indexed and readable
+// when it was not, so the caller asked for content that did not exist yet
+// (issue #676). SPEC 0.48.0 added `pending` to the 15.5 enum for exactly this
+// row and made the mapping normative: a server MUST NOT report a document as
+// `ok` unless it is retrievable now, and `skipped` MUST NOT be reused for work
+// that is still in progress. Before that spec change there was no honest value
+// to return here, which is why the previous comment refused to guess one.
+//
+// The default arm stays `ok`. It carries the store's own `ok` plus any value a
+// future store adds, and inventing a public state for an unknown stored one
+// would be the same class of guess.
 func normalizeFileStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "skipped", "secret_excluded":
 		return "skipped"
+	case "pending":
+		return "pending"
 	case "error":
 		return "error"
 	default:
@@ -4147,7 +4154,7 @@ func listFilesOutputSchema() map[string]interface{} {
 						"doc_type":   map[string]interface{}{"type": "string"},
 						"size_bytes": map[string]interface{}{"type": "integer"},
 						"mtime_unix": map[string]interface{}{"type": "integer"},
-						"status":     map[string]interface{}{"type": "string", "enum": []string{"ok", "skipped", "error"}},
+						"status":     map[string]interface{}{"type": "string", "enum": []string{"ok", "skipped", "pending", "error"}},
 						"deleted":    map[string]interface{}{"type": "boolean"},
 					},
 					"required": []string{"rel_path", "doc_type", "size_bytes", "mtime_unix", "status", "deleted"},
