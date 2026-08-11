@@ -2528,8 +2528,8 @@ func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel st
 	if statErr != nil {
 		return model.Document{}, mapFileAccessError(statErr)
 	}
-	// Bound the read to the ingest file-size cap. open_file streams via
-	// readFileBounded; this on-demand branch previously used an unbounded
+	// Bound the read to the ingest file-size cap. open_file streams its source
+	// (issue #690); this on-demand branch previously used an unbounded
 	// os.ReadFile, so a large within-root audio file could OOM the daemon
 	// (issue #407). Files over the cap are never indexed by discovery either,
 	// so refusing here keeps the two paths consistent.
