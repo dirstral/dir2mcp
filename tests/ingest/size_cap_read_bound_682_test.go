@@ -448,6 +448,39 @@ func TestSizeCapRead_RaisesOneFileSkipEvent(t *testing.T) {
 	}
 }
 
+// TestSizeCapRead_ManifestCarriesFileTooLarge pins the §14.4 code on the batch
+// manifest record (§8.6.11). A file the discovery stat drops already records
+// FILE_TOO_LARGE, so a file the READ refuses must record it too: a codeless skip
+// leaves the manifest unable to tell this asset from an unchanged cache hit.
+//
+// On `main` the asset is recorded as "completed".
+func TestSizeCapRead_ManifestCarriesFileTooLarge(t *testing.T) {
+	root := t.TempDir()
+	stateDir := t.TempDir()
+	manifestPath := filepath.Join(stateDir, "run.jsonl")
+	fs := &underReportingFS682{relPath: "liar.txt", reportedLen: 512, bodyLen: overCapBytes682}
+	st := newRealStore(t)
+
+	cfg := capConfig682(root, stateDir)
+	cfg.MediaBatchManifest = manifestPath
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetCorpusFS(fs)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	recs := readManifest(t, manifestPath)
+	if len(recs) != 1 {
+		t.Fatalf("want 1 manifest record, got %d: %+v", len(recs), recs)
+	}
+	if got := recs[0]["status"]; got != "skipped" {
+		t.Errorf("manifest status = %v, want skipped", got)
+	}
+	if got := recs[0]["error_code"]; got != "FILE_TOO_LARGE" {
+		t.Errorf("manifest error_code = %v, want FILE_TOO_LARGE", got)
+	}
+}
+
 // TestSizeCapRead_FileAtTheCapIsStillIndexed is the false-positive guard on the
 // limit+1 read. A file of exactly `ingest.max_file_mb` bytes is inside the cap and
 // must still be indexed: the bound must refuse only what passes it, and an

@@ -3277,6 +3277,11 @@ func isSizeCapSkip(doc model.Document) bool {
 // file_skip until member extraction finishes, and for this document extraction
 // never runs, so the deferred event would never be raised and the run would report
 // one more skip than it raised events for (SPEC §3.2).
+//
+// The batch manifest entry carries the canonical §14.4 FILE_TOO_LARGE code, exactly
+// as the discovery-time drop already does (runScan records it for every
+// pendingOversize path). A plain, codeless skip would leave the manifest unable to
+// tell this asset from a cache hit.
 func (s *Service) settleSizeCapSkip(ctx context.Context, doc model.Document) error {
 	s.retireRepresentationsForPath(ctx, doc.RelPath, "size cap")
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
@@ -3286,7 +3291,7 @@ func (s *Service) settleSizeCapSkip(ctx context.Context, doc model.Document) err
 	// instead of grouping it on the content it held before (#691).
 	s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 	s.addSkipped(1)
-	s.markActiveSkipped()
+	s.activeOutcome.markSkippedWithCode(manifestErrFileTooLarge)
 	s.notifyDocumentSkip(doc)
 	return nil
 }
