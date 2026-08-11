@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // Issue #691: retrieval-time cross-file dedup (SPEC §9.2) grouped candidate hits
@@ -176,6 +178,49 @@ func TestLiveIngest_CrossFileDedupFollowsAnEditedDuplicate(t *testing.T) {
 	}
 
 	assertLivePaths(t, ret, []string{"a.txt", "copy/a.txt"}, "after the copy is edited")
+}
+
+// TestScan_OversizeFileForgetsItsGroupKey covers the discovery path. A file that
+// grows past ingest.max_file_mb is rewritten as a skipped row with no
+// content_hash, so it must give up its group key. Otherwise a live daemon keeps
+// suppressing a distinct document against content the corpus no longer indexes.
+func TestScan_OversizeFileForgetsItsGroupKey(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	oversize := bytes.Repeat([]byte("x"), 2*1024*1024) // 2 MiB, over the 1 MiB cap
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), oversize, 0o600); err != nil {
+		t.Fatalf("write oversize file: %v", err)
+	}
+
+	// The corpus once held two byte-identical documents. ghost.txt is not on disk
+	// any more, so this run never restates its key; big.txt is over the cap now.
+	idx := &fixedLabelsIndex{labels: []uint64{1, 2}}
+	ret := retrieval.NewService(nil, idx, &staticEmbedder{vec: []float32{1, 0}}, nil)
+	ret.SetCrossFileDedupEnabled(true)
+	ret.SetDocumentHashes([]model.DocumentHash{
+		{RelPath: "ghost.txt", ContentHash: "H1"},
+		{RelPath: "big.txt", ContentHash: "H1"},
+	})
+	ret.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "ghost.txt", Snippet: "alpha"})
+	ret.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "big.txt", Snippet: "alpha"})
+
+	assertLivePaths(t, ret, []string{"ghost.txt"}, "before the scan")
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.STTProvider = "off"
+	cfg.IngestMaxFileMB = 1
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetOnDocumentContentHash(ret.UpdateDocumentHash)
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	assertLivePaths(t, ret, []string{"ghost.txt", "big.txt"}, "after the over-cap file is skipped")
 }
 
 // assertLivePaths runs one search and compares the surviving rel_paths.

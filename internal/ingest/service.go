@@ -2637,6 +2637,9 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 				// failure here would otherwise be invisible and could leave the
 				// archive looking like a silent skip again.
 				s.getLogger().Printf("persist error status for %s: %v", f.RelPath, upErr)
+			} else {
+				// Keep the live dedup map equal to the row this write produced (#691).
+				s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 			}
 			// processDocument already counted this archive as skipped (archive
 			// containers build as status="skipped"); scanPass will count the error
@@ -2871,6 +2874,10 @@ func (s *Service) persistArchiveMemberSizeCapSkips(ctx context.Context, f Discov
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
 			s.getLogger().Printf("archive %s: persist size-cap skip row for %s: %v", f.RelPath, ex.RelPath, err)
 			allPersisted = false
+		} else {
+			// The row now carries no content_hash, so dedup must forget the path
+			// rather than keep grouping it on the content it held before (#691).
+			s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 		}
 	}
 	return allPersisted
@@ -3097,6 +3104,10 @@ func (s *Service) persistOversizeSkips(ctx context.Context, oversize map[string]
 		}
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
 			s.getLogger().Printf("discovery: persist size-cap skip row for %s: %v", relPath, err)
+		} else {
+			// A file that grew past the cap keeps no content_hash, so dedup must
+			// forget the path instead of grouping on stale content (#691).
+			s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 		}
 		// Emitted here rather than at the OnOversize counter bump so the event and
 		// the persisted row stay one-to-one; the oversize map is keyed by relPath,
@@ -3130,6 +3141,9 @@ func (s *Service) persistSymlinkSkips(ctx context.Context, symlinks map[string]s
 		}
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
 			s.getLogger().Printf("discovery: persist symlink skip row for %s: %v", relPath, err)
+		} else {
+			// Same rule as the size-cap row: no content_hash, no group key (#691).
+			s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 		}
 		// Emitted even when the upsert failed, matching the size-cap path. The
 		// skipped counter was already bumped at discovery, and SPEC §3.2 ties
@@ -3983,6 +3997,9 @@ func (s *Service) persistNonFatalDocSkip(ctx context.Context, doc model.Document
 	doc.SkipReason = reason
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		s.getLogger().Printf("persist skipped status for %s: %v", doc.RelPath, err)
+	} else {
+		// Keep the live dedup map equal to the row this write produced (#691).
+		s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 	}
 	s.notifyDocumentSkip(doc)
 }
