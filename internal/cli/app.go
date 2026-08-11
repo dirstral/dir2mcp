@@ -121,6 +121,13 @@ type documentSkipNotifier interface {
 	SetOnDocumentSkip(fn func(relPath, docType, reason string))
 }
 
+// documentContentHashNotifier lets the server keep retrieval-time cross-file
+// dedup (SPEC §9.2) on live state during ingest, instead of the startup-only
+// hash snapshot it used before (#691).
+type documentContentHashNotifier interface {
+	SetOnDocumentContentHash(fn func(relPath, contentHash string))
+}
+
 type contentHashResetter interface {
 	ClearDocumentContentHashes(ctx context.Context) error
 }

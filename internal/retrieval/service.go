@@ -230,11 +230,28 @@ type Service struct {
 	// identical content_hash collapse to one best-ranked survivor. Default
 	// false (pass-through). Wired from config.DedupRetrieval at construction.
 	crossFileDedupEnabled bool
-	// groupKeyByRelPath maps a document rel_path to its content_hash (SPEC
-	// 7.6), populated at startup from a model.DocumentHashLister. It is the
-	// grouping key for cross-file dedup; an empty/absent value disables
-	// grouping for that path (entries are never collapsed together).
-	groupKeyByRelPath map[string]string
+	// groupKeys publishes the immutable rel_path → content_hash map (SPEC 7.6)
+	// used as the grouping key for cross-file dedup. It is seeded at startup
+	// from a model.DocumentHashLister and kept current by the live ingest
+	// updates below (#691). An empty/absent value disables grouping for that
+	// path (entries are never collapsed together). The pointed-to map is NEVER
+	// mutated after publication, so a query reads it with a single atomic load
+	// and no lock.
+	groupKeys atomic.Pointer[map[string]string]
+	// groupKeysMu guards pendingGroupKeys and serializes publication of a new
+	// groupKeys snapshot. It is never taken by a query that has nothing to fold
+	// in, so it does not sit on the hot retrieval path.
+	groupKeysMu sync.Mutex
+	// pendingGroupKeys buffers live ingest updates that are not published yet.
+	// An empty value means "forget this path" (deleted document, or a document
+	// whose content_hash is withheld while its representations are still being
+	// written). Buffering keeps an ingest event O(1): a per-event copy of the
+	// whole map would make a full corpus scan quadratic.
+	pendingGroupKeys map[string]string
+	// groupKeysDirty reports whether pendingGroupKeys holds unpublished
+	// updates. A query loads this atomically; only a query that sees true takes
+	// groupKeysMu and folds the buffer into a fresh snapshot.
+	groupKeysDirty atomic.Bool
 	// minScore is a server-side relevance floor (config retrieval.min_score):
 	// hits whose score — MIN-MAX NORMALIZED to [0,1] over the result set, so the
 	// floor is scale-free across cosine/RRF/rerank modes (#411) — is strictly
@@ -710,21 +727,128 @@ func (s *Service) SetCorpusLanguagesProvider(fn func() []string) {
 // candidate hits for cross-file dedup (SPEC 9.2). Entries with an empty
 // content_hash are ignored (never grouped together). The map is copied so the
 // caller may reuse its slice/map. Passing nil clears the map (pass-through).
+// It replaces the whole map, so it also drops any buffered live update (#691):
+// the caller states the full truth as of now.
 func (s *Service) SetDocumentHashes(hashes []model.DocumentHash) {
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	if len(hashes) == 0 {
-		s.groupKeyByRelPath = nil
-		return
-	}
 	m := make(map[string]string, len(hashes))
 	for _, h := range hashes {
 		if strings.TrimSpace(h.ContentHash) == "" {
 			continue
 		}
-		m[h.RelPath] = h.ContentHash
+		m[normalizeEvictPath(h.RelPath)] = h.ContentHash
 	}
-	s.groupKeyByRelPath = m
+	s.groupKeysMu.Lock()
+	defer s.groupKeysMu.Unlock()
+	s.pendingGroupKeys = nil
+	s.groupKeysDirty.Store(false)
+	s.groupKeys.Store(&m)
+}
+
+// UpdateDocumentHash records the current content_hash of one document so
+// cross-file dedup groups on live state instead of a startup-only snapshot
+// (#691). Ingest calls it after a document row is durably written: with the
+// stored hash once the representations commit, and with an empty hash while the
+// hash is withheld or the document failed. An empty hash forgets the path, so
+// the document passes through un-grouped rather than being suppressed against a
+// stale group.
+//
+// The update is buffered, not published: the call is O(1) and never blocks a
+// query. The next query that needs the map folds the buffer in.
+func (s *Service) UpdateDocumentHash(relPath, contentHash string) {
+	key := normalizeEvictPath(relPath)
+	if key == "" {
+		return
+	}
+	s.bufferGroupKeyUpdates(map[string]string{key: strings.TrimSpace(contentHash)})
+}
+
+// forgetDocumentHashes drops the group keys of the given paths, so a deleted or
+// renamed document stops claiming (or joining) a duplicate group (#691).
+func (s *Service) forgetDocumentHashes(normalized map[string]struct{}) {
+	if len(normalized) == 0 {
+		return
+	}
+	updates := make(map[string]string, len(normalized))
+	for relPath := range normalized {
+		updates[relPath] = ""
+	}
+	s.bufferGroupKeyUpdates(updates)
+}
+
+// bufferGroupKeyUpdates queues rel_path → content_hash changes for publication
+// by the next reader. An empty value means "forget this path".
+//
+// An update that states what the published map already says is dropped here. A
+// rescan re-reports every document it visits, and most of them did not change,
+// so this keeps an unchanged corpus at zero rebuilds: a query pays for the copy
+// only when the corpus really changed.
+func (s *Service) bufferGroupKeyUpdates(updates map[string]string) {
+	s.groupKeysMu.Lock()
+	defer s.groupKeysMu.Unlock()
+	var published map[string]string
+	if p := s.groupKeys.Load(); p != nil {
+		published = *p
+	}
+	changed := false
+	for relPath, hash := range updates {
+		if _, buffered := s.pendingGroupKeys[relPath]; !buffered && published[relPath] == hash {
+			continue
+		}
+		if s.pendingGroupKeys == nil {
+			s.pendingGroupKeys = make(map[string]string, len(updates))
+		}
+		s.pendingGroupKeys[relPath] = hash
+		changed = true
+	}
+	if changed {
+		s.groupKeysDirty.Store(true)
+	}
+}
+
+// currentGroupKeys returns the published rel_path → content_hash map, after
+// folding in any buffered live update. The steady state (no ingest since the
+// last read) costs one atomic bool load plus one atomic pointer load: no lock,
+// no copy, and never a store query. Only the first reader after a batch of
+// ingest events pays for the copy, so a burst of N document updates costs one
+// copy, not N.
+func (s *Service) currentGroupKeys() map[string]string {
+	if s.groupKeysDirty.Load() {
+		s.publishPendingGroupKeys()
+	}
+	if published := s.groupKeys.Load(); published != nil {
+		return *published
+	}
+	return nil
+}
+
+// publishPendingGroupKeys folds the buffered updates into a fresh immutable
+// snapshot and publishes it. The old snapshot is left untouched, so a query that
+// already loaded it keeps reading a consistent map.
+func (s *Service) publishPendingGroupKeys() {
+	s.groupKeysMu.Lock()
+	defer s.groupKeysMu.Unlock()
+	if len(s.pendingGroupKeys) == 0 {
+		s.groupKeysDirty.Store(false)
+		return
+	}
+	var base map[string]string
+	if published := s.groupKeys.Load(); published != nil {
+		base = *published
+	}
+	next := make(map[string]string, len(base)+len(s.pendingGroupKeys))
+	for relPath, hash := range base {
+		next[relPath] = hash
+	}
+	for relPath, hash := range s.pendingGroupKeys {
+		if hash == "" {
+			delete(next, relPath)
+			continue
+		}
+		next[relPath] = hash
+	}
+	s.groupKeys.Store(&next)
+	s.pendingGroupKeys = nil
+	s.groupKeysDirty.Store(false)
 }
 
 func (s *Service) SetLogger(l *log.Logger) {
@@ -974,11 +1098,16 @@ func (s *Service) EvictDocument(relPath string) {
 // normal case. The path tombstone covers the two remaining cases: a backend
 // Delete that fails, and a payload-only backend that holds no in-memory metadata,
 // where no chunk_id can be resolved for the path (issue #687).
+//
+// It also forgets each document's cross-file dedup group key (#691). A deleted
+// or renamed path must stop claiming a duplicate group, otherwise a live daemon
+// keeps suppressing a distinct document against content that no longer exists.
 func (s *Service) EvictDocuments(relPaths []string) {
 	normalized := normalizeEvictPaths(relPaths)
 	if len(normalized) == 0 {
 		return
 	}
+	s.forgetDocumentHashes(normalized)
 	s.tombstoneRelPaths(normalized)
 	labels := s.labelsForRelPaths(normalized)
 	if len(labels) == 0 {
@@ -2705,10 +2834,12 @@ func dedupMediaCandidates(hits []model.SearchHit) []model.SearchHit {
 func (s *Service) dedupCrossFileCandidates(hits []model.SearchHit) []model.SearchHit {
 	s.metaMu.RLock()
 	enabled := s.crossFileDedupEnabled
-	groupKeyByRelPath := s.groupKeyByRelPath
 	s.metaMu.RUnlock()
-
-	if !enabled || len(groupKeyByRelPath) == 0 || len(hits) == 0 {
+	if !enabled || len(hits) == 0 {
+		return hits
+	}
+	groupKeyByRelPath := s.currentGroupKeys()
+	if len(groupKeyByRelPath) == 0 {
 		return hits
 	}
 
@@ -2717,18 +2848,19 @@ func (s *Service) dedupCrossFileCandidates(hits []model.SearchHit) []model.Searc
 	claimedBy := make(map[string]string, len(hits))
 	out := make([]model.SearchHit, 0, len(hits))
 	for _, h := range hits {
-		contentHash := groupKeyByRelPath[h.RelPath]
+		relPath := normalizeEvictPath(h.RelPath)
+		contentHash := groupKeyByRelPath[relPath]
 		if contentHash == "" {
 			// Unknown/empty content_hash: never grouped, always kept.
 			out = append(out, h)
 			continue
 		}
 		owner, claimed := claimedBy[contentHash]
-		if claimed && owner != h.RelPath {
+		if claimed && owner != relPath {
 			continue
 		}
 		if !claimed {
-			claimedBy[contentHash] = h.RelPath
+			claimedBy[contentHash] = relPath
 		}
 		out = append(out, h)
 	}

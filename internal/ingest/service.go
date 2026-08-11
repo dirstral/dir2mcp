@@ -297,6 +297,15 @@ type Service struct {
 	// is the streaming counterpart of the durable skip_reasons aggregate.
 	onDocumentSkip   func(relPath, docType, reason string)
 	onDocumentSkipMu sync.RWMutex
+
+	// optional callback invoked with a document's rel_path and the content_hash
+	// its row now holds, every time that row is durably written. The CLI uses it
+	// to keep retrieval-time cross-file dedup (SPEC §9.2) on live state instead
+	// of a startup-only snapshot (#691). An empty hash means "not known good
+	// right now" (withheld #402 done marker, or a failed document), which makes
+	// the consumer forget the path rather than group on a stale hash.
+	onDocumentContentHash   func(relPath, contentHash string)
+	onDocumentContentHashMu sync.RWMutex
 	// bounds the compatibility wrapper used by SetOnDocumentDeleted so large
 	// deletion batches do not spawn an unbounded number of goroutines.
 	onDocumentDeletedMaxConcurrency int
@@ -1045,6 +1054,17 @@ func (s *Service) SetOnDocumentSkip(fn func(relPath, docType, reason string)) {
 	s.onDocumentSkipMu.Lock()
 	defer s.onDocumentSkipMu.Unlock()
 	s.onDocumentSkip = fn
+}
+
+// SetOnDocumentContentHash registers a callback invoked after every durable
+// write of a document row, with the content_hash that row now holds (#691).
+// An empty hash reports that the document has no usable content_hash right now:
+// the #402 done marker is withheld until the representations commit, and a
+// failed document never gets one. Passing nil clears the callback.
+func (s *Service) SetOnDocumentContentHash(fn func(relPath, contentHash string)) {
+	s.onDocumentContentHashMu.Lock()
+	defer s.onDocumentContentHashMu.Unlock()
+	s.onDocumentContentHash = fn
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
@@ -2081,6 +2101,8 @@ func (s *Service) persistBuildError(ctx context.Context, f DiscoveredFile, secre
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert error document: %w", err)
 	}
+	// The row carries no content_hash, so dedup must forget this path (#691).
+	s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 	return buildErr
 }
 
@@ -2180,6 +2202,10 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
+	// Report the hash the row now holds (#691). It is blank while the #402 done
+	// marker is withheld, which makes dedup forget the path for the duration of
+	// the reprocess instead of grouping on the previous content.
+	s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 
 	if err := s.refreshDocID(ctx, &doc); err != nil {
 		return err
@@ -2344,6 +2370,7 @@ func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.D
 		if err := s.store.UpsertDocument(ctx, *doc); err != nil {
 			return fmt.Errorf("finalize document content hash: %w", err)
 		}
+		s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 		return nil
 	}
 	// #413 guard: a non-fatal per-representation failure (or archive-subtype
@@ -2358,6 +2385,8 @@ func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.D
 	if err := s.store.UpsertDocument(ctx, current); err != nil {
 		return fmt.Errorf("finalize document content hash: %w", err)
 	}
+	// The done marker is durable now, so the group key is safe to publish (#691).
+	s.notifyDocumentContentHash(current.RelPath, current.ContentHash)
 	return nil
 }
 
@@ -2965,6 +2994,8 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
+	// Same live-dedup report as processDocument, for an archive member (#691).
+	s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 	if updated, err := s.store.GetDocumentByPath(ctx, relPath); err == nil {
 		doc.DocID = updated.DocID
 	} else if !isNotFoundError(err) {
@@ -3928,6 +3959,9 @@ func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Documen
 	doc.ErrorMessage = RedactSecretsInMessage(cause.Error(), secretPatterns)
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		s.getLogger().Printf("persist error status for %s: %v", doc.RelPath, err)
+	} else {
+		// Keep the live dedup map equal to the row this write produced (#691).
+		s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 	}
 	s.notifyDocumentError(doc)
 }
@@ -4017,6 +4051,26 @@ func (s *Service) notifyDocumentSkip(doc model.Document) {
 		}
 	}()
 	fn(doc.RelPath, doc.DocType, reason)
+}
+
+// notifyDocumentContentHash reports the content_hash a document row now holds
+// to the registered consumer (#691). Callers MUST invoke it only after the
+// store write returned nil, so a consumer never sees a hash the corpus does not
+// carry yet. A panicking consumer is contained: ingest must not die because a
+// notification handler misbehaved, which mirrors the other document hooks.
+func (s *Service) notifyDocumentContentHash(relPath, contentHash string) {
+	s.onDocumentContentHashMu.RLock()
+	fn := s.onDocumentContentHash
+	s.onDocumentContentHashMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.getLogger().Printf("onDocumentContentHash panic for %s (%s)", relPath, safePanicValue(r))
+		}
+	}()
+	fn(relPath, contentHash)
 }
 
 // persistTitleIfFound runs the title heuristic on the supplied text body and,

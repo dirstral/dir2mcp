@@ -159,6 +159,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		evict:         ret.EvictDocuments,
 		onDocError:    newFileErrorEmitter(emitter),
 		onDocSkip:     newFileSkipEmitter(emitter),
+		onDocHash:     crossFileDedupHashHook(cfg, ret),
 	})
 	wireDerivationCacheIdentities(ret, ing)
 
@@ -1592,6 +1593,7 @@ type ingestorHooks struct {
 	evict         func([]string)
 	onDocError    func(relPath, docType, message string)
 	onDocSkip     func(relPath, docType, reason string)
+	onDocHash     func(relPath, contentHash string)
 }
 
 // wireIngestorHooks connects the optional indexing-state, document-delete,
@@ -1610,6 +1612,20 @@ func wireIngestorHooks(ing model.Ingestor, hooks ingestorHooks) {
 	if notifier, ok := ing.(documentSkipNotifier); ok && hooks.onDocSkip != nil {
 		notifier.SetOnDocumentSkip(hooks.onDocSkip)
 	}
+	if notifier, ok := ing.(documentContentHashNotifier); ok && hooks.onDocHash != nil {
+		notifier.SetOnDocumentContentHash(hooks.onDocHash)
+	}
+}
+
+// crossFileDedupHashHook returns the per-document content-hash callback that
+// keeps retrieval-time cross-file dedup on live corpus state (#691). It returns
+// nil when dedup is off, so a corpus that does not use the feature carries no
+// notification work at all.
+func crossFileDedupHashHook(cfg config.Config, ret *retrieval.Service) func(relPath, contentHash string) {
+	if !cfg.DedupRetrieval || ret == nil {
+		return nil
+	}
+	return ret.UpdateDocumentHash
 }
 
 // newFileErrorEmitter returns the per-document error callback handed to the
