@@ -31,6 +31,13 @@ type Config struct {
 	// StateDir is the always-local state directory; the S3 cache lives under it.
 	StateDir string
 
+	// MaxFileBytes is the resolved `ingest.max_file_mb` cap in bytes. It bounds
+	// every whole-object read and every Localize download an object-store backend
+	// performs (#682), so a bucket that serves more bytes than it declared cannot
+	// exhaust memory or the local cache disk. Zero or negative selects
+	// DefaultMaxFileSizeBytes; there is no unbounded setting.
+	MaxFileBytes int64
+
 	// S3* describe the object-store backend (used only when Kind=="s3").
 	S3Bucket          string
 	S3Prefix          string
@@ -152,6 +159,7 @@ func newS3FromConfig(ctx context.Context, cfg Config) (CorpusFS, error) {
 		Bucket:   cfg.S3Bucket,
 		Prefix:   cfg.S3Prefix,
 		CacheDir: cacheDir,
+		MaxBytes: cfg.MaxFileBytes,
 	}, presignerForClient(client))
 }
 

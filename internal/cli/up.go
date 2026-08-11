@@ -1573,9 +1573,12 @@ func sourceIsRemote(cfg config.Config) bool {
 // where the S3 backend caches downloads.
 func buildCorpusFS(ctx context.Context, cfg config.Config) (corpusfs.CorpusFS, error) {
 	return corpusfs.New(ctx, corpusfs.Config{
-		Kind:              cfg.Source.Kind,
-		RootDir:           cfg.RootDir,
-		StateDir:          cfg.StateDir,
+		Kind:     cfg.Source.Kind,
+		RootDir:  cfg.RootDir,
+		StateDir: cfg.StateDir,
+		// The cap discovery admits files under, so an object-store read or download
+		// can never deliver more bytes than the operator allowed (#682).
+		MaxFileBytes:      ingest.ResolvedMaxFileBytes(cfg),
 		S3Bucket:          cfg.Source.S3Bucket,
 		S3Prefix:          cfg.Source.S3Prefix,
 		S3Region:          cfg.Source.S3Region,

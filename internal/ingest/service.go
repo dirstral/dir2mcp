@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -1097,9 +1096,9 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options.FollowSymlinks = cfg.IngestFollowSymlinks
 	// One resolved list for the scan, the watcher, and the S3 lister (#773).
 	options.ExcludeDirs = append([]string(nil), cfg.IngestExcludeDirs...)
-	if cfg.IngestMaxFileMB > 0 {
-		options.MaxSizeBytes = int64(cfg.IngestMaxFileMB) * 1024 * 1024
-	}
+	// One resolver for the cap as well (#682), so discovery, the source reads, the
+	// object-store backend, and the on-demand tool paths enforce one number.
+	options.MaxSizeBytes = ResolvedMaxFileBytes(cfg)
 	options.MediaVariants = MediaVariantOptionsFromConfig(cfg)
 	return options
 }
@@ -2208,6 +2207,14 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if buildErr != nil {
 		return s.persistBuildError(ctx, f, secretPatterns, buildErr)
 	}
+	if isSizeCapSkip(doc) {
+		// #682: the read passed the cap, so anything an earlier scan indexed for this
+		// path came from bytes this file no longer has. Retire it BEFORE the row is
+		// written, so a crash between the two steps leaves a document with nothing
+		// searchable rather than one whose row says "skipped for size_cap" while its
+		// chunks are still being served. Same ordering rule as the #681 withhold.
+		s.retireRepresentationsForPath(ctx, doc.RelPath, "size cap")
+	}
 	// Stamp the resolved content_hash onto the batch manifest outcome (§8.6.11);
 	// no-op when no batch run is active.
 	s.recordContentHash(doc.ContentHash)
@@ -2646,13 +2653,22 @@ func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Docu
 // localizing remote (object-store) objects as needed. Used by the two-phase
 // derivation pass, which needs the source bytes only to key the per-language
 // translation cache.
+//
+// The read is bounded by the configured cap (#682). An over-cap asset returns
+// ErrFileTooLarge rather than a truncated buffer: a short read would produce a
+// different cache key and quietly re-derive every translation for a file the
+// transcription pass keyed on the whole bytes. deriveDocument treats any read
+// failure as a skip and leaves the existing source transcript searchable, which
+// is the right outcome here too.
 func (s *Service) readDocumentContent(ctx context.Context, relPath string) ([]byte, error) {
-	rc, err := s.corpusFS().Open(ctx, relPath)
+	content, overCap, err := s.readSourceBytes(ctx, relPath)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rc.Close() }()
-	return io.ReadAll(rc)
+	if overCap {
+		return nil, s.sourceOverCapError(relPath)
+	}
+	return content, nil
 }
 
 // handleArchiveDocument handles an archive-type document: if the archive
@@ -3143,14 +3159,15 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 		Deleted: false,
 	}
 
-	rc, err := s.corpusFS().Open(ctx, f.RelPath)
+	content, overCap, err := s.readSourceBytes(ctx, f.RelPath)
 	if err != nil {
 		return doc, nil, fmt.Errorf("read %s: %w", f.RelPath, err)
 	}
-	content, err := io.ReadAll(rc)
-	_ = rc.Close()
-	if err != nil {
-		return doc, nil, fmt.Errorf("read %s: %w", f.RelPath, err)
+	if overCap {
+		// #682: the bytes passed the cap, so this file is not the file discovery
+		// admitted. Return the honest size_cap skip row and no content: nothing
+		// downstream may see a prefix of a file it cannot have in full.
+		return s.sizeCapSkippedDocument(doc, f), nil, nil
 	}
 	// Fold any subtitle sidecar fingerprint (sibling paths + mtimes) into the
 	// media document's content hash so the incremental gate (§7.6) re-processes
@@ -3183,15 +3200,74 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 	return doc, content, nil
 }
 
+// sizeCapSkippedDocument turns a document whose SOURCE READ passed the configured
+// cap into the honest skip row for it (#682).
+//
+// The reason is `size_cap`: SPEC §15.2 defines it as "exceeded the configured max
+// file size", which is exactly what happened. That enum is CLOSED for a spec
+// minor, and reusing the value the spec already has for this condition is what
+// keeps the honest-coverage aggregate reporting a real cause. A file caught here
+// and a file caught by the discovery stat (#497) were refused by the same policy,
+// so they must read the same in `skip_reasons`.
+//
+// SizeBytes is deliberately zeroed. All this path knows is "more than the cap":
+// it stopped reading at cap+1 by design, and to keep reading until the end just
+// to measure the file would spend the very resources the bound exists to save.
+// The size discovery recorded is worse than nothing, because it describes a
+// snapshot the read has just proved wrong: a row saying "5 KB, skipped for
+// size_cap" is a contradiction an operator cannot act on. Zero means unknown
+// here, never empty, matching persistSymlinkSkips and the archive-member
+// exclusions.
+//
+// content_hash and ETag are cleared for the same reason: both are identity claims
+// about bytes this run did not obtain. A blank content_hash also keeps the
+// incremental gate honest: the next scan re-reads and decides again, so a file
+// that shrinks back under the cap is indexed instead of staying skipped forever,
+// and the remote ETag fast path cannot skip the re-read.
+//
+// The log line names the path, the cap, and the size discovery measured, so the
+// growth or the misreport is visible. It carries no file content.
+func (s *Service) sizeCapSkippedDocument(doc model.Document, f DiscoveredFile) model.Document {
+	s.getLogger().Printf(
+		"ingest: skipping %s: its bytes passed the ingest.max_file_mb cap (%d bytes) during the read, although discovery measured %d bytes; recorded as a size_cap skip. Raise ingest.max_file_mb to include it",
+		f.RelPath, s.sourceReadCapBytes(), f.SizeBytes,
+	)
+	doc.Status = "skipped"
+	doc.SkipReason = model.SkipReasonSizeCap
+	doc.SizeBytes = 0
+	doc.ContentHash = ""
+	doc.ETag = ""
+	doc.SidecarFingerprint = ""
+	doc.Title = ""
+	return doc
+}
+
+// isSizeCapSkip reports whether doc is the size_cap skip row
+// sizeCapSkippedDocument produced. It is the marker processDocument keys the
+// representation retirement off, and it is deliberately narrow: no other builder
+// pairs status="skipped" with skip_reason="size_cap".
+func isSizeCapSkip(doc model.Document) bool {
+	return doc.Status == "skipped" && doc.SkipReason == model.SkipReasonSizeCap
+}
+
 // persistOversizeSkips upserts a minimal skipped document row for each file
 // dropped at discovery for exceeding the ingest size cap (#497), stamping
 // skip_reason=size_cap so CorpusStats.SkipSummary can report it. Each path is
 // also registered in seen so markMissingAsDeleted (which runs after the scan)
 // does not tombstone the freshly-persisted row. Best-effort per path: a failed
 // upsert is logged and skipped rather than aborting the whole scan.
+//
+// It also retires anything an earlier scan indexed for the path (#682). A file
+// that grew past the cap was indexed while it was smaller, and the row this
+// writes carries no content_hash, so without the retirement the corpus would
+// report the file as skipped for size_cap while still serving chunks of its old
+// content. That is the same contradiction the read-time path avoids, so both
+// paths resolve it the same way. It is a no-op (one empty list query) for a file
+// that was never indexed, which is the common case.
 func (s *Service) persistOversizeSkips(ctx context.Context, oversize map[string]int64, seen map[string]struct{}) {
 	for relPath, size := range oversize {
 		seen[relPath] = struct{}{}
+		s.retireRepresentationsForPath(ctx, relPath, "size cap")
 		doc := model.Document{
 			RelPath:    relPath,
 			DocType:    ClassifyDocType(relPath),

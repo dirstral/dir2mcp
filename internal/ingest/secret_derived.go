@@ -196,19 +196,33 @@ func (s *Service) creditSecretExcludedSkip(doc model.Document) {
 // convert a withheld document into a failed run. The document row is still
 // recorded `secret_excluded` either way.
 func (s *Service) retireDocumentRepresentations(ctx context.Context, relPath string) {
+	s.retireRepresentationsForPath(ctx, relPath, "secret policy")
+}
+
+// retireRepresentationsForPath is the shared retirement step: it tombstones every
+// live representation of relPath together with its chunks, and labels its logs
+// with the policy that asked for it.
+//
+// Two policies retire a document's representations, and both need the same
+// action. The secret policy (#681) withholds a document whose derived text
+// carries a credential. The size cap (#682) refuses a document whose bytes passed
+// the cap, which retires anything an earlier scan indexed from the smaller
+// version. A second delete path for the second policy would be a second place for
+// the §6.6 tombstone rule to be got wrong, so there is one.
+func (s *Service) retireRepresentationsForPath(ctx context.Context, relPath, policy string) {
 	lister, listOK := s.store.(activeRepresentationLister)
 	retirer, retireOK := s.store.(representationRetirer)
 	if !listOK || !retireOK {
 		s.getLogger().Printf(
-			"secret policy: store cannot retire representations for %s; verify no stale representation is left for it",
-			relPath,
+			"%s: store cannot retire representations for %s; verify no stale representation is left for it",
+			policy, relPath,
 		)
 		return
 	}
 	reps, err := lister.ActiveRepresentations(ctx, relPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			s.getLogger().Printf("secret policy: list representations for %s failed: %v", relPath, err)
+			s.getLogger().Printf("%s: list representations for %s failed: %v", policy, relPath, err)
 		}
 		return
 	}
@@ -220,7 +234,7 @@ func (s *Service) retireDocumentRepresentations(ctx context.Context, relPath str
 		ids = append(ids, rep.RepID)
 	}
 	if _, err := retirer.SoftDeleteRepresentations(ctx, relPath, ids); err != nil {
-		s.getLogger().Printf("secret policy: retire representations for %s failed: %v", relPath, err)
+		s.getLogger().Printf("%s: retire representations for %s failed: %v", policy, relPath, err)
 	}
 }
 

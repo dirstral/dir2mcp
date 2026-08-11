@@ -19,6 +19,20 @@ import (
 // to their own fatal-error classification without string matching.
 var ErrPathEscapesRoot = errors.New("corpusfs: path escapes the corpus root")
 
+// ErrObjectTooLarge is returned by an object-store backend when the bytes it
+// actually served passed the configured per-file cap (#682).
+//
+// It is a distinct sentinel from a transport failure for one reason: the two need
+// opposite answers. A transport failure is retried, because the next attempt may
+// work. A cap trip is a policy decision about a file discovery already refused, so
+// it is permanent for as long as the object stays that size, and callers report it
+// as the `size_cap` skip it is rather than as an error.
+//
+// LocalFS never returns it. A local Localize hands back the in-root path and
+// copies nothing, so it has no read to bound; the caller's own read is the
+// boundary there.
+var ErrObjectTooLarge = errors.New("corpusfs: object exceeds the configured max file size")
+
 // LocalFS is the default CorpusFS backed by the local filesystem. An NFS mount
 // is a local path, so it is served by LocalFS as well. It is behavior-preserving
 // relative to the historical ingest discovery walker.
