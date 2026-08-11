@@ -2574,15 +2574,15 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 	if needsProcessing {
 		complete, err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen)
 		if err != nil {
-			if !errors.Is(err, errUnsupportedArchiveFormat) {
+			if !isDurableArchiveFailure(err) {
 				// Context cancellation (shutdown mid-archive) and any other
 				// non-sentinel error must propagate WITHOUT persisting a durable
 				// "error" status or mutating counters: processArchiveMembers returns
 				// ctx.Err() on cancellation, and recording that as a hard per-document
 				// failure would corrupt CorpusStats and wrongly flag the container.
 				//
-				// This "persist only for the errUnsupportedArchiveFormat sentinel"
-				// guard is what keeps cancellation from writing a status="error"; it is
+				// This "persist only for a known durable sentinel" guard is what keeps
+				// cancellation from writing a status="error"; it is
 				// verified by static reasoning rather than a test. Triggering the
 				// member-loop cancellation path deterministically needs a call-count
 				// context tuned to the exact ctx.Err() sequence (LocalFS.Localize
@@ -2595,7 +2595,8 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 				return err
 			}
 			// #398: an unsupported/unextractable archive (.xz/.7z/.rar) must not be
-			// silently ingested as an empty skipped document. Persist the container
+			// silently ingested as an empty skipped document. #658: an archive that
+			// could not be read in full must not either. Persist the container
 			// itself as status="error" so it is durably visible via status queries and
 			// retried on the next incremental run, mirroring the representation-failure
 			// path in processDocument.
@@ -2642,6 +2643,18 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 	return nil
 }
 
+// isDurableArchiveFailure reports whether an archive failure must be persisted
+// on the container as status="error" rather than merely propagated.
+//
+// Both members of the set describe the archive's own content: the format cannot
+// be extracted at all (#398), or the bytes could not be read in full (#658).
+// Both are worth an operator's attention and both are retried on the next scan.
+// Everything else (notably context cancellation at shutdown) is about the RUN,
+// not the file, and must never brand the container.
+func isDurableArchiveFailure(err error) bool {
+	return errors.Is(err, errUnsupportedArchiveFormat) || errors.Is(err, errArchiveUnreadable)
+}
+
 // archiveMaxMembersEff resolves the effective per-archive member-count cap:
 // the Service override when positive, else the package default (#408).
 func (s *Service) archiveMaxMembersEff() int {
@@ -2674,8 +2687,9 @@ func (s *Service) archiveMaxTotalBytesEff() int64 {
 // member granularity). Tradeoff: a partially-failing archive is re-extracted on
 // every scan until all its members succeed (successful members are cheap cache
 // hits; only the failed ones do real work). A non-nil error is a hard per-archive
-// failure (unsupported format sentinel or context cancellation) the caller
-// persists/propagates separately; complete is meaningless when err != nil.
+// failure (an unsupported format, an unreadable archive, or context cancellation)
+// the caller persists/propagates separately; complete is meaningless when
+// err != nil.
 func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) (complete bool, err error) {
 	// Archive readers need a real filesystem path. Localize returns the in-root
 	// path for a local corpus (no-op cleanup) or a temp download for an object
@@ -2683,7 +2697,8 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 	localPath, cleanup, err := s.corpusFS().Localize(ctx, f.RelPath)
 	if err != nil {
 		s.getLogger().Printf("archive localize %s: %v", f.RelPath, err)
-		// localize failure is non-fatal but leaves extraction incomplete; the
+		// A localize failure is about the transport (an S3 download, a disk read),
+		// not about the archive's content, so it is non-fatal and unbranded: the
 		// archive stays "skipped" and its content_hash must not be finalized so
 		// the next scan retries.
 		return false, nil
@@ -2691,59 +2706,160 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 	defer cleanup()
 	extraction, err := extractArchiveMembers(localPath, f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff())
 	if err != nil {
-		if errors.Is(err, errUnsupportedArchiveFormat) {
-			// #398: .xz/.7z/.rar (and any other classified-but-unextractable
-			// container) were being silently ingested as empty skipped documents —
-			// known but unsearchable, with zero diagnostics. Return the error so the
-			// caller records the archive as status="error" and counts it, making the
-			// gap visible and retriable instead of vanishing.
-			return false, fmt.Errorf("unsupported archive format for %s: %w", f.RelPath, err)
-		}
-		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
-		// corrupt/other extraction failure is non-fatal; archive stays "skipped"
-		// and its content_hash stays withheld so the next scan retries.
-		return false, nil
+		return false, archiveExtractionError(f.RelPath, err)
 	}
-	members := extraction.Members
+	s.reportArchiveExtraction(f.RelPath, extraction)
+	allMembersOK, err := s.ingestArchiveMembers(ctx, f, extraction.Members, secretPatterns, forceReindex, seen)
+	if err != nil {
+		return false, err
+	}
+	// Members and exclusions never share a rel_path (see memberAccumulator.result),
+	// so this pass cannot overwrite a row the pass above just wrote.
+	skipsPersisted := s.persistArchiveMemberSizeCapSkips(ctx, f, extraction.Excluded, seen)
+	if extraction.Unreadable > 0 {
+		// #658: at least one declared member could not be opened or read. The
+		// members that did read are ingested above (best-effort), but the container
+		// must not look healthy. Report it as a durable per-archive failure so the
+		// gap is visible and the next scan retries it.
+		return false, fmt.Errorf("archive %s: %d declared member(s) could not be read: %w", f.RelPath, extraction.Unreadable, errArchiveUnreadable)
+	}
+	// Truncation (#408) is a deliberate, deterministic cap. The dropped members
+	// can never be recovered by re-extraction, so it does NOT withhold the marker
+	// (that would re-extract on every scan forever with no benefit). The same is
+	// true of the per-member size cap (#683), which is why its members are
+	// persisted as durable size_cap skips instead. A size_cap row that failed to
+	// persist is the exception: the omission then has no durable record, so the
+	// container must stay incomplete and re-extract until the row lands. Only
+	// that, and genuine per-member failures, leave the archive incomplete.
+	return allMembersOK && skipsPersisted, nil
+}
+
+// archiveExtractionError classifies an extractor failure into the durable
+// sentinel the caller brands the container with.
+//
+// Both outcomes are about the file itself, so both are persisted on the
+// container and retried. Before #658 the second branch returned no error at all:
+// an archive whose bytes could not be opened or decompressed was logged once and
+// then looked like an ordinary empty archive.
+func archiveExtractionError(archiveRelPath string, err error) error {
+	if errors.Is(err, errUnsupportedArchiveFormat) {
+		// #398: .xz/.7z/.rar (and any other classified-but-unextractable
+		// container) were being silently ingested as empty skipped documents:
+		// known but unsearchable, with zero diagnostics.
+		return fmt.Errorf("unsupported archive format for %s: %w", archiveRelPath, err)
+	}
+	return fmt.Errorf("extract archive %s: %w: %w", archiveRelPath, err, errArchiveUnreadable)
+}
+
+// reportArchiveExtraction logs the two extraction-wide diagnostics: the #408
+// fan-out truncation warning and the #718 per-member skip record. Split out of
+// processArchiveMembers to keep that function within the complexity budget.
+func (s *Service) reportArchiveExtraction(archiveRelPath string, extraction archiveExtraction) {
 	if extraction.Truncated {
 		// #408 decompression-bomb guard: extraction stopped once the archive hit
 		// the member-count or aggregate-uncompressed-size cap. The members read
-		// before the cap are still ingested below; surface a clear warning so the
+		// before the cap are still ingested; surface a clear warning so the
 		// truncation is visible rather than a silent partial ingest.
 		s.getLogger().Printf(
 			"archive %s: member fan-out exceeded caps (max_members=%d, max_total_bytes=%d); ingesting the first %d member(s), remaining entries skipped (#408)",
-			f.RelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff(), len(members),
+			archiveRelPath, s.archiveMaxMembersEff(), s.archiveMaxTotalBytesEff(), len(extraction.Members),
 		)
 	}
-	s.logArchiveMemberSkips(f.RelPath, extraction.Skips)
-	allMembersOK := true
+	s.logArchiveMemberSkips(archiveRelPath, extraction.Skips)
+}
+
+// ingestArchiveMembers ingests each extracted member as an independent document.
+// One bad member is logged and does not abort the rest (#398 best-effort); it
+// only clears the allOK result so the container's done marker stays withheld.
+// A non-nil error is context cancellation, which must abort the whole archive.
+func (s *Service) ingestArchiveMembers(ctx context.Context, f DiscoveredFile, members []archiveMember, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) (allOK bool, err error) {
+	allOK = true
 	for _, m := range members {
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
 		if err := s.processDocumentFromContent(ctx, m.RelPath, m.Content, f.MTimeUnix, secretPatterns, forceReindex); err != nil {
 			s.getLogger().Printf("archive member %s: %v", m.RelPath, err)
-			allMembersOK = false // extraction did not fully complete; retry next scan
+			allOK = false // extraction did not fully complete; retry next scan
 			// continue with next member (#398 best-effort)
 		}
 		if seen != nil {
 			seen[m.RelPath] = struct{}{}
 		}
 	}
-	// Truncation (#408) is a deliberate, deterministic cap — the dropped members
-	// can never be recovered by re-extraction, so it does NOT withhold the marker
-	// (that would re-extract on every scan forever with no benefit). Only genuine
-	// per-member failures leave the archive incomplete.
-	return allMembersOK, nil
+	return allOK, nil
+}
+
+// persistArchiveMemberSizeCapSkips upserts a durable status=skipped row, with
+// skip_reason=size_cap, for each archive member the per-member size cap left out
+// (#683).
+//
+// Before this, an oversized member was a log line and nothing else. The archive
+// finished, its content_hash was stamped, and the member simply was not in the
+// corpus: an operator could not tell an archive that never held the file from
+// one whose only member was 11 MiB, and no later incremental scan retried it
+// (nor could one, since the cap is deterministic). The row makes the omission
+// part of the honest-coverage aggregate (SPEC §7.7 skip_reasons), which survives
+// the run that produced it, so the container may still be finalized as done.
+//
+// size_cap is the spec's own enum value for "exceeded the configured max file
+// size". The enum is CLOSED for a given spec minor, so this path reuses it
+// rather than inventing an archive-specific reason.
+//
+// The row is deliberately not reported through notifyDocumentSkip. Archive
+// members are not credited to the run's scanned/skipped counters at all (the
+// container accounts for the archive), and SPEC §3.2 ties the number of
+// file_skip events to the run's terminal indexing.skipped. Emitting one here
+// would break that equality. This matches how a nested archive member is
+// already persisted as skipped without an event.
+//
+// A failed upsert does not abort the other exclusions, mirroring
+// persistOversizeSkips, but it IS reported: the return value is false, and the
+// caller then leaves the container incomplete so the next scan re-extracts and
+// writes the row again. Logging alone would let the container be stamped done
+// with the omission recorded nowhere, which is the very bug this path closes.
+// Each path is registered in seen so markMissingAsDeleted does not tombstone
+// the row that was just written.
+func (s *Service) persistArchiveMemberSizeCapSkips(ctx context.Context, f DiscoveredFile, excluded []archiveMemberExclusion, seen map[string]struct{}) (allPersisted bool) {
+	allPersisted = true
+	for _, ex := range excluded {
+		if seen != nil {
+			seen[ex.RelPath] = struct{}{}
+		}
+		doc := model.Document{
+			RelPath:    ex.RelPath,
+			DocType:    ClassifyDocType(ex.RelPath),
+			SourceType: "archive_member",
+			// The archive's own mtime, matching every other member row: the member
+			// content came from this archive at this revision.
+			MTimeUnix: f.MTimeUnix,
+			// The size the archive declared, or 0 when the format declares none.
+			// Zero means "unknown", never "empty".
+			SizeBytes:  ex.SizeBytes,
+			Status:     "skipped",
+			SkipReason: model.SkipReasonSizeCap,
+		}
+		if err := s.store.UpsertDocument(ctx, doc); err != nil {
+			s.getLogger().Printf("archive %s: persist size-cap skip row for %s: %v", f.RelPath, ex.RelPath, err)
+			allPersisted = false
+		}
+	}
+	return allPersisted
 }
 
 // logArchiveMemberSkips surfaces members an archive declared but that did not
 // become documents (#718). A refused member is otherwise invisible: the archive
 // indexes fine, the member is simply absent, and nothing tells the operator the
 // difference between "the archive did not contain it" and "dir2mcp refused the
-// name". Log-only, matching the OnUnsafeKey precedent (#735): there is no usable
-// rel_path to key a skipped document row on (the unusable name IS the finding),
-// so this is not counted as a corpus skip either.
+// name". Log-only, matching the OnUnsafeKey precedent (#735): a refused name has
+// no usable rel_path to key a skipped document row on (the unusable name IS the
+// finding), so it is not counted as a corpus skip either.
+//
+// This is the log of every skip, including those that DO get a durable record
+// elsewhere: a size-cap exclusion also becomes a status=skipped row (#683), and
+// an unreadable member also brands the container status=error (#658). The log
+// keeps naming them so one place still answers "what did this archive declare
+// that did not become a document".
 //
 // Each member is named with its reason, up to the bounded sample the extractor
 // retained; the count is always exact.
