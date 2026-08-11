@@ -54,7 +54,7 @@ func TestX402_ModeOff_NoPaymentHeaders(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.X402.Mode = x402.ModeOff
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -82,7 +82,7 @@ func TestX402_ModeOff_PaymentSignatureIgnored(t *testing.T) {
 	cfg.X402.Mode = x402.ModeOff
 	cfg.X402.FacilitatorURL = facSrv.URL
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -109,7 +109,7 @@ func TestX402_ModeOn_IncompleteConfigFailsOpen(t *testing.T) {
 	cfg.X402.ToolsCallEnabled = true
 
 	var warningEmitted atomic.Bool
-	srv := newServer(cfg, mcp.WithEventEmitter(func(level, event string, _ interface{}) {
+	srv := newServer(t, cfg, mcp.WithEventEmitter(func(level, event string, _ interface{}) {
 		if event == "x402_validation_failed" {
 			warningEmitted.Store(true)
 		}
@@ -142,7 +142,7 @@ func TestX402_ModeOn_NoPaymentReturns402(t *testing.T) {
 	cfg := x402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -166,7 +166,7 @@ func TestX402_ModeRequired_MissingConfigReturns503(t *testing.T) {
 	cfg.X402.Mode = x402.ModeRequired
 	cfg.X402.ToolsCallEnabled = true
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -192,7 +192,7 @@ func TestX402_ModeRequired_ValidPaymentAccepted(t *testing.T) {
 	cfg := x402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -224,7 +224,7 @@ func TestX402_InitializeAndToolsListNotGated(t *testing.T) {
 			cfg := x402Config(t, facSrv.URL)
 			cfg.X402.Mode = mode
 
-			srv := newServer(cfg)
+			srv := newServer(t, cfg)
 			defer srv.Close()
 
 			// initialize must always succeed.
@@ -257,7 +257,7 @@ func TestX402_ModeOn_PaymentRequiredHeaderIsValidJSON(t *testing.T) {
 	cfg := x402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)

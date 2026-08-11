@@ -17,7 +17,7 @@ import (
 func TestLifecycle_Initialize(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil)
@@ -57,7 +57,7 @@ func TestLifecycle_Initialize(t *testing.T) {
 func TestLifecycle_UnknownMethod(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -83,7 +83,7 @@ func TestLifecycle_UnknownMethod(t *testing.T) {
 func TestLifecycle_MalformedJSON(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, "", `{not valid json`, nil)
@@ -108,7 +108,7 @@ func TestLifecycle_MalformedJSON(t *testing.T) {
 func TestLifecycle_MissingSession(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, "", `{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}`, nil)
@@ -131,7 +131,7 @@ func TestLifecycle_MissingSession(t *testing.T) {
 func TestLifecycle_InitializeMissingJSONRPC(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, "", `{"id":1,"method":"initialize","params":{}}`, nil)
@@ -153,7 +153,7 @@ func TestLifecycle_AuthRequired(t *testing.T) {
 	cfg.AuthMode = "token"
 	cfg.ResolvedAuthToken = "supersecret"
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil)
