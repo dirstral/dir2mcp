@@ -56,6 +56,13 @@ type memberAccumulator struct {
 	// excluded lists members the per-member size cap deliberately left out (#683).
 	// See excludeOversize.
 	excluded []archiveMemberExclusion
+	// excludedLast holds the rel_paths whose LATEST decision, in archive order,
+	// was an exclusion. Two entries can normalize onto one rel_path, and rel_path
+	// is the store's document key, so only the last one is reachable. Without this
+	// an earlier accepted member would overwrite the skip row of the later
+	// oversized member that actually wins, and the corpus would claim the path is
+	// indexed when it is not. See result.
+	excludedLast map[string]struct{}
 	// unreadable counts members (or whole entry streams) the archive declared but
 	// that could not be read (#658). See recordUnreadable/recordStreamFailure.
 	unreadable int
@@ -72,7 +79,17 @@ func newMemberAccumulator(maxMembers int, maxTotalBytes int64) *memberAccumulato
 		maxMembers:   maxMembers,
 		maxTotalByte: maxTotalBytes,
 		seen:         make(map[string]struct{}),
+		excludedLast: make(map[string]struct{}),
 	}
+}
+
+// entriesTaken is the number of archive entries this accumulator has already
+// committed to, whether by ingesting them or by naming them as an exclusion.
+// Both consume the same budget: each one costs memory that a hostile archive
+// controls, and the member-count cap is the single ceiling on how many entries
+// one archive may turn into work (#408).
+func (a *memberAccumulator) entriesTaken() int {
+	return len(a.members) + len(a.excluded)
 }
 
 // add appends a member unless a cap would be exceeded. It returns stop=true when
@@ -85,7 +102,7 @@ func newMemberAccumulator(maxMembers int, maxTotalBytes int64) *memberAccumulato
 // tar's own last-entry-wins extraction semantics), but the earlier member's
 // content stops being reachable, so the collapse is reported rather than silent.
 func (a *memberAccumulator) add(relPath string, content []byte) (stop bool) {
-	if len(a.members) >= a.maxMembers {
+	if a.entriesTaken() >= a.maxMembers {
 		a.truncated = true
 		return true
 	}
@@ -97,6 +114,9 @@ func (a *memberAccumulator) add(relPath string, content []byte) (stop bool) {
 		a.skips.record(relPath, "collides with an earlier member's rel_path; the later member wins")
 	}
 	a.seen[relPath] = struct{}{}
+	// This member is now the latest claim on the rel_path, so it supersedes any
+	// earlier exclusion of the same path.
+	delete(a.excludedLast, relPath)
 	a.total += int64(len(content))
 	a.members = append(a.members, archiveMember{RelPath: relPath, Content: content})
 	return false
@@ -117,15 +137,28 @@ func (a *memberAccumulator) add(relPath string, content []byte) (stop bool) {
 // declare one (a bare gzip/bzip2 payload is only known to be over the cap).
 // The member is also recorded in skips so the operator log names it.
 //
-// The retained list is bounded by the same member-count cap that bounds
-// ingestion: one durable row per excluded member is honest, but an archive
-// declaring millions of oversized entries must not turn a coverage record into
-// a memory problem. skips.Total stays exact either way.
-func (a *memberAccumulator) excludeOversize(declaredName, relPath string, sizeBytes int64) {
-	if len(a.excluded) < a.maxMembers {
-		a.excluded = append(a.excluded, archiveMemberExclusion{RelPath: relPath, SizeBytes: sizeBytes})
-	}
+// It returns stop=true on exactly the same terms as add: naming an exclusion
+// costs memory a hostile archive controls, so it draws on the SAME member-count
+// budget, and extraction halts once that budget is spent. An exclusion is
+// therefore never quietly dropped for want of room. Either it is recorded, or
+// the run stopped at the cap and the caller reports the #408 truncation. The
+// member is recorded in skips either way, and skips.Total stays exact.
+func (a *memberAccumulator) excludeOversize(declaredName, relPath string, sizeBytes int64) (stop bool) {
 	a.skips.record(declaredName, fmt.Sprintf("member exceeds the %d-byte per-member cap; recorded as a size_cap skip", int64(archiveMemberMaxBytes)))
+	if a.entriesTaken() >= a.maxMembers {
+		a.truncated = true
+		return true
+	}
+	if _, dup := a.seen[relPath]; dup {
+		a.skips.record(relPath, "collides with an earlier member's rel_path; the later member wins")
+	}
+	a.seen[relPath] = struct{}{}
+	// This exclusion is now the latest claim on the rel_path. result() uses that
+	// to drop any earlier accepted member that would otherwise overwrite the skip
+	// row with an "indexed" one.
+	a.excludedLast[relPath] = struct{}{}
+	a.excluded = append(a.excluded, archiveMemberExclusion{RelPath: relPath, SizeBytes: sizeBytes})
+	return false
 }
 
 // recordUnreadable records a member the archive declared but that could not be
@@ -214,12 +247,40 @@ type archiveExtraction struct {
 // extractor ends the same way, so the field-by-field copy lives in one place:
 // a new observable field added to the accumulator cannot then be plumbed
 // through one format and forgotten on another.
+//
+// It also settles collisions between the two lists. rel_path is the store's
+// document key, so when several entries normalize onto one path only the last
+// one in archive order is reachable, and the caller writes Members and Excluded
+// in two separate passes with no ordering between them. Each list therefore
+// keeps only the paths its own side claimed LAST. The two are then disjoint, so
+// whichever pass runs first, the surviving row is the outcome the archive
+// actually ends on: an oversized last entry stays a size_cap skip, and an
+// under-cap last entry stays an indexed document.
 func (a *memberAccumulator) result() archiveExtraction {
+	members, excluded := a.members, a.excluded
+	// Gate on the exclusions, never on excludedLast: an exclusion that a later
+	// accepted member superseded empties that map while leaving the stale entry in
+	// a.excluded, and skipping the filter would then write a skip row over the
+	// member that actually wins.
+	if len(a.excluded) > 0 {
+		members = make([]archiveMember, 0, len(a.members))
+		for _, m := range a.members {
+			if _, superseded := a.excludedLast[m.RelPath]; !superseded {
+				members = append(members, m)
+			}
+		}
+		excluded = make([]archiveMemberExclusion, 0, len(a.excluded))
+		for _, e := range a.excluded {
+			if _, wins := a.excludedLast[e.RelPath]; wins {
+				excluded = append(excluded, e)
+			}
+		}
+	}
 	return archiveExtraction{
-		Members:    a.members,
+		Members:    members,
 		Skips:      a.skips,
 		Truncated:  a.truncated,
-		Excluded:   a.excluded,
+		Excluded:   excluded,
 		Unreadable: a.unreadable,
 	}
 }
@@ -457,7 +518,9 @@ func extractSingleCompressedMember(absPath, archiveRelPath, format string, maxMe
 		// the caller persists a durable size_cap skip row for it (#683). The
 		// declared size is unknown, because the read stopped one byte past the cap
 		// (see archiveMemberExclusion.SizeBytes).
-		acc.excludeOversize(base, memberRelPath, 0)
+		// The stop signal cannot fire here: a bare gzip/bzip2 holds one payload,
+		// so no entry budget has been spent yet.
+		_ = acc.excludeOversize(base, memberRelPath, 0)
 		return acc.result(), nil
 	}
 	// Route through the shared accumulator so the aggregate-size cap is enforced
@@ -486,7 +549,9 @@ func extractZipMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 		}
 		memberRelPath := archiveRelPath + "/" + memberRel
 		if f.UncompressedSize64 > archiveMemberMaxBytes {
-			acc.excludeOversize(f.Name, memberRelPath, int64(f.UncompressedSize64))
+			if acc.excludeOversize(f.Name, memberRelPath, int64(f.UncompressedSize64)) {
+				break // entry budget spent (#408)
+			}
 			continue
 		}
 		rc, err := f.Open()
@@ -505,7 +570,9 @@ func extractZipMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 		if int64(len(content)) > archiveMemberMaxBytes {
 			// The central directory understated the member. The cap still applies,
 			// and the true size is unknown, so report the declared one.
-			acc.excludeOversize(f.Name, memberRelPath, int64(f.UncompressedSize64))
+			if acc.excludeOversize(f.Name, memberRelPath, int64(f.UncompressedSize64)) {
+				break // entry budget spent (#408)
+			}
 			continue
 		}
 		if acc.add(memberRelPath, content) {
@@ -515,25 +582,38 @@ func extractZipMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 	return acc.result(), nil
 }
 
-func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) (archiveExtraction, error) {
+// openTarStream opens the archive at absPath and returns the raw tar byte
+// stream, unwrapping whichever compression the archive's name declares. cleanup
+// closes everything the stream holds open and is non-nil whenever err is nil.
+// Split out of extractTarMembers to keep that function within the complexity
+// budget.
+func openTarStream(absPath, archiveRelPath string) (rd io.Reader, cleanup func(), err error) {
 	f, err := os.Open(absPath)
 	if err != nil {
-		return archiveExtraction{}, fmt.Errorf("open tar: %w", err)
+		return nil, nil, fmt.Errorf("open tar: %w", err)
 	}
-	defer func() { _ = f.Close() }()
-
-	var rd io.Reader = f
+	closeFile := func() { _ = f.Close() }
 	switch archiveFormat(archiveRelPath) {
 	case "tar.gz":
 		gr, err := gzip.NewReader(f)
 		if err != nil {
-			return archiveExtraction{}, fmt.Errorf("gzip reader: %w", err)
+			closeFile()
+			return nil, nil, fmt.Errorf("gzip reader: %w", err)
 		}
-		defer func() { _ = gr.Close() }()
-		rd = gr
+		return gr, func() { _ = gr.Close(); closeFile() }, nil
 	case "tar.bz2":
-		rd = bzip2.NewReader(f)
+		return bzip2.NewReader(f), closeFile, nil
+	default:
+		return f, closeFile, nil
 	}
+}
+
+func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalBytes int64) (archiveExtraction, error) {
+	rd, cleanup, err := openTarStream(absPath, archiveRelPath)
+	if err != nil {
+		return archiveExtraction{}, err
+	}
+	defer cleanup()
 
 	tr := tar.NewReader(rd)
 	acc := newMemberAccumulator(maxMembers, maxTotalBytes)
@@ -559,7 +639,9 @@ func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 		}
 		memberRelPath := archiveRelPath + "/" + memberRel
 		if hdr.Size > archiveMemberMaxBytes {
-			acc.excludeOversize(hdr.Name, memberRelPath, hdr.Size)
+			if acc.excludeOversize(hdr.Name, memberRelPath, hdr.Size) {
+				break // entry budget spent (#408)
+			}
 			continue
 		}
 		content, readErr := io.ReadAll(io.LimitReader(tr, archiveMemberMaxBytes+1))
@@ -570,7 +652,9 @@ func extractTarMembers(absPath, archiveRelPath string, maxMembers int, maxTotalB
 		if int64(len(content)) > archiveMemberMaxBytes {
 			// The header understated the member. The cap still applies, and the true
 			// size is unknown, so report the declared one.
-			acc.excludeOversize(hdr.Name, memberRelPath, hdr.Size)
+			if acc.excludeOversize(hdr.Name, memberRelPath, hdr.Size) {
+				break // entry budget spent (#408)
+			}
 			continue
 		}
 		if acc.add(memberRelPath, content) {

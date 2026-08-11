@@ -4,11 +4,14 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/bzip2"
 	"compress/gzip"
 	"context"
+	"errors"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -94,23 +97,33 @@ func buildGz683(t *testing.T, body []byte) []byte {
 	return buf.Bytes()
 }
 
-// buildBz2683 compresses body with the system bzip2 tool. Go has no bzip2
-// writer, and the repository pulls in no third-party compressor, so the test
-// skips when the tool is absent rather than dropping the format's coverage.
-func buildBz2683(t *testing.T, body []byte) []byte {
+// oversizeBz2Fixture683 is a checked-in bzip2 stream that decodes to exactly
+// oversizePayload683(). Go ships no bzip2 writer and this repository pulls in no
+// third-party compressor, so the alternative was to shell out to a system
+// bzip2. That would let CI pass while silently skipping the only bare-bzip2
+// case. The fixture is 2 KB and regenerates with:
+//
+//	python3 -c 'import bz2,sys; u=b"dir2mcp oversized archive member payload\n"; \
+//	  n=10*1024*1024+1; sys.stdout.buffer.write(bz2.compress((u*(n//len(u)+1))[:n],9))' \
+//	  > tests/ingest/testdata/oversize_member_683.bz2
+const oversizeBz2Fixture683 = "testdata/oversize_member_683.bz2"
+
+func readOversizeBz2Fixture683(t *testing.T) []byte {
 	t.Helper()
-	bin, err := exec.LookPath("bzip2")
+	data, err := os.ReadFile(oversizeBz2Fixture683)
 	if err != nil {
-		t.Skip("bzip2 not installed; skipping the bzip2 oversize case")
+		t.Fatalf("read bzip2 fixture: %v", err)
 	}
-	cmd := exec.Command(bin, "-c")
-	cmd.Stdin = bytes.NewReader(body)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("bzip2 compress: %v", err)
+	// Guard the fixture itself: a truncated or regenerated file that no longer
+	// decodes past the cap would make the test vacuous.
+	decoded, err := io.ReadAll(bzip2.NewReader(bytes.NewReader(data)))
+	if err != nil {
+		t.Fatalf("decode bzip2 fixture: %v", err)
 	}
-	return out.Bytes()
+	if len(decoded) <= archiveMemberCapBytes683 {
+		t.Fatalf("bzip2 fixture decodes to %d bytes, want more than the %d-byte cap", len(decoded), archiveMemberCapBytes683)
+	}
+	return data
 }
 
 // assertSizeCapSkip683 asserts that relPath exists as a durable skipped document
@@ -169,7 +182,7 @@ func TestArchiveOversizeMember683_GzipRecordsSizeCapSkip(t *testing.T) {
 // TestArchiveOversizeMember683_Bzip2RecordsSizeCapSkip is the #683 guard for a
 // bare bzip2 payload.
 func TestArchiveOversizeMember683_Bzip2RecordsSizeCapSkip(t *testing.T) {
-	st := runArchiveIngest(t, "report.txt.bz2", buildBz2683(t, oversizePayload683()))
+	st := runArchiveIngest(t, "report.txt.bz2", readOversizeBz2Fixture683(t))
 	assertSizeCapSkip683(t, st, "report.txt.bz2/report.txt")
 }
 
@@ -230,6 +243,111 @@ func TestArchiveOversizeMember683_SkipRowSurvivesSecondScan(t *testing.T) {
 		t.Error("the size_cap row was tombstoned on the second scan; the coverage gap must outlive the run that found it")
 	}
 	assertSizeCapSkip683(t, st, "docs.zip/huge.txt")
+}
+
+// TestArchiveOversizeMember683_LastEntryWinsOnCollision covers the collision
+// case. Two entries can normalize onto one rel_path, and rel_path is the store's
+// document key, so only the last one is reachable. The final row must therefore
+// describe the LAST entry.
+//
+// Both directions matter. A small member followed by an oversized twin must end
+// as a size_cap skip, not as an indexed document that claims coverage the corpus
+// does not have. An oversized member followed by a small twin must end indexed,
+// not as a skip that hides a member which is really there.
+func TestArchiveOversizeMember683_LastEntryWinsOnCollision(t *testing.T) {
+	small := []byte("a small member")
+
+	t.Run("oversized entry last", func(t *testing.T) {
+		data := buildZipSized683(t, []sizedMember683{
+			{name: "./notes.txt", body: small},
+			{name: "notes.txt", body: oversizePayload683()},
+		})
+		st := runArchiveIngest(t, "docs.zip", data)
+		assertSizeCapSkip683(t, st, "docs.zip/notes.txt")
+	})
+
+	t.Run("under-cap entry last", func(t *testing.T) {
+		data := buildZipSized683(t, []sizedMember683{
+			{name: "./notes.txt", body: oversizePayload683()},
+			{name: "notes.txt", body: small},
+		})
+		st := runArchiveIngest(t, "docs.zip", data)
+		doc := documentByPath(t, st, "docs.zip/notes.txt")
+		if doc.Status != "ok" {
+			t.Errorf("status = %q, want \"ok\" (the last entry is under the cap and IS indexed)", doc.Status)
+		}
+	})
+}
+
+// TestArchiveOversizeMember683_ExclusionsShareTheMemberBudget pins that naming
+// an exclusion draws on the same member-count budget as ingesting a member.
+// An exclusion costs memory that a hostile archive controls, so it cannot have
+// its own unbounded allowance. Once the budget is spent, extraction stops and
+// reports the #408 truncation, rather than dropping the remaining exclusions in
+// silence.
+func TestArchiveOversizeMember683_ExclusionsShareTheMemberBudget(t *testing.T) {
+	data := buildZipSized683(t, []sizedMember683{
+		{name: "huge-a.txt", body: oversizePayload683()},
+		{name: "huge-b.txt", body: oversizePayload683()},
+		{name: "small.txt", body: []byte("a small member")},
+	})
+	st, logs := runArchiveIngestCapped(t, "docs.zip", data, 1, 0)
+
+	paths := docPaths(t, st)
+	if !paths["docs.zip/huge-a.txt"] {
+		t.Error("the first exclusion fits the budget and must be recorded")
+	}
+	if paths["docs.zip/huge-b.txt"] || paths["docs.zip/small.txt"] {
+		t.Errorf("extraction must stop once the budget is spent; got %v", paths)
+	}
+	if !strings.Contains(logs, "#408") {
+		t.Errorf("want the truncation warning so the stop is visible; got logs:\n%s", logs)
+	}
+}
+
+// failingSkipRowStore683 fails the upsert of one rel_path and delegates
+// everything else. It models the store rejecting exactly the size_cap row.
+type failingSkipRowStore683 struct {
+	*memoryStore
+	failPath string
+}
+
+func (s *failingSkipRowStore683) UpsertDocument(ctx context.Context, doc model.Document) error {
+	if doc.RelPath == s.failPath {
+		return errors.New("simulated store failure")
+	}
+	return s.memoryStore.UpsertDocument(ctx, doc)
+}
+
+// TestArchiveOversizeMember683_UnpersistedSkipRowBlocksFinalize pins that the
+// container is finalized on the RECORD, not on the attempt. If the size_cap row
+// does not land, the omission has no durable trace, so the container must keep
+// an empty content_hash and re-extract on the next scan.
+func TestArchiveOversizeMember683_UnpersistedSkipRowBlocksFinalize(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	data := buildZipSized683(t, []sizedMember683{
+		{name: "small.txt", body: []byte("a small member")},
+		{name: "huge.txt", body: oversizePayload683()},
+	})
+	if err := os.WriteFile(filepath.Join(root, "docs.zip"), data, 0o600); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+
+	st := &failingSkipRowStore683{memoryStore: newMemoryStore(), failPath: "docs.zip/huge.txt"}
+	cfg := config.Default()
+	cfg.RootDir = root
+	svc := mustNewIngestService(t, cfg, st)
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, wrote := st.docs["docs.zip/huge.txt"]; wrote {
+		t.Fatal("the fixture did not block the size_cap row; the test proves nothing")
+	}
+	if hash := st.docs["docs.zip"].ContentHash; hash != "" {
+		t.Errorf("container content_hash = %q, want empty (the omission was recorded nowhere, so the archive is not done)", hash)
+	}
 }
 
 // corruptStoredZip658 builds a zip whose single member is stored uncompressed

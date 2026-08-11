@@ -2709,14 +2709,13 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 		return false, archiveExtractionError(f.RelPath, err)
 	}
 	s.reportArchiveExtraction(f.RelPath, extraction)
-	// Persist the deliberate per-member-cap exclusions BEFORE ingesting the good
-	// members, so an interruption cannot leave the corpus claiming the members it
-	// did ingest are all there was (#683).
-	s.persistArchiveMemberSizeCapSkips(ctx, f, extraction.Excluded, seen)
 	allMembersOK, err := s.ingestArchiveMembers(ctx, f, extraction.Members, secretPatterns, forceReindex, seen)
 	if err != nil {
 		return false, err
 	}
+	// Members and exclusions never share a rel_path (see memberAccumulator.result),
+	// so this pass cannot overwrite a row the pass above just wrote.
+	skipsPersisted := s.persistArchiveMemberSizeCapSkips(ctx, f, extraction.Excluded, seen)
 	if extraction.Unreadable > 0 {
 		// #658: at least one declared member could not be opened or read. The
 		// members that did read are ingested above (best-effort), but the container
@@ -2728,9 +2727,11 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 	// can never be recovered by re-extraction, so it does NOT withhold the marker
 	// (that would re-extract on every scan forever with no benefit). The same is
 	// true of the per-member size cap (#683), which is why its members are
-	// persisted as durable size_cap skips instead. Only genuine per-member
-	// failures leave the archive incomplete.
-	return allMembersOK, nil
+	// persisted as durable size_cap skips instead. A size_cap row that failed to
+	// persist is the exception: the omission then has no durable record, so the
+	// container must stay incomplete and re-extract until the row lands. Only
+	// that, and genuine per-member failures, leave the archive incomplete.
+	return allMembersOK && skipsPersisted, nil
 }
 
 // archiveExtractionError classifies an extractor failure into the durable
@@ -2812,10 +2813,15 @@ func (s *Service) ingestArchiveMembers(ctx context.Context, f DiscoveredFile, me
 // would break that equality. This matches how a nested archive member is
 // already persisted as skipped without an event.
 //
-// Best-effort per member, mirroring persistOversizeSkips: a failed upsert is
-// logged, not fatal. Each path is registered in seen so markMissingAsDeleted
-// does not tombstone the row that was just written.
-func (s *Service) persistArchiveMemberSizeCapSkips(ctx context.Context, f DiscoveredFile, excluded []archiveMemberExclusion, seen map[string]struct{}) {
+// A failed upsert does not abort the other exclusions, mirroring
+// persistOversizeSkips, but it IS reported: the return value is false, and the
+// caller then leaves the container incomplete so the next scan re-extracts and
+// writes the row again. Logging alone would let the container be stamped done
+// with the omission recorded nowhere, which is the very bug this path closes.
+// Each path is registered in seen so markMissingAsDeleted does not tombstone
+// the row that was just written.
+func (s *Service) persistArchiveMemberSizeCapSkips(ctx context.Context, f DiscoveredFile, excluded []archiveMemberExclusion, seen map[string]struct{}) (allPersisted bool) {
+	allPersisted = true
 	for _, ex := range excluded {
 		if seen != nil {
 			seen[ex.RelPath] = struct{}{}
@@ -2835,8 +2841,10 @@ func (s *Service) persistArchiveMemberSizeCapSkips(ctx context.Context, f Discov
 		}
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
 			s.getLogger().Printf("archive %s: persist size-cap skip row for %s: %v", f.RelPath, ex.RelPath, err)
+			allPersisted = false
 		}
 	}
+	return allPersisted
 }
 
 // logArchiveMemberSkips surfaces members an archive declared but that did not
