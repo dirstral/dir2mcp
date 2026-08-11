@@ -50,11 +50,13 @@ func (s *Service) sourceReadCapBytes() int64 {
 // prefix is dropped rather than returned, so no path downstream can mistake part
 // of a file for the whole of it.
 //
-// Two sources of the verdict are folded together here. The first is this limit,
-// which is the only thing that catches a LOCAL file that grew. The second is
-// corpusfs.ErrObjectTooLarge, which an object-store backend raises when its own
-// transport-level bound trips first; the caller needs one answer, not two, so it
-// is normalized into the same overCap verdict.
+// This limit is what decides in practice, and it is the only thing that can catch
+// a LOCAL file that grew. The two corpusfs.ErrObjectTooLarge branches are belt and
+// braces: an object-store backend bounds its own transport as well, and although
+// its sentinel cannot surface through THIS path (the limit reader stops asking at
+// cap+1, so the backend is never pushed past its own bound), a backend that
+// refused earlier must produce the same answer rather than a second one the caller
+// would have to classify.
 func (s *Service) readSourceBytes(ctx context.Context, relPath string) (content []byte, overCap bool, err error) {
 	capBytes := s.sourceReadCapBytes()
 	rc, err := s.corpusFS().Open(ctx, relPath)
