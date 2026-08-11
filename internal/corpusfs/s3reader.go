@@ -34,13 +34,18 @@ type s3RangeReader struct {
 // Read fulfills io.Reader, opening a ranged GET from the current offset on
 // demand.
 //
-// Two bounds apply, and they answer different lies (#682). The cap check refuses
-// to deliver a byte past maxBytes, which is what stops an object HeadObject
-// under-reported and discovery therefore admitted. The per-call slice trim holds
+// Two bounds apply, and they answer different problems (#682). The cap stops an
+// object DISCOVERY under-reported: ListObjectsV2 said the object fitted, HeadObject
+// says otherwise, and the cap refuses the difference. The per-call slice trim holds
 // the reader to the size HeadObject DID report, so a body that returns more bytes
 // than the range asked for cannot push the total past that size either.
+//
+// The cap is enforced as a limit+1, the same idiom every other bounded read in this
+// repository uses. The reader delivers one byte more than the cap and then fails,
+// because that extra byte is what separates an object of exactly the cap (which is
+// inside the policy and must read cleanly to io.EOF) from an object past it.
 func (r *s3RangeReader) Read(p []byte) (int, error) {
-	if r.offset >= r.maxBytes {
+	if r.offset > r.maxBytes {
 		return 0, fmt.Errorf("corpusfs: read s3://%s/%s: %w (cap %d bytes)", r.bucket, r.key, ErrObjectTooLarge, r.maxBytes)
 	}
 	if r.offset >= r.size {
@@ -51,9 +56,9 @@ func (r *s3RangeReader) Read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	// Never hand back more than the object's reported size, or more than the cap,
+	// Never hand back more than the object's reported size, or more than cap+1,
 	// whichever ends first.
-	limit := min(r.size, r.maxBytes) - r.offset
+	limit := min(r.size, r.maxBytes+1) - r.offset
 	if int64(len(p)) > limit {
 		p = p[:limit]
 	}
@@ -143,11 +148,16 @@ type s3StreamReader struct {
 // It stops at the configured cap with ErrObjectTooLarge (#682). An unknown-length
 // object is the case where a size check cannot help at all: there is no reported
 // size to check, so only a bound on the bytes as they arrive can hold.
+//
+// The cap is enforced as a limit+1, exactly as in s3RangeReader. Here the extra
+// byte is the ONLY way to tell an object of exactly the cap from one past it: with
+// no reported length, the difference between "the body ended" and "the body
+// continues" is one byte of evidence.
 func (r *s3StreamReader) Read(p []byte) (int, error) {
 	if r.closed {
 		return 0, fs.ErrClosed
 	}
-	if r.offset >= r.maxBytes {
+	if r.offset > r.maxBytes {
 		return 0, fmt.Errorf("corpusfs: read s3://%s/%s: %w (cap %d bytes)", r.bucket, r.key, ErrObjectTooLarge, r.maxBytes)
 	}
 	if r.body == nil {
@@ -155,7 +165,7 @@ func (r *s3StreamReader) Read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	if limit := r.maxBytes - r.offset; int64(len(p)) > limit {
+	if limit := r.maxBytes + 1 - r.offset; int64(len(p)) > limit {
 		p = p[:limit]
 	}
 	n, err := r.body.Read(p)

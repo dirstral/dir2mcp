@@ -196,8 +196,10 @@ func TestS3FSOpen_BoundsAWholeObjectReadWhenHeadDisagreesWithDiscovery(t *testin
 	if readErr == nil {
 		t.Errorf("read of a %d-byte object completed with no error under a %d-byte cap; want a refusal (got %d bytes)", bodyBytes682, capBytes682, len(got))
 	}
-	if int64(len(got)) > capBytes682 {
-		t.Errorf("read returned %d bytes under a %d-byte cap; want no more than the cap", len(got), capBytes682)
+	// limit+1: one byte past the cap is what proves the object is over it rather
+	// than exactly at it. That byte is the whole allowance.
+	if int64(len(got)) > capBytes682+1 {
+		t.Errorf("read returned %d bytes under a %d-byte cap; the bound is cap+1", len(got), capBytes682)
 	}
 	if served := stub.bytesServed.Load(); served > capBytes682+1 {
 		t.Errorf("read pulled %d bytes from the body; the bound is %d (cap+1)", served, capBytes682+1)
@@ -224,8 +226,10 @@ func TestS3FSOpen_BoundsAWholeObjectReadWithNoReportedLength(t *testing.T) {
 	if readErr == nil {
 		t.Errorf("unknown-length object read to completion with no error; a %d-byte read under a %d-byte cap must be refused (got %d bytes)", bodyBytes682, capBytes682, len(got))
 	}
-	if int64(len(got)) > capBytes682 {
-		t.Errorf("read returned %d bytes under a %d-byte cap; want no more than the cap", len(got), capBytes682)
+	// limit+1: one byte past the cap is what proves the object is over it rather
+	// than exactly at it. That byte is the whole allowance.
+	if int64(len(got)) > capBytes682+1 {
+		t.Errorf("read returned %d bytes under a %d-byte cap; the bound is cap+1", len(got), capBytes682)
 	}
 	if served := stub.bytesServed.Load(); served > capBytes682+1 {
 		t.Errorf("read pulled %d bytes from the body; the bound is %d (cap+1)", served, capBytes682+1)

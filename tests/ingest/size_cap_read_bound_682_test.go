@@ -372,6 +372,82 @@ func TestSizeCapDiscovery_RetiresWhatTheSmallerFileIndexed(t *testing.T) {
 	assertSizeCapSkip682(t, st, "notes.txt")
 }
 
+// TestSizeCapRead_OverCapArchiveIsNotExpanded pins that an over-cap ARCHIVE is
+// refused as a whole. The archive branch runs for a `skipped` container by design,
+// so without an explicit stop the pipeline would localize a container whose own
+// bytes had just been declared over the cap and ingest its members. A file dropped
+// by the discovery stat (#497) never reaches that branch, and this one must not
+// either.
+//
+// On `main` the container reads in full and is recorded with skip_reason="archive".
+func TestSizeCapRead_OverCapArchiveIsNotExpanded(t *testing.T) {
+	root := t.TempDir()
+	fs := &underReportingFS682{relPath: "bundle.zip", reportedLen: 512, bodyLen: overCapBytes682}
+	st := newRealStore(t)
+
+	svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+	svc.SetCorpusFS(fs)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if served := fs.bytesServed.Load(); served > readCapBytes682+1 {
+		t.Errorf("the scan pulled %d bytes from the container; the bound is %d (cap+1)", served, readCapBytes682+1)
+	}
+	doc, err := st.GetDocumentByPath(context.Background(), "bundle.zip")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath: %v", err)
+	}
+	if doc.SkipReason != model.SkipReasonSizeCap {
+		t.Errorf("container skip_reason = %q, want %q: an over-cap container was refused by the cap, not because it is an archive", doc.SkipReason, model.SkipReasonSizeCap)
+	}
+	docs, _, err := st.ListFiles(context.Background(), "", "", 100, 0)
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	for _, d := range docs {
+		if d.RelPath != "bundle.zip" {
+			t.Errorf("member %q was ingested out of an over-cap container", d.RelPath)
+		}
+	}
+}
+
+// TestSizeCapRead_RaisesOneFileSkipEvent pins SPEC §3.2: the number of file_skip
+// events a run emits equals its terminal `indexing.skipped`. An over-cap read
+// counts one skip, so it must raise exactly one event, carrying the §15.2 reason.
+//
+// The container case is included because it takes a different route: an archive's
+// event is normally deferred until extraction finishes, and an over-cap container
+// never extracts.
+func TestSizeCapRead_RaisesOneFileSkipEvent(t *testing.T) {
+	for _, relPath := range []string{"liar.txt", "bundle.zip"} {
+		t.Run(relPath, func(t *testing.T) {
+			root := t.TempDir()
+			fs := &underReportingFS682{relPath: relPath, reportedLen: 512, bodyLen: overCapBytes682}
+			st := newRealStore(t)
+
+			svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+			svc.SetCorpusFS(fs)
+			var reasons []string
+			svc.SetOnDocumentSkip(func(_, _, reason string) {
+				reasons = append(reasons, reason)
+			})
+			state := appstate.NewIndexingState(appstate.ModeIncremental)
+			svc.SetIndexingState(state)
+			if err := svc.Run(context.Background()); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if len(reasons) != 1 || reasons[0] != model.SkipReasonSizeCap {
+				t.Errorf("file_skip reasons = %v, want exactly one %q", reasons, model.SkipReasonSizeCap)
+			}
+			if got := state.Snapshot().Skipped; got != int64(len(reasons)) {
+				t.Errorf("skipped counter = %d but %d file_skip event(s) were raised; SPEC §3.2 requires equality", got, len(reasons))
+			}
+		})
+	}
+}
+
 // TestSizeCapRead_FileAtTheCapIsStillIndexed is the false-positive guard on the
 // limit+1 read. A file of exactly `ingest.max_file_mb` bytes is inside the cap and
 // must still be indexed: the bound must refuse only what passes it, and an

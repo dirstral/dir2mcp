@@ -2208,12 +2208,9 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return s.persistBuildError(ctx, f, secretPatterns, buildErr)
 	}
 	if isSizeCapSkip(doc) {
-		// #682: the read passed the cap, so anything an earlier scan indexed for this
-		// path came from bytes this file no longer has. Retire it BEFORE the row is
-		// written, so a crash between the two steps leaves a document with nothing
-		// searchable rather than one whose row says "skipped for size_cap" while its
-		// chunks are still being served. Same ordering rule as the #681 withhold.
-		s.retireRepresentationsForPath(ctx, doc.RelPath, "size cap")
+		// #682: the read was refused, so this document is finished here. Everything
+		// below reasons about content this run did not obtain.
+		return s.settleSizeCapSkip(ctx, doc)
 	}
 	// Stamp the resolved content_hash onto the batch manifest outcome (§8.6.11);
 	// no-op when no batch run is active.
@@ -2478,6 +2475,10 @@ func (s *Service) creditInitialStatus(doc model.Document) (indexedPending, termi
 		// An archive container is credited as skipped here but is NOT terminal: it
 		// reverts to an error (and addSkipped(-1)) if member extraction fails, so
 		// its file_skip is deferred until handleArchiveDocument succeeds.
+		//
+		// A size_cap document never reaches this function (#682): settleSizeCapSkip
+		// counts it and raises its event, precisely so an over-cap ARCHIVE is not
+		// handed to the deferred emitter that only member extraction would reach.
 		if doc.DocType != "archive" {
 			s.notifyDocumentSkip(doc)
 		}
@@ -3243,11 +3244,51 @@ func (s *Service) sizeCapSkippedDocument(doc model.Document, f DiscoveredFile) m
 }
 
 // isSizeCapSkip reports whether doc is the size_cap skip row
-// sizeCapSkippedDocument produced. It is the marker processDocument keys the
-// representation retirement off, and it is deliberately narrow: no other builder
-// pairs status="skipped" with skip_reason="size_cap".
+// sizeCapSkippedDocument produced. It is the marker processDocument routes on, and
+// it is deliberately narrow: no other builder pairs status="skipped" with
+// skip_reason="size_cap".
 func isSizeCapSkip(doc model.Document) bool {
 	return doc.Status == "skipped" && doc.SkipReason == model.SkipReasonSizeCap
+}
+
+// settleSizeCapSkip is the whole terminal handling of a document whose SOURCE READ
+// passed the cap (#682): retire, persist, count, report. It is the read-time
+// counterpart of persistOversizeSkips, which does the same four things for a file
+// the discovery stat dropped (#497), and the two must agree, because they write the
+// same skip reason.
+//
+// Terminal by design. Everything processDocument does after this point reasons
+// about content this run did not obtain: the incremental gate, the derivation
+// identity, representation generation, output reconciliation. The most important of
+// them is the archive branch, which runs for a `skipped` container: without a
+// terminal return, an over-cap ARCHIVE would be localized and expanded, and members
+// would be ingested out of a container whose own bytes were just refused. A file
+// dropped by the discovery stat never reaches that branch, and this one must not
+// either.
+//
+// The order is load-bearing. Representations are retired FIRST, so an ungraceful
+// death between the two writes leaves a document with nothing searchable rather
+// than one whose row reads "skipped for size_cap" while its chunks are still being
+// served. It is the same rule the #681 withhold follows.
+//
+// The counters are the ones creditInitialStatus would have applied to a skipped
+// document, with one difference that is the point of doing it here: the event is
+// raised unconditionally. creditInitialStatus defers an archive container's
+// file_skip until member extraction finishes, and for this document extraction
+// never runs, so the deferred event would never be raised and the run would report
+// one more skip than it raised events for (SPEC §3.2).
+func (s *Service) settleSizeCapSkip(ctx context.Context, doc model.Document) error {
+	s.retireRepresentationsForPath(ctx, doc.RelPath, "size cap")
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		return fmt.Errorf("upsert document: %w", err)
+	}
+	// The row carries no content_hash, so cross-file dedup must forget the path
+	// instead of grouping it on the content it held before (#691).
+	s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
+	s.addSkipped(1)
+	s.markActiveSkipped()
+	s.notifyDocumentSkip(doc)
+	return nil
 }
 
 // persistOversizeSkips upserts a minimal skipped document row for each file

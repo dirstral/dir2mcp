@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
@@ -72,8 +73,83 @@ func TestS3FSOpen_RefusalCarriesTheSentinel(t *testing.T) {
 	if !errors.Is(readErr, corpusfs.ErrObjectTooLarge) {
 		t.Fatalf("read error = %v, want ErrObjectTooLarge", readErr)
 	}
-	if len(got) != cap682 {
-		t.Errorf("read delivered %d bytes before refusing, want exactly the %d-byte cap", len(got), cap682)
+	// limit+1: the reader hands over one byte past the cap and then fails. That
+	// byte is what proves the object is past the cap rather than exactly at it.
+	if len(got) != cap682+1 {
+		t.Errorf("read delivered %d bytes before refusing, want the %d-byte cap plus the one probe byte", len(got), cap682)
+	}
+}
+
+// TestS3FSOpen_ObjectOfExactlyTheCapReadsCleanly is the off-by-one guard on the
+// limit+1 read, and it is the case a naive bound gets wrong. An object of exactly
+// `ingest.max_file_mb` is INSIDE the policy: discovery admits it, so the reader must
+// deliver all of it and end at io.EOF, not at ErrObjectTooLarge.
+//
+// It is asserted through both reader shapes, because they decide differently: the
+// ranged reader compares against the length HEAD reported, while the streaming
+// reader has no length and must read one byte past the cap to learn that the object
+// ended there.
+func TestS3FSOpen_ObjectOfExactlyTheCapReadsCleanly(t *testing.T) {
+	const cap682 = 64 * 1024
+	head := int64(cap682)
+
+	for _, tc := range []struct {
+		name     string
+		headSize *int64
+	}{
+		{name: "reported length (ranged reader)", headSize: &head},
+		{name: "no reported length (streaming reader)", headSize: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &lyingS3For682{key: "corpus/exact.bin", listSize: cap682, headSize: tc.headSize, bodySize: cap682}
+			fsys, err := corpusfs.NewS3FS(stub, corpusfs.S3Config{
+				Bucket: "bkt", Prefix: "corpus/", CacheDir: t.TempDir(), MaxBytes: cap682,
+			})
+			if err != nil {
+				t.Fatalf("NewS3FS: %v", err)
+			}
+			rc, err := fsys.Open(context.Background(), "exact.bin")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer func() { _ = rc.Close() }()
+
+			got, err := io.ReadAll(rc)
+			if err != nil {
+				t.Fatalf("read of an object exactly at the cap failed: %v", err)
+			}
+			if len(got) != cap682 {
+				t.Errorf("read returned %d bytes, want the whole %d-byte object", len(got), cap682)
+			}
+		})
+	}
+}
+
+// TestS3FSLocalize_ObjectOfExactlyTheCapDownloadsCleanly is the same off-by-one
+// guard on the download path: an object exactly at the cap must localize.
+func TestS3FSLocalize_ObjectOfExactlyTheCapDownloadsCleanly(t *testing.T) {
+	const cap682 = 64 * 1024
+	stub := &lyingS3For682{key: "corpus/exact.mp4", listSize: cap682, bodySize: cap682}
+	fsys, err := corpusfs.NewS3FS(stub, corpusfs.S3Config{
+		Bucket: "bkt", Prefix: "corpus/", CacheDir: t.TempDir(), MaxBytes: cap682,
+	})
+	if err != nil {
+		t.Fatalf("NewS3FS: %v", err)
+	}
+
+	localPath, cleanup, err := fsys.Localize(context.Background(), "exact.mp4")
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		t.Fatalf("Localize of an object exactly at the cap failed: %v", err)
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat localized file: %v", err)
+	}
+	if info.Size() != cap682 {
+		t.Errorf("localized file is %d bytes, want the whole %d-byte object", info.Size(), cap682)
 	}
 }
 
