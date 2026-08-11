@@ -41,6 +41,29 @@ inconsistently between the two renderings. They are lost, not misread: a
 dropped frame of a ticker costs nothing, because the passage is still on screen
 in the next one and `collapse_text_sightings` joins the run across the gap.
 
+## Readable enough to cite
+
+Agreement decides which BAND holds an overlay. It does not decide whether the
+words that came off that band are words. A fixed graphic inside the band is
+real pixels, so both passes misread it the same way and it scores as high as a
+clean read. The output is therefore citable text of which most is noise, and a
+citation pointing at noise is worse than no citation at all.
+
+So an emitted cue passes a second gate, on the cue rather than on the band.
+See `READABLE_MIN_CHARS` for the measurement that chose it. Two properties of
+where the gate sits matter:
+
+* It runs AFTER the collapse, on the cue, because that is what was measured
+  and what a consumer cites. A per-frame gate would also change which band
+  locks, since `interpret` supplies the band search its evidence: a short read
+  is still evidence that this band carries an overlay, and rejecting it there
+  would move the lock and change what gets READ, not just what gets emitted.
+* It drops the cue instead of lowering its confidence. Confidence here means
+  agreement between the passes and nothing else, and `fusion.fuse` combines
+  confidences under noisy-OR, so two rejected cues of one passage would
+  compound back into a high-confidence annotation. A floor that is not applied
+  is also no floor: `min_confidence` defaults to 0.0.
+
 ## One reader per role
 
 `_RegionSearch` locks a single band and `OverlayReader.read` stops a frame once
@@ -70,9 +93,12 @@ __all__ = [
     "DEFAULT_AGREEMENT",
     "HEADLINE_REGIONS",
     "NEWS_ROLES",
+    "READABLE_MIN_AGREEMENT",
+    "READABLE_MIN_CHARS",
     "TICKER_REGIONS",
     "NewsOverlayRecognizer",
     "OverlayRole",
+    "is_readable",
     "read_agreement",
 ]
 
@@ -81,6 +107,45 @@ __all__ = [
 #: background population sat at 0.00, so this is a floor with room under it
 #: rather than a boundary between two touching distributions.
 DEFAULT_AGREEMENT = 0.3
+
+#: The readability gate on an emitted cue: how many characters its text must
+#: carry, and how firmly that text must have been read. Both floors apply, and
+#: either one set to 0 switches its half of the gate off.
+#:
+#: Measured on 145 cues (94 headline, 51 ticker) from 15 minutes of a TV Rain
+#: broadcast at 720p, read with tesseract `rus`. A cue counted as readable when
+#: it held a word of 4 or more Cyrillic letters that the programme's own
+#: subtitle track also held, so the vocabulary came from the same broadcast and
+#: needed no external dictionary. Garbled text almost never lands on a real
+#: word by accident.
+#:
+#:   | gate                             | keeps | precision | recall |
+#:   |----------------------------------|-------|-----------|--------|
+#:   | none                             |   145 |     40.0% | 100.0% |
+#:   | agreement >= 0.6                 |    60 |     60.0% |  62.1% |
+#:   | chars >= 20                      |    87 |     65.5% |  98.3% |
+#:   | chars >= 20 and agreement >= 0.6 |    40 |     90.0% |  62.1% |
+#:   | chars >= 25 and agreement >= 0.6 |    36 |     91.7% |  56.9% |
+#:
+#: Neither signal works alone. Agreement alone is flat, not weak: a floor of
+#: 0.5 gives 48.5% precision and a floor of 1.0 gives 48.8%, while recall falls
+#: from 81.0% to 34.5%. Length alone is the stronger single signal, because the
+#: garbage is short (median 15 characters against 32), but it tops out near
+#: 68%. Together they take precision from 40% to 90%, and that is the point:
+#: agreement carries real information once the short fragments are gone.
+#:
+#: 20 and 0.6 is the knee. Moving the length floor to 25 buys 1.7 points of
+#: precision for 5.2 points of recall.
+#:
+#: Measured on the same cues and REJECTED: vowel fraction (the garbage has MORE
+#: vowels, 0.50 against 0.44, so it separates the wrong way), Cyrillic fraction
+#: (1.00 for both, because the reader is pinned to one script), and character
+#: bigram plausibility (the medians separate but the ranges overlap, and it
+#: degenerates on short text, which is exactly where the garbage is).
+#:
+#: One corpus is one corpus, so both floors are parameters. See #751.
+READABLE_MIN_CHARS = 20
+READABLE_MIN_AGREEMENT = 0.6
 
 #: Candidate bands for a headline banner, and for a ticker along the bottom.
 #: Broadcast convention rather than one broadcaster's layout, in the spirit of
@@ -142,6 +207,22 @@ def read_agreement(read: OverlayRead) -> float:
     )
 
 
+def is_readable(
+    cue: Cue,
+    *,
+    min_chars: int = READABLE_MIN_CHARS,
+    min_agreement: float = READABLE_MIN_AGREEMENT,
+) -> bool:
+    """Whether a cue carries words rather than misread pixels.
+
+    Both floors have to hold. Each one alone admits most of the garbage; see
+    `READABLE_MIN_CHARS` for the numbers. The cue's confidence IS the run's
+    agreement, so this is the same quantity the band floor uses, applied a
+    second time at a higher level and a higher threshold.
+    """
+    return len(cue.text.strip()) >= min_chars and cue.confidence >= min_agreement
+
+
 def _fullest(read: OverlayRead) -> str:
     """The pass that recovered the most words.
 
@@ -164,6 +245,11 @@ class _RoleReader:
     #: discarded with the generator, so the interpreter is the only place that
     #: sees which region answered.
     answered: Region | None = None
+    #: How many collapsed cues the readability gate dropped on the last run.
+    #: Without it an empty result is ambiguous: a role that found no overlay
+    #: and a role that found one and could not read it look the same, and they
+    #: are different answers, exactly as `answered` exists to say.
+    rejected: int = 0
 
     def interpret(self, read: OverlayRead) -> tuple[str, int]:
         """Return this band's text and whether it counts as evidence.
@@ -194,6 +280,12 @@ class NewsOverlayRecognizer:
     Confidence is the agreement between the preprocessing passes, which is a
     statement about how firmly the text was read and not about whether it is
     true. Nothing here resolves an entity, so cues carry no `entity_ids`.
+
+    A cue that fails the readability gate is not emitted. The gate is ON by
+    default, because the ungated output measured 40% precision and the product
+    of this cascade is citations: a cited span whose text is noise costs more
+    than a passage never found. `readable_chars=0, readable_agreement=0.0`
+    turns it off and returns the ungated stream.
     """
 
     name = "news"
@@ -206,6 +298,8 @@ class NewsOverlayRecognizer:
         psm: int | None = None,
         fps: float = 0.5,
         agreement: float = DEFAULT_AGREEMENT,
+        readable_chars: int = READABLE_MIN_CHARS,
+        readable_agreement: float = READABLE_MIN_AGREEMENT,
         workers: int | None = None,
         ocr: OcrFn | None = None,
         similarity: float | None = None,
@@ -216,6 +310,12 @@ class NewsOverlayRecognizer:
             raise ValueError("a news recognizer needs at least one overlay role")
         if not 0.0 <= agreement <= 1.0:
             raise ValueError(f"agreement floor out of [0,1]: {agreement}")
+        if readable_chars < 0:
+            raise ValueError(f"readable_chars must not be negative: {readable_chars}")
+        if not 0.0 <= readable_agreement <= 1.0:
+            raise ValueError(
+                f"readability agreement floor out of [0,1]: {readable_agreement}"
+            )
         # Checked here rather than at the first division: every timing this
         # class derives is 1/fps or a multiple, so a zero raises deep inside a
         # collapse and a negative one quietly produces cues that end before
@@ -224,6 +324,8 @@ class NewsOverlayRecognizer:
             raise ValueError(f"fps must be positive: {fps}")
         self.fps = fps
         self.agreement = agreement
+        self.readable_chars = readable_chars
+        self.readable_agreement = readable_agreement
         self.similarity = similarity
         self.roles = roles
         # The collapse gap has to be at least the BAND SEARCH's sampling
@@ -263,6 +365,7 @@ class NewsOverlayRecognizer:
             # PREVIOUS file answered from.
             role_reader.sightings.clear()
             role_reader.answered = None
+            role_reader.rejected = 0
             # `closing` because the reader owns a worker pool and a scratch
             # directory for the length of the iteration: abandoning it part way
             # through has to shut them down now, not at collection.
@@ -277,7 +380,7 @@ class NewsOverlayRecognizer:
 
     def _collapse(self, role_reader: _RoleReader) -> list[Cue]:
         extra = {} if self.similarity is None else {"similarity": self.similarity}
-        return collapse_text_sightings(
+        cues = collapse_text_sightings(
             role_reader.sightings,
             source=self.name,
             event=role_reader.role.event,
@@ -288,6 +391,21 @@ class NewsOverlayRecognizer:
             cue_gap=1.0 / self.fps,
             **extra,
         )
+        # The gate goes here, on the whole run's cue, because the run is what
+        # was measured and what a consumer cites. It cannot go in `interpret`:
+        # that return value is the band search's evidence, so rejecting a short
+        # read there would move the lock and change which band gets read.
+        keep = [
+            cue
+            for cue in cues
+            if is_readable(
+                cue,
+                min_chars=self.readable_chars,
+                min_agreement=self.readable_agreement,
+            )
+        ]
+        role_reader.rejected = len(cues) - len(keep)
+        return keep
 
     @property
     def regions(self) -> tuple[Region, ...]:
@@ -307,6 +425,15 @@ class NewsOverlayRecognizer:
         finding one and reading it badly. None until a `recognize` has run.
         """
         return {rr.role.event: rr.answered for rr in self._readers}
+
+    def rejected_counts(self) -> dict[str, int]:
+        """How many cues per role the readability gate dropped, after a `recognize`.
+
+        A role that answered from a band and still emitted nothing found an
+        overlay it could not read, which is a different answer from finding no
+        overlay. Zero until a `recognize` has run.
+        """
+        return {rr.role.event: rr.rejected for rr in self._readers}
 
 
 def roles_from(spec: Sequence[tuple[str, Sequence[Region]]]) -> tuple[OverlayRole, ...]:

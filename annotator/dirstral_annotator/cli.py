@@ -13,6 +13,10 @@
     # A news archive resolves no roster, so it needs none:
     dirstral-annotate serve --news --ocr-lang rus
 
+    # News overlay cues pass a readability gate before they are emitted.
+    # It is on by default. This turns it off and returns every cue:
+    dirstral-annotate serve --news --news-min-chars 0 --news-min-agreement 0
+
     # Phase-1 accuracy gate against Statcast ground truth
     dirstral-annotate eval game7.mp4 --roster roster.json \
         (--game-pk 745123 | --feed saved-gumbo.json) --anchor "EPOCH=VIDEO_S" \
@@ -56,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         c.add_argument("--faces", type=Path, help="roster image bank dir; enables face recognition")
         c.add_argument("--news", action="store_true",
                        help="enable news overlay text (headline banner + ticker); needs no roster")
+        c.add_argument("--news-min-chars", type=int, metavar="N",
+                       help="drop news overlay cues shorter than N characters "
+                            "(default 20; 0 disables this half of the gate)")
+        c.add_argument("--news-min-agreement", type=float, metavar="F",
+                       help="drop news overlay cues read with less agreement than F "
+                            "(default 0.6; 0 disables this half of the gate)")
         c.add_argument("--ocr-lang", help="OCR language for the overlay readers (e.g. rus)")
         c.add_argument("--fps", type=float, default=0.5, help="frame sampling rate (default 0.5)")
         c.add_argument("--min-confidence", type=float, default=0.0)
@@ -110,6 +120,8 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         scorebug_pitch_counts=args.scorebug_pitch_counts,
         jersey=args.jersey,
         news=args.news,
+        news_min_chars=args.news_min_chars,
+        news_min_agreement=args.news_min_agreement,
         ocr_lang=args.ocr_lang,
         faces_bank=args.faces,
         fps=args.fps,

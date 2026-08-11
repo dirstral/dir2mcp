@@ -144,15 +144,59 @@ play-by-play, which all resolve names against it. Point dir2mcp at the backend
 as usual and each headline and ticker passage lands as a `recognition` chunk
 with a `time` span, which `ask`/`search` cite directly.
 
-**Known limitation.** Ticker cues can carry a long garbage prefix ahead of
-their real text, where a stable graphic in the band OCRs as a run of repeated
-letters. It agrees across both preprocessing passes, because it is real pixels
-being misread rather than noise, so the agreement floor cannot reject it and
-confidence does not separate it: such reads score 0.90 like the good ones.
+#### The readability gate
 
-The text behind the prefix is intact, so the cue is still usable; what suffers
-is the fraction of a citation that is signal. Two remedies were built and
-measured against real footage, and NEITHER is shipped:
+Agreement decides which band holds an overlay. It does not decide whether the
+words that came off that band are words. A cue therefore passes a second gate,
+and this one is **on by default**: a cue is emitted only if its text is at
+least 20 characters long AND it was read with agreement of at least 0.6.
+
+Measured on 145 cues (94 headline, 51 ticker) from 15 minutes of a TV Rain
+broadcast, read with tesseract `rus`. A cue counted as readable when it held a
+word of 4 or more Cyrillic letters that the programme's own subtitle track also
+held, so the vocabulary came from the same broadcast and needed no external
+dictionary.
+
+| gate | keeps | precision | recall |
+|---|---|---|---|
+| none | 145 | 40.0% | 100.0% |
+| agreement >= 0.6 | 60 | 60.0% | 62.1% |
+| chars >= 20 | 87 | 65.5% | 98.3% |
+| **chars >= 20 and agreement >= 0.6** | **40** | **90.0%** | **62.1%** |
+| chars >= 25 and agreement >= 0.6 | 36 | 91.7% | 56.9% |
+
+Neither signal works alone. Agreement alone is flat: a floor of 0.5 gives 48.5%
+precision and a floor of 1.0 gives 48.8%, while recall falls from 81.0% to
+34.5%. Length alone is the stronger single signal, because the garbage is short
+(median 15 characters against 32), but it tops out near 68%. Together they take
+precision from 40% to 90%.
+
+The gate is on by default because the product of this cascade is citations. The
+ungated stream is 60% noise, so a citation drawn from it is more likely to be
+garbage than text, and a cited span that says nothing costs a reader more than
+a passage never found. The cost is real: 38% of readable passages go with it.
+An operator who wants recall over precision, or who is on footage this
+measurement does not describe, turns the gate off:
+
+```bash
+dirstral-annotate serve --news --news-min-chars 0 --news-min-agreement 0
+```
+
+Both floors are also parameters of `NewsOverlayRecognizer`, and
+`rejected_counts()` reports how many cues per role the gate dropped, so a role
+that found an overlay and could not read it stays distinct from a role that
+found none.
+
+**Known limitation.** The gate rejects a cue that is garbage. It does not clean
+a cue that is PART garbage. Ticker cues can carry a long garbage prefix ahead of
+their real text, where a stable graphic in the band OCRs as a run of repeated
+letters. That text is real pixels being misread rather than noise, so both
+preprocessing passes agree on it and it scores 0.90 like a good read. Such a
+cue is long and firmly read, so it passes the gate, which is the right answer:
+the words behind the prefix are intact and citable.
+
+Four other remedies were built and measured against real footage, and NONE is
+shipped:
 
 - A token-level cleaner dropped real content (`220` out of `около 220 тысяч`,
   and the preposition `К`) while missing the actual garbage, whose character
@@ -161,6 +205,14 @@ measured against real footage, and NEITHER is shipped:
   no candidate dominates: against the current longest-read rule, a medoid
   selector gains 2.8 points of token precision on a ticker with a graphic in
   the band and loses 4.3 precision and 3.7 recall on one without.
+- Vowel fraction. The garbage has MORE vowels than readable text (0.50 against
+  0.44), so it separates the wrong way.
+- Character bigram plausibility. The medians separate but the ranges overlap,
+  and it degenerates on short text, which is where the garbage is.
+
+Cyrillic fraction was also measured and is 1.00 for both populations, because
+the reader is pinned to one script and returns that script whatever the pixels
+were.
 
 See #751.
 

@@ -8,11 +8,15 @@ evidence that a band holds an overlay, and what shape the cues come out in.
 import pytest
 
 from dirstral_annotator.recognizers import news, overlay
+from dirstral_annotator.model import Cue
 from dirstral_annotator.recognizers.news import (
     DEFAULT_AGREEMENT,
     NEWS_ROLES,
+    READABLE_MIN_AGREEMENT,
+    READABLE_MIN_CHARS,
     NewsOverlayRecognizer,
     OverlayRole,
+    is_readable,
     read_agreement,
 )
 from dirstral_annotator.recognizers.overlay import OverlayRead
@@ -77,7 +81,9 @@ def bands(monkeypatch, tmp_path):
 
     `install({region: text_or_fn})` makes every sampled frame answer with that
     text for that band. A callable receives the frame index, which is how a
-    scrolling ticker is expressed.
+    scrolling ticker is expressed. A tuple is the two preprocessing passes
+    said separately, which is how a band the passes only half agree on is
+    expressed; a plain string is a legible band, where they agree.
     """
 
     def install(script, frames=40, fps=0.5):
@@ -92,6 +98,8 @@ def bands(monkeypatch, tmp_path):
             i = index[frame]
             value = script.get(tuple(region), "")
             text = value(i) if callable(value) else value
+            if isinstance(text, tuple):
+                return list(text)
             # Both preprocessing passes: a scripted band is a legible one, so
             # they agree, which is exactly what the interpreter looks for.
             return [text, text]
@@ -262,6 +270,123 @@ def test_a_non_positive_fps_is_refused_at_construction():
         NewsOverlayRecognizer(fps=-0.5)
 
 
+# --- the readability gate ---------------------------------------------------
+#
+# Agreement says which BAND holds an overlay. It does not say whether the words
+# that came off it are words. Measured on 145 cues of real TV Rain footage, the
+# ungated stream is 40.0% precision: 60% of what a reader would cite is noise.
+# The gate is `chars >= 20 and agreement >= 0.6`, which measured 90.0%
+# precision at 62.1% recall. See READABLE_MIN_CHARS for the full table.
+
+#: The shape of the garbage: short. Median 15 characters, against 32 for a
+#: readable cue. This one is 14, and both passes agree on it perfectly, which
+#: is why the agreement floor alone cannot reject it.
+SHORT_GARBAGE = "ЕЕК ЕЕЕ НЕЕЕЕ"
+
+#: Long enough to pass the length floor, and the two passes only half agree:
+#: three of six tokens survive both renderings, so agreement is 0.50. This is
+#: an all-caps display face OCR'ing inconsistently, which the module docstring
+#: describes; the reader should decline to cite it.
+HALF_READ = (
+    "Правительство одобрило новые правила перевозки грузов",
+    "Правительстзо одобрило нозые правила перевозки грузоз",
+)
+
+
+def test_the_measured_thresholds_are_what_ships():
+    """Anyone changing these is changing a measured claim, not a taste."""
+    assert READABLE_MIN_CHARS == 20
+    assert READABLE_MIN_AGREEMENT == pytest.approx(0.6)
+
+
+def test_neither_signal_gates_alone():
+    """The finding that chose this gate. Length alone tops out at 65.5%
+    precision and agreement alone is flat (48.5% at 0.5, 48.8% at 1.0), so
+    both floors have to hold."""
+    long_and_firm = Cue(source="news", start_s=0.0, end_s=1.0, event="headline",
+                        entity_ids=(), confidence=0.9, text=HEADLINE)
+    assert is_readable(long_and_firm)
+    # Firmly read, and too short to be a sentence.
+    short = Cue(source="news", start_s=0.0, end_s=1.0, event="headline",
+                entity_ids=(), confidence=1.0, text=SHORT_GARBAGE)
+    assert not is_readable(short)
+    # Long, and the passes did not agree it says this.
+    weak = Cue(source="news", start_s=0.0, end_s=1.0, event="headline",
+               entity_ids=(), confidence=0.5, text=HEADLINE)
+    assert not is_readable(weak)
+
+
+def test_a_short_cue_is_not_emitted(bands):
+    """A citation pointing at noise is worse than no citation, so the gate is
+    on by default. The band is still found: the gate changes what is emitted,
+    not what is read."""
+    bands({HEADLINE_BAND: SHORT_GARBAGE})
+    recognizer = NewsOverlayRecognizer(workers=1)
+    assert only(recognizer, "headline") == []
+    assert recognizer.answered_regions()["headline"] == HEADLINE_BAND
+
+
+def test_a_cue_the_passes_only_half_agreed_on_is_not_emitted(bands):
+    """Long enough, and read at 0.50. That clears the band floor of 0.3,
+    because the band really does hold an overlay, and it fails the cue floor
+    of 0.6, because the words are not trustworthy enough to quote."""
+    bands({HEADLINE_BAND: HALF_READ})
+    (cue,) = only(NewsOverlayRecognizer(workers=1, readable_agreement=0.0), "headline")
+    assert cue.confidence == pytest.approx(0.5)
+    assert len(cue.text) >= READABLE_MIN_CHARS
+
+    assert only(NewsOverlayRecognizer(workers=1), "headline") == []
+
+
+def test_the_gate_can_be_turned_off(bands):
+    """The trade costs 38% of recall, which is a real loss. An operator on
+    footage this measurement does not describe gets the ungated stream."""
+    bands({HEADLINE_BAND: SHORT_GARBAGE})
+    ungated = NewsOverlayRecognizer(
+        workers=1, readable_chars=0, readable_agreement=0.0
+    )
+    (cue,) = only(ungated, "headline")
+    assert cue.text == SHORT_GARBAGE
+
+
+def test_a_readable_cue_is_untouched_by_the_gate(bands):
+    """The gate drops cues; it does not edit them. A headline that passes must
+    come out byte-identical to the ungated one."""
+    bands({HEADLINE_BAND: HEADLINE})
+    (gated,) = only(NewsOverlayRecognizer(workers=1), "headline")
+    bands({HEADLINE_BAND: HEADLINE})
+    (ungated,) = only(
+        NewsOverlayRecognizer(workers=1, readable_chars=0, readable_agreement=0.0),
+        "headline",
+    )
+    assert gated == ungated
+
+
+def test_the_gate_reports_what_it_dropped(bands):
+    """An empty result has two meanings: no overlay, or an overlay nobody
+    could read. Those are different answers, so the count is reported."""
+    bands({HEADLINE_BAND: SHORT_GARBAGE})
+    recognizer = NewsOverlayRecognizer(workers=1)
+    assert recognizer.recognize(MEDIA) == []
+    assert recognizer.rejected_counts()["headline"] == 1
+    assert recognizer.rejected_counts()["ticker"] == 0
+
+    # And a second file with nothing in the band must not report the first
+    # file's rejections, for the same reason `answered_regions` is cleared.
+    bands({BACKGROUND: "чтото в кадре"})
+    assert recognizer.recognize(MEDIA) == []
+    assert set(recognizer.rejected_counts().values()) == {0}
+
+
+def test_impossible_gate_floors_are_refused_at_construction():
+    with pytest.raises(ValueError):
+        NewsOverlayRecognizer(readable_chars=-1)
+    with pytest.raises(ValueError):
+        NewsOverlayRecognizer(readable_agreement=1.5)
+    with pytest.raises(ValueError):
+        NewsOverlayRecognizer(readable_agreement=-0.1)
+
+
 # --- wiring -----------------------------------------------------------------
 
 def test_the_news_recognizer_needs_no_roster():
@@ -299,4 +424,36 @@ def test_the_pipeline_runs_the_news_recognizer_when_asked(monkeypatch, tmp_path)
     pipeline_mod.Pipeline(
         roster=Roster([]), news=True, ocr_lang="rus", fps=0.25
     ).cues_for(media)
+    # No gate arguments: the measured defaults live in the recognizer, and the
+    # pipeline forwards only what an operator actually set.
     assert built == {"lang": "rus", "fps": 0.25}
+
+
+def test_the_gate_floors_reach_the_recognizer_from_argv(monkeypatch, tmp_path):
+    """A flag parsed but never threaded is the usual way an option silently
+    does nothing, and this one's job is to turn a default-on gate off."""
+    from dirstral_annotator import pipeline as pipeline_mod
+    from dirstral_annotator.cli import _pipeline, build_parser
+    from dirstral_annotator.recognizers import news as news_mod
+    from dirstral_annotator.roster import Roster
+
+    built = {}
+
+    class Fake:
+        def __init__(self, **kwargs):
+            built.update(kwargs)
+
+        def recognize(self, media_path):
+            return []
+
+    monkeypatch.setattr(news_mod, "NewsOverlayRecognizer", Fake)
+    monkeypatch.setattr(pipeline_mod, "fuse", lambda cues, min_confidence=0.0: [])
+    media = tmp_path / "broadcast.mp4"
+    media.write_bytes(b"")
+
+    args = build_parser().parse_args(
+        ["serve", "--news", "--news-min-chars", "0", "--news-min-agreement", "0"]
+    )
+    _pipeline(args, Roster([]), {}).cues_for(media)
+    assert built["readable_chars"] == 0
+    assert built["readable_agreement"] == pytest.approx(0.0)
