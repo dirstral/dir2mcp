@@ -371,22 +371,43 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 	// applyCueCleaningToSegments call builds a fresh collapser, so one language's
 	// trailing cue can never start a run in the next.
 	cleanOpts := s.captionCleanOptions()
-	ingested := false
+
+	// Chunk every language BEFORE persisting any of them, so the #681 secret screen
+	// below sees the whole document's sidecar text at once. Screening per language
+	// inside the persist loop would let a clean first language commit (and count a
+	// representation) before a later language withheld the document and retired it
+	// again, which would leave the run's representation counter describing a
+	// representation that no longer exists.
+	perLang := make(map[string][]chunkSegment, len(langs))
+	var allText strings.Builder
 	for _, lang := range langs {
 		segments := chunkSubtitleCuesFiltered(groups[lang], s.captionWordFilter())
 		segments = applyCueCleaningToSegments(segments, cleanOpts)
 		if len(segments) == 0 {
 			continue
 		}
+		perLang[lang] = segments
+		if allText.Len() > 0 {
+			allText.WriteByte('\n')
+		}
+		allText.WriteString(joinSegmentTexts(segments))
+	}
+	// #681: a sidecar becomes the media document's searchable transcript, so its
+	// cue text is screened exactly like an STT transcript, over the cleaned strings
+	// that are chunked and embedded. On a match the document is already withheld
+	// and nothing below runs.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindSidecar, allText.String()) {
+		return false, nil
+	}
+
+	ingested := false
+	for _, lang := range langs {
+		segments, ok := perLang[lang]
+		if !ok {
+			continue
+		}
 		if err := s.persistSidecarTranscript(ctx, doc, lang, groups[lang], segments); err != nil {
 			return ingested, err
-		}
-		// #681: this language's cues matched a configured secret pattern, so nothing
-		// was persisted and the whole document is now withheld. Stop before counting
-		// a representation that does not exist, and do not read the remaining
-		// languages: the document is already terminal.
-		if s.secretExcludedThisDoc {
-			return ingested, nil
 		}
 		s.addRepresentations(1)
 		ingested = true
@@ -464,15 +485,6 @@ func (s *Service) persistSidecarTranscript(ctx context.Context, doc model.Docume
 	// the same value (no padded/non-canonical language stored alongside a trimmed
 	// provenance decision).
 	lang = strings.TrimSpace(lang)
-
-	// #681: a subtitle sidecar becomes the media document's searchable transcript,
-	// so its cue text is screened before persistence exactly like an STT
-	// transcript. The scan runs over the cleaned segment texts, which are the
-	// strings that are chunked and embedded.
-	if s.screenDerivedSecrets(ctx, doc, derivedKindSidecar, joinSegmentTexts(segments)) {
-		return nil
-	}
-
 	meta := transcriptMeta{Source: sidecarSource, Language: lang, Timestamps: true}
 	// A sidecar's language is asserted by the source itself — the filename suffix
 	// (clip.en.vtt §8.6.4) or a TTML xml:lang — so its provenance is "declared"
