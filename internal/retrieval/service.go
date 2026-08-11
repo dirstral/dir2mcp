@@ -732,10 +732,13 @@ func (s *Service) SetCorpusLanguagesProvider(fn func() []string) {
 func (s *Service) SetDocumentHashes(hashes []model.DocumentHash) {
 	m := make(map[string]string, len(hashes))
 	for _, h := range hashes {
-		if strings.TrimSpace(h.ContentHash) == "" {
+		// Trim exactly as UpdateDocumentHash does, so a snapshot entry and a live
+		// update of the same document always produce the same group key.
+		hash := strings.TrimSpace(h.ContentHash)
+		if hash == "" {
 			continue
 		}
-		m[normalizeEvictPath(h.RelPath)] = h.ContentHash
+		m[normalizeEvictPath(h.RelPath)] = hash
 	}
 	s.groupKeysMu.Lock()
 	defer s.groupKeysMu.Unlock()
