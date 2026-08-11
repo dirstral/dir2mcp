@@ -2913,7 +2913,11 @@ func (s *Service) hybridVectorCandidateLimit(k int, idx model.Index) int {
 // rerankPool applies the optional rerank stage to a fused candidate
 // pool and returns the best k. When rerank is disabled or no reranker
 // is configured it is exactly truncateSearchHits(hits, k). It is
-// fail-open: any provider error keeps the pre-rerank order. Output is
+// fail-open: any provider error, and any response that is not a valid ranking
+// of the pool, keeps the pre-rerank order. A response that scores only part of
+// the pool keeps the unscored candidates instead of dropping them, so the
+// result count never falls below the pre-rerank count for the same k
+// (issue #669). Output is
 // deterministically ordered (relevance desc, then chunk_id asc) so ties
 // don't depend on provider response ordering (SPEC 9.1.1). Extracted
 // from the search paths to keep their cyclomatic complexity in budget.
@@ -2954,22 +2958,9 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		}
 		return s.diversifyAndTruncate(fused, k)
 	}
-	out := make([]model.SearchHit, 0, len(fused))
-	for _, r := range results {
-		if r.Index < 0 || r.Index >= len(cand) {
-			s.logf("rerank: out-of-range index %d, falling back to fused order", r.Index)
-			return s.diversifyAndTruncate(fused, k)
-		}
-		h := cand[r.Index]
-		h.Score = r.RelevanceScore
-		// The reranker scored this (query, chunk) pair directly, so its score is
-		// an absolute relevance signal on the provider's own scale and supersedes
-		// the cosine reading recorded at retrieval time (SPEC §9.4.3). The
-		// un-reranked tail appended below keeps whatever scale it already carried,
-		// which is exactly why the scale travels per hit rather than per response.
-		h.EvidenceScore = r.RelevanceScore
-		h.EvidenceScale = evidenceScaleRerank
-		out = append(out, h)
+	out, scored, ok := s.rerankedHits(cand, results)
+	if !ok {
+		return s.diversifyAndTruncate(fused, k)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -2977,12 +2968,60 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		}
 		return out[i].ChunkID < out[j].ChunkID
 	})
-	// Preserve fused candidates beyond the reranked pool so rerank only
-	// reorders and never returns fewer than k when more were available.
+	// Preserve every candidate the provider did not score, in fused order, so
+	// rerank only reorders and never returns fewer than k when more were
+	// available (SPEC §9.1.1 "no result loss"). Two sources feed this tail:
+	// pool members the provider left out of its response (it may cap the
+	// response at top_n), then fused candidates beyond the pool.
+	for i, h := range cand {
+		if !scored[i] {
+			out = append(out, h)
+		}
+	}
 	if len(fused) > len(cand) {
 		out = append(out, fused[len(cand):]...)
 	}
 	return s.diversifyAndTruncate(out, k)
+}
+
+// rerankedHits maps a provider response onto the candidate pool that was sent
+// to it. It returns the re-scored hits plus a scored[i] mask over cand, so the
+// caller can append the candidates the provider left out.
+//
+// A response is rejected whole (ok=false) when it is not a valid ranking of the
+// pool: an index outside the pool, or an index repeated. Both would corrupt the
+// result set (a repeated index duplicates a hit), and neither can be repaired
+// without guessing what the provider meant. Rejection routes the query to the
+// same fail-open fallback as a provider error: the deterministic pre-rerank
+// fused order, truncated to k (SPEC §9.1.1). A response that merely omits
+// candidates is NOT malformed: providers legitimately return only their top_n,
+// so those candidates are kept by the caller instead.
+func (s *Service) rerankedHits(cand []model.SearchHit, results []model.Reranked) ([]model.SearchHit, []bool, bool) {
+	out := make([]model.SearchHit, 0, len(cand))
+	scored := make([]bool, len(cand))
+	for _, r := range results {
+		if r.Index < 0 || r.Index >= len(cand) {
+			s.logf("rerank: out-of-range index %d, falling back to fused order", r.Index)
+			return nil, nil, false
+		}
+		if scored[r.Index] {
+			s.logf("rerank: duplicate index %d, falling back to fused order", r.Index)
+			return nil, nil, false
+		}
+		scored[r.Index] = true
+		h := cand[r.Index]
+		h.Score = r.RelevanceScore
+		// The reranker scored this (query, chunk) pair directly, so its score is
+		// an absolute relevance signal on the provider's own scale and supersedes
+		// the cosine reading recorded at retrieval time (SPEC §9.4.3). The
+		// un-reranked tail appended by the caller keeps whatever scale it already
+		// carried, which is exactly why the scale travels per hit rather than per
+		// response.
+		h.EvidenceScore = r.RelevanceScore
+		h.EvidenceScale = evidenceScaleRerank
+		out = append(out, h)
+	}
+	return out, scored, true
 }
 
 // rerankDocs returns the text sent to the reranker for each candidate. The
