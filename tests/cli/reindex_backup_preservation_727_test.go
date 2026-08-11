@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,16 +95,34 @@ func seedCrashedHashState(t *testing.T, stateDir, relPath string) {
 }
 
 // crashHashStateFromCurrent stages the store side of a reindex over whatever
-// hashes are there NOW (snapshot, then clear) and stops without resolving it,
-// standing in for the process being killed mid-run. Split out from
-// seedCrashedHashState so a second simulated crash chains onto the state the
-// previous run left rather than re-establishing a known-good one.
+// hashes are there NOW (recover, snapshot, then clear) and stops without
+// resolving it, standing in for the process being killed mid-run. Split out
+// from seedCrashedHashState so a second simulated crash chains onto the state
+// the previous run left rather than re-establishing a known-good one.
+//
+// The recover step is not decoration: it is the first thing prepareReindexStore
+// does (snapshotContentHashes calls restoreInterruptedReindexHashes before
+// BackupContentHashes), and since #811 a snapshot REFUSES to overwrite one that
+// is already there. So a helper that snapshots without recovering first asks
+// the store for something no real run ever asks for, and it fails the moment a
+// previous attempt leaves a snapshot behind (for example when a run exits
+// early, before it establishes its staging). CI saw exactly that: "refusing to
+// overwrite the existing content-hash snapshot ... it holds an unrecovered
+// generation". Mirroring the real order keeps the simulation faithful AND makes
+// it independent of how far the previous attempt got.
 func crashHashStateFromCurrent(t *testing.T, stateDir string) {
 	t.Helper()
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("crash-seed Init: %v", err)
+	}
+	// "Nothing to restore" is the normal case: the previous attempt resolved its
+	// own staging. Any other error is real.
+	if err := st.RestoreContentHashes(ctx); err != nil &&
+		!errors.Is(err, store.ErrNoContentHashSnapshot) &&
+		!errors.Is(err, store.ErrEmptyContentHashSnapshot) {
+		t.Fatalf("crash-seed recover before snapshot: %v", err)
 	}
 	if err := st.BackupContentHashes(ctx); err != nil {
 		t.Fatalf("crash-seed BackupContentHashes: %v", err)
