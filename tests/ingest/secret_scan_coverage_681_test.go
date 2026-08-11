@@ -27,9 +27,10 @@ import (
 //     OCR, transcription, extraction, or translation was never tested against the
 //     patterns at all.
 //
-// Every test here withholds nothing but the document: the assertions look at the
-// persisted status, the skip reason, and the live representations, which is what
-// retrieval reads.
+// Every test asserts on the state retrieval actually reads: the persisted
+// document status, its skip reason, and its live representations. A withheld
+// document must carry the SPEC 15.2 `secret_excluded` reason and must have
+// nothing left that `search`, `ask`, or `open_file` can return.
 
 // secret681 is a synthetic AWS access key id. It matches the FIRST default
 // pattern (`AKIA[0-9A-Z]{16}`), which is the shape SPEC §7.2 lists first, and it
