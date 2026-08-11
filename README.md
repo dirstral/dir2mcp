@@ -588,6 +588,7 @@ Notes:
 
 - The watcher runs alongside the existing embedding worker, so newly indexed files become searchable automatically without a manual `reindex`.
 - It is **best-effort, not a correctness guarantee**: a low-frequency safety rescan reconciles anything missed (kernel event coalescing, OS watch limits on very large trees), so the index converges even if individual events are dropped.
+- A **directory** that is removed, or renamed out of the corpus, retires every document below it at once. A filesystem reports one event for the directory, not one per file, so the watcher reconciles the descendants itself instead of leaving them searchable until the next safety rescan.
 - Excluded paths, `.gitignore` rules, and size/type limits apply to watched changes exactly as they do to the initial scan.
 - **The watcher needs a filesystem.** `source.kind: local` and `source.kind: nfs` are ordinary directory trees, so both use it. A remote corpus (`source.kind: s3`) has no filesystem to watch, so the watcher does not start for it. The index reconciles on a periodic rescan of the remote source instead, and `dir2mcp up` prints a warning at startup. `watch_debounce` and the `watch_overflows` stat apply only to the filesystem watcher; a remote corpus reports neither.
 - Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.

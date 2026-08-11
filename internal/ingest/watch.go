@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -381,6 +383,11 @@ func (w *fsWatchLoop) process(ctx context.Context, job watchJob) {
 		// The path is genuinely gone: tombstone it. Covers both a delete job and
 		// a write job whose file vanished before we processed it.
 		w.svc.processDelete(ctx, rel)
+		// A directory that is removed or renamed out of the tree is reported as
+		// ONE event for the directory path. The store holds no document at that
+		// path, only documents below it, so the descendants must be reconciled
+		// here too (issue #678).
+		w.svc.processDeleteSubtree(ctx, w.absRoot, rel)
 		return
 	}
 	if statErr != nil {
@@ -645,18 +652,104 @@ func (s *Service) processDelete(ctx context.Context, relPath string) {
 		return
 	}
 	s.addDeleted(1)
-	s.onDocumentsDeletedMu.RLock()
-	onDeleted := s.onDocumentsDeleted
-	s.onDocumentsDeletedMu.RUnlock()
-	if onDeleted != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					s.addErrors(1)
-					s.getLogger().Printf("onDocumentsDeleted panic for %s (%s)", relPath, safePanicValue(r))
-				}
-			}()
-			onDeleted([]string{relPath})
-		}()
+	s.notifyDocumentsDeleted([]string{relPath})
+}
+
+// subtreeListPageSize pages the descendant listing processDeleteSubtree reads.
+// It matches the page size listActiveDocuments uses for the full corpus.
+const subtreeListPageSize = 500
+
+// processDeleteSubtree tombstones every active document stored below relDir and
+// evicts it from retrieval (issue #678).
+//
+// The watcher needs it because a filesystem does not report a subtree removal
+// per child. A `rm -rf docs` or a `mv docs ../elsewhere` can arrive as a single
+// Remove/Rename event for `docs`, while the store holds one document per
+// descendant file. Without this pass those documents stay searchable until the
+// safety rescan, which is up to ten minutes later.
+//
+// The caller MUST have proven that relDir itself is gone from disk. That proof
+// is what makes the deletion safe: a document at `relDir/child` can only be
+// reachable through a directory at `relDir`, so if `relDir` does not exist then
+// no descendant of it exists either. The per-path Lstat below re-checks that
+// for each candidate, so a path that somehow still exists keeps its chunks.
+//
+// SPEC §6.6 is preserved: each document is retired through MarkDocumentDeleted,
+// which sets deleted=1 on the document, its representations and its chunks.
+// Nothing is hard-deleted.
+func (s *Service) processDeleteSubtree(ctx context.Context, absRoot, relDir string) {
+	deleter, ok := s.store.(documentDeleteMarker)
+	if !ok {
+		return
 	}
+	paths, err := s.activeDocumentsUnder(ctx, relDir)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.getLogger().Printf("watch: list documents under %s: %v", relDir, err)
+		}
+		return
+	}
+	deleted := make([]string, 0, len(paths))
+	for _, relPath := range paths {
+		if ctx.Err() != nil {
+			break
+		}
+		if pathStillPresent(absRoot, relPath) {
+			continue
+		}
+		if err := deleter.MarkDocumentDeleted(ctx, relPath); err != nil {
+			s.addErrors(1)
+			continue
+		}
+		s.addDeleted(1)
+		deleted = append(deleted, relPath)
+	}
+	s.notifyDocumentsDeleted(deleted)
+}
+
+// activeDocumentsUnder returns the sorted rel_paths of every active document
+// stored below relDir.
+//
+// The store prefix filter is only a coarse pre-filter. ListFiles normalizes the
+// prefix, which drops a trailing slash, and SQLite LIKE compares ASCII letters
+// case-insensitively. The prefix "docs" therefore also matches "docsets/a.md"
+// and "Docs/a.md". The byte-exact HasPrefix test below is what makes the
+// returned set safe to tombstone.
+func (s *Service) activeDocumentsUnder(ctx context.Context, relDir string) ([]string, error) {
+	prefix := relDir + "/"
+	var out []string
+	offset := 0
+	for {
+		docs, total, err := s.store.ListFiles(ctx, relDir, "", subtreeListPageSize, offset)
+		if err != nil {
+			if errors.Is(err, model.ErrNotImplemented) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		for _, doc := range docs {
+			if doc.Deleted || !strings.HasPrefix(doc.RelPath, prefix) {
+				continue
+			}
+			out = append(out, doc.RelPath)
+		}
+		offset += len(docs)
+		if len(docs) == 0 || int64(offset) >= total {
+			break
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// pathStillPresent reports whether relPath names an entry that is still on disk
+// under absRoot.
+//
+// It guards the destructive subtree pass. An archive member carries a synthetic
+// rel_path ("book.zip/chapter.md") that never exists on disk, so a member of a
+// removed archive is retired as it should be, while a real file that survived
+// the event keeps its chunks.
+func pathStillPresent(absRoot, relPath string) bool {
+	_, err := os.Lstat(filepath.Join(absRoot, filepath.FromSlash(relPath)))
+	return err == nil
 }
