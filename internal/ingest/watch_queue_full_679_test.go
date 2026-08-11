@@ -74,6 +74,25 @@ func TestWatchQueueFull_DeleteDropAsksForImmediateRescan(t *testing.T) {
 	}
 }
 
+// TestWatchQueueFull_ReportEscapesTheDroppedPath keeps the report safe to write
+// to an untrusted sink. A file name can carry a newline, and a log file or a pipe
+// reads a newline as the end of the record, so a crafted name must not be able to
+// forge a second line.
+func TestWatchQueueFull_ReportEscapesTheDroppedPath(t *testing.T) {
+	w, logs, _ := newSaturatedWatchLoop(t)
+
+	w.arm("/corpus/evil\nwatch: forged line.md", false)
+
+	waitForLog(t, logs, "internal job queue full")
+	got := logs.String()
+	if strings.Contains(got, "\nwatch: forged line") {
+		t.Errorf("a file name forged a log line; log was %q", got)
+	}
+	if !strings.Contains(got, `\n`) {
+		t.Errorf("the control character in the path must be escaped; log was %q", got)
+	}
+}
+
 // TestWatchQueueFull_BurstReportsOnceAndReconcilesAll asserts the burst
 // behavior an operator meets in practice: every drop asks for the reconcile, the
 // requests coalesce, and the log carries a running total instead of one line per

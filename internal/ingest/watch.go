@@ -456,8 +456,13 @@ func (w *fsWatchLoop) handleQueueFull(job watchJob) {
 	if !report {
 		return
 	}
+	// The path is quoted with %q, not printed raw. A file name can carry a
+	// newline or another control character, and this line goes to an untrusted
+	// sink (a log file, a pipe). %q escapes them, so a crafted name cannot forge
+	// a second log line. The path itself stays: an operator needs to know which
+	// change was lost.
 	w.svc.getLogger().Printf(
-		"watch: internal job queue full (%d jobs): dropped the pending change for %s; %d change(s) dropped since the watcher started; %s",
+		"watch: internal job queue full (%d jobs): dropped the pending change for %q; %d change(s) dropped since the watcher started; %s",
 		cap(w.fire), job.absPath, dropped, rescanNote(rescanQueued),
 	)
 }
