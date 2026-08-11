@@ -62,7 +62,7 @@ func writeDedupCorpusFile(t *testing.T, root, relPath, content string) ingest.Di
 	return ingest.DiscoveredFile{AbsPath: absPath, RelPath: relPath, SizeBytes: int64(len(content))}
 }
 
-func assertHashes(t *testing.T, got, want []string, stage string) {
+func assertStringSliceEqual(t *testing.T, got, want []string, stage string) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("%s: want %q, got %q", stage, want, got)
@@ -92,7 +92,7 @@ func TestProcessDocument_ContentHashHook_PublishesOnlyAfterRepsCommit(t *testing
 		t.Fatalf("ProcessDocument: %v", err)
 	}
 
-	assertHashes(t, reports.hashesFor("a.txt"),
+	assertStringSliceEqual(t, reports.hashesFor("a.txt"),
 		[]string{"", ingest.ComputeContentHash([]byte(content))},
 		"a new document reports the withheld marker first")
 }
@@ -113,7 +113,7 @@ func TestProcessDocument_ContentHashHook_NoPublishWhenRepsFail(t *testing.T) {
 		t.Fatal("a failed representation commit must return an error")
 	}
 
-	assertHashes(t, reports.hashesFor("a.txt"), []string{""},
+	assertStringSliceEqual(t, reports.hashesFor("a.txt"), []string{""},
 		"a failed document publishes no group key")
 }
 
@@ -135,7 +135,7 @@ func TestProcessDocument_ContentHashHook_UnchangedDocumentRestatesItsHash(t *tes
 		t.Fatalf("ProcessDocument: %v", err)
 	}
 
-	assertHashes(t, reports.hashesFor("a.txt"), []string{hash},
+	assertStringSliceEqual(t, reports.hashesFor("a.txt"), []string{hash},
 		"an unchanged document restates its hash once")
 }
 
@@ -189,5 +189,5 @@ func assertLivePaths(t *testing.T, ret *retrieval.Service, want []string, stage 
 	for _, h := range hits {
 		got = append(got, h.RelPath)
 	}
-	assertHashes(t, got, want, stage)
+	assertStringSliceEqual(t, got, want, stage)
 }
