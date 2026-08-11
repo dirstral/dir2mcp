@@ -97,8 +97,11 @@ func TestWatchQueueFull_BurstReportsOnceAndReconcilesAll(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("want exactly one queue-full line for one burst, got %d: %v", len(lines), lines)
 	}
-	if !strings.Contains(lines[0], "change(s) dropped since the watcher started") {
-		t.Errorf("the line must name a running total; line was %q", lines[0])
+	// The line is written on the FIRST drop of the burst, so the total it names
+	// is 1. That is the point of the rate limit: the line says a burst started,
+	// and the reconcile line says how big it was (see the next test).
+	if !strings.Contains(lines[0], "1 change(s) dropped since the watcher started") {
+		t.Errorf("the line must name the running total at the moment it was written; line was %q", lines[0])
 	}
 	if !strings.Contains(lines[0], "rescan") {
 		t.Errorf("the line must say what closes the gap; line was %q", lines[0])
@@ -132,8 +135,13 @@ func TestWatchQueueFull_ReconcileReportsTheBurstSize(t *testing.T) {
 	waitForLog(t, logs, "watch: safety rescan:")
 	rescanReq <- struct{}{}
 	waitForLogCount(t, logs, "rescan starting to reconcile 7 change(s)", 2)
+
 	cancel()
-	<-done
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker did not stop after the context was cancelled")
+	}
 }
 
 // TestWatchQueueFull_RoomInQueueKeepsPerPathProcessing guards the normal path:
