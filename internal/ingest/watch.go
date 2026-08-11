@@ -187,6 +187,11 @@ type fsWatchLoop struct {
 	excluded corpusfs.ExcludedDirSet
 	debounce time.Duration
 
+	// requestRescan queues a coalesced safety rescan. run() installs it before
+	// the worker starts, so every caller (the event loop and the worker alike)
+	// shares one request slot.
+	requestRescan func()
+
 	mu      sync.Mutex
 	pending map[string]*time.Timer
 	fire    chan watchJob
@@ -203,6 +208,7 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 		default:
 		}
 	}
+	w.requestRescan = requestRescan
 	// A watcher is now running: let the stats surface report watch_overflows
 	// (even 0) rather than omitting it as "not applicable" (#591).
 	w.svc.indexingState.MarkWatchActive()
@@ -367,48 +373,50 @@ func (w *fsWatchLoop) arm(absPath string, deleted bool) {
 	})
 }
 
-// process applies a debounced job: index the file or mark it deleted.
+// gitignoreFileName is the discovery rule file whose content decides which
+// paths are eligible.
+const gitignoreFileName = ".gitignore"
+
+// documentStatusSkipped is the documents.status value for a discovered path
+// that ingest refused. It carries a model.SkipReason* in skip_reason.
+const documentStatusSkipped = "skipped"
+
+// watchSkip says how the store must represent a path the watcher refuses.
+//
+// The two forms mirror what the initial scan does with the same path, so a
+// watch decision and a rescan decision agree:
+//
+//   - reason set: discovery keeps a durable skipped row for such a path, so the
+//     watcher writes that row too. The value is a model.SkipReason* constant.
+//   - reason empty: discovery drops the path entirely, so the watcher
+//     tombstones the document.
+type watchSkip struct {
+	reason    string
+	sizeBytes int64
+}
+
+// process applies a debounced job: index the file, reconcile it, or mark it
+// deleted.
 func (w *fsWatchLoop) process(ctx context.Context, job watchJob) {
-	rel, err := filepath.Rel(w.absRoot, job.absPath)
-	if err != nil {
+	rel, ok := w.relPath(job.absPath)
+	if !ok {
 		return
 	}
-	rel = filepath.ToSlash(rel)
-	if rel == "." || matchesAnyPathExclude(rel, w.svc.cfg.PathExcludes) {
-		return
-	}
+	w.rescanOnIgnoreRuleChange(job.absPath)
 
 	info, statErr := os.Lstat(job.absPath)
-	if os.IsNotExist(statErr) {
-		// The path is genuinely gone: tombstone it. Covers both a delete job and
-		// a write job whose file vanished before we processed it.
-		w.svc.processDelete(ctx, rel)
-		// A directory that is removed or renamed out of the tree is reported as
-		// ONE event for the directory path. The store holds no document at that
-		// path, only documents below it, so the descendants must be reconciled
-		// here too (issue #678).
-		w.svc.processDeleteSubtree(ctx, w.absRoot, rel)
-		return
-	}
 	if statErr != nil {
-		// Transient stat error (e.g. permissions). Honor a delete job as before;
-		// for a write job, skip and let the safety rescan reconcile.
-		if job.deleted {
-			w.svc.processDelete(ctx, rel)
-		}
+		w.processStatError(ctx, job, rel, statErr)
 		return
 	}
 
-	f, ok := w.indexableFile(job.absPath, rel, info)
+	f, skip, ok := w.indexableFile(job.absPath, rel, info)
 	if !ok {
-		// The path exists but is no longer indexable (became a directory, was
-		// filtered out, exceeds the size cap, is gitignored, or is an unfollowed
-		// symlink). A delete job is honored so a document replaced by a
-		// non-indexable entry is removed; a write job is simply dropped, matching
-		// the prior behavior for an unindexable modify.
-		if job.deleted {
-			w.svc.processDelete(ctx, rel)
-		}
+		// The path exists but is no longer indexable: it became a directory, it
+		// grew past the size cap, it is newly gitignored, or it is an unfollowed
+		// symlink. A document that was indexed under the old rules must stop
+		// being searchable now, not at the next safety rescan (issue #680).
+		w.svc.reconcileIneligibleDocument(ctx, rel, skip)
 		return
 	}
 	// The path exists and is indexable. Whether the job was armed as a delete
@@ -422,12 +430,66 @@ func (w *fsWatchLoop) process(ctx context.Context, job watchJob) {
 	}
 }
 
+// relPath converts an event path to the corpus-relative, slash-separated path
+// the store keys on. ok=false means the watcher must ignore the event.
+func (w *fsWatchLoop) relPath(absPath string) (string, bool) {
+	rel, err := filepath.Rel(w.absRoot, absPath)
+	if err != nil {
+		return "", false
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." || matchesAnyPathExclude(rel, w.svc.cfg.PathExcludes) {
+		return "", false
+	}
+	return rel, true
+}
+
+// rescanOnIgnoreRuleChange asks for a coalesced rescan when the changed path is
+// a .gitignore file (issue #680).
+//
+// A rule file decides the eligibility of every path below it, and one write can
+// flip many of them at once. No per-path event describes that, so the watcher
+// asks the scan to reconcile the tree. The request is coalesced, so a burst of
+// edits collapses to one reconcile.
+func (w *fsWatchLoop) rescanOnIgnoreRuleChange(absPath string) {
+	if !w.opts.UseGitIgnore || w.requestRescan == nil {
+		return
+	}
+	if filepath.Base(absPath) != gitignoreFileName {
+		return
+	}
+	w.requestRescan()
+}
+
+// processStatError handles a job whose path could not be read.
+func (w *fsWatchLoop) processStatError(ctx context.Context, job watchJob, rel string, statErr error) {
+	if os.IsNotExist(statErr) {
+		// The path is genuinely gone: tombstone it. Covers both a delete job and
+		// a write job whose file vanished before we processed it.
+		w.svc.processDelete(ctx, rel)
+		// A directory that is removed or renamed out of the tree is reported as
+		// ONE event for the directory path. The store holds no document at that
+		// path, only documents below it, so the descendants must be reconciled
+		// here too (issue #678).
+		w.svc.processDeleteSubtree(ctx, w.absRoot, rel)
+		return
+	}
+	// Transient stat error (e.g. permissions). Honor a delete job as before;
+	// for a write job, skip and let the safety rescan reconcile.
+	if job.deleted {
+		w.svc.processDelete(ctx, rel)
+	}
+}
+
 // indexableFile applies the same discovery filters as the initial scan
 // (directory/symlink policy, size cap, .gitignore) and returns the
-// DiscoveredFile to index, or ok=false if the path should be skipped.
-func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (DiscoveredFile, bool) {
+// DiscoveredFile to index, or ok=false plus the way the store must record the
+// refusal.
+func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (DiscoveredFile, watchSkip, bool) {
 	if info.IsDir() {
-		return DiscoveredFile{}, false
+		// A directory is not a document. Discovery walks it instead of recording
+		// it, so a document that was replaced by a directory leaves the corpus.
+		return DiscoveredFile{}, watchSkip{}, false
 	}
 	// Symlink policy: mirror the discovery walker. When symlinks are not
 	// followed, skip them; otherwise resolve the link and enforce root
@@ -435,11 +497,11 @@ func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (Disc
 	if info.Mode()&os.ModeSymlink != 0 {
 		resolved, ok := w.followedSymlinkTarget(absPath, rel)
 		if !ok {
-			return DiscoveredFile{}, false
+			return DiscoveredFile{}, w.symlinkSkip(), false
 		}
 		target, err := os.Stat(resolved)
 		if err != nil {
-			return DiscoveredFile{}, false
+			return DiscoveredFile{}, watchSkip{}, false
 		}
 		// Hand downstream the RESOLVED path, exactly as the discovery walker
 		// records it in DiscoveredFile.AbsPath, so any consumer that reads the
@@ -448,15 +510,21 @@ func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (Disc
 		absPath = resolved
 		info = target
 	}
-	if !info.Mode().IsRegular() || info.Size() > w.opts.MaxSizeBytes {
-		return DiscoveredFile{}, false
+	if !info.Mode().IsRegular() {
+		return DiscoveredFile{}, watchSkip{}, false
+	}
+	if info.Size() > w.opts.MaxSizeBytes {
+		// Discovery records an over-size file as a durable skipped row (#497), so
+		// the watcher records the same row when a file grows past the cap.
+		return DiscoveredFile{}, watchSkip{reason: model.SkipReasonSizeCap, sizeBytes: info.Size()}, false
 	}
 	if w.opts.UseGitIgnore {
 		ignored, err := matchesGitignoreForFile(w.absRoot, rel)
 		if err != nil {
 			w.svc.getLogger().Printf("watch: gitignore check %s: %v", rel, err)
 		} else if ignored {
-			return DiscoveredFile{}, false
+			// Discovery never yields a gitignored path, so a rescan tombstones it.
+			return DiscoveredFile{}, watchSkip{}, false
 		}
 	}
 	return DiscoveredFile{
@@ -465,7 +533,20 @@ func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (Disc
 		SizeBytes: info.Size(),
 		MTimeUnix: info.ModTime().Unix(),
 		Mode:      info.Mode(),
-	}, true
+	}, watchSkip{}, true
+}
+
+// symlinkSkip says how the store records a symlink the watcher refuses.
+//
+// With following off, discovery reports the link and persists a
+// symlink_ignored row (#781). With following on, the only refusal left is a
+// target outside the corpus root, which discovery drops without a row, so the
+// document is tombstoned instead.
+func (w *fsWatchLoop) symlinkSkip() watchSkip {
+	if w.opts.FollowSymlinks {
+		return watchSkip{}
+	}
+	return watchSkip{reason: model.SkipReasonSymlinkIgnored}
 }
 
 // followedSymlinkTarget applies the symlink policy to an in-root symlink the
@@ -653,6 +734,67 @@ func (s *Service) processDelete(ctx context.Context, relPath string) {
 	}
 	s.addDeleted(1)
 	s.notifyDocumentsDeleted([]string{relPath})
+}
+
+// reconcileIneligibleDocument retires a document whose path still exists but no
+// longer passes the discovery filters (issue #680).
+//
+// Before this, an unindexable write was dropped, so a file that grew past the
+// size cap or that became gitignored kept its old chunks. Search and ask
+// returned content the current ingest policy excludes, until the safety rescan
+// up to ten minutes later. For a newly ignored path that is a policy surprise:
+// the operator excluded it and it stayed retrievable.
+//
+// The two outcomes mirror what a full scan does with the same path, so watch
+// and rescan agree:
+//
+//   - skip.reason empty: the path leaves the corpus. Tombstone it.
+//   - skip.reason set: discovery keeps a durable skipped row for such a path.
+//     The document is tombstoned first, which is what evicts the
+//     representations and the chunks, and the document row is then written back
+//     as a skipped row. The result is a visible document with a skip reason and
+//     no searchable content, which is exactly how the initial scan represents a
+//     file it refused.
+//
+// SPEC §6.6 is preserved. The eviction goes through MarkDocumentDeleted, so the
+// representations and the chunks carry deleted=1. Nothing is hard-deleted.
+func (s *Service) reconcileIneligibleDocument(ctx context.Context, relPath string, skip watchSkip) {
+	doc, err := s.store.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) && ctx.Err() == nil {
+			s.getLogger().Printf("watch: read document %s: %v", relPath, err)
+		}
+		return
+	}
+	if doc.Deleted {
+		return // already retired; nothing of it is searchable
+	}
+	if skip.reason == "" {
+		s.processDelete(ctx, relPath)
+		return
+	}
+	if doc.Status == documentStatusSkipped && doc.SkipReason == skip.reason {
+		// The transition was already reconciled. The pass that set this state
+		// evicted the chunks, so a repeated write (an append to an over-size
+		// file) must not write the row again.
+		return
+	}
+	s.processDelete(ctx, relPath)
+	skipped := model.Document{
+		RelPath:    relPath,
+		DocType:    ClassifyDocType(relPath),
+		SizeBytes:  skip.sizeBytes,
+		Status:     documentStatusSkipped,
+		SkipReason: skip.reason,
+	}
+	if err := s.store.UpsertDocument(ctx, skipped); err != nil {
+		if ctx.Err() == nil {
+			s.getLogger().Printf("watch: persist %s skip row for %s: %v", skip.reason, relPath, err)
+		}
+		return
+	}
+	s.addSkipped(1)
+	s.notifyDocumentSkip(skipped)
 }
 
 // subtreeListPageSize pages the descendant listing processDeleteSubtree reads.
