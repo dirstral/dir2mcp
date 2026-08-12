@@ -210,7 +210,6 @@ func TestMediaContent_AudioClipReachesTheClient(t *testing.T) {
 //	go test ./tests/conformance -run TestMediaContent_VideoClipReachesTheClient
 func TestMediaContent_VideoClipReachesTheClient(t *testing.T) {
 	t.Parallel()
-	t.Skip("blocked on dirstral-spec#60: SPEC §15.11 mandates a video-typed content item, which MCP 2025-11-25 does not define (dir2mcp #663)")
 	cfg, opts, chunkID := seedMediaClipCorpus(t, "clip.mp4", "video")
 	srv := newServer(t, cfg, opts...)
 	defer srv.Close()
@@ -220,4 +219,16 @@ func TestMediaContent_VideoClipReachesTheClient(t *testing.T) {
 		t.Fatalf("structured mime_type = %#v, want video/mp4", structured["mime_type"])
 	}
 	assertClipContentCarriesBytes(t, content, "video/mp4")
+
+	// SPEC §15.11 (spec 0.49.0) names the carrier, so assert it rather than
+	// only that SOME item carried the bytes. MCP 2025-11-25 defines no `video`
+	// item, so an embedded resource is the only valid carrier; a server that
+	// invents `type: "video"` would satisfy the helper above and still be
+	// rejected by a strict client.
+	if content[0].Type != "resource" {
+		t.Fatalf("content item type = %q, want resource: MCP defines no video item, so inline video travels as an embedded resource (SPEC §15.11)", content[0].Type)
+	}
+	if content[0].Resource == nil || content[0].Resource.URI == "" {
+		t.Fatalf("embedded resource carries no uri: MCP requires one on a resource item, got %+v", content[0].Resource)
+	}
 }
