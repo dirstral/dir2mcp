@@ -3,6 +3,11 @@
 dir2mcp with `recognize.provider: serve` POSTs `{"path": "<abs media path>"}`
 to `/recognize` and indexes the returned annotations. `/health` answers 200
 for probes (docling-serve parity). Stdlib-only.
+
+One pipeline serves every request, so the recognizers it caches are shared by
+every request too, and this runs on ThreadingHTTPServer. The pipeline owns that
+contract: it builds each recognizer once and lets one request at a time into it.
+See `pipeline._Shared`.
 """
 
 from __future__ import annotations
