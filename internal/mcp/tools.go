@@ -460,6 +460,9 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	if failures := loadRecentFailuresForStats(ctx, s.store); len(failures) > 0 {
 		structured["recent_failures"] = failures
 	}
+	if reasons := skipReasonsForStats(retrievedStats.SkipSummary); len(reasons) > 0 {
+		structured["skip_reasons"] = reasons
+	}
 
 	s.sessionMu.RLock()
 	sessionItems := make([]map[string]interface{}, 0, len(s.sessions))
@@ -495,6 +498,55 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		},
 		StructuredContent: structured,
 	}, nil
+}
+
+// skipReasonsForStats projects the store's durable skip aggregate onto the
+// canonical skip_reasons array: one {reason, count} entry per distinct reason a
+// document was recorded as status="skipped" (SPEC §15.6 / stats.json).
+//
+// It is the honest-coverage half of the stats payload. doc_counts groups every
+// non-deleted document by doc_type regardless of status, so it OVERSTATES what
+// is retrievable: a skipped .odt and an extracted .docx both count as
+// "document". skip_reasons is what says otherwise. The aggregate was populated
+// and then dropped before serialization (#646), so a corpus with unindexable
+// files looked fully covered to every MCP client.
+//
+// Zero-or-negative counts are omitted (the spec pins count >= 1), as is a blank
+// reason. Ordering is deterministic (count descending, then reason ascending), so
+// repeated calls and independent stores produce the same array. Returns nil when
+// nothing was skipped, so the caller omits the field entirely: the spec's "MAY
+// omit when nothing was skipped", which clients MUST read as "nothing skipped"
+// rather than "unsupported".
+func skipReasonsForStats(summary *model.SkipSummary) []map[string]interface{} {
+	if summary == nil || len(summary.Categories) == 0 {
+		return nil
+	}
+	type skipReasonCount struct {
+		reason string
+		count  int64
+	}
+	entries := make([]skipReasonCount, 0, len(summary.Categories))
+	for reason, count := range summary.Categories {
+		reason = strings.TrimSpace(reason)
+		if reason == "" || count < 1 {
+			continue
+		}
+		entries = append(entries, skipReasonCount{reason: reason, count: count})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].count != entries[j].count {
+			return entries[i].count > entries[j].count
+		}
+		return entries[i].reason < entries[j].reason
+	})
+	out := make([]map[string]interface{}, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, map[string]interface{}{"reason": entry.reason, "count": entry.count})
+	}
+	return out
 }
 
 // statsRecentFailuresLimit caps the recent_failures array per the spec
@@ -4351,6 +4403,36 @@ func statsOutputSchema() map[string]interface{} {
 						"error_message": map[string]interface{}{"type": "string"},
 					},
 					"required": []string{"rel_path", "doc_type", "mtime_unix", "error_message"},
+				},
+			},
+			// skip_reasons: optional per SPEC §15.6. It is the honest-coverage
+			// breakdown of what was NOT indexed and why. Omitted when nothing
+			// was skipped; clients MUST read omission as "nothing skipped",
+			// not "unsupported".
+			//
+			// `reason` is advertised as a plain string, not the canonical
+			// closed enum. The spec's enum is the vocabulary for one spec
+			// minor and the same section tells clients they MAY receive an
+			// unrecognized value from a newer server and SHOULD render it
+			// verbatim. A served enum would therefore publish a schema that
+			// rejects a payload this server can legitimately emit, the very
+			// defect skip_reasons is being added to fix. The canonical values
+			// are named in the description so a client can still branch on
+			// them.
+			"skip_reasons": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]interface{}{
+						"reason": map[string]interface{}{
+							"type":        "string",
+							"minLength":   1,
+							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, symlink_ignored. Render an unrecognized value verbatim.",
+						},
+						"count": map[string]interface{}{"type": "integer", "minimum": 1},
+					},
+					"required": []string{"reason", "count"},
 				},
 			},
 		},

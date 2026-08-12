@@ -2613,6 +2613,11 @@ func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
 	base.EmbeddedPending = corpus.EmbeddedPending
 	base.Errors = corpus.Errors
 	base.TotalDocs = corpus.TotalDocs
+	// SkipSummary is the honest-coverage aggregate the store persists (#414/#395).
+	// It has to travel with the counters, because dir2mcp_stats reports it as the
+	// canonical skip_reasons field (SPEC §15.6). Dropping it here made a corpus
+	// with skipped documents look fully covered to every MCP client (#646).
+	base.SkipSummary = corpus.SkipSummary
 	if len(corpus.DocCounts) == 0 {
 		base.DocCounts = map[string]int64{}
 	} else {
