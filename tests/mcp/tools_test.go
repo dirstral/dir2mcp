@@ -880,7 +880,7 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	assertStatsDocCountsUnavailable(t, envelope.Result.StructuredContent)
 	assertStatsIndexingHasMode(t, envelope.Result.StructuredContent)
 	assertStatsModelsSTTProvider(t, envelope.Result.StructuredContent)
-	assertStatsSessionsActiveAndItems(t, envelope.Result.StructuredContent)
+	assertStatsOmitsSessions(t, envelope.Result.StructuredContent)
 }
 
 func assertStatsDocCountsUnavailable(t *testing.T, sc map[string]interface{}) {
@@ -917,18 +917,15 @@ func assertStatsModelsSTTProvider(t *testing.T, sc map[string]interface{}) {
 	}
 }
 
-func assertStatsSessionsActiveAndItems(t *testing.T, sc map[string]interface{}) {
+// assertStatsOmitsSessions pins issue #850: dir2mcp_stats MUST NOT carry a
+// `sessions` object. The canonical stats.json closes the output object and
+// declares no such field, so emitting it made a client that validates against
+// the canonical schema reject every stats response. It also published the
+// transport session roster of one client to every other client.
+func assertStatsOmitsSessions(t *testing.T, sc map[string]interface{}) {
 	t.Helper()
-	sessionsRaw, ok := sc["sessions"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected sessions object, got %#v", sc["sessions"])
-	}
-	if active, ok := sessionsRaw["active"].(float64); !ok || active < 1 {
-		t.Fatalf("expected sessions.active >= 1, got %#v", sessionsRaw["active"])
-	}
-	items, ok := sessionsRaw["items"].([]interface{})
-	if !ok || len(items) == 0 {
-		t.Fatalf("expected non-empty sessions.items, got %#v", sessionsRaw["items"])
+	if got, present := sc["sessions"]; present {
+		t.Fatalf("stats must not emit sessions (canonical stats.json is additionalProperties:false and declares no such field), got %#v", got)
 	}
 }
 
@@ -986,7 +983,7 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 	if !retriever.statsCalled.Load() {
 		t.Fatal("expected retriever.Stats to be called")
 	}
-	assertRetrieverStatsSessionsActive(t, envelope.Result.StructuredContent)
+	assertStatsOmitsSessions(t, envelope.Result.StructuredContent)
 }
 
 func assertRetrieverStatsTopLevel(t *testing.T, sc map[string]interface{}) {
@@ -1028,17 +1025,6 @@ func assertRetrieverStatsIndexing(t *testing.T, sc map[string]interface{}) {
 	}
 	if indexingRaw["scanned"] != float64(4) || indexingRaw["representations"] != float64(6) || indexingRaw["chunks_total"] != float64(8) {
 		t.Fatalf("unexpected indexing payload: %#v", indexingRaw)
-	}
-}
-
-func assertRetrieverStatsSessionsActive(t *testing.T, sc map[string]interface{}) {
-	t.Helper()
-	sessionsRaw, ok := sc["sessions"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected sessions object, got %#v", sc["sessions"])
-	}
-	if active, ok := sessionsRaw["active"].(float64); !ok || active < 1 {
-		t.Fatalf("expected sessions.active >= 1, got %#v", sessionsRaw["active"])
 	}
 }
 

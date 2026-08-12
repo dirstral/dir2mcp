@@ -499,12 +499,8 @@ func TestStatsOutputSchemaConformance(t *testing.T) {
 			"stt_model":    "voxtral-mini-latest",
 			"chat":         "mistral-large-latest",
 		},
-		"sessions": map[string]interface{}{
-			"active": 1,
-			"items": []map[string]interface{}{
-				{"id": "abc***", "created_unix": int64(1700000000), "last_seen_unix": int64(1700000100)},
-			},
-		},
+		// No "sessions" key: the transport session roster is not part of the
+		// §15.6 output (#850), and the schema closes the object.
 		"recent_failures": []map[string]interface{}{
 			{"rel_path": "docs/bad.pdf", "doc_type": "pdf", "mtime_unix": int64(1700000050), "error_message": "ocr failed"},
 		},

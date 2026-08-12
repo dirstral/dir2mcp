@@ -28,6 +28,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/x402"
 )
@@ -144,7 +145,15 @@ const serverCloseTimeout = 15 * time.Second
 // handler on purpose.
 func newServer(t *testing.T, cfg config.Config, opts ...mcp.ServerOption) *runningServer {
 	t.Helper()
-	server := mcp.NewServer(cfg, nil, opts...)
+	return newServerWithRetriever(t, cfg, nil, opts...)
+}
+
+// newServerWithRetriever is newServer with a live retriever behind the tools, so
+// a test can read a payload that travelled the production chain (store aggregate
+// -> retrieval service -> tool serialization) instead of the no-corpus fallback.
+func newServerWithRetriever(t *testing.T, cfg config.Config, retriever model.Retriever, opts ...mcp.ServerOption) *runningServer {
+	t.Helper()
+	server := mcp.NewServer(cfg, retriever, opts...)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

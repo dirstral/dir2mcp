@@ -445,25 +445,10 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		structured["skip_reasons"] = reasons
 	}
 
-	s.sessionMu.RLock()
-	sessionItems := make([]map[string]interface{}, 0, len(s.sessions))
-	for id, si := range s.sessions {
-		sessionItems = append(sessionItems, map[string]interface{}{
-			"id":             maskSessionID(id),
-			"created_unix":   si.created.Unix(),
-			"last_seen_unix": si.lastSeen.Unix(),
-		})
-	}
-	s.sessionMu.RUnlock()
-	sort.Slice(sessionItems, func(i, j int) bool {
-		left, _ := sessionItems[i]["id"].(string)
-		right, _ := sessionItems[j]["id"].(string)
-		return left < right
-	})
-	structured["sessions"] = map[string]interface{}{
-		"active": len(sessionItems),
-		"items":  sessionItems,
-	}
+	// No `sessions` block here on purpose (#850). See statsOutputSchema for the
+	// full reasoning: the transport session roster is not part of the §15.6
+	// contract, and the canonical stats.json closes the output object, so
+	// emitting it made a canonically-validating client reject every response.
 
 	text := fmt.Sprintf(
 		"indexing running=%t scanned=%d indexed=%d errors=%d",
@@ -4387,6 +4372,22 @@ func statsInputSchema() map[string]interface{} {
 	}
 }
 
+// statsOutputSchema is the schema dir2mcp advertises for dir2mcp_stats. It must
+// stay the same contract as the canonical
+// dirstral-spec/spec/tools/schemas/stats.json for the pinned spec version,
+// because SPEC §1.3 treats "the server-advertised schema" and "the schema for
+// the payload's declared format_version" as one schema, and the canonical output
+// object is closed (additionalProperties: false).
+//
+// It therefore declares no `sessions` block (#850). The transport session roster
+// used to be published here and emitted on every call, so a client that
+// validated against the canonical schema rejected EVERY stats response. Sessions
+// are transport state, not corpus state: §15.6 scopes this tool to
+// "status/progress/health for indexing and models", session state has its own
+// normative home in spec/sessions/lifecycle.md, and that document gives a client
+// only its own session, through headers. It defines no roster. On the stdio
+// transport a session id does not exist at all, so a required roster field
+// cannot mean anything for a stdio implementation.
 func statsOutputSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type":                 "object",
@@ -4446,27 +4447,6 @@ func statsOutputSchema() map[string]interface{} {
 				},
 				"required": []string{"embed_text", "embed_code", "ocr", "stt_provider", "stt_model", "chat"},
 			},
-			"sessions": map[string]interface{}{
-				"type":                 "object",
-				"additionalProperties": false,
-				"properties": map[string]interface{}{
-					"active": map[string]interface{}{"type": "integer"},
-					"items": map[string]interface{}{
-						"type": "array",
-						"items": map[string]interface{}{
-							"type":                 "object",
-							"additionalProperties": false,
-							"properties": map[string]interface{}{
-								"id":             map[string]interface{}{"type": "string"},
-								"created_unix":   map[string]interface{}{"type": "integer"},
-								"last_seen_unix": map[string]interface{}{"type": "integer"},
-							},
-							"required": []string{"id", "created_unix", "last_seen_unix"},
-						},
-					},
-				},
-				"required": []string{"active", "items"},
-			},
 			// recent_failures: optional per SPEC §15.6 — implementations
 			// MAY omit when no failures are recorded; clients MUST treat
 			// omission as "no recent failures". additionalProperties:false
@@ -4517,6 +4497,6 @@ func statsOutputSchema() map[string]interface{} {
 				},
 			},
 		},
-		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models", "sessions"},
+		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models"},
 	}
 }
