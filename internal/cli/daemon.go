@@ -20,34 +20,8 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 )
 
-// daemonChildEnv carries a per-spawn nonce that the parent sets on the
-// child's environment. The child treats itself as a daemon body only if
-// the env value is non-empty AND matches the value the parent's process
-// memory still holds, so a manually-exported `DIR2MCP_DAEMON_CHILD=1`
-// in a user's shell can't accidentally trip the daemon-child code paths
-// (which would silently drop the banner, the stdin quit listener, and
-// the parent's pid-file write — confusing footgun, no security boundary
-// crossed but worth eliminating).
-const daemonChildEnv = "DIR2MCP_DAEMON_CHILD"
-
-// minDaemonChildNonceLen is the floor we require on the daemonChildEnv
-// value before accepting it as proof that this process was spawned by a
-// matching parent. Our parent sets a 32-character hex nonce; we accept
-// 16+ chars to give us slack for future format changes while still
-// rejecting "1" / "true" / other shell-exported values.
-const minDaemonChildNonceLen = 16
-
-// isRunningAsDaemonChild reports whether the current process was spawned
-// by an earlier dir2mcp invocation as the daemon body. We require the
-// env var to look like the parent-generated nonce rather than treating
-// any presence as truthy, so a manually-exported `DIR2MCP_DAEMON_CHILD=1`
-// can't accidentally trip the daemon code paths (which would silently
-// drop the banner, the stdin quit listener, and the pid-file write —
-// confusing footgun, no security boundary crossed).
-func isRunningAsDaemonChild() bool {
-	v := os.Getenv(daemonChildEnv)
-	return len(v) >= minDaemonChildNonceLen
-}
+// The daemon-child marker and the launch handshake that proves it live in
+// daemon_child.go (issue #671).
 
 // pidFileName is the canonical filename for the dir2mcp daemon pid file
 // inside the state directory. Kept short so it lines up with the other
@@ -150,7 +124,7 @@ func serverLogPath(stateDir string) string {
 // is additive: existing destinations (terminal in the foreground, the service
 // manager under launchd/systemd) keep receiving logs.
 func (a *App) teeServerLog(stateDir string) func() {
-	if isRunningAsDaemonChild() {
+	if a.isDaemonChild() {
 		return nil
 	}
 	logPath := serverLogPath(stateDir)

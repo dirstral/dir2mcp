@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1961,14 +1962,16 @@ func (a *App) publishConnection(cfg config.Config, mcpURL string, auth authMater
 // divergent in-memory state corrupt the index (#434). The daemon child
 // relies on its parent having reconciled a stale pid file first; the
 // foreground/service path has no parent, so acquireSingleInstanceLock
-// reconciles a dead owner itself before its O_EXCL claim.
+// reconciles the record itself before its O_EXCL claim. That
+// reconciliation is token-aware (issue #665): only a pid file that still
+// names our live server refuses the start; a recycled pid does not.
 //
 // Returns the deferred cleanup closure (removes the pid file on exit)
 // and an exit code; runUp returns immediately when the code is non-zero
 // (the helper has already written the error).
 func (a *App) setupServerSingleInstance(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
 	cleanup = func() {}
-	if isRunningAsDaemonChild() {
+	if a.isDaemonChild() {
 		installDaemonChildSignalHandler(cancel)
 	}
 	release, err := acquireSingleInstanceLock(stateDir)
@@ -1999,31 +2002,15 @@ var errAlreadyRunning = errors.New("dir2mcp is already running")
 
 // acquireSingleInstanceLock claims the per-state-dir pid file so at most
 // one server process ever writes a given corpus's sqlite + index. It
-// reconciles a stale pid file (owner process dead) so a clean restart is
-// not blocked by a crash, then claims with O_EXCL so two live starters
-// racing the same directory cannot both win. A live owner — or losing
-// the O_EXCL race — returns an "already running" error the caller
+// reconciles a pid file that no longer names our live server so a clean
+// restart is not blocked by a crash, then claims with O_EXCL so two live
+// starters racing the same directory cannot both win. A live owner — or
+// losing the O_EXCL race — returns an "already running" error the caller
 // surfaces; the returned release removes the pid file on shutdown.
 func acquireSingleInstanceLock(stateDir string) (release func(), err error) {
 	pidPath := pidFilePath(stateDir)
-	// Reconcile a stale pid file whose owner is gone so the O_EXCL claim
-	// below has a clear field; a LIVE owner means a second writer, which
-	// we must refuse.
-	if existing, rerr := readPIDFile(pidPath); rerr == nil {
-		if processIsAlive(existing) {
-			return nil, fmt.Errorf("%w for %s (pid %d)", errAlreadyRunning, stateDir, existing)
-		}
-		_ = removePIDFile(pidPath)
-	} else if !errors.Is(rerr, os.ErrNotExist) {
-		// The pid file exists but is empty/corrupt/unparseable
-		// (readPIDFile errored with something other than "not exist").
-		// Its content names no live process, so treat it as a dead owner
-		// and clear it — otherwise a single malformed pid file would
-		// permanently brick startup: the O_EXCL claim below would fail
-		// and every run would report a bogus "already running" (#434). A
-		// live owner is never removed here because a live owner yields a
-		// parseable pid (the rerr == nil branch above), not an error.
-		_ = removePIDFile(pidPath)
+	if rerr := reconcilePIDFileOwner(pidPath, stateDir); rerr != nil {
+		return nil, rerr
 	}
 	if cerr := claimPIDFile(pidPath, os.Getpid()); cerr != nil {
 		if errors.Is(cerr, os.ErrExist) {
@@ -2037,6 +2024,97 @@ func acquireSingleInstanceLock(stateDir string) (release func(), err error) {
 		return nil, fmt.Errorf("claim pid file %s: %w", pidPath, cerr)
 	}
 	return func() { _ = removePIDFile(pidPath) }, nil
+}
+
+// pidReconcileAttempts bounds how often the startup lock re-reads a pid file
+// that another starter rewrote under it. Two attempts already cover the case;
+// the third is slack, and the bound guarantees the loop ends.
+const pidReconcileAttempts = 3
+
+// reconcilePIDFileOwner decides whether the startup lock may claim the pid
+// file at pidPath, and clears the record when it does not name our live
+// server. It returns errAlreadyRunning only for a positively identified live
+// owner, so the O_EXCL claim that follows has a clear field in every other
+// case.
+//
+// The ownership decision uses classifyPIDFile, the same token-aware check
+// `down`, `status` and `reindex` already use, so every command agrees on what
+// "our live daemon" means (issue #665). A bare liveness check is not an
+// identity check: after a crash without cleanup the OS can recycle the
+// recorded pid to an unrelated process, and that process would block every
+// later start with a false "already running" (issue #418).
+//
+// The three non-live classes are all cleared:
+//
+//   - pidDead: the owner exited, the normal post-crash restart.
+//   - pidRecycled: alive, but its start-time token no longer matches, so it
+//     is a bystander and not our server (issue #665).
+//   - pidMalformed: empty/corrupt/unparseable, so it names no live process.
+//     Clearing it keeps one bad file from bricking startup forever, because
+//     the O_EXCL claim over a surviving file would fail and report a bogus
+//     "already running" (issue #434).
+//
+// The record is only cleared while it still holds the bytes the ownership
+// decision read. A second starter can reconcile and claim the same pid file
+// between our read and our unlink, and an unconditional unlink would then
+// delete a live claim and let both servers serve one corpus. When the bytes
+// changed we re-read instead, and the record we find is either that live claim
+// (refused) or another stale record (cleared on the next attempt). A window of
+// a few instructions remains between the compare and the unlink; closing it
+// completely needs an advisory lock over the whole state directory, which is
+// more than this fix carries.
+func reconcilePIDFileOwner(pidPath, stateDir string) error {
+	for attempt := 0; attempt < pidReconcileAttempts; attempt++ {
+		snapshot, serr := os.ReadFile(pidPath)
+		if serr != nil && errors.Is(serr, os.ErrNotExist) {
+			return nil
+		}
+		existing, ownership := classifyPIDFile(pidPath)
+		switch ownership {
+		case pidNoFile:
+			return nil
+		case pidLive:
+			return fmt.Errorf("%w for %s (pid %d)", errAlreadyRunning, stateDir, existing)
+		}
+		cleared, cerr := clearPIDRecordIfUnchanged(pidPath, snapshot)
+		if cerr != nil {
+			// A removal we are not allowed to perform is an environment
+			// failure, not an already-running server. Report it as itself so
+			// the hint about `dir2mcp down` does not mislead (#434).
+			return fmt.Errorf("clear stale pid file %s: %w", pidPath, cerr)
+		}
+		if cleared {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w for %s (pid file %s keeps changing under concurrent starts)",
+		errAlreadyRunning, stateDir, pidPath)
+}
+
+// clearPIDRecordIfUnchanged removes pidPath only while its content still
+// equals snapshot, the bytes the ownership decision was made on. It reports
+// whether the record is gone. A record that changed under us is left alone and
+// reported as not cleared, so the caller re-reads it rather than unlink a
+// claim it never inspected.
+func clearPIDRecordIfUnchanged(pidPath string, snapshot []byte) (bool, error) {
+	current, err := os.ReadFile(pidPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Another starter cleared the same stale record, which is the
+			// outcome we wanted.
+			return true, nil
+		}
+		// We cannot tell what we would be deleting, so delete nothing and let
+		// the caller report the real error.
+		return false, err
+	}
+	if !bytes.Equal(current, snapshot) {
+		return false, nil
+	}
+	if rerr := removePIDFile(pidPath); rerr != nil {
+		return false, rerr
+	}
+	return true, nil
 }
 
 // installInteractionForUp picks the right termination interaction for
@@ -2060,7 +2138,7 @@ func (a *App) installInteractionForUp(
 	opts upOptions,
 	nonInteractiveMode bool,
 ) <-chan struct{} {
-	if isRunningAsDaemonChild() {
+	if a.isDaemonChild() {
 		installDaemonChildSignalHandler(cancel)
 		return startStdinQuitListener(true, opts.jsonOutput)
 	}
@@ -2076,8 +2154,11 @@ func (a *App) installInteractionForUp(
 //   - --foreground / -f: explicit caller request
 //   - --json: NDJSON event stream callers (smoke tests, automation) need
 //     events on stdout in real time, which detaching breaks
-//   - daemon child: we're already inside the forked process; fall through
-//     to the in-process server body
+//   - daemon marker present in the environment: we are already inside the
+//     forked process; fall through to the in-process server body. The test
+//     is the presence of the marker, not the verified handshake (#671): a
+//     marker that fails to verify must degrade to one in-process run, never
+//     to a chain of spawns, so a broken handshake can never fork-bomb.
 //   - non-unix platforms: setsid isn't available, so degrade gracefully
 //   - stdout not a TTY: piped, redirected, or being scraped by a test
 //     harness — the caller wants to see real-time output (and any
@@ -2092,7 +2173,7 @@ func shouldDaemonize(a *App, opts upOptions) bool {
 	if opts.foreground || opts.jsonOutput {
 		return false
 	}
-	if isRunningAsDaemonChild() {
+	if os.Getenv(daemonChildEnv) != "" {
 		return false
 	}
 	if !isDaemonSupported() {

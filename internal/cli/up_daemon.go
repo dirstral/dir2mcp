@@ -77,19 +77,24 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 		return exitGeneric
 	}
 
-	// Pass the original argv through verbatim. The child re-enters
-	// runUp; the daemonChildEnv marker (set on Env below) takes the
-	// in-process branch instead of recursing into the daemon parent.
-	// The marker value is a per-spawn random nonce rather than a
-	// constant "1" so a manually-exported env var in the user's shell
-	// can't accidentally trip the daemon-child code paths.
-	nonce, err := generateDaemonNonce()
+	// Pass the original argv through verbatim. The child re-enters runUp; the
+	// daemon marker (set on Env below) takes the in-process branch instead of
+	// recursing into the daemon parent.
+	//
+	// The marker is one half of a launch handshake: the nonce travels in the
+	// environment, and the same nonce sits in an owner-only file the child
+	// consumes (#671). Only the process this parent spawned can match it, so an
+	// exported or inherited environment value cannot claim the role. The
+	// cleanup removes the file when this parent returns, which bounds the
+	// nonce's life to this launch even if the child died before it read it.
+	childEnv, cleanupHandshake, err := prepareDaemonChildHandshake(stateDir)
 	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("generate daemon nonce: %v", err))
+		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("prepare daemon handshake: %v", err))
 		return exitGeneric
 	}
+	defer cleanupHandshake()
 	cmd := exec.Command(selfPath, os.Args[1:]...)
-	cmd.Env = append(os.Environ(), daemonChildEnv+"="+nonce)
+	cmd.Env = append(os.Environ(), childEnv...)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -281,9 +286,9 @@ func (a *App) preflightDaemonParentConfig(cfg *config.Config, opts upOptions) in
 	return a.checkMistralAPIKey(cfg, opts, upNonInteractiveMode(opts))
 }
 
-// generateDaemonNonce returns a 32-character hex string drawn from the
-// system CSPRNG. Used as the daemonChildEnv value so isRunningAsDaemonChild
-// can distinguish a parent-spawned child from a manually-exported env var.
+// generateDaemonNonce returns a 32-character hex string drawn from the system
+// CSPRNG. It is the secret half of the daemon launch handshake, so the child
+// can tell a parent-spawned launch from any other environment value (#671).
 func generateDaemonNonce() (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
