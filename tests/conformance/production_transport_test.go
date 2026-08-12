@@ -270,51 +270,7 @@ func TestProduction_DeleteTerminatesTheSession(t *testing.T) {
 	}
 }
 
-// TestProduction_CORSPreflightIsServed verifies a browser preflight still gets
-// the CORS headers on the production transport. OPTIONS is the one MCP-path verb
-// the SDK transport hands back to Server.Handler(), so this pins that routing.
-func TestProduction_CORSPreflightIsServed(t *testing.T) {
-	t.Parallel()
-	cfg := defaultConfig()
-	const origin = "https://allowed.example.com"
-	cfg.AllowedOrigins = append(cfg.AllowedOrigins, origin)
-	srv := newServer(t, cfg)
-	defer srv.Close()
-
-	req, err := http.NewRequest(http.MethodOptions, srv.URL+cfg.MCPPath, nil)
-	if err != nil {
-		t.Fatalf("create OPTIONS request: %v", err)
-	}
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		t.Fatalf("do OPTIONS: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("preflight: status=%d want=204", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != origin {
-		t.Fatalf("preflight Access-Control-Allow-Origin = %q, want %q", got, origin)
-	}
-}
-
-// TestProduction_DisallowedOriginIsRefused verifies the origin guard still runs
-// on the production transport.
-func TestProduction_DisallowedOriginIsRefused(t *testing.T) {
-	t.Parallel()
-	cfg := defaultConfig()
-	srv := newServer(t, cfg)
-	defer srv.Close()
-
-	sid := initSession(t, srv.URL+cfg.MCPPath)
-	resp := sendRPC(t, srv.URL+cfg.MCPPath, sid, statsCallBody(28), map[string]string{
-		"Origin": "https://evil.example.com",
-	})
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("disallowed origin: status=%d want=403", resp.StatusCode)
-	}
-}
+// Cross-origin coverage for the production transport lives in
+// cross_origin_test.go. The preflight-only assertion that used to sit here
+// reported green while the POST that follows the preflight got 403 (issue #652),
+// so it was replaced by a test that pins the whole browser sequence.

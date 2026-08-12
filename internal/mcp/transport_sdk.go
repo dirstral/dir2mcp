@@ -29,6 +29,7 @@ type SDKTransport struct {
 	certFile      string
 	keyFile       string
 	shutdownGrace time.Duration
+	originGuard   *sdkOriginGuard
 }
 
 // DefaultShutdownGrace is how long Serve waits for in-flight MCP requests to
@@ -38,13 +39,22 @@ const DefaultShutdownGrace = 5 * time.Second
 // NewSDKTransport constructs an SDKTransport. certFile and keyFile are
 // optional; both must be non-empty to enable TLS.
 func NewSDKTransport(server *Server, listener net.Listener, certFile, keyFile string) *SDKTransport {
-	return &SDKTransport{
+	transport := &SDKTransport{
 		server:        server,
 		listener:      listener,
 		certFile:      certFile,
 		keyFile:       keyFile,
 		shutdownGrace: DefaultShutdownGrace,
 	}
+	if server != nil {
+		// The SDK's cross-origin guard is built from the same allowed_origins
+		// policy this server enforces, so the two cannot disagree (issue #652).
+		transport.originGuard = newSDKOriginGuard(server.cfg.AllowedOrigins)
+		// This transport serves DELETE session termination on the MCP path, so
+		// the CORS preflight may advertise it.
+		server.markSessionTerminationServed()
+	}
+	return transport
 }
 
 // SetShutdownGrace sets how long Serve waits for in-flight MCP requests after
@@ -82,12 +92,22 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 	if err := t.validateServeInputs(handler); err != nil {
 		return err
 	}
+	if t.originGuard == nil {
+		// NewSDKTransport builds the guard. This keeps the configured policy in
+		// force even if a transport is assembled another way, because a nil guard
+		// would leave the SDK to install its own unconfigured one (issue #652).
+		t.originGuard = newSDKOriginGuard(t.server.cfg.AllowedOrigins)
+	}
 
 	sdkServer := t.server.buildSDKServer()
 	sdkHandler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
 		return sdkServer
 	}, &sdkmcp.StreamableHTTPOptions{
 		JSONResponse: true,
+		// Without this the SDK builds a default, unconfigured cross-origin guard
+		// that refuses every configured cross-origin request (issue #652). The
+		// guard stays on; it is fed the allowed_origins policy.
+		CrossOriginProtection: t.originGuard.protection(),
 	})
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -106,12 +126,19 @@ func (t *SDKTransport) Serve(ctx context.Context, handler Handler) error {
 		}
 	}()
 
+	// corsMiddleware adds the CORS response headers a browser needs to read the
+	// body it just received. Server.Handler() carries it for every other path and
+	// for OPTIONS; the MCP-path POST and DELETE responses come from this
+	// transport, so they need it here too (issue #652).
+	mcpPathHandler := t.server.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		t.serveHTTPRequest(w, req, sdkHandler)
+	}))
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodOptions || req.URL.Path != t.server.cfg.MCPPath {
 			handler.ServeHTTP(w, req)
 			return
 		}
-		t.serveHTTPRequest(w, req, sdkHandler)
+		mcpPathHandler.ServeHTTP(w, req)
 	})
 
 	server := newMCPHTTPServer(wrapped)
@@ -226,7 +253,27 @@ func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Requ
 	if !t.server.allowOrigin(w, req) {
 		return false
 	}
+	if !t.applyOriginGuard(w, req) {
+		return false
+	}
 	negotiateAccept(req)
+	return true
+}
+
+// applyOriginGuard reconciles the SDK's cross-origin guard with the allowlist
+// decision that allowOrigin has just made, and owns the refusal contract.
+//
+// Call it only after allowOrigin returned true. adjudicate tells the SDK guard
+// that the allowlist accepted this origin. The check that follows keeps the SDK
+// guard's remaining authority, mainly a request that declares itself cross-site
+// and names no origin, but answers it with this server's canonical
+// FORBIDDEN_ORIGIN contract instead of the SDK's bare text body (issue #652).
+func (t *SDKTransport) applyOriginGuard(w http.ResponseWriter, req *http.Request) bool {
+	t.originGuard.adjudicate(req)
+	if err := t.originGuard.check(req); err != nil {
+		writeError(w, http.StatusForbidden, nil, -32000, err.Error(), "FORBIDDEN_ORIGIN", false)
+		return false
+	}
 	return true
 }
 
@@ -289,6 +336,10 @@ func (t *SDKTransport) serveSessionTermination(w http.ResponseWriter, req *http.
 		return
 	}
 	if !t.server.allowOrigin(w, req) {
+		return
+	}
+	// DELETE is not a safe method, so the SDK's guard checks it too (issue #652).
+	if !t.applyOriginGuard(w, req) {
 		return
 	}
 	sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
