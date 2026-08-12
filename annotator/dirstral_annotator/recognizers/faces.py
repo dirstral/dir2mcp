@@ -12,9 +12,13 @@ and pre-overlay archival material, and is fused with, never trusted over,
 scorebug/play-by-play.
 
 The bank is an optional backend asset, so it follows the package rule for one
-of those: a bank that is missing, is not a directory, or cannot be read raises
-`RecognizerUnavailable` at construction and the pipeline skips this recognizer
-with a note. See `_bank_player_dirs`.
+of those: a bank that cannot be enrolled from raises `RecognizerUnavailable` at
+construction and the pipeline skips this recognizer with a note. That covers a
+bank that is missing, is not a directory or cannot be read
+(`_bank_player_dirs`), and a bank that exists and holds nobody to enroll
+(`_enrollable_players`). Both are checked before the embedder is built, and each
+reason names its own problem, because an empty bank and a missing bank send an
+operator to different places.
 """
 
 from __future__ import annotations
@@ -233,6 +237,115 @@ def _bank_player_dirs(bank_dir: Path) -> list[Path]:
         ) from exc
 
 
+def _enrollable_players(
+    bank_dir: Path, player_dirs: list[Path], roster: Roster
+) -> list[tuple[str, list[Path]]]:
+    """Each roster player in the bank that has an image, or an unavailable
+    recognizer. `(player id, images)` in bank order.
+
+    A bank that EXISTS and holds nobody to enroll is the same missing asset as a
+    bank that is not there, so it takes the same route: `RecognizerUnavailable`
+    at construction, before the embedder is built. The check is a directory
+    listing per player, and the embedder it stands in front of loads and prepares
+    five ONNX models, measured at 0.5 s (#845).
+
+    The reason names WHICH problem it is. An empty bank, a bank whose directories
+    are named for players nobody rostered, a rostered player whose images never
+    got copied, and images that refuse to open are different mistakes with
+    different fixes, so they must not collapse into one message.
+
+    One unreadable player directory, or one unreadable image, still costs only
+    that player: it is skipped with a warning that says who was lost, and the
+    rest of the bank still enrolls. A bank that leaves nobody after that ends as
+    unavailability here.
+    """
+    enrollable: list[tuple[str, list[Path]]] = []
+    off_roster: list[str] = []
+    imageless: list[str] = []
+    unreadable: list[str] = []
+    locked_images: list[str] = []
+    for player_dir in player_dirs:
+        pid = player_dir.name.replace("_", ":", 1)
+        if not roster.get(pid):
+            off_roster.append(player_dir.name)
+            continue
+        try:
+            entries = sorted(player_dir.iterdir())
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "face bank: skipping %s (%s)",
+                player_dir.name, exc.strerror or type(exc).__name__,
+            )
+            unreadable.append(player_dir.name)
+            continue
+        # `is_file()` as well as the suffix: a DIRECTORY called `nested.jpg`
+        # would otherwise count as an image, so a bank with nothing to enroll
+        # would pass this check, build the embedder, and hand it a path that was
+        # never an image. A broken symlink is excluded for the same reason.
+        named = [p for p in entries if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+        if not named:
+            imageless.append(player_dir.name)
+            continue
+        # An image the process cannot open is not an image it can enroll from.
+        # `is_file()` says nothing about permissions, so each candidate is opened
+        # here: the alternative is that the models load and the adapter then
+        # returns no face, which reports a detector problem for a permission one.
+        # One open per image, against about a second per image to embed.
+        images = []
+        for image in named:
+            try:
+                with image.open("rb"):
+                    pass
+            except OSError as exc:
+                logging.getLogger(__name__).warning(
+                    "face bank: skipping %s/%s (%s)",
+                    player_dir.name, image.name,
+                    exc.strerror or type(exc).__name__,
+                )
+                continue
+            images.append(image)
+        if not images:
+            locked_images.append(player_dir.name)
+            continue
+        enrollable.append((pid, images))
+    if enrollable:
+        return enrollable
+
+    exts = ", ".join(sorted(IMAGE_EXTS))
+    if not player_dirs:
+        raise RecognizerUnavailable(
+            f"face bank is empty: {bank_dir} holds no player directory "
+            "(expected <bank>/<player-id-with-underscores>/*.jpg)"
+        )
+    # Most actionable first. A directory named for a rostered player is one an
+    # operator meant to fill, so say it is unfilled rather than counting the
+    # strangers beside it.
+    if imageless:
+        raise RecognizerUnavailable(
+            "face bank has no image for any rostered player: "
+            f"{', '.join(imageless)} under {bank_dir} hold no {exts} file"
+        )
+    if locked_images:
+        raise RecognizerUnavailable(
+            "face bank has no readable image for any rostered player: "
+            f"every image under {', '.join(locked_images)} in {bank_dir} "
+            "refused to open (check the file permissions)"
+        )
+    if unreadable:
+        raise RecognizerUnavailable(
+            "face bank has no readable player directory: "
+            f"{', '.join(unreadable)} under {bank_dir} could not be read"
+        )
+    # Every remaining directory is off the roster, or `enrollable` would have
+    # won: the five buckets above cover every player directory.
+    raise RecognizerUnavailable(
+        f"face bank has no player on this roster: {', '.join(off_roster)} "
+        f"under {bank_dir} match no roster id "
+        "(expected <bank>/<player-id-with-underscores>, "
+        "e.g. player_webb-logan for player:webb-logan)"
+    )
+
+
 def match(
     embedding: Embedding, gallery: dict[str, Embedding], threshold: float = SIM_THRESHOLD
 ) -> tuple[str, float] | None:
@@ -262,41 +375,35 @@ class FaceRecognizer:
     ):
         self.roster = roster
         bank = Path(bank_dir)
-        # The bank is read BEFORE the embedder is built. Building the default
-        # embedder loads and prepares five ONNX models, and paying that only to
-        # then find the bank is not there is waste with no upside. Both failures
-        # are RecognizerUnavailable, so the cheaper one goes first.
-        player_dirs = _bank_player_dirs(bank)
+        # The bank is read BEFORE the embedder is built, and read far enough to
+        # know there is somebody to enroll. Building the default embedder loads
+        # and prepares five ONNX models, and paying that only to then find an
+        # empty bank is waste with no upside. Both failures are
+        # RecognizerUnavailable, so the cheap one goes first (#651, #845).
+        candidates = _enrollable_players(bank, _bank_player_dirs(bank), roster)
         self.embedder = embedder if embedder is not None else default_embedder()
         self.fps = fps
         self.threshold = threshold
-        self.gallery = self._enroll(bank, player_dirs)
+        self.gallery = self._enroll(bank, candidates)
 
-    def _enroll(self, bank_dir: Path, player_dirs: list[Path]) -> dict[str, Embedding]:
+    def _enroll(
+        self, bank_dir: Path, candidates: list[tuple[str, list[Path]]]
+    ) -> dict[str, Embedding]:
         """Bank layout: `<bank>/<player-id-with-underscores>/*.jpg` (":" is
         awkward in dirnames, so "player:webb-logan" -> "player_webb-logan").
-        Every image contributes its largest detected face."""
+        Every image contributes its largest detected face.
+
+        `candidates` is what `_enrollable_players` already found: the rostered
+        players that have images. So the only failure left here is the one that
+        needs the embedder to know it, which is an image the detector finds no
+        face in.
+        """
         gallery: dict[str, Embedding] = {}
-        for player_dir in player_dirs:
-            pid = player_dir.name.replace("_", ":", 1)
-            if not self.roster.get(pid):
-                continue
-            try:
-                images = sorted(player_dir.iterdir())
-            except OSError as exc:
-                # One player's images being unreadable is not the bank being
-                # unreadable. Degrade by as little as possible: enroll everyone
-                # who can be enrolled, and say who was lost. A bank where that
-                # leaves nobody still ends as unavailability below.
-                logging.getLogger(__name__).warning(
-                    "face bank: skipping %s (%s)",
-                    player_dir.name, exc.strerror or type(exc).__name__,
-                )
-                continue
+        images_read = 0
+        for pid, images in candidates:
             embeddings = []
             for img in images:
-                if img.suffix.lower() not in IMAGE_EXTS:
-                    continue
+                images_read += 1
                 faces = self.embedder(img)
                 if faces:
                     largest = max(faces, key=lambda f: f[1][2] * f[1][3])
@@ -304,7 +411,11 @@ class FaceRecognizer:
             if embeddings:
                 gallery[pid] = centroid(embeddings)
         if not gallery:
-            raise RecognizerUnavailable(f"no enrollable faces found under {bank_dir}")
+            raise RecognizerUnavailable(
+                "face bank has no detectable face: the embedder found none in "
+                f"the {images_read} image(s) under {bank_dir} "
+                "(bank images should show one clear, front-facing face)"
+            )
         return gallery
 
     def recognize(self, media_path: Path) -> list[Cue]:
