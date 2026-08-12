@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 
@@ -195,33 +196,63 @@ func (s *Service) creditSecretExcludedSkip(doc model.Document) {
 // Best-effort with a loud log, never fatal: a store that cannot retire must not
 // convert a withheld document into a failed run. The document row is still
 // recorded `secret_excluded` either way.
+// The returned error is deliberately DROPPED here, preserving the decision above.
+// The size-cap caller (#682) does propagate it, and the two differ for a reason
+// worth stating: a size-cap verdict is reproducible, so failing the document and
+// retrying next scan costs a re-read and nothing else, while a derived secret
+// verdict is not reproducible (the incremental gate will not re-run OCR or STT for
+// an unchanged file), so refusing to settle it would risk losing the verdict.
 func (s *Service) retireDocumentRepresentations(ctx context.Context, relPath string) {
+	_ = s.retireRepresentationsForPath(ctx, relPath, "secret policy")
+}
+
+// retireRepresentationsForPath is the shared retirement step: it tombstones every
+// live representation of relPath together with its chunks, and labels its logs
+// with the policy that asked for it.
+//
+// Two policies retire a document's representations, and both need the same
+// action. The secret policy (#681) withholds a document whose derived text
+// carries a credential. The size cap (#682) refuses a document whose bytes passed
+// the cap, which retires anything an earlier scan indexed from the smaller
+// version. A second delete path for the second policy would be a second place for
+// the §6.6 tombstone rule to be got wrong, so there is one.
+//
+// It returns an error only when a retirement that SHOULD have happened did not: a
+// list or delete the store refused. A store that does not implement the surface at
+// all is a capability gap, not a failure, so it logs and returns nil; and a
+// document with nothing live to retire is a success. The caller decides what to do
+// with a real failure, because the right answer differs by policy (see
+// retireDocumentRepresentations and settleSizeCapSkip).
+func (s *Service) retireRepresentationsForPath(ctx context.Context, relPath, policy string) error {
 	lister, listOK := s.store.(activeRepresentationLister)
 	retirer, retireOK := s.store.(representationRetirer)
 	if !listOK || !retireOK {
 		s.getLogger().Printf(
-			"secret policy: store cannot retire representations for %s; verify no stale representation is left for it",
-			relPath,
+			"%s: store cannot retire representations for %s; verify no stale representation is left for it",
+			policy, relPath,
 		)
-		return
+		return nil
 	}
 	reps, err := lister.ActiveRepresentations(ctx, relPath)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			s.getLogger().Printf("secret policy: list representations for %s failed: %v", relPath, err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-		return
+		s.getLogger().Printf("%s: list representations for %s failed: %v", policy, relPath, err)
+		return fmt.Errorf("%s: list representations for %s: %w", policy, relPath, err)
 	}
 	if len(reps) == 0 {
-		return
+		return nil
 	}
 	ids := make([]int64, 0, len(reps))
 	for _, rep := range reps {
 		ids = append(ids, rep.RepID)
 	}
 	if _, err := retirer.SoftDeleteRepresentations(ctx, relPath, ids); err != nil {
-		s.getLogger().Printf("secret policy: retire representations for %s failed: %v", relPath, err)
+		s.getLogger().Printf("%s: retire representations for %s failed: %v", policy, relPath, err)
+		return fmt.Errorf("%s: retire representations for %s: %w", policy, relPath, err)
 	}
+	return nil
 }
 
 // carrySecretExclusion makes a DERIVED secret verdict stick across scans.

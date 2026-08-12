@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"path"
 	"sort"
 	"strings"
@@ -547,15 +546,19 @@ func sidecarRepHash(lang string, cues []subtitle.Cue) string {
 
 // readSidecar reads a sidecar file's bytes through the corpus FS and normalises
 // them to valid UTF-8 with LF line endings.
+//
+// The read is bounded by the configured cap (#682). A sidecar is a corpus file
+// like any other, so it is subject to the same cap, and it reaches this read
+// through the sidecar index rather than through the document pipeline. An
+// over-cap sidecar returns ErrFileTooLarge instead of a truncated cue list: half
+// a subtitle file would be persisted as if it were the whole transcript.
 func (s *Service) readSidecar(ctx context.Context, relPath string) (string, error) {
-	rc, err := s.corpusFS().Open(ctx, relPath)
+	raw, overCap, err := s.readSourceBytes(ctx, relPath)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = rc.Close() }()
-	raw, err := io.ReadAll(rc)
-	if err != nil {
-		return "", err
+	if overCap {
+		return "", s.sourceOverCapError(relPath)
 	}
 	return string(NormalizeUTF8(raw)), nil
 }

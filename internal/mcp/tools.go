@@ -2640,6 +2640,12 @@ func mapPathError(err error) *toolExecutionError {
 	switch {
 	case errors.Is(err, model.ErrForbidden):
 		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
+	case errors.Is(err, corpusfs.ErrObjectTooLarge):
+		// #682: the object served more bytes than the configured cap, so the
+		// localize was refused. It is the §14.4 FILE_TOO_LARGE condition, and the
+		// default branch below would report it as "permission denied", which names
+		// the wrong cause and sends the operator to the wrong setting.
+		return &toolExecutionError{Code: "FILE_TOO_LARGE", Message: "object exceeds the configured ingest.max_file_mb cap", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, os.ErrNotExist):
@@ -2818,12 +2824,11 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 }
 
 // ingestMaxFileBytes returns the per-file size cap used by ingestion, so the
-// on-demand tool read paths honour the same bound (issue #407).
+// on-demand tool read paths honour the same bound (issue #407). It delegates to
+// the single resolver in ingest (#682) so this bound cannot drift from the one
+// discovery, the source reads, and the object-store backend apply.
 func (s *Server) ingestMaxFileBytes() int64 {
-	if s.cfg.IngestMaxFileMB > 0 {
-		return int64(s.cfg.IngestMaxFileMB) * 1024 * 1024
-	}
-	return ingest.DefaultMaxFileSizeBytes()
+	return ingest.ResolvedMaxFileBytes(s.cfg)
 }
 
 // readBoundedFile reads at most maxBytes from path. It reports tooLarge=true

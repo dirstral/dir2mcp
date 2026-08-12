@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -53,6 +54,10 @@ type S3FS struct {
 	// test that does not exercise the URL path); MediaURL then reports ok=false so
 	// callers fall back to Localize.
 	presign presignFunc
+	// maxBytes is the per-object read/download cap (#682). It is always positive:
+	// resolveMaxBytes turns a zero or negative configured value into the 10 MiB
+	// default, so no construction path can leave the backend unbounded.
+	maxBytes int64
 }
 
 // S3Config configures an S3FS.
@@ -62,6 +67,35 @@ type S3Config struct {
 	// CacheDir is the directory under which Localize materializes temp files.
 	// When empty, the OS temp dir is used.
 	CacheDir string
+	// MaxBytes caps the bytes a single object may deliver through Open or
+	// Localize (#682). Set it to the resolved `ingest.max_file_mb` value, because
+	// discovery already refuses an object over that cap: an object that then
+	// serves more bytes than the cap is either lying about its size or changed
+	// after discovery measured it, and neither may be read without a bound.
+	//
+	// Zero or negative selects DefaultMaxFileSizeBytes. There is deliberately no
+	// "unlimited" value: an unbounded download is the defect this field closes.
+	MaxBytes int64
+}
+
+// resolveMaxBytes turns a configured per-object cap into the positive value the
+// backend enforces. A zero or negative input selects the 10 MiB default rather
+// than disabling the bound, so a caller that forgets the field still gets one.
+//
+// The upper clamp keeps `maxBytes+1` representable. Every bound in this file is a
+// limit+1, and math.MaxInt64 would overflow that sum to a negative number, which
+// io.LimitReader reads as "zero bytes allowed": Localize would then write an empty
+// file and report SUCCESS, and a read would return an empty document. S3Config is
+// exported, so this invariant is enforced here rather than trusted to the caller.
+func resolveMaxBytes(configured int64) int64 {
+	switch {
+	case configured <= 0:
+		return defaultMaxFileSizeBytes
+	case configured > math.MaxInt64-1:
+		return math.MaxInt64 - 1
+	default:
+		return configured
+	}
 }
 
 // NewS3FS constructs an S3FS over the provided client and config. The client is
@@ -88,6 +122,7 @@ func newS3FSWithPresign(client s3API, cfg S3Config, presign presignFunc) (*S3FS,
 		prefix:   normalizeS3Prefix(cfg.Prefix),
 		cacheDir: cfg.CacheDir,
 		presign:  presign,
+		maxBytes: resolveMaxBytes(cfg.MaxBytes),
 	}, nil
 }
 
@@ -401,6 +436,15 @@ func keyHasExcludedDir(rel string, excluded ExcludedDirSet) bool {
 // size so seeks (including io.SeekEnd) resolve, and reads issue a ranged GET for
 // the requested window — so a caller reading a slice does not download the whole
 // object.
+//
+// Both readers it returns are bounded by the configured cap (#682). The bound is
+// on the BYTES DELIVERED, not on a size the object reported, because the two can
+// disagree: discovery sizes an object from ListObjectsV2, Open sizes it from
+// HeadObject, and the body arrives from a third call. A caller that reads the
+// whole reader can therefore never receive more than the cap, whichever of those
+// three numbers is wrong. Over-cap delivery stops with ErrObjectTooLarge rather
+// than with io.EOF: a silent short read would look to every caller like a
+// complete file, which is the truncated-document failure #487 already fixed once.
 func (s *S3FS) Open(ctx context.Context, relPath string) (io.ReadSeekCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -423,24 +467,36 @@ func (s *S3FS) Open(ctx context.Context, relPath string) (io.ReadSeekCloser, err
 	// whole-object streaming GET so the bytes are actually read (issue #487).
 	if head.ContentLength == nil {
 		return &s3StreamReader{
-			ctx:    ctx,
-			client: s.client,
-			bucket: s.bucket,
-			key:    key,
+			ctx:      ctx,
+			client:   s.client,
+			bucket:   s.bucket,
+			key:      key,
+			maxBytes: s.maxBytes,
 		}, nil
 	}
 	return &s3RangeReader{
-		ctx:    ctx,
-		client: s.client,
-		bucket: s.bucket,
-		key:    key,
-		size:   aws.ToInt64(head.ContentLength),
+		ctx:      ctx,
+		client:   s.client,
+		bucket:   s.bucket,
+		key:      key,
+		size:     aws.ToInt64(head.ContentLength),
+		maxBytes: s.maxBytes,
 	}, nil
 }
 
 // Localize downloads the object to a temp file under the cache dir (preserving
 // the object extension so ffmpeg can infer the muxer) and returns its path with
 // a cleanup that removes the file.
+//
+// The download is bounded by the configured cap (#682). It reads at most cap+1
+// bytes: the extra byte is what separates "exactly at the cap" from "past it",
+// and it is the whole cost of telling the two apart. Past the cap the partial
+// file is removed and ErrObjectTooLarge is returned, so a bucket that serves
+// more bytes than it declared cannot fill the local cache disk.
+//
+// The bound is on the copy, not on a preceding size check. GetObject is a
+// separate operation from the ListObjectsV2 that discovery sized the object with,
+// so no check made before it can constrain what the body then delivers.
 func (s *S3FS) Localize(ctx context.Context, relPath string) (string, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
@@ -471,10 +527,16 @@ func (s *S3FS) Localize(ctx context.Context, relPath string) (string, func(), er
 		return "", nil, fmt.Errorf("corpusfs: create temp file: %w", err)
 	}
 	cleanup := func() { _ = os.Remove(tmp.Name()) }
-	if _, err := io.Copy(tmp, out.Body); err != nil {
+	written, err := io.Copy(tmp, io.LimitReader(out.Body, s.maxBytes+1))
+	if err != nil {
 		_ = tmp.Close()
 		cleanup()
 		return "", nil, fmt.Errorf("corpusfs: download s3://%s/%s: %w", s.bucket, key, err)
+	}
+	if written > s.maxBytes {
+		_ = tmp.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("corpusfs: download s3://%s/%s: %w (cap %d bytes)", s.bucket, key, ErrObjectTooLarge, s.maxBytes)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
