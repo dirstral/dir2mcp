@@ -124,8 +124,9 @@ func (f *rangeStubS3For673) GetObject(_ context.Context, in *s3.GetObjectInput, 
 	return out, nil
 }
 
-// object673 is a body whose every byte names its own offset, so a test can prove
-// WHICH bytes it received, not only how many.
+// object673 builds a body from a repeating a-z pattern. The bytes at one offset
+// differ from the bytes at another, so a test proves WHICH bytes it received and
+// not only how many of them.
 func object673(n int) []byte {
 	b := make([]byte, n)
 	for i := range b {
