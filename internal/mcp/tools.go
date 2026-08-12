@@ -94,6 +94,12 @@ type toolContentItem struct {
 	Text     string `json:"text,omitempty"`
 	Data     string `json:"data,omitempty"`
 	MIMEType string `json:"mimeType,omitempty"`
+	// URI identifies the bytes when the transport has to carry them as an
+	// embedded resource rather than a natively-typed item (a video clip; see
+	// convertToolCallResult and SPEC §15.11). An embedded resource's `uri` is
+	// required by MCP, so it is set where rel_path and the span are known
+	// rather than invented at the transport.
+	URI string `json:"uri,omitempty"`
 }
 
 type toolExecutionError struct {
@@ -1825,9 +1831,31 @@ func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]in
 	}
 	return toolCallResult{
 		// Media bytes travel only via the typed data item, never a text item.
-		Content:           []toolContentItem{{Type: contentType, Data: encoded, MIMEType: mimeType}},
+		//
+		// `video` is an INTERNAL item type. MCP 2025-11-25 defines no video
+		// content item, so the transport maps it onto an embedded resource
+		// (SPEC §15.11); the URI below is that resource's identifier. Keeping
+		// the internal type media-shaped means the tool layer describes what it
+		// produced and the transport owns how the protocol carries it.
+		Content: []toolContentItem{{
+			Type:     contentType,
+			Data:     encoded,
+			MIMEType: mimeType,
+			URI:      mediaClipURI(req.relPath, req.startMS, req.endMS),
+		}},
 		StructuredContent: structured,
 	}, nil
+}
+
+// mediaClipURI identifies one extracted clip: its source document plus the time
+// span it covers, in the `#t=` media-fragment form the citations already use
+// (§5.4). It is a stable identifier for the bytes, NOT a fetchable location:
+// `return=inline` carries the clip in the response, and only `return=reference`
+// promises somewhere to fetch it from.
+func mediaClipURI(relPath string, startMS, endMS int) string {
+	return fmt.Sprintf("dir2mcp:///%s#t=%.3f,%.3f",
+		strings.TrimPrefix(relPath, "/"),
+		float64(startMS)/1000, float64(endMS)/1000)
 }
 
 // parseMediaClipReturnArg parses the optional "return" argument (inline|reference).

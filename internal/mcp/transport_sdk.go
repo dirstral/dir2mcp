@@ -594,7 +594,39 @@ func convertToolCallResult(res toolCallResult) *sdkmcp.CallToolResult {
 				MIMEType: item.MIMEType,
 				Data:     data,
 			})
+		case "video":
+			// MCP 2025-11-25 defines text, image, audio, resource_link and
+			// resource. It defines NO video item, so SPEC §15.11 names an
+			// embedded resource carrying the blob and a video/* mimeType as the
+			// only valid carrier for inline video bytes (spec 0.49.0).
+			//
+			// This arm used to fall through to `default`, which produced a
+			// TextContent from an item that has no Text. The call then reported
+			// success and the client rendered nothing: no player, no text, no
+			// error (#663). Audio worked, so the failure looked arbitrary.
+			data, err := base64.StdEncoding.DecodeString(item.Data)
+			if err != nil {
+				log.Printf("warning: dropping invalid base64 video content (mime=%q): %v", item.MIMEType, err)
+				continue
+			}
+			out.Content = append(out.Content, &sdkmcp.EmbeddedResource{
+				Resource: &sdkmcp.ResourceContents{
+					URI:      item.URI,
+					MIMEType: item.MIMEType,
+					Blob:     data,
+				},
+			})
 		default:
+			// An item that carries BYTES and no text must never become a text
+			// item. That is the #663 failure mode, and §15.11 forbids it: a
+			// blank text item drops the payload while reporting success. An
+			// unmapped media type is a bug in this switch, so it is reported
+			// rather than rendered as an empty item.
+			if item.Data != "" && item.Text == "" {
+				log.Printf("warning: no MCP content mapping for item type %q (mime=%q); dropping it rather than sending an empty text item",
+					item.Type, item.MIMEType)
+				continue
+			}
 			out.Content = append(out.Content, &sdkmcp.TextContent{Text: item.Text})
 		}
 	}
