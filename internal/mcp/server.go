@@ -118,6 +118,12 @@ type Server struct {
 
 	rateLimiter *ipRateLimiter
 
+	// servesSessionTermination reports whether a transport in front of this
+	// handler serves DELETE on the MCP path. It decides whether the CORS
+	// preflight advertises DELETE (issue #652). Written once during transport
+	// construction, before serving starts, then read only.
+	servesSessionTermination bool
+
 	x402Client      x402.FacilitatorClient
 	x402Requirement x402.Requirement
 	x402Enabled     bool
@@ -353,6 +359,31 @@ func (s *Server) Handler() http.Handler {
 	return s.corsMiddleware(mux)
 }
 
+// corsAllowedMethods returns the methods to advertise for the MCP endpoint.
+//
+// DELETE, the MCP session-termination verb, is advertised only when a transport
+// that serves it sits in front of this handler. A browser reads the advertised
+// list and never sends a method the list omits, so a browser client could not end
+// its own session and the session stayed on the server until it timed out (issue
+// #652). Advertising DELETE unconditionally would be the mirror error: the
+// handler chain on its own answers 405 to a DELETE, so the preflight would
+// promise a verb that then fails.
+func (s *Server) corsAllowedMethods() string {
+	if s.servesSessionTermination {
+		return "POST, DELETE, OPTIONS"
+	}
+	return "POST, OPTIONS"
+}
+
+// markSessionTerminationServed records that a transport in front of this handler
+// serves DELETE session termination. It is called during transport construction,
+// before the listener accepts anything.
+func (s *Server) markSessionTerminationServed() {
+	if s != nil {
+		s.servesSessionTermination = true
+	}
+}
+
 // corsMiddleware wraps the handler to support CORS preflight (OPTIONS) and
 // response headers for the MCP endpoint. Required for browser-based MCP
 // clients such as ElevenLabs Conversational AI.
@@ -361,7 +392,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", s.corsAllowedMethods())
 			w.Header().Set("Access-Control-Allow-Headers", fmt.Sprintf("Content-Type, Authorization, %s, %s, PAYMENT-SIGNATURE", protocol.MCPProtocolVersionHeader, protocol.MCPSessionHeader))
 			w.Header().Set("Access-Control-Expose-Headers", protocol.MCPSessionHeader+", PAYMENT-REQUIRED, PAYMENT-RESPONSE, "+protocol.MCPSessionExpiredHeader)
 			w.Header().Set("Access-Control-Max-Age", "86400")
