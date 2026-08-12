@@ -451,10 +451,11 @@ func (a *App) validateUpConfig(cfg *config.Config, opts upOptions) int {
 			return code
 		}
 	}
-	if !strings.HasPrefix(cfg.MCPPath, "/") {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: --mcp-path must start with '/'")
-		return exitConfigInvalid
-	}
+	// The mcp_path grammar is checked by cfg.Validate() above, which every entry
+	// point runs (persisted config, this flag overlay, and `config set`). The
+	// leading-slash check that used to live here was only reachable before that
+	// gate existed; keeping it would be dead code claiming to be a safety net
+	// (issue #653).
 	strictX402 := strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "required")
 	if err := cfg.ValidateX402(strictX402); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("x402 configuration invalid: %v", err))
