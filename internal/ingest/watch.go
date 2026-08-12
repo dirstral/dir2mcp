@@ -27,6 +27,22 @@ const defaultWatchDebounce = 500 * time.Millisecond
 // deletes the watcher's per-path handler missed.
 const safetyRescanInterval = 10 * time.Minute
 
+// watchJobQueueCapacity is the depth of the internal job queue between the
+// event loop and the worker. It buys the event loop room to keep draining
+// fsnotify while the worker extracts and embeds one document.
+//
+// The queue is lossy on purpose: a send that would block is dropped instead,
+// because blocking the event loop is what makes the kernel drop events. A drop
+// is therefore normal under a large burst, and it is handled by
+// handleQueueFull, not ignored.
+const watchJobQueueCapacity = 256
+
+// queueFullReportInterval rate limits the queue-saturation log line. One burst
+// can drop thousands of jobs, and one line per drop would bury the corpus log.
+// The first drop reports at once; while drops continue, one more line follows
+// per interval, and each line carries the running total.
+const queueFullReportInterval = 30 * time.Second
+
 // remoteRescanInterval is how often a remote corpus (source.kind=s3)
 // reconciles while ingest.watch is on. A remote corpus has no filesystem event
 // source, so the reconcile is the only continuous-sync mechanism. It is a
@@ -79,6 +95,9 @@ func SourceSupportsFileWatch(kind string) bool {
 //     indexed.
 //   - A periodic safety rescan backstops missed events; the watcher alone is
 //     not a correctness guarantee.
+//   - The job queue between the two is bounded and lossy. A drop asks for an
+//     immediate coalesced rescan and is logged, so a saturated queue costs one
+//     reconcile, not up to ten minutes of stale content (issue #679).
 //   - The watcher deliberately does NOT toggle indexingState.Running: the
 //     initial scan owns that signal, and a steady-state server picking up the
 //     occasional new file should not flip IndexingComplete back to false.
@@ -133,7 +152,7 @@ func (s *Service) Watch(ctx context.Context) error {
 		excluded: discoverOpts.ExcludedDirs(),
 		debounce: debounce,
 		pending:  make(map[string]*time.Timer),
-		fire:     make(chan watchJob, 256),
+		fire:     make(chan watchJob, watchJobQueueCapacity),
 	}
 	return w.run(ctx)
 }
@@ -195,6 +214,22 @@ type fsWatchLoop struct {
 	mu      sync.Mutex
 	pending map[string]*time.Timer
 	fire    chan watchJob
+
+	// dropMu guards the queue-saturation report state below. It is a separate
+	// lock from mu on purpose: mu serializes the debounce timer map, and a drop
+	// is recorded from inside a fired timer, after that map entry is gone.
+	dropMu sync.Mutex
+	// droppedJobs counts every debounced job the queue refused over the life of
+	// the loop. It feeds the log line, so an operator reads a running total
+	// rather than a single incident.
+	droppedJobs int64
+	// unreconciledDrops counts the drops the next reconcile has still to cover.
+	// The reconcile takes the count and names it, so an operator learns how big
+	// the burst was, not only that one drop happened.
+	unreconciledDrops int64
+	// lastDropReport is when the first-drop line was last written. It rate limits
+	// that line; see queueFullReportInterval.
+	lastDropReport time.Time
 }
 
 func (w *fsWatchLoop) run(ctx context.Context) error {
@@ -263,6 +298,10 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 // event-draining path. Keeping fsnotify event reads in run()'s select loop
 // (which only debounces) prevents the kernel's fixed event buffer from
 // overflowing while a large file is being extracted/embedded.
+//
+// A queued rescan competes with the job queue on equal terms: select picks at
+// random between two ready cases, so a rescan requested because the queue
+// saturated (issue #679) starts after a job or two, not after the whole backlog.
 func (w *fsWatchLoop) worker(ctx context.Context, rescanReq <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	for {
@@ -272,8 +311,13 @@ func (w *fsWatchLoop) worker(ctx context.Context, rescanReq <-chan struct{}, don
 		case job := <-w.fire:
 			w.process(ctx, job)
 		case <-rescanReq:
+			dropped := w.reportDropsUnderReconcile()
 			if err := w.svc.runScan(ctx); err != nil && ctx.Err() == nil {
 				w.svc.getLogger().Printf("watch: safety rescan: %v", err)
+				// The scan did not reconcile them after all, so give the drops
+				// back. The next scan then reports the true outstanding number
+				// instead of losing this burst from the ledger.
+				w.returnUnreconciledDrops(dropped)
 			}
 		}
 	}
@@ -365,12 +409,135 @@ func (w *fsWatchLoop) arm(absPath string, deleted bool) {
 		w.mu.Lock()
 		delete(w.pending, absPath)
 		w.mu.Unlock()
+		job := watchJob{absPath: absPath, deleted: deleted}
 		select {
-		case w.fire <- watchJob{absPath: absPath, deleted: deleted}:
+		case w.fire <- job:
 		default:
-			// Channel full: the safety rescan will reconcile.
+			w.handleQueueFull(job)
 		}
 	})
+}
+
+// handleQueueFull reacts to a debounced job the worker queue could not accept
+// (issue #679).
+//
+// The send stays non-blocking. To block here would hold a debounce timer
+// goroutine, and, once the timers pile up, the event loop is the next thing to
+// stall, which is exactly what makes the kernel drop events. So the job is
+// still dropped. What changes is the consequence of the drop:
+//
+//   - It asks for an immediate coalesced rescan. The rescan is a full hash-diff
+//     scan, so it reconciles every dropped job at once, whatever the job was: a
+//     new or edited file is indexed, and a file that is gone is tombstoned. The
+//     request is coalesced, so a burst of ten thousand drops costs one
+//     reconcile.
+//   - It reports the loss. Before this, a drop was invisible: the corpus served
+//     stale or missing content until the next safety rescan tick, up to ten
+//     minutes later, with nothing in the log to say why. An operator now reads
+//     one line when the queue first refuses a change, and one line when the
+//     reconcile starts, which names how many changes it covers.
+//
+// The work here is deliberately tiny (one counter, one non-blocking send, and a
+// rate-limited log line) and it runs only on the drop path, so it adds nothing
+// to the cost of handling a normal event.
+//
+// SPEC note: this does NOT touch the watch_overflows counter. SPEC §15.6 and
+// stats.json define that field as the count of fsnotify KERNEL event-buffer
+// overflows. This queue is dir2mcp's own, and the kernel buffer did not
+// overflow, so counting it there would serve a number the field does not
+// describe. To surface a served counter for an internal drop needs a
+// dirstral-spec change first.
+func (w *fsWatchLoop) handleQueueFull(job watchJob) {
+	// The drop is counted before the reconcile is asked for, so the count a
+	// starting reconcile reads already includes every drop that asked for it.
+	// The log line comes last, so it can only claim a reconcile already queued.
+	dropped, report := w.recordDroppedJob(time.Now())
+	rescanQueued := w.askForRescan()
+	if !report {
+		return
+	}
+	// The path is quoted with %q, not printed raw. A file name can carry a
+	// newline or another control character, and this line goes to an untrusted
+	// sink (a log file, a pipe). %q escapes them, so a crafted name cannot forge
+	// a second log line. The path itself stays: an operator needs to know which
+	// change was lost.
+	w.svc.getLogger().Printf(
+		"watch: internal job queue full (%d jobs): dropped the pending change for %q; %d change(s) dropped since the watcher started; %s",
+		cap(w.fire), job.absPath, dropped, rescanNote(rescanQueued),
+	)
+}
+
+// recordDroppedJob counts one dropped job and reports whether this drop must be
+// logged now. It returns the running total so the line names it.
+func (w *fsWatchLoop) recordDroppedJob(now time.Time) (int64, bool) {
+	w.dropMu.Lock()
+	defer w.dropMu.Unlock()
+	w.droppedJobs++
+	w.unreconciledDrops++
+	if !w.lastDropReport.IsZero() && now.Sub(w.lastDropReport) < queueFullReportInterval {
+		return w.droppedJobs, false
+	}
+	w.lastDropReport = now
+	return w.droppedJobs, true
+}
+
+// reportDropsUnderReconcile logs the size of the burst a starting reconcile has
+// to repair and returns that count (issue #679). It runs before every rescan the
+// worker performs and says nothing when no job was dropped, so a periodic or
+// rule-driven rescan logs as it did before.
+//
+// The line closes the report the drop path opened: the drop path says a change
+// was lost, this one says how many the reconcile covers. Taking the count also
+// clears the rate limit, so the first drop of the NEXT burst reports at once
+// instead of waiting out the interval.
+func (w *fsWatchLoop) reportDropsUnderReconcile() int64 {
+	w.dropMu.Lock()
+	pending := w.unreconciledDrops
+	if pending > 0 {
+		w.unreconciledDrops = 0
+		w.lastDropReport = time.Time{}
+	}
+	w.dropMu.Unlock()
+	if pending == 0 {
+		return 0
+	}
+	w.svc.getLogger().Printf(
+		"watch: rescan starting to reconcile %d change(s) that the full internal job queue (%d jobs) dropped",
+		pending, cap(w.fire),
+	)
+	return pending
+}
+
+// returnUnreconciledDrops puts drops back on the outstanding count after the
+// rescan that claimed them failed. The count then stays true: the next rescan
+// reports this burst again, together with anything dropped since.
+func (w *fsWatchLoop) returnUnreconciledDrops(count int64) {
+	if count <= 0 {
+		return
+	}
+	w.dropMu.Lock()
+	defer w.dropMu.Unlock()
+	w.unreconciledDrops += count
+}
+
+// askForRescan queues a coalesced reconcile and reports whether it could. run()
+// installs the request slot before the first event is handled, so false means
+// the loop was built without one.
+func (w *fsWatchLoop) askForRescan() bool {
+	if w.requestRescan == nil {
+		return false
+	}
+	w.requestRescan()
+	return true
+}
+
+// rescanNote states what closes the gap the drop opened, so the log line never
+// promises a reconcile that was not asked for.
+func rescanNote(queued bool) string {
+	if queued {
+		return "an immediate rescan is queued to reconcile them"
+	}
+	return "the periodic safety rescan reconciles them"
 }
 
 // gitignoreFileName is the discovery rule file whose content decides which
