@@ -14,7 +14,7 @@ import (
 func TestErrors_JSONRPCErrorShape(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -58,7 +58,7 @@ func TestErrors_HTTPUnauthorized(t *testing.T) {
 	cfg.AuthMode = "token"
 	cfg.ResolvedAuthToken = "secret-token"
 
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil)
@@ -84,7 +84,7 @@ func TestErrors_HTTPUnauthorized(t *testing.T) {
 func TestErrors_HTTPMethodNotAllowed(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL+cfg.MCPPath, nil)
@@ -107,7 +107,7 @@ func TestErrors_HTTPMethodNotAllowed(t *testing.T) {
 func TestErrors_ParseErrorHasStandardCode(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	resp := sendRPC(t, srv.URL+cfg.MCPPath, "", `{bad json`, nil)

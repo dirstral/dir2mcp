@@ -12,7 +12,7 @@ import (
 func TestTools_ListContainsExpectedTools(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -66,7 +66,7 @@ func TestTools_ListContainsExpectedTools(t *testing.T) {
 func TestTools_CallListFilesSuccess(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	corpusDir := t.TempDir()
@@ -111,13 +111,21 @@ func TestTools_CallListFilesSuccess(t *testing.T) {
 	}
 }
 
-// TestTools_CallUnknownToolReturnsError verifies that tools/call with an
-// unknown tool name returns a tool-level isError=true result (per MCP spec,
-// tools/call errors are returned as tool-level errors, not JSON-RPC errors).
+// TestTools_CallUnknownToolReturnsError verifies that tools/call with an unknown
+// tool name returns a JSON-RPC -32602 error.
+//
+// An unknown tool name is a PROTOCOL error, not a tool execution failure, so MCP
+// puts it in the JSON-RPC error envelope. isError=true is reserved for a tool
+// that ran and failed (SPEC §12.4). The production transport returns -32602.
+//
+// This assertion used to require isError=true, and it passed only because the
+// suite drove the legacy direct handler, which maps an unknown tool to a
+// METHOD_NOT_FOUND tool result. The repointed suite (#664) reads the contract a
+// client actually gets.
 func TestTools_CallUnknownToolReturnsError(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -131,8 +139,9 @@ func TestTools_CallUnknownToolReturnsError(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unknown tool: status=%d body=%s", resp.StatusCode, body)
 	}
-	if !isToolError(body) {
-		t.Fatalf("unknown tool: expected tool-level isError=true result body=%s", body)
+	code, _ := decodeRPCError(t, body)
+	if code != -32602 {
+		t.Fatalf("unknown tool: code=%d want=-32602 body=%s", code, body)
 	}
 }
 
@@ -141,7 +150,7 @@ func TestTools_CallUnknownToolReturnsError(t *testing.T) {
 func TestTools_CallMissingRequiredParamReturnsError(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
@@ -178,7 +187,7 @@ func isToolError(body []byte) bool {
 func TestTools_StatsCallReturnsResult(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)

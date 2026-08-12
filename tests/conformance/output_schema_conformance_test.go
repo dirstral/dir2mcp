@@ -11,7 +11,7 @@ import (
 func toolsListSchemas(t *testing.T) map[string]interface{} {
 	t.Helper()
 	cfg := defaultConfig()
-	srv := newServer(cfg)
+	srv := newServer(t, cfg)
 	defer srv.Close()
 
 	sid := initSession(t, srv.URL+cfg.MCPPath)
