@@ -100,7 +100,14 @@ func ClientOrDefault(base *http.Client, fallbackTimeout time.Duration) *http.Cli
 // error text holds the limit and the status only. It never holds body content.
 func ReadLimitedBody(resp *http.Response, limit int64, code string) ([]byte, error) {
 	if resp == nil || resp.Body == nil {
-		return nil, nil
+		// net/http always gives a client response a non-nil body, so this
+		// case means the caller built the response itself. A named error
+		// beats a decode error that says "unexpected end of JSON input".
+		return nil, &model.ProviderError{
+			Code:      code,
+			Message:   "response had no body",
+			Retryable: false,
+		}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {

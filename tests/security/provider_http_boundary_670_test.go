@@ -107,26 +107,83 @@ func usesRefuseRedirect(lit *ast.CompositeLit) bool {
 	return false
 }
 
+// bodyReaders are the calls that can drain a whole body into memory.
+var bodyReaders = [][2]string{
+	{"json", "NewDecoder"},
+	{"io", "ReadAll"},
+	{"io", "Copy"},
+}
+
 // checkUnboundedBodyReads enforces rule 2: a response body must go through the
 // shared capped reader before it is decoded.
+//
+// The rule follows a local alias too, so `body := resp.Body` before the read
+// does not slip past it. A read of a bounded reader, for example
+// io.LimitReader(resp.Body, 4096) in an httpError helper, stays allowed: the
+// argument is then a call, not the body.
 func checkUnboundedBodyReads(t *testing.T, f providerAdapterFile) {
 	t.Helper()
+	aliases := bodyAliases(f.file)
 	ast.Inspect(f.file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 {
+		if !ok || !isBodyReader(call.Fun) {
 			return true
 		}
-		if !isSelector(call.Fun, "json", "NewDecoder") && !isSelector(call.Fun, "io", "ReadAll") {
+		for _, arg := range call.Args {
+			if !isResponseBody(arg, aliases) {
+				continue
+			}
+			t.Errorf("%s: a response body is read with no size cap. Use %s.ReadLimitedJSONBody (or ReadLimitedBody) so an endless 2xx response cannot exhaust memory (issue #670).",
+				f.position(call.Pos()), providerHTTPHelperPackage)
 			return true
 		}
-		arg, ok := call.Args[0].(*ast.SelectorExpr)
-		if !ok || arg.Sel.Name != "Body" {
-			return true
-		}
-		t.Errorf("%s: a response body is read with no size cap. Use %s.ReadLimitedJSONBody (or ReadLimitedBody) so an endless 2xx response cannot exhaust memory (issue #670).",
-			f.position(call.Pos()), providerHTTPHelperPackage)
 		return true
 	})
+}
+
+func isBodyReader(fun ast.Expr) bool {
+	for _, reader := range bodyReaders {
+		if isSelector(fun, reader[0], reader[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isResponseBody reports whether expr names a response body, either directly
+// (resp.Body) or through a local alias of one.
+func isResponseBody(expr ast.Expr, aliases map[string]struct{}) bool {
+	switch v := expr.(type) {
+	case *ast.SelectorExpr:
+		return v.Sel.Name == "Body"
+	case *ast.Ident:
+		_, ok := aliases[v.Name]
+		return ok
+	}
+	return false
+}
+
+// bodyAliases collects the names that a file binds to a response body, for
+// example `body := resp.Body`.
+func bodyAliases(file *ast.File) map[string]struct{} {
+	aliases := map[string]struct{}{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			sel, ok := rhs.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Body" {
+				continue
+			}
+			if name, ok := assign.Lhs[i].(*ast.Ident); ok {
+				aliases[name.Name] = struct{}{}
+			}
+		}
+		return true
+	})
+	return aliases
 }
 
 // checkRoundTrips enforces rule 3: an adapter must get its client from the
@@ -186,8 +243,8 @@ func isSelector(expr ast.Expr, pkg, name string) bool {
 	if !ok || sel.Sel.Name != name {
 		return false
 	}
-	if star, ok := sel.X.(*ast.Ident); ok {
-		return star.Name == pkg
+	if ident, ok := sel.X.(*ast.Ident); ok {
+		return ident.Name == pkg
 	}
 	return false
 }
@@ -202,26 +259,41 @@ func (f providerAdapterFile) position(pos token.Pos) string {
 // HTTP (it imports net/http) and reports provider failures (it uses
 // model.ProviderError). The rule is structural, so a new adapter is covered on
 // the day it is added. No allowlist can go stale.
+//
+// The walk goes down the whole tree, so an adapter in a nested directory such
+// as internal/providers/foo is covered too.
 func providerAdapterFiles(t *testing.T) []providerAdapterFile {
 	t.Helper()
-	internalDir := filepath.Join(repoRoot(t), "internal")
-	entries, err := os.ReadDir(internalDir)
-	if err != nil {
-		t.Fatalf("read internal/: %v", err)
-	}
 	var out []providerAdapterFile
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	internalDir := filepath.Join(repoRoot(t), "internal")
+	err := filepath.WalkDir(internalDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		pkgDir := filepath.Join(internalDir, entry.Name())
-		parsed := parsePackageFiles(t, pkgDir)
+		if !entry.IsDir() {
+			return nil
+		}
+		if path != internalDir && skipPackageDir(entry.Name()) {
+			return filepath.SkipDir
+		}
+		parsed := parsePackageFiles(t, path)
 		if isProviderAdapterPackage(parsed) {
 			out = append(out, parsed...)
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk internal/: %v", err)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
 	return out
+}
+
+// skipPackageDir reports whether a directory holds no package to check.
+// testdata is Go's reserved name for fixture files, which do not have to
+// compile.
+func skipPackageDir(name string) bool {
+	return name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
 }
 
 func parsePackageFiles(t *testing.T, pkgDir string) []providerAdapterFile {

@@ -58,6 +58,20 @@ func TestReadLimitedBodyReturnsAWithinLimitBody(t *testing.T) {
 	}
 }
 
+func TestReadLimitedBodyRejectsAMissingBody(t *testing.T) {
+	_, err := providerhttp.ReadLimitedBody(&http.Response{StatusCode: http.StatusOK}, 10, "TEST_FAILED")
+	if err == nil {
+		t.Fatal("a response with no body must fail")
+	}
+	var pErr *model.ProviderError
+	if !errors.As(err, &pErr) {
+		t.Fatalf("want a *model.ProviderError, got %T", err)
+	}
+	if pErr.Code != "TEST_FAILED" {
+		t.Fatalf("code = %q, want TEST_FAILED", pErr.Code)
+	}
+}
+
 func TestReadLimitedBodyAcceptsAnExactLimitBody(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -72,7 +86,9 @@ func TestReadLimitedBodyAcceptsAnExactLimitBody(t *testing.T) {
 	}
 }
 
-func TestJSONHelperUsesTheJSONCap(t *testing.T) {
+// TestResponseCapsHoldTheirPinnedValues guards the two caps. A silent change to
+// either value would widen the memory bound that issue #670 restored.
+func TestResponseCapsHoldTheirPinnedValues(t *testing.T) {
 	if providerhttp.MaxJSONResponseBytes != 64<<20 {
 		t.Fatalf("MaxJSONResponseBytes = %d, want %d", providerhttp.MaxJSONResponseBytes, int64(64<<20))
 	}

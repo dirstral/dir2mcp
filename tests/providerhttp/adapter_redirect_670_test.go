@@ -87,6 +87,14 @@ func adapterCalls() []adapterCall {
 			_, err := c.Generate(ctx, "hello")
 			return err
 		}},
+		{"gemini.Embed", func(ctx context.Context, base string) error {
+			// The native embed path sends x-goog-api-key, the custom key
+			// header that Go keeps on a redirect to another host.
+			c := gemini.NewClient(base, testSecret)
+			c.MaxRetries = 0
+			_, err := c.Embed(ctx, "gemini-embedding-001", model.EmbedDocument, []string{"doc"})
+			return err
+		}},
 		{"mistral.Embed", func(ctx context.Context, base string) error {
 			c := mistral.NewClient(base, testSecret)
 			c.MaxRetries = 0

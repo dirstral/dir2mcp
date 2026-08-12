@@ -20,6 +20,11 @@ const (
 	defaultBaseURL  = "https://api.elevenlabs.io"
 	defaultTimeout  = 30 * time.Second
 	defaultSTTModel = "scribe_v1"
+
+	// maxErrorBodyBytes bounds the upstream text that reaches an error
+	// message. It matches the cap that the other adapters use in their
+	// httpError helpers.
+	maxErrorBodyBytes = 4096
 )
 
 type Client struct {
@@ -184,7 +189,7 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		message := strings.TrimSpace(string(bodyBytes))
+		message := errorMessage(bodyBytes)
 		if message == "" {
 			message = fmt.Sprintf("elevenlabs stt returned status %d", resp.StatusCode)
 		}
@@ -283,11 +288,22 @@ func (c *Client) SynthesizeWithVoice(ctx context.Context, text, voiceID string) 
 		return body, nil
 	}
 
-	message := strings.TrimSpace(string(body))
+	message := errorMessage(body)
 	if message == "" {
 		message = fmt.Sprintf("elevenlabs tts returned status %d", resp.StatusCode)
 	}
 	return nil, mapProviderError(resp.StatusCode, message)
+}
+
+// errorMessage turns a non-2xx body into a short error message. The body is
+// read under the response cap, which is generous (up to 64 MiB of JSON or
+// 256 MiB of audio), so an error string must be cut down. The other adapters
+// cap an error body at maxErrorBodyBytes as well.
+func errorMessage(body []byte) string {
+	if len(body) > maxErrorBodyBytes {
+		body = body[:maxErrorBodyBytes]
+	}
+	return strings.TrimSpace(string(body))
 }
 
 func mapProviderError(statusCode int, message string) error {
