@@ -195,7 +195,11 @@ func (r *s3RangeReader) refuseRange(detail string) error {
 // contentRange is a parsed `Content-Range: bytes <start>-<end>/<total>` value.
 type contentRange struct {
 	start int64
-	end   int64
+	// end is validated but is not compared with the object size. A store may
+	// answer an open-ended `bytes=N-` with a shorter range than the whole tail,
+	// which is legal; a body that then ends before the object does is caught by
+	// the truncation check in endOfBody.
+	end int64
 	// total is the complete length of the object, or -1 for the `*` form RFC 9110
 	// allows when the store does not know it.
 	total int64
