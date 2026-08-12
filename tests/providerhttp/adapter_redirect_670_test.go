@@ -90,7 +90,7 @@ func adapterCalls() []adapterCall {
 		{"mistral.Embed", func(ctx context.Context, base string) error {
 			c := mistral.NewClient(base, testSecret)
 			c.MaxRetries = 0
-			_, err := c.Embed(ctx, "", model.EmbedDocument, []string{"doc"})
+			_, err := c.Embed(ctx, "mistral-embed", model.EmbedDocument, []string{"doc"})
 			return err
 		}},
 		{"omniembed.Embed", func(ctx context.Context, base string) error {
@@ -150,7 +150,9 @@ func TestAdaptersRefuseARedirect(t *testing.T) {
 			}))
 			defer target.Close()
 
+			originHits := &redirectWatcher{}
 			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				originHits.record(r)
 				http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
 			}))
 			defer origin.Close()
@@ -158,6 +160,11 @@ func TestAdaptersRefuseARedirect(t *testing.T) {
 			err := tc.call(context.Background(), origin.URL)
 			if err == nil {
 				t.Fatal("the call must fail on a redirect")
+			}
+			// The call must really reach the origin. A subtest that fails
+			// before the request would prove nothing.
+			if got, _ := originHits.result(); got == 0 {
+				t.Fatal("the call never reached the origin server")
 			}
 			hits, leaked := watcher.result()
 			if hits != 0 {
