@@ -763,9 +763,12 @@ func TestLoad_RejectsNegativeRAGAndChunkingTunables(t *testing.T) {
 		want string
 	}{
 		{
+			// rag.k_default carries the same 1..50 bound as the k request field
+			// (SPEC §9.1), so a negative value is out of bound, not merely
+			// negative. See k_default_654_test.go for the full bound.
 			name: "negative rag k default",
 			yaml: "rag_k_default: -1\n",
-			want: "rag.k_default must be non-negative",
+			want: "rag.k_default must be between 1 and 50",
 		},
 		{
 			name: "negative chunking max tokens",

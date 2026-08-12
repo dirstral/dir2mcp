@@ -129,28 +129,28 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 		protocol.ToolNameSearch: {
 			Name:         protocol.ToolNameSearch,
 			Description:  "Semantic retrieval across indexed content.",
-			InputSchema:  searchInputSchema(),
+			InputSchema:  searchInputSchema(s.effectiveK()),
 			OutputSchema: searchOutputSchema(),
 			handler:      s.handleSearchTool,
 		},
 		protocol.ToolNameRelated: {
 			Name:         protocol.ToolNameRelated,
 			Description:  "Nearest-neighbour segments for a given chunk or document ('more like this').",
-			InputSchema:  relatedInputSchema(),
+			InputSchema:  relatedInputSchema(s.effectiveK()),
 			OutputSchema: relatedOutputSchema(),
 			handler:      s.handleRelatedTool,
 		},
 		protocol.ToolNameAsk: {
 			Name:         protocol.ToolNameAsk,
 			Description:  "RAG answer with citations; can run search-only mode.",
-			InputSchema:  askInputSchema(),
+			InputSchema:  askInputSchema(s.effectiveK()),
 			OutputSchema: askOutputSchema(),
 			handler:      s.handleAskTool,
 		},
 		protocol.ToolNameAskAudio: {
 			Name:         protocol.ToolNameAskAudio,
 			Description:  "RAG answer with optional ElevenLabs audio synthesis.",
-			InputSchema:  askAudioInputSchema(),
+			InputSchema:  askAudioInputSchema(s.effectiveK()),
 			OutputSchema: askAudioOutputSchema(),
 			handler:      s.handleAskAudioTool,
 		},
@@ -171,7 +171,7 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 		protocol.ToolNameTranscribeAndAsk: {
 			Name:         protocol.ToolNameTranscribeAndAsk,
 			Description:  "Ensure transcript exists for audio file, then answer a question with citations.",
-			InputSchema:  transcribeAndAskInputSchema(),
+			InputSchema:  transcribeAndAskInputSchema(s.effectiveK()),
 			OutputSchema: transcribeAndAskOutputSchema(),
 			handler:      s.handleTranscribeAndAskTool,
 		},
@@ -1040,7 +1040,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if !ok {
 		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "query is required", Retryable: false}
 	}
-	k, toolErr := parseKArg(args)
+	k, toolErr := parseKArg(args, s.effectiveK())
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1143,7 +1143,7 @@ func normalizeIndexAxis(axis string) string {
 // nearest-neighbour retrieval. Exactly one of chunk_id / rel_path identifies the
 // seed; the same §9.5/§9.6 filters as dir2mcp_search narrow the neighbours.
 func (s *Server) handleRelatedTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
-	rq, toolErr := parseRelatedArgs(args)
+	rq, toolErr := parseRelatedArgs(args, s.effectiveK())
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1177,8 +1177,9 @@ func (s *Server) handleRelatedTool(ctx context.Context, args map[string]interfac
 // parseRelatedArgs validates and projects the dir2mcp_related arguments into a
 // model.RelatedQuery. It enforces the chunk_id/rel_path oneOf and reuses the
 // shared k/index/filter/date parsers so dir2mcp_related and dir2mcp_search stay
-// in lockstep on those semantics.
-func parseRelatedArgs(args map[string]interface{}) (model.RelatedQuery, *toolExecutionError) {
+// in lockstep on those semantics. defaultK is the deployment's effective default
+// k (Server.effectiveK); related is one of the five tools rag.k_default covers.
+func parseRelatedArgs(args map[string]interface{}, defaultK int) (model.RelatedQuery, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"chunk_id": {}, "rel_path": {}, "k": {}, "index": {}, "exclude_same_document": {},
 		"path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "date_from": {}, "date_to": {},
@@ -1200,7 +1201,7 @@ func parseRelatedArgs(args map[string]interface{}) (model.RelatedQuery, *toolExe
 	if chunkPresent && chunkID < 1 {
 		return model.RelatedQuery{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "chunk_id must be >= 1", Retryable: false}
 	}
-	k, toolErr := parseKArg(args)
+	k, toolErr := parseKArg(args, defaultK)
 	if toolErr != nil {
 		return model.RelatedQuery{}, toolErr
 	}
@@ -1311,8 +1312,9 @@ type askRequest struct {
 //
 // Both ask-family tools funnel through here, so a filter cannot be advertised on
 // one and rejected on the other, and a filter cannot be accepted yet dropped
-// before it reaches retrieval.
-func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}) (askRequest, *toolExecutionError) {
+// before it reaches retrieval. defaultK is the deployment's effective default k
+// (Server.effectiveK), applied when the request omits the field.
+func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}, defaultK int) (askRequest, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, allowed); err != nil {
 		return askRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -1323,7 +1325,7 @@ func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}) (ask
 	if !ok {
 		return askRequest{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
 	}
-	k, toolErr := parseKArg(args)
+	k, toolErr := parseKArg(args, defaultK)
 	if toolErr != nil {
 		return askRequest{}, toolErr
 	}
@@ -1367,14 +1369,14 @@ func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}) (ask
 }
 
 func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
-	req, toolErr := parseAskArgs(args, askFamilyArguments())
+	req, toolErr := parseAskArgs(args, askFamilyArguments(), s.effectiveK())
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	if req.mode == "search_only" {
+	if s.withholdsAnswer(req.mode) {
 		return s.runSearchOnlyMode(ctx, req.question, req.query)
 	}
 	askResult, askErr := s.retriever.Ask(ctx, req.question, req.query)
@@ -1388,7 +1390,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 }
 
 func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
-	req, toolErr := parseAskArgs(args, askFamilyArguments("voice_id"))
+	req, toolErr := parseAskArgs(args, askFamilyArguments("voice_id"), s.effectiveK())
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1399,10 +1401,22 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	if req.mode == "search_only" {
+	if s.withholdsAnswer(req.mode) {
 		return s.runSearchOnlyMode(ctx, req.question, req.query)
 	}
 	return s.runAskAudioAnswer(ctx, req.question, voiceID, req.query)
+}
+
+// withholdsAnswer reports whether this request returns hits without an answer.
+// SPEC §9.4 states the condition as a disjunction: EITHER the server disabled
+// generation (`rag.generate_answer: false`) OR the request asked for
+// `mode=search_only`. Either one is sufficient, so `mode=answer` against a
+// server with generation off is SERVED as search_only rather than refused: the
+// response shape is identical, and a refusal would leave the caller no way to
+// use the corpus at all. A request therefore cannot turn generation back on
+// against the operator's decision about provider cost and data flow.
+func (s *Server) withholdsAnswer(mode string) bool {
+	return mode == "search_only" || !s.generatesAnswers()
 }
 
 func (s *Server) runAskAudioAnswer(ctx context.Context, question, voiceID string, sq model.SearchQuery) (toolCallResult, *toolExecutionError) {
@@ -1764,7 +1778,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	if !ok {
 		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
 	}
-	k, toolErr := parseKArg(args)
+	k, toolErr := parseKArg(args, s.effectiveK())
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1779,27 +1793,49 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
-	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
+	query := model.SearchQuery{
 		Query: question, K: k, Index: "text", FileGlob: escapeGlobLiteral(relPath),
-	})
-	if askErr != nil {
-		return toolCallResult{}, mapSearchError(askErr)
+	}
+	result, toolErr := s.transcriptAnswer(ctx, question, query)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
 	}
 
 	sttProvider, sttModel := resolvedSTTProvenance(s.cfg)
-	structured := buildAskStructuredContent(askResult)
+	structured, ok := result.StructuredContent.(map[string]interface{})
+	if !ok {
+		structured = map[string]interface{}{}
+	}
 	structured["transcript_provider"] = sttProvider
 	structured["transcript_model"] = sttModel
 	structured["transcribed"] = strings.TrimSpace(transcriptText) != ""
 	structured["transcribed_now"] = transcribedNow
+	result.StructuredContent = structured
+	return result, nil
+}
 
+// transcriptAnswer runs the retrieval half of dir2mcp_transcribe_and_ask and
+// returns the answer payload, minus the transcript provenance the caller adds.
+//
+// `rag.generate_answer: false` withholds generation here exactly as it does on
+// dir2mcp_ask (SPEC §9.4): the tool returns the same shape with `answer: ""` and
+// `citations: []`, and no chat provider is called. The tool has no `mode`
+// argument, so the server setting is the only condition that applies.
+func (s *Server) transcriptAnswer(ctx context.Context, question string, query model.SearchQuery) (toolCallResult, *toolExecutionError) {
+	if !s.generatesAnswers() {
+		return s.runSearchOnlyMode(ctx, question, query)
+	}
+	askResult, askErr := s.retriever.Ask(ctx, question, query)
+	if askErr != nil {
+		return toolCallResult{}, mapSearchError(askErr)
+	}
 	answerText := strings.TrimSpace(askResult.Answer)
 	if answerText == "" {
 		answerText = "no answer text returned"
 	}
 	return toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: answerText}},
-		StructuredContent: structured,
+		StructuredContent: buildAskStructuredContent(askResult),
 	}, nil
 }
 
@@ -2224,23 +2260,25 @@ func parseListFilesArgs(args map[string]interface{}) (pathPrefix, glob string, l
 // parseKArg resolves the shared k argument for search, ask, related, ask_audio
 // and transcribe_and_ask.
 //
-// An OMITTED k resolves to the shipped default (DefaultSearchK). A SUPPLIED k
-// must satisfy the bound the input schema advertises, 1..50 (SPEC §15.2/§15.3,
-// canonical search.json/ask.json), and anything outside it is INVALID_RANGE.
+// An OMITTED k resolves to defaultK, which callers take from Server.effectiveK:
+// `rag.k_default` when the operator set one, else the shipped fallback (SPEC
+// §9.1, issue #654). Every tool that takes a k funnels through here, so one
+// corpus cannot end up with a different default per tool.
 //
-// This distinction is the fix for issue #648: k=0 and k=-1 used to be replaced
+// A SUPPLIED k must satisfy the bound the input schema advertises, 1..50 (SPEC
+// §15.2/§15.3, canonical search.json/ask.json), and anything outside it is
+// INVALID_RANGE. The request field wins over the configured default, so a
+// supplied value is never replaced by defaultK.
+//
+// That distinction is the fix for issue #648: k=0 and k=-1 used to be replaced
 // by the default, so a caller that asked for a k the schema forbids got a
 // silent, different retrieval instead of the machine-parseable error every
 // other out-of-bound value produced. Absent and present-but-invalid are
 // different requests and answer differently now.
-//
-// Resolving an omitted k against `rag.k_default` is deliberately NOT done here:
-// that precedence is dirstral-spec PR #90 / dir2mcp #654 and it changes what the
-// served schema must advertise as well.
-func parseKArg(args map[string]interface{}) (int, *toolExecutionError) {
+func parseKArg(args map[string]interface{}, defaultK int) (int, *toolExecutionError) {
 	rawK, exists := args["k"]
 	if !exists {
-		return DefaultSearchK, nil
+		return defaultK, nil
 	}
 	k, parseErr := parseInteger(rawK, "k")
 	if parseErr != nil {
@@ -2561,11 +2599,29 @@ func mapOpenFileError(err error) *toolExecutionError {
 	}
 }
 
-// runSearchOnlyMode performs a search-only retrieval and formats the result.
+// runSearchOnlyMode performs a search-only retrieval and formats the result. It
+// serves both reasons an ask-family request generates no answer:
+// `mode=search_only` and `rag.generate_answer: false` (SPEC §9.4, withholdsAnswer).
 func (s *Server) runSearchOnlyMode(ctx context.Context, question string, sq model.SearchQuery) (toolCallResult, *toolExecutionError) {
+	structured, hits, toolErr := s.searchOnlyPayload(ctx, question, sq)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	return toolCallResult{
+		Content:           []toolContentItem{{Type: "text", Text: renderSearchHitsText(hits, "supporting result")}},
+		StructuredContent: structured,
+	}, nil
+}
+
+// searchOnlyPayload runs the retrieval half of an ask-family request and builds
+// the SPEC §9.4 no-answer payload. The response SHAPE is unchanged: ask.json
+// marks `answer` and `citations` required, so both are present and empty rather
+// than absent. It returns the hits as well, so a caller that adds its own fields
+// (transcribe_and_ask) renders the same hit text without searching twice.
+func (s *Server) searchOnlyPayload(ctx context.Context, question string, sq model.SearchQuery) (map[string]interface{}, []model.SearchHit, *toolExecutionError) {
 	hits, searchErr := s.retriever.Search(ctx, sq)
 	if searchErr != nil {
-		return toolCallResult{}, mapSearchError(searchErr)
+		return nil, nil, mapSearchError(searchErr)
 	}
 	hitMaps := make([]map[string]interface{}, 0, len(hits))
 	for _, h := range hits {
@@ -2582,10 +2638,7 @@ func (s *Server) runSearchOnlyMode(ctx context.Context, question string, sq mode
 		"hits":              hitMaps,
 		"indexing_complete": indexingComplete,
 	}
-	return toolCallResult{
-		Content:           []toolContentItem{{Type: "text", Text: renderSearchHitsText(hits, "supporting result")}},
-		StructuredContent: structured,
-	}, nil
+	return structured, hits, nil
 }
 
 // synthesizeAnswer runs TTS synthesis, selecting the voice-aware path when voiceID is non-empty.
@@ -3838,6 +3891,13 @@ func hitDefinitionSchema() map[string]interface{} {
 	}
 }
 
+// kPropertyDescription documents the shared k field on every tool that takes
+// one. The `default` next to it is this deployment's EFFECTIVE default: SPEC
+// §9.1 requires a served schema to advertise the value an omitted field
+// actually produces, so a client that reads the schema and sends the advertised
+// value explicitly gets the same k as a client that omits the field.
+const kPropertyDescription = "Number of hits to return. Bound 1..50 (a supplied value outside it is INVALID_RANGE). An OMITTED field resolves to this server's configured rag.k_default, which is the `default` advertised here (SPEC §9.1)."
+
 func sharedDefinitions() map[string]interface{} {
 	return map[string]interface{}{
 		"Span": spanDefinitionSchema(),
@@ -3845,13 +3905,13 @@ func sharedDefinitions() map[string]interface{} {
 	}
 }
 
-func searchInputSchema() map[string]interface{} {
+func searchInputSchema(defaultK int) map[string]interface{} {
 	return map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"query":       map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": defaultK, "description": kPropertyDescription},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
 			"file_glob":   map[string]interface{}{"type": "string"},
@@ -3920,7 +3980,7 @@ func searchOutputSchema() map[string]interface{} {
 	}
 }
 
-func relatedInputSchema() map[string]interface{} {
+func relatedInputSchema(defaultK int) map[string]interface{} {
 	return map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -3940,7 +4000,7 @@ func relatedInputSchema() map[string]interface{} {
 				"minLength":   1,
 				"description": "The source document (corpus-relative, normalized '/'): neighbours are ranked against the document's own chunk vectors. Chunks belonging to this document are always excluded from hits.",
 			},
-			"k":     map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":     map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": defaultK, "description": kPropertyDescription},
 			"index": map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto", "description": "Which logical vector axis to search (SPEC §6.1). 'auto' matches the source segment's own index_kind."},
 			"exclude_same_document": map[string]interface{}{
 				"type":        "boolean",
@@ -3984,13 +4044,13 @@ func relatedOutputSchema() map[string]interface{} {
 	}
 }
 
-func askInputSchema() map[string]interface{} {
+func askInputSchema(defaultK int) map[string]interface{} {
 	return map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"question":    map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": defaultK, "description": kPropertyDescription},
 			"mode":        map[string]interface{}{"type": "string", "enum": []string{"answer", "search_only"}, "default": "answer"},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
@@ -4069,11 +4129,11 @@ func askOutputSchema() map[string]interface{} {
 	}
 }
 
-func askAudioInputSchema() map[string]interface{} {
-	schema := askInputSchema()
+func askAudioInputSchema(defaultK int) map[string]interface{} {
+	schema := askInputSchema(defaultK)
 	properties, ok := schema["properties"].(map[string]interface{})
 	if !ok {
-		return askInputSchema()
+		return askInputSchema(defaultK)
 	}
 	properties["voice_id"] = map[string]interface{}{"type": "string", "minLength": 1}
 	return schema
@@ -4177,14 +4237,14 @@ func annotateOutputSchema() map[string]interface{} {
 	}
 }
 
-func transcribeAndAskInputSchema() map[string]interface{} {
+func transcribeAndAskInputSchema(defaultK int) map[string]interface{} {
 	return map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
 			"question": map[string]interface{}{"type": "string", "minLength": 1},
-			"k":        map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":        map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": defaultK, "description": kPropertyDescription},
 		},
 		"required": []string{"rel_path", "question"},
 	}

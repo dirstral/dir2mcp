@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/usage"
@@ -161,7 +162,11 @@ type Service struct {
 	overfetchMultiplier int
 	ragSystemPrompt     string
 	ragMaxContextChars  int
-	metaMu              sync.RWMutex
+	// defaultK is the number of hits a query that carries no k of its own
+	// resolves to: the operator's rag.k_default when SetDefaultK plumbed one,
+	// else the shipped fallback (SPEC §9.1, issue #654). Guarded by metaMu.
+	defaultK int
+	metaMu   sync.RWMutex
 	// chunkByLabel is the single in-memory chunk-metadata store keyed by chunk_id
 	// label. A chunk_id belongs to exactly one axis (text or code) in production,
 	// so the previous per-index split (chunkByIndex) held a redundant second copy
@@ -392,6 +397,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		overfetchMultiplier: defaultOverfetchMultiplier,
 		ragSystemPrompt:     defaultRAGSystemPrompt,
 		ragMaxContextChars:  defaultRAGMaxContext,
+		defaultK:            config.RAGKFallback,
 		chunkByLabel:        make(map[uint64]model.SearchHit),
 		tombstonedRelPaths:  make(map[string]struct{}),
 		rootDir:             ".",
@@ -1334,6 +1340,34 @@ func (s *Service) SetOversampleFactor(factor int) {
 	s.metaMu.Unlock()
 }
 
+// SetDefaultK sets the number of hits a query with no k of its own resolves to.
+// The engine wires it from config.EffectiveKDefault, so this service and the MCP
+// tool layer share ONE default (SPEC §9.1). A value outside the canonical
+// 1..50 bound keeps the shipped fallback; config validation rejects such a value
+// at load, so this only guards a caller that builds a Config by hand.
+func (s *Service) SetDefaultK(k int) {
+	if k < config.RAGKMin || k > config.RAGKMax {
+		k = config.RAGKFallback
+	}
+	s.metaMu.Lock()
+	s.defaultK = k
+	s.metaMu.Unlock()
+}
+
+// effectiveK resolves the k a query runs with: the query's own k when it set
+// one, else the configured default.
+func (s *Service) effectiveK(k int) int {
+	if k > 0 {
+		return k
+	}
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	if s.defaultK <= 0 {
+		return config.RAGKFallback
+	}
+	return s.defaultK
+}
+
 // SetOverfetchMultiplier changes the multiplier used when querying the
 // underlying vector index.  The service will ask for `k * multiplier`
 // neighbors for a request that originally asked for `k` hits.  Values
@@ -1361,10 +1395,7 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 }
 
 func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, error) {
-	k := query.K
-	if k <= 0 {
-		k = 15
-	}
+	k := s.effectiveK(query.K)
 
 	// When recency decay is active it re-scores each hit by its source-document
 	// age and can reorder candidates — promoting a fresh, highly-relevant doc
@@ -1778,9 +1809,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	if strings.TrimSpace(query.Query) == "" {
 		query.Query = question
 	}
-	if query.K <= 0 {
-		query.K = 15
-	}
+	query.K = s.effectiveK(query.K)
 
 	// Install a per-query usage sink so embed/rerank/generate token usage and
 	// latency for this ask are accumulated and emitted as a single

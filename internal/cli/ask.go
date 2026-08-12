@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/provider"
 )
@@ -48,27 +49,7 @@ func (a *App) runAskLocal(ctx context.Context, global globalOptions, opts askOpt
 	// SPEC 8.1.3 preflight: an embed provider must resolve (generalized
 	// from the legacy MISTRAL_API_KEY-specific check; mirrors `up`).
 	if _, embErr := cfg.Providers().Resolve(provider.CapEmbed); embErr != nil {
-		msg := "CONFIG_INVALID: no embedding provider configured"
-		hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
-		var ce *provider.ConfigError
-		if errors.As(embErr, &ce) {
-			msg = ce.Error()
-		}
-		if global.jsonOutput {
-			writeCLIError(a.stderr, true, exitConfigInvalid, msg, hint, "Or run: dir2mcp config init")
-			return exitConfigInvalid
-		}
-		se := a.sty(global.jsonOutput)
-		nonInteractiveMode := global.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
-		if nonInteractiveMode {
-			writef(a.stderr, "%s %s\n", se.errPrefix(), msg)
-			writeln(a.stderr, hint)
-			writeln(a.stderr, "Or run: dir2mcp config init")
-		} else {
-			writef(a.stderr, "%s %s\n", se.errPrefix(), strings.TrimPrefix(msg, "CONFIG_INVALID: "))
-			writeln(a.stderr, "Run: dir2mcp config init")
-		}
-		return exitConfigInvalid
+		return a.reportMissingEmbedProvider(global, embErr)
 	}
 	st := a.storeForConfig(cfg)
 	defer func() { _ = st.Close() }()
@@ -88,14 +69,18 @@ func (a *App) runAskLocal(ctx context.Context, global globalOptions, opts askOpt
 
 	query := model.SearchQuery{
 		Query:      opts.question,
-		K:          opts.k,
+		K:          resolveAskK(cfg, opts.k),
 		Index:      opts.index,
 		PathPrefix: opts.pathPrefix,
 		FileGlob:   opts.fileGlob,
 		DocTypes:   opts.docTypes,
 	}
 
-	if opts.mode == "search_only" {
+	// Either condition withholds generation (SPEC §9.4): the request's own
+	// mode, or the operator's rag.generate_answer. A request cannot turn
+	// generation back on, so `--mode answer` on a corpus with generation off
+	// returns the same hits with an empty answer instead of failing.
+	if opts.mode == "search_only" || !cfg.RAGGenerateAnswer {
 		return a.runAskSearchOnly(ctx, global, opts.question, retriever, query)
 	}
 
@@ -105,6 +90,45 @@ func (a *App) runAskLocal(ctx context.Context, global globalOptions, opts askOpt
 		return exitGeneric
 	}
 	return a.renderAskResult(global, askResult)
+}
+
+// reportMissingEmbedProvider writes the "no embedding provider" preflight
+// failure in the shape the caller's output mode expects, and returns the exit
+// code. It is split out of runAskLocal so that function stays inside the
+// cyclomatic-complexity gate; the text and the exit code are unchanged.
+func (a *App) reportMissingEmbedProvider(global globalOptions, embErr error) int {
+	msg := "CONFIG_INVALID: no embedding provider configured"
+	hint := "Set a provider credential (e.g. MISTRAL_API_KEY / OPENAI_API_KEY) or configure providers: in .dir2mcp.yaml"
+	var ce *provider.ConfigError
+	if errors.As(embErr, &ce) {
+		msg = ce.Error()
+	}
+	if global.jsonOutput {
+		writeCLIError(a.stderr, true, exitConfigInvalid, msg, hint, "Or run: dir2mcp config init")
+		return exitConfigInvalid
+	}
+	se := a.sty(global.jsonOutput)
+	nonInteractiveMode := global.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
+	if nonInteractiveMode {
+		writef(a.stderr, "%s %s\n", se.errPrefix(), msg)
+		writeln(a.stderr, hint)
+		writeln(a.stderr, "Or run: dir2mcp config init")
+	} else {
+		writef(a.stderr, "%s %s\n", se.errPrefix(), strings.TrimPrefix(msg, "CONFIG_INVALID: "))
+		writeln(a.stderr, "Run: dir2mcp config init")
+	}
+	return exitConfigInvalid
+}
+
+// resolveAskK resolves the number of hits a LOCAL ask/search runs with (SPEC
+// §9.1): the -k flag when the caller supplied one, else the corpus's configured
+// rag.k_default. The remote path does not use it: it omits k from the tool
+// arguments so the daemon resolves the default against ITS configuration.
+func resolveAskK(cfg config.Config, k int) int {
+	if k > 0 {
+		return k
+	}
+	return cfg.EffectiveKDefault()
 }
 
 func (a *App) runAskSearchOnly(ctx context.Context, global globalOptions, question string, retriever model.Retriever, query model.SearchQuery) int {

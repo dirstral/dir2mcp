@@ -103,6 +103,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
+	// One effective rag.k_default for the whole deployment (SPEC §9.1): the tool
+	// layer resolves an omitted k to the same number this service falls back to.
+	ret.SetDefaultK(cfg.EffectiveKDefault())
 	a.configureReranker(ret, cfg)
 	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
 	ret.SetMinScore(cfg.RetrievalMinScore)
