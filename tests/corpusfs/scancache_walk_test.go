@@ -68,11 +68,17 @@ func walkWith(t *testing.T, root string, cache corpusfs.ScanCache) []corpusfs.Di
 // TestScanCache_UnchangedTreeSkipsReWalk verifies that a second walk of an
 // unchanged tree is served from the cache (every directory is a hit and no
 // directory is re-stored) and returns byte-identical discovery results.
+//
+// The directory stamps are aged first (#667). A directory written milliseconds ago
+// is deliberately NOT cached: a further write in the same timestamp tick would
+// leave its stamp unchanged, so the cached child list could hide a new file. This
+// test used to walk a tree it had just created, which is exactly that window.
 func TestScanCache_UnchangedTreeSkipsReWalk(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "a.txt"), []byte("alpha"))
 	mustWrite(t, filepath.Join(root, "sub", "b.txt"), []byte("beta"))
 	mustWrite(t, filepath.Join(root, "sub", "deep", "c.txt"), []byte("gamma"))
+	settleDirs667(t, root)
 
 	cache := newFakeScanCache()
 

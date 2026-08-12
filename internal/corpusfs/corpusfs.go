@@ -212,7 +212,18 @@ type CachedDirEntry struct {
 	Name      string
 	IsDir     bool
 	SizeBytes int64
-	MTimeUnix int64
+	// MTimeUnixNano is the child's modification time in NANOSECONDS (#667).
+	//
+	// It was seconds. A same-size in-place edit inside one Unix second therefore
+	// matched the cached entry, and the directory was served from cache instead of
+	// being re-read. Nanoseconds separate those two writes on every filesystem
+	// that keeps a sub-second stamp (ext4, APFS, XFS, btrfs, NTFS).
+	//
+	// Note this field is a fallback TRIGGER, not the change signal a caller acts
+	// on: a validated child is emitted with its LIVE stat, so the file's reported
+	// size and mtime are always current. See CachedDirSignature for the field that
+	// carries the correctness weight.
+	MTimeUnixNano int64
 	// Mode is the file mode bits recorded for a regular file so a cache hit can
 	// reconstruct the DiscoveredFile.Mode without re-stat beyond the size/mtime
 	// confirmation the walker already performs.
@@ -222,12 +233,20 @@ type CachedDirEntry struct {
 // CachedDirSignature is the persisted fingerprint of a single directory: the
 // directory's own mtime (which POSIX bumps on any add/remove/rename of a direct
 // child) plus the sorted list of its direct children. A live directory whose
-// mtime equals DirMTimeUnix has the same set of children as when the signature
-// was stored, so the walker can validate the cached children with per-file stats
-// instead of re-reading the directory.
+// mtime equals DirMTimeUnixNano has the same set of children as when the
+// signature was stored, so the walker can validate the cached children with
+// per-file stats instead of re-reading the directory.
+//
+// That deduction only holds when the recorded mtime is OLDER than the moment the
+// child list was read, by more than the filesystem's timestamp granularity
+// (#667). A child added in the same timestamp tick the walk read the directory in
+// leaves the mtime equal to the recorded one, so the walk would keep serving a
+// child list the new file is not in. The walker therefore refuses to store a
+// signature for a directory whose mtime is not yet settled; see
+// dirSignatureIsSettled in local.go for the rule and the proof.
 type CachedDirSignature struct {
-	DirMTimeUnix int64
-	Entries      []CachedDirEntry
+	DirMTimeUnixNano int64
+	Entries          []CachedDirEntry
 }
 
 // ScanCache persists per-directory discovery signatures keyed by a directory's
@@ -240,6 +259,10 @@ type CachedDirSignature struct {
 // Implementations must be safe for the walker's usage (sequential within one
 // Walk). Lookup returning ok=false (or any inconsistency) must make the walker
 // fall back to a full directory read.
+//
+// Timestamps in a signature are NANOSECONDS (#667). An implementation that
+// persists them must keep the full precision; truncating to seconds reopens the
+// window this cache used to have.
 type ScanCache interface {
 	// LookupDir returns the cached signature for relDir, or ok=false when none is
 	// recorded. An error is treated by the walker as a cache miss (full re-walk).

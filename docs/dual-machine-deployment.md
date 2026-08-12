@@ -442,9 +442,14 @@ embedded, and the coordinator enqueues the chunk's current form on its next pass
   ```
 
   The cache keys each directory on its own mtime plus its direct children's
-  name/size/mtime/mode, so a changed directory is still rescanned. It is only
-  consulted for the local-filesystem backend (not the native `source.kind: s3`
-  object listing).
+  name/size/mtime/mode, so a changed directory is still rescanned. Every
+  timestamp is compared to the nanosecond, and a directory whose mtime is less
+  than two seconds old is not cached at all: a further write in the same
+  filesystem timestamp tick would leave the stamp unchanged, and the cached
+  child list could then hide a new file. A directory that is being written to
+  during the scan therefore keeps the full read until it settles. The cache is
+  only consulted for the local-filesystem backend (not the native
+  `source.kind: s3` object listing).
 
 - **Video time-window reads currently download the whole object.** Range reads
   over S3 avoid whole-object downloads for plain byte-slice reads, but the

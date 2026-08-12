@@ -556,8 +556,16 @@ type Config struct {
 	// re-sorting its entries. Correctness is never traded for speed: every cached
 	// child file is still stat'd so an in-place modification is detected, and any
 	// add/remove/rename (which bumps the parent directory mtime) or stat failure
-	// falls the directory back to a full re-walk. Default OFF: discovery behaves
-	// exactly as before. Only consulted for the local-filesystem backend.
+	// falls the directory back to a full re-walk.
+	//
+	// Every timestamp is compared to the NANOSECOND, and a directory whose mtime
+	// is not yet settled (older than the coarsest filesystem timestamp
+	// granularity) is not cached at all (#667). Both rules exist because a
+	// second-resolution comparison read a change inside the recorded second as no
+	// change, and a file added in that window was never enumerated.
+	//
+	// Default OFF: discovery behaves exactly as before. Only consulted for the
+	// local-filesystem backend.
 	IngestScanCache bool
 
 	// IngestLateChunking opts IN to "late chunking" (issue #332, Jina's

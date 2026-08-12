@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ErrPathEscapesRoot is returned by Open/Localize when a relPath resolves
@@ -322,10 +323,10 @@ func (w *discoverWalker) walkDirFull(ctx context.Context, absDir, relDir string,
 	// we decline to cache a possibly-partial snapshot rather than risk recording a
 	// new mtime against a stale child set (which a later run would wrongly trust).
 	caching := w.options.ScanCache != nil && !w.options.FollowSymlinks
-	var preReadMTime int64
+	var preReadMTime time.Time
 	if caching {
 		if info, statErr := os.Stat(absDir); statErr == nil {
-			preReadMTime = info.ModTime().Unix()
+			preReadMTime = info.ModTime()
 		} else {
 			caching = false
 		}
@@ -411,10 +412,10 @@ func (w *discoverWalker) processFullEntry(ctx context.Context, absDir, relDir, n
 	}
 
 	sig := CachedDirEntry{
-		Name:      name,
-		SizeBytes: lstat.Size(),
-		MTimeUnix: lstat.ModTime().Unix(),
-		Mode:      uint32(lstat.Mode()),
+		Name:          name,
+		SizeBytes:     lstat.Size(),
+		MTimeUnixNano: lstat.ModTime().UnixNano(),
+		Mode:          uint32(lstat.Mode()),
 	}
 	if w.shouldAddFile(lstat, relPath, rules) {
 		*w.files = append(*w.files, DiscoveredFile{
@@ -459,7 +460,12 @@ func (w *discoverWalker) walkDirFromCache(ctx context.Context, absDir, relDir st
 		return false, nil //nolint:nilerr // unreadable dir is a miss; full path reports the error
 	}
 	sig, ok, err := w.options.ScanCache.LookupDir(relDir)
-	if err != nil || !ok || sig.DirMTimeUnix != info.ModTime().Unix() {
+	// Nanoseconds, not seconds (#667): a second-resolution comparison accepted a
+	// directory whose child list had changed within the recorded Unix second.
+	// A signature written by an older build carries a seconds value here, which
+	// cannot equal a nanosecond stamp, so it reads as a miss and the directory is
+	// re-read and re-stored once. The cache is self-healing by design.
+	if err != nil || !ok || sig.DirMTimeUnixNano != info.ModTime().UnixNano() {
 		return false, nil //nolint:nilerr // a cache error/miss/mtime drift is a full-read fallback
 	}
 
@@ -506,6 +512,10 @@ func (w *discoverWalker) validateCachedChildren(ctx context.Context, absDir, rel
 // cachedChildMatches reports whether a live stat is consistent with the cached
 // entry: a directory must still be a directory; a regular file must still be a
 // regular file with the same size and mtime (so an in-place modification fails).
+//
+// The mtime is compared in NANOSECONDS (#667). At second resolution a same-size
+// edit made inside the recorded Unix second matched, and the directory kept its
+// cache hit.
 func cachedChildMatches(e CachedDirEntry, lstat os.FileInfo) bool {
 	if e.IsDir {
 		return lstat.IsDir()
@@ -513,7 +523,7 @@ func cachedChildMatches(e CachedDirEntry, lstat os.FileInfo) bool {
 	if lstat.IsDir() || !lstat.Mode().IsRegular() {
 		return false
 	}
-	return lstat.Size() == e.SizeBytes && lstat.ModTime().Unix() == e.MTimeUnix
+	return lstat.Size() == e.SizeBytes && lstat.ModTime().UnixNano() == e.MTimeUnixNano
 }
 
 // emitCachedChildren appends the confirmed files and recurses into confirmed
@@ -543,22 +553,78 @@ func (w *discoverWalker) emitCachedChildren(ctx context.Context, confirmed []cac
 	return nil
 }
 
-// storeDirSignature persists the freshly observed directory signature, but only
-// if the directory's mtime has not changed since it was sampled before the read
+// storeDirSignature persists the freshly observed directory signature, subject to
+// two guards. Errors are non-fatal: discovery already produced correct results; a
+// failed or skipped store only forgoes the optimization next run.
+//
+// 1. The directory's mtime must be unchanged since it was sampled before the read
 // (preReadMTime). A changed mtime means a child was added/removed/renamed during
 // the read, so the captured child set may be partial; in that case we skip the
 // store rather than record a new mtime against a stale set (which a later run
-// would wrongly trust). Errors are non-fatal: discovery already produced correct
-// results; a failed store only forgoes the optimization next run.
-func (w *discoverWalker) storeDirSignature(absDir, relDir string, preReadMTime int64, entries []CachedDirEntry) {
+// would wrongly trust).
+//
+// 2. The mtime must be SETTLED (#667): older than this instant by more than the
+// coarsest filesystem timestamp granularity. Guard 1 compares two stamps, so it
+// cannot see a change that landed in the same tick as the stamp it is comparing;
+// guard 2 is what refuses that case. See mtimeSettleWindow.
+func (w *discoverWalker) storeDirSignature(absDir, relDir string, preReadMTime time.Time, entries []CachedDirEntry) {
 	info, err := os.Stat(absDir)
-	if err != nil || info.ModTime().Unix() != preReadMTime {
+	if err != nil || !info.ModTime().Equal(preReadMTime) {
+		return
+	}
+	if !dirSignatureIsSettled(preReadMTime, time.Now()) {
 		return
 	}
 	_ = w.options.ScanCache.StoreDir(relDir, CachedDirSignature{
-		DirMTimeUnix: preReadMTime,
-		Entries:      entries,
+		DirMTimeUnixNano: preReadMTime.UnixNano(),
+		Entries:          entries,
 	})
+}
+
+// mtimeSettleWindow is how far in the past a directory's mtime must sit, relative
+// to the moment the walk read that directory, before the walk is allowed to cache
+// the directory's child list (#667).
+//
+// Why a window is needed. A filesystem records an mtime with a finite
+// granularity, so the stamp names a BUCKET, not an instant. Say the walk reads
+// directory D at time O and D's recorded mtime is M. A file added at any later
+// time C gives D a new mtime of bucket(C). If bucket(C) == M the add is invisible
+// to a walk that compares mtimes, and the cached child list keeps hiding the new
+// file for as long as nothing else touches D.
+//
+// Why 2 seconds closes it. Require M <= O - 2s. Then for any C >= O we have
+// bucket(C) >= bucket(O) > M whenever the granularity G is at most 2s, so the
+// add always changes the stamp. G is 1s on ext3 and on many NFS mounts, 2s on
+// FAT32 (the coarsest stamp in real use: an SD card or a USB stick), and
+// nanoseconds on ext4/APFS/XFS/btrfs/NTFS. A filesystem with a stamp coarser
+// than 2s would need this constant raised.
+//
+// What it costs. Only a directory modified within 2 seconds of the walk reaching
+// it goes uncached, and only until the next scan, which caches it once the stamp
+// has settled. A corpus that is not being written to during the scan pays
+// nothing.
+const mtimeSettleWindow = 2 * time.Second
+
+// dirSignatureIsSettled reports whether a directory whose mtime is dirMTime, read
+// by a walk that reached this point at readAt, may have its child list cached.
+//
+// The answer is yes only when dirMTime is at least mtimeSettleWindow behind
+// readAt. Any later write to the directory then produces a stamp that differs
+// from dirMTime whatever the filesystem's granularity, so the next walk sees the
+// change instead of serving a child list the change is not in (#667).
+//
+// A directory whose mtime is in the FUTURE relative to readAt is not settled, so
+// it is not cached. A corpus on a mount whose server clock runs ahead of this
+// host therefore loses the fast path and keeps the full read, which is the safe
+// direction to fail in.
+//
+// Nanosecond comparison needs the stamp to be exactly representable as an int64
+// nanosecond count, which holds for 1678..2262. No mainstream filesystem can
+// report a stamp before that range (ext4 clamps at 1901, APFS counts 64-bit
+// nanoseconds), and a stamp after it is in the future, which this test already
+// refuses. So the range needs no separate check.
+func dirSignatureIsSettled(dirMTime, readAt time.Time) bool {
+	return !dirMTime.After(readAt.Add(-mtimeSettleWindow))
 }
 
 func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath string, rules []gitIgnoreRule) error {
