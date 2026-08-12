@@ -13,10 +13,14 @@ func TestSQLiteCache_StoreAndLookupRoundTrip(t *testing.T) {
 	c := scancache.Open(path)
 	defer func() { _ = c.Close() }()
 
+	// Nanosecond values with a non-zero sub-second part (#667). A seconds-magnitude
+	// value would round-trip even through a column that silently lost precision.
+	const dirNano = int64(1700000000_123456789)
+	const fileNano = int64(1699999999_987654321)
 	sig := corpusfs.CachedDirSignature{
-		DirMTimeUnix: 1700000000,
+		DirMTimeUnixNano: dirNano,
 		Entries: []corpusfs.CachedDirEntry{
-			{Name: "a.txt", SizeBytes: 5, MTimeUnix: 1699999999, Mode: 0o644},
+			{Name: "a.txt", SizeBytes: 5, MTimeUnixNano: fileNano, Mode: 0o644},
 			{Name: "sub", IsDir: true},
 		},
 	}
@@ -31,14 +35,17 @@ func TestSQLiteCache_StoreAndLookupRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("LookupDir: expected hit")
 	}
-	if got.DirMTimeUnix != sig.DirMTimeUnix {
-		t.Fatalf("mtime mismatch: got %d want %d", got.DirMTimeUnix, sig.DirMTimeUnix)
+	if got.DirMTimeUnixNano != sig.DirMTimeUnixNano {
+		t.Fatalf("mtime mismatch: got %d want %d", got.DirMTimeUnixNano, sig.DirMTimeUnixNano)
 	}
 	if len(got.Entries) != 2 {
 		t.Fatalf("entry count mismatch: got %d want 2", len(got.Entries))
 	}
 	if got.Entries[0].Name != "a.txt" || got.Entries[0].SizeBytes != 5 || got.Entries[0].Mode != 0o644 {
 		t.Fatalf("file entry round-trip mismatch: %+v", got.Entries[0])
+	}
+	if got.Entries[0].MTimeUnixNano != fileNano {
+		t.Fatalf("child mtime lost precision: got %d want %d", got.Entries[0].MTimeUnixNano, fileNano)
 	}
 	if !got.Entries[1].IsDir || got.Entries[1].Name != "sub" {
 		t.Fatalf("dir entry round-trip mismatch: %+v", got.Entries[1])
@@ -62,11 +69,11 @@ func TestSQLiteCache_StoreUpsertsAndPersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scan.sqlite")
 
 	c := scancache.Open(path)
-	if err := c.StoreDir("d", corpusfs.CachedDirSignature{DirMTimeUnix: 1}); err != nil {
+	if err := c.StoreDir("d", corpusfs.CachedDirSignature{DirMTimeUnixNano: 1}); err != nil {
 		t.Fatalf("first store: %v", err)
 	}
 	// Overwrite the same key with a new mtime.
-	if err := c.StoreDir("d", corpusfs.CachedDirSignature{DirMTimeUnix: 2}); err != nil {
+	if err := c.StoreDir("d", corpusfs.CachedDirSignature{DirMTimeUnixNano: 2}); err != nil {
 		t.Fatalf("upsert store: %v", err)
 	}
 	if err := c.Close(); err != nil {
@@ -81,8 +88,8 @@ func TestSQLiteCache_StoreUpsertsAndPersists(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("reopened LookupDir: ok=%v err=%v", ok, err)
 	}
-	if got.DirMTimeUnix != 2 {
-		t.Fatalf("upsert not persisted: got mtime %d want 2", got.DirMTimeUnix)
+	if got.DirMTimeUnixNano != 2 {
+		t.Fatalf("upsert not persisted: got mtime %d want 2", got.DirMTimeUnixNano)
 	}
 }
 

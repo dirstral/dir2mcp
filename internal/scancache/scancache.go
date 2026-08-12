@@ -5,6 +5,9 @@
 // local archive can skip re-reading and re-sorting directories whose contents
 // are unchanged, while still detecting any added/removed/modified file.
 //
+// Every timestamp is stored in NANOSECONDS (#667). Seconds were too coarse: a
+// change inside the recorded second read as no change at all.
+//
 // The cache is purely a performance optimization: the walker only trusts a
 // signature after confirming the directory's live mtime is unchanged AND
 // re-stat'ing every cached child, so a stale or corrupt cache can never cause a
@@ -88,15 +91,25 @@ func (c *SQLiteCache) ensureDB(ctx context.Context) (*sql.DB, error) {
 			return nil, fmt.Errorf("scancache: pragma: %w", err)
 		}
 	}
-	schema := `
-CREATE TABLE IF NOT EXISTS dir_signatures (
-  rel_dir       TEXT PRIMARY KEY,
-  dir_mtime_unix INTEGER NOT NULL,
-  entries_json  TEXT NOT NULL
-);`
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("scancache: init schema: %w", err)
+	// The table is versioned in its NAME and the previous version is dropped
+	// (#667). Timestamps moved from seconds to nanoseconds, so a row written by an
+	// older build states a number this build reads as a different instant. Such a
+	// row is harmless (the walker compares it, sees a mismatch, and re-reads the
+	// directory), but keeping it wastes a lookup and a row per directory forever.
+	// The cache holds no authoritative state and is safe to delete at any time, so
+	// dropping is the whole migration.
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS dir_signatures;`,
+		`CREATE TABLE IF NOT EXISTS dir_signatures_v2 (
+  rel_dir             TEXT PRIMARY KEY,
+  dir_mtime_unix_nano INTEGER NOT NULL,
+  entries_json        TEXT NOT NULL
+);`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("scancache: init schema: %w", err)
+		}
 	}
 	c.db = db
 	return db, nil
@@ -113,11 +126,11 @@ func (c *SQLiteCache) LookupDir(relDir string) (corpusfs.CachedDirSignature, boo
 		return corpusfs.CachedDirSignature{}, false, nil //nolint:nilerr // a cache error is a miss
 	}
 
-	var mtime int64
+	var mtimeNano int64
 	var entriesJSON string
 	row := db.QueryRowContext(ctx,
-		`SELECT dir_mtime_unix, entries_json FROM dir_signatures WHERE rel_dir = ?`, relDir)
-	if err := row.Scan(&mtime, &entriesJSON); err != nil {
+		`SELECT dir_mtime_unix_nano, entries_json FROM dir_signatures_v2 WHERE rel_dir = ?`, relDir)
+	if err := row.Scan(&mtimeNano, &entriesJSON); err != nil {
 		c.recordMiss()
 		return corpusfs.CachedDirSignature{}, false, nil //nolint:nilerr // no row / scan error -> miss
 	}
@@ -130,7 +143,7 @@ func (c *SQLiteCache) LookupDir(relDir string) (corpusfs.CachedDirSignature, boo
 		}
 	}
 	c.recordHit()
-	return corpusfs.CachedDirSignature{DirMTimeUnix: mtime, Entries: entries}, true, nil
+	return corpusfs.CachedDirSignature{DirMTimeUnixNano: mtimeNano, Entries: entries}, true, nil
 }
 
 // StoreDir upserts the signature for relDir.
@@ -145,12 +158,12 @@ func (c *SQLiteCache) StoreDir(relDir string, sig corpusfs.CachedDirSignature) e
 		return fmt.Errorf("scancache: marshal entries: %w", err)
 	}
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO dir_signatures (rel_dir, dir_mtime_unix, entries_json)
+		`INSERT INTO dir_signatures_v2 (rel_dir, dir_mtime_unix_nano, entries_json)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT(rel_dir) DO UPDATE SET
-		   dir_mtime_unix = excluded.dir_mtime_unix,
-		   entries_json   = excluded.entries_json`,
-		relDir, sig.DirMTimeUnix, string(entriesJSON))
+		   dir_mtime_unix_nano = excluded.dir_mtime_unix_nano,
+		   entries_json        = excluded.entries_json`,
+		relDir, sig.DirMTimeUnixNano, string(entriesJSON))
 	if err != nil {
 		return fmt.Errorf("scancache: store signature: %w", err)
 	}

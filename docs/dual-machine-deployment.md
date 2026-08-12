@@ -442,9 +442,11 @@ embedded, and the coordinator enqueues the chunk's current form on its next pass
   ```
 
   The cache keys each directory on its own mtime plus its direct children's
-  name/size/mtime/mode, so a changed directory is still rescanned. It is only
-  consulted for the local-filesystem backend (not the native `source.kind: s3`
-  object listing).
+  name/size/mtime/mode, so a changed directory is still rescanned. A directory
+  that is being written to while the scan runs keeps the full read, so a corpus
+  under active write gains less from the cache than a settled archive. The cache
+  is only consulted for the local-filesystem backend (not the native
+  `source.kind: s3` object listing).
 
 - **Video time-window reads currently download the whole object.** Range reads
   over S3 avoid whole-object downloads for plain byte-slice reads, but the
