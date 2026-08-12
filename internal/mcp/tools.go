@@ -436,26 +436,7 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			}
 			return idx
 		}(),
-		"models": map[string]interface{}{
-			"embed_text":   defaultEmbedTextModel,
-			"embed_code":   defaultEmbedCodeModel,
-			"ocr":          defaultOCRModel,
-			"stt_provider": defaultSTTProvider,
-			"stt_model":    defaultSTTModel,
-			"chat": func() string {
-				cp, err := s.cfg.Providers().Resolve(provider.CapChat)
-				if err != nil {
-					// No chat provider resolves; report the built-in default.
-					return defaultChatModel
-				}
-				if m := strings.TrimSpace(cp.ChatModel); m != "" {
-					return m
-				}
-				// Resolved but no explicit model: the adapter uses its
-				// own provider-kind default — don't misreport Mistral's.
-				return "(" + cp.Name + " provider default)"
-			}(),
-		},
+		"models": resolvedStatsModels(s.cfg),
 	}
 	if failures := loadRecentFailuresForStats(ctx, s.store); len(failures) > 0 {
 		structured["recent_failures"] = failures
@@ -498,6 +479,100 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		},
 		StructuredContent: structured,
 	}, nil
+}
+
+// resolvedStatsModels reports the models.* block of dir2mcp_stats: the provider
+// and model identities THIS deployment actually resolves for each pipeline
+// (SPEC §15.6).
+//
+// It used to emit the built-in Mistral constants for embeddings, OCR and STT and
+// resolve only the chat model (issue #647). An operator who pointed embeddings at
+// Gemini or STT at a self-hosted Whisper endpoint still read "mistral-embed" and
+// "mistral" here, so the one surface that answers "what produced these vectors
+// and this transcript" named a backend the deployment does not use. Provenance
+// that reports a default instead of the configuration is worse than no
+// provenance: it looks authoritative.
+//
+// Every field resolves through the same provider model the pipelines use, so the
+// reported identity cannot drift from the identity on the wire:
+//
+//   - embed_text / embed_code: provider.EffectiveEmbedModels of the resolved
+//     embed profile, the same resolution the embed identity (SPEC 8.1.4) and both
+//     embed call sites use.
+//   - ocr: ingest.ResolveOCRProviderModel, which mirrors the extractor's own
+//     `model.ocr.provider` binding.
+//   - stt_provider / stt_model: resolvedSTTProvenance, already shared with the
+//     transcribe tools.
+//   - chat: the resolved chat profile's model.
+//
+// A capability with no eligible profile keeps the shipped default, because that
+// is what a later `up` with a credential present would use. A profile that
+// resolves but names no model reports "(<profile> provider default)" rather than
+// another provider's constant: the adapter picks its own default there, and
+// naming a model would be a guess.
+func resolvedStatsModels(cfg config.Config) map[string]interface{} {
+	embedText, embedCode := resolvedEmbedProvenance(cfg)
+	sttProvider, sttModel := resolvedSTTProvenance(cfg)
+	return map[string]interface{}{
+		"embed_text":   embedText,
+		"embed_code":   embedCode,
+		"ocr":          resolvedOCRProvenance(cfg),
+		"stt_provider": sttProvider,
+		"stt_model":    sttModel,
+		"chat":         resolvedChatProvenance(cfg),
+	}
+}
+
+// providerDefaultLabel names the adapter-chosen model for a profile that
+// resolves without an explicit model id. It is deliberately not a model id: the
+// adapter substitutes its own kind default there, and printing another provider's
+// constant would misreport provenance.
+func providerDefaultLabel(profileName string) string {
+	return "(" + profileName + " provider default)"
+}
+
+// resolvedEmbedProvenance reports the text/code embed models the resolved embed
+// profile puts on the wire, falling back to the shipped defaults when no embed
+// profile is eligible.
+func resolvedEmbedProvenance(cfg config.Config) (embedText, embedCode string) {
+	prof, err := cfg.Providers().Resolve(provider.CapEmbed)
+	if err != nil {
+		return defaultEmbedTextModel, defaultEmbedCodeModel
+	}
+	text, code := provider.EffectiveEmbedModels(prof)
+	if strings.TrimSpace(text) == "" {
+		text = providerDefaultLabel(prof.Name)
+	}
+	if strings.TrimSpace(code) == "" {
+		code = providerDefaultLabel(prof.Name)
+	}
+	return text, code
+}
+
+// resolvedOCRProvenance reports the OCR model of the profile the extractor binds,
+// falling back to the shipped default when no OCR-capable profile resolves.
+func resolvedOCRProvenance(cfg config.Config) string {
+	name, ocrModel, ok := ingest.ResolveOCRProviderModel(cfg)
+	if !ok {
+		return defaultOCRModel
+	}
+	if strings.TrimSpace(ocrModel) == "" {
+		return providerDefaultLabel(name)
+	}
+	return ocrModel
+}
+
+// resolvedChatProvenance reports the chat model of the resolved chat profile,
+// falling back to the shipped default when no chat profile is eligible.
+func resolvedChatProvenance(cfg config.Config) string {
+	prof, err := cfg.Providers().Resolve(provider.CapChat)
+	if err != nil {
+		return defaultChatModel
+	}
+	if m := strings.TrimSpace(prof.ChatModel); m != "" {
+		return m
+	}
+	return providerDefaultLabel(prof.Name)
 }
 
 // skipReasonsForStats projects the store's durable skip aggregate onto the
@@ -4356,10 +4431,16 @@ func statsOutputSchema() map[string]interface{} {
 				"type":                 "object",
 				"additionalProperties": false,
 				"properties": map[string]interface{}{
-					"embed_text":   map[string]interface{}{"type": "string"},
-					"embed_code":   map[string]interface{}{"type": "string"},
-					"ocr":          map[string]interface{}{"type": "string"},
-					"stt_provider": map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}},
+					"embed_text": map[string]interface{}{"type": "string"},
+					"embed_code": map[string]interface{}{"type": "string"},
+					"ocr":        map[string]interface{}{"type": "string"},
+					// stt_provider is NOT a closed enum (bs-007 and stats.json:
+					// "any STT-capable provider ... is valid"). The old
+					// mistral|elevenlabs enum made a strict client reject the
+					// stats of a deployment that transcribes with whisper,
+					// openai, gemini or an operator-named profile, all of which
+					// the provider model already supports (#647).
+					"stt_provider": map[string]interface{}{"type": "string", "minLength": 1},
 					"stt_model":    map[string]interface{}{"type": "string"},
 					"chat":         map[string]interface{}{"type": "string"},
 				},

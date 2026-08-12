@@ -1378,6 +1378,22 @@ func ResolveSTTProviderModel(cfg config.Config) (providerName, sttModel string, 
 	return strings.TrimSpace(prof.Name), strings.TrimSpace(prof.STTModel), true
 }
 
+// ResolveOCRProviderModel returns the resolved bespoke-OCR provider profile name
+// and its OCR model for cfg (SPEC 8.1.3), mirroring the exact selection
+// mistralExtractor performs: the explicit `model.ocr.provider` binding when set,
+// otherwise the built-in `mistral-ocr` profile. It is the OCR twin of
+// ResolveSTTProviderModel, and it exists so the MCP stats tool can report the OCR
+// model an operator actually configured instead of the built-in Mistral constant
+// (issue #647). ok=false when no OCR-capable profile resolves, in which case the
+// caller keeps its own fallback.
+func ResolveOCRProviderModel(cfg config.Config) (providerName, ocrModel string, ok bool) {
+	prof, err := cfg.Providers().ResolveExplicit(provider.CapOCR, ocrProviderName(cfg), true)
+	if err != nil {
+		return "", "", false
+	}
+	return strings.TrimSpace(prof.Name), strings.TrimSpace(prof.OCRModel), true
+}
+
 // translatorFromConfig resolves the chat-capability binding used to translate
 // transcripts (SPEC §8.6.2: "uses the chat capability unless a dedicated
 // binding is configured") and builds a model.Generator from it. A dedicated
