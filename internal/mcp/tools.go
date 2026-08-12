@@ -2083,20 +2083,37 @@ func parseListFilesArgs(args map[string]interface{}) (pathPrefix, glob string, l
 	return pathPrefix, glob, limit, offset, includeHidden, nil
 }
 
-// parseKArg parses the "k" argument with default and range validation.
+// parseKArg resolves the shared k argument for search, ask, related, ask_audio
+// and transcribe_and_ask.
+//
+// An OMITTED k resolves to the shipped default (DefaultSearchK). A SUPPLIED k
+// must satisfy the bound the input schema advertises, 1..50 (SPEC §15.2/§15.3,
+// canonical search.json/ask.json), and anything outside it is INVALID_RANGE.
+//
+// This distinction is the fix for issue #648: k=0 and k=-1 used to be replaced
+// by the default, so a caller that asked for a k the schema forbids got a
+// silent, different retrieval instead of the machine-parseable error every
+// other out-of-bound value produced. Absent and present-but-invalid are
+// different requests and answer differently now.
+//
+// Resolving an omitted k against `rag.k_default` is deliberately NOT done here:
+// that precedence is dirstral-spec PR #90 / dir2mcp #654 and it changes what the
+// served schema must advertise as well.
 func parseKArg(args map[string]interface{}) (int, *toolExecutionError) {
-	k := DefaultSearchK
-	if rawK, exists := args["k"]; exists {
-		parsedK, parseErr := parseInteger(rawK, "k")
-		if parseErr != nil {
-			return 0, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
-		}
-		if parsedK > 0 {
-			k = parsedK
-		}
+	rawK, exists := args["k"]
+	if !exists {
+		return DefaultSearchK, nil
 	}
-	if k > 50 {
-		return 0, &toolExecutionError{Code: "INVALID_RANGE", Message: "k must be between 1 and 50", Retryable: false}
+	k, parseErr := parseInteger(rawK, "k")
+	if parseErr != nil {
+		return 0, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+	}
+	if k < MinSearchK || k > MaxSearchK {
+		return 0, &toolExecutionError{
+			Code:      "INVALID_RANGE",
+			Message:   fmt.Sprintf("k must be between %d and %d", MinSearchK, MaxSearchK),
+			Retryable: false,
+		}
 	}
 	return k, nil
 }
@@ -3696,7 +3713,7 @@ func searchInputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"query":       map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
 			"file_glob":   map[string]interface{}{"type": "string"},
@@ -3785,7 +3802,7 @@ func relatedInputSchema() map[string]interface{} {
 				"minLength":   1,
 				"description": "The source document (corpus-relative, normalized '/'): neighbours are ranked against the document's own chunk vectors. Chunks belonging to this document are always excluded from hits.",
 			},
-			"k":     map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":     map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 			"index": map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto", "description": "Which logical vector axis to search (SPEC §6.1). 'auto' matches the source segment's own index_kind."},
 			"exclude_same_document": map[string]interface{}{
 				"type":        "boolean",
@@ -3835,7 +3852,7 @@ func askInputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"question":    map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 			"mode":        map[string]interface{}{"type": "string", "enum": []string{"answer", "search_only"}, "default": "answer"},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
@@ -4029,7 +4046,7 @@ func transcribeAndAskInputSchema() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
 			"question": map[string]interface{}{"type": "string", "minLength": 1},
-			"k":        map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":        map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 		},
 		"required": []string{"rel_path", "question"},
 	}
