@@ -14,10 +14,12 @@ from pathlib import Path
 
 import pytest
 
+from dirstral_annotator.eval import ground_truth
 from dirstral_annotator.eval.align import Anchor, estimate
 from dirstral_annotator.eval.ground_truth import PitchEvent
 from dirstral_annotator.eval.score import score
 from dirstral_annotator.fusion import fuse
+from dirstral_annotator.model import Player, slug_entity_id
 from dirstral_annotator.recognizers.playbyplay import PlayByPlayRecognizer
 from dirstral_annotator.roster import Roster
 
@@ -233,3 +235,200 @@ def test_a_club_name_that_slugs_to_nothing_is_dropped():
     assert team_id("") == ""
     assert team_id("   ") == ""
     assert team_id("!!!") == ""
+
+
+# --- the outcome of an at-bat is an event, not a sentence --------------------
+#
+# THE DEFECT. Asked "who hit home runs? list every player", the pilot answered
+# "Bryce Eldridge, Curtis Mead, Matt Chapman": it invented a player and dropped
+# one who really homered. It was not the model (mistral-large-latest gave the
+# same wrong list) and not retrieval depth (k=8, k=30 and k=50 all did). Each
+# span carried event="at_bat" and the outcome only inside the prose of the cue
+# text, so the `events` filter could not reach it, the question fell back to
+# top-k semantic search over prose, and a "list every X" question was answered
+# from a partial sample: 3 of 14 retrieved hits mentioned a homer, and one
+# hitter's chunk was never retrieved at all.
+#
+# The feed types every play. So the outcome becomes an event, and the question
+# becomes a selection instead of a sample.
+
+PILOT = Path(__file__).parent / "fixtures" / "gumbo_823215.json"
+
+#: Game 823215, Washington at San Francisco: what the feed records.
+PILOT_HOME_RUNS = 6
+PILOT_STRIKEOUTS = 13
+PILOT_HOME_RUN_HITTERS = {
+    "player:james-wood", "player:matt-chapman", "player:rafael-devers",
+    "player:curtis-mead", "player:bryce-eldridge",
+}
+
+
+@pytest.fixture
+def pilot_events():
+    return ground_truth.parse_pitches(ground_truth.load_game(PILOT))
+
+
+@pytest.fixture
+def pilot_roster(pilot_events):
+    """Both clubs, off the feed itself. The pilot roster covers both sides,
+    because a question about the game is not a question about one club."""
+    players, mlbam = [], {}
+    for ev in pilot_events:
+        for pid, name in ((ev.pitcher_id, ev.pitcher_name),
+                          (ev.batter_id, ev.batter_name)):
+            if pid and pid not in mlbam:
+                player = Player(id=slug_entity_id(name), name=name)
+                mlbam[pid] = player.id
+                players.append(player)
+    return Roster(players, mlbam)
+
+
+def _outcome(event_type, **kw):
+    """The last pitch of an at-bat: the one the feed types."""
+    fields = {
+        "game_pk": 1, "epoch_s": 1000.0,
+        "pitcher_id": OPP_PITCHER, "pitcher_name": "Opp Ace",
+        "batter_id": RAMOS, "batter_name": "Heliot Ramos",
+        "inning": 9, "top_inning": False,
+        "description": "Heliot Ramos homers (9) on a fly ball to center field.",
+        "event_type": event_type, **BOTH_CLUBS,
+    }
+    return PitchEvent(**{**fields, **kw})
+
+
+def test_the_outcome_becomes_its_own_event_keyed_on_the_batter(roster):
+    """The whole fix in one assertion: the outcome is selectable."""
+    cues = PlayByPlayRecognizer([_outcome("home_run")], 0.0, roster).recognize(MEDIA)
+    homer = next(c for c in cues if c.event == "home_run")
+    assert homer.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert homer.start_s == 997.0 and homer.end_s == 1005.0  # the ending pitch
+
+
+def test_the_outcome_cue_reads_as_a_sentence(roster):
+    """`event` is the feed's exact token, so a filter can select it. The text
+    stays something a person reads, with the inning and both names, because it
+    is also the passage an answer quotes."""
+    cues = PlayByPlayRecognizer([_outcome("home_run")], 0.0, roster).recognize(MEDIA)
+    homer = next(c for c in cues if c.event == "home_run")
+    assert homer.text.startswith("Home run: Heliot Ramos vs Opp Ace")
+    assert "bottom of the 9th" in homer.text
+    assert "homers (9) on a fly ball" in homer.text
+    assert "Giants" not in homer.text  # the club stays an entity, as before
+
+
+def test_the_outcome_is_an_extra_cue_and_changes_no_existing_one(roster):
+    """THE CONTRACT. #620 was caused by retagging, so this change may only add.
+    The `pitch` and `at_bat` cues must be identical with and without it."""
+    with_outcome = PlayByPlayRecognizer(
+        [_outcome("home_run", pitcher_id=WEBB, pitcher_name="Logan Webb")],
+        0.0, roster,
+    ).recognize(MEDIA)
+    without = PlayByPlayRecognizer(
+        [_outcome("", pitcher_id=WEBB, pitcher_name="Logan Webb")], 0.0, roster
+    ).recognize(MEDIA)
+
+    assert [c.event for c in without] == ["pitch", "at_bat"]
+    assert [c.event for c in with_outcome] == ["pitch", "at_bat", "home_run"]
+    assert with_outcome[:2] == without  # byte-for-byte, entities and text too
+
+
+def test_a_pitch_that_does_not_end_the_at_bat_emits_no_outcome(roster):
+    """One at-bat is one outcome. A 6 pitch home run at-bat is not 6 homers."""
+    mid = _outcome("", description="Foul")  # a pitch inside the at-bat
+    cues = PlayByPlayRecognizer([mid], 0.0, roster).recognize(MEDIA)
+    assert [c.event for c in cues] == ["at_bat"]
+
+
+def test_an_unrostered_batter_gets_no_outcome_cue(roster):
+    """The outcome is the batter's, so it needs a batter to name. A rostered
+    pitcher facing an unrostered batter still emits his `pitch` cue."""
+    ev = _outcome("strikeout", pitcher_id=WEBB, pitcher_name="Logan Webb",
+                  batter_id=OPP_BATTER, batter_name="Opp Guy")
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+    assert [c.event for c in cues] == ["pitch"]
+
+
+def test_an_outcome_of_whitespace_is_not_an_event(roster):
+    """An empty or blank `eventType` must not reach the wire as `event: ""`,
+    which no filter could select and no reader could understand."""
+    for blank in ("", "   "):
+        cues = PlayByPlayRecognizer([_outcome(blank)], 0.0, roster).recognize(MEDIA)
+        assert [c.event for c in cues] == ["at_bat"]
+
+
+def test_an_outcome_may_never_take_a_role_event_name(roster):
+    """The #620 guard. A batter-keyed cue tagged `pitch` would enter the
+    pitcher-keyed metric as a false positive. MLB types no play "pitch" or
+    "at_bat", so this cannot happen today; the metric must not depend on that
+    staying true."""
+    for stolen in ("pitch", "at_bat"):
+        ev = _outcome(stolen, pitcher_id=WEBB, pitcher_name="Logan Webb")
+        cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+        assert [c.event for c in cues] == ["pitch", "at_bat"]
+        assert cues[0].entity_ids[0] == "player:webb-logan"  # still the pitcher
+
+
+def test_the_outcome_label_spells_the_feeds_own_vocabulary():
+    from dirstral_annotator.recognizers.playbyplay import outcome_label
+    assert outcome_label("home_run") == "Home run"
+    assert outcome_label("strikeout") == "Strikeout"
+    assert outcome_label("field_out") == "Field out"
+    assert outcome_label("") == ""
+
+
+# --- the pilot game, whole --------------------------------------------------
+
+
+def test_every_home_run_in_the_pilot_game_is_selectable(pilot_events, pilot_roster):
+    """The question that failed, answered by selection instead of by sample.
+
+    Six home runs, five hitters, off the real feed. No prose is matched
+    anywhere: the list comes from `event == "home_run"` alone.
+    """
+    cues = PlayByPlayRecognizer(pilot_events, 0.0, pilot_roster).recognize(MEDIA)
+    homers = [c for c in cues if c.event == "home_run"]
+    assert len(homers) == PILOT_HOME_RUNS
+    hitters = {c.entity_ids[0] for c in homers}
+    assert hitters == PILOT_HOME_RUN_HITTERS
+    strikeouts = [c for c in cues if c.event == "strikeout"]
+    assert len(strikeouts) == PILOT_STRIKEOUTS
+
+
+def test_the_pilot_game_emits_one_outcome_per_at_bat(pilot_events, pilot_roster):
+    """84 plays, 344 pitches: the outcomes must count the plays, not the
+    pitches, or every long at-bat would be reported several times over."""
+    cues = PlayByPlayRecognizer(pilot_events, 0.0, pilot_roster).recognize(MEDIA)
+    counted = {"pitch": 0, "at_bat": 0}
+    outcomes = 0
+    for cue in cues:
+        if cue.event in counted:
+            counted[cue.event] += 1
+        else:
+            outcomes += 1
+    assert counted == {"pitch": 344, "at_bat": 344}
+    assert outcomes == 84
+
+
+def test_the_phase_1_metric_does_not_move(pilot_events, pilot_roster):
+    """The pitcher-keyed metric reads `event == "pitch"` alone, so it cannot
+    see the outcome cues. Measured here on the whole pilot game rather than
+    argued: the scorecards are equal, term by term."""
+    alignment = estimate([Anchor(pilot_events[0].epoch_s, 60.0)])
+    cues = PlayByPlayRecognizer(
+        pilot_events, alignment.offset_s, pilot_roster
+    ).recognize(MEDIA)
+    before = [c for c in cues if c.event in ("pitch", "at_bat")]
+    assert len(cues) > len(before)  # the outcome cues are really there
+
+    after_card = score(fuse(cues), pilot_events, alignment, pilot_roster)
+    before_card = score(fuse(before), pilot_events, alignment, pilot_roster)
+
+    assert after_card.total_events == before_card.total_events == 344
+    assert vars(after_card.overall) == vars(before_card.overall)
+    assert after_card.per_source_found == before_card.per_source_found
+    assert dict(after_card.per_player) == dict(before_card.per_player)
+    # The two misses are two pitches thrown inside the fusion merge gap, which
+    # this change does not touch: the same two miss before it. What matters is
+    # that the number is the same one, and that no outcome cue became a false
+    # positive.
+    assert after_card.overall.tp == 342 and after_card.overall.fp == 0

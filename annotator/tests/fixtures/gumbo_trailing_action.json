@@ -1,0 +1,83 @@
+{
+ "gamePk": 776815,
+ "gameData": {
+  "teams": {
+   "away": {
+    "name": "Houston Astros"
+   },
+   "home": {
+    "name": "New York Yankees"
+   }
+  }
+ },
+ "liveData": {
+  "plays": {
+   "allPlays": [
+    {
+     "result": {
+      "eventType": "walk",
+      "description": "Aaron Judge walks."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 664285,
+       "fullName": "Framber Valdez"
+      },
+      "batter": {
+       "id": 592450,
+       "fullName": "Aaron Judge"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2025-08-09T19:29:46.855Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2025-08-09T19:30:01.456Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2025-08-09T19:30:22.524Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2025-08-09T19:30:45.078Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2025-08-09T19:31:05.703Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2025-08-09T19:31:29.307Z",
+       "details": {
+        "description": "Automatic Ball - Pitcher Pitch Timer Violation"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

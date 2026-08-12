@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -156,3 +157,100 @@ def test_a_feed_without_gameData_leaves_the_clubs_empty(events):
     must stay valid, with no club rather than a guessed one."""
     assert all(e.away_team == "" and e.home_team == "" for e in events)
     assert all(e.batting_team() == "" and e.pitching_team() == "" for e in events)
+
+
+# --- the outcome of a play, as structured data ------------------------------
+#
+# The outcome used to live only in the prose of `description`. Nothing could
+# select on it, so "who hit home runs? list every player" fell back to top-k
+# search over that prose and answered a "list every X" question from a partial
+# sample. `result.eventType` is the outcome the feed already types, so these
+# tests run on the real pilot game rather than on a shape invented here.
+#
+# Both fixtures are real statsapi payloads
+# (`/api/v1.1/game/{game_pk}/feed/live`), projected down to the fields
+# `parse_pitches` reads and otherwise unedited:
+#
+#   gumbo_823215.json         game 823215, the pilot game, all 84 plays
+#   gumbo_trailing_action.json game 776815, the one play in 8 games whose last
+#                             playEvent is not a pitch
+
+PILOT = Path(__file__).parent / "fixtures" / "gumbo_823215.json"
+TRAILING = Path(__file__).parent / "fixtures" / "gumbo_trailing_action.json"
+
+#: What game 823215 (Washington at San Francisco) actually holds. Counted from
+#: the live statsapi payload, then projected down to the fields the parser
+#: reads; nothing here is chosen, it is what the game was.
+PILOT_OUTCOMES = {
+    "field_out": 37, "single": 18, "strikeout": 13, "home_run": 6,
+    "walk": 5, "double": 4, "force_out": 1,
+}
+PILOT_PLAYS = 84
+PILOT_PITCHES = 344
+
+
+@pytest.fixture
+def pilot_events():
+    return ground_truth.parse_pitches(ground_truth.load_game(PILOT))
+
+
+def test_the_pilot_feed_types_every_outcome(pilot_events):
+    """The measurement this change rests on: the outcome is already structured
+    in the feed, for every play, with no prose parsing anywhere."""
+    assert len(pilot_events) == PILOT_PITCHES
+    outcomes = Counter(e.event_type for e in pilot_events if e.event_type)
+    assert dict(outcomes) == PILOT_OUTCOMES
+    assert sum(outcomes.values()) == PILOT_PLAYS  # one outcome per at-bat
+
+
+def test_only_the_pitch_that_ended_the_at_bat_carries_the_outcome(pilot_events):
+    """A 6 pitch at-bat is not 6 home runs. The outcome rides where the play
+    result text already rides: on the pitch that ended the at-bat."""
+    ended = [e for e in pilot_events if e.event_type]
+    assert len(ended) == PILOT_PLAYS
+    # The play result text is a sentence about the whole play ("... homers (9)
+    # on a fly ball ..."); a mid-at-bat pitch carries its own call instead.
+    assert all(e.description.endswith(".") for e in ended)
+    homers = [e for e in pilot_events if e.event_type == "home_run"]
+    assert len(homers) == 6
+    assert all("homer" in e.description or "grand slam" in e.description
+               for e in homers)
+
+
+def test_a_play_that_does_not_end_on_a_pitch_still_records_its_outcome():
+    """The `is_last` hazard, from a real game.
+
+    `ev is play["playEvents"][-1]` was evaluated after the loop had skipped
+    every non-pitch, so a play whose last playEvent is not a pitch marked NO
+    pitch as last. This fixture is that play, unedited: Aaron Judge walks on an
+    "Automatic Ball - Pitcher Pitch Timer Violation", which the feed records
+    with `isPitch: false`. One play in 594 across 8 games of 2025, so it is
+    rare and real, and each occurrence is an at-bat whose outcome no
+    structured query could reach.
+    """
+    events = ground_truth.parse_pitches(ground_truth.load_game(TRAILING))
+    assert events, "the fixture must hold pitches, or this proves nothing"
+    ended = [e for e in events if e.event_type]
+    assert [e.event_type for e in ended] == ["walk"]
+    assert ended[0] is events[-1]  # the last PITCH, not the last playEvent
+    assert ended[0].description == "Aaron Judge walks."
+
+
+def test_a_pitch_with_no_timestamp_cannot_end_an_at_bat():
+    """A pitch with no `startTime` is skipped, because it cannot be placed on
+    the video timeline. It must not take the outcome with it: the outcome moves
+    to the last pitch that a caller can actually reach."""
+    feed = _feed_with_clubs(top_inning=True)
+    play = feed["liveData"]["plays"]["allPlays"][0]
+    play["result"] = {"description": "B strikes out swinging.", "eventType": "strikeout"}
+    play["playEvents"].append({"isPitch": True, "details": {"description": "no time"}})
+    parsed = ground_truth.parse_pitches(feed)
+    assert len(parsed) == 1
+    assert parsed[0].event_type == "strikeout"
+    assert parsed[0].description == "B strikes out swinging."
+
+
+def test_a_feed_without_an_eventType_leaves_the_outcome_empty(events):
+    """Back-compat, and the reason every existing suite is untouched: the
+    shared fixture types no play, so it produces no outcome."""
+    assert all(e.event_type == "" for e in events)
