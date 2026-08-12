@@ -12,7 +12,11 @@ import (
 // cache enabled. The corpusfs suite pins the walker; this pins what an operator
 // sees: which documents the run indexed.
 //
-// Every timestamp is set with os.Chtimes. Nothing waits on the clock.
+// Every timestamp is set with os.Chtimes, and no assertion depends on how long the
+// test took. A directory that must be SETTLED is stamped years in the past
+// (anchor667); a directory that must be UNSETTLED is stamped an hour ahead
+// (unsettledStamp667). Stamping "now" would make the outcome turn on whether the
+// scan started inside the settle window.
 
 // anchor667 is a fixed instant with a zero nanosecond part, so a second write can
 // be placed inside the same Unix second. It is years in the past, so a directory
@@ -74,21 +78,37 @@ func TestServiceRun667_SameSecondAddIsIndexed(t *testing.T) {
 	}
 }
 
+// unsettledStamp667 returns a stamp that no scan in this test run can consider
+// settled, whatever the host does between the Chtimes call and the scan.
+//
+// "Not settled" is ONE predicate with two ways in: a stamp too RECENT (what a
+// coarse-granularity filesystem reports for a write happening now) and a stamp in
+// the FUTURE (a corpus on a mount whose clock runs ahead of this host). Both reach
+// the same comparison.
+//
+// Using time.Now() instead would make the assertion depend on the scan starting
+// within the settle window. A host that stalled for longer would settle the
+// directory, a CORRECT walker would cache it, and the test would go red with no
+// defect present.
+func unsettledStamp667() time.Time {
+	return time.Now().Add(time.Hour).Truncate(time.Second)
+}
+
 // TestServiceRun667_CoarseTimestampAddIsIndexed is the same defect on a filesystem
 // whose mtime granularity is a whole second or coarser, where no comparison of
 // stamps can separate the two writes. The settle guard is what covers it: a
-// directory whose stamp is still inside the ambiguity window is not cached, so the
-// next run reads it and finds the new file.
+// directory whose stamp is not settled is not cached, so the next run reads it and
+// finds the new file.
 //
-// The coarse filesystem is simulated by stamping the directory with the current
-// second truncated to a whole second, which is what such a filesystem reports for
-// a write happening now.
+// The coarse filesystem is simulated in the part that matters and can be
+// controlled: the stamp does not move across the add, and it is not settled when
+// the first scan reads it. See unsettledStamp667 for why the stamp is not "now".
 func TestServiceRun667_CoarseTimestampAddIsIndexed(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "dir")
 	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("alpha text"))
 
-	bucket := time.Now().Truncate(time.Second)
+	bucket := unsettledStamp667()
 	setMTime667(t, dir, bucket)
 	setMTime667(t, root, bucket)
 
@@ -98,7 +118,7 @@ func TestServiceRun667_CoarseTimestampAddIsIndexed(t *testing.T) {
 		t.Fatalf("first Run: %v", err)
 	}
 
-	// A write later in the same second leaves the coarse stamp exactly where it was.
+	// A write later in the same tick leaves the coarse stamp exactly where it was.
 	mustWriteFile(t, filepath.Join(dir, "b.txt"), []byte("beta text"))
 	setMTime667(t, dir, bucket)
 

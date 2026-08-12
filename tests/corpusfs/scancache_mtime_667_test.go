@@ -13,8 +13,17 @@ import (
 // children's mtimes at SECOND resolution, so a change that landed inside the
 // recorded Unix second read as no change at all.
 //
-// Every timestamp below is set with os.Chtimes. Nothing here waits on the clock,
-// and nothing depends on how fast the test host is.
+// Every timestamp below is set with os.Chtimes, and no assertion depends on how
+// long the test took. That has to hold in BOTH directions:
+//
+//   - a test that needs a directory to be SETTLED stamps it with anchor667, years
+//     in the past, so no amount of speed can make it unsettled;
+//   - a test that needs a directory to be UNSETTLED stamps it with
+//     unsettledStamp667, an hour ahead, so no amount of stalling can settle it.
+//
+// Stamping "now" would satisfy neither: the outcome would then turn on whether the
+// walk started inside the settle window, which is a timing coincidence and not the
+// property under test.
 
 // anchor667 is a fixed instant with a zero nanosecond part, so a test can place a
 // second write at a chosen offset INSIDE the same Unix second. It is years in the
@@ -141,24 +150,42 @@ func TestScanCache667_SameSizeSameSecondEditIsReObserved(t *testing.T) {
 	}
 }
 
+// unsettledStamp667 returns a stamp that no walk in this test run can consider
+// settled, whatever the host does between the Chtimes call and the walk.
+//
+// "Not settled" is ONE predicate with two ways in: a stamp too RECENT (what a
+// coarse-granularity filesystem reports for a write happening now) and a stamp in
+// the FUTURE (a corpus on a mount whose clock runs ahead of this host). Both reach
+// the same comparison, so a future stamp exercises the same branch.
+//
+// Using time.Now() instead would make the assertion depend on the walk starting
+// within the settle window. A host that stalled for longer would settle the
+// directory, a CORRECT walker would then cache it, and the test would go red with
+// no defect present. That is the same failure shape this PR is about: an outcome
+// decided by a timing coincidence rather than by the property under test. The
+// offset is an hour, so only an hour-long stall could reach it.
+func unsettledStamp667() time.Time {
+	return time.Now().Add(time.Hour).Truncate(time.Second)
+}
+
 // TestScanCache667_CoarseTimestampFilesystemStillSeesAnAdd covers what nanosecond
 // comparison alone cannot: a filesystem whose mtime granularity is a whole second
 // (ext3, many NFS mounts) or two seconds (FAT32).
 //
 // On such a filesystem both writes below produce the SAME stamp, so no comparison
 // of stamps can tell them apart. The settle guard is what saves it: a directory
-// whose stamp is not yet older than the coarsest granularity is not cached at all,
-// so the next walk reads it and sees the new file.
+// whose stamp is not settled is not cached at all, so the next walk reads it and
+// sees the new file.
 //
-// The coarse filesystem is simulated by stamping the directory with the current
-// second truncated to a whole second, which is exactly what such a filesystem
-// would report for a write happening now.
+// The coarse filesystem is simulated in the part that matters and can be
+// controlled: the stamp does not move across the add, and it is not settled when
+// the first walk reads it. See unsettledStamp667 for why the stamp is not "now".
 func TestScanCache667_CoarseTimestampFilesystemStillSeesAnAdd(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "dir")
 	mustWrite(t, filepath.Join(dir, "a.txt"), []byte("alpha"))
 
-	bucket := time.Now().Truncate(time.Second)
+	bucket := unsettledStamp667()
 	setMTime667(t, dir, bucket)
 	setMTime667(t, root, bucket)
 
@@ -167,8 +194,8 @@ func TestScanCache667_CoarseTimestampFilesystemStillSeesAnAdd(t *testing.T) {
 		t.Fatalf("first walk: got %v want [dir/a.txt]", got)
 	}
 
-	// A write later in the same second, reported by the same coarse clock: the
-	// stamp does not move at all.
+	// A write later in the same tick, reported by the same coarse clock: the stamp
+	// does not move at all.
 	mustWrite(t, filepath.Join(dir, "b.txt"), []byte("beta"))
 	setMTime667(t, dir, bucket)
 
@@ -176,19 +203,28 @@ func TestScanCache667_CoarseTimestampFilesystemStillSeesAnAdd(t *testing.T) {
 	assertRelPaths667(t, "second walk", got, []string{"dir/a.txt", "dir/b.txt"})
 }
 
-// TestScanCache667_FreshlyWrittenDirectoryIsNotCached pins the settle guard
-// directly. A directory written moments ago cannot be cached safely, because a
-// further write in the same timestamp tick would leave its stamp unchanged.
-func TestScanCache667_FreshlyWrittenDirectoryIsNotCached(t *testing.T) {
+// TestScanCache667_UnsettledDirectoryIsNotCached pins the settle guard directly. A
+// directory whose stamp is not settled cannot be cached safely, because a further
+// write in the same timestamp tick would leave that stamp unchanged.
+//
+// The refusal must be scoped to the affected directory, so the settled root in the
+// same tree must still take the cheap path.
+func TestScanCache667_UnsettledDirectoryIsNotCached(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "dir", "a.txt"), []byte("alpha"))
+	dir := filepath.Join(root, "dir")
+	mustWrite(t, filepath.Join(dir, "a.txt"), []byte("alpha"))
+	settleDirs667(t, root)
+	setMTime667(t, dir, unsettledStamp667())
 
 	cache := newFakeScanCache()
 	if got := relPaths(walkWith(t, root, cache)); len(got) != 1 {
 		t.Fatalf("walk: got %v want [dir/a.txt]", got)
 	}
-	if cache.stores != 0 {
-		t.Fatalf("a just-written tree was cached (stores=%d); its stamp is still inside the ambiguity window", cache.stores)
+	if sig, ok := cache.sigs["dir"]; ok {
+		t.Fatalf("an unsettled directory was cached: %+v", sig)
+	}
+	if _, ok := cache.sigs[""]; !ok {
+		t.Fatalf("the settled root was not cached; the refusal must be scoped to the affected directory")
 	}
 }
 
