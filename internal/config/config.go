@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/netutil"
@@ -4621,6 +4622,7 @@ func (c *Config) Validate() error {
 		c.validateDistributedEmbed,
 		c.validateMediaBatch,
 		c.validateCrossLingual,
+		c.validateMCPPath,
 	} {
 		if err := validate(); err != nil {
 			return err
@@ -4630,6 +4632,73 @@ func (c *Config) Validate() error {
 	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
 			c.SessionMaxLifetime, c.SessionInactivityTimeout)
+	}
+	return nil
+}
+
+// validateMCPPath fails fast (CONFIG_INVALID) when mcp_path is not a literal URL
+// path this server can register (issue #653).
+//
+// The only check used to be a leading slash, applied in the `up` command. Go
+// 1.22's http.ServeMux reads `{name}` in a pattern as a wildcard segment and
+// PANICS on a malformed one, so `--mcp-path '/{'` took the whole daemon down
+// with `panic: parsing "/{": at offset 1: bad wildcard segment` AFTER startup
+// work had already run. A typo in a persisted config crashed the process
+// instead of producing this repository's machine-parseable CONFIG_INVALID.
+//
+// The grammar is deliberately narrower than what ServeMux accepts: mcp_path
+// names ONE endpoint, so pattern syntax is never useful here and accepting it
+// would only create ways to write a path that does not mean what it looks like.
+// Each rejected character is rejected for its own reason, named in the error, so
+// an operator can fix the value rather than guess at a grammar.
+func (c *Config) validateMCPPath() error {
+	// The value is checked UNTRIMMED, because the server registers it untrimmed.
+	// An earlier version of this gate validated a trimmed copy, so "/mcp " passed
+	// and then panicked at registration: ServeMux reads a space as the separator
+	// before the path, so "/mcp " parses as the METHOD "/mcp" with no path at all
+	// (`invalid method "/mcp"`). Validating anything other than the value that is
+	// used is the same class of defect this gate exists to close.
+	path := c.MCPPath
+	if path == "" {
+		// An empty value keeps the default, which the loader supplies. Only an
+		// actually empty string qualifies: a whitespace-only value is a typo, and
+		// it panics registration rather than selecting the default.
+		return nil
+	}
+	// Every Unicode space, not just ' ' and '\t'. A tab panics for the same reason
+	// a space does; a newline and a non-breaking space register a route that is
+	// not the one the operator wrote, which is worse than a refusal because the
+	// daemon then runs and no client can reach it.
+	for _, r := range path {
+		if unicode.IsSpace(r) {
+			return fmt.Errorf("mcp_path %q must not contain whitespace (found %q): "+
+				"a space or tab panics route registration, and any other whitespace registers a path no client can request", path, r)
+		}
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("mcp_path %q must start with '/'", path)
+	}
+	// `{` and `}` are the panic. ServeMux reads them as a wildcard segment.
+	if strings.ContainsAny(path, "{}") {
+		return fmt.Errorf("mcp_path %q must not contain '{' or '}': "+
+			"Go's request multiplexer reads those as a wildcard pattern, and a malformed one panics the server", path)
+	}
+	// `?` and `#` never reach a handler as part of the path: the client sends the
+	// query and the fragment separately, so a path containing them can never
+	// match and the server would silently answer nothing on it.
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		return fmt.Errorf("mcp_path %q must not contain %q: a query or fragment is not part of the request path, so no request could ever match it",
+			path, path[i:i+1])
+	}
+	// ServeMux redirects a request with a doubled slash to the cleaned path, so a
+	// pattern holding one is registered at an address no client is served on.
+	if strings.Contains(path, "//") {
+		return fmt.Errorf("mcp_path %q must not contain '//': requests are redirected to the cleaned path, so nothing would be served on this one", path)
+	}
+	// A trailing slash makes ServeMux treat the pattern as a SUBTREE, so
+	// `/mcp/` would also claim `/mcp/anything`. mcp_path names one endpoint.
+	if path != "/" && strings.HasSuffix(path, "/") {
+		return fmt.Errorf("mcp_path %q must not end with '/': a trailing slash registers a subtree rather than the single endpoint mcp_path names", path)
 	}
 	return nil
 }
