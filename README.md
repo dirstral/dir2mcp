@@ -319,6 +319,25 @@ Use it for persistent, non‑sensitive settings such as connector definitions, d
 you might want to check into source control. Values defined here may be overridden at runtime by
 environment variables.
 
+A key that no setting claims does not fail the load. `dir2mcp up` prints one warning that
+names every unrecognized key, then starts, so a typo or a stale key from an older release
+is reported instead of being dropped in silence.
+
+#### Chunking keys
+
+```yaml
+chunking:
+  max_tokens: 0        # 0 = the chunker default
+  overlap_tokens: 0    # must be smaller than max_tokens when max_tokens is set
+```
+
+`chunking.strategy` is **not** a setting. Releases before this one accepted the key, saved
+it, and never read it: chunking is selected per document type (characters for text, line
+windows for code, time windows for a transcript), and the canonical spec defines no
+strategy selector. The key is now unrecognized, so a config that still carries it loads
+with the warning above and no longer publishes the key back into the saved config or the
+effective snapshot.
+
 ### Environment variables (overrides / secrets)
 
 Sensitive keys and temporary runtime overrides are supplied via environment variables. They take
@@ -410,6 +429,43 @@ An extractor counts as *available* only when it can actually **run**, not merely
 - *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.
 - *Expected docling but the banner shows `mistral-ocr (fallback ...)`* — docling either isn't on `PATH` or is present-but-broken (it failed the `docling --version` functional check, e.g. an ABI-incompatible venv). Under `auto` a non-functional docling is skipped and the cascade continues to docling-serve/Mistral; fix the install (or use the `-full` track), or pin `extractor: docling` to turn the broken install into a loud error instead of a silent fallback.
 - *Wrong host's docling chosen / pointing at a custom binary* — set `ingest.docling.command` (`DIR2MCP_DOCLING_COMMAND`) to the command template; the resolved path is redacted from diagnostics. Confirm via the `extractor` row of `dir2mcp doctor` or `routing.json` in a support bundle.
+
+#### Per-format mode keys: validated, no runtime effect yet
+
+The config template also carries one mode key per format:
+
+```yaml
+ingest:
+  pdf:
+    mode: ocr          # off|ocr|auto
+  images:
+    mode: ocr_auto     # off|ocr_auto|ocr_on
+  audio:
+    mode: auto         # off|auto|on
+  archives:
+    mode: deep         # off|shallow|deep
+```
+
+Each of the four is a closed set. A value outside its set is rejected at startup
+with `CONFIG_INVALID`, so `ingest.archives.mode: shalow` fails instead of loading as
+if it had been understood. The value is also case-normalized, and an absent key keeps
+the default above.
+
+**No accepted value changes behavior yet.** The canonical spec lists the members of
+each set without defining what any member does, so dir2mcp validates them and waits
+for that definition rather than inventing one (see `dirstral-spec`). Until then, use
+the keys that do work:
+
+| Goal | Setting that works today |
+|---|---|
+| Turn PDF/image text extraction off | `ingest.extractor: off` |
+| Choose the PDF/image engine | `ingest.extractor` (table above) |
+| Turn audio/video transcription off | `stt.provider: off` |
+| Report a format nothing can read | `ingest.on_unsupported: strict` |
+
+Archive handling today expands the top level of an archive. An archive nested inside
+an archive is not expanded; it is recorded as a skipped document with
+`skip_reason=archive`, so the gap appears in the coverage report.
 
 ### docling extraction over HTTP (docling-serve)
 

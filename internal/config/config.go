@@ -491,10 +491,18 @@ type Config struct {
 	// CohereBaseURL overrides the Cohere API endpoint (self-hosted /
 	// proxied deployments and tests). Empty = provider default. Not a
 	// secret; persisted to the config snapshot.
-	CohereBaseURL         string
-	RerankModel           string
-	RerankCandidatePool   int
-	ChunkingStrategy      string
+	CohereBaseURL       string
+	RerankModel         string
+	RerankCandidatePool int
+	// `chunking.strategy` used to be accepted here as ChunkingStrategy. It is
+	// gone on purpose (issue #661). No runtime path ever read it, the canonical
+	// spec defines no chunking-strategy selector, and the chunker picks its
+	// strategy from the doc type (SPEC §7.5: characters for text, line windows
+	// for code, time windows for a transcript). The key is therefore an
+	// unrecognized key like any other typo: config load names it in a warning
+	// (issue #628) and it is no longer written to a generated config or snapshot.
+	// Do not re-add the field without a spec that says what a strategy value
+	// means and a chunker that reads it.
 	ChunkingMaxTokens     int
 	ChunkingOverlapTokens int
 
@@ -529,7 +537,21 @@ type Config struct {
 	// `node_modules` is blocked in retrieval as well
 	// (internal/retrieval/service.go defaultPathExcludes), so it needs a third
 	// edit.
-	IngestExcludeDirs  []string
+	IngestExcludeDirs []string
+	// IngestPDFMode / IngestImagesMode / IngestAudioMode / IngestArchivesMode are
+	// the per-format mode keys of the SPEC §16.2 config template
+	// (`ingest.pdf.mode`, `ingest.images.mode`, `ingest.audio.mode`,
+	// `ingest.archives.mode`). Each one is a CLOSED enum, listed with the
+	// template: off|ocr|auto, off|ocr_auto|ocr_on, off|auto|on and
+	// off|shallow|deep.
+	//
+	// Validate rejects a value outside the advertised set (issue #655), so a typo
+	// no longer loads. The ingestion runtime does NOT read these values yet, and
+	// that half of #655 is deliberately not implemented here: the canonical spec
+	// names the enum members without defining what any member DOES, so writing
+	// the behavior would author normative semantics this repository does not own
+	// (spec-first governance; compare dirstral-spec#68). The README says the same
+	// thing, so an operator is not told the modes work.
 	IngestPDFMode      string
 	IngestImagesMode   string
 	IngestAudioMode    string
@@ -1174,7 +1196,6 @@ type fileConfig struct {
 	CohereBaseURL                      *string
 	RerankModel                        *string
 	RerankCandidatePool                *int
-	ChunkingStrategy                   *string
 	ChunkingMaxTokens                  *int
 	ChunkingOverlapTokens              *int
 	IngestGitignore                    *bool
@@ -1337,7 +1358,6 @@ type persistedConfig struct {
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
 	RerankModel                        string        `yaml:"rerank_model"`
 	RerankCandidatePool                int           `yaml:"rerank_candidate_pool"`
-	ChunkingStrategy                   string        `yaml:"chunking_strategy"`
 	ChunkingMaxTokens                  int           `yaml:"chunking_max_tokens"`
 	ChunkingOverlapTokens              int           `yaml:"chunking_overlap_tokens"`
 	IngestGitignore                    bool          `yaml:"ingest_gitignore"`
@@ -1590,7 +1610,6 @@ func Default() Config {
 		CohereBaseURL:             "",
 		RerankModel:               "rerank-v3.5",
 		RerankCandidatePool:       50,
-		ChunkingStrategy:          "",
 		ChunkingMaxTokens:         0,
 		ChunkingOverlapTokens:     0,
 		IngestGitignore:           true,
@@ -1759,7 +1778,6 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		CohereBaseURL:                      cfg.CohereBaseURL,
 		RerankModel:                        cfg.RerankModel,
 		RerankCandidatePool:                cfg.RerankCandidatePool,
-		ChunkingStrategy:                   cfg.ChunkingStrategy,
 		ChunkingMaxTokens:                  cfg.ChunkingMaxTokens,
 		ChunkingOverlapTokens:              cfg.ChunkingOverlapTokens,
 		IngestGitignore:                    cfg.IngestGitignore,
@@ -2583,9 +2601,6 @@ func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 
 // applyChunkingFileParsed copies the set chunking file fields onto cfg.
 func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
-	if fc.ChunkingStrategy != nil {
-		cfg.ChunkingStrategy = *fc.ChunkingStrategy
-	}
 	if fc.ChunkingMaxTokens != nil {
 		cfg.ChunkingMaxTokens = *fc.ChunkingMaxTokens
 	}
@@ -3236,7 +3251,6 @@ var configKeyAliases = map[string]string{
 	"rerank.provider":                         "rerank_provider",
 	"rerank.model":                            "rerank_model",
 	"rerank_candidate_pool":                   "rerank.candidate_pool",
-	"chunking_strategy":                       "chunking.strategy",
 	"chunking_max_tokens":                     "chunking.max_tokens",
 	"chunking_overlap_tokens":                 "chunking.overlap_tokens",
 	"ingest_gitignore":                        "ingest.gitignore",
@@ -3753,8 +3767,6 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestPandocCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
-	case "chunking.strategy":
-		cfg.ChunkingStrategy = strPtr(value)
 	case "retrieval.hyde.mode":
 		cfg.RetrievalHyDEMode = strPtr(value)
 	}
@@ -4061,7 +4073,6 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
 	writeScalar("rerank_model", cfg.RerankModel)
 	writeInt("rerank_candidate_pool", cfg.RerankCandidatePool)
-	writeScalar("chunking_strategy", cfg.ChunkingStrategy)
 	writeInt("chunking_max_tokens", cfg.ChunkingMaxTokens)
 	writeInt("chunking_overlap_tokens", cfg.ChunkingOverlapTokens)
 	writeComment(
@@ -4603,6 +4614,7 @@ func (c *Config) Validate() error {
 	for _, validate := range []func() error{
 		c.validateIngestOnUnsupported,
 		c.validateIngestExtractor,
+		c.validateIngestFormatModes,
 		c.validateIndexBackend,
 		// Before the provider-resolving gates (STT/media): an unrecognized
 		// provider `kind:` must fail here with its own root-cause CONFIG_INVALID
@@ -4991,19 +5003,75 @@ func (c *Config) validateMediaSubtitles() error {
 	return nil
 }
 
-// validateIngestExtractor normalizes IngestExtractor (defaulting empty)
-// and rejects any value outside auto/docling/docling-serve/mistral/off.
+// validateIngestExtractor normalizes IngestExtractor (defaulting empty) and
+// rejects any value outside auto/docling/docling-serve/pandoc/mistral/off. The
+// accepted set is the one the error message prints, so the two cannot drift.
 func (c *Config) validateIngestExtractor() error {
-	extractorMode := strings.ToLower(strings.TrimSpace(c.IngestExtractor))
-	if extractorMode == "" {
-		extractorMode = Default().IngestExtractor
+	normalized, err := normalizeClosedEnum("ingest.extractor", c.IngestExtractor, Default().IngestExtractor,
+		[]string{"auto", "docling", "docling-serve", "pandoc", "mistral", "off"})
+	if err != nil {
+		return err
 	}
-	switch extractorMode {
-	case "auto", "docling", "docling-serve", "pandoc", "mistral", "off":
-	default:
-		return fmt.Errorf("ingest.extractor must be one of auto, docling, docling-serve, pandoc, mistral, off: %q", c.IngestExtractor)
+	c.IngestExtractor = normalized
+	return nil
+}
+
+// normalizeClosedEnum lowercases and trims value, substitutes fallback for an
+// empty value, and returns an error naming key and the accepted set when the
+// result is outside allowed. It is the shared body of the small closed-enum
+// gates (ingest.extractor, ingest.on_unsupported, the per-format ingest modes),
+// so a new enum costs one line here instead of another switch chain, and the
+// gate that holds four of them stays inside the cyclomatic-complexity budget.
+func normalizeClosedEnum(key, value, fallback string, allowed []string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		normalized = fallback
 	}
-	c.IngestExtractor = extractorMode
+	for _, candidate := range allowed {
+		if normalized == candidate {
+			return normalized, nil
+		}
+	}
+	return "", fmt.Errorf("%s must be one of %s: %q", key, strings.Join(allowed, ", "), value)
+}
+
+// validateIngestFormatModes rejects a per-format ingest mode outside its
+// advertised enum (issue #655).
+//
+// The four keys were parsed, persisted and reported with meaningful defaults, and
+// nothing validated them: `ingest.archives.mode: shalow` loaded exactly as
+// happily as `deep`. That is the dangerous half for media and archives, because
+// an operator who mistypes a value believes a provider-cost or privacy setting is
+// in force when no value at all was understood.
+//
+// The gate lives in Validate(), not in the `up` command, for the reason
+// validateMCPPath gives: Validate() is the one gate every entry point runs (a
+// persisted config, the CLI flag overlay, and the save paths), so a value that
+// cannot be honored is refused wherever it is written, and no single command is
+// the only place that notices. It also runs after the CLI overrides are merged,
+// which is what the issue asks for.
+//
+// Each value is normalized in place, so the accepted set is closed and the stored
+// value is canonical (`OFF` becomes `off`).
+func (c *Config) validateIngestFormatModes() error {
+	defaults := Default()
+	for _, mode := range []struct {
+		key      string
+		value    *string
+		fallback string
+		allowed  []string
+	}{
+		{"ingest.pdf.mode", &c.IngestPDFMode, defaults.IngestPDFMode, []string{"off", "ocr", "auto"}},
+		{"ingest.images.mode", &c.IngestImagesMode, defaults.IngestImagesMode, []string{"off", "ocr_auto", "ocr_on"}},
+		{"ingest.audio.mode", &c.IngestAudioMode, defaults.IngestAudioMode, []string{"off", "auto", "on"}},
+		{"ingest.archives.mode", &c.IngestArchivesMode, defaults.IngestArchivesMode, []string{"off", "shallow", "deep"}},
+	} {
+		normalized, err := normalizeClosedEnum(mode.key, *mode.value, mode.fallback, mode.allowed)
+		if err != nil {
+			return err
+		}
+		*mode.value = normalized
+	}
 	return nil
 }
 
@@ -5011,16 +5079,12 @@ func (c *Config) validateIngestExtractor() error {
 // the lenient default) and rejects any value outside lenient/strict. It is the
 // §7.4.B.2 degradation-mode knob mirroring the tri-state opt-outs used elsewhere.
 func (c *Config) validateIngestOnUnsupported() error {
-	mode := strings.ToLower(strings.TrimSpace(c.IngestOnUnsupported))
-	if mode == "" {
-		mode = Default().IngestOnUnsupported
+	normalized, err := normalizeClosedEnum("ingest.on_unsupported", c.IngestOnUnsupported, Default().IngestOnUnsupported,
+		[]string{"lenient", "strict"})
+	if err != nil {
+		return err
 	}
-	switch mode {
-	case "lenient", "strict":
-	default:
-		return fmt.Errorf("ingest.on_unsupported must be one of lenient, strict: %q", c.IngestOnUnsupported)
-	}
-	c.IngestOnUnsupported = mode
+	c.IngestOnUnsupported = normalized
 	return nil
 }
 
