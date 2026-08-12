@@ -297,6 +297,10 @@ func (d *DiskIndex) appendRecords(recs []pendingRecord) error {
 	if err := d.ensureAppendEnd(f); err != nil {
 		return err
 	}
+	// A failure up to here needs no rollback: neither the open, the header write
+	// nor the seek puts a record byte in the file, and d.appendEnd already names
+	// the boundary the next append starts from. The rollback below covers every
+	// step that does write a record.
 	if _, err := f.Seek(d.appendEnd, io.SeekStart); err != nil {
 		return err
 	}
@@ -872,6 +876,13 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 		return err
 	}
 	identity, idErr := readIdentitySidecar(identitySidecarPath(path))
+	if idErr != nil && end == 0 {
+		// The segment file is empty (#674), so it holds no vectors and a damaged
+		// sidecar has nothing to protect. The missing-segment path above reads a
+		// damaged sidecar exactly this way, and an empty file states as much as
+		// no file: nothing.
+		identity, idErr = "", nil
+	}
 	if idErr != nil {
 		// A sidecar that EXISTS and cannot be understood. This used to read as
 		// "" exactly like a missing one, so EnsureIdentity saw a mismatch and

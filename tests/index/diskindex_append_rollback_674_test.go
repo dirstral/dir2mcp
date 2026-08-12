@@ -233,3 +233,33 @@ func TestLoad_TreatsAnEmptySegmentFileAsFresh(t *testing.T) {
 		t.Fatalf("reloaded live set = %d, want 1", n)
 	}
 }
+
+// TestLoad_EmptySegmentIgnoresADamagedIdentitySidecar pairs the empty segment
+// with a sidecar that cannot be read. A damaged sidecar over a POPULATED segment
+// stays a hard error, because it decides the fate of vectors the index still
+// holds (#728). An empty segment holds none, so there is nothing to protect and
+// nothing to report: the missing-segment path already reads a damaged sidecar
+// this way.
+func TestLoad_EmptySegmentIgnoresADamagedIdentitySidecar(t *testing.T) {
+	ctx := context.Background()
+	segPath := filepath.Join(t.TempDir(), diskindex.SegmentFileName("text"))
+	if err := os.WriteFile(segPath, nil, 0o600); err != nil {
+		t.Fatalf("create empty segment: %v", err)
+	}
+	if err := os.WriteFile(segPath+diskindex.IdentitySidecarSuffix, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("create damaged sidecar: %v", err)
+	}
+
+	idx := diskindex.New(segPath)
+	t.Cleanup(func() { _ = idx.Close() })
+	if err := idx.Load(ctx, segPath); err != nil {
+		t.Fatalf("Load of an empty segment with a damaged sidecar must succeed, got: %v", err)
+	}
+	identity, err := idx.Identity(ctx)
+	if err != nil {
+		t.Fatalf("Identity: %v", err)
+	}
+	if identity != "" {
+		t.Fatalf("identity = %q, want empty: a damaged sidecar over an empty segment states nothing", identity)
+	}
+}
