@@ -39,8 +39,8 @@ type Client interface {
 // Index is a Qdrant-backed model.Index. A single instance maps to one Qdrant
 // collection (one per dir2mcp index kind, e.g. text/code). The collection is
 // created lazily on first Upsert because Qdrant requires the vector dimension
-// up front, which dir2mcp only learns from the first embedding; Search before
-// any Upsert returns no hits.
+// up front, which dir2mcp only learns from the first embedding; Search over a
+// collection that does not exist yet returns no hits.
 type Index struct {
 	client     Client
 	collection string
@@ -49,7 +49,16 @@ type Index struct {
 	// dim is the vector dimension recorded when the collection was created;
 	// 0 means the collection does not exist yet.
 	dim int
-	// ready is true once we have confirmed (or created) the collection.
+	// exists is true once the collection has been observed on the server. It
+	// gates Search/Delete only: an existing collection answers queries and
+	// deletes by id whether or not THIS process has finished its setup.
+	exists bool
+	// ready is true once every required component of the collection is
+	// confirmed: the collection itself, both payload field indexes, and the
+	// embed-identity sentinel. Only then may ensureCollection skip its work
+	// (issue #675). It is deliberately narrower than exists: a collection left
+	// half-built by a failed setup exists but is not ready, so the next call
+	// finishes it.
 	ready bool
 	// identity is the corpus-lifetime embed identity (SPEC 8.1.4) recorded for
 	// this collection, mirrored in memory for cheap Identity() reads.
@@ -168,10 +177,11 @@ func (i *Index) Delete(ctx context.Context, chunkIDs []uint64) error {
 	if len(chunkIDs) == 0 {
 		return nil
 	}
-	i.mu.Lock()
-	ready := i.ready
-	i.mu.Unlock()
-	if !ready {
+	present, err := i.collectionPresent(ctx)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return nil
 	}
 
@@ -179,12 +189,11 @@ func (i *Index) Delete(ctx context.Context, chunkIDs []uint64) error {
 	for _, id := range chunkIDs {
 		ids = append(ids, qdrant.NewIDNum(id))
 	}
-	_, err := i.client.Delete(ctx, &qdrant.DeletePoints{
+	if _, err := i.client.Delete(ctx, &qdrant.DeletePoints{
 		CollectionName: i.collection,
 		Points:         qdrant.NewPointsSelector(ids...),
 		Wait:           qdrant.PtrOf(true),
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("qdrant delete: %w", err)
 	}
 	return nil
@@ -203,10 +212,11 @@ func (i *Index) Search(ctx context.Context, vector []float32, k int, filter mode
 	if k <= 0 {
 		return []model.IndexHit{}, nil
 	}
-	i.mu.Lock()
-	ready := i.ready
-	i.mu.Unlock()
-	if !ready {
+	present, err := i.collectionPresent(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
 		return []model.IndexHit{}, nil
 	}
 
@@ -261,7 +271,51 @@ func (i *Index) Identity(ctx context.Context) (string, error) {
 	if !exists {
 		return "", nil
 	}
-	i.ready = true
+	// The collection answers queries from here on, but its setup is NOT known to
+	// be complete: a previous run can have died between the create and the
+	// payload indexes or the sentinel (issue #675). Only ensureCollection, which
+	// reconciles every component, may set ready.
+	i.exists = true
+	stored, err := i.readIdentitySentinel(ctx)
+	if err != nil {
+		return "", err
+	}
+	i.identity = stored
+	return stored, nil
+}
+
+// collectionPresent reports whether the collection exists, which is all Search
+// and Delete need: both are well defined over a collection whose payload indexes
+// or sentinel are still missing.
+//
+// The answer comes from the server whenever this process has not seen the
+// collection yet, never from memory alone. A collection an earlier run created
+// holds vectors, so answering "empty" from a process that has upserted nothing
+// would return silently wrong results. A positive answer is cached; a negative
+// one is not, because the collection appears as soon as something is embedded.
+func (i *Index) collectionPresent(ctx context.Context) (bool, error) {
+	i.mu.Lock()
+	known := i.exists
+	i.mu.Unlock()
+	if known {
+		return true, nil
+	}
+	exists, err := i.client.CollectionExists(ctx, i.collection)
+	if err != nil {
+		return false, fmt.Errorf("qdrant collection exists: %w", err)
+	}
+	if exists {
+		i.mu.Lock()
+		i.exists = true
+		i.mu.Unlock()
+	}
+	return exists, nil
+}
+
+// readIdentitySentinel returns the embed identity recorded in the reserved
+// sentinel point, or "" when the collection carries no sentinel. The caller must
+// hold i.mu.
+func (i *Index) readIdentitySentinel(ctx context.Context) (string, error) {
 	got, err := i.client.Get(ctx, &qdrant.GetPoints{
 		CollectionName: i.collection,
 		Ids:            []*qdrant.PointId{qdrant.NewIDNum(identityPointID)},
@@ -273,8 +327,7 @@ func (i *Index) Identity(ctx context.Context) (string, error) {
 	if len(got) == 0 {
 		return "", nil
 	}
-	i.identity = got[0].GetPayload()[identityKey].GetStringValue()
-	return i.identity, nil
+	return got[0].GetPayload()[identityKey].GetStringValue(), nil
 }
 
 // Reset clears all vectors/payloads and records identity as the new
@@ -297,6 +350,7 @@ func (i *Index) Reset(ctx context.Context, identity string) error {
 			return fmt.Errorf("qdrant delete collection: %w", err)
 		}
 	}
+	i.exists = false
 	i.ready = false
 	i.dim = 0
 	i.identity = identity
@@ -308,9 +362,16 @@ func (i *Index) Close() error {
 	return i.client.Close()
 }
 
-// ensureCollection creates the collection (cosine distance, payload indexes for
-// the pushable filter fields, and the identity sentinel) on first use. It is
-// idempotent: a pre-existing collection is adopted without recreation.
+// ensureCollection brings the collection to its required shape on first use:
+// the collection itself (cosine distance), the keyword payload indexes the
+// pushed-down filter relies on, and the embed-identity sentinel.
+//
+// Every step is idempotent and every step runs on every attempt until they all
+// succeed, so a setup that failed part-way is finished by the next call instead
+// of being adopted half-built (issue #675). A pre-existing collection is still
+// adopted without any destructive recreation: only the missing components are
+// added. ready is set last, so it means "all components confirmed" and never
+// "the collection is there".
 func (i *Index) ensureCollection(ctx context.Context, dim int) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -327,14 +388,22 @@ func (i *Index) ensureCollection(ctx context.Context, dim int) error {
 			return err
 		}
 	}
+	i.exists = true
+	if err := i.ensureFieldIndexes(ctx); err != nil {
+		return err
+	}
+	if err := i.ensureIdentitySentinel(ctx, dim); err != nil {
+		return err
+	}
 	i.dim = dim
 	i.ready = true
 	return nil
 }
 
-// createCollection creates the collection with cosine distance, adds the
-// keyword payload indexes the pushed-down filter relies on, and writes the
-// embed-identity sentinel point.
+// createCollection creates the collection with cosine distance. The payload
+// indexes and the identity sentinel are NOT written here: ensureCollection adds
+// them for a newly created and for an adopted collection alike, so one code path
+// covers both and neither can be skipped.
 func (i *Index) createCollection(ctx context.Context, dim int) error {
 	if err := i.client.CreateCollection(ctx, &qdrant.CreateCollection{
 		CollectionName: i.collection,
@@ -345,7 +414,14 @@ func (i *Index) createCollection(ctx context.Context, dim int) error {
 	}); err != nil {
 		return fmt.Errorf("qdrant create collection: %w", err)
 	}
+	return nil
+}
 
+// ensureFieldIndexes creates the keyword payload indexes for the pushable
+// filter fields. Qdrant treats a create over an existing index of the same
+// schema as a no-op, so this is safe to re-issue on every attempt and repairs a
+// collection whose indexes were lost to a failed setup.
+func (i *Index) ensureFieldIndexes(ctx context.Context) error {
 	for _, field := range []string{fieldDocTypeLC, fieldRelPath} {
 		if _, err := i.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
 			CollectionName: i.collection,
@@ -355,13 +431,44 @@ func (i *Index) createCollection(ctx context.Context, dim int) error {
 			return fmt.Errorf("qdrant create field index %q: %w", field, err)
 		}
 	}
-
-	if i.identity != "" {
-		if err := i.writeIdentitySentinel(ctx, dim); err != nil {
-			return err
-		}
-	}
 	return nil
+}
+
+// ensureIdentitySentinel makes the stored embed identity (SPEC 8.1.4) agree with
+// the one this Index holds, and it never overwrites a stored one. The embed
+// identity is the fence that keeps two vector spaces apart, so the three cases
+// are kept apart deliberately:
+//
+//   - nothing stored: write what this Index holds. A collection is only ever
+//     written to after this returns, so a collection that holds vectors holds
+//     the identity those vectors were built under.
+//   - stored, and this Index holds nothing: adopt the stored value. The server
+//     is the record; Identity() already reports it.
+//   - stored, and it differs from what this Index holds: refuse. Overwriting the
+//     sentinel would relabel another run's vectors, and adopting the stored
+//     value would mislabel the vectors this process is about to write. Neither
+//     is a silent option, so the upsert fails and the operator is told.
+//
+// The caller must hold i.mu.
+func (i *Index) ensureIdentitySentinel(ctx context.Context, dim int) error {
+	stored, err := i.readIdentitySentinel(ctx)
+	if err != nil {
+		return err
+	}
+	switch {
+	case stored == "" && i.identity == "":
+		return nil
+	case stored == "":
+		return i.writeIdentitySentinel(ctx, dim)
+	case i.identity == "":
+		i.identity = stored
+		return nil
+	case stored != i.identity:
+		return fmt.Errorf("qdrant collection %q records embed identity %q but this process embeds under %q: refusing to mix vector spaces (SPEC 8.1.4); reindex the corpus or point it at a different collection",
+			i.collection, stored, i.identity)
+	default:
+		return nil
+	}
 }
 
 // writeIdentitySentinel upserts the reserved identity point. The sentinel uses
