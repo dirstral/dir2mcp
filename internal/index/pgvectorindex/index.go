@@ -96,15 +96,28 @@ type Index struct {
 	schema string
 	table  string
 
-	mu         sync.Mutex
-	dim        int  // 0 until known (config or first vector)
-	tableReady bool // vectors table created (+ HNSW index when dim <= HNSWMaxDim)
+	mu  sync.Mutex
+	dim int // 0 until known (config or first vector)
+	// tableReady is true once THIS process created (or re-issued the DDL for) the
+	// vectors table and its HNSW index, so Upsert may skip the DDL.
+	tableReady bool
+	// tableExists is true once the vectors table has been observed in the
+	// database. It gates Search/Delete only, and it is weaker than tableReady on
+	// purpose: a table another process created answers queries here, and a table
+	// whose HNSW index a crashed process never finished still needs the DDL
+	// re-issued by the next Upsert (issue #666).
+	tableExists bool
 }
 
 // Open connects to Postgres, verifies pgvector is available, and ensures the
 // schema (vectors table + HNSW index + identity table) exists. A connection or
 // extension failure returns a clear, remediable error — there is no silent
 // fallback to the in-memory backend (issue #269).
+//
+// With an unknown dimension the vectors table cannot be created here, so Open
+// asks the catalog whether an earlier run already created it. That makes a
+// restart over a populated corpus queryable before it embeds anything, and it
+// keeps a fresh corpus an empty index rather than an error (issue #666).
 func Open(ctx context.Context, cfg Config) (*Index, error) {
 	cfg = cfg.withDefaults()
 	if err := cfg.validate(); err != nil {
@@ -125,12 +138,20 @@ func Open(ctx context.Context, cfg Config) (*Index, error) {
 	}
 	// When the dimension is known up front, create the vectors table eagerly so
 	// a connection/privilege problem surfaces at startup rather than on the
-	// first embedded chunk. With dim==0 the table is created lazily.
+	// first embedded chunk. With dim==0 the table is created lazily, so ask the
+	// catalog whether a previous run already created it: a restart over a
+	// populated corpus must serve searches before it embeds anything (issue
+	// #666).
 	if cfg.Dim > 0 {
 		if err := ix.ensureVectorsTable(ctx, cfg.Dim); err != nil {
 			pool.Close()
 			return nil, err
 		}
+		return ix, nil
+	}
+	if _, err := ix.vectorsTablePresent(ctx); err != nil {
+		pool.Close()
+		return nil, err
 	}
 	return ix, nil
 }
@@ -139,15 +160,17 @@ func Open(ctx context.Context, cfg Config) (*Index, error) {
 // opening a real connection pool. It is the seam out-of-package tests use to
 // exercise the Index methods against a stub Querier (no live database). Schema
 // and Table fall back to the package defaults when empty; if tableReady is true
-// the vectors table is assumed to already exist (Upsert will not re-issue DDL).
+// the vectors table is assumed to already exist, so Upsert does not re-issue the
+// DDL and Search/Delete do not check the catalog for it.
 func NewWithQuerier(db Querier, cfg Config, tableReady bool) *Index {
 	cfg = cfg.withDefaults()
 	return &Index{
-		db:         db,
-		schema:     cfg.Schema,
-		table:      cfg.Table,
-		dim:        cfg.Dim,
-		tableReady: tableReady,
+		db:          db,
+		schema:      cfg.Schema,
+		table:       cfg.Table,
+		dim:         cfg.Dim,
+		tableReady:  tableReady,
+		tableExists: tableReady,
 	}
 }
 
@@ -198,7 +221,53 @@ func (i *Index) ensureVectorsTable(ctx context.Context, dim int) error {
 	}
 	i.dim = dim
 	i.tableReady = true
+	i.tableExists = true
 	return nil
+}
+
+// vectorsTablePresent reports whether the vectors table exists. The answer comes
+// from the database catalog, never from this process's memory, so a table another
+// process (or an earlier run) created is found: a fresh index is an empty index,
+// but a populated table must never be reported empty (issue #666). A positive
+// answer is cached; a negative one is not, because the table appears as soon as
+// something is embedded.
+func (i *Index) vectorsTablePresent(ctx context.Context) (bool, error) {
+	i.mu.Lock()
+	known := i.tableExists
+	i.mu.Unlock()
+	if known {
+		return true, nil
+	}
+	var present bool
+	if err := i.db.QueryRow(ctx, tableExistsSQL, qualifiedTable(i.schema, i.table)).Scan(&present); err != nil {
+		return false, fmt.Errorf("pgvector: check vectors table: %w", err)
+	}
+	if present {
+		i.mu.Lock()
+		i.tableExists = true
+		i.mu.Unlock()
+	}
+	return present, nil
+}
+
+// forgetVectorsTable clears the cached presence and readiness flags. It is called
+// when the database reports the table missing under a query that expected it,
+// which happens when another process dropped it (Reset) after the check. The
+// next call probes again, so the state repairs itself.
+func (i *Index) forgetVectorsTable() {
+	i.mu.Lock()
+	i.tableExists = false
+	i.tableReady = false
+	i.mu.Unlock()
+}
+
+// isUndefinedTable reports whether err is Postgres' undefined_table (42P01).
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == undefinedTableCode
+	}
+	return false
 }
 
 // Upsert stores (or replaces) the vector and its payload, keyed by
@@ -235,8 +304,23 @@ func (i *Index) Delete(ctx context.Context, chunkIDs []uint64) error {
 	if len(chunkIDs) == 0 {
 		return nil
 	}
+	// A vectors table that does not exist holds no vector, so there is nothing to
+	// delete. Without this the first reconciliation of a corpus that has not
+	// embedded anything yet fails with "relation ... does not exist" (issue #666).
+	present, err := i.vectorsTablePresent(ctx)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
 	sql, args := DeleteSQL(i.schema, i.table, chunkIDs)
 	if _, err := i.db.Exec(ctx, sql, args...); err != nil {
+		if isUndefinedTable(err) {
+			// Dropped between the check and the delete: still nothing to delete.
+			i.forgetVectorsTable()
+			return nil
+		}
 		return fmt.Errorf("pgvector: delete: %w", err)
 	}
 	return nil
@@ -255,9 +339,24 @@ func (i *Index) Search(ctx context.Context, vector []float32, k int, filter mode
 	if k <= 0 {
 		return []model.IndexHit{}, nil
 	}
+	// A vectors table that does not exist holds no vector, so the answer is zero
+	// hits. Without this a search before the first embedded chunk fails with
+	// "relation ... does not exist" (issue #666).
+	present, err := i.vectorsTablePresent(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return []model.IndexHit{}, nil
+	}
 	sql, args := SearchSQL(i.schema, i.table, vector, k, filter)
 	rows, err := i.db.Query(ctx, sql, args...)
 	if err != nil {
+		if isUndefinedTable(err) {
+			// Dropped between the check and the query: an empty index again.
+			i.forgetVectorsTable()
+			return []model.IndexHit{}, nil
+		}
 		return nil, fmt.Errorf("pgvector: search: %w", err)
 	}
 	defer rows.Close()
@@ -333,6 +432,7 @@ func (i *Index) Reset(ctx context.Context, identity string) error {
 	}
 	i.mu.Lock()
 	i.tableReady = false
+	i.tableExists = false
 	i.mu.Unlock()
 	upsertIdentity := fmt.Sprintf(`INSERT INTO %s (id, identity) VALUES (true, $1)
 ON CONFLICT (id) DO UPDATE SET identity = EXCLUDED.identity`, identityTable(i.schema, i.table))

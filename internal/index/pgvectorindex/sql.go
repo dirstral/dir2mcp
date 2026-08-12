@@ -23,6 +23,16 @@ const (
 	// a different embed provider/model/dimension is reset, never silently
 	// reused.
 	identityTableSuffix = "_identity"
+
+	// tableExistsSQL asks the catalog whether a relation exists, by its quoted,
+	// schema-qualified name ($1). to_regclass returns NULL for an absent
+	// relation, so the statement is valid whether or not the table is there,
+	// which is what makes it usable as the guard for Search/Delete on a corpus
+	// that has not embedded anything yet (issue #666).
+	tableExistsSQL = `SELECT to_regclass($1) IS NOT NULL`
+
+	// undefinedTableCode is Postgres' SQLSTATE for "relation does not exist".
+	undefinedTableCode = "42P01"
 )
 
 // quoteIdent quotes a SQL identifier (schema or table name) for safe
