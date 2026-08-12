@@ -195,12 +195,14 @@ func (d *DiskIndex) Upsert(ctx context.Context, vector []float32, payload model.
 	if err != nil {
 		return err
 	}
+
+	// d.path is read under the lock, like the batch path: Load assigns it under
+	// d.mu, so an unlocked read here races a concurrent reopen.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.path == "" {
 		return errors.New("disk index requires a path")
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	return d.appendRecords(recs)
 }
 
@@ -226,9 +228,9 @@ func (d *DiskIndex) BatchUpsert(ctx context.Context, items []model.IndexUpsert) 
 		return nil
 	}
 	// Item validation and payload encoding stay ahead of the lock so a malformed
-	// batch is rejected without touching shared state. Reading d.path must NOT:
-	// Load assigns it under d.mu, so an unlocked read here races a concurrent
-	// reopen.
+	// batch is rejected without touching shared state. Reading d.path must stay
+	// behind the lock: Load assigns it under d.mu, so an unlocked read here
+	// races a concurrent reopen.
 	recs, err := stageUpserts(items)
 	if err != nil {
 		return err
