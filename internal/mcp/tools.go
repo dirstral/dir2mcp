@@ -1159,62 +1159,113 @@ func mapRelatedError(err error) *toolExecutionError {
 	}
 }
 
-func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
-	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
+// askFamilyArguments is the argument set dir2mcp_ask accepts, and therefore the
+// set askInputSchema advertises. dir2mcp_ask_audio "inherits all dir2mcp_ask
+// fields" (bs-007 / SPEC §15.10) and its schema is a clone of ask's, so the two
+// handlers MUST allow the same names. extra names the additive, tool-specific
+// arguments the caller adds on top (ask_audio's voice_id).
+//
+// Sharing one list is the fix for the first half of issue #644: ask_audio kept a
+// shorter hand-written list, so every filter its own schema advertised came
+// back INVALID_FIELD: languages, language_match, date_from, date_to,
+// time_from_ms, time_to_ms, entities and events.
+func askFamilyArguments(extra ...string) map[string]struct{} {
+	allowed := map[string]struct{}{
+		"question": {}, "k": {}, "mode": {}, "index": {},
+		"path_prefix": {}, "file_glob": {}, "doc_types": {},
+		"languages": {}, "language_match": {},
+		"date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
 		"entities": {}, "events": {},
-	}); err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	for _, name := range extra {
+		allowed[name] = struct{}{}
+	}
+	return allowed
+}
+
+// askRequest is a parsed dir2mcp_ask (or dir2mcp_ask_audio) request: the
+// question, the resolved mode, and the retrieval query carrying every filter the
+// caller supplied.
+type askRequest struct {
+	question string
+	mode     string
+	query    model.SearchQuery
+}
+
+// parseAskArgs validates an ask-family argument map and projects it into an
+// askRequest. allowed is the tool's argument allowlist (see askFamilyArguments),
+// so a tool-specific additive argument passes the unknown-argument gate while
+// every shared field is parsed the one way.
+//
+// Both ask-family tools funnel through here, so a filter cannot be advertised on
+// one and rejected on the other, and a filter cannot be accepted yet dropped
+// before it reaches retrieval.
+func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}) (askRequest, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, allowed); err != nil {
+		return askRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 	question, ok, err := parseRequiredString(args, "question")
 	if err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+		return askRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 	if !ok {
-		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
+		return askRequest{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
 	}
 	k, toolErr := parseKArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	mode, toolErr := parseModeArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	indexName, toolErr := parseIndexArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	pathPrefix, fileGlob, docTypes, toolErr := parseSearchFilters(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	languages, toolErr := parseLanguagesArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	languageMatch, toolErr := parseLanguageMatchArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
-	tw, toolErr := parseTemporalFilters(args)
+	tw, entities, events, toolErr := parseSearchScopeFilters(args)
+	if toolErr != nil {
+		return askRequest{}, toolErr
+	}
+	return askRequest{
+		question: question,
+		mode:     mode,
+		query: model.SearchQuery{
+			Query: question, K: k, Index: indexName,
+			PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes,
+			Languages: languages, LanguageMatch: languageMatch,
+			DateFrom: tw.dateFrom, DateTo: tw.dateTo,
+			HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS,
+			HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
+			Entities: entities, Events: events,
+		},
+	}, nil
+}
+
+func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	req, toolErr := parseAskArgs(args, askFamilyArguments())
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	askEntities, askEvents, toolErr := parseAnnotationFilters(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
+	if req.mode == "search_only" {
+		return s.runSearchOnlyMode(ctx, req.question, req.query)
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
-		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
-		Entities: askEntities, Events: askEvents}
-	if mode == "search_only" {
-		return s.runSearchOnlyMode(ctx, question, sq)
-	}
-	askResult, askErr := s.retriever.Ask(ctx, question, sq)
+	askResult, askErr := s.retriever.Ask(ctx, req.question, req.query)
 	if askErr != nil {
 		return toolCallResult{}, mapSearchError(askErr)
 	}
@@ -1225,31 +1276,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 }
 
 func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
-	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "voice_id": {},
-	}); err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-	}
-	question, ok, err := parseRequiredString(args, "question")
-	if err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-	}
-	if !ok {
-		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
-	}
-	k, toolErr := parseKArg(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
-	}
-	mode, toolErr := parseModeArg(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
-	}
-	indexName, toolErr := parseIndexArg(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
-	}
-	pathPrefix, fileGlob, docTypes, toolErr := parseSearchFilters(args)
+	req, toolErr := parseAskArgs(args, askFamilyArguments("voice_id"))
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1260,11 +1287,10 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes}
-	if mode == "search_only" {
-		return s.runSearchOnlyMode(ctx, question, sq)
+	if req.mode == "search_only" {
+		return s.runSearchOnlyMode(ctx, req.question, req.query)
 	}
-	return s.runAskAudioAnswer(ctx, question, voiceID, sq)
+	return s.runAskAudioAnswer(ctx, req.question, voiceID, req.query)
 }
 
 func (s *Server) runAskAudioAnswer(ctx context.Context, question, voiceID string, sq model.SearchQuery) (toolCallResult, *toolExecutionError) {
