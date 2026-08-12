@@ -283,8 +283,21 @@ timestamps, ~2017 onward) — no manual annotation.
 
 ## Tests
 
+From the repository root, in a venv the target owns:
+
 ```bash
-pip install -e '.[test]'   # test runner + jsonschema (external test tooling)
+make test-annotator          # installs into annotator/.venv-test, then runs pytest
+```
+
+`make check` runs the same suite, so the repository's merge-readiness gate
+covers this package. To drive pytest by hand, install into a venv of your own
+(a PEP 668 interpreter refuses an install into itself):
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+# [test] is the runner + jsonschema; [ocr] makes the vision recognizers' tests
+# run rather than skip, which is what `make test-annotator` installs (#787).
+pip install -e '.[test,ocr]'
 python3 -m pytest tests/    # tested code needs no network, models, or ffmpeg
 ```
 

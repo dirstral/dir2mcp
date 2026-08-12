@@ -10,6 +10,11 @@ Honest expectations (pilot proposal): faces are small and occluded in
 broadcast footage — this signal earns its keep on close-ups, dugout shots
 and pre-overlay archival material, and is fused with, never trusted over,
 scorebug/play-by-play.
+
+The bank is an optional backend asset, so it follows the package rule for one
+of those: a bank that is missing, is not a directory, or cannot be read raises
+`RecognizerUnavailable` at construction and the pipeline skips this recognizer
+with a note. See `_bank_player_dirs`.
 """
 
 from __future__ import annotations
@@ -192,6 +197,42 @@ def centroid(embeddings: list[Embedding]) -> Embedding:
     return [sum(e[i] for e in embeddings) / len(embeddings) for i in range(dim)]
 
 
+def _bank_player_dirs(bank_dir: Path) -> list[Path]:
+    """The bank's player subdirectories, or an unavailable recognizer.
+
+    A bank that is absent, is not a directory, or cannot be read is a missing
+    optional ASSET, the same class of problem as an uninstalled insightface
+    wheel. This package has one rule for that class, stated in the pipeline
+    docstring: raise `RecognizerUnavailable` at construction, so the pipeline
+    records a skip note and the rest of the cascade still runs. Letting the raw
+    `OSError` out instead made one absent directory fail the whole annotation
+    request: the served backend answered 502 and the eval CLI exited with a
+    traceback (#651).
+
+    Only filesystem errors are converted. Anything else is a bug in this package
+    and is left to surface as one.
+    """
+    try:
+        return sorted(p for p in bank_dir.iterdir() if p.is_dir())
+    except NotADirectoryError as exc:
+        raise RecognizerUnavailable(
+            f"face bank is not a directory: {bank_dir}"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise RecognizerUnavailable(
+            f"face bank not found: {bank_dir} "
+            "(expected <bank>/<player-id-with-underscores>/*.jpg)"
+        ) from exc
+    except OSError as exc:
+        # PermissionError and everything else the filesystem can answer with.
+        # `strerror` rather than `str(exc)`: the reason belongs in the message,
+        # the path is already there, and nothing else about the caller is.
+        raise RecognizerUnavailable(
+            f"face bank cannot be read: {bank_dir} "
+            f"({exc.strerror or type(exc).__name__})"
+        ) from exc
+
+
 def match(
     embedding: Embedding, gallery: dict[str, Embedding], threshold: float = SIM_THRESHOLD
 ) -> tuple[str, float] | None:
@@ -220,22 +261,40 @@ class FaceRecognizer:
         threshold: float = SIM_THRESHOLD,
     ):
         self.roster = roster
+        bank = Path(bank_dir)
+        # The bank is read BEFORE the embedder is built. Building the default
+        # embedder loads and prepares five ONNX models, and paying that only to
+        # then find the bank is not there is waste with no upside. Both failures
+        # are RecognizerUnavailable, so the cheaper one goes first.
+        player_dirs = _bank_player_dirs(bank)
         self.embedder = embedder if embedder is not None else default_embedder()
         self.fps = fps
         self.threshold = threshold
-        self.gallery = self._enroll(Path(bank_dir))
+        self.gallery = self._enroll(bank, player_dirs)
 
-    def _enroll(self, bank_dir: Path) -> dict[str, Embedding]:
+    def _enroll(self, bank_dir: Path, player_dirs: list[Path]) -> dict[str, Embedding]:
         """Bank layout: `<bank>/<player-id-with-underscores>/*.jpg` (":" is
         awkward in dirnames, so "player:webb-logan" -> "player_webb-logan").
         Every image contributes its largest detected face."""
         gallery: dict[str, Embedding] = {}
-        for player_dir in sorted(p for p in bank_dir.iterdir() if p.is_dir()):
+        for player_dir in player_dirs:
             pid = player_dir.name.replace("_", ":", 1)
             if not self.roster.get(pid):
                 continue
+            try:
+                images = sorted(player_dir.iterdir())
+            except OSError as exc:
+                # One player's images being unreadable is not the bank being
+                # unreadable. Degrade by as little as possible: enroll everyone
+                # who can be enrolled, and say who was lost. A bank where that
+                # leaves nobody still ends as unavailability below.
+                logging.getLogger(__name__).warning(
+                    "face bank: skipping %s (%s)",
+                    player_dir.name, exc.strerror or type(exc).__name__,
+                )
+                continue
             embeddings = []
-            for img in sorted(player_dir.iterdir()):
+            for img in images:
                 if img.suffix.lower() not in IMAGE_EXTS:
                     continue
                 faces = self.embedder(img)
