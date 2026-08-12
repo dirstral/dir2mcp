@@ -430,6 +430,43 @@ An extractor counts as *available* only when it can actually **run**, not merely
 - *Expected docling but the banner shows `mistral-ocr (fallback ...)`* — docling either isn't on `PATH` or is present-but-broken (it failed the `docling --version` functional check, e.g. an ABI-incompatible venv). Under `auto` a non-functional docling is skipped and the cascade continues to docling-serve/Mistral; fix the install (or use the `-full` track), or pin `extractor: docling` to turn the broken install into a loud error instead of a silent fallback.
 - *Wrong host's docling chosen / pointing at a custom binary* — set `ingest.docling.command` (`DIR2MCP_DOCLING_COMMAND`) to the command template; the resolved path is redacted from diagnostics. Confirm via the `extractor` row of `dir2mcp doctor` or `routing.json` in a support bundle.
 
+#### Per-format mode keys: validated, no runtime effect yet
+
+The config template also carries one mode key per format:
+
+```yaml
+ingest:
+  pdf:
+    mode: ocr          # off|ocr|auto
+  images:
+    mode: ocr_auto     # off|ocr_auto|ocr_on
+  audio:
+    mode: auto         # off|auto|on
+  archives:
+    mode: deep         # off|shallow|deep
+```
+
+Each of the four is a closed set. A value outside its set is rejected at startup
+with `CONFIG_INVALID`, so `ingest.archives.mode: shalow` fails instead of loading as
+if it had been understood. The value is also case-normalized, and an absent key keeps
+the default above.
+
+**No accepted value changes behavior yet.** The canonical spec lists the members of
+each set without defining what any member does, so dir2mcp validates them and waits
+for that definition rather than inventing one (see `dirstral-spec`). Until then, use
+the keys that do work:
+
+| Goal | Setting that works today |
+|---|---|
+| Turn PDF/image text extraction off | `ingest.extractor: off` |
+| Choose the PDF/image engine | `ingest.extractor` (table above) |
+| Turn audio/video transcription off | `stt.provider: off` |
+| Report a format nothing can read | `ingest.on_unsupported: strict` |
+
+Archive handling today expands the top level of an archive. An archive nested inside
+an archive is not expanded; it is recorded as a skipped document with
+`skip_reason=archive`, so the gap appears in the coverage report.
+
 ### docling extraction over HTTP (docling-serve)
 
 Instead of spawning the docling CLI per document, dir2mcp can call a long-running [**docling-serve**](https://github.com/docling-project/docling-serve) HTTP container. This is the same docling engine and produces **byte-identical** output (the same structured `DoclingDocument` → Markdown + region citations) — only the transport differs (spec 0.10.0 §7.4.B).
