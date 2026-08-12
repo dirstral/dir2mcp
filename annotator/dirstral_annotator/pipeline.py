@@ -14,6 +14,11 @@ run was picked up at whichever request happened to re-enroll.
 
 A cached recognizer is shared by concurrent requests, and these recognizers are
 not reentrant, so one request at a time enters any one of them. See `_Shared`.
+
+The play-by-play recognizer is the one that is still built per request, because
+it is keyed per media file and holds no model. What made that expensive was its
+LABELS, not its construction: it read the game feed every time. That read is now
+a memo on the binding it came from. See `GameConfig.events` (#844).
 """
 
 from __future__ import annotations
@@ -40,6 +45,13 @@ class GameConfig:
     game_pk: int | None = None
     feed: str | None = None  # saved GUMBO JSON path (wins over game_pk)
 
+    def __post_init__(self) -> None:
+        # Not dataclass fields on purpose, as in `Pipeline`: a Lock is neither
+        # comparable nor copyable, and a game's parsed events have no place in a
+        # repr of the configuration an operator wrote.
+        self._read_lock = threading.Lock()
+        self._parsed: tuple[tuple, list[ground_truth.PitchEvent]] | None = None
+
     @classmethod
     def parse(cls, raw: dict) -> "GameConfig":
         anchors = []
@@ -49,8 +61,53 @@ class GameConfig:
         return cls(anchors=anchors, game_pk=raw.get("game_pk"), feed=raw.get("feed"))
 
     def events(self) -> list[ground_truth.PitchEvent]:
-        feed = ground_truth.load_game(self.feed) if self.feed else ground_truth.fetch_game(self.game_pk)
-        return ground_truth.parse_pitches(feed)
+        """The feed's pitches, read at most once per binding (#844).
+
+        `Pipeline.cues_for` builds `PlayByPlayRecognizer` per request, so this
+        ran per request. Measured on a real 0.901 MB GUMBO feed of 344 pitches:
+        15.33 ms for the saved file, 2892 ms (up to 5953 ms) for the `game_pk`
+        fetch. The file read is noise beside the 46 s that #650 removed; the
+        fetch is seconds of latency per request, spent on a service that has no
+        reason to be live for a recognizer to run.
+
+        This is a memo on the binding, not a cache with an eviction policy.
+        What stays resident is bounded by the bindings games.json declares,
+        which already live as long as the pipeline: 69.5 KiB of parsed events for
+        that 344 pitch game, and the 2.77 MiB raw payload is parsed and dropped.
+
+        Keyed on the binding, so repointing `feed` or `game_pk` is picked up, the
+        same rule the recognizer cache follows. A binding that still points at the
+        same path keeps the parse it made: every request in a run then answers
+        from one label set, instead of from whichever request happened to re-read
+        a file that changed. An operator who wants a changed file reloads the
+        bindings.
+
+        Only a success is remembered. A read that fails raises as it did before,
+        and the next request tries again, because a remembered failure would turn
+        one bad moment into a process that never recognizes play-by-play again.
+        The lock means two concurrent first requests do not both fetch: the second
+        waits and then reads the memo.
+        """
+        with self._read_lock:
+            # The binding is read under the lock, and the read below uses those
+            # locals. A binding sampled before the wait could be repointed while
+            # this request queues, which would file the NEW feed's events under
+            # the OLD key.
+            feed, game_pk = self.feed, self.game_pk
+            binding = (feed, game_pk)
+            memo = self._parsed
+            if memo is None or memo[0] != binding:
+                raw = (
+                    ground_truth.load_game(feed) if feed
+                    else ground_truth.fetch_game(game_pk)
+                )
+                memo = (binding, ground_truth.parse_pitches(raw))
+                self._parsed = memo
+            # A copy of a few hundred pointers, because the memo is now shared by
+            # every request: one caller sorting or filtering in place would
+            # otherwise change what every later request sees. `PitchEvent` is
+            # frozen, so the events themselves need no copy.
+            return list(memo[1])
 
     def alignment(self) -> align.Alignment:
         return align.estimate(self.anchors)
