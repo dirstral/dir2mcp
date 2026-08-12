@@ -6,10 +6,37 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+// ErrRangeNotHonored is returned when an object store answers a ranged GET with
+// bytes that do not start at the requested offset (#673).
+//
+// The condition is not exotic. An S3-compatible proxy or gateway that drops the
+// Range header answers with the WHOLE object, so a reader that seeked to offset N
+// receives the bytes at offset 0 and cannot tell. Those bytes are then hashed,
+// chunked and cited as if they came from N, so the corpus indexes content the
+// source document does not have at that position.
+//
+// It is a distinct sentinel because it is a property of the SERVER, not of the
+// object: the same object read without a seek is fine, so a caller may report the
+// backend as unusable for range reads instead of the document as broken.
+var ErrRangeNotHonored = errors.New("corpusfs: object store did not honor the requested byte range")
+
+// ErrObjectTruncated is returned when an object body ends before the size the
+// store itself reported (#673).
+//
+// The bytes that did arrive are a PREFIX of the document. Returned as io.EOF they
+// are indistinguishable from a complete read, so the pipeline stores a short
+// document, a content hash over the wrong bytes, and citations that do not match
+// the source. That silent short read is the #487 truncation failure, and #682
+// established the rule this follows: a read that did not deliver the object fails
+// with its own error and never with io.EOF.
+var ErrObjectTruncated = errors.New("corpusfs: object body ended before the reported size")
 
 // s3RangeReader is an io.ReadSeekCloser over an S3 object that satisfies reads
 // via ranged GETs. It tracks a logical offset and lazily opens a GET body on the
@@ -29,6 +56,7 @@ type s3RangeReader struct {
 
 	offset int64
 	body   io.ReadCloser
+	closed bool
 }
 
 // Read fulfills io.Reader, opening a ranged GET from the current offset on
@@ -44,7 +72,16 @@ type s3RangeReader struct {
 // repository uses. The reader delivers one byte more than the cap and then fails,
 // because that extra byte is what separates an object of exactly the cap (which is
 // inside the policy and must read cleanly to io.EOF) from an object past it.
+//
+// A read after Close returns fs.ErrClosed. Close leaves the logical offset where
+// it was, so a reopen would issue a fresh ranged GET on a reader the caller has
+// already released: the context may be cancelled, and if the store ignores the
+// Range the reopened body serves offset 0 while the caller believes it is at
+// r.offset (#673).
 func (r *s3RangeReader) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, fs.ErrClosed
+	}
 	if r.offset > r.maxBytes {
 		return 0, fmt.Errorf("corpusfs: read s3://%s/%s: %w (cap %d bytes)", r.bucket, r.key, ErrObjectTooLarge, r.maxBytes)
 	}
@@ -64,10 +101,32 @@ func (r *s3RangeReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.body.Read(p)
 	r.offset += int64(n)
+	if errors.Is(err, io.EOF) {
+		return n, r.endOfBody()
+	}
 	return n, err
 }
 
-// openFrom starts a ranged GET beginning at off through the end of the object.
+// endOfBody decides what the end of a GET body means at the current offset.
+//
+// It is io.EOF only when the reader delivered every byte the store said the
+// object has. A body that stops earlier delivered a PREFIX, and reporting that
+// prefix as io.EOF is the silent truncation #487 fixed once already, so it fails
+// with ErrObjectTruncated instead. The cap is checked first so an object past the
+// configured limit keeps the single answer #682 gave it.
+func (r *s3RangeReader) endOfBody() error {
+	if r.offset > r.maxBytes {
+		return fmt.Errorf("corpusfs: read s3://%s/%s: %w (cap %d bytes)", r.bucket, r.key, ErrObjectTooLarge, r.maxBytes)
+	}
+	if r.offset >= r.size {
+		return io.EOF
+	}
+	return fmt.Errorf("corpusfs: read s3://%s/%s: %w (got %d of %d bytes)",
+		r.bucket, r.key, ErrObjectTruncated, r.offset, r.size)
+}
+
+// openFrom starts a ranged GET beginning at off through the end of the object,
+// and refuses a response that does not start there (#673).
 func (r *s3RangeReader) openFrom(off int64) error {
 	if off >= r.size {
 		return io.EOF
@@ -81,13 +140,93 @@ func (r *s3RangeReader) openFrom(off int64) error {
 	if err != nil {
 		return fmt.Errorf("corpusfs: range get s3://%s/%s: %w", r.bucket, r.key, err)
 	}
+	if err := r.checkRangeResponse(off, out); err != nil {
+		_ = out.Body.Close()
+		return err
+	}
 	r.body = out.Body
 	return nil
 }
 
+// checkRangeResponse verifies that the body of a ranged GET really begins at off.
+//
+// The evidence is the response itself. A store that honors `bytes=N-` answers 206
+// with `Content-Range: bytes N-<end>/<total>`, so the start byte is stated and is
+// compared. A store that DROPS the header answers 200 with the whole object and
+// states no range at all, which is why an absent Content-Range at a non-zero
+// offset is refused rather than trusted: the alternative is to read offset-0 bytes
+// as if they came from N.
+//
+// Two responses without a Content-Range are still accepted, because in both the
+// body provably starts at off:
+//
+//   - off == 0, where the whole object IS the requested range;
+//   - a reported length equal to the tail from off, which only a honored range
+//     produces (an ignored range returns the full r.size).
+func (r *s3RangeReader) checkRangeResponse(off int64, out *s3.GetObjectOutput) error {
+	start, stated, err := parseContentRangeStart(aws.ToString(out.ContentRange))
+	if err != nil {
+		return fmt.Errorf("corpusfs: range get s3://%s/%s: %w (%v)",
+			r.bucket, r.key, ErrRangeNotHonored, err)
+	}
+	if stated {
+		if start != off {
+			return fmt.Errorf("corpusfs: range get s3://%s/%s: %w (asked for byte %d, got byte %d)",
+				r.bucket, r.key, ErrRangeNotHonored, off, start)
+		}
+		return nil
+	}
+	if off == 0 {
+		return nil
+	}
+	if out.ContentLength != nil && *out.ContentLength == r.size-off {
+		return nil
+	}
+	return fmt.Errorf("corpusfs: range get s3://%s/%s: %w (asked for byte %d, response states no range)",
+		r.bucket, r.key, ErrRangeNotHonored, off)
+}
+
+// parseContentRangeStart reads the first byte position out of a `Content-Range:
+// bytes <start>-<end>/<total>` value. stated=false means the response carried no
+// Content-Range at all.
+//
+// A value that is present but malformed is an error, including the
+// unsatisfied-range form that states no first byte position. Such a value is not
+// evidence that the range was honored, and treating it as absent would let a
+// broken store fall through to the off == 0 acceptance.
+func parseContentRangeStart(header string) (start int64, stated bool, err error) {
+	h := strings.TrimSpace(header)
+	if h == "" {
+		return 0, false, nil
+	}
+	const unit = "bytes "
+	if !strings.HasPrefix(h, unit) {
+		return 0, true, fmt.Errorf("unsupported range unit in %q", header)
+	}
+	spec := strings.TrimSpace(strings.TrimPrefix(h, unit))
+	slash := strings.IndexByte(spec, '/')
+	if slash >= 0 {
+		spec = spec[:slash]
+	}
+	dash := strings.IndexByte(spec, '-')
+	if dash <= 0 {
+		return 0, true, fmt.Errorf("no first byte position in %q", header)
+	}
+	start, parseErr := strconv.ParseInt(strings.TrimSpace(spec[:dash]), 10, 64)
+	if parseErr != nil || start < 0 {
+		return 0, true, fmt.Errorf("invalid first byte position in %q", header)
+	}
+	return start, true, nil
+}
+
 // Seek fulfills io.Seeker. Any pending GET body is closed so the next Read
-// reopens from the new offset.
+// reopens from the new offset. A seek after Close returns fs.ErrClosed, matching
+// Read: a closed reader is finished, and moving its offset only sets up a read
+// that must fail anyway (#673).
 func (r *s3RangeReader) Seek(offset int64, whence int) (int64, error) {
+	if r.closed {
+		return 0, fs.ErrClosed
+	}
 	var abs int64
 	switch whence {
 	case io.SeekStart:
@@ -110,8 +249,14 @@ func (r *s3RangeReader) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
-// Close releases any open GET body.
+// Close releases any open GET body and marks the reader closed, so a later Read
+// cannot issue a new ranged GET on a reader the caller already released (#673).
+// Double-Close is a no-op, as it is for s3StreamReader.
 func (r *s3RangeReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 	if r.body != nil {
 		err := r.body.Close()
 		r.body = nil

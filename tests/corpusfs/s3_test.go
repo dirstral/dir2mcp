@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -59,10 +60,20 @@ func (f *fakeS3) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(*
 	}
 	rangeHeader := aws.ToString(in.Range)
 	f.getRanges = append(f.getRanges, rangeHeader)
-	if start, ok := parseRangeStart(rangeHeader); ok && start <= int64(len(body)) {
+	total := int64(len(body))
+	if start, ok := parseRangeStart(rangeHeader); ok && start <= total {
 		body = body[start:]
+		// State the range that was served, exactly as a real store does on a 206.
+		// Without this the response is indistinguishable from a store that DROPPED
+		// the Range header and returned the whole object, and the reader refuses
+		// that response (#673).
+		return &s3.GetObjectOutput{
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			ContentRange:  aws.String(fmt.Sprintf("bytes %d-%d/%d", start, total-1, total)),
+			ContentLength: aws.Int64(int64(len(body))),
+		}, nil
 	}
-	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(body))}, nil
+	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(body)), ContentLength: aws.Int64(total)}, nil
 }
 
 // parseRangeStart extracts the start byte from a "bytes=N-" header.
