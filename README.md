@@ -800,6 +800,15 @@ and `STATE_DIR`.
   the oversized body
 - These MCP clients do not follow HTTP redirects. A 3xx from the endpoint is
   reported as a failure, so connection headers stay on the configured host
+- Every provider adapter (Anthropic, Cohere, ColBERT, ElevenLabs, Gemini,
+  Mistral, OmniEmbed, OpenAI, Whisper API) uses one shared HTTP path. It caps a
+  successful JSON response at 64 MiB and a successful audio response at
+  256 MiB. A larger response fails with an error that names the limit, so a
+  hostile or broken endpoint cannot exhaust memory
+- Provider adapters do not follow HTTP redirects either. Go keeps a custom
+  API-key header (`x-api-key`, `xi-api-key`, `x-goog-api-key`) on a redirect to
+  another host, so a 3xx from a provider endpoint is reported as a failure and
+  the key stays on the configured host
 
 ### What a support bundle discloses
 

@@ -1,0 +1,338 @@
+package tests
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// This file is the guard that keeps issue #670 from happening again.
+//
+// Issue #416 hardened the provider HTTP clients: it refused redirects, which
+// carry a custom API-key header to the redirect target, and it capped a
+// success body before the decode, which an endless 2xx response can otherwise
+// use to exhaust memory. That fix was copied into each adapter package, so
+// adapters written later (anthropic, cohere, colbertrerank, whisperapi) simply
+// did not have it.
+//
+// internal/providerhttp now holds the one hardened path. The rules below make
+// a new adapter safe by construction: an adapter that builds its own client,
+// or reads a body without the cap, fails this test in CI.
+
+// providerHTTPHelperPackage is the shared package that every adapter uses.
+const providerHTTPHelperPackage = "providerhttp"
+
+// providerAdapterFile is one parsed non-test file of a provider adapter
+// package.
+type providerAdapterFile struct {
+	path string
+	fset *token.FileSet
+	file *ast.File
+}
+
+// TestProviderAdaptersUseTheSharedHardenedClient checks the three rules.
+func TestProviderAdaptersUseTheSharedHardenedClient(t *testing.T) {
+	files := providerAdapterFiles(t)
+	if len(files) == 0 {
+		t.Fatal("found no provider adapter files to check")
+	}
+	seenPackages := map[string]struct{}{}
+	for _, f := range files {
+		seenPackages[filepath.Base(filepath.Dir(f.path))] = struct{}{}
+	}
+	// A short sanity list. It proves the discovery rule still finds the
+	// adapters named in issue #670.
+	for _, want := range []string{"anthropic", "cohere", "colbertrerank", "elevenlabs", "gemini", "mistral", "omniembed", "openai", "whisperapi"} {
+		if _, ok := seenPackages[want]; !ok {
+			t.Fatalf("adapter package %q was not discovered; the discovery rule needs an update", want)
+		}
+	}
+
+	for _, f := range files {
+		checkClientLiterals(t, f)
+		checkUnboundedBodyReads(t, f)
+		checkRoundTrips(t, f)
+	}
+}
+
+// checkClientLiterals enforces rule 1: an http.Client built inside an adapter
+// must use the shared refusing policy.
+//
+// The rule names the policy function, not just the CheckRedirect field. A field
+// that holds a permissive callback still follows redirects, so a field-only
+// check would pass code that leaks the key.
+func checkClientLiterals(t *testing.T, f providerAdapterFile) {
+	t.Helper()
+	ast.Inspect(f.file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok || !isSelector(lit.Type, "http", "Client") {
+			return true
+		}
+		if usesRefuseRedirect(lit) {
+			return true
+		}
+		t.Errorf("%s: an http.Client literal does not use %s.RefuseRedirect. Use %s.NewClient, %s.WithTimeout or %s.ClientOrDefault, so a custom API-key header cannot follow a redirect to another host (issue #670).",
+			f.position(lit.Pos()), providerHTTPHelperPackage, providerHTTPHelperPackage, providerHTTPHelperPackage, providerHTTPHelperPackage)
+		return true
+	})
+}
+
+// usesRefuseRedirect reports whether an http.Client literal sets CheckRedirect
+// to the shared policy. It accepts the bare name inside package providerhttp,
+// where the constructors live, and the qualified name everywhere else.
+func usesRefuseRedirect(lit *ast.CompositeLit) bool {
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "CheckRedirect" {
+			continue
+		}
+		switch value := kv.Value.(type) {
+		case *ast.Ident:
+			return value.Name == "RefuseRedirect"
+		case *ast.SelectorExpr:
+			return isSelector(value, providerHTTPHelperPackage, "RefuseRedirect")
+		}
+		return false
+	}
+	return false
+}
+
+// bodyReaders are the calls that can drain a whole body into memory.
+var bodyReaders = [][2]string{
+	{"json", "NewDecoder"},
+	{"io", "ReadAll"},
+	{"io", "Copy"},
+}
+
+// checkUnboundedBodyReads enforces rule 2: a response body must go through the
+// shared capped reader before it is decoded.
+//
+// The rule follows a local alias too, so `body := resp.Body` before the read
+// does not slip past it. A read of a bounded reader, for example
+// io.LimitReader(resp.Body, 4096) in an httpError helper, stays allowed: the
+// argument is then a call, not the body.
+func checkUnboundedBodyReads(t *testing.T, f providerAdapterFile) {
+	t.Helper()
+	aliases := bodyAliases(f.file)
+	ast.Inspect(f.file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !isBodyReader(call.Fun) {
+			return true
+		}
+		for _, arg := range call.Args {
+			if !isResponseBody(arg, aliases) {
+				continue
+			}
+			t.Errorf("%s: a response body is read with no size cap. Use %s.ReadLimitedJSONBody (or ReadLimitedBody) so an endless 2xx response cannot exhaust memory (issue #670).",
+				f.position(call.Pos()), providerHTTPHelperPackage)
+			return true
+		}
+		return true
+	})
+}
+
+func isBodyReader(fun ast.Expr) bool {
+	for _, reader := range bodyReaders {
+		if isSelector(fun, reader[0], reader[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isResponseBody reports whether expr names a response body, either directly
+// (resp.Body) or through a local alias of one.
+func isResponseBody(expr ast.Expr, aliases map[string]struct{}) bool {
+	switch v := expr.(type) {
+	case *ast.SelectorExpr:
+		return v.Sel.Name == "Body"
+	case *ast.Ident:
+		_, ok := aliases[v.Name]
+		return ok
+	}
+	return false
+}
+
+// bodyAliases collects the names that a file binds to a response body, for
+// example `body := resp.Body`.
+func bodyAliases(file *ast.File) map[string]struct{} {
+	aliases := map[string]struct{}{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			sel, ok := rhs.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Body" {
+				continue
+			}
+			if name, ok := assign.Lhs[i].(*ast.Ident); ok {
+				aliases[name.Name] = struct{}{}
+			}
+		}
+		return true
+	})
+	return aliases
+}
+
+// checkRoundTrips enforces rule 3: an adapter must get its client from the
+// shared package, not from a field or a local variable of its own.
+func checkRoundTrips(t *testing.T, f providerAdapterFile) {
+	t.Helper()
+	ast.Inspect(f.file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Do" || !looksLikeHTTPClient(sel.X) {
+			return true
+		}
+		if isProviderHTTPCall(sel.X) {
+			return true
+		}
+		t.Errorf("%s: an HTTP round trip uses a client that did not come from %s. Call %s.ClientOrDefault or %s.WithTimeout at the call site, so the redirect policy is always installed (issue #670).",
+			f.position(call.Pos()), providerHTTPHelperPackage, providerHTTPHelperPackage, providerHTTPHelperPackage)
+		return true
+	})
+}
+
+// looksLikeHTTPClient reports whether expr names something that reads like an
+// HTTP client. It keeps the rule off unrelated Do methods, for example
+// sync.Once.Do.
+func looksLikeHTTPClient(expr ast.Expr) bool {
+	switch v := expr.(type) {
+	case *ast.Ident:
+		return strings.Contains(strings.ToLower(v.Name), "client")
+	case *ast.SelectorExpr:
+		return strings.Contains(strings.ToLower(v.Sel.Name), "client")
+	case *ast.CallExpr:
+		return true
+	}
+	return false
+}
+
+// isProviderHTTPCall reports whether expr is a call into the shared package,
+// for example providerhttp.WithTimeout(c.HTTPClient, timeout).
+func isProviderHTTPCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == providerHTTPHelperPackage
+}
+
+func isSelector(expr ast.Expr, pkg, name string) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	if ident, ok := sel.X.(*ast.Ident); ok {
+		return ident.Name == pkg
+	}
+	return false
+}
+
+func (f providerAdapterFile) position(pos token.Pos) string {
+	p := f.fset.Position(pos)
+	return filepath.Base(filepath.Dir(f.path)) + "/" + filepath.Base(f.path) + ":" + strconv.Itoa(p.Line)
+}
+
+// providerAdapterFiles finds every non-test file of every provider adapter
+// package. A provider adapter package is a package under internal/ that speaks
+// HTTP (it imports net/http) and reports provider failures (it uses
+// model.ProviderError). The rule is structural, so a new adapter is covered on
+// the day it is added. No allowlist can go stale.
+//
+// The walk goes down the whole tree, so an adapter in a nested directory such
+// as internal/providers/foo is covered too.
+func providerAdapterFiles(t *testing.T) []providerAdapterFile {
+	t.Helper()
+	var out []providerAdapterFile
+	internalDir := filepath.Join(repoRoot(t), "internal")
+	err := filepath.WalkDir(internalDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if path != internalDir && skipPackageDir(entry.Name()) {
+			return filepath.SkipDir
+		}
+		parsed := parsePackageFiles(t, path)
+		if isProviderAdapterPackage(parsed) {
+			out = append(out, parsed...)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk internal/: %v", err)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out
+}
+
+// skipPackageDir reports whether a directory holds no package to check.
+// testdata is Go's reserved name for fixture files, which do not have to
+// compile.
+func skipPackageDir(name string) bool {
+	return name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
+}
+
+func parsePackageFiles(t *testing.T, pkgDir string) []providerAdapterFile {
+	t.Helper()
+	names, err := os.ReadDir(pkgDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", pkgDir, err)
+	}
+	var out []providerAdapterFile
+	for _, name := range names {
+		if name.IsDir() || !strings.HasSuffix(name.Name(), ".go") || strings.HasSuffix(name.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(pkgDir, name.Name())
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		out = append(out, providerAdapterFile{path: path, fset: fset, file: file})
+	}
+	return out
+}
+
+func isProviderAdapterPackage(files []providerAdapterFile) bool {
+	var speaksHTTP, reportsProviderErrors bool
+	for _, f := range files {
+		for _, imp := range f.file.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err == nil && path == "net/http" {
+				speaksHTTP = true
+			}
+		}
+		ast.Inspect(f.file, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && isSelector(sel, "model", "ProviderError") {
+				reportsProviderErrors = true
+			}
+			return true
+		})
+	}
+	return speaksHTTP && reportsProviderErrors
+}

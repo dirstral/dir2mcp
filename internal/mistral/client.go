@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/providerhttp"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
@@ -43,12 +44,6 @@ const (
 	// DefaultTranscribeModel is the default model used for audio
 	// transcription requests.
 	DefaultTranscribeModel = "voxtral-mini-latest"
-
-	// maxResponseBytes caps a JSON success response body (embeddings, OCR,
-	// transcription, chat) so a malicious or buggy upstream (e.g. a gzip bomb
-	// behind a custom base_url) cannot drive unbounded memory use when we
-	// buffer or decode it (issue #416).
-	maxResponseBytes = 64 << 20 // 64 MiB
 )
 
 // Client provides Mistral API integrations.
@@ -113,7 +108,7 @@ func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		BaseURL:                strings.TrimRight(baseURL, "/"),
 		APIKey:                 apiKey,
-		HTTPClient:             &http.Client{Timeout: defaultRequestTimeout},
+		HTTPClient:             providerhttp.NewClient(defaultRequestTimeout),
 		BatchSize:              defaultBatchSize,
 		MaxRetries:             defaultMaxRetries,
 		InitialBackoff:         defaultInitialBackoff,
@@ -307,12 +302,7 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: defaultRequestTimeout}
-	}
-
-	resp, err := client.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultRequestTimeout).Do(req)
 	if err != nil {
 		return nil, &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
@@ -329,7 +319,7 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		return nil, mistralHTTPError(resp)
 	}
 
-	raw, err := readLimitedBody(resp, maxResponseBytes)
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "MISTRAL_FAILED")
 	if err != nil {
 		return nil, err
 	}
@@ -385,21 +375,6 @@ func collectEmbedVectors(parsed embedResponse, n, statusCode int) ([][]float32, 
 		}
 	}
 	return vectors, nil
-}
-
-// readLimitedBody buffers a success response body under limit bytes, returning
-// a clear error rather than reading unbounded if the upstream sends more
-// (issue #416). It reads one byte past the cap to detect an over-limit body
-// without buffering the whole thing.
-func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
-	}
-	if int64(len(data)) > limit {
-		return nil, &model.ProviderError{Code: "MISTRAL_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
-	}
-	return data, nil
 }
 
 // mistralHTTPError reads the response body and returns a *model.ProviderError
@@ -652,12 +627,7 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: defaultRequestTimeout}
-	}
-
-	resp, err := client.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultRequestTimeout).Do(req)
 	if err != nil {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
@@ -674,7 +644,7 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 		return "", mistralHTTPError(resp)
 	}
 
-	raw, err := readLimitedBody(resp, maxResponseBytes)
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "MISTRAL_FAILED")
 	if err != nil {
 		return "", err
 	}
@@ -840,12 +810,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultRequestTimeout}
-	}
-
-	resp, err := httpClient.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultRequestTimeout).Do(req)
 	if err != nil {
 		return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
 	}
@@ -855,7 +820,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		return "", mistralHTTPError(resp)
 	}
 
-	raw, err := readLimitedBody(resp, maxResponseBytes)
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "MISTRAL_FAILED")
 	if err != nil {
 		return "", err
 	}
@@ -962,20 +927,14 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := c.HTTPClient
 	// generation requests may take longer than the standard default timeout.
 	// apply GenerationTimeout (when configured) even if HTTPClient is already set.
 	timeout := defaultRequestTimeout
 	if c.GenerationTimeout > 0 {
 		timeout = c.GenerationTimeout
 	}
-	if client == nil {
-		client = &http.Client{Timeout: timeout}
-	} else {
-		client = cloneHTTPClientWithTimeout(client, timeout)
-	}
 
-	resp, err := client.Do(req)
+	resp, err := providerhttp.WithTimeout(c.HTTPClient, timeout).Do(req)
 	if err != nil {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
@@ -990,7 +949,7 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 		return "", mistralHTTPError(resp)
 	}
 
-	raw, err := readLimitedBody(resp, maxResponseBytes)
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "MISTRAL_FAILED")
 	if err != nil {
 		return "", err
 	}
@@ -1020,15 +979,6 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 		}
 	}
 	return text, nil
-}
-
-func cloneHTTPClientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
-	if base == nil {
-		return &http.Client{Timeout: timeout}
-	}
-	cloned := *base
-	cloned.Timeout = timeout
-	return &cloned
 }
 
 func contentToText(content interface{}) string {

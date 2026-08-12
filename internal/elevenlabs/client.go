@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/providerhttp"
 )
 
 const (
@@ -21,14 +21,10 @@ const (
 	defaultTimeout  = 30 * time.Second
 	defaultSTTModel = "scribe_v1"
 
-	// maxResponseBytes caps a JSON success response body (STT) so a malicious
-	// or buggy upstream (e.g. a gzip bomb behind a custom base_url) cannot
-	// drive unbounded memory use when we buffer it (issue #416).
-	maxResponseBytes = 64 << 20 // 64 MiB
-	// maxAudioResponseBytes caps a TTS audio body. Audio is legitimately
-	// larger than JSON, so it gets a higher ceiling while still bounding the
-	// read.
-	maxAudioResponseBytes = 256 << 20 // 256 MiB
+	// maxErrorBodyBytes bounds the upstream text that reaches an error
+	// message. It matches the cap that the other adapters use in their
+	// httpError helpers.
+	maxErrorBodyBytes = 4096
 )
 
 type Client struct {
@@ -49,7 +45,7 @@ func NewClient(apiKey, voiceID string) *Client {
 	return &Client{
 		APIKey:          strings.TrimSpace(apiKey),
 		BaseURL:         baseURL,
-		HTTPClient:      &http.Client{Timeout: defaultTimeout},
+		HTTPClient:      providerhttp.NewClient(defaultTimeout),
 		VoiceID:         strings.TrimSpace(voiceID),
 		TranscribeModel: defaultSTTModel,
 	}
@@ -179,12 +175,7 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 	req.Header.Set("xi-api-key", apiKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultTimeout}
-	}
-
-	resp, err := httpClient.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultTimeout).Do(req)
 	if err != nil {
 		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "stt request failed", Retryable: true, Cause: err}
 	}
@@ -192,13 +183,13 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 		_ = resp.Body.Close()
 	}()
 
-	bodyBytes, err := readLimitedBody(resp, maxResponseBytes)
+	bodyBytes, err := providerhttp.ReadLimitedJSONBody(resp, "ELEVENLABS_FAILED")
 	if err != nil {
 		return "", err
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		message := strings.TrimSpace(string(bodyBytes))
+		message := errorMessage(bodyBytes)
 		if message == "" {
 			message = fmt.Sprintf("elevenlabs stt returned status %d", resp.StatusCode)
 		}
@@ -275,12 +266,7 @@ func (c *Client) SynthesizeWithVoice(ctx context.Context, text, voiceID string) 
 	req.Header.Set("Accept", "audio/mpeg")
 	req.Header.Set("Content-Type", "application/json")
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultTimeout}
-	}
-
-	resp, err := httpClient.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultTimeout).Do(req)
 	if err != nil {
 		return nil, &model.ProviderError{
 			Code:      "ELEVENLABS_FAILED",
@@ -293,7 +279,7 @@ func (c *Client) SynthesizeWithVoice(ctx context.Context, text, voiceID string) 
 		_ = resp.Body.Close()
 	}()
 
-	body, err := readLimitedBody(resp, maxAudioResponseBytes)
+	body, err := providerhttp.ReadLimitedBody(resp, providerhttp.MaxAudioResponseBytes, "ELEVENLABS_FAILED")
 	if err != nil {
 		return nil, err
 	}
@@ -302,26 +288,22 @@ func (c *Client) SynthesizeWithVoice(ctx context.Context, text, voiceID string) 
 		return body, nil
 	}
 
-	message := strings.TrimSpace(string(body))
+	message := errorMessage(body)
 	if message == "" {
 		message = fmt.Sprintf("elevenlabs tts returned status %d", resp.StatusCode)
 	}
 	return nil, mapProviderError(resp.StatusCode, message)
 }
 
-// readLimitedBody buffers a response body under limit bytes, returning a clear
-// error rather than reading unbounded if the upstream sends more (issue #416).
-// It reads one byte past the cap to detect an over-limit body without
-// buffering the whole thing.
-func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
+// errorMessage turns a non-2xx body into a short error message. The body is
+// read under the response cap, which is generous (up to 64 MiB of JSON or
+// 256 MiB of audio), so an error string must be cut down. The other adapters
+// cap an error body at maxErrorBodyBytes as well.
+func errorMessage(body []byte) string {
+	if len(body) > maxErrorBodyBytes {
+		body = body[:maxErrorBodyBytes]
 	}
-	if int64(len(data)) > limit {
-		return nil, &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
-	}
-	return data, nil
+	return strings.TrimSpace(string(body))
 }
 
 func mapProviderError(statusCode int, message string) error {
