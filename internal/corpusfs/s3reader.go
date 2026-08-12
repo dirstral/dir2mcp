@@ -150,73 +150,122 @@ func (r *s3RangeReader) openFrom(off int64) error {
 
 // checkRangeResponse verifies that the body of a ranged GET really begins at off.
 //
-// The evidence is the response itself. A store that honors `bytes=N-` answers 206
-// with `Content-Range: bytes N-<end>/<total>`, so the start byte is stated and is
-// compared. A store that DROPS the header answers 200 with the whole object and
-// states no range at all, which is why an absent Content-Range at a non-zero
-// offset is refused rather than trusted: the alternative is to read offset-0 bytes
-// as if they came from N.
+// The only evidence accepted is a well-formed Content-Range that states the
+// requested first byte position. A store that honors `bytes=N-` answers 206 with
+// `Content-Range: bytes N-<end>/<total>`, which RFC 9110 §14.4 requires it to
+// send. A store that DROPS the header answers 200 with the whole object and
+// states no range at all, so an absent Content-Range at a non-zero offset is
+// refused: the alternative is to read offset-0 bytes as if they came from N.
 //
-// Two responses without a Content-Range are still accepted, because in both the
-// body provably starts at off:
+// A response length is NOT accepted as a substitute. Content-Length states how
+// many bytes arrive, never where they start, so an object replaced between the
+// HEAD and the GET can produce a full body whose length happens to equal the
+// requested tail. The one response without a Content-Range that is still
+// accepted is off == 0, where a whole-object body IS the requested range.
 //
-//   - off == 0, where the whole object IS the requested range;
-//   - a reported length equal to the tail from off, which only a honored range
-//     produces (an ignored range returns the full r.size).
+// A stated complete length must also match the size HEAD reported. A different
+// total describes a different object, and its bytes are not the ones the caller
+// asked for. The `*` form states no total and is left to the start check.
 func (r *s3RangeReader) checkRangeResponse(off int64, out *s3.GetObjectOutput) error {
-	start, stated, err := parseContentRangeStart(aws.ToString(out.ContentRange))
+	rng, stated, err := parseContentRange(aws.ToString(out.ContentRange))
 	if err != nil {
-		return fmt.Errorf("corpusfs: range get s3://%s/%s: %w (%v)",
-			r.bucket, r.key, ErrRangeNotHonored, err)
+		return r.refuseRange(err.Error())
 	}
-	if stated {
-		if start != off {
-			return fmt.Errorf("corpusfs: range get s3://%s/%s: %w (asked for byte %d, got byte %d)",
-				r.bucket, r.key, ErrRangeNotHonored, off, start)
+	if !stated {
+		if off == 0 {
+			return nil
 		}
-		return nil
+		return r.refuseRange(fmt.Sprintf("asked for byte %d, response states no range", off))
 	}
-	if off == 0 {
-		return nil
+	if rng.start != off {
+		return r.refuseRange(fmt.Sprintf("asked for byte %d, response starts at byte %d", off, rng.start))
 	}
-	if out.ContentLength != nil && *out.ContentLength == r.size-off {
-		return nil
+	if rng.total >= 0 && rng.total != r.size {
+		return r.refuseRange(fmt.Sprintf("object is %d bytes, response states %d", r.size, rng.total))
 	}
-	return fmt.Errorf("corpusfs: range get s3://%s/%s: %w (asked for byte %d, response states no range)",
-		r.bucket, r.key, ErrRangeNotHonored, off)
+	return nil
 }
 
-// parseContentRangeStart reads the first byte position out of a `Content-Range:
-// bytes <start>-<end>/<total>` value. stated=false means the response carried no
-// Content-Range at all.
+// refuseRange builds the ErrRangeNotHonored refusal. detail names offsets and
+// sizes only, never a byte of the object, so the error is safe to log.
+func (r *s3RangeReader) refuseRange(detail string) error {
+	return fmt.Errorf("corpusfs: range get s3://%s/%s: %w (%s)", r.bucket, r.key, ErrRangeNotHonored, detail)
+}
+
+// contentRange is a parsed `Content-Range: bytes <start>-<end>/<total>` value.
+type contentRange struct {
+	start int64
+	end   int64
+	// total is the complete length of the object, or -1 for the `*` form RFC 9110
+	// allows when the store does not know it.
+	total int64
+}
+
+// parseContentRange parses a Content-Range response header. stated=false means
+// the response carried no Content-Range at all.
 //
-// A value that is present but malformed is an error, including the
-// unsatisfied-range form that states no first byte position. Such a value is not
-// evidence that the range was honored, and treating it as absent would let a
-// broken store fall through to the off == 0 acceptance.
-func parseContentRangeStart(header string) (start int64, stated bool, err error) {
+// The whole value is validated, not only the part that is read. A store that
+// sends a malformed header has not stated where its bytes start, so accepting the
+// leading digits of `bytes 32-x/64` would trust exactly the response that proves
+// the store is unreliable. Every malformed form is an error, and an error is
+// never treated as an absent header (which would fall through to the off == 0
+// acceptance).
+func parseContentRange(header string) (contentRange, bool, error) {
 	h := strings.TrimSpace(header)
 	if h == "" {
-		return 0, false, nil
+		return contentRange{}, false, nil
 	}
 	const unit = "bytes "
 	if !strings.HasPrefix(h, unit) {
-		return 0, true, fmt.Errorf("unsupported range unit in %q", header)
+		return contentRange{}, true, fmt.Errorf("unsupported Content-Range unit in %q", header)
 	}
-	spec := strings.TrimSpace(strings.TrimPrefix(h, unit))
-	slash := strings.IndexByte(spec, '/')
-	if slash >= 0 {
-		spec = spec[:slash]
+	spec, totalText, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(h, unit)), "/")
+	if !ok {
+		return contentRange{}, true, fmt.Errorf("no complete length in Content-Range %q", header)
 	}
-	dash := strings.IndexByte(spec, '-')
-	if dash <= 0 {
-		return 0, true, fmt.Errorf("no first byte position in %q", header)
+	rng, err := parseByteRangeSpec(spec)
+	if err != nil {
+		return contentRange{}, true, fmt.Errorf("%s in Content-Range %q", err, header)
 	}
-	start, parseErr := strconv.ParseInt(strings.TrimSpace(spec[:dash]), 10, 64)
-	if parseErr != nil || start < 0 {
-		return 0, true, fmt.Errorf("invalid first byte position in %q", header)
+	total, err := parseCompleteLength(totalText)
+	if err != nil {
+		return contentRange{}, true, fmt.Errorf("%s in Content-Range %q", err, header)
 	}
-	return start, true, nil
+	rng.total = total
+	return rng, true, nil
+}
+
+// parseByteRangeSpec parses the `<start>-<end>` half of a Content-Range. Both
+// positions are required: `bytes 32-/64` states a start it does not back with an
+// end, which is not a range a store served.
+func parseByteRangeSpec(spec string) (contentRange, error) {
+	first, last, ok := strings.Cut(spec, "-")
+	if !ok {
+		return contentRange{}, errors.New("no last byte position")
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(first), 10, 64)
+	if err != nil || start < 0 {
+		return contentRange{}, errors.New("invalid first byte position")
+	}
+	end, err := strconv.ParseInt(strings.TrimSpace(last), 10, 64)
+	if err != nil || end < start {
+		return contentRange{}, errors.New("invalid last byte position")
+	}
+	return contentRange{start: start, end: end}, nil
+}
+
+// parseCompleteLength parses the `/<total>` half of a Content-Range. It returns
+// -1 for the `*` form, which is legal and states nothing.
+func parseCompleteLength(text string) (int64, error) {
+	t := strings.TrimSpace(text)
+	if t == "*" {
+		return -1, nil
+	}
+	total, err := strconv.ParseInt(t, 10, 64)
+	if err != nil || total <= 0 {
+		return 0, errors.New("invalid complete length")
+	}
+	return total, nil
 }
 
 // Seek fulfills io.Seeker. Any pending GET body is closed so the next Read

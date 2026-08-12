@@ -50,9 +50,13 @@ const (
 	ignoreRange673
 	// wrongOffset673 states a range it did not serve from.
 	wrongOffset673
-	// lengthOnly673 serves the correct tail but states it only through
-	// Content-Length, with no Content-Range.
+	// lengthOnly673 serves the tail but states it only through Content-Length,
+	// with no Content-Range. A length states how many bytes arrive, never where
+	// they start.
 	lengthOnly673
+	// customRange673 states the literal value in rangeHeader, so a test can pin a
+	// malformed or mismatched Content-Range.
+	customRange673
 )
 
 // rangeStubS3For673 is a network-free S3 stub whose range behaviour and body
@@ -62,6 +66,8 @@ type rangeStubS3For673 struct {
 	object   []byte
 	headSize *int64 // nil: HEAD reports len(object)
 	behavior rangeBehavior673
+	// rangeHeader is the literal Content-Range for customRange673.
+	rangeHeader string
 	// serveBytes truncates the served body to this many bytes when it is > 0. It
 	// models a connection that ends early or a store that returns a short object.
 	serveBytes int64
@@ -109,7 +115,9 @@ func (f *rangeStubS3For673) GetObject(_ context.Context, in *s3.GetObjectInput, 
 	case wrongOffset673:
 		out.ContentRange = aws.String(fmt.Sprintf("bytes 0-%d/%d", total-1, total))
 	case lengthOnly673:
-		// Content-Length only, which is still proof of the tail.
+		// Content-Length only: a byte count, and no start.
+	case customRange673:
+		out.ContentRange = aws.String(f.rangeHeader)
 	case honorRange673:
 		out.ContentRange = aws.String(fmt.Sprintf("bytes %d-%d/%d", start, total-1, total))
 	}
@@ -355,12 +363,16 @@ func TestS3RangeReader_HonestServerRoundTripsARangedRead(t *testing.T) {
 	}
 }
 
-// TestS3RangeReader_AcceptsARangeStatedOnlyByItsLength covers the store that
-// serves the right tail but states it only through Content-Length. The reported
-// length equals the tail from the requested offset, which an ignored range can
-// never produce (it returns the whole object), so the response is still proof and
-// is accepted. Without this allowance the check would refuse correct data.
-func TestS3RangeReader_AcceptsARangeStatedOnlyByItsLength(t *testing.T) {
+// TestS3RangeReader_RefusesARangeStatedOnlyByItsLength pins that a response
+// length is not evidence of a start.
+//
+// The store here serves the right tail and states only its Content-Length, and it
+// is still refused. Content-Length says how many bytes arrive, never where they
+// begin. An object replaced between the HEAD and the GET produces a WHOLE body
+// whose length can equal the requested tail, so a store that ignores the Range
+// would pass a length check while serving byte 0. RFC 9110 requires
+// Content-Range on a 206, so the strict rule costs a conforming store nothing.
+func TestS3RangeReader_RefusesARangeStatedOnlyByItsLength(t *testing.T) {
 	obj := object673(64)
 	stub := &rangeStubS3For673{key: "corpus/doc.txt", object: obj, behavior: lengthOnly673}
 	fsys := newRangeFS673(t, stub)
@@ -374,12 +386,88 @@ func TestS3RangeReader_AcceptsARangeStatedOnlyByItsLength(t *testing.T) {
 	if _, err := rc.Seek(24, io.SeekStart); err != nil {
 		t.Fatalf("Seek: %v", err)
 	}
+	if _, err := io.ReadAll(rc); !errors.Is(err, corpusfs.ErrRangeNotHonored) {
+		t.Fatalf("read error = %v, want ErrRangeNotHonored", err)
+	}
+}
+
+// TestS3RangeReader_RefusesAMalformedContentRange covers the header values a
+// store must not be trusted on.
+//
+// Reading only the leading digits would accept `bytes 32-x/64` from a store whose
+// header proves it is unreliable, and a total that disagrees with HEAD describes a
+// DIFFERENT object, whose bytes are not the ones the caller asked for. The whole
+// value is therefore validated, and every invalid form is a refusal.
+func TestS3RangeReader_RefusesAMalformedContentRange(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+	}{
+		{name: "no complete length", header: "bytes 32-63"},
+		{name: "no last byte position", header: "bytes 32-/64"},
+		{name: "non-numeric last byte position", header: "bytes 32-x/64"},
+		{name: "no positions at all", header: "bytes 32"},
+		{name: "last before first", header: "bytes 32-16/64"},
+		{name: "unsupported unit", header: "items 32-63/64"},
+		{name: "unsatisfied range", header: "bytes */64"},
+		{name: "non-numeric complete length", header: "bytes 32-63/all"},
+		{name: "complete length of another object", header: "bytes 32-63/999"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &rangeStubS3For673{
+				key:         "corpus/doc.txt",
+				object:      object673(64),
+				behavior:    customRange673,
+				rangeHeader: tc.header,
+			}
+			fsys := newRangeFS673(t, stub)
+
+			rc, err := fsys.Open(context.Background(), "doc.txt")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer func() { _ = rc.Close() }()
+
+			if _, err := rc.Seek(32, io.SeekStart); err != nil {
+				t.Fatalf("Seek: %v", err)
+			}
+			if _, err := io.ReadAll(rc); !errors.Is(err, corpusfs.ErrRangeNotHonored) {
+				t.Fatalf("read error = %v for Content-Range %q, want ErrRangeNotHonored", err, tc.header)
+			}
+		})
+	}
+}
+
+// TestS3RangeReader_AcceptsAnUnknownCompleteLength is the guard on the strict
+// parser. `bytes 32-63/*` is a legal Content-Range: the store states the start it
+// served and says it does not know the object's total length. The start is the
+// evidence the reader needs, so the response must be accepted rather than refused
+// for the missing total.
+func TestS3RangeReader_AcceptsAnUnknownCompleteLength(t *testing.T) {
+	obj := object673(64)
+	stub := &rangeStubS3For673{
+		key:         "corpus/doc.txt",
+		object:      obj,
+		behavior:    customRange673,
+		rangeHeader: "bytes 32-63/*",
+	}
+	fsys := newRangeFS673(t, stub)
+
+	rc, err := fsys.Open(context.Background(), "doc.txt")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	if _, err := rc.Seek(32, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
 	got, err := io.ReadAll(rc)
 	if err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("read of a legal `*` complete length failed: %v", err)
 	}
-	if !bytes.Equal(got, obj[24:]) {
-		t.Errorf("read returned %q, want the tail %q", got, obj[24:])
+	if !bytes.Equal(got, obj[32:]) {
+		t.Errorf("read returned %q, want the tail %q", got, obj[32:])
 	}
 }
 
