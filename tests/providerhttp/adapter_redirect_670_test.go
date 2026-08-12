@@ -1,4 +1,4 @@
-package providerhttp_test
+package tests
 
 import (
 	"context"

@@ -49,6 +49,11 @@ const (
 // refuse all of them. http.ErrUseLastResponse stops at the 3xx, which the
 // adapter reports as a normal non-2xx provider error, and the key is never
 // sent onward.
+//
+// internal/protocol holds the same policy for the two MCP clients (issues #704
+// and #711). The two stay apart on purpose: a provider adapter must not depend
+// on the MCP wire package, and an MCP client must not depend on the provider
+// packages.
 func RefuseRedirect(_ *http.Request, _ []*http.Request) error {
 	return http.ErrUseLastResponse
 }

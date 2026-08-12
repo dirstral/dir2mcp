@@ -1,6 +1,6 @@
-// Package providerhttp_test covers the shared hardened HTTP path that every
-// provider adapter uses (issue #670).
-package providerhttp_test
+// Package tests covers the shared hardened HTTP path that every provider
+// adapter uses (issue #670).
+package tests
 
 import (
 	"errors"
