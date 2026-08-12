@@ -62,7 +62,11 @@ func TestProviderAdaptersUseTheSharedHardenedClient(t *testing.T) {
 }
 
 // checkClientLiterals enforces rule 1: an http.Client built inside an adapter
-// must carry a redirect policy.
+// must use the shared refusing policy.
+//
+// The rule names the policy function, not just the CheckRedirect field. A field
+// that holds a permissive callback still follows redirects, so a field-only
+// check would pass code that leaks the key.
 func checkClientLiterals(t *testing.T, f providerAdapterFile) {
 	t.Helper()
 	ast.Inspect(f.file, func(n ast.Node) bool {
@@ -70,19 +74,37 @@ func checkClientLiterals(t *testing.T, f providerAdapterFile) {
 		if !ok || !isSelector(lit.Type, "http", "Client") {
 			return true
 		}
-		for _, elt := range lit.Elts {
-			kv, ok := elt.(*ast.KeyValueExpr)
-			if !ok {
-				continue
-			}
-			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "CheckRedirect" {
-				return true
-			}
+		if usesRefuseRedirect(lit) {
+			return true
 		}
-		t.Errorf("%s: an http.Client literal has no CheckRedirect policy. Use %s.NewClient, %s.WithTimeout or %s.ClientOrDefault, so a custom API-key header cannot follow a redirect to another host (issue #670).",
-			f.position(lit.Pos()), providerHTTPHelperPackage, providerHTTPHelperPackage, providerHTTPHelperPackage)
+		t.Errorf("%s: an http.Client literal does not use %s.RefuseRedirect. Use %s.NewClient, %s.WithTimeout or %s.ClientOrDefault, so a custom API-key header cannot follow a redirect to another host (issue #670).",
+			f.position(lit.Pos()), providerHTTPHelperPackage, providerHTTPHelperPackage, providerHTTPHelperPackage, providerHTTPHelperPackage)
 		return true
 	})
+}
+
+// usesRefuseRedirect reports whether an http.Client literal sets CheckRedirect
+// to the shared policy. It accepts the bare name inside package providerhttp,
+// where the constructors live, and the qualified name everywhere else.
+func usesRefuseRedirect(lit *ast.CompositeLit) bool {
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "CheckRedirect" {
+			continue
+		}
+		switch value := kv.Value.(type) {
+		case *ast.Ident:
+			return value.Name == "RefuseRedirect"
+		case *ast.SelectorExpr:
+			return isSelector(value, providerHTTPHelperPackage, "RefuseRedirect")
+		}
+		return false
+	}
+	return false
 }
 
 // checkUnboundedBodyReads enforces rule 2: a response body must go through the

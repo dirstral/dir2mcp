@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,15 +83,22 @@ func TestJSONHelperUsesTheJSONCap(t *testing.T) {
 
 // TestConstructorsInstallTheRedirectPolicy pins the shared half of issue #670:
 // every constructor must return a client that refuses a redirect.
+//
+// One case starts from a client that follows redirects. A caller can hand an
+// adapter such a client, so the helpers must replace that policy, not keep it.
 func TestConstructorsInstallTheRedirectPolicy(t *testing.T) {
 	base := &http.Client{Timeout: 5 * time.Second}
+	followRedirects := func(*http.Request, []*http.Request) error { return nil }
+	permissive := &http.Client{Timeout: 5 * time.Second, CheckRedirect: followRedirects}
 	cases := map[string]*http.Client{
-		"NewClient":               providerhttp.NewClient(time.Second),
-		"WithTimeout(nil)":        providerhttp.WithTimeout(nil, time.Second),
-		"WithTimeout(base)":       providerhttp.WithTimeout(base, time.Second),
-		"ClientOrDefault(nil)":    providerhttp.ClientOrDefault(nil, time.Second),
-		"ClientOrDefault(base)":   providerhttp.ClientOrDefault(base, time.Second),
-		"ClientOrDefault(custom)": providerhttp.ClientOrDefault(&http.Client{}, time.Second),
+		"NewClient":                   providerhttp.NewClient(time.Second),
+		"WithTimeout(nil)":            providerhttp.WithTimeout(nil, time.Second),
+		"WithTimeout(base)":           providerhttp.WithTimeout(base, time.Second),
+		"WithTimeout(permissive)":     providerhttp.WithTimeout(permissive, time.Second),
+		"ClientOrDefault(nil)":        providerhttp.ClientOrDefault(nil, time.Second),
+		"ClientOrDefault(base)":       providerhttp.ClientOrDefault(base, time.Second),
+		"ClientOrDefault(custom)":     providerhttp.ClientOrDefault(&http.Client{}, time.Second),
+		"ClientOrDefault(permissive)": providerhttp.ClientOrDefault(permissive, time.Second),
 	}
 	for name, client := range cases {
 		if client.CheckRedirect == nil {
@@ -105,6 +113,9 @@ func TestConstructorsInstallTheRedirectPolicy(t *testing.T) {
 	}
 	if base.Timeout != 5*time.Second {
 		t.Fatal("the helpers must not mutate the caller's timeout")
+	}
+	if err := permissive.CheckRedirect(nil, nil); err != nil {
+		t.Fatalf("the helpers must not mutate the caller's own redirect policy, got %v", err)
 	}
 }
 
@@ -124,9 +135,10 @@ func TestWithTimeoutOverridesAndClientOrDefaultKeepsTheTimeout(t *testing.T) {
 // TestHardenedClientStopsAtTheRedirect proves the policy end to end: the client
 // returns the 3xx response and sends nothing to the redirect target.
 func TestHardenedClientStopsAtTheRedirect(t *testing.T) {
-	var hits int
+	// The handler runs on the server goroutine, so the counter is atomic.
+	var hits atomic.Int64
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer target.Close()
@@ -144,7 +156,7 @@ func TestHardenedClientStopsAtTheRedirect(t *testing.T) {
 	if resp.StatusCode != http.StatusTemporaryRedirect {
 		t.Fatalf("status = %d, want 307", resp.StatusCode)
 	}
-	if hits != 0 {
-		t.Fatalf("the redirect target got %d requests, want 0", hits)
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("the redirect target got %d requests, want 0", got)
 	}
 }
