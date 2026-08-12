@@ -493,7 +493,15 @@ type Config struct {
 	CohereBaseURL         string
 	RerankModel           string
 	RerankCandidatePool   int
-	ChunkingStrategy      string
+	// `chunking.strategy` used to be accepted here as ChunkingStrategy. It is
+	// gone on purpose (issue #661). No runtime path ever read it, the canonical
+	// spec defines no chunking-strategy selector, and the chunker picks its
+	// strategy from the doc type (SPEC §7.5: characters for text, line windows
+	// for code, time windows for a transcript). The key is therefore an
+	// unrecognized key like any other typo: config load names it in a warning
+	// (issue #628) and it is no longer written to a generated config or snapshot.
+	// Do not re-add the field without a spec that says what a strategy value
+	// means and a chunker that reads it.
 	ChunkingMaxTokens     int
 	ChunkingOverlapTokens int
 
@@ -1165,7 +1173,6 @@ type fileConfig struct {
 	CohereBaseURL                      *string
 	RerankModel                        *string
 	RerankCandidatePool                *int
-	ChunkingStrategy                   *string
 	ChunkingMaxTokens                  *int
 	ChunkingOverlapTokens              *int
 	IngestGitignore                    *bool
@@ -1328,7 +1335,6 @@ type persistedConfig struct {
 	CohereBaseURL                      string        `yaml:"cohere_base_url"`
 	RerankModel                        string        `yaml:"rerank_model"`
 	RerankCandidatePool                int           `yaml:"rerank_candidate_pool"`
-	ChunkingStrategy                   string        `yaml:"chunking_strategy"`
 	ChunkingMaxTokens                  int           `yaml:"chunking_max_tokens"`
 	ChunkingOverlapTokens              int           `yaml:"chunking_overlap_tokens"`
 	IngestGitignore                    bool          `yaml:"ingest_gitignore"`
@@ -1581,7 +1587,6 @@ func Default() Config {
 		CohereBaseURL:             "",
 		RerankModel:               "rerank-v3.5",
 		RerankCandidatePool:       50,
-		ChunkingStrategy:          "",
 		ChunkingMaxTokens:         0,
 		ChunkingOverlapTokens:     0,
 		IngestGitignore:           true,
@@ -1750,7 +1755,6 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		CohereBaseURL:                      cfg.CohereBaseURL,
 		RerankModel:                        cfg.RerankModel,
 		RerankCandidatePool:                cfg.RerankCandidatePool,
-		ChunkingStrategy:                   cfg.ChunkingStrategy,
 		ChunkingMaxTokens:                  cfg.ChunkingMaxTokens,
 		ChunkingOverlapTokens:              cfg.ChunkingOverlapTokens,
 		IngestGitignore:                    cfg.IngestGitignore,
@@ -2574,9 +2578,6 @@ func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 
 // applyChunkingFileParsed copies the set chunking file fields onto cfg.
 func applyChunkingFileParsed(cfg *Config, fc fileConfig) {
-	if fc.ChunkingStrategy != nil {
-		cfg.ChunkingStrategy = *fc.ChunkingStrategy
-	}
 	if fc.ChunkingMaxTokens != nil {
 		cfg.ChunkingMaxTokens = *fc.ChunkingMaxTokens
 	}
@@ -3227,7 +3228,6 @@ var configKeyAliases = map[string]string{
 	"rerank.provider":                         "rerank_provider",
 	"rerank.model":                            "rerank_model",
 	"rerank_candidate_pool":                   "rerank.candidate_pool",
-	"chunking_strategy":                       "chunking.strategy",
 	"chunking_max_tokens":                     "chunking.max_tokens",
 	"chunking_overlap_tokens":                 "chunking.overlap_tokens",
 	"ingest_gitignore":                        "ingest.gitignore",
@@ -3744,8 +3744,6 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestPandocCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
-	case "chunking.strategy":
-		cfg.ChunkingStrategy = strPtr(value)
 	case "retrieval.hyde.mode":
 		cfg.RetrievalHyDEMode = strPtr(value)
 	}
@@ -4052,7 +4050,6 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("cohere_base_url", cfg.CohereBaseURL)
 	writeScalar("rerank_model", cfg.RerankModel)
 	writeInt("rerank_candidate_pool", cfg.RerankCandidatePool)
-	writeScalar("chunking_strategy", cfg.ChunkingStrategy)
 	writeInt("chunking_max_tokens", cfg.ChunkingMaxTokens)
 	writeInt("chunking_overlap_tokens", cfg.ChunkingOverlapTokens)
 	writeComment(

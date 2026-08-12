@@ -319,6 +319,25 @@ Use it for persistent, non‑sensitive settings such as connector definitions, d
 you might want to check into source control. Values defined here may be overridden at runtime by
 environment variables.
 
+A key that no setting claims does not fail the load. `dir2mcp up` prints one warning that
+names every unrecognized key, then starts, so a typo or a stale key from an older release
+is reported instead of being dropped in silence.
+
+#### Chunking keys
+
+```yaml
+chunking:
+  max_tokens: 0        # 0 = the chunker default
+  overlap_tokens: 0    # must be smaller than max_tokens when max_tokens is set
+```
+
+`chunking.strategy` is **not** a setting. Releases before this one accepted the key, saved
+it, and never read it: chunking is selected per document type (characters for text, line
+windows for code, time windows for a transcript), and the canonical spec defines no
+strategy selector. The key is now unrecognized, so a config that still carries it loads
+with the warning above and no longer publishes the key back into the saved config or the
+effective snapshot.
+
 ### Environment variables (overrides / secrets)
 
 Sensitive keys and temporary runtime overrides are supplied via environment variables. They take

@@ -149,7 +149,6 @@ var snapshotAllowedKeys = map[string]bool{
 
 	// Chunking and ingest routing — the settings an extraction/OCR bug report
 	// is actually triaged against.
-	"chunking_strategy":       true,
 	"chunking_max_tokens":     true,
 	"chunking_overlap_tokens": true,
 	"ingest_gitignore":        true,
