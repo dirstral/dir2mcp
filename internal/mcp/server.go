@@ -51,12 +51,18 @@ const (
 	paymentOutcomeMaxEntries      = 5000
 )
 
-// DefaultSearchK is used when tools/call search arguments omit k or provide
-// a non-positive value.
+// DefaultSearchK is the k a tools/call uses when the arguments OMIT k. A
+// supplied k is never replaced by it: an out-of-bound value is INVALID_RANGE
+// (see parseKArg, issue #648).
 const DefaultSearchK = 15
 
-// MaxSearchK is the highest allowed k value for search/ask requests.
-const MaxSearchK = 50
+// MinSearchK and MaxSearchK are the inclusive bounds the advertised input
+// schemas publish for k (SPEC §15.2/§15.3, canonical search.json/ask.json:
+// "minimum": 1, "maximum": 50). A supplied k outside them is INVALID_RANGE.
+const (
+	MinSearchK = 1
+	MaxSearchK = 50
+)
 
 // sessionInfo holds metadata tracked for each active session.  `created` is the
 // time the session was started; `lastSeen` is updated on each successful

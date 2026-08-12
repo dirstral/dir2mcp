@@ -436,29 +436,13 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			}
 			return idx
 		}(),
-		"models": map[string]interface{}{
-			"embed_text":   defaultEmbedTextModel,
-			"embed_code":   defaultEmbedCodeModel,
-			"ocr":          defaultOCRModel,
-			"stt_provider": defaultSTTProvider,
-			"stt_model":    defaultSTTModel,
-			"chat": func() string {
-				cp, err := s.cfg.Providers().Resolve(provider.CapChat)
-				if err != nil {
-					// No chat provider resolves; report the built-in default.
-					return defaultChatModel
-				}
-				if m := strings.TrimSpace(cp.ChatModel); m != "" {
-					return m
-				}
-				// Resolved but no explicit model: the adapter uses its
-				// own provider-kind default — don't misreport Mistral's.
-				return "(" + cp.Name + " provider default)"
-			}(),
-		},
+		"models": resolvedStatsModels(s.cfg),
 	}
 	if failures := loadRecentFailuresForStats(ctx, s.store); len(failures) > 0 {
 		structured["recent_failures"] = failures
+	}
+	if reasons := skipReasonsForStats(retrievedStats.SkipSummary); len(reasons) > 0 {
+		structured["skip_reasons"] = reasons
 	}
 
 	s.sessionMu.RLock()
@@ -495,6 +479,149 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		},
 		StructuredContent: structured,
 	}, nil
+}
+
+// resolvedStatsModels reports the models.* block of dir2mcp_stats: the provider
+// and model identities THIS deployment actually resolves for each pipeline
+// (SPEC §15.6).
+//
+// It used to emit the built-in Mistral constants for embeddings, OCR and STT and
+// resolve only the chat model (issue #647). An operator who pointed embeddings at
+// Gemini or STT at a self-hosted Whisper endpoint still read "mistral-embed" and
+// "mistral" here, so the one surface that answers "what produced these vectors
+// and this transcript" named a backend the deployment does not use. Provenance
+// that reports a default instead of the configuration is worse than no
+// provenance: it looks authoritative.
+//
+// Every field resolves through the same provider model the pipelines use, so the
+// reported identity cannot drift from the identity on the wire:
+//
+//   - embed_text / embed_code: provider.EffectiveEmbedModels of the resolved
+//     embed profile, the same resolution the embed identity (SPEC 8.1.4) and both
+//     embed call sites use.
+//   - ocr: ingest.ResolveOCRProviderModel, which mirrors the extractor's own
+//     `model.ocr.provider` binding.
+//   - stt_provider / stt_model: resolvedSTTProvenance, already shared with the
+//     transcribe tools.
+//   - chat: the resolved chat profile's model.
+//
+// A capability with no eligible profile keeps the shipped default, because that
+// is what a later `up` with a credential present would use. A profile that
+// resolves but names no model reports "(<profile> provider default)" rather than
+// another provider's constant: the adapter picks its own default there, and
+// naming a model would be a guess.
+func resolvedStatsModels(cfg config.Config) map[string]interface{} {
+	embedText, embedCode := resolvedEmbedProvenance(cfg)
+	sttProvider, sttModel := resolvedSTTProvenance(cfg)
+	return map[string]interface{}{
+		"embed_text":   embedText,
+		"embed_code":   embedCode,
+		"ocr":          resolvedOCRProvenance(cfg),
+		"stt_provider": sttProvider,
+		"stt_model":    sttModel,
+		"chat":         resolvedChatProvenance(cfg),
+	}
+}
+
+// providerDefaultLabel names the adapter-chosen model for a profile that
+// resolves without an explicit model id. It is deliberately not a model id: the
+// adapter substitutes its own kind default there, and printing another provider's
+// constant would misreport provenance.
+func providerDefaultLabel(profileName string) string {
+	return "(" + profileName + " provider default)"
+}
+
+// resolvedEmbedProvenance reports the text/code embed models the resolved embed
+// profile puts on the wire, falling back to the shipped defaults when no embed
+// profile is eligible.
+func resolvedEmbedProvenance(cfg config.Config) (embedText, embedCode string) {
+	prof, err := cfg.Providers().Resolve(provider.CapEmbed)
+	if err != nil {
+		return defaultEmbedTextModel, defaultEmbedCodeModel
+	}
+	text, code := provider.EffectiveEmbedModels(prof)
+	if strings.TrimSpace(text) == "" {
+		text = providerDefaultLabel(prof.Name)
+	}
+	if strings.TrimSpace(code) == "" {
+		code = providerDefaultLabel(prof.Name)
+	}
+	return text, code
+}
+
+// resolvedOCRProvenance reports the OCR model of the profile the extractor binds,
+// falling back to the shipped default when no OCR-capable profile resolves.
+func resolvedOCRProvenance(cfg config.Config) string {
+	name, ocrModel, ok := ingest.ResolveOCRProviderModel(cfg)
+	if !ok {
+		return defaultOCRModel
+	}
+	if strings.TrimSpace(ocrModel) == "" {
+		return providerDefaultLabel(name)
+	}
+	return ocrModel
+}
+
+// resolvedChatProvenance reports the chat model of the resolved chat profile,
+// falling back to the shipped default when no chat profile is eligible.
+func resolvedChatProvenance(cfg config.Config) string {
+	prof, err := cfg.Providers().Resolve(provider.CapChat)
+	if err != nil {
+		return defaultChatModel
+	}
+	if m := strings.TrimSpace(prof.ChatModel); m != "" {
+		return m
+	}
+	return providerDefaultLabel(prof.Name)
+}
+
+// skipReasonsForStats projects the store's durable skip aggregate onto the
+// canonical skip_reasons array: one {reason, count} entry per distinct reason a
+// document was recorded as status="skipped" (SPEC §15.6 / stats.json).
+//
+// It is the honest-coverage half of the stats payload. doc_counts groups every
+// non-deleted document by doc_type regardless of status, so it OVERSTATES what
+// is retrievable: a skipped .odt and an extracted .docx both count as
+// "document". skip_reasons is what says otherwise. The aggregate was populated
+// and then dropped before serialization (#646), so a corpus with unindexable
+// files looked fully covered to every MCP client.
+//
+// Zero-or-negative counts are omitted (the spec pins count >= 1), as is a blank
+// reason. Ordering is deterministic (count descending, then reason ascending), so
+// repeated calls and independent stores produce the same array. Returns nil when
+// nothing was skipped, so the caller omits the field entirely: the spec's "MAY
+// omit when nothing was skipped", which clients MUST read as "nothing skipped"
+// rather than "unsupported".
+func skipReasonsForStats(summary *model.SkipSummary) []map[string]interface{} {
+	if summary == nil || len(summary.Categories) == 0 {
+		return nil
+	}
+	type skipReasonCount struct {
+		reason string
+		count  int64
+	}
+	entries := make([]skipReasonCount, 0, len(summary.Categories))
+	for reason, count := range summary.Categories {
+		reason = strings.TrimSpace(reason)
+		if reason == "" || count < 1 {
+			continue
+		}
+		entries = append(entries, skipReasonCount{reason: reason, count: count})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].count != entries[j].count {
+			return entries[i].count > entries[j].count
+		}
+		return entries[i].reason < entries[j].reason
+	})
+	out := make([]map[string]interface{}, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, map[string]interface{}{"reason": entry.reason, "count": entry.count})
+	}
+	return out
 }
 
 // statsRecentFailuresLimit caps the recent_failures array per the spec
@@ -1159,62 +1286,113 @@ func mapRelatedError(err error) *toolExecutionError {
 	}
 }
 
-func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
-	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
+// askFamilyArguments is the argument set dir2mcp_ask accepts, and therefore the
+// set askInputSchema advertises. dir2mcp_ask_audio "inherits all dir2mcp_ask
+// fields" (bs-007 / SPEC §15.10) and its schema is a clone of ask's, so the two
+// handlers MUST allow the same names. extra names the additive, tool-specific
+// arguments the caller adds on top (ask_audio's voice_id).
+//
+// Sharing one list is the fix for the first half of issue #644: ask_audio kept a
+// shorter hand-written list, so every filter its own schema advertised came
+// back INVALID_FIELD: languages, language_match, date_from, date_to,
+// time_from_ms, time_to_ms, entities and events.
+func askFamilyArguments(extra ...string) map[string]struct{} {
+	allowed := map[string]struct{}{
+		"question": {}, "k": {}, "mode": {}, "index": {},
+		"path_prefix": {}, "file_glob": {}, "doc_types": {},
+		"languages": {}, "language_match": {},
+		"date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
 		"entities": {}, "events": {},
-	}); err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	for _, name := range extra {
+		allowed[name] = struct{}{}
+	}
+	return allowed
+}
+
+// askRequest is a parsed dir2mcp_ask (or dir2mcp_ask_audio) request: the
+// question, the resolved mode, and the retrieval query carrying every filter the
+// caller supplied.
+type askRequest struct {
+	question string
+	mode     string
+	query    model.SearchQuery
+}
+
+// parseAskArgs validates an ask-family argument map and projects it into an
+// askRequest. allowed is the tool's argument allowlist (see askFamilyArguments),
+// so a tool-specific additive argument passes the unknown-argument gate while
+// every shared field is parsed the one way.
+//
+// Both ask-family tools funnel through here, so a filter cannot be advertised on
+// one and rejected on the other, and a filter cannot be accepted yet dropped
+// before it reaches retrieval.
+func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}) (askRequest, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, allowed); err != nil {
+		return askRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 	question, ok, err := parseRequiredString(args, "question")
 	if err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+		return askRequest{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 	if !ok {
-		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
+		return askRequest{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
 	}
 	k, toolErr := parseKArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	mode, toolErr := parseModeArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	indexName, toolErr := parseIndexArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	pathPrefix, fileGlob, docTypes, toolErr := parseSearchFilters(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	languages, toolErr := parseLanguagesArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
 	languageMatch, toolErr := parseLanguageMatchArg(args)
 	if toolErr != nil {
-		return toolCallResult{}, toolErr
+		return askRequest{}, toolErr
 	}
-	tw, toolErr := parseTemporalFilters(args)
+	tw, entities, events, toolErr := parseSearchScopeFilters(args)
+	if toolErr != nil {
+		return askRequest{}, toolErr
+	}
+	return askRequest{
+		question: question,
+		mode:     mode,
+		query: model.SearchQuery{
+			Query: question, K: k, Index: indexName,
+			PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes,
+			Languages: languages, LanguageMatch: languageMatch,
+			DateFrom: tw.dateFrom, DateTo: tw.dateTo,
+			HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS,
+			HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
+			Entities: entities, Events: events,
+		},
+	}, nil
+}
+
+func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	req, toolErr := parseAskArgs(args, askFamilyArguments())
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	askEntities, askEvents, toolErr := parseAnnotationFilters(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
+	if req.mode == "search_only" {
+		return s.runSearchOnlyMode(ctx, req.question, req.query)
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
-		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
-		Entities: askEntities, Events: askEvents}
-	if mode == "search_only" {
-		return s.runSearchOnlyMode(ctx, question, sq)
-	}
-	askResult, askErr := s.retriever.Ask(ctx, question, sq)
+	askResult, askErr := s.retriever.Ask(ctx, req.question, req.query)
 	if askErr != nil {
 		return toolCallResult{}, mapSearchError(askErr)
 	}
@@ -1225,31 +1403,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 }
 
 func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
-	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"question": {}, "k": {}, "mode": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "voice_id": {},
-	}); err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-	}
-	question, ok, err := parseRequiredString(args, "question")
-	if err != nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-	}
-	if !ok {
-		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
-	}
-	k, toolErr := parseKArg(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
-	}
-	mode, toolErr := parseModeArg(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
-	}
-	indexName, toolErr := parseIndexArg(args)
-	if toolErr != nil {
-		return toolCallResult{}, toolErr
-	}
-	pathPrefix, fileGlob, docTypes, toolErr := parseSearchFilters(args)
+	req, toolErr := parseAskArgs(args, askFamilyArguments("voice_id"))
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1260,11 +1414,10 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
-	sq := model.SearchQuery{Query: question, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes}
-	if mode == "search_only" {
-		return s.runSearchOnlyMode(ctx, question, sq)
+	if req.mode == "search_only" {
+		return s.runSearchOnlyMode(ctx, req.question, req.query)
 	}
-	return s.runAskAudioAnswer(ctx, question, voiceID, sq)
+	return s.runAskAudioAnswer(ctx, req.question, voiceID, req.query)
 }
 
 func (s *Server) runAskAudioAnswer(ctx context.Context, question, voiceID string, sq model.SearchQuery) (toolCallResult, *toolExecutionError) {
@@ -2083,20 +2236,37 @@ func parseListFilesArgs(args map[string]interface{}) (pathPrefix, glob string, l
 	return pathPrefix, glob, limit, offset, includeHidden, nil
 }
 
-// parseKArg parses the "k" argument with default and range validation.
+// parseKArg resolves the shared k argument for search, ask, related, ask_audio
+// and transcribe_and_ask.
+//
+// An OMITTED k resolves to the shipped default (DefaultSearchK). A SUPPLIED k
+// must satisfy the bound the input schema advertises, 1..50 (SPEC §15.2/§15.3,
+// canonical search.json/ask.json), and anything outside it is INVALID_RANGE.
+//
+// This distinction is the fix for issue #648: k=0 and k=-1 used to be replaced
+// by the default, so a caller that asked for a k the schema forbids got a
+// silent, different retrieval instead of the machine-parseable error every
+// other out-of-bound value produced. Absent and present-but-invalid are
+// different requests and answer differently now.
+//
+// Resolving an omitted k against `rag.k_default` is deliberately NOT done here:
+// that precedence is dirstral-spec PR #90 / dir2mcp #654 and it changes what the
+// served schema must advertise as well.
 func parseKArg(args map[string]interface{}) (int, *toolExecutionError) {
-	k := DefaultSearchK
-	if rawK, exists := args["k"]; exists {
-		parsedK, parseErr := parseInteger(rawK, "k")
-		if parseErr != nil {
-			return 0, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
-		}
-		if parsedK > 0 {
-			k = parsedK
-		}
+	rawK, exists := args["k"]
+	if !exists {
+		return DefaultSearchK, nil
 	}
-	if k > 50 {
-		return 0, &toolExecutionError{Code: "INVALID_RANGE", Message: "k must be between 1 and 50", Retryable: false}
+	k, parseErr := parseInteger(rawK, "k")
+	if parseErr != nil {
+		return 0, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+	}
+	if k < MinSearchK || k > MaxSearchK {
+		return 0, &toolExecutionError{
+			Code:      "INVALID_RANGE",
+			Message:   fmt.Sprintf("k must be between %d and %d", MinSearchK, MaxSearchK),
+			Retryable: false,
+		}
 	}
 	return k, nil
 }
@@ -3696,7 +3866,7 @@ func searchInputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"query":       map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
 			"file_glob":   map[string]interface{}{"type": "string"},
@@ -3785,7 +3955,7 @@ func relatedInputSchema() map[string]interface{} {
 				"minLength":   1,
 				"description": "The source document (corpus-relative, normalized '/'): neighbours are ranked against the document's own chunk vectors. Chunks belonging to this document are always excluded from hits.",
 			},
-			"k":     map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":     map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 			"index": map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto", "description": "Which logical vector axis to search (SPEC §6.1). 'auto' matches the source segment's own index_kind."},
 			"exclude_same_document": map[string]interface{}{
 				"type":        "boolean",
@@ -3835,7 +4005,7 @@ func askInputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"question":    map[string]interface{}{"type": "string", "minLength": 1},
-			"k":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":           map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 			"mode":        map[string]interface{}{"type": "string", "enum": []string{"answer", "search_only"}, "default": "answer"},
 			"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}, "default": "auto"},
 			"path_prefix": map[string]interface{}{"type": "string"},
@@ -4029,7 +4199,7 @@ func transcribeAndAskInputSchema() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
 			"question": map[string]interface{}{"type": "string", "minLength": 1},
-			"k":        map[string]interface{}{"type": "integer", "minimum": 1, "maximum": MaxSearchK, "default": DefaultSearchK},
+			"k":        map[string]interface{}{"type": "integer", "minimum": MinSearchK, "maximum": MaxSearchK, "default": DefaultSearchK},
 		},
 		"required": []string{"rel_path", "question"},
 	}
@@ -4261,10 +4431,16 @@ func statsOutputSchema() map[string]interface{} {
 				"type":                 "object",
 				"additionalProperties": false,
 				"properties": map[string]interface{}{
-					"embed_text":   map[string]interface{}{"type": "string"},
-					"embed_code":   map[string]interface{}{"type": "string"},
-					"ocr":          map[string]interface{}{"type": "string"},
-					"stt_provider": map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}},
+					"embed_text": map[string]interface{}{"type": "string"},
+					"embed_code": map[string]interface{}{"type": "string"},
+					"ocr":        map[string]interface{}{"type": "string"},
+					// stt_provider is NOT a closed enum (bs-007 and stats.json:
+					// "any STT-capable provider ... is valid"). The old
+					// mistral|elevenlabs enum made a strict client reject the
+					// stats of a deployment that transcribes with whisper,
+					// openai, gemini or an operator-named profile, all of which
+					// the provider model already supports (#647).
+					"stt_provider": map[string]interface{}{"type": "string", "minLength": 1},
 					"stt_model":    map[string]interface{}{"type": "string"},
 					"chat":         map[string]interface{}{"type": "string"},
 				},
@@ -4308,6 +4484,36 @@ func statsOutputSchema() map[string]interface{} {
 						"error_message": map[string]interface{}{"type": "string"},
 					},
 					"required": []string{"rel_path", "doc_type", "mtime_unix", "error_message"},
+				},
+			},
+			// skip_reasons: optional per SPEC §15.6. It is the honest-coverage
+			// breakdown of what was NOT indexed and why. Omitted when nothing
+			// was skipped; clients MUST read omission as "nothing skipped",
+			// not "unsupported".
+			//
+			// `reason` is advertised as a plain string, not the canonical
+			// closed enum. The spec's enum is the vocabulary for one spec
+			// minor and the same section tells clients they MAY receive an
+			// unrecognized value from a newer server and SHOULD render it
+			// verbatim. A served enum would therefore publish a schema that
+			// rejects a payload this server can legitimately emit, the very
+			// defect skip_reasons is being added to fix. The canonical values
+			// are named in the description so a client can still branch on
+			// them.
+			"skip_reasons": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]interface{}{
+						"reason": map[string]interface{}{
+							"type":        "string",
+							"minLength":   1,
+							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, symlink_ignored. Render an unrecognized value verbatim.",
+						},
+						"count": map[string]interface{}{"type": "integer", "minimum": 1},
+					},
+					"required": []string{"reason", "count"},
 				},
 			},
 		},
