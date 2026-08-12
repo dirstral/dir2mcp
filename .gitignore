@@ -53,3 +53,7 @@ __pycache__/
 # `pip install -e` so the tests exercise the working tree rather than a copy;
 # that writes this alongside the package.
 *.egg-info/
+
+# The venv `make test-annotator` owns. It installs there rather than into the
+# ambient interpreter, which a PEP 668 python refuses.
+annotator/.venv-test/

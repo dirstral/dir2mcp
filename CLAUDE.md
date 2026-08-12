@@ -23,12 +23,24 @@ dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. I
 ## Build and test
 
 - Build: `make build`
-- Full checks: `make check`
+- Full checks: `make check` (the local merge-readiness gate: Go plus the Python
+  annotator suite)
 - CI-safe checks: `make ci`
 - Focused suites:
   - `go test ./tests/mcp -run X402`
   - `go test ./tests/x402`
   - `go test ./tests/ingest`
+  - `make test-annotator` (Python annotator suite on its own)
+
+### Gate rules
+
+- `make check` and `make ci` never rewrite the tree. `fmt-check` reports
+  unformatted files and fails; `make fmt` is the separate developer target that
+  formats in place. Do not put `fmt` back in front of a gate.
+- `make test-annotator` installs into `annotator/.venv-test`, a venv it owns.
+  A PEP 668 interpreter (Homebrew, Debian) refuses a `pip install` into itself,
+  so the suite must never install into the ambient python. Rebuild the venv with
+  `rm -rf annotator/.venv-test` or `make clean-all`.
 
 ### Integration tests
 

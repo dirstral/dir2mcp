@@ -29,6 +29,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # `make check` runs the Python annotator suite too, so this job needs the
+      # same interpreter the dedicated `annotator` job uses.
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: annotator/pyproject.toml
+
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
@@ -94,6 +101,11 @@ jobs:
   # never reaches it. Without this job a PR touching only annotator/ collected
   # a full set of green checks that had not executed a line of the change --
   # which is how an ungated precision regression shipped (#779/#787).
+  #
+  # `make check` in the `checks` job now runs this suite as well, so a developer
+  # who runs the documented local gate sees the same result (#649). This job
+  # stays because it reports the annotator on its own, in well under a minute,
+  # instead of inside a five minute Go run.
   annotator:
     runs-on: ubuntu-latest
     timeout-minutes: 5

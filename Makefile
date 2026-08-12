@@ -26,7 +26,7 @@ build-elevenlabs-bridge:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt vet lint cyclo ineffassign misspell test test-race test-annotator check ci benchmark inspector-smoke conformance
+.PHONY: all clean clean-all help fmt fmt-check vet lint cyclo ineffassign misspell test test-race test-release-tools test-annotator check ci benchmark inspector-smoke conformance
 
 all: check
 
@@ -35,7 +35,8 @@ help:
 	@echo "  all       - default target (runs check)"
 	@echo "  clean     - remove build artifacts and local test caches only"
 	@echo "  clean-all - full clean including Go build cache (use sparingly)"
-	@echo "  fmt       - format Go code"
+	@echo "  fmt       - format Go code in place (developer convenience)"
+	@echo "  fmt-check - fail when Go code is unformatted (read-only gate)"
 	@echo "  vet    - run go vet"
 	@echo "  lint   - run golangci-lint"
 	@echo "  cyclo  - run gocyclo -over 15 over the whole tree"
@@ -43,15 +44,35 @@ help:
 	@echo "  misspell    - run misspell over the whole tree"
 	@echo "  test   - run go test"
 	@echo "  test-race - run go test -race on the concurrency-sensitive packages (needs CGO)"
-	@echo "  check  - fmt + vet + lint + cyclo + ineffassign + misspell + test + build"
-	@echo "  ci     - vet + cyclo + ineffassign + misspell + test (CI-safe default)"
+	@echo "  test-annotator - run the Python annotator suite in its own venv"
+	@echo "  check  - fmt-check + vet + lint + cyclo + ineffassign + misspell + test + test-annotator + build"
+	@echo "  ci     - fmt-check + vet + cyclo + ineffassign + misspell + test + test-annotator (CI-safe default)"
 	@echo "  build-elevenlabs-bridge - build the ElevenLabs webhook bridge binary"
 	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
 	@echo "  inspector-smoke  - build and run MCP inspector headless smoke test"
 
+# Go trees the two formatting targets cover. `fmt` rewrites them, `fmt-check`
+# only reads them.
+GOFMT_ROOTS := cmd internal tests
+
+# Developer convenience: format in place. Never a prerequisite of a gate.
 fmt:
-	gofmt -w $$(find cmd internal tests -name '*.go')
+	gofmt -w $$(find $(GOFMT_ROOTS) -name '*.go')
+
+# The formatting gate, and the reason it is separate from `fmt`. `check` used
+# to depend on `fmt`, so unformatted code was rewritten instead of reported: on
+# CI the rewrite landed on a throwaway checkout, the job went green, and the
+# committed tree stayed unformatted until main needed a cleanup commit (#649).
+# A check that mutates the tree can never fail, so this one only reads.
+fmt-check:
+	@drift=$$(gofmt -l $$(find $(GOFMT_ROOTS) -name '*.go')) || exit 1; \
+	if [ -n "$$drift" ]; then \
+		echo "gofmt: these files are not formatted:"; \
+		printf '  %s\n' $$drift; \
+		echo "run 'make fmt' and commit the result"; \
+		exit 1; \
+	fi
 
 vet:
 	go vet ./...
@@ -95,12 +116,36 @@ conformance:
 # not reachable from `go test`, so it needs its own target. Core is stdlib-only
 # by design; the `ocr` extra is installed as well so the vision recognizers'
 # tests run rather than skip (#787).
-test-annotator:
-	cd annotator && python3 -m pip install --quiet -e '.[test,ocr]' && python3 -m pytest -q
+#
+# The install goes into a venv this target owns, not into the ambient
+# interpreter. `pip install` into a PEP 668 interpreter (Homebrew, Debian, most
+# distribution pythons) is refused outright, so the previous form could not run
+# on a normal developer machine: the target existed and was unrunnable, which is
+# half of why the suite stayed outside every gate (#649). The venv also keeps
+# the editable install off the developer's own environment.
+ANNOTATOR_VENV ?= $(CURDIR)/annotator/.venv-test
+# Absolute, because the pytest recipe runs from `annotator/`: an override given
+# as a relative path would otherwise be resolved against the wrong directory.
+ANNOTATOR_PY := $(abspath $(ANNOTATOR_VENV))/bin/python
+# Stamp file, so the install runs when the dependency set changes and not on
+# every test run. Delete the venv (or run `make clean-all`) to rebuild it from
+# scratch, which is also the fix if its interpreter is ever removed underneath.
+ANNOTATOR_STAMP := $(ANNOTATOR_VENV)/.installed
 
-check: fmt vet lint cyclo ineffassign misspell test test-release-tools build
+$(ANNOTATOR_STAMP): annotator/pyproject.toml
+	python3 -m venv "$(ANNOTATOR_VENV)"
+	"$(ANNOTATOR_PY)" -m pip install --quiet -e '$(CURDIR)/annotator[test,ocr]'
+	touch "$@"
 
-ci: vet cyclo ineffassign misspell test test-release-tools
+test-annotator: $(ANNOTATOR_STAMP)
+	cd annotator && "$(ANNOTATOR_PY)" -m pytest -q
+
+# `check` is the documented local merge-readiness gate, so it has to cover the
+# whole repository: the annotator suite is part of it, and the formatting step
+# reports rather than rewrites.
+check: fmt-check vet lint cyclo ineffassign misspell test test-release-tools test-annotator build
+
+ci: fmt-check vet cyclo ineffassign misspell test test-release-tools test-annotator
 
 benchmark:
 	# run the large-corpus retrieval benchmark only
@@ -132,3 +177,4 @@ clean:
 clean-all: clean
 	# perform a full cache wipe, use only when you really need it
 	go clean -cache -testcache >/dev/null 2>&1 || true
+	rm -rf "$(ANNOTATOR_VENV)"
