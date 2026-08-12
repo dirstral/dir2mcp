@@ -129,7 +129,7 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		// commit() only unlinks the moved-aside backups, so running it while the
 		// store is open is safe: a persist-on-close writes the live slot, never
 		// the backup slot.
-		staging.commit()
+		staging.commit(a.stderr)
 		staging.discardContentHashBackup(ctx, a.stderr)
 		a.closeStoreWithLog(st)
 	} else {
@@ -288,6 +288,96 @@ func (s *reindexStaging) backup(name string) error {
 	return nil
 }
 
+// reindexCommitMarkerName is the durable record that a reindex reached its
+// commit point. It lives in the state directory beside the backups it describes.
+//
+// It exists because commit() is the ONE step of this protocol that ordering
+// cannot make safe (issue #820). Every other step is a single atomic operation,
+// so a crash lands either before it or after it, and #796 closed its window by
+// ordering the steps rather than by adding state. commit() is different: it is N
+// independent unlinks over a SET of backups, and the set carries no boundary.
+// After a crash the recovery scan sees the surviving subset and cannot tell
+// "three of five were already discarded" from "a rebuild staged three files and
+// died". Adopting that subset mixes one generation's text index with another's
+// code index. No ordering of the unlinks removes the ambiguity, because every
+// prefix of the removals is a legal observation and every prefix looks exactly
+// like a smaller staged set.
+//
+// So the marker states the one fact the file names cannot: the rebuild is
+// durable, therefore every *.reindex-old beside this marker is superseded and
+// must be discarded, not adopted. It is written before the first unlink and
+// removed after the last one, which makes recovery idempotent and makes an
+// interrupted commit resumable.
+const reindexCommitMarkerName = "reindex-commit"
+
+// reindexCommitMarkerBody explains the file to an operator who finds it in a
+// state directory. Nothing reads the contents: the marker's presence carries the
+// whole meaning, and the names it would list are exactly the names recovery
+// already reads off the directory.
+const reindexCommitMarkerBody = "dir2mcp: a reindex reached its commit point.\n" +
+	"Every *" + reindexBackupSuffix + " file beside this marker is a superseded index generation.\n" +
+	"The next `dir2mcp up` or `dir2mcp reindex` discards them and removes this file.\n"
+
+// writeReindexCommitMarker records that the rebuild is durable, so the backups
+// are stale rather than a rollback target.
+//
+// The contents are fsynced and so is the directory entry, because this marker is
+// only useful if it survives the crash it describes. The rest of the staging
+// protocol needs no fsync: it is built from renames, which are atomic, so a
+// crash sees one of two orderings either way.
+func writeReindexCommitMarker(stateDir string) error {
+	path := filepath.Join(stateDir, reindexCommitMarkerName)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	if _, err := f.WriteString(reindexCommitMarkerBody); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", path, err)
+	}
+	return syncStateDir(stateDir)
+}
+
+// syncStateDir fsyncs a directory so a file created in it is durable by name and
+// not only by contents. Mirrors diskindex.syncDir: a platform that cannot open a
+// directory for read reports no error rather than failing an otherwise good
+// write.
+func syncStateDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return fmt.Errorf("sync %s: %w", dir, err)
+	}
+	return nil
+}
+
+// interruptedReindex reports what the recovery pass did, so each caller can word
+// its own warning (the two commands do different things next) and can tell
+// "nothing to do" from "acted" without re-scanning.
+type interruptedReindex struct {
+	// restored names the live basenames put back from a crashed run's backups.
+	restored []string
+	// discarded names the superseded generations an interrupted commit left
+	// behind. Restoring one of these would mix index generations (issue #820).
+	discarded []string
+	// discardErr collects the superseded copies that could not be unlinked. It
+	// is reported and never fatal: a copy nothing reads is not a reason to
+	// refuse a corpus whose live generation is already correct. The marker
+	// stays, so the next run tries again, and a `reindex` in the meantime is
+	// still refused by backup() on the occupied slot.
+	discardErr error
+}
+
 // recoverInterruptedReindex finishes the rollback that a crashed reindex never
 // got to run. `reindex` calls it before staging a new generation; `up` calls it
 // before opening the corpus to serve from it (issue #764), so the two commands
@@ -308,43 +398,113 @@ func (s *reindexStaging) backup(name string) error {
 // single rename (not remove-then-rename) so a crash inside recovery itself can
 // never leave neither copy.
 //
-// Recovery failure is fatal to both callers: for `reindex` because staging would
-// then move the partial file into the recovery slot and destroy it, and for `up`
-// because the alternative is serving the partial generation, which is the bug.
+// A commit marker inverts the policy for exactly the case it names. The marker
+// says the rebuild is durable, so the backups beside it are superseded copies
+// that commit() had started to unlink, and adopting them would put an older
+// generation back over a newer one, file by file, in whatever mixture the crash
+// happened to leave (issue #820). Recovery therefore finishes the commit instead:
+// it discards those backups and clears the marker. Both halves are unlinks, so
+// this is idempotent and a crash inside it simply resumes on the next run.
 //
-// Returns the live basenames it restored so each caller can word its own warning
-// (the two commands do different things next), and so a caller can tell "nothing
-// to do" from "recovered" without re-scanning.
-func recoverInterruptedReindex(stateDir string) ([]string, error) {
+// A failure to RESTORE is fatal to both callers: for `reindex` because staging
+// would then move the partial file into the recovery slot and destroy it, and
+// for `up` because the alternative is serving the partial generation, which is
+// the bug. A failure to DISCARD is not, and finishInterruptedReindexCommit says
+// why.
+func recoverInterruptedReindex(stateDir string) (interruptedReindex, error) {
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
-		return nil, fmt.Errorf("scan state dir %s: %w", stateDir, err)
+		return interruptedReindex{}, fmt.Errorf("scan state dir %s: %w", stateDir, err)
 	}
-	var recovered []string
+	if hasReindexCommitMarker(entries) {
+		return finishInterruptedReindexCommit(stateDir, entries), nil
+	}
+	var out interruptedReindex
 	for _, entry := range entries {
-		name := entry.Name()
-		// Scan by suffix rather than iterating index.StaleIndexFiles for the
-		// configured backend: a crash under one backend can be retried under
-		// another, and the leftovers of the backend that crashed are part of
-		// the same last-known-good set.
-		if name == reindexBackupSuffix || !strings.HasSuffix(name, reindexBackupSuffix) {
+		live, ok := reindexBackupTarget(entry)
+		if !ok {
 			continue
 		}
-		// Only regular files are ours: staging produces a backup by renaming an
-		// index file, never a directory or a symlink. Renaming something of
-		// another shape into the live slot would move an unrelated path (or
-		// point the index at an arbitrary target), so leave it alone and let
-		// backup() refuse the occupied slot with its own explicit error.
-		if !entry.Type().IsRegular() {
-			continue
+		if err := os.Rename(filepath.Join(stateDir, entry.Name()), filepath.Join(stateDir, live)); err != nil {
+			return out, fmt.Errorf("restore last-known-good index %s: %w", live, err)
 		}
-		live := strings.TrimSuffix(name, reindexBackupSuffix)
-		if err := os.Rename(filepath.Join(stateDir, name), filepath.Join(stateDir, live)); err != nil {
-			return nil, fmt.Errorf("restore last-known-good index %s: %w", live, err)
-		}
-		recovered = append(recovered, live)
+		out.restored = append(out.restored, live)
 	}
-	return recovered, nil
+	return out, nil
+}
+
+// finishInterruptedReindexCommit runs the other policy: the marker says the
+// rebuild is durable, so every backup beside it is superseded and is unlinked
+// rather than adopted.
+//
+// Nothing here is fatal. The restoring half is fatal because the generation it
+// puts back is the one the caller is about to serve or stage over; this half
+// only deletes a copy that nothing reads. Refusing to start a daemon over a
+// leftover file would turn a stale copy into an outage, which is the trade #764
+// already rejected. A copy that survives keeps the marker, so the next run tries
+// again, and a `reindex` in the meantime still refuses on the occupied slot.
+func finishInterruptedReindexCommit(stateDir string, entries []os.DirEntry) interruptedReindex {
+	var out interruptedReindex
+	var failures []error
+	for _, entry := range entries {
+		live, ok := reindexBackupTarget(entry)
+		if !ok {
+			continue
+		}
+		if err := os.Remove(filepath.Join(stateDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failures = append(failures, fmt.Errorf("discard superseded index generation %s: %w", live, err))
+			continue
+		}
+		out.discarded = append(out.discarded, live)
+	}
+	if len(failures) > 0 {
+		// Keep the marker: the commit is not finished, so the next run must
+		// still read these backups as superseded rather than adopt them.
+		out.discardErr = errors.Join(failures...)
+		return out
+	}
+	// Last, so a crash before this point leaves the marker in place and the next
+	// run finishes the same work rather than adopting what is left.
+	if err := os.Remove(filepath.Join(stateDir, reindexCommitMarkerName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		out.discardErr = fmt.Errorf("clear the reindex commit marker: %w", err)
+	}
+	return out
+}
+
+// hasReindexCommitMarker reports whether the state directory holds the marker a
+// commit writes before it unlinks the first backup. Only a regular file counts,
+// for the same reason recovery skips a non-regular backup.
+func hasReindexCommitMarker(entries []os.DirEntry) bool {
+	for _, entry := range entries {
+		if entry.Name() == reindexCommitMarkerName && entry.Type().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+// reindexBackupTarget reports the live basename a directory entry is the moved-
+// aside copy of, and whether the entry is one of ours at all.
+//
+// Entries are matched by suffix rather than by iterating index.StaleIndexFiles
+// for the configured backend: a crash under one backend can be retried under
+// another, and the leftovers of the backend that crashed are part of the same
+// last-known-good set.
+//
+// Only regular files are ours: staging produces a backup by renaming an index
+// file, never a directory or a symlink. Renaming something of another shape into
+// the live slot would move an unrelated path (or point the index at an arbitrary
+// target), so leave it alone and let backup() refuse the occupied slot with its
+// own explicit error.
+func reindexBackupTarget(entry os.DirEntry) (string, bool) {
+	name := entry.Name()
+	if name == reindexBackupSuffix || !strings.HasSuffix(name, reindexBackupSuffix) {
+		return "", false
+	}
+	if !entry.Type().IsRegular() {
+		return "", false
+	}
+	return strings.TrimSuffix(name, reindexBackupSuffix), true
 }
 
 // restoreInterruptedReindexHashes is the store-side half of the rollback a
@@ -380,11 +540,57 @@ func restoreInterruptedReindexHashes(ctx context.Context, st model.Store) error 
 }
 
 // commit deletes the moved-aside backups after a durable rebuild.
-func (s *reindexStaging) commit() {
+//
+// The deletions are N independent unlinks and the set of backups has no boundary
+// on disk, so a crash inside the loop used to leave a subset that recovery read
+// as a rollback target and adopted: one generation's text index beside another
+// generation's code index (issue #820). A marker written before the first unlink
+// states the fact the file names cannot carry, namely that the rebuild is
+// durable, so recovery discards the survivors instead of adopting them. It is
+// removed after the last unlink, so a crash anywhere in this function leaves a
+// commit the next run finishes.
+//
+// Two degradations are deliberate, and both keep the corpus no worse than the
+// behaviour this replaces:
+//
+//   - The marker cannot be written. The unlinks still run, because NOT deleting
+//     the backups is the worse failure: the snapshot is dropped straight after
+//     this and recovery would then adopt a stale generation over hashes that
+//     already describe the new one, which is the #796 bug. So this degrades to
+//     the old, unprotected window, and it says so.
+//   - An unlink fails. The marker STAYS, so the next `up` or `reindex` discards
+//     what is left rather than adopting it.
+func (s *reindexStaging) commit(stderr io.Writer) {
+	if len(s.backups) == 0 {
+		return
+	}
+	marked := true
+	if err := writeReindexCommitMarker(s.stateDir); err != nil {
+		marked = false
+		writef(stderr, "warning: reindex commit: could not record the commit marker (%v); "+
+			"a crash while the superseded index generations are removed may leave a mixed generation behind\n", err)
+	}
+	removed := true
 	for _, name := range s.backups {
-		_ = os.Remove(filepath.Join(s.stateDir, name) + reindexBackupSuffix)
+		if err := os.Remove(filepath.Join(s.stateDir, name) + reindexBackupSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removed = false
+			writef(stderr, "warning: reindex commit: discard superseded index generation %s: %v\n", name, err)
+		}
 	}
 	s.backups = nil
+	if !removed {
+		if marked {
+			writef(stderr, "warning: reindex commit: a superseded index generation is still on disk; "+
+				"the next `dir2mcp up` or `dir2mcp reindex` discards it\n")
+		}
+		return
+	}
+	// Unconditional, so a marker that was only half written (created, then
+	// failed to sync) is cleaned up too. A missing marker is the ordinary case
+	// when the write failed outright.
+	if err := os.Remove(filepath.Join(s.stateDir, reindexCommitMarkerName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writef(stderr, "warning: reindex commit: remove the commit marker: %v\n", err)
+	}
 }
 
 // rollback restores the moved-aside index files over any partially-written
@@ -433,9 +639,19 @@ func (a *App) prepareReindexStore(ctx context.Context, global globalOptions, cfg
 			"The previous index generation is still on disk as *"+reindexBackupSuffix+" in the state directory; fix the error above and re-run `dir2mcp reindex`.")
 		return nil, nil, exitGeneric
 	}
-	if len(recovered) > 0 {
+	if len(recovered.restored) > 0 {
 		writef(a.stderr, "warning: recovered %d index file(s) left by an interrupted reindex before rebuilding: %s\n",
-			len(recovered), strings.Join(recovered, ", "))
+			len(recovered.restored), strings.Join(recovered.restored, ", "))
+	}
+	if len(recovered.discarded) > 0 {
+		writef(a.stderr, "warning: finished an interrupted reindex commit before rebuilding; discarded %d superseded index file(s): %s\n",
+			len(recovered.discarded), strings.Join(recovered.discarded, ", "))
+	}
+	if recovered.discardErr != nil {
+		// Not fatal here either: the staging below refuses an occupied backup
+		// slot with its own explicit error, so the run still stops before it can
+		// overwrite anything.
+		writef(a.stderr, "warning: could not finish an interrupted reindex commit: %v\n", recovered.discardErr)
 	}
 	st := a.storeForConfig(cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {

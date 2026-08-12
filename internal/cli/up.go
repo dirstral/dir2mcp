@@ -758,12 +758,25 @@ func (a *App) openStateForServing(ctx context.Context, cfg *config.Config, jsonO
 			"The last-known-good index generation is still on disk as *"+reindexBackupSuffix+" in the state directory; fix the error above, then start the server again or rebuild with `dir2mcp reindex`.")
 		return nil, builtIndex{}, builtIndex{}, exitIndexLoadFailure
 	}
-	if len(recovered) > 0 {
+	if len(recovered.restored) > 0 {
 		// Loud on purpose, and durable: teeServerLog is already installed, so this
 		// reaches <state_dir>/server.log and the support bundle, which is where an
 		// operator looks after the fact to explain a rebuild that never finished.
 		writef(a.stderr, "warning: an interrupted reindex left this corpus inconsistent; restored %d last-known-good index file(s) before serving: %s\n",
-			len(recovered), strings.Join(recovered, ", "))
+			len(recovered.restored), strings.Join(recovered.restored, ", "))
+	}
+	if len(recovered.discarded) > 0 {
+		// The other half of the same repair: the rebuild WAS durable, so these
+		// copies are superseded and serving one would mix index generations (#820).
+		writef(a.stderr, "warning: an interrupted reindex commit left superseded index file(s) behind; discarded %d before serving: %s\n",
+			len(recovered.discarded), strings.Join(recovered.discarded, ", "))
+	}
+	if recovered.discardErr != nil {
+		// Reported, not fatal. The live slots already hold the durable rebuild's
+		// generation, so a copy that could not be unlinked changes nothing the
+		// server reads. Refusing to serve over it would turn a stale file into an
+		// outage, which is the trade this startup path already rejected.
+		writef(a.stderr, "warning: could not finish an interrupted reindex commit: %v\n", recovered.discardErr)
 	}
 	st, textBuilt, codeBuilt, code := a.initStoreAndIndices(ctx, cfg, jsonOutput)
 	if code != exitSuccess {
