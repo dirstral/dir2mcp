@@ -233,10 +233,17 @@ func TestReindex_AfterCrash_RepeatedCrashesDoNotRotatePartialState(t *testing.T)
 			t.Fatalf("attempt %d: reindex should fail when the ingestor errors; stderr=%q", attempt, stderr)
 		}
 		if got := readFileString(t, live); got != crashGoodIndex {
-			t.Fatalf("attempt %d: live index must still be the last-known-good generation; want %q got %q", attempt, crashGoodIndex, got)
+			t.Fatalf("attempt %d: live index must still be the last-known-good generation; want %q got %q; stderr=%q",
+				attempt, crashGoodIndex, got, stderr)
 		}
+		// stderr is part of the assertion, not decoration. The rollback names
+		// which of the two #811 sentinels it hit when a restore puts nothing
+		// back, so an empty hash here reads as "the snapshot was absent" or
+		// "the snapshot held no rows" rather than an unexplained blank. Issue
+		// #807 was mis-filed as a flaky test twice for exactly that reason.
 		if got := readDocumentHash(t, stateDir, relPath); got != crashGoodHash {
-			t.Fatalf("attempt %d: content_hash must still be the pre-crash snapshot; want %q got %q", attempt, crashGoodHash, got)
+			t.Fatalf("attempt %d: content_hash must still be the pre-crash snapshot; want %q got %q; stderr=%q",
+				attempt, crashGoodHash, got, stderr)
 		}
 	}
 }
