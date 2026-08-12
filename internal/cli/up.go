@@ -1971,7 +1971,7 @@ func (a *App) publishConnection(cfg config.Config, mcpURL string, auth authMater
 // (the helper has already written the error).
 func (a *App) setupServerSingleInstance(stateDir string, opts upOptions, cancel context.CancelFunc) (cleanup func(), code int) {
 	cleanup = func() {}
-	if isRunningAsDaemonChild() {
+	if a.isDaemonChild() {
 		installDaemonChildSignalHandler(cancel)
 	}
 	release, err := acquireSingleInstanceLock(stateDir)
@@ -2138,7 +2138,7 @@ func (a *App) installInteractionForUp(
 	opts upOptions,
 	nonInteractiveMode bool,
 ) <-chan struct{} {
-	if isRunningAsDaemonChild() {
+	if a.isDaemonChild() {
 		installDaemonChildSignalHandler(cancel)
 		return startStdinQuitListener(true, opts.jsonOutput)
 	}
@@ -2154,8 +2154,11 @@ func (a *App) installInteractionForUp(
 //   - --foreground / -f: explicit caller request
 //   - --json: NDJSON event stream callers (smoke tests, automation) need
 //     events on stdout in real time, which detaching breaks
-//   - daemon child: we're already inside the forked process; fall through
-//     to the in-process server body
+//   - daemon marker present in the environment: we are already inside the
+//     forked process; fall through to the in-process server body. The test
+//     is the presence of the marker, not the verified handshake (#671): a
+//     marker that fails to verify must degrade to one in-process run, never
+//     to a chain of spawns, so a broken handshake can never fork-bomb.
 //   - non-unix platforms: setsid isn't available, so degrade gracefully
 //   - stdout not a TTY: piped, redirected, or being scraped by a test
 //     harness — the caller wants to see real-time output (and any
@@ -2170,7 +2173,7 @@ func shouldDaemonize(a *App, opts upOptions) bool {
 	if opts.foreground || opts.jsonOutput {
 		return false
 	}
-	if isRunningAsDaemonChild() {
+	if os.Getenv(daemonChildEnv) != "" {
 		return false
 	}
 	if !isDaemonSupported() {

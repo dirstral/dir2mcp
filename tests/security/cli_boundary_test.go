@@ -170,6 +170,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"corpus_snapshot_test.go":                {},
 		"corpus_writer_test.go":                  {},
 		"daemon.go":                              {},
+		"daemon_child.go":                        {},
 		"daemon_other.go":                        {},
 		"daemon_unix.go":                         {},
 		"down.go":                                {},

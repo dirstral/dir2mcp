@@ -103,6 +103,14 @@ type App struct {
 	// successful termination rather than an interrupted command. See
 	// resolveProcessExitCode (#434).
 	serverGracefulStop bool
+
+	// daemonChildOnce/daemonChildVerified cache the daemon-child launch
+	// handshake for this process (#671). The verdict must not change while a
+	// server runs: the parent removes the handshake file once the child is
+	// ready, so re-verifying later would flip the role mid-flight. See
+	// isDaemonChild in daemon_child.go.
+	daemonChildOnce     sync.Once
+	daemonChildVerified bool
 }
 
 type indexingStateAware interface {

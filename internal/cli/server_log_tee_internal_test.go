@@ -132,12 +132,42 @@ func TestTeeServerLog_WritesToServerLogInForeground(t *testing.T) {
 // TestTeeServerLog_NoopInDaemonChild verifies the tee is a no-op in the daemon
 // child, whose stderr the parent already redirects to server.log — teeing again
 // would double-write every line.
+// The daemon child is identified by a verified launch handshake, so the test
+// builds a real one (a marker that merely "looks long" is rejected, #671).
 func TestTeeServerLog_NoopInDaemonChild(t *testing.T) {
-	t.Setenv(daemonChildEnv, strings.Repeat("a", 64)) // looks like a daemon child
+	stateDir := t.TempDir()
+	childEnv, cleanup, err := prepareDaemonChildHandshake(stateDir)
+	if err != nil {
+		t.Fatalf("prepare daemon handshake: %v", err)
+	}
+	defer cleanup()
+	for _, entry := range childEnv {
+		name, value, _ := strings.Cut(entry, "=")
+		t.Setenv(name, value)
+	}
 	app := NewAppWithIO(io.Discard, &bytes.Buffer{})
-	if restore := app.teeServerLog(t.TempDir()); restore != nil {
+	if restore := app.teeServerLog(stateDir); restore != nil {
 		restore()
 		t.Fatal("teeServerLog must be a no-op in the daemon child (stderr already → server.log)")
+	}
+}
+
+// TestTeeServerLog_ActiveWhenMarkerDoesNotVerify pins the other half of #671: a
+// marker that is present but has no matching handshake must not select
+// daemon-child behaviour, so the foreground server.log tee stays active.
+func TestTeeServerLog_ActiveWhenMarkerDoesNotVerify(t *testing.T) {
+	t.Setenv(daemonChildEnv, strings.Repeat("a", 64)) // long, but proves nothing
+	t.Setenv(daemonChildHandshakeEnv, "")
+	stateDir := t.TempDir()
+	var stderr bytes.Buffer
+	app := NewAppWithIO(io.Discard, &stderr)
+	restore := app.teeServerLog(stateDir)
+	if restore == nil {
+		t.Fatal("an unverified marker must not disable the foreground tee")
+	}
+	restore()
+	if !strings.Contains(stderr.String(), daemonChildEnv) {
+		t.Errorf("an unverified marker should be reported once on stderr; got %q", stderr.String())
 	}
 }
 
