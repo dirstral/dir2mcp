@@ -322,11 +322,15 @@ func (w *discoverWalker) walkDirFull(ctx context.Context, absDir, relDir string,
 	// TOCTOU: if a child is added concurrently with the read, the mtime bumps and
 	// we decline to cache a possibly-partial snapshot rather than risk recording a
 	// new mtime against a stale child set (which a later run would wrongly trust).
+	//
+	// The clock is read first, and it is the PRE-read instant that the settle rule
+	// is measured against (#667). See dirReadStamp.
 	caching := w.options.ScanCache != nil && !w.options.FollowSymlinks
-	var preReadMTime time.Time
+	var stamp dirReadStamp
 	if caching {
+		stamp.readAt = time.Now()
 		if info, statErr := os.Stat(absDir); statErr == nil {
-			preReadMTime = info.ModTime()
+			stamp.mtime = info.ModTime()
 		} else {
 			caching = false
 		}
@@ -366,9 +370,25 @@ func (w *discoverWalker) walkDirFull(ctx context.Context, absDir, relDir string,
 	}
 
 	if caching {
-		w.storeDirSignature(absDir, relDir, preReadMTime, sigEntries)
+		w.storeDirSignature(absDir, relDir, stamp, sigEntries)
 	}
 	return nil
+}
+
+// dirReadStamp is what walkDirFull observed about a directory immediately BEFORE
+// it read the directory's entries: the directory's mtime, and the wall-clock
+// instant at which that observation was made.
+//
+// Both halves are pre-read on purpose (#667). The settle rule asks whether a write
+// arriving after the child list was determined is guaranteed to move the stamp,
+// so it must be measured against an instant no later than the read. Measuring it
+// at STORE time instead would be weaker by the duration of the read: a directory
+// whose listing takes seconds (a large directory on a slow NFS mount) could then
+// accept a stamp that a concurrent same-tick add had already made stale, which is
+// the one case the pre-read mtime comparison cannot see either.
+type dirReadStamp struct {
+	mtime  time.Time
+	readAt time.Time
 }
 
 // processFullEntry handles a single freshly-read child of a directory: it stats
@@ -558,25 +578,25 @@ func (w *discoverWalker) emitCachedChildren(ctx context.Context, confirmed []cac
 // failed or skipped store only forgoes the optimization next run.
 //
 // 1. The directory's mtime must be unchanged since it was sampled before the read
-// (preReadMTime). A changed mtime means a child was added/removed/renamed during
+// (stamp.mtime). A changed mtime means a child was added/removed/renamed during
 // the read, so the captured child set may be partial; in that case we skip the
 // store rather than record a new mtime against a stale set (which a later run
 // would wrongly trust).
 //
-// 2. The mtime must be SETTLED (#667): older than this instant by more than the
-// coarsest filesystem timestamp granularity. Guard 1 compares two stamps, so it
-// cannot see a change that landed in the same tick as the stamp it is comparing;
-// guard 2 is what refuses that case. See mtimeSettleWindow.
-func (w *discoverWalker) storeDirSignature(absDir, relDir string, preReadMTime time.Time, entries []CachedDirEntry) {
+// 2. The mtime must be SETTLED (#667): older than the moment of that observation
+// by more than the coarsest filesystem timestamp granularity. Guard 1 compares two
+// stamps, so it cannot see a change that landed in the same tick as the stamp it is
+// comparing; guard 2 is what refuses that case. See mtimeSettleWindow.
+func (w *discoverWalker) storeDirSignature(absDir, relDir string, stamp dirReadStamp, entries []CachedDirEntry) {
 	info, err := os.Stat(absDir)
-	if err != nil || !info.ModTime().Equal(preReadMTime) {
+	if err != nil || !info.ModTime().Equal(stamp.mtime) {
 		return
 	}
-	if !dirSignatureIsSettled(preReadMTime, time.Now()) {
+	if !dirSignatureIsSettled(stamp.mtime, stamp.readAt) {
 		return
 	}
 	_ = w.options.ScanCache.StoreDir(relDir, CachedDirSignature{
-		DirMTimeUnixNano: preReadMTime.UnixNano(),
+		DirMTimeUnixNano: stamp.mtime.UnixNano(),
 		Entries:          entries,
 	})
 }
@@ -606,7 +626,8 @@ func (w *discoverWalker) storeDirSignature(absDir, relDir string, preReadMTime t
 const mtimeSettleWindow = 2 * time.Second
 
 // dirSignatureIsSettled reports whether a directory whose mtime is dirMTime, read
-// by a walk that reached this point at readAt, may have its child list cached.
+// by a walk that observed it at readAt, may have its child list cached. readAt is
+// the PRE-read instant (see dirReadStamp), never a later one.
 //
 // The answer is yes only when dirMTime is at least mtimeSettleWindow behind
 // readAt. Any later write to the directory then produces a stamp that differs
