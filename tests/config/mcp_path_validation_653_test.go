@@ -49,6 +49,20 @@ func TestMCPPathRejectsValuesThatCannotServeARequest(t *testing.T) {
 		{"/mcp/", "a trailing slash registers a subtree, not one endpoint"},
 		{"/mcp path", "whitespace"},
 		{"mcp", "no leading slash"},
+		// Whitespace, measured rather than assumed. ServeMux reads a space as the
+		// separator before the path, so "/mcp " parses as the METHOD "/mcp" with
+		// no path and panics with `invalid method "/mcp"`. A tab does the same. A
+		// newline and a non-breaking space do NOT panic: they register a route no
+		// client can request, which is worse, because the daemon runs and nothing
+		// reaches it. An earlier version of this gate trimmed the value before
+		// checking it, so every case below passed and "/mcp " still panicked.
+		{"/mcp ", "a trailing space: ServeMux parses it as a method separator and panics"},
+		{" /mcp", "a leading space"},
+		{"/mc\tp", "an internal tab: panics like a space"},
+		{"/mc\np", "an internal newline: registers a route no client can request"},
+		{"/mcp\u00a0x", "a non-breaking space: not caught by a space-and-tab check"},
+		{"   ", "whitespace only: this is a typo, not a request for the default"},
+		{"\t", "whitespace only"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			cfg := config.Default()
@@ -94,6 +108,9 @@ func TestEveryAcceptedMCPPathRegistersWithoutPanic(t *testing.T) {
 	for _, path := range []string{
 		"/mcp", "/", "/deep/nested/mcp", "/mcp-v2", "/MCP", "/mcp.json",
 		"/{", "/{name}", "/mcp}",
+		// The whitespace family, which is why this property test exists: the
+		// first version of the grammar accepted "/mcp " and it panicked here.
+		"/mcp ", " /mcp", "/mc\tp", "/mc\np", "/mcp\u00a0x", "   ", "\t",
 	} {
 		cfg := config.Default()
 		cfg.MCPPath = path

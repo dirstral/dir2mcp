@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/netutil"
@@ -4651,10 +4652,28 @@ func (c *Config) Validate() error {
 // Each rejected character is rejected for its own reason, named in the error, so
 // an operator can fix the value rather than guess at a grammar.
 func (c *Config) validateMCPPath() error {
-	path := strings.TrimSpace(c.MCPPath)
+	// The value is checked UNTRIMMED, because the server registers it untrimmed.
+	// An earlier version of this gate validated a trimmed copy, so "/mcp " passed
+	// and then panicked at registration: ServeMux reads a space as the separator
+	// before the path, so "/mcp " parses as the METHOD "/mcp" with no path at all
+	// (`invalid method "/mcp"`). Validating anything other than the value that is
+	// used is the same class of defect this gate exists to close.
+	path := c.MCPPath
 	if path == "" {
-		// An empty value keeps the default, which the loader supplies.
+		// An empty value keeps the default, which the loader supplies. Only an
+		// actually empty string qualifies: a whitespace-only value is a typo, and
+		// it panics registration rather than selecting the default.
 		return nil
+	}
+	// Every Unicode space, not just ' ' and '\t'. A tab panics for the same reason
+	// a space does; a newline and a non-breaking space register a route that is
+	// not the one the operator wrote, which is worse than a refusal because the
+	// daemon then runs and no client can reach it.
+	for _, r := range path {
+		if unicode.IsSpace(r) {
+			return fmt.Errorf("mcp_path %q must not contain whitespace (found %q): "+
+				"a space or tab panics route registration, and any other whitespace registers a path no client can request", path, r)
+		}
 	}
 	if !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("mcp_path %q must start with '/'", path)
@@ -4670,9 +4689,6 @@ func (c *Config) validateMCPPath() error {
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		return fmt.Errorf("mcp_path %q must not contain %q: a query or fragment is not part of the request path, so no request could ever match it",
 			path, path[i:i+1])
-	}
-	if strings.ContainsAny(path, " \t") {
-		return fmt.Errorf("mcp_path %q must not contain whitespace", path)
 	}
 	// ServeMux redirects a request with a doubled slash to the cleaned path, so a
 	// pattern holding one is registered at an address no client is served on.
