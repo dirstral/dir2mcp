@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/providerhttp"
 )
 
 const (
@@ -49,12 +50,6 @@ const (
 	// frequently ignore the field or accept the served model alias, but
 	// operators SHOULD set an explicit model via the provider profile.
 	DefaultModel = "omniembed"
-
-	// maxResponseBytes caps a success response body so a malicious or buggy
-	// self-hosted endpoint (the omniembed base_url is operator-supplied and
-	// often unauthenticated) cannot drive unbounded memory use via a
-	// giant/gzip-bombed 200 response (issue #416).
-	maxResponseBytes = 64 << 20 // 64 MiB
 )
 
 // Client speaks the OpenAI-compatible /v1/embeddings contract against a
@@ -96,7 +91,7 @@ func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		BaseURL:           strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:            strings.TrimSpace(apiKey),
-		HTTPClient:        &http.Client{Timeout: defaultRequestTimeout},
+		HTTPClient:        providerhttp.NewClient(defaultRequestTimeout),
 		MaxRetries:        defaultMaxRetries,
 		InitialBackoff:    defaultInitialBackoff,
 		MaxBackoff:        defaultMaxBackoff,
@@ -253,7 +248,7 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 		return nil, httpError(resp)
 	}
 
-	raw, err := readLimitedBody(resp, maxResponseBytes)
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "OMNIEMBED_FAILED")
 	if err != nil {
 		return nil, err
 	}
@@ -309,30 +304,11 @@ func (c *Client) doJSON(ctx context.Context, path string, body []byte) (*http.Re
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultRequestTimeout}
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultRequestTimeout).Do(req)
 	if err != nil {
 		return nil, &model.ProviderError{Code: "OMNIEMBED_FAILED", Message: "request failed", Retryable: true, Cause: err}
 	}
 	return resp, nil
-}
-
-// readLimitedBody buffers a success response body under maxResponseBytes,
-// returning a clear error rather than reading unbounded if the upstream sends
-// more (issue #416). It reads one byte past the cap to detect an over-limit
-// body without buffering the whole thing.
-func readLimitedBody(resp *http.Response, limit int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, &model.ProviderError{Code: "OMNIEMBED_FAILED", Message: "failed to read response", Retryable: true, StatusCode: resp.StatusCode, Cause: err}
-	}
-	if int64(len(data)) > limit {
-		return nil, &model.ProviderError{Code: "OMNIEMBED_FAILED", Message: fmt.Sprintf("response exceeds %d-byte limit", limit), Retryable: false, StatusCode: resp.StatusCode}
-	}
-	return data, nil
 }
 
 func httpError(resp *http.Response) error {

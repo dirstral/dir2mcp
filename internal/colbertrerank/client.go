@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/providerhttp"
 )
 
 const (
@@ -77,7 +78,7 @@ func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		BaseURL:        strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:         strings.TrimSpace(apiKey),
-		HTTPClient:     &http.Client{Timeout: defaultRequestTimeout},
+		HTTPClient:     providerhttp.NewClient(defaultRequestTimeout),
 		MaxRetries:     defaultMaxRetries,
 		InitialBackoff: defaultInitialBackoff,
 		MaxBackoff:     defaultMaxBackoff,
@@ -165,12 +166,7 @@ func (c *Client) rerankOnce(ctx context.Context, modelName, query string, docume
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultRequestTimeout}
-	}
-
-	resp, err := httpClient.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultRequestTimeout).Do(req)
 	if err != nil {
 		return nil, &model.ProviderError{Code: "COLBERT_FAILED", Message: "rerank request failed", Retryable: true, Cause: err}
 	}
@@ -179,8 +175,12 @@ func (c *Client) rerankOnce(ctx context.Context, modelName, query string, docume
 		return nil, httpError(resp)
 	}
 
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "COLBERT_FAILED")
+	if err != nil {
+		return nil, err
+	}
 	var parsed rerankResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &model.ProviderError{Code: "COLBERT_FAILED", Message: "failed to decode rerank response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/providerhttp"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
@@ -90,7 +91,7 @@ func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		BaseURL:           strings.TrimRight(baseURL, "/"),
 		APIKey:            apiKey,
-		HTTPClient:        &http.Client{Timeout: defaultRequestTimeout},
+		HTTPClient:        providerhttp.NewClient(defaultRequestTimeout),
 		MaxRetries:        defaultMaxRetries,
 		InitialBackoff:    defaultInitialBackoff,
 		MaxBackoff:        defaultMaxBackoff,
@@ -190,8 +191,12 @@ func (c *Client) rerankOnce(ctx context.Context, modelName, query string, docume
 		return nil, cohereHTTPError(resp)
 	}
 
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "COHERE_FAILED")
+	if err != nil {
+		return nil, err
+	}
 	var parsed rerankResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &model.ProviderError{Code: "COHERE_FAILED", Message: "failed to decode rerank response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 
@@ -296,8 +301,12 @@ func (c *Client) embedBatch(ctx context.Context, modelName, inputType string, in
 		return nil, cohereHTTPError(resp)
 	}
 
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "COHERE_FAILED")
+	if err != nil {
+		return nil, err
+	}
 	var parsed embedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &model.ProviderError{Code: "COHERE_FAILED", Message: "failed to decode embedding response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	floats := parsed.Embeddings.Float
@@ -393,8 +402,12 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 		return "", cohereHTTPError(resp)
 	}
 
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "COHERE_FAILED")
+	if err != nil {
+		return "", err
+	}
 	var parsed chatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "COHERE_FAILED", Message: "failed to decode generation response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
 	if u, ok := parsed.tokenUsage(); ok {
@@ -426,26 +439,11 @@ func (c *Client) doJSON(ctx context.Context, path string, body []byte, timeout t
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := clientWithTimeout(c.HTTPClient, timeout).Do(req)
+	resp, err := providerhttp.WithTimeout(c.HTTPClient, timeout).Do(req)
 	if err != nil {
 		return nil, &model.ProviderError{Code: "COHERE_FAILED", Message: "request failed", Retryable: true, Cause: err}
 	}
 	return resp, nil
-}
-
-// clientWithTimeout returns an *http.Client that uses the per-call
-// timeout. The default client built by NewClient carries the short
-// (30s) request timeout, so chat completions — which use the longer
-// GenerationTimeout — must override it even when HTTPClient is set
-// (mirrors internal/openai). The base client's Transport is shared via
-// a shallow copy so connection pooling is preserved.
-func clientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
-	if base == nil {
-		return &http.Client{Timeout: timeout}
-	}
-	cp := *base
-	cp.Timeout = timeout
-	return &cp
 }
 
 func cohereHTTPError(resp *http.Response) error {

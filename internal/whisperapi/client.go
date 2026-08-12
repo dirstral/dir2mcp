@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/providerhttp"
 )
 
 const (
@@ -114,7 +115,7 @@ func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		BaseURL:         strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:          strings.TrimSpace(apiKey),
-		HTTPClient:      &http.Client{Timeout: defaultRequestTimeout},
+		HTTPClient:      providerhttp.NewClient(defaultRequestTimeout),
 		MaxRetries:      defaultMaxRetries,
 		InitialBackoff:  defaultInitialBackoff,
 		MaxBackoff:      defaultMaxBackoff,
@@ -361,12 +362,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultRequestTimeout}
-	}
-
-	resp, err := httpClient.Do(req)
+	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultRequestTimeout).Do(req)
 	if err != nil {
 		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
 	}
@@ -376,8 +372,12 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		return model.TranscriptResult{}, httpError(resp)
 	}
 
+	raw, err := providerhttp.ReadLimitedJSONBody(resp, "WHISPER_FAILED")
+	if err != nil {
+		return model.TranscriptResult{}, err
+	}
 	var parsed transcribeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return model.TranscriptResult{}, &model.ProviderError{
 			Code:      "WHISPER_FAILED",
 			Message:   "failed to decode transcription response",
