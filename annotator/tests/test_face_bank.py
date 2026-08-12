@@ -124,6 +124,183 @@ def test_a_bank_with_nothing_enrollable_is_unavailable(tmp_path, roster):
         FaceRecognizer(roster, stranger, embedder=_embedder())
 
 
+# --- a bank with nothing in it is known before the models load (#845) --------
+#
+# The missing-bank case above already refuses before the embedder is built. A
+# bank that EXISTS and holds nothing enrollable is the same class of problem:
+# the recognizer cannot run, and loading five ONNX models first buys nothing.
+
+
+def _recorder(built: list[str]):
+    """A stand-in `default_embedder` that records that it was called."""
+
+    def default_embedder():
+        built.append("loaded")
+        return _embedder()
+
+    return default_embedder
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["no player directory", "no roster player", "no image"],
+)
+def test_a_bank_with_nothing_to_enroll_refuses_before_the_embedder(
+    tmp_path, roster, monkeypatch, case
+):
+    """Each way a bank can hold nothing enrollable, measured on the ONE thing
+    that costs seconds: whether the models were loaded."""
+    bank = tmp_path / "bank"
+    if case == "no player directory":
+        bank.mkdir()
+    elif case == "no roster player":
+        bank = _bank(tmp_path, player_dir="player_not-on-this-roster")
+    else:
+        (bank / PLAYER_DIR).mkdir(parents=True)
+        (bank / PLAYER_DIR / "notes.txt").write_text("no image ever got copied here")
+
+    built: list[str] = []
+    monkeypatch.setattr(faces, "default_embedder", _recorder(built))
+    with pytest.raises(RecognizerUnavailable):
+        FaceRecognizer(roster, bank)
+    assert built == [], f"the models were loaded for a bank with {case}"
+
+
+def test_a_directory_named_like_an_image_is_not_an_image(tmp_path, roster,
+                                                         monkeypatch):
+    """`nested.jpg` is a legal directory name.
+
+    Counting one as an image would let a bank with nothing to enroll past the
+    check, build the embedder, and then hand it a path that was never an image.
+    So the check tests the suffix AND the file.
+    """
+    bank = tmp_path / "bank"
+    (bank / PLAYER_DIR / "nested.jpg").mkdir(parents=True)
+
+    built: list[str] = []
+    monkeypatch.setattr(faces, "default_embedder", _recorder(built))
+    with pytest.raises(RecognizerUnavailable) as caught:
+        FaceRecognizer(roster, bank)
+    assert "image" in str(caught.value)
+    assert built == [], "a directory named .jpg bought a model load"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores file permissions, so this cannot be provoked",
+)
+def test_an_image_that_refuses_to_open_is_not_an_enrollable_image(tmp_path, roster,
+                                                                 monkeypatch):
+    """`is_file()` says nothing about permissions.
+
+    A bank whose only image cannot be read has nothing to enroll, so it must
+    refuse before the models load. Left to the embedder, the default adapter
+    returns no face for it, which reports a detector problem for a permission
+    one.
+    """
+    bank = _bank(tmp_path, images=("a.jpg",))
+    locked = bank / PLAYER_DIR / "a.jpg"
+    locked.chmod(0o000)
+
+    built: list[str] = []
+    monkeypatch.setattr(faces, "default_embedder", _recorder(built))
+    try:
+        with pytest.raises(RecognizerUnavailable) as caught:
+            FaceRecognizer(roster, bank)
+    finally:
+        locked.chmod(0o644)  # or tmp_path cleanup fails
+    assert "readable image" in str(caught.value), str(caught.value)
+    assert built == [], "an unreadable image bought a model load"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores file permissions, so this cannot be provoked",
+)
+def test_an_unreadable_image_costs_only_its_own_player(tmp_path):
+    """Degrade by as little as possible, as an unreadable player directory
+    already does: the players who can be enrolled are enrolled."""
+    two_players = Roster([
+        Player(id=PLAYER_ID, name="Logan Webb", number="62"),
+        Player(id="player:daylen-lile", name="Daylen Lile", number="4"),
+    ])
+    bank = _bank(tmp_path)
+    other = bank / "player_daylen-lile"
+    other.mkdir()
+    locked = other / "a.jpg"
+    locked.write_bytes(b"stand-in")
+    locked.chmod(0o000)
+    try:
+        rec = FaceRecognizer(two_players, bank, embedder=_embedder())
+    finally:
+        locked.chmod(0o644)
+    assert list(rec.gallery) == [PLAYER_ID]
+
+
+def test_each_empty_bank_reason_says_which_one_it_is(tmp_path, roster):
+    """"Empty" and "missing" send an operator to different places, so they must
+    not collapse into one message. Neither may the two ways a bank that exists
+    can still hold nobody to enroll."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    stranger = _bank(tmp_path / "stranger", player_dir="player_not-on-this-roster")
+    imageless = tmp_path / "imageless"
+    (imageless / PLAYER_DIR).mkdir(parents=True)
+
+    def reason(bank: Path) -> str:
+        with pytest.raises(RecognizerUnavailable) as caught:
+            FaceRecognizer(roster, bank, embedder=_embedder())
+        return str(caught.value)
+
+    missing = reason(tmp_path / "no-such-bank")
+    assert "not found" in missing
+
+    no_dirs = reason(empty)
+    assert "empty" in no_dirs, f"an empty bank does not say so: {no_dirs}"
+
+    off_roster = reason(stranger)
+    assert "roster" in off_roster, f"the reason hides the roster: {off_roster}"
+    assert "player_not-on-this-roster" in off_roster, off_roster
+
+    no_images = reason(imageless)
+    assert "image" in no_images, f"the reason hides the missing images: {no_images}"
+    assert PLAYER_DIR in no_images, no_images
+
+    # Four different problems, four different fixes, so four distinct messages.
+    assert len({missing, no_dirs, off_roster, no_images}) == 4
+    for text in (missing, no_dirs, off_roster, no_images):
+        assert "face bank" in text, text
+
+
+def test_an_empty_bank_is_not_reported_as_a_missing_wheel(tmp_path, roster,
+                                                          monkeypatch):
+    """The operator-facing end of #845.
+
+    A host without the face extra installed reports "install insightface". A
+    host WITH an empty bank must not borrow that message, because installing a
+    wheel would not fix an empty directory. The cheap check runs first, so the
+    reason the pipeline records is the true one.
+    """
+    def uninstalled():
+        raise RecognizerUnavailable(
+            "face recognition needs insightface + opencv "
+            "(pip install 'dirstral-annotator[face]')"
+        )
+
+    monkeypatch.setattr(faces, "default_embedder", uninstalled)
+
+    empty = tmp_path / "empty-bank"
+    empty.mkdir()
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"stand-in; no recognizer reaches frame extraction here")
+
+    pipeline = Pipeline(roster=roster, faces_bank=empty)
+    assert pipeline.cues_for(media) == []
+    note = " ".join(pipeline.skipped)
+    assert "empty" in note, f"an empty bank was reported as something else: {note}"
+    assert "insightface" not in note, note
+
+
 @pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="root ignores directory permissions, so this cannot be provoked",
