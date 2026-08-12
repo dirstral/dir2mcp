@@ -258,7 +258,11 @@ func (o *optionalBoolFlag) IsBoolFlag() bool {
 }
 
 type askOptions struct {
-	question   string
+	question string
+	// k is the requested number of hits, or 0 when the caller supplied none.
+	// 0 means "resolve it against rag.k_default" (SPEC §9.1): the local path
+	// reads the corpus config, and the remote path OMITS k from the tool
+	// arguments so the daemon that owns the configuration resolves it.
 	k          int
 	mode       string
 	index      string
@@ -937,6 +941,9 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
 	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
+	// The local ask path reads the same rag.k_default the served tools do
+	// (SPEC §9.1), so one corpus answers with one default k on both surfaces.
+	ret.SetDefaultK(cfg.EffectiveKDefault())
 	a.configureReranker(ret, cfg)
 	ret.SetMinScore(cfg.RetrievalMinScore)
 	ret.SetRecencyHalfLife(cfg.RetrievalRecencyHalfLife)
@@ -992,7 +999,6 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 // applying defaults and validating k, mode, index, and the doc-types filter.
 func parseAskOptions(args []string) (askOptions, error) {
 	opts := askOptions{
-		k:     mcp.DefaultSearchK,
 		mode:  "answer",
 		index: "auto",
 	}
@@ -1004,7 +1010,7 @@ func parseAskOptions(args []string) (askOptions, error) {
 		&opts.k,
 		"k",
 		opts.k,
-		fmt.Sprintf("number of results (<=0 defaults to %d, max %d)", mcp.DefaultSearchK, mcp.MaxSearchK),
+		fmt.Sprintf("number of results (<=0 uses the configured rag.k_default, currently %d by default; max %d)", mcp.DefaultSearchK, mcp.MaxSearchK),
 	)
 	fs.StringVar(&opts.mode, "mode", opts.mode, "answer|search_only")
 	fs.StringVar(&opts.index, "index", opts.index, "auto|text|code|both")
@@ -1019,8 +1025,12 @@ func parseAskOptions(args []string) (askOptions, error) {
 	if opts.question == "" {
 		return askOptions{}, errors.New("ask command requires a question argument")
 	}
-	if opts.k <= 0 {
-		opts.k = mcp.DefaultSearchK
+	// <=0 keeps the historical "I did not choose a k" meaning, but the number it
+	// resolves to is now the corpus's rag.k_default rather than a constant baked
+	// into the client (SPEC §9.1). Both forms normalize to 0, the value the ask
+	// and search paths read as "unset".
+	if opts.k < 0 {
+		opts.k = 0
 	}
 	if opts.k > mcp.MaxSearchK {
 		return askOptions{}, fmt.Errorf("k must be <= %d", mcp.MaxSearchK)

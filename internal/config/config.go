@@ -80,6 +80,28 @@ const (
 // evidence threshold in internal/retrieval/evidence.go. `0` disables the floor.
 const defaultRetrievalMinScore = 0.05
 
+// RAGKMin, RAGKMax and RAGKFallback resolve the number of hits a retrieval
+// request asks for (SPEC §9.1).
+//
+// RAGKMin/RAGKMax are the inclusive bound the `k` request field advertises on
+// every tool that takes one, and `rag.k_default` MUST satisfy the SAME bound: a
+// default that asks for a k the schema forbids can only fail later, at a request
+// the operator did not write, so a configured value outside it is CONFIG_INVALID
+// at load.
+//
+// RAGKFallback is the shipped fallback, used when the operator configured no
+// `rag.k_default`. Default() ships it, so the config template, the served schema
+// and the runtime all state the same number.
+//
+// They live here, not in internal/mcp, because config validation needs the bound
+// and internal/mcp imports this package (mcp.MinSearchK/MaxSearchK/DefaultSearchK
+// alias them, so there is still one definition).
+const (
+	RAGKMin      = 1
+	RAGKMax      = 50
+	RAGKFallback = 15
+)
+
 // DefaultMediaSubtitlesAlignToleranceMS is the bilingual cross-language cue
 // alignment tolerance (SPEC §8.6.10, media.subtitles.ttml.align_tolerance_ms):
 // a secondary segment whose start is within this many milliseconds of a primary
@@ -257,8 +279,19 @@ type Config struct {
 	// field is intentionally not persisted to disk.
 	Warnings []error
 
-	RAGSystemPrompt     string
-	RAGGenerateAnswer   bool
+	RAGSystemPrompt string
+	// RAGGenerateAnswer is `rag.generate_answer` (SPEC §16). false withholds
+	// answer generation on every ask-family surface: the server returns the
+	// retrieval hits with `answer: ""` and `citations: []`, the same shape
+	// `mode=search_only` returns (SPEC §9.4). The setting and the request field
+	// form a disjunction, so a request cannot turn generation back on, and
+	// `mode=answer` against false is SERVED as search_only rather than refused.
+	RAGGenerateAnswer bool
+	// RAGKDefault is `rag.k_default` (SPEC §16): the number of hits a request
+	// that OMITS `k` resolves to. It MUST satisfy the same RAGKMin..RAGKMax
+	// bound the request field does; a configured value outside it is
+	// CONFIG_INVALID at load. Read it through EffectiveKDefault, which applies
+	// the shipped fallback for a Config that never went through Default().
 	RAGKDefault         int
 	RAGMaxContextChars  int
 	RAGOversampleFactor int
@@ -1538,7 +1571,7 @@ func Default() Config {
 		},
 		RAGSystemPrompt:        "",
 		RAGGenerateAnswer:      true,
-		RAGKDefault:            10,
+		RAGKDefault:            RAGKFallback,
 		RAGMaxContextChars:     20000,
 		RAGOversampleFactor:    5,
 		RetrievalHybridEnabled: true,
@@ -1562,7 +1595,7 @@ func Default() Config {
 		RetrievalAdaptiveEnabled: false,
 		// RetrievalAdaptiveKMin / RetrievalAdaptiveKMax bound the dynamic k the
 		// gate may choose. These defaults give the heuristic room to narrow easy
-		// queries and widen hard ones around the typical rag.k_default (10).
+		// queries and widen hard ones around the shipped rag.k_default (15).
 		RetrievalAdaptiveKMin: 4,
 		RetrievalAdaptiveKMax: 30,
 		// MMR diversity re-ordering defaults to OFF (issue #340): candidate order
@@ -4595,6 +4628,26 @@ func applyX402RouteEnvOverrides(cfg *Config, env map[string]string) {
 	}
 }
 
+// EffectiveKDefault returns the number of hits a request that OMITS `k`
+// resolves to (SPEC §9.1, step 2 then step 3): `rag.k_default` when it is
+// configured and in bound, and the shipped RAGKFallback otherwise.
+//
+// Every surface that takes a `k` reads it through this one method: the tool
+// handlers, the `default` the served tool schemas advertise, the retrieval
+// service and the CLI. One corpus therefore has ONE default, and the value a
+// client reads from the schema is the value an omitted field produces.
+//
+// Validate rejects an out-of-bound configured value, so the fallback branch is
+// reached only by a Config that never went through Default()/Load (a test or an
+// embedder constructing a Config literal). It resolves such a Config to the
+// shipped default rather than to 0, which would retrieve nothing.
+func (c Config) EffectiveKDefault() int {
+	if c.RAGKDefault >= RAGKMin && c.RAGKDefault <= RAGKMax {
+		return c.RAGKDefault
+	}
+	return RAGKFallback
+}
+
 // Validate checks configuration consistency and applies normalization
 // or defaults.  It currently enforces rules around session durations:
 //
@@ -5207,14 +5260,8 @@ func (c *Config) validateNumericBounds() error {
 	if err := c.validateMediaSTTNumericBounds(); err != nil {
 		return err
 	}
-	if c.RAGMaxContextChars < 0 {
-		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
-	}
-	if c.RAGKDefault < 0 {
-		return fmt.Errorf("rag.k_default must be non-negative: %d", c.RAGKDefault)
-	}
-	if c.RAGOversampleFactor < 0 {
-		return fmt.Errorf("rag.oversample_factor must be non-negative: %d", c.RAGOversampleFactor)
+	if err := c.validateRAGNumericBounds(); err != nil {
+		return err
 	}
 	if c.ChunkingMaxTokens < 0 {
 		return fmt.Errorf("chunking.max_tokens must be non-negative: %d", c.ChunkingMaxTokens)
@@ -5234,6 +5281,24 @@ func (c *Config) validateNumericBounds() error {
 	}
 	if err := c.validateRetrievalNumericBounds(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateRAGNumericBounds validates the rag.* numeric knobs.
+func (c *Config) validateRAGNumericBounds() error {
+	if c.RAGMaxContextChars < 0 {
+		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
+	}
+	// rag.k_default carries the same bound as the `k` request field (SPEC 9.1),
+	// and it fails HERE rather than at a later request: an operator who asks for
+	// a k the tool schemas forbid must learn it at load, not from a request they
+	// did not write.
+	if c.RAGKDefault < RAGKMin || c.RAGKDefault > RAGKMax {
+		return fmt.Errorf("rag.k_default must be between %d and %d: %d", RAGKMin, RAGKMax, c.RAGKDefault)
+	}
+	if c.RAGOversampleFactor < 0 {
+		return fmt.Errorf("rag.oversample_factor must be non-negative: %d", c.RAGOversampleFactor)
 	}
 	return nil
 }

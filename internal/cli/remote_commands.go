@@ -341,14 +341,15 @@ func (a *App) runSearchRemote(ctx context.Context, global globalOptions, args []
 		return exitGeneric
 	}
 
-	payload, err := client.CallTool(ctx, protocol.ToolNameSearch, map[string]interface{}{
+	toolArgs := map[string]interface{}{
 		"query":       opts.question,
-		"k":           opts.k,
 		"index":       opts.index,
 		"path_prefix": opts.pathPrefix,
 		"file_glob":   opts.fileGlob,
 		"doc_types":   opts.docTypes,
-	})
+	}
+	withRemoteK(toolArgs, opts.k)
+	payload, err := client.CallTool(ctx, protocol.ToolNameSearch, toolArgs)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("search failed: %v", err))
 		return exitGeneric
@@ -360,16 +361,27 @@ func (a *App) runSearchRemote(ctx context.Context, global globalOptions, args []
 	return exitSuccess
 }
 
+// withRemoteK adds the k argument to a remote tool call, and adds NOTHING when
+// the caller supplied no k. An omitted field is what makes the daemon resolve
+// its own rag.k_default (SPEC §9.1); sending a client-side constant instead
+// would override the server's configured default on every call.
+func withRemoteK(args map[string]interface{}, k int) {
+	if k > 0 {
+		args["k"] = k
+	}
+}
+
 func (a *App) runAskRemote(ctx context.Context, global globalOptions, opts askOptions, client *remoteMCPClient) int {
-	payload, err := client.CallTool(ctx, protocol.ToolNameAsk, map[string]interface{}{
+	args := map[string]interface{}{
 		"question":    opts.question,
 		"mode":        opts.mode,
-		"k":           opts.k,
 		"index":       opts.index,
 		"path_prefix": opts.pathPrefix,
 		"file_glob":   opts.fileGlob,
 		"doc_types":   opts.docTypes,
-	})
+	}
+	withRemoteK(args, opts.k)
+	payload, err := client.CallTool(ctx, protocol.ToolNameAsk, args)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("ask failed: %v", err))
 		return exitGeneric

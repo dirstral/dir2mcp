@@ -338,6 +338,33 @@ strategy selector. The key is now unrecognized, so a config that still carries i
 with the warning above and no longer publishes the key back into the saved config or the
 effective snapshot.
 
+#### Retrieval answer keys
+
+```yaml
+rag:
+  generate_answer: true   # false serves every ask as search-only
+  k_default: 15           # hits for a request that sends no k (1..50)
+```
+
+`rag.k_default` sets how many hits a request that omits `k` gets. It applies to every
+tool that takes a `k`: `search`, `ask`, `related`, `ask_audio` and `transcribe_and_ask`,
+plus the `ask` and `search` CLI commands. Precedence is fixed: the `k` on the request,
+then `rag.k_default`, then the shipped default of 15.
+
+The value carries the same `1..50` bound as the request field. A value outside it fails
+at startup with `CONFIG_INVALID`, because a default that asks for a `k` the tools forbid
+would otherwise only fail later, on a request the operator never wrote.
+
+The served tool schemas advertise the **effective** value. `tools/list` reports
+`"default": <your k_default>` for `k`, so a client that reads the schema and sends the
+advertised number explicitly gets the same result as a client that omits the field.
+
+`rag.generate_answer: false` turns answer generation off for the whole server. Every
+`ask`, `ask_audio` and `transcribe_and_ask` request then behaves as `mode=search_only`:
+the response shape is unchanged, `answer` is `""`, `citations` is `[]`, and the retrieval
+hits are still returned. No chat provider is called. A request cannot switch generation
+back on, so `mode=answer` is served as search-only rather than refused.
+
 ### Environment variables (overrides / secrets)
 
 Sensitive keys and temporary runtime overrides are supplied via environment variables. They take

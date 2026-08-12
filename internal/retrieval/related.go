@@ -31,10 +31,7 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 	if !ok {
 		return model.RelatedResult{}, model.ErrRelatedNotSupported
 	}
-	k := q.K
-	if k <= 0 {
-		k = 15
-	}
+	k := s.effectiveK(q.K)
 	seed, err := s.resolveRelatedSource(ctx, cs, q)
 	if err != nil {
 		return model.RelatedResult{}, err

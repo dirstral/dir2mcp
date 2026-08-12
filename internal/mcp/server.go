@@ -51,18 +51,41 @@ const (
 	paymentOutcomeMaxEntries      = 5000
 )
 
-// DefaultSearchK is the k a tools/call uses when the arguments OMIT k. A
-// supplied k is never replaced by it: an out-of-bound value is INVALID_RANGE
+// DefaultSearchK is the SHIPPED fallback k, used when the arguments omit k and
+// the operator configured no rag.k_default (SPEC §9.1, step 3). A deployment
+// that configures rag.k_default resolves an omitted k to THAT value instead;
+// read the resolved number with Server.effectiveK, never this constant. A
+// supplied k is never replaced by either: an out-of-bound value is INVALID_RANGE
 // (see parseKArg, issue #648).
-const DefaultSearchK = 15
+const DefaultSearchK = config.RAGKFallback
 
 // MinSearchK and MaxSearchK are the inclusive bounds the advertised input
 // schemas publish for k (SPEC §15.2/§15.3, canonical search.json/ask.json:
-// "minimum": 1, "maximum": 50). A supplied k outside them is INVALID_RANGE.
+// "minimum": 1, "maximum": 50). A supplied k outside them is INVALID_RANGE, and
+// rag.k_default carries the same bound at load (SPEC §9.1).
 const (
-	MinSearchK = 1
-	MaxSearchK = 50
+	MinSearchK = config.RAGKMin
+	MaxSearchK = config.RAGKMax
 )
+
+// effectiveK is the k this deployment resolves an OMITTED k to: rag.k_default
+// when the operator set one, else the shipped fallback (SPEC §9.1). Every k
+// surface reads it here: the shared argument parser, and the `default` the
+// served input schemas advertise. The advertised default is therefore, by
+// construction, the value an omitted field produces.
+func (s *Server) effectiveK() int {
+	return s.cfg.EffectiveKDefault()
+}
+
+// generatesAnswers reports whether this deployment generates answers at all
+// (`rag.generate_answer`, SPEC §16). false is equivalent to `mode=search_only`
+// on every ask-family request: hits are returned with an empty answer and empty
+// citations, no prompt is assembled and no chat provider is called (SPEC §9.4).
+// The condition is a disjunction with the request's own mode, so a request
+// cannot turn generation back on against the operator's setting.
+func (s *Server) generatesAnswers() bool {
+	return s.cfg.RAGGenerateAnswer
+}
 
 // sessionInfo holds metadata tracked for each active session.  `created` is the
 // time the session was started; `lastSeen` is updated on each successful
