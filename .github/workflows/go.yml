@@ -129,7 +129,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # submodules: true because the suite now validates a whole tool payload
+      # against the CANONICAL schema in dirstral-spec (#850), not against a copy
+      # kept in this repo. Without the submodule that assertion cannot run, and
+      # a conformance guard that silently skips is worse than no guard.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          submodules: true
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
