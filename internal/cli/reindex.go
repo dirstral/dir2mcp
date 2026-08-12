@@ -105,42 +105,115 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	// rebuild still rolls the index files back AFTER the store is closed, so a
 	// persist-on-close cannot clobber the restored generation.
 	if reindexErr == nil {
-		// Commit the index files BEFORE dropping the hash snapshot (issue #796).
-		//
-		// The two artifacts are undo records for the two halves of one change:
-		// *.reindex-old undoes the index move, the snapshot undoes the cleared
-		// content-hash gate. A crash between them decides which half recovery
-		// sees, so the order decides which way the corpus is wrong.
-		//
-		// Dropping the snapshot first left this window: hashes already say
-		// "new", the index backup still says "roll me back". recoverInterrupted-
-		// Reindex adopts that backup, so the corpus serves the PREVIOUS index
-		// generation while its hashes assert the new content is already
-		// ingested. The gate then skips those documents on every later run, so
-		// nothing re-ingests them and nothing reports it.
-		//
-		// Committing first inverts the failure. A crash in the window leaves no
-		// index backup and a snapshot that still holds the old hashes, so
-		// recovery restores hashes that under-state the corpus. The next scan
-		// re-ingests work it did not strictly need to redo (the #764 direction)
-		// and converges on its own. Redundant work is recoverable; a gate set
-		// too far ahead is not.
-		//
-		// commit() only unlinks the moved-aside backups, so running it while the
-		// store is open is safe: a persist-on-close writes the live slot, never
-		// the backup slot.
-		staging.commit(a.stderr)
-		staging.discardContentHashBackup(ctx, a.stderr)
-		a.closeStoreWithLog(st)
+		a.commitReindex(ctx, st, staging)
 	} else {
-		staging.restoreContentHashes(ctx, a.stderr)
-		a.closeStoreWithLog(st)
-		// Any non-success — a real error, ctx cancellation from Ctrl-C, or an
-		// unimplemented pipeline — means the rebuild is not durable, so put the
-		// previous index back (issue #418).
-		staging.rollback(a.stderr)
+		a.rollbackReindex(ctx, cfg, st, staging)
 	}
 	return a.finishReindex(global, reindexErr)
+}
+
+// commitReindex keeps the rebuild: it discards both undo records and closes the
+// store.
+//
+// The index files are committed BEFORE the hash snapshot is dropped (issue #796).
+//
+// The two artifacts are undo records for the two halves of one change:
+// *.reindex-old undoes the index move, the snapshot undoes the cleared
+// content-hash gate. A crash between them decides which half recovery sees, so
+// the order decides which way the corpus is wrong.
+//
+// Dropping the snapshot first left this window: hashes already say "new", the
+// index backup still says "roll me back". recoverInterruptedReindex adopts that
+// backup, so the corpus serves the PREVIOUS index generation while its hashes
+// assert the new content is already ingested. The gate then skips those
+// documents on every later run, so nothing re-ingests them and nothing reports
+// it.
+//
+// Committing first inverts the failure. A crash in the window leaves no index
+// backup and a snapshot that still holds the old hashes, so recovery restores
+// hashes that under-state the corpus. The next scan re-ingests work it did not
+// strictly need to redo (the #764 direction) and converges on its own. Redundant
+// work is recoverable; a gate set too far ahead is not.
+//
+// commit() only unlinks the moved-aside backups, so running it while the store
+// is open is safe: a persist-on-close writes the live slot, never the backup
+// slot.
+func (a *App) commitReindex(ctx context.Context, st model.Store, staging *reindexStaging) {
+	staging.commit(a.stderr)
+	staging.discardContentHashBackup(ctx, a.stderr)
+	a.closeStoreWithLog(st)
+}
+
+// rollbackReindex unwinds what the staging owns and then reports what it does
+// not own.
+//
+// Any non-success — a real error, ctx cancellation from Ctrl-C, or an
+// unimplemented pipeline — means the rebuild is not durable, so the previous
+// index generation and the content-hash gate both go back (issue #418). The
+// hashes are restored while the store is still open; the index files are
+// restored after it closes, so a persist-on-close cannot clobber them.
+//
+// The report is the second half of the fix for issue #668 and it runs last, so
+// it is the final word on the terminal.
+func (a *App) rollbackReindex(ctx context.Context, cfg config.Config, st model.Store, staging *reindexStaging) {
+	staging.restoreContentHashes(ctx, a.stderr)
+	a.closeStoreWithLog(st)
+	staging.rollback(a.stderr)
+	a.reportPartialReindexRollback(cfg)
+}
+
+// reportPartialReindexRollback states what the rollback did NOT put back.
+//
+// The staging owns two artifacts and restores both of them. It owns nothing
+// else. The rebuild runs through the ordinary ingest pipeline, which rewrites
+// documents, representations and chunks in place, and none of that is staged.
+// So the corpus after a rollback is NOT the corpus from before the run, and the
+// command used to imply that it was (issue #668).
+//
+// The decision here is to report rather than to complete the rollback. Two
+// reasons:
+//
+//   - Completing it means snapshotting the whole sqlite graph per run and giving
+//     the networked backends a generation swap they do not expose. That is a
+//     redesign of the protocol, and a "complete" rollback that is itself partial
+//     would be the same dishonesty one level up.
+//   - Most of the drift already repairs itself, and the report says which part
+//     does not. A re-ingest keeps chunk ids stable (they are keyed by
+//     representation and ordinal) and re-queues every chunk it rewrites, and the
+//     embed worker selects on that queue and never on the content hash. So the
+//     restored index and the partly rebuilt chunk graph still address each other,
+//     and the next `dir2mcp up` re-embeds exactly the chunks the failed run
+//     rewrote.
+//
+// The part that does not repair itself is extraction. The content hash is a done
+// marker that is withheld until a document's representations commit, so a
+// document the rebuild was still extracting holds no hash of its own, and the
+// rollback puts its pre-run hash back over it. The next scan then skips a
+// document whose representations are part old and part new. Only another full
+// rebuild clears that, which is why the report names one.
+func (a *App) reportPartialReindexRollback(cfg config.Config) {
+	writef(a.stderr, "warning: this rollback is partial. It restored the previous index generation and the content-hash gate. "+
+		"It did not restore the document, representation and chunk rows that the interrupted rebuild already rewrote.\n")
+	if !localIndexRollbackSupported(cfg.IndexBackend) {
+		// The networked backends keep no local index files, so there was no
+		// generation to move aside and none to put back. The rebuild did not
+		// touch the remote store either, so the previous vectors are still
+		// there; they are simply beside a chunk graph that has moved on.
+		writef(a.stderr, "warning: index.backend=%s keeps its vectors on the server. "+
+			"This rollback did not change them and it cannot restore them. "+
+			"They stay as they were until a later run re-embeds over them.\n", strings.TrimSpace(cfg.IndexBackend))
+	}
+	writef(a.stderr, "warning: the rebuild re-queued every chunk it rewrote, so the next `dir2mcp up` re-embeds those. "+
+		"A document the rebuild was still extracting keeps its restored content hash, so the next scan skips it and it stays part rebuilt.\n")
+	writef(a.stderr, "warning: run `dir2mcp reindex` again and let it finish to bring the whole corpus to one generation.\n")
+}
+
+// localIndexRollbackSupported reports whether the backend keeps an on-disk index
+// generation that the staging can move aside and put back. It reads the answer
+// off index.StaleIndexFiles rather than repeating the backend list, so the two
+// can never disagree about which backends are covered.
+func localIndexRollbackSupported(backend string) bool {
+	return len(index.StaleIndexFiles(backend)) > 0
 }
 
 // loadReindexConfig pulls the layered config and normalises the state

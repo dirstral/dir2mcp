@@ -169,8 +169,16 @@ func kindSnapshotFileName(kind string) string {
 // selected.
 func StaleIndexFiles(backend string) []string {
 	// Networked backends keep no local index files: their durability lives
-	// server-side and a reindex clears the remote store via the index's Reset
-	// (driven by EnsureIdentity), so there is nothing on disk to remove.
+	// server-side, so there is nothing on disk to move aside or remove.
+	//
+	// This function returning nil is therefore NOT a statement that a reindex
+	// rebuilds the remote store. It does not. `dir2mcp reindex` never opens an
+	// index at all: it rewrites the sqlite rows, re-queues every chunk it
+	// rewrote, and leaves the vectors to the daemon's embed worker. Reset runs
+	// only through EnsureIdentity, which resets only a fresh or incompatible
+	// index, and only `up`/`ask` call it. So a reindex under one of these
+	// backends leaves the previous generation's vectors in place until the next
+	// `dir2mcp up` re-embeds the queued chunks over them (issue #668).
 	switch strings.ToLower(strings.TrimSpace(backend)) {
 	case BackendQdrant, BackendPgvector:
 		return nil
