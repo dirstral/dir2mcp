@@ -183,23 +183,27 @@ func (d *DiskIndex) SetAutosavePolicy(threshold uint64, maxInterval time.Duratio
 
 // Upsert appends the vector+payload as the newest record and points the locator
 // at it. An empty vector or zero chunk_id is an error (matching HNSWIndex).
+//
+// It shares the append path with BatchUpsert, so it shares the crash contract: a
+// write or fsync failure truncates the segment back to its pre-append length and
+// leaves the locators untouched (#674).
 func (d *DiskIndex) Upsert(ctx context.Context, vector []float32, payload model.IndexPayload) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(vector) == 0 {
-		return errors.New("vector cannot be empty")
+	recs, err := stageUpserts([]model.IndexUpsert{{Vector: vector, Payload: payload}})
+	if err != nil {
+		return err
 	}
-	if payload.ChunkID == 0 {
-		return errors.New("payload chunk_id cannot be zero")
-	}
+
+	// d.path is read under the lock, like the batch path: Load assigns it under
+	// d.mu, so an unlocked read here races a concurrent reopen.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.path == "" {
 		return errors.New("disk index requires a path")
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.appendRecord(payload.ChunkID, false, vector, payload)
+	return d.appendRecords(recs)
 }
 
 // BatchUpsert appends every item to the segment through ONE file open, ONE
@@ -223,32 +227,67 @@ func (d *DiskIndex) BatchUpsert(ctx context.Context, items []model.IndexUpsert) 
 	if len(items) == 0 {
 		return nil
 	}
-	// Validate the whole batch before touching the file so a malformed item
-	// cannot leave a partially written segment behind (Upsert rejects the same
-	// two cases).
-	for i := range items {
-		if len(items[i].Vector) == 0 {
-			return errors.New("vector cannot be empty")
-		}
-		if items[i].Payload.ChunkID == 0 {
-			return errors.New("payload chunk_id cannot be zero")
-		}
+	// Item validation and payload encoding stay ahead of the lock so a malformed
+	// batch is rejected without touching shared state. Reading d.path must stay
+	// behind the lock: Load assigns it under d.mu, so an unlocked read here
+	// races a concurrent reopen.
+	recs, err := stageUpserts(items)
+	if err != nil {
+		return err
 	}
-	// Item validation stays ahead of the lock so a malformed batch is rejected
-	// without touching shared state. Reading d.path must NOT: Load assigns it
-	// under d.mu, so an unlocked read here races a concurrent reopen.
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.path == "" {
 		return errors.New("disk index requires a path")
 	}
-	return d.appendBatch(items)
+	return d.appendRecords(recs)
 }
 
-// appendBatch writes every item as a record, fsyncs once, and then publishes the
-// new locators. On any failure it rolls the segment back to its pre-batch length
-// and leaves the in-memory state untouched. Caller holds the write lock.
-func (d *DiskIndex) appendBatch(items []model.IndexUpsert) error {
+// pendingRecord is one record staged for the append log: an upsert (tombstone
+// false, carrying the vector and the encoded payload) or a delete (tombstone
+// true). Every mutation is staged in full before the segment file is opened, so
+// a validation or encoding failure can never leave bytes behind.
+type pendingRecord struct {
+	chunkID      uint64
+	tombstone    bool
+	vector       []float32
+	payloadBytes []byte
+}
+
+// stageUpserts validates and encodes every item. It rejects the same two cases
+// as Upsert, and it does so for the whole batch before any record is written.
+func stageUpserts(items []model.IndexUpsert) ([]pendingRecord, error) {
+	recs := make([]pendingRecord, len(items))
+	for i := range items {
+		if len(items[i].Vector) == 0 {
+			return nil, errors.New("vector cannot be empty")
+		}
+		if items[i].Payload.ChunkID == 0 {
+			return nil, errors.New("payload chunk_id cannot be zero")
+		}
+		payloadBytes, err := encodePayload(items[i].Payload)
+		if err != nil {
+			return nil, err
+		}
+		recs[i] = pendingRecord{
+			chunkID:      items[i].Payload.ChunkID,
+			vector:       items[i].Vector,
+			payloadBytes: payloadBytes,
+		}
+	}
+	return recs, nil
+}
+
+// appendRecords writes every staged record through ONE file open, ONE buffered
+// write pass and ONE fsync, and then publishes the result in memory.
+//
+// Every mutation (Upsert, BatchUpsert, Delete) goes through here, so every
+// mutation has the same crash contract: on a write or fsync failure the segment
+// is truncated back to its pre-append length, and neither the locators nor the
+// append pointer move. The single-record path used to return on failure without
+// the truncation, which left abandoned bytes past d.appendEnd for a later append
+// to overwrite in part (#674). Caller holds the write lock.
+func (d *DiskIndex) appendRecords(recs []pendingRecord) error {
 	f, err := statefs.OpenFile(d.path, os.O_RDWR|os.O_CREATE)
 	if err != nil {
 		return err
@@ -258,70 +297,81 @@ func (d *DiskIndex) appendBatch(items []model.IndexUpsert) error {
 	if err := d.ensureAppendEnd(f); err != nil {
 		return err
 	}
+	// A failure up to here needs no rollback: neither the open, the header write
+	// nor the seek puts a record byte in the file, and d.appendEnd already names
+	// the boundary the next append starts from. The rollback below covers every
+	// step that does write a record.
 	if _, err := f.Seek(d.appendEnd, io.SeekStart); err != nil {
 		return err
 	}
 
 	start := d.appendEnd
-	locs, end, werr := writeBatch(f, start, items)
+	offsets, end, werr := writeRecords(f, start, recs)
 	if werr == nil {
-		// The single durability barrier for the whole batch.
+		// The single durability barrier for the whole mutation.
 		werr = syncFile(f)
 	}
 	if werr != nil {
-		return d.rollbackBatch(f, start, werr)
+		return d.rollbackAppend(f, start, werr)
 	}
 
 	// Published only now that the bytes are durable. Applying in slice order
-	// makes a repeated chunk ID within one batch resolve last-writer-wins,
-	// exactly as a sequence of Upserts would.
-	for i := range items {
-		d.locators[items[i].Payload.ChunkID] = locs[i]
-	}
+	// makes a repeated chunk ID resolve last-writer-wins, exactly as a sequence
+	// of single mutations would.
+	d.applyRecords(recs, offsets)
 	d.appendEnd = end
-	// One mutation per item keeps the autosave delta accounting identical to the
-	// per-record path.
-	d.version += uint64(len(items))
+	// One mutation per record keeps the autosave delta accounting identical to
+	// the old per-record path.
+	d.version += uint64(len(recs))
 	// The mmap view is now stale (file grew); drop it so the next read re-maps.
 	return d.invalidateReaderLocked()
 }
 
-// writeBatch encodes every item into w through a single buffered writer, with
-// the first record landing at offset start. It returns one locator per item
-// (parallel to items) and the new end offset. It does not fsync: appendBatch
-// owns the batch's single durability barrier.
-func writeBatch(w io.Writer, start int64, items []model.IndexUpsert) ([]locator, int64, error) {
+// applyRecords points the locator map at the records just made durable: an
+// upsert publishes its locator, a tombstone drops the entry. offsets is parallel
+// to recs. Caller holds the write lock.
+func (d *DiskIndex) applyRecords(recs []pendingRecord, offsets []int64) {
+	for i := range recs {
+		if recs[i].tombstone {
+			delete(d.locators, recs[i].chunkID)
+			continue
+		}
+		d.locators[recs[i].chunkID] = locator{
+			offset:     offsets[i],
+			vecLen:     uint32(len(recs[i].vector)),
+			payloadLen: uint32(len(recs[i].payloadBytes)),
+		}
+	}
+}
+
+// writeRecords writes every staged record into w through a single buffered
+// writer, with the first record landing at offset start. It returns one offset
+// per record (parallel to recs) and the new end offset. It does not fsync:
+// appendRecords owns the mutation's single durability barrier.
+func writeRecords(w io.Writer, start int64, recs []pendingRecord) ([]int64, int64, error) {
 	bw := bufio.NewWriter(w)
-	locs := make([]locator, len(items))
+	offsets := make([]int64, len(recs))
 	offset := start
-	for i := range items {
-		payloadBytes, err := encodePayload(items[i].Payload)
+	for i := range recs {
+		n, err := writeRecord(bw, recs[i].chunkID, recs[i].tombstone, recs[i].vector, recs[i].payloadBytes)
 		if err != nil {
 			return nil, 0, err
 		}
-		n, err := writeRecord(bw, items[i].Payload.ChunkID, false, items[i].Vector, payloadBytes)
-		if err != nil {
-			return nil, 0, err
-		}
-		locs[i] = locator{
-			offset:     offset,
-			vecLen:     uint32(len(items[i].Vector)),
-			payloadLen: uint32(len(payloadBytes)),
-		}
+		offsets[i] = offset
 		offset += int64(n)
 	}
 	if err := bw.Flush(); err != nil {
 		return nil, 0, err
 	}
-	return locs, offset, nil
+	return offsets, offset, nil
 }
 
-// rollbackBatch truncates the segment back to its pre-batch length after a
-// failed batch and returns cause (joined with any rollback failure). d.locators
-// and d.appendEnd are never advanced before the fsync succeeds, so after the
-// truncation the in-memory state already matches the file again; only the mmap
-// view has to be dropped. Caller holds the write lock.
-func (d *DiskIndex) rollbackBatch(f *os.File, start int64, cause error) error {
+// rollbackAppend truncates the segment back to its pre-append length after a
+// failed mutation and returns cause (joined with any rollback failure).
+// d.locators and d.appendEnd are never advanced before the fsync succeeds, so
+// after the truncation the in-memory state already matches the file again; only
+// the mmap view has to be dropped. Caller holds the write lock.
+func (d *DiskIndex) rollbackAppend(f *os.File, start int64, cause error) error {
 	if terr := f.Truncate(start); terr != nil {
 		return errors.Join(cause, fmt.Errorf("diskindex: rollback truncate to %d: %w", start, terr))
 	}
@@ -337,6 +387,11 @@ func (d *DiskIndex) rollbackBatch(f *os.File, start int64, cause error) error {
 // Delete writes a tombstone record for each id and drops the locator. Unknown
 // ids are ignored. Tombstones keep the on-disk log append-only and consistent;
 // space is reclaimed on the next Save (compaction).
+//
+// A multi-id delete is ALL or NOTHING. Every tombstone goes into one write pass
+// behind one durability barrier, so a failure removes no id at all. The old
+// per-id loop made each id durable on its own, so an error on the third id left
+// the first two deleted and reported failure for the whole call (#674).
 func (d *DiskIndex) Delete(ctx context.Context, chunkIDs []uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -346,61 +401,42 @@ func (d *DiskIndex) Delete(ctx context.Context, chunkIDs []uint64) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, id := range chunkIDs {
-		if _, ok := d.locators[id]; !ok {
-			continue
-		}
-		if err := d.appendRecord(id, true, nil, model.IndexPayload{}); err != nil {
-			return err
-		}
-		delete(d.locators, id)
+
+	recs, err := d.stageTombstones(chunkIDs)
+	if err != nil {
+		return err
 	}
-	return nil
+	if len(recs) == 0 {
+		return nil
+	}
+	return d.appendRecords(recs)
 }
 
-// appendRecord appends one record to the segment, creating/initialising the
-// file (with header) on first write, and updates the locator map. The caller
-// must hold the write lock.
-func (d *DiskIndex) appendRecord(chunkID uint64, tombstone bool, vector []float32, payload model.IndexPayload) error {
-	f, err := statefs.OpenFile(d.path, os.O_RDWR|os.O_CREATE)
+// stageTombstones builds one tombstone record per id that the index actually
+// holds. Unknown ids are skipped, and a repeated id is staged once: the old loop
+// wrote a single tombstone for a repeat too, because the second pass found the
+// locator already dropped. A tombstone carries the encoded zero payload, exactly
+// as the per-record path always wrote it, so the segment bytes are unchanged.
+// Caller holds the write lock.
+func (d *DiskIndex) stageTombstones(chunkIDs []uint64) ([]pendingRecord, error) {
+	// Every tombstone carries the same encoded zero payload, so encode it once.
+	payloadBytes, err := encodePayload(model.IndexPayload{})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-
-	if err := d.ensureAppendEnd(f); err != nil {
-		return err
-	}
-	if _, err := f.Seek(d.appendEnd, io.SeekStart); err != nil {
-		return err
-	}
-	payloadBytes, err := encodePayload(payload)
-	if err != nil {
-		return err
-	}
-	recOffset := d.appendEnd
-	n, err := writeRecord(f, chunkID, tombstone, vector, payloadBytes)
-	if err != nil {
-		return err
-	}
-	if err := syncFile(f); err != nil {
-		return err
-	}
-	d.appendEnd += int64(n)
-
-	if !tombstone {
-		d.locators[chunkID] = locator{
-			offset:     recOffset,
-			vecLen:     uint32(len(vector)),
-			payloadLen: uint32(len(payloadBytes)),
+	recs := make([]pendingRecord, 0, len(chunkIDs))
+	staged := make(map[uint64]struct{}, len(chunkIDs))
+	for _, id := range chunkIDs {
+		if _, known := d.locators[id]; !known {
+			continue
 		}
+		if _, dup := staged[id]; dup {
+			continue
+		}
+		staged[id] = struct{}{}
+		recs = append(recs, pendingRecord{chunkID: id, tombstone: true, payloadBytes: payloadBytes})
 	}
-	// A record landed durably: mark the index dirty so the next Save compacts it.
-	// Delete only calls this for ids it knows exist, so tombstones bump version
-	// only on a real removal — matching HNSWIndex's changed-only Delete accounting.
-	d.version++
-	// The mmap view is now stale (file grew); drop it so the next read re-maps.
-	return d.invalidateReaderLocked()
+	return recs, nil
 }
 
 // ensureAppendEnd initialises d.appendEnd from the open file, writing the header
@@ -840,6 +876,13 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 		return err
 	}
 	identity, idErr := readIdentitySidecar(identitySidecarPath(path))
+	if idErr != nil && end == 0 {
+		// The segment file is empty (#674), so it holds no vectors and a damaged
+		// sidecar has nothing to protect. The missing-segment path above reads a
+		// damaged sidecar exactly this way, and an empty file states as much as
+		// no file: nothing.
+		identity, idErr = "", nil
+	}
 	if idErr != nil {
 		// A sidecar that EXISTS and cannot be understood. This used to read as
 		// "" exactly like a missing one, so EnsureIdentity saw a mismatch and
@@ -887,7 +930,7 @@ func (d *DiskIndex) ensureReader() error {
 
 // readerLocked returns the mmap reader, opening it lazily. Returns (nil, nil)
 // when no segment file exists yet (fresh index). The cached view is invalidated
-// on every mutation (appendRecord/Reset/Save), so a held view always reflects
+// on every mutation (appendRecords/Reset/Save), so a held view always reflects
 // the on-disk bytes the current locator offsets point at. Callers must hold the
 // write lock (it may assign d.reader).
 func (d *DiskIndex) readerLocked() (*mmap.ReaderAt, error) {
@@ -1010,6 +1053,19 @@ func scanSegment(path string) (map[uint64]locator, int64, bool, error) {
 	}
 	defer func() { _ = f.Close() }()
 
+	empty, err := isEmptyFile(f)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if empty {
+		// An empty segment holds no header and no records, so it is a fresh
+		// index, not damage. The append path creates the file before it writes
+		// the header, so a failure or a crash in that window leaves exactly this
+		// file. Reporting an error here refused to start over a file that says
+		// nothing (#674); returning end 0 makes the next append write the header.
+		return make(map[uint64]locator), 0, false, nil
+	}
+
 	r := bufio.NewReader(f)
 	if err := verifyHeader(r); err != nil {
 		return nil, 0, false, err
@@ -1060,6 +1116,15 @@ func scanSegment(path string) (map[uint64]locator, int64, bool, error) {
 		}
 		offset += int64(recordHdrLen) + bodyLen
 	}
+}
+
+// isEmptyFile reports whether f holds no bytes at all.
+func isEmptyFile(f *os.File) (bool, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	return info.Size() == 0, nil
 }
 
 // verifyHeader reads and validates the segment magic + version.
