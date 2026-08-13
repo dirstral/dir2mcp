@@ -15,7 +15,11 @@ import jsonschema
 import pytest
 
 from dirstral_annotator.emit import build_response
-from dirstral_annotator.model import Annotation, Document
+from dirstral_annotator.eval import ground_truth
+from dirstral_annotator.fusion import fuse
+from dirstral_annotator.model import Annotation, Document, Player, slug_entity_id
+from dirstral_annotator.recognizers.playbyplay import NOTABILITY_EVENTS, PlayByPlayRecognizer
+from dirstral_annotator.roster import Roster
 
 SCHEMA_REL = "docs/design/0004-recognize-response.schema.json"
 
@@ -49,3 +53,41 @@ def test_serve_response_validates_against_design_0004_draft_schema():
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     jsonschema.validate(build_response(doc), schema)
+
+
+def test_the_notability_cues_are_legal_wire():
+    """The whole pilot game, through the real path, against the same schema.
+
+    `annotations[]` is closed (`additionalProperties: false`), so the contract
+    has no numeric field: a captivating index or an exit velocity can only reach
+    a client inside `text`, and a fact can only be selected on through `event`,
+    which the contract leaves as a "producer-defined event vocabulary". This
+    validates that the cues carrying them are legal wire, and it fails the day
+    somebody answers "where does the number go?" by inventing a field here
+    instead of proposing one in dirstral-spec.
+    """
+    schema_path = find_schema()
+    if schema_path is None:
+        pytest.skip("dirstral-spec design-0004 draft schema not available")
+    import json
+
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    feed = ground_truth.load_game(Path(__file__).parent / "fixtures" / "gumbo_823215.json")
+    events = ground_truth.parse_pitches(feed)
+    players, mlbam = [], {}
+    for ev in events:
+        for pid, name in ((ev.pitcher_id, ev.pitcher_name), (ev.batter_id, ev.batter_name)):
+            if pid and pid not in mlbam:
+                player = Player(id=slug_entity_id(name), name=name)
+                mlbam[pid] = player.id
+                players.append(player)
+    roster = Roster(players, mlbam)
+
+    cues = PlayByPlayRecognizer(events, 0.0, roster).recognize(Path("game.mp4"))
+    annotations = fuse(cues)
+    doc = Document(media="game.mp4", annotations=annotations)
+    payload = build_response(doc, roster)
+    jsonschema.validate(payload, schema)
+
+    emitted = {a["event"] for a in payload["annotations"]}
+    assert set(NOTABILITY_EVENTS).issubset(emitted), emitted
