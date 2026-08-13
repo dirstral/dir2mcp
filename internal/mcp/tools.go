@@ -3494,6 +3494,12 @@ func serializeTimeSpan(span model.Span) map[string]interface{} {
 		"start_ms": span.StartMS,
 		"end_ms":   span.EndMS,
 	}
+	// speaker_label is nested under speaker on purpose: a label always comes with
+	// a stable id in this tree. The subtitle assigner returns ("", "") for a cue
+	// with no voice name, the diarizer skips a segment whose id is empty, and
+	// timeSpanExtraJSON persists nothing at all when speaker is empty. So a
+	// label-only span cannot be produced or stored, and emitting one would
+	// advertise a speaker the caller cannot then filter on.
 	if speaker := strings.TrimSpace(span.Speaker); speaker != "" {
 		out["speaker"] = speaker
 		if label := strings.TrimSpace(span.SpeakerLabel); label != "" {
