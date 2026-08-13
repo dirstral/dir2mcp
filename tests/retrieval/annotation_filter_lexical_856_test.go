@@ -256,6 +256,34 @@ func TestAnAbsentFilterStillFusesEveryLexicalCandidate(t *testing.T) {
 	}
 }
 
+// TestALexicalCandidateIsJudgedOnTheAttributionItCarries is the other direction
+// of the same bug: the filter must never judge a candidate against attribution
+// the candidate does not carry but its chunk does. Here the in-memory metadata
+// predates the attribution (an older indexing run) while the live lexical read
+// has it, so a matching filter must still admit the candidate.
+func TestALexicalCandidateIsJudgedOnTheAttributionItCarries(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	attributed := annotationHit(1, homeRun, []string{hrBatterID, sfgID})
+
+	// The cached metadata for the same chunk holds the span bounds only.
+	stale := attributed
+	stale.Span = model.Span{Kind: "time", StartMS: attributed.Span.StartMS, EndMS: attributed.Span.EndMS}
+	addAnnotationVector(t, idx, stale)
+
+	st := &lexicalHitStore{hits: []model.SearchHit{attributed}}
+	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(stale.ChunkID, stale)
+
+	if got := hybridSearchIDs(t, svc, model.SearchQuery{Events: []string{homeRun}}); !sameIDs(got, []uint64{1}) {
+		t.Fatalf("events=[home_run] = %v, want [1]; the lexical candidate carries that event", got)
+	}
+	if got := hybridSearchIDs(t, svc, model.SearchQuery{Events: []string{"no_such_event_xyz"}}); len(got) != 0 {
+		t.Fatalf("events=[no_such_event_xyz] = %v, want none", got)
+	}
+}
+
 // TestAskAppliesTheFilterAndCitesOnlyMatches covers the second tool that
 // advertises the parameters. `ask` is the surface the pilot uses, and a citation
 // to a filtered-out chunk is a confident wrong answer.

@@ -196,9 +196,7 @@ func (s *Service) selectLexicalCandidates(
 // entity/event (design 0004 §7) predicates read.
 func (s *Service) hydrateLexicalHit(indexKind string, hit model.SearchHit) model.SearchHit {
 	cached := s.searchHitForLabel(indexKind, hit.ChunkID)
-	if cached.Span.Kind != "" {
-		hit.Span = cached.Span
-	}
+	hit.Span = resolveLexicalSpan(hit.Span, cached.Span)
 	if hit.RepType == "" {
 		hit.RepType = cached.RepType
 	}
@@ -212,6 +210,34 @@ func (s *Service) hydrateLexicalHit(indexKind string, hit model.SearchHit) model
 		hit.MTimeUnix = cached.MTimeUnix
 	}
 	return hit
+}
+
+// resolveLexicalSpan merges a lexical hit's span with the cached one.
+//
+// The cached span wins when it exists, as it always has: it is the span row the
+// vector path cites, so a chunk localizes to the same place whichever retriever
+// found it. One exception keeps the filter honest: when the cached span carries
+// no recognition attribution and the lexical span does, the attribution is
+// carried across. A candidate must never be judged against attribution it does
+// not have but its chunk does, because a non-empty filter rejects an
+// attribution-less span by design and the hit would be dropped for the wrong
+// reason (issue #856).
+func resolveLexicalSpan(lexical, cached model.Span) model.Span {
+	if cached.Kind == "" {
+		return lexical
+	}
+	resolved := cached
+	if !spanHasAttribution(resolved) && spanHasAttribution(lexical) {
+		resolved.Entities = lexical.Entities
+		resolved.Event = lexical.Event
+	}
+	return resolved
+}
+
+// spanHasAttribution reports whether a span carries a recognition annotation's
+// entity ids or event (design 0004 §7).
+func spanHasAttribution(span model.Span) bool {
+	return len(span.Entities) > 0 || strings.TrimSpace(span.Event) != ""
 }
 
 // rerankFusionPoolSize returns how many fused candidates to keep before the
