@@ -2767,7 +2767,7 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	if err != nil {
 		return nil, err
 	}
-	if fused, ok := s.runHybridSearch(ctx, query, k, indexName, filtered); ok {
+	if fused, ok := s.runHybridSearch(ctx, query, k, indexName, filters, filtered); ok {
 		fused = dedupMediaCandidates(fused)
 		fused = s.dedupCrossFileCandidates(fused)
 		if allowRerank {
