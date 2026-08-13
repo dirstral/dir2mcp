@@ -33,13 +33,17 @@ unavailable.
 
 ### What the play-by-play recognizer emits
 
-One pitch produces up to three cues. Each cue carries one role:
+One pitch produces up to seven cues. Each cue carries one fact:
 
 | `event` | Keyed on | Emitted for |
 |---|---|---|
 | `pitch` | the pitcher, plus the fielding club | every pitch a rostered pitcher threw |
 | `at_bat` | the batter, plus the club at the plate | every pitch a rostered batter faced |
 | the feed's `result.eventType`: `home_run`, `strikeout`, `walk`, `single`, `double`, `field_out`, ... | the batter, plus the club at the plate | the pitch that ended the at-bat |
+| `batted_ball` | the batter, plus the club at the plate | a pitch the tracking measured (`playEvents[].hitData`) |
+| `captivating` | the batter, plus the club at the plate | a play the feed scores above 0 on `about.captivatingIndex` |
+| `reviewed` | the batter, plus the club at the plate | a play whose call went to a review (`about.hasReview`) |
+| `scoring_play` | the batter, plus the club at the plate | a play that scored a run (`about.isScoringPlay`) |
 
 The third cue makes the outcome of a play structured data. Before it, the
 outcome was prose inside the cue text alone, so `dir2mcp_search`'s `events`
@@ -49,9 +53,34 @@ question from a partial sample: it named a player who never homered and it
 dropped one who did. The vocabulary is MLB's own, so a client selects the real
 thing with `events: ["home_run"]` instead of a match on words.
 
-The three cues share one time span, so the answer path groups them into one
-moment (issue #784) and counts one event once. The phase-1 metric reads
-`event == "pitch"` alone, so the outcome cues do not move it.
+The last four cues answer the questions the outcome cannot: "the most
+captivating moments", "the hardest hit ball", "the longest home run", "the
+contested calls". Every value is the feed's own, carried verbatim.
+
+A number is neither an event nor an entity, and the design 0004 wire schema
+closes `annotations[]` (`additionalProperties: false`), so it has no numeric
+field. Each fact therefore reaches a client by the two channels the contract
+does have: `event` is the token to FILTER on, and `text` carries the number
+itself, in the feed's unit, inside the sentence that gets indexed, which is what
+a client RANKS on.
+
+```
+Captivating moment (captivating index 95): Bryce Eldridge vs Mitchell Parker
+  (bottom of the 9th) — Bryce Eldridge hits a grand slam (4) to right field. …
+Batted ball: Matt Chapman vs Foster Griffin (bottom of the 6th): exit velocity
+  107 mph, launch angle 22 degrees, distance 421 ft, fly ball, medium contact
+  — Matt Chapman homers (5) on a fly ball to left center field.
+```
+
+The recognizer sets no threshold on `captivatingIndex`. The one boundary the
+feed itself draws is zero (43 of the pilot game's 84 plays score exactly 0), so
+`captivating` means "the feed scored this play above zero" and the score rides
+in the text. A sharper cut would be this backend's judgement baked into the
+index, where no client could undo it.
+
+All the cues of one pitch share one time span, so the answer path groups them
+into one moment (issue #784) and counts one event once. The phase-1 metric reads
+`event == "pitch"` alone, so none of the added cues move it.
 
 ### The overlay text reader
 

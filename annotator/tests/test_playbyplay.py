@@ -10,17 +10,21 @@ with a perfect metadata source.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from dirstral_annotator.eval import ground_truth
 from dirstral_annotator.eval.align import Anchor, estimate
-from dirstral_annotator.eval.ground_truth import PitchEvent
+from dirstral_annotator.eval.ground_truth import HitData, PitchEvent
 from dirstral_annotator.eval.score import score
 from dirstral_annotator.fusion import fuse
 from dirstral_annotator.model import Player, slug_entity_id
-from dirstral_annotator.recognizers.playbyplay import PlayByPlayRecognizer
+from dirstral_annotator.recognizers.playbyplay import (
+    NOTABILITY_EVENTS,
+    PlayByPlayRecognizer,
+)
 from dirstral_annotator.roster import Roster
 
 MEDIA = Path("game.mp4")  # unused by the recognizer: labels are external
@@ -403,7 +407,7 @@ def test_the_pilot_game_emits_one_outcome_per_at_bat(pilot_events, pilot_roster)
     for cue in cues:
         if cue.event in counted:
             counted[cue.event] += 1
-        else:
+        elif cue.event not in NOTABILITY_EVENTS:
             outcomes += 1
     assert counted == {"pitch": 344, "at_bat": 344}
     assert outcomes == 84
@@ -432,3 +436,315 @@ def test_the_phase_1_metric_does_not_move(pilot_events, pilot_roster):
     # that the number is the same one, and that no outcome cue became a false
     # positive.
     assert after_card.overall.tp == 342 and after_card.overall.fp == 0
+
+
+# --- how notable a play was, and how hard the ball was hit -------------------
+#
+# The outcome makes "who homered" a selection. It leaves four questions with no
+# handle at all: "the most captivating moments", "the hardest hit ball", "the
+# longest home run", "the contested calls". The feed answers all four, and every
+# one of those fields was dropped.
+#
+# A number is not an event and not an entity, and the design 0004 wire schema
+# closes `annotations[]` (`additionalProperties: false`), so it has no numeric
+# field to put one in. So each fact reaches a client twice over, by two
+# channels, each doing the job it can do:
+#
+#   `event`  a token to FILTER on: `captivating`, `reviewed`, `scoring_play`,
+#            `batted_ball`. One cue carries one event string, so N selectable
+#            facts need N cues; they share the ending pitch's span, so the
+#            answer path groups them into one moment (#784).
+#   `text`   the number itself, verbatim, in the sentence that gets indexed. It
+#            is what a client RANKS on, and what an answer quotes.
+#
+# The threshold question matters. `captivatingIndex` is a number, and the only
+# boundary the feed itself draws in it is zero: 43 of the 84 plays score exactly
+# 0. So `captivating` means "the feed scored this above zero", and the score
+# rides in the text. Any sharper cut (>= 33, >= 70) would be this backend's
+# judgement baked into the index, where no client could undo it.
+
+CAPTIVATING_IN_TEXT = re.compile(r"captivating index (\d+)")
+SPEED_IN_TEXT = re.compile(r"exit velocity ([\d.]+) mph")
+DISTANCE_IN_TEXT = re.compile(r"distance ([\d.]+) ft")
+
+HARD_HIT = HitData(
+    launch_speed=107.0, launch_angle=28.0, total_distance=421.0,
+    trajectory="fly_ball", hardness="hard",
+)
+
+
+def _notable(**kw):
+    """The pitch that ended an at-bat, carrying what the feed said about it."""
+    return _outcome("home_run", **kw)
+
+
+def test_a_captivating_play_becomes_its_own_event(roster):
+    """The "best moments" question, answered by selection. The event says the
+    feed scored the play above zero; the score itself rides in the text."""
+    cues = PlayByPlayRecognizer(
+        [_notable(captivating_index=95)], 0.0, roster
+    ).recognize(MEDIA)
+    moment = next(c for c in cues if c.event == "captivating")
+    assert moment.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert moment.start_s == 997.0 and moment.end_s == 1005.0  # the ending pitch
+    assert CAPTIVATING_IN_TEXT.search(moment.text).group(1) == "95"
+    assert moment.text.startswith("Captivating moment")
+    assert "Heliot Ramos" in moment.text and "bottom of the 9th" in moment.text
+    assert "homers (9) on a fly ball" in moment.text
+    assert "Giants" not in moment.text  # the club stays an entity, as before
+
+
+def test_a_play_the_feed_scores_zero_is_not_a_captivating_moment(roster):
+    """43 of the pilot game's 84 plays score 0. Zero is the one boundary the
+    feed draws, so it is the one this recognizer uses."""
+    for index in (0, -1):
+        cues = PlayByPlayRecognizer(
+            [_notable(captivating_index=index)], 0.0, roster
+        ).recognize(MEDIA)
+        assert "captivating" not in [c.event for c in cues]
+
+
+def test_the_recognizer_invents_no_threshold_of_its_own(roster):
+    """A play the feed scores 1 is captivating, exactly like a play it scores
+    95. The ranking is the feed's number, not a cut this backend chose."""
+    for index in (1, 14, 33, 95):
+        cues = PlayByPlayRecognizer(
+            [_notable(captivating_index=index)], 0.0, roster
+        ).recognize(MEDIA)
+        moment = next(c for c in cues if c.event == "captivating")
+        assert CAPTIVATING_IN_TEXT.search(moment.text).group(1) == str(index)
+
+
+def test_a_contested_call_becomes_its_own_event(roster):
+    """"Which calls were contested" is `hasReview`, which the feed sets on the
+    2 plays of the pilot game that went to a review."""
+    cues = PlayByPlayRecognizer([_notable(has_review=True)], 0.0, roster).recognize(MEDIA)
+    review = next(c for c in cues if c.event == "reviewed")
+    assert review.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert review.text.startswith("Reviewed call")
+    assert "homers (9) on a fly ball" in review.text
+    without = PlayByPlayRecognizer([_notable()], 0.0, roster).recognize(MEDIA)
+    assert "reviewed" not in [c.event for c in without]
+
+
+def test_a_scoring_play_states_the_runs_and_the_score(roster):
+    """The score is the pair the feed carries, after the play. The clubs are
+    NOT named: writing a club into the text is the measured retrieval
+    regression (design 0004 §6.1), so the halves are named instead."""
+    cues = PlayByPlayRecognizer(
+        [_notable(is_scoring_play=True, rbi=4, away_score=3, home_score=9)], 0.0, roster
+    ).recognize(MEDIA)
+    scoring = next(c for c in cues if c.event == "scoring_play")
+    assert scoring.text.startswith("Scoring play (4 RBI, score: away 3, home 9)")
+    assert "Nationals" not in scoring.text and "Giants" not in scoring.text
+
+
+def test_a_scoring_play_with_no_rbi_states_no_rbi(roster):
+    """A run can score without an RBI (an error, a wild pitch). "0 RBI" would
+    read as a claim about the batter that the feed did not make."""
+    cues = PlayByPlayRecognizer(
+        [_notable(is_scoring_play=True, rbi=0, away_score=1, home_score=0)], 0.0, roster
+    ).recognize(MEDIA)
+    scoring = next(c for c in cues if c.event == "scoring_play")
+    assert scoring.text.startswith("Scoring play (score: away 1, home 0)")
+
+
+def test_a_batted_ball_carries_every_measurement_the_feed_took(roster):
+    """"The hardest hit ball" and "the longest home run" are one number each.
+    The schema has no numeric field, so the number rides in the indexed text,
+    in the feed's own units, and a client ranks on it."""
+    cues = PlayByPlayRecognizer([_notable(hit_data=HARD_HIT)], 0.0, roster).recognize(MEDIA)
+    hit = next(c for c in cues if c.event == "batted_ball")
+    assert hit.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert hit.text.startswith(
+        "Batted ball: Heliot Ramos vs Opp Ace (bottom of the 9th): "
+        "exit velocity 107 mph, launch angle 28 degrees, distance 421 ft, "
+        "fly ball, hard contact"
+    )
+    # The play result rides along, so one chunk answers "the longest home run"
+    # without a join across cues.
+    assert "homers (9) on a fly ball" in hit.text
+    assert SPEED_IN_TEXT.search(hit.text).group(1) == "107"
+    assert DISTANCE_IN_TEXT.search(hit.text).group(1) == "421"
+
+
+def test_a_measurement_the_feed_did_not_take_is_left_out(roster):
+    """Statcast misses a field now and then. The cue then states less; it does
+    not state a zero the tracking never measured."""
+    partial = HitData(launch_speed=96.4, trajectory="line_drive")
+    cues = PlayByPlayRecognizer([_notable(hit_data=partial)], 0.0, roster).recognize(MEDIA)
+    hit = next(c for c in cues if c.event == "batted_ball")
+    assert "exit velocity 96.4 mph" in hit.text
+    assert "line drive" in hit.text
+    assert "launch angle" not in hit.text
+    assert "distance" not in hit.text
+    assert "contact" not in hit.text
+
+
+def test_a_batted_ball_with_nothing_measured_emits_no_cue(roster):
+    """An empty measurement set has nothing to rank on and nothing to read, so
+    it must not become a cue at all."""
+    cues = PlayByPlayRecognizer([_notable(hit_data=HitData())], 0.0, roster).recognize(MEDIA)
+    assert "batted_ball" not in [c.event for c in cues]
+
+
+def test_the_new_cues_need_a_rostered_batter(roster):
+    """Each new cue is a statement about the play, and the play's actor is the
+    batter, exactly like the outcome cue. With no rostered batter there is
+    nobody to key it on, so the pitcher keeps his `pitch` cue alone."""
+    ev = _notable(
+        pitcher_id=WEBB, pitcher_name="Logan Webb",
+        batter_id=OPP_BATTER, batter_name="Opp Guy",
+        captivating_index=95, has_review=True, is_scoring_play=True,
+        hit_data=HARD_HIT,
+    )
+    cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
+    assert [c.event for c in cues] == ["pitch"]
+
+
+def test_the_new_cues_change_no_existing_cue(roster):
+    """THE CONTRACT, again. #620 was caused by retagging, so this change may
+    only add. The `pitch`, `at_bat` and outcome cues must be identical with and
+    without every new field."""
+    plain = _notable(pitcher_id=WEBB, pitcher_name="Logan Webb")
+    loaded = _notable(
+        pitcher_id=WEBB, pitcher_name="Logan Webb",
+        captivating_index=95, has_review=True, is_scoring_play=True,
+        rbi=4, away_score=3, home_score=9, hit_data=HARD_HIT,
+    )
+    before = PlayByPlayRecognizer([plain], 0.0, roster).recognize(MEDIA)
+    after = PlayByPlayRecognizer([loaded], 0.0, roster).recognize(MEDIA)
+
+    assert [c.event for c in before] == ["pitch", "at_bat", "home_run"]
+    assert [c.event for c in after] == [
+        "pitch", "at_bat", "home_run",
+        "batted_ball", "captivating", "reviewed", "scoring_play",
+    ]
+    assert after[:3] == before  # byte-for-byte, entities and text too
+
+
+def test_a_whole_measurement_loses_its_trailing_zero_and_nothing_else():
+    """The number is the feed's. "107.0 mph" reads worse than "107 mph" and
+    means the same thing, so the redundant zero goes; 107.9 keeps every digit,
+    because rounding a measurement a client ranks on would change the answer."""
+    from dirstral_annotator.recognizers.playbyplay import measurement_phrase
+    assert measurement_phrase(HitData(launch_speed=107.0)) == "exit velocity 107 mph"
+    assert measurement_phrase(HitData(launch_speed=107.9)) == "exit velocity 107.9 mph"
+    assert measurement_phrase(HitData(launch_angle=-7.0)) == "launch angle -7 degrees"
+    assert measurement_phrase(HitData(total_distance=0.0)) == "distance 0 ft"
+    assert measurement_phrase(HitData(trajectory="ground_ball")) == "ground ball"
+    assert measurement_phrase(HitData()) == ""
+
+
+def test_no_new_event_can_take_a_role_event_name():
+    """The #620 guard, at the vocabulary level: the pitcher-keyed metric reads
+    `event == "pitch"`, so no cue this recognizer adds may ever be named one of
+    the role events."""
+    from dirstral_annotator.recognizers.playbyplay import ROLE_EVENTS
+    assert not set(NOTABILITY_EVENTS).intersection(ROLE_EVENTS)
+
+
+# --- the pilot game, whole --------------------------------------------------
+
+#: Game 823215 again, counted off the feed: 84 plays, of which 43 score 0 on the
+#: captivating index, 2 went to a review and 15 scored a run; 66 of the 344
+#: pitches were hit, and the feed measured every one of them.
+PILOT_CAPTIVATING = 41
+PILOT_REVIEWS = 2
+PILOT_SCORING_PLAYS = 15
+PILOT_BATTED_BALLS = 66
+
+
+def test_the_pilot_games_notable_moments_are_all_selectable(pilot_events, pilot_roster):
+    """Every new event, counted on the real game rather than on a shape
+    invented here. Both clubs are rostered, so every play has a batter to key
+    on and the cue counts are the play counts."""
+    cues = PlayByPlayRecognizer(pilot_events, 0.0, pilot_roster).recognize(MEDIA)
+    counted = {event: 0 for event in NOTABILITY_EVENTS}
+    for cue in cues:
+        if cue.event in counted:
+            counted[cue.event] += 1
+    assert counted == {
+        "captivating": PILOT_CAPTIVATING,
+        "reviewed": PILOT_REVIEWS,
+        "scoring_play": PILOT_SCORING_PLAYS,
+        "batted_ball": PILOT_BATTED_BALLS,
+    }
+
+
+def test_the_best_moment_of_the_pilot_game_ranks_first_on_the_feeds_number(
+    pilot_events, pilot_roster
+):
+    """"Find the most captivating moments of the game", end to end: filter on
+    the event, rank on the number in the text. The answer is the grand slam,
+    which is the play MLB scored highest, and no model opinion is involved."""
+    cues = PlayByPlayRecognizer(pilot_events, 0.0, pilot_roster).recognize(MEDIA)
+    moments = [c for c in cues if c.event == "captivating"]
+    assert len(moments) == PILOT_CAPTIVATING
+    ranked = sorted(
+        moments,
+        key=lambda c: -int(CAPTIVATING_IN_TEXT.search(c.text).group(1)),
+    )
+    assert CAPTIVATING_IN_TEXT.search(ranked[0].text).group(1) == "95"
+    assert "grand slam" in ranked[0].text
+    assert ranked[0].entity_ids[0] == "player:bryce-eldridge"
+    # It really is a ranking and not one lucky play: the next two are the other
+    # two plays the feed scored above 38.
+    assert [CAPTIVATING_IN_TEXT.search(c.text).group(1) for c in ranked[1:3]] == \
+        ["75", "70"]
+
+
+def test_the_hardest_hit_ball_and_the_longest_home_run_are_rankable(
+    pilot_events, pilot_roster
+):
+    """The two measurement questions, answered off one cue each: filter
+    `batted_ball`, then rank on the number the text carries."""
+    cues = PlayByPlayRecognizer(pilot_events, 0.0, pilot_roster).recognize(MEDIA)
+    hits = [c for c in cues if c.event == "batted_ball"]
+    assert len(hits) == PILOT_BATTED_BALLS
+
+    hardest = max(hits, key=lambda c: float(SPEED_IN_TEXT.search(c.text).group(1)))
+    assert SPEED_IN_TEXT.search(hardest.text).group(1) == "107.9"
+    assert hardest.entity_ids[0] == "player:matt-chapman"
+    assert "singles" in hardest.text  # the hardest hit ball was not a home run
+
+    homers = [c for c in hits if "homers" in c.text or "grand slam" in c.text]
+    assert len(homers) == 6
+    longest = max(homers, key=lambda c: float(DISTANCE_IN_TEXT.search(c.text).group(1)))
+    assert DISTANCE_IN_TEXT.search(longest.text).group(1) == "421"
+    assert longest.entity_ids[0] == "player:matt-chapman"
+    # And the longest home run is NOT the most captivating one: the grand slam
+    # the feed scored 95 travelled 326 ft, the shortest of the six. The two
+    # signals are independent, which is why both are carried.
+    assert "grand slam" not in longest.text
+
+
+def test_the_contested_calls_of_the_pilot_game_are_selectable(pilot_events, pilot_roster):
+    """Two plays in 84. Top-k semantic search over prose has no chance of
+    finding exactly those two; `events: ["reviewed"]` returns them and nothing
+    else."""
+    cues = PlayByPlayRecognizer(pilot_events, 0.0, pilot_roster).recognize(MEDIA)
+    reviews = [c for c in cues if c.event == "reviewed"]
+    assert len(reviews) == PILOT_REVIEWS
+    assert all(c.text.startswith("Reviewed call") for c in reviews)
+
+
+def test_the_phase_1_metric_still_does_not_move(pilot_events, pilot_roster):
+    """The same proof as for the outcome cues, over the notability cues too:
+    the pitcher-keyed scorecard is equal term by term with and without them."""
+    alignment = estimate([Anchor(pilot_events[0].epoch_s, 60.0)])
+    cues = PlayByPlayRecognizer(
+        pilot_events, alignment.offset_s, pilot_roster
+    ).recognize(MEDIA)
+    roles = [c for c in cues if c.event in ("pitch", "at_bat")]
+    notable = [c for c in cues if c.event in NOTABILITY_EVENTS]
+    assert len(notable) == 124  # 41 + 2 + 15 + 66, really there
+
+    with_all = score(fuse(cues), pilot_events, alignment, pilot_roster)
+    roles_only = score(fuse(roles), pilot_events, alignment, pilot_roster)
+
+    assert with_all.total_events == roles_only.total_events == 344
+    assert vars(with_all.overall) == vars(roles_only.overall)
+    assert with_all.per_source_found == roles_only.per_source_found
+    assert dict(with_all.per_player) == dict(roles_only.per_player)
+    assert with_all.overall.tp == 342 and with_all.overall.fp == 0

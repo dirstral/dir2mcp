@@ -254,3 +254,115 @@ def test_a_feed_without_an_eventType_leaves_the_outcome_empty(events):
     """Back-compat, and the reason every existing suite is untouched: the
     shared fixture types no play, so it produces no outcome."""
     assert all(e.event_type == "" for e in events)
+
+
+# --- how notable a play was, and how hard the ball was hit -------------------
+#
+# The outcome answers "who homered". It does not answer "what were the best
+# moments", "which was the hardest hit ball", "how far did that home run go" or
+# "which calls were contested". The feed answers all four, and the parser threw
+# every one of those fields away:
+#
+#   about.captivatingIndex   MLB's own notability score for the play
+#   about.hasReview          the call went to a review
+#   about.isScoringPlay      a run scored
+#   result.rbi / awayScore / homeScore
+#   playEvents[].hitData     exit velocity, launch angle, distance, trajectory
+#
+# Nothing here is computed or normalised. Each field is carried verbatim, so the
+# ranking a client gets is MLB's, not one this backend invented.
+
+#: The captivating index of every play of game 823215, counted from the live
+#: statsapi payload. 43 plays score 0, so the field genuinely discriminates.
+PILOT_CAPTIVATING = {95: 1, 75: 1, 70: 1, 38: 4, 34: 4, 33: 17, 14: 13, 0: 43}
+PILOT_REVIEWS = 2
+PILOT_SCORING_PLAYS = 15
+PILOT_BATTED_BALLS = 66
+#: The hardest hit ball and the longest home run of the game, in the feed's own
+#: units (mph, feet).
+PILOT_HARDEST_HIT_MPH = 107.9
+PILOT_LONGEST_HOME_RUN_FT = 421.0
+
+
+def test_the_pilot_feed_scores_every_play_for_notability(pilot_events):
+    """The measurement the "best moments" question rests on. MLB scores every
+    play, so the answer is a read of the feed rather than a model's opinion."""
+    ended = [e for e in pilot_events if e.event_type]
+    assert len(ended) == PILOT_PLAYS
+    assert dict(Counter(e.captivating_index for e in ended)) == PILOT_CAPTIVATING
+    top = max(ended, key=lambda e: e.captivating_index)
+    assert top.captivating_index == 95
+    assert top.event_type == "home_run"
+    assert "grand slam" in top.description
+
+
+def test_the_pilot_feed_marks_the_contested_and_the_scoring_plays(pilot_events):
+    """Two reviewed calls and 15 scoring plays, off the feed's own flags."""
+    ended = [e for e in pilot_events if e.event_type]
+    assert sum(1 for e in ended if e.has_review) == PILOT_REVIEWS
+    scoring = [e for e in ended if e.is_scoring_play]
+    assert len(scoring) == PILOT_SCORING_PLAYS
+    # A scoring play moves the score, so the final one holds the final score.
+    last = scoring[-1]
+    assert (last.away_score, last.home_score) == (10, 11)
+    assert sum(e.rbi for e in ended) == 20
+
+
+def test_the_batted_ball_measurements_ride_on_the_pitch_that_was_hit(pilot_events):
+    """`hitData` is a property of one pitch, not of the play, so it rides on
+    that pitch. 66 of the 344 pitches were hit."""
+    hit = [e for e in pilot_events if e.hit_data]
+    assert len(hit) == PILOT_BATTED_BALLS
+    assert all(e.hit_data.launch_speed is not None for e in hit)
+    hardest = max(hit, key=lambda e: e.hit_data.launch_speed)
+    assert hardest.hit_data.launch_speed == PILOT_HARDEST_HIT_MPH
+    assert hardest.hit_data.hardness == "hard"
+    homers = [e for e in hit if e.event_type == "home_run"]
+    assert len(homers) == 6
+    longest = max(homers, key=lambda e: e.hit_data.total_distance)
+    assert longest.hit_data.total_distance == PILOT_LONGEST_HOME_RUN_FT
+    assert longest.hit_data.trajectory == "fly_ball"
+
+
+def test_a_pitch_inside_the_at_bat_carries_no_play_level_field(pilot_events):
+    """The play-level fields ride where `event_type` rides: on the pitch that
+    ended the at-bat. One play must produce one notable moment, not one per
+    pitch, or a 6 pitch at-bat would report the same grand slam six times."""
+    inside = [e for e in pilot_events if not e.event_type]
+    assert inside, "the game must have multi-pitch at-bats, or this proves nothing"
+    assert all(e.captivating_index == 0 for e in inside)
+    assert all(not e.has_review and not e.is_scoring_play for e in inside)
+    assert all(e.rbi == 0 and e.away_score == 0 and e.home_score == 0 for e in inside)
+
+
+def test_a_feed_without_the_notability_fields_keeps_the_defaults(events):
+    """Back-compat: every field is optional, so a payload without them parses
+    exactly as it did before."""
+    assert all(e.captivating_index == 0 for e in events)
+    assert all(not e.has_review and not e.is_scoring_play for e in events)
+    assert all(e.rbi == 0 and e.away_score == 0 and e.home_score == 0 for e in events)
+    assert all(e.hit_data is None for e in events)
+
+
+def test_a_hitData_with_nothing_measured_reads_as_no_hit_data():
+    """An empty or unusable `hitData` must not become a batted ball with no
+    measurements in it, which would claim a hit that nothing measured."""
+    feed = _feed_with_clubs(top_inning=True)
+    play = feed["liveData"]["plays"]["allPlays"][0]
+    play["playEvents"][0]["hitData"] = {}
+    assert ground_truth.parse_pitches(feed)[0].hit_data is None
+    play["playEvents"][0]["hitData"] = {"launchSpeed": None, "trajectory": ""}
+    assert ground_truth.parse_pitches(feed)[0].hit_data is None
+
+
+def test_a_partly_measured_batted_ball_keeps_what_the_feed_had():
+    """Statcast misses a field now and then. What it did measure must survive,
+    and what it did not must stay absent rather than become a zero."""
+    feed = _feed_with_clubs(top_inning=True)
+    play = feed["liveData"]["plays"]["allPlays"][0]
+    play["playEvents"][0]["hitData"] = {"launchSpeed": 96.4, "trajectory": "line_drive"}
+    hit = ground_truth.parse_pitches(feed)[0].hit_data
+    assert hit.launch_speed == 96.4
+    assert hit.trajectory == "line_drive"
+    assert hit.launch_angle is None and hit.total_distance is None
+    assert hit.hardness == ""

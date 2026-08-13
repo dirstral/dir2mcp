@@ -16,11 +16,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "James Wood grounds out, second baseman Luis Arraez to first baseman Rafael Devers."
+      "description": "James Wood grounds out, second baseman Luis Arraez to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 1,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -73,6 +79,13 @@
        "startTime": "2026-06-10T19:46:48.885Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 75.5,
+        "launchAngle": -0.0,
+        "totalDistance": 37.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -80,11 +93,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Curtis Mead flies out to right fielder Jung Hoo Lee."
+      "description": "Curtis Mead flies out to right fielder Jung Hoo Lee.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 1,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -137,6 +156,13 @@
        "startTime": "2026-06-10T19:48:55.722Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 89.9,
+        "launchAngle": 59.0,
+        "totalDistance": 218.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -144,11 +170,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Andrés Chaparro called out on strikes."
+      "description": "Andrés Chaparro called out on strikes.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 1,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -215,11 +247,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Casey Schmitt lines out to third baseman Curtis Mead."
+      "description": "Casey Schmitt lines out to third baseman Curtis Mead.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 1,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -265,6 +303,13 @@
        "startTime": "2026-06-10T19:55:34.368Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 76.5,
+        "launchAngle": 12.0,
+        "totalDistance": 132.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -272,11 +317,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Luis Arraez grounds out softly, pitcher Foster Griffin to first baseman Andrés Chaparro."
+      "description": "Luis Arraez grounds out softly, pitcher Foster Griffin to first baseman Andrés Chaparro.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 1,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -350,6 +401,13 @@
        "startTime": "2026-06-10T19:58:34.542Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 55.2,
+        "launchAngle": 3.0,
+        "totalDistance": 44.0,
+        "trajectory": "ground_ball",
+        "hardness": "soft"
        }
       }
      ]
@@ -357,11 +415,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Matt Chapman singles on a sharp ground ball to third baseman Curtis Mead."
+      "description": "Matt Chapman singles on a sharp ground ball to third baseman Curtis Mead.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 1,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -407,6 +471,13 @@
        "startTime": "2026-06-10T20:00:21.118Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 107.9,
+        "launchAngle": 5.0,
+        "totalDistance": 119.0,
+        "trajectory": "ground_ball",
+        "hardness": "hard"
        }
       }
      ]
@@ -414,11 +485,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Rafael Devers lines out to center fielder Jacob Young."
+      "description": "Rafael Devers lines out to center fielder Jacob Young.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 1,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -471,6 +548,13 @@
        "startTime": "2026-06-10T20:02:53.948Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 99.1,
+        "launchAngle": 22.0,
+        "totalDistance": 348.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -478,11 +562,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Dylan Crews flies out to center fielder Jonah Cox."
+      "description": "Dylan Crews flies out to center fielder Jonah Cox.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -507,6 +597,13 @@
        "startTime": "2026-06-10T20:05:26.846Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 87.4,
+        "launchAngle": 34.0,
+        "totalDistance": 312.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -514,11 +611,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Daylen Lile singles on a fly ball to left fielder Victor Bericoto."
+      "description": "Daylen Lile singles on a fly ball to left fielder Victor Bericoto.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -536,6 +639,13 @@
        "startTime": "2026-06-10T20:05:57.505Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 74.6,
+        "launchAngle": 29.0,
+        "totalDistance": 243.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -543,11 +653,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Jacob Young flies out to center fielder Jonah Cox."
+      "description": "Jacob Young flies out to center fielder Jonah Cox.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -607,6 +723,13 @@
        "startTime": "2026-06-10T20:08:25.551Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 93.2,
+        "launchAngle": 56.0,
+        "totalDistance": 231.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -614,11 +737,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Nasim Nuñez called out on strikes."
+      "description": "Nasim Nuñez called out on strikes.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -678,11 +807,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Jung Hoo Lee strikes out swinging."
+      "description": "Jung Hoo Lee strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -756,11 +891,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Bryce Eldridge flies out to left fielder Daylen Lile."
+      "description": "Bryce Eldridge flies out to left fielder Daylen Lile.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -785,6 +926,13 @@
        "startTime": "2026-06-10T20:16:37.706Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 86.1,
+        "launchAngle": 53.0,
+        "totalDistance": 239.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -792,11 +940,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Daniel Susac singles on a line drive to left fielder Daylen Lile."
+      "description": "Daniel Susac singles on a line drive to left fielder Daylen Lile.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -835,6 +989,13 @@
        "startTime": "2026-06-10T20:17:49.670Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 68.8,
+        "launchAngle": 22.0,
+        "totalDistance": 201.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -842,11 +1003,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Victor Bericoto strikes out swinging."
+      "description": "Victor Bericoto strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 2,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -906,11 +1073,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Jorbit Vivas flies out to left fielder Victor Bericoto."
+      "description": "Jorbit Vivas flies out to left fielder Victor Bericoto.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -935,6 +1108,13 @@
        "startTime": "2026-06-10T20:22:32.884Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 73.0,
+        "launchAngle": 31.0,
+        "totalDistance": 236.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -942,11 +1122,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Keibert Ruiz singles on a line drive to left fielder Victor Bericoto."
+      "description": "Keibert Ruiz singles on a line drive to left fielder Victor Bericoto.",
+      "rbi": 0,
+      "awayScore": 0,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -992,6 +1178,13 @@
        "startTime": "2026-06-10T20:24:12.259Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 98.0,
+        "launchAngle": 17.0,
+        "totalDistance": 274.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -999,11 +1192,17 @@
     {
      "result": {
       "eventType": "home_run",
-      "description": "James Wood homers (18) on a fly ball to center field. Keibert Ruiz scores."
+      "description": "James Wood homers (18) on a fly ball to center field. Keibert Ruiz scores.",
+      "rbi": 2,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 75,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -1049,6 +1248,13 @@
        "startTime": "2026-06-10T20:26:13.554Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 104.1,
+        "launchAngle": 33.0,
+        "totalDistance": 405.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1056,11 +1262,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Curtis Mead flies out to center fielder Jonah Cox."
+      "description": "Curtis Mead flies out to center fielder Jonah Cox.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1092,6 +1304,13 @@
        "startTime": "2026-06-10T20:27:29.942Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 98.6,
+        "launchAngle": 29.0,
+        "totalDistance": 380.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1099,11 +1318,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Andrés Chaparro grounds out sharply, third baseman Matt Chapman to first baseman Rafael Devers."
+      "description": "Andrés Chaparro grounds out sharply, third baseman Matt Chapman to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1142,6 +1367,13 @@
        "startTime": "2026-06-10T20:28:58.456Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 102.2,
+        "launchAngle": -5.0,
+        "totalDistance": 26.0,
+        "trajectory": "ground_ball",
+        "hardness": "hard"
        }
       }
      ]
@@ -1149,11 +1381,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Jonah Cox strikes out swinging."
+      "description": "Jonah Cox strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1192,11 +1430,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Casey Schmitt grounds out, first baseman Andrés Chaparro to pitcher Foster Griffin."
+      "description": "Casey Schmitt grounds out, first baseman Andrés Chaparro to pitcher Foster Griffin.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1242,6 +1486,13 @@
        "startTime": "2026-06-10T20:33:25.758Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 70.6,
+        "launchAngle": 10.0,
+        "totalDistance": 98.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1249,11 +1500,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Luis Arraez singles on a ground ball to left fielder Daylen Lile."
+      "description": "Luis Arraez singles on a ground ball to left fielder Daylen Lile.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1278,6 +1535,13 @@
        "startTime": "2026-06-10T20:34:22.155Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 93.4,
+        "launchAngle": -10.0,
+        "totalDistance": 13.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1285,11 +1549,17 @@
     {
      "result": {
       "eventType": "force_out",
-      "description": "Matt Chapman grounds into a force out, shortstop Nasim Nuñez to second baseman Jorbit Vivas. Luis Arraez out at 2nd."
+      "description": "Matt Chapman grounds into a force out, shortstop Nasim Nuñez to second baseman Jorbit Vivas. Luis Arraez out at 2nd.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 3,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1328,6 +1598,13 @@
        "startTime": "2026-06-10T20:35:55.624Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 98.5,
+        "launchAngle": -23.0,
+        "totalDistance": 5.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1335,11 +1612,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Dylan Crews grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+      "description": "Dylan Crews grounds out, third baseman Matt Chapman to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 4,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1406,6 +1689,13 @@
        "startTime": "2026-06-10T20:40:07.306Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 88.8,
+        "launchAngle": -19.0,
+        "totalDistance": 10.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1413,11 +1703,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Daylen Lile grounds out sharply, shortstop Casey Schmitt to first baseman Rafael Devers."
+      "description": "Daylen Lile grounds out sharply, shortstop Casey Schmitt to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 4,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1477,6 +1773,13 @@
        "startTime": "2026-06-10T20:42:44.673Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 100.8,
+        "launchAngle": 2.0,
+        "totalDistance": 60.0,
+        "trajectory": "ground_ball",
+        "hardness": "hard"
        }
       }
      ]
@@ -1484,11 +1787,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Jacob Young strikes out swinging."
+      "description": "Jacob Young strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 4,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1548,11 +1857,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Rafael Devers called out on strikes."
+      "description": "Rafael Devers called out on strikes.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 4,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1598,11 +1913,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Jung Hoo Lee grounds out, second baseman Jorbit Vivas to first baseman Andrés Chaparro."
+      "description": "Jung Hoo Lee grounds out, second baseman Jorbit Vivas to first baseman Andrés Chaparro.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 4,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1627,6 +1948,13 @@
        "startTime": "2026-06-10T20:48:29.701Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 70.7,
+        "launchAngle": 9.0,
+        "totalDistance": 108.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1634,11 +1962,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Bryce Eldridge grounds out softly, pitcher Foster Griffin to first baseman Andrés Chaparro."
+      "description": "Bryce Eldridge grounds out softly, pitcher Foster Griffin to first baseman Andrés Chaparro.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 4,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1656,6 +1990,13 @@
        "startTime": "2026-06-10T20:49:01.418Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 39.8,
+        "launchAngle": -50.0,
+        "totalDistance": 3.0,
+        "trajectory": "ground_ball",
+        "hardness": "soft"
        }
       }
      ]
@@ -1663,11 +2004,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Nasim Nuñez grounds out, shortstop Casey Schmitt to first baseman Rafael Devers."
+      "description": "Nasim Nuñez grounds out, shortstop Casey Schmitt to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1727,6 +2074,13 @@
        "startTime": "2026-06-10T20:53:08.936Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 88.8,
+        "launchAngle": -14.0,
+        "totalDistance": 9.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1734,11 +2088,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Jorbit Vivas singles on a line drive to left fielder Victor Bericoto."
+      "description": "Jorbit Vivas singles on a line drive to left fielder Victor Bericoto.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1763,6 +2123,13 @@
        "startTime": "2026-06-10T20:54:03.539Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 74.1,
+        "launchAngle": 22.0,
+        "totalDistance": 212.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -1770,11 +2137,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Keibert Ruiz flies out to right fielder Jung Hoo Lee."
+      "description": "Keibert Ruiz flies out to right fielder Jung Hoo Lee.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1792,6 +2165,13 @@
        "startTime": "2026-06-10T20:54:39.694Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 78.7,
+        "launchAngle": 53.0,
+        "totalDistance": 229.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1799,11 +2179,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "James Wood flies out to left fielder Victor Bericoto."
+      "description": "James Wood flies out to left fielder Victor Bericoto.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1863,6 +2249,13 @@
        "startTime": "2026-06-10T20:57:08.093Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 101.6,
+        "launchAngle": 39.0,
+        "totalDistance": 345.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1870,11 +2263,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Daniel Susac grounds out, second baseman Jorbit Vivas to first baseman Andrés Chaparro."
+      "description": "Daniel Susac grounds out, second baseman Jorbit Vivas to first baseman Andrés Chaparro.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -1934,6 +2333,13 @@
        "startTime": "2026-06-10T21:00:48.421Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 99.5,
+        "launchAngle": -16.0,
+        "totalDistance": 9.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -1941,11 +2347,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Nationals challenged (play at 1st), call on the field was overturned: Victor Bericoto grounds out, shortstop Nasim Nuñez to first baseman Andrés Chaparro."
+      "description": "Nationals challenged (play at 1st), call on the field was overturned: Victor Bericoto grounds out, shortstop Nasim Nuñez to first baseman Andrés Chaparro.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": true,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2019,6 +2431,13 @@
        "startTime": "2026-06-10T21:03:46.673Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 96.0,
+        "launchAngle": -12.0,
+        "totalDistance": 9.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2026,11 +2445,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Jonah Cox singles on a fly ball to right fielder Dylan Crews."
+      "description": "Jonah Cox singles on a fly ball to right fielder Dylan Crews.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2069,6 +2494,13 @@
        "startTime": "2026-06-10T21:06:44.793Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 63.5,
+        "launchAngle": 39.0,
+        "totalDistance": 185.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2076,11 +2508,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Casey Schmitt lines out sharply to center fielder Jacob Young."
+      "description": "Casey Schmitt lines out sharply to center fielder Jacob Young.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 5,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2112,6 +2550,13 @@
        "startTime": "2026-06-10T21:08:10.575Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 103.6,
+        "launchAngle": 17.0,
+        "totalDistance": 363.0,
+        "trajectory": "line_drive",
+        "hardness": "hard"
        }
       }
      ]
@@ -2119,11 +2564,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Curtis Mead grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+      "description": "Curtis Mead grounds out, third baseman Matt Chapman to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2162,6 +2613,13 @@
        "startTime": "2026-06-10T21:10:59.588Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 81.5,
+        "launchAngle": -5.0,
+        "totalDistance": 19.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2169,11 +2627,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Andrés Chaparro grounds out, shortstop Casey Schmitt to first baseman Rafael Devers."
+      "description": "Andrés Chaparro grounds out, shortstop Casey Schmitt to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2205,6 +2669,13 @@
        "startTime": "2026-06-10T21:12:01.961Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 101.2,
+        "launchAngle": 8.0,
+        "totalDistance": 146.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2212,11 +2683,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Dylan Crews singles on a fly ball to right fielder Jung Hoo Lee."
+      "description": "Dylan Crews singles on a fly ball to right fielder Jung Hoo Lee.",
+      "rbi": 0,
+      "awayScore": 2,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2234,6 +2711,13 @@
        "startTime": "2026-06-10T21:12:32.300Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 71.7,
+        "launchAngle": 30.0,
+        "totalDistance": 228.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2241,11 +2725,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Daylen Lile singles on a fly ball to left fielder Drew Gilbert. Dylan Crews scores."
+      "description": "Daylen Lile singles on a fly ball to left fielder Drew Gilbert. Dylan Crews scores.",
+      "rbi": 1,
+      "awayScore": 3,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 70,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -2291,6 +2781,13 @@
        "startTime": "2026-06-10T21:14:24.724Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 65.4,
+        "launchAngle": 42.0,
+        "totalDistance": 190.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2298,11 +2795,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Jacob Young singles on a line drive to center fielder Jonah Cox. Daylen Lile to 3rd."
+      "description": "Jacob Young singles on a line drive to center fielder Jonah Cox. Daylen Lile to 3rd.",
+      "rbi": 0,
+      "awayScore": 3,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2362,6 +2865,13 @@
        "startTime": "2026-06-10T21:17:07.483Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 105.7,
+        "launchAngle": 10.0,
+        "totalDistance": 247.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -2369,11 +2879,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Nasim Nuñez singles on a ground ball to left fielder Drew Gilbert. Daylen Lile scores. Jacob Young scores."
+      "description": "Nasim Nuñez singles on a ground ball to left fielder Drew Gilbert. Daylen Lile scores. Jacob Young scores.",
+      "rbi": 2,
+      "awayScore": 5,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -2447,6 +2963,13 @@
        "startTime": "2026-06-10T21:22:03.548Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 91.2,
+        "launchAngle": -13.0,
+        "totalDistance": 7.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2454,11 +2977,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Jorbit Vivas singles on a ground ball to right fielder Jung Hoo Lee. Nasim Nuñez scores. Jorbit Vivas to 2nd."
+      "description": "Jorbit Vivas singles on a ground ball to right fielder Jung Hoo Lee. Nasim Nuñez scores. Jorbit Vivas to 2nd.",
+      "rbi": 1,
+      "awayScore": 6,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -2504,6 +3033,13 @@
        "startTime": "2026-06-10T21:23:58.505Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 96.3,
+        "launchAngle": 5.0,
+        "totalDistance": 100.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2511,11 +3047,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Keibert Ruiz pops out to shortstop Casey Schmitt."
+      "description": "Keibert Ruiz pops out to shortstop Casey Schmitt.",
+      "rbi": 0,
+      "awayScore": 6,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2568,6 +3110,13 @@
        "startTime": "2026-06-10T21:26:48.802Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 64.6,
+        "launchAngle": 35.0,
+        "totalDistance": 208.0,
+        "trajectory": "popup",
+        "hardness": "medium"
        }
       }
      ]
@@ -2575,11 +3124,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Luis Arraez lines out to left fielder Daylen Lile."
+      "description": "Luis Arraez lines out to left fielder Daylen Lile.",
+      "rbi": 0,
+      "awayScore": 6,
+      "homeScore": 0
      },
      "about": {
       "inning": 6,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2604,6 +3159,13 @@
        "startTime": "2026-06-10T21:29:22.280Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 91.4,
+        "launchAngle": 22.0,
+        "totalDistance": 291.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -2611,11 +3173,17 @@
     {
      "result": {
       "eventType": "home_run",
-      "description": "Matt Chapman homers (5) on a fly ball to left center field."
+      "description": "Matt Chapman homers (5) on a fly ball to left center field.",
+      "rbi": 1,
+      "awayScore": 6,
+      "homeScore": 1
      },
      "about": {
       "inning": 6,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 38,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -2668,6 +3236,13 @@
        "startTime": "2026-06-10T21:31:21.500Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 107.0,
+        "launchAngle": 22.0,
+        "totalDistance": 421.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2675,11 +3250,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Rafael Devers flies out to right fielder Dylan Crews."
+      "description": "Rafael Devers flies out to right fielder Dylan Crews.",
+      "rbi": 0,
+      "awayScore": 6,
+      "homeScore": 1
      },
      "about": {
       "inning": 6,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2711,6 +3292,13 @@
        "startTime": "2026-06-10T21:32:40.029Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 84.2,
+        "launchAngle": 58.0,
+        "totalDistance": 211.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -2718,11 +3306,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Jung Hoo Lee singles on a line drive to right fielder Dylan Crews."
+      "description": "Jung Hoo Lee singles on a line drive to right fielder Dylan Crews.",
+      "rbi": 0,
+      "awayScore": 6,
+      "homeScore": 1
      },
      "about": {
       "inning": 6,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2740,6 +3334,13 @@
        "startTime": "2026-06-10T21:33:14.351Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 99.4,
+        "launchAngle": 9.0,
+        "totalDistance": 208.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -2747,11 +3348,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Bryce Eldridge strikes out swinging."
+      "description": "Bryce Eldridge strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 6,
+      "homeScore": 1
      },
      "about": {
       "inning": 6,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2818,11 +3425,17 @@
     {
      "result": {
       "eventType": "walk",
-      "description": "James Wood walks."
+      "description": "James Wood walks.",
+      "rbi": 0,
+      "awayScore": 6,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2889,11 +3502,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Curtis Mead singles on a pop up to second baseman Luis Arraez."
+      "description": "Curtis Mead singles on a pop up to second baseman Luis Arraez.",
+      "rbi": 0,
+      "awayScore": 6,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -2939,6 +3558,13 @@
        "startTime": "2026-06-10T21:41:00.648Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 68.4,
+        "launchAngle": 41.0,
+        "totalDistance": 208.0,
+        "trajectory": "popup",
+        "hardness": "medium"
        }
       }
      ]
@@ -2946,11 +3572,17 @@
     {
      "result": {
       "eventType": "double",
-      "description": "Luis García Jr. doubles (12) on a fly ball to left fielder Drew Gilbert. James Wood scores. Curtis Mead to 3rd."
+      "description": "Luis García Jr. doubles (12) on a fly ball to left fielder Drew Gilbert. James Wood scores. Curtis Mead to 3rd.",
+      "rbi": 1,
+      "awayScore": 7,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 34,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -2996,6 +3628,13 @@
        "startTime": "2026-06-10T21:43:02.004Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 98.2,
+        "launchAngle": 34.0,
+        "totalDistance": 355.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -3003,11 +3642,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Dylan Crews grounds out sharply, shortstop Casey Schmitt to first baseman Rafael Devers. Curtis Mead scores. Luis García Jr. to 3rd."
+      "description": "Dylan Crews grounds out sharply, shortstop Casey Schmitt to first baseman Rafael Devers. Curtis Mead scores. Luis García Jr. to 3rd.",
+      "rbi": 1,
+      "awayScore": 8,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -3032,6 +3677,13 @@
        "startTime": "2026-06-10T21:44:08.053Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 100.0,
+        "launchAngle": -1.0,
+        "totalDistance": 45.0,
+        "trajectory": "ground_ball",
+        "hardness": "hard"
        }
       }
      ]
@@ -3039,11 +3691,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Daylen Lile singles on a sharp line drive to right fielder Jung Hoo Lee. Luis García Jr. scores."
+      "description": "Daylen Lile singles on a sharp line drive to right fielder Jung Hoo Lee. Luis García Jr. scores.",
+      "rbi": 1,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -3075,6 +3733,13 @@
        "startTime": "2026-06-10T21:45:22.072Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 103.3,
+        "launchAngle": 14.0,
+        "totalDistance": 235.0,
+        "trajectory": "line_drive",
+        "hardness": "hard"
        }
       }
      ]
@@ -3082,11 +3747,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Jacob Young called out on strikes."
+      "description": "Jacob Young called out on strikes.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3167,11 +3838,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Nasim Nuñez lines out to center fielder Jonah Cox."
+      "description": "Nasim Nuñez lines out to center fielder Jonah Cox.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3203,6 +3880,13 @@
        "startTime": "2026-06-10T21:50:03.052Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 78.1,
+        "launchAngle": 26.0,
+        "totalDistance": 269.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -3210,11 +3894,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Daniel Susac pops out to first baseman Luis García Jr. in foul territory."
+      "description": "Daniel Susac pops out to first baseman Luis García Jr. in foul territory.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3260,6 +3950,13 @@
        "startTime": "2026-06-10T21:53:03.103Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 66.3,
+        "launchAngle": 72.0,
+        "totalDistance": 85.0,
+        "trajectory": "popup",
+        "hardness": "medium"
        }
       }
      ]
@@ -3267,11 +3964,17 @@
     {
      "result": {
       "eventType": "walk",
-      "description": "Drew Gilbert walks."
+      "description": "Drew Gilbert walks.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3338,11 +4041,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Jonah Cox strikes out swinging."
+      "description": "Jonah Cox strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3388,11 +4097,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Casey Schmitt singles on a sharp line drive to right fielder Dylan Crews. Drew Gilbert to 2nd."
+      "description": "Casey Schmitt singles on a sharp line drive to right fielder Dylan Crews. Drew Gilbert to 2nd.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3417,6 +4132,13 @@
        "startTime": "2026-06-10T21:57:35.405Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 101.4,
+        "launchAngle": 8.0,
+        "totalDistance": 168.0,
+        "trajectory": "line_drive",
+        "hardness": "hard"
        }
       }
      ]
@@ -3424,11 +4146,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Luis Arraez grounds out, shortstop Nasim Nuñez to first baseman Luis García Jr."
+      "description": "Luis Arraez grounds out, shortstop Nasim Nuñez to first baseman Luis García Jr.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 7,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3488,6 +4216,13 @@
        "startTime": "2026-06-10T21:59:55.795Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 82.2,
+        "launchAngle": -26.0,
+        "totalDistance": 6.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -3495,11 +4230,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Jorbit Vivas grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+      "description": "Jorbit Vivas grounds out, third baseman Matt Chapman to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 8,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3545,6 +4286,13 @@
        "startTime": "2026-06-10T22:02:55.814Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 61.0,
+        "launchAngle": -26.0,
+        "totalDistance": 5.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -3552,11 +4300,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Keibert Ruiz grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+      "description": "Keibert Ruiz grounds out, third baseman Matt Chapman to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 8,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3609,6 +4363,13 @@
        "startTime": "2026-06-10T22:04:43.016Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 89.2,
+        "launchAngle": -27.0,
+        "totalDistance": 6.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -3616,11 +4377,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "James Wood strikes out swinging."
+      "description": "James Wood strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 1
      },
      "about": {
       "inning": 8,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3666,11 +4433,17 @@
     {
      "result": {
       "eventType": "home_run",
-      "description": "Matt Chapman homers (6) on a fly ball to center field."
+      "description": "Matt Chapman homers (6) on a fly ball to center field.",
+      "rbi": 1,
+      "awayScore": 9,
+      "homeScore": 2
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 38,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -3688,6 +4461,13 @@
        "startTime": "2026-06-10T22:07:58.398Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 101.4,
+        "launchAngle": 31.0,
+        "totalDistance": 409.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -3695,11 +4475,17 @@
     {
      "result": {
       "eventType": "home_run",
-      "description": "Rafael Devers homers (9) on a fly ball to center field."
+      "description": "Rafael Devers homers (9) on a fly ball to center field.",
+      "rbi": 1,
+      "awayScore": 9,
+      "homeScore": 3
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 38,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -3724,6 +4510,13 @@
        "startTime": "2026-06-10T22:08:59.373Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 101.3,
+        "launchAngle": 37.0,
+        "totalDistance": 408.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -3731,11 +4524,17 @@
     {
      "result": {
       "eventType": "walk",
-      "description": "Jung Hoo Lee walks."
+      "description": "Jung Hoo Lee walks.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 3
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3795,11 +4594,17 @@
     {
      "result": {
       "eventType": "walk",
-      "description": "Bryce Eldridge walks."
+      "description": "Bryce Eldridge walks.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 3
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -3873,11 +4678,17 @@
     {
      "result": {
       "eventType": "double",
-      "description": "Daniel Susac doubles (5) on a line drive to left fielder Daylen Lile. Jung Hoo Lee scores. Bryce Eldridge to 3rd."
+      "description": "Daniel Susac doubles (5) on a line drive to left fielder Daylen Lile. Jung Hoo Lee scores. Bryce Eldridge to 3rd.",
+      "rbi": 1,
+      "awayScore": 9,
+      "homeScore": 4
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 34,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -3944,6 +4755,13 @@
        "startTime": "2026-06-10T22:17:04.049Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 79.4,
+        "launchAngle": 20.0,
+        "totalDistance": 216.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -3951,11 +4769,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Drew Gilbert grounds out, first baseman Luis García Jr. to pitcher Orlando Ribalta. Bryce Eldridge scores. Daniel Susac to 3rd."
+      "description": "Drew Gilbert grounds out, first baseman Luis García Jr. to pitcher Orlando Ribalta. Bryce Eldridge scores. Daniel Susac to 3rd.",
+      "rbi": 1,
+      "awayScore": 9,
+      "homeScore": 5
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -4015,6 +4839,13 @@
        "startTime": "2026-06-10T22:21:28.181Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 82.2,
+        "launchAngle": -6.0,
+        "totalDistance": 20.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -4022,11 +4853,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Buddy Kennedy challenged (pitch result), call on the field was confirmed: Buddy Kennedy called out on strikes."
+      "description": "Buddy Kennedy challenged (pitch result), call on the field was confirmed: Buddy Kennedy called out on strikes.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 6
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 14,
+      "hasReview": true,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4100,11 +4937,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Casey Schmitt flies out to center fielder Jacob Young."
+      "description": "Casey Schmitt flies out to center fielder Jacob Young.",
+      "rbi": 0,
+      "awayScore": 9,
+      "homeScore": 6
      },
      "about": {
       "inning": 8,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4122,6 +4965,13 @@
        "startTime": "2026-06-10T22:25:31.894Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 93.2,
+        "launchAngle": 58.0,
+        "totalDistance": 243.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -4129,11 +4979,17 @@
     {
      "result": {
       "eventType": "home_run",
-      "description": "Curtis Mead homers (10) on a fly ball to left center field."
+      "description": "Curtis Mead homers (10) on a fly ball to left center field.",
+      "rbi": 1,
+      "awayScore": 10,
+      "homeScore": 6
      },
      "about": {
       "inning": 9,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 38,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -4207,6 +5063,13 @@
        "startTime": "2026-06-10T22:29:14.541Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 101.1,
+        "launchAngle": 32.0,
+        "totalDistance": 399.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -4214,11 +5077,17 @@
     {
      "result": {
       "eventType": "strikeout",
-      "description": "Luis García Jr. strikes out swinging."
+      "description": "Luis García Jr. strikes out swinging.",
+      "rbi": 0,
+      "awayScore": 10,
+      "homeScore": 6
      },
      "about": {
       "inning": 9,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 14,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4278,11 +5147,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Dylan Crews lines out sharply to second baseman Luis Arraez."
+      "description": "Dylan Crews lines out sharply to second baseman Luis Arraez.",
+      "rbi": 0,
+      "awayScore": 10,
+      "homeScore": 6
      },
      "about": {
       "inning": 9,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4307,6 +5182,13 @@
        "startTime": "2026-06-10T22:31:27.333Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 100.2,
+        "launchAngle": 7.0,
+        "totalDistance": 193.0,
+        "trajectory": "line_drive",
+        "hardness": "hard"
        }
       }
      ]
@@ -4314,11 +5196,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Daylen Lile singles on a line drive to left fielder Eric Haase."
+      "description": "Daylen Lile singles on a line drive to left fielder Eric Haase.",
+      "rbi": 0,
+      "awayScore": 10,
+      "homeScore": 6
      },
      "about": {
       "inning": 9,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4336,6 +5224,13 @@
        "startTime": "2026-06-10T22:31:55.811Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 91.7,
+        "launchAngle": 9.0,
+        "totalDistance": 184.0,
+        "trajectory": "line_drive",
+        "hardness": "medium"
        }
       }
      ]
@@ -4343,11 +5238,17 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Jacob Young grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+      "description": "Jacob Young grounds out, third baseman Matt Chapman to first baseman Rafael Devers.",
+      "rbi": 0,
+      "awayScore": 10,
+      "homeScore": 6
      },
      "about": {
       "inning": 9,
-      "isTopInning": true
+      "isTopInning": true,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4393,6 +5294,13 @@
        "startTime": "2026-06-10T22:34:35.442Z",
        "details": {
         "description": "In play, out(s)"
+       },
+       "hitData": {
+        "launchSpeed": 97.1,
+        "launchAngle": -0.0,
+        "totalDistance": 46.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -4400,11 +5308,17 @@
     {
      "result": {
       "eventType": "double",
-      "description": "Luis Arraez doubles (14) on a fly ball to right fielder Dylan Crews."
+      "description": "Luis Arraez doubles (14) on a fly ball to right fielder Dylan Crews.",
+      "rbi": 0,
+      "awayScore": 10,
+      "homeScore": 6
      },
      "about": {
       "inning": 9,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 34,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4450,6 +5364,13 @@
        "startTime": "2026-06-10T22:38:04.678Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 99.0,
+        "launchAngle": 24.0,
+        "totalDistance": 380.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -4457,11 +5378,17 @@
     {
      "result": {
       "eventType": "double",
-      "description": "Matt Chapman doubles (17) on a sharp fly ball to right fielder Dylan Crews. Luis Arraez scores."
+      "description": "Matt Chapman doubles (17) on a sharp fly ball to right fielder Dylan Crews. Luis Arraez scores.",
+      "rbi": 1,
+      "awayScore": 10,
+      "homeScore": 7
      },
      "about": {
       "inning": 9,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 34,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -4500,6 +5427,13 @@
        "startTime": "2026-06-10T22:39:31.982Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 102.4,
+        "launchAngle": 27.0,
+        "totalDistance": 358.0,
+        "trajectory": "fly_ball",
+        "hardness": "hard"
        }
       }
      ]
@@ -4507,11 +5441,17 @@
     {
      "result": {
       "eventType": "walk",
-      "description": "Rafael Devers walks."
+      "description": "Rafael Devers walks.",
+      "rbi": 0,
+      "awayScore": 10,
+      "homeScore": 7
      },
      "about": {
       "inning": 9,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 0,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4578,11 +5518,17 @@
     {
      "result": {
       "eventType": "single",
-      "description": "Jung Hoo Lee singles on a ground ball to left fielder Daylen Lile. Matt Chapman to 3rd. Rafael Devers to 2nd."
+      "description": "Jung Hoo Lee singles on a ground ball to left fielder Daylen Lile. Matt Chapman to 3rd. Rafael Devers to 2nd.",
+      "rbi": 0,
+      "awayScore": 10,
+      "homeScore": 7
      },
      "about": {
       "inning": 9,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 33,
+      "hasReview": false,
+      "isScoringPlay": false
      },
      "matchup": {
       "pitcher": {
@@ -4642,6 +5588,13 @@
        "startTime": "2026-06-10T22:47:00.648Z",
        "details": {
         "description": "In play, no out"
+       },
+       "hitData": {
+        "launchSpeed": 97.4,
+        "launchAngle": 4.0,
+        "totalDistance": 111.0,
+        "trajectory": "ground_ball",
+        "hardness": "medium"
        }
       }
      ]
@@ -4649,11 +5602,17 @@
     {
      "result": {
       "eventType": "home_run",
-      "description": "Bryce Eldridge hits a grand slam (4) to right field. Matt Chapman scores. Rafael Devers scores. Jung Hoo Lee scores."
+      "description": "Bryce Eldridge hits a grand slam (4) to right field. Matt Chapman scores. Rafael Devers scores. Jung Hoo Lee scores.",
+      "rbi": 4,
+      "awayScore": 10,
+      "homeScore": 11
      },
      "about": {
       "inning": 9,
-      "isTopInning": false
+      "isTopInning": false,
+      "captivatingIndex": 95,
+      "hasReview": false,
+      "isScoringPlay": true
      },
      "matchup": {
       "pitcher": {
@@ -4685,6 +5644,13 @@
        "startTime": "2026-06-10T22:48:18.988Z",
        "details": {
         "description": "In play, run(s)"
+       },
+       "hitData": {
+        "launchSpeed": 98.1,
+        "launchAngle": 44.0,
+        "totalDistance": 326.0,
+        "trajectory": "fly_ball",
+        "hardness": "medium"
        }
       }
      ]
