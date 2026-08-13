@@ -284,6 +284,64 @@ func TestALexicalCandidateIsJudgedOnTheAttributionItCarries(t *testing.T) {
 	}
 }
 
+// TestAPartlyAttributedCacheKeepsTheLexicalEvent pins the INDEPENDENT merge of
+// the two attribution fields. `entities` and `events` are separate predicates
+// that are ANDed, so a cached span that holds the ids but not the event must
+// still be judged on the event the live lexical read carries.
+func TestAPartlyAttributedCacheKeepsTheLexicalEvent(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	attributed := annotationHit(1, homeRun, []string{hrBatterID, sfgID})
+
+	// The cached span carries the ids and no event.
+	partial := attributed
+	partial.Span = model.Span{
+		Kind: "time", StartMS: attributed.Span.StartMS, EndMS: attributed.Span.EndMS,
+		Entities: []string{hrBatterID, sfgID},
+	}
+	addAnnotationVector(t, idx, partial)
+
+	st := &lexicalHitStore{hits: []model.SearchHit{attributed}}
+	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(partial.ChunkID, partial)
+
+	if got := hybridSearchIDs(t, svc, model.SearchQuery{
+		Entities: []string{hrBatterID}, Events: []string{homeRun},
+	}); !sameIDs(got, []uint64{1}) {
+		t.Fatalf("entities=[batter] events=[home_run] = %v, want [1]; the cached ids must not erase the event", got)
+	}
+}
+
+// TestALexicalOnlyCorpusReturnsTheFilteredSet is the third path in isolation: the
+// vector index holds nothing, so every candidate comes from BM25. The zero-hit
+// assertion must hold here as well, or the answer depends on which retriever ran.
+func TestALexicalOnlyCorpusReturnsTheFilteredSet(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	hits := []model.SearchHit{
+		annotationHit(1, homeRun, []string{hrBatterID, sfgID}),
+		annotationHit(2, homeRun, []string{hrBatterID, sfgID}),
+		annotationHit(3, "pitch", []string{hrPitcherID, sfgID}),
+	}
+	st := &lexicalHitStore{hits: hits}
+	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	for _, hit := range hits {
+		svc.SetChunkMetadata(hit.ChunkID, hit)
+	}
+
+	if got := hybridSearchIDs(t, svc, model.SearchQuery{Events: []string{"no_such_event_xyz"}}); len(got) != 0 {
+		t.Fatalf("lexical-only search with an impossible event returned %v, want none", got)
+	}
+	if got := hybridSearchIDs(t, svc, model.SearchQuery{Entities: []string{"player:nobody-at-all"}}); len(got) != 0 {
+		t.Fatalf("lexical-only search with an impossible entity returned %v, want none", got)
+	}
+	if got := hybridSearchIDs(t, svc, model.SearchQuery{Events: []string{homeRun}}); !sameIDs(got, []uint64{1, 2}) {
+		t.Fatalf("lexical-only search with events=[home_run] = %v, want [1 2]", got)
+	}
+}
+
 // TestAskAppliesTheFilterAndCitesOnlyMatches covers the second tool that
 // advertises the parameters. `ask` is the surface the pilot uses, and a citation
 // to a filtered-out chunk is a confident wrong answer.

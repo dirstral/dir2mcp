@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -79,7 +78,17 @@ func assertAttribution(t *testing.T, path string, span model.Span) {
 	if span.Event != attributionEvent {
 		t.Fatalf("%s: event = %q, want %q", path, span.Event, attributionEvent)
 	}
-	if !strings.Contains(strings.Join(span.Entities, ","), attributionEntityID) {
+	// Exact membership, not a substring of the joined ids: an id is an opaque
+	// token, and "player:heliot-ramos-old" must not pass for
+	// "player:heliot-ramos".
+	found := false
+	for _, entityID := range span.Entities {
+		if entityID == attributionEntityID {
+			found = true
+			break
+		}
+	}
+	if !found {
 		t.Fatalf("%s: entities = %v, want %s among them", path, span.Entities, attributionEntityID)
 	}
 }
