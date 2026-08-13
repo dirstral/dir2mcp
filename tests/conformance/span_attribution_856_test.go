@@ -215,9 +215,8 @@ func recognitionServer856(t *testing.T) (*runningServer, config.Config) {
 
 	cfg := defaultConfig()
 	cfg.StateDir = tmp
-	srv := newServerWithRetriever(t, cfg, svc, mcp.WithStore(st))
-	t.Cleanup(srv.Close)
-	return srv, cfg
+	// newServerWithRetriever registers its own cleanup, so the caller does not.
+	return newServerWithRetriever(t, cfg, svc, mcp.WithStore(st)), cfg
 }
 
 // callToolStructured856 calls one tool over the production transport and returns
