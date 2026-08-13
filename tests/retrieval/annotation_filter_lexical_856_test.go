@@ -307,6 +307,19 @@ func TestAskAppliesTheFilterAndCitesOnlyMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask (home_run): %v", err)
 	}
+	// Both surfaces of the ask result: `hits` is what a caller inspects, and
+	// `citations` is what the answer stands on. A filter honoured on one only is
+	// still a wrong answer.
+	for _, hit := range res.Hits {
+		if hit.Span.Event != homeRun {
+			t.Fatalf("ask returned chunk %d with event %q; the filter admits home_run only",
+				hit.ChunkID, hit.Span.Event)
+		}
+	}
+	if len(res.Hits) != len(homeRunTotalIDs) {
+		t.Fatalf("ask returned %d hits, want %d (every home run, including the lexical-only one)",
+			len(res.Hits), len(homeRunTotalIDs))
+	}
 	for _, cited := range res.Citations {
 		if cited.Span.Event != homeRun {
 			t.Fatalf("ask cited chunk %d with event %q; the filter admits home_run only",
