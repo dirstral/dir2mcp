@@ -258,10 +258,10 @@ func TestStats_AdvertisedSchemaMatchesCanonical(t *testing.T) {
 	}
 	canonical := canonicalStatsTree(t)
 
-	assertSameStrings(t, "top-level property",
+	assertSameStrings(t, "stats.json", "top-level property",
 		schemaPropertyNames(t, canonical, "canonical"),
 		schemaPropertyNames(t, served, "served"))
-	assertSameStrings(t, "required field",
+	assertSameStrings(t, "stats.json", "required field",
 		schemaRequired(t, canonical, "canonical"),
 		schemaRequired(t, served, "served"))
 }
@@ -270,7 +270,11 @@ func TestStats_AdvertisedSchemaMatchesCanonical(t *testing.T) {
 // direction, because the two directions are different defects: served-only means
 // the server publishes a field outside the contract, canonical-only means it
 // fails to publish a field the contract defines.
-func assertSameStrings(t *testing.T, label string, canonical, served []string) {
+//
+// `subject` names the canonical file under comparison, so a second caller (the
+// Span check in span_attribution_856_test.go) does not report a Span drift as a
+// stats drift.
+func assertSameStrings(t *testing.T, subject, label string, canonical, served []string) {
 	t.Helper()
 	inCanonical := make(map[string]bool, len(canonical))
 	for _, name := range canonical {
@@ -282,12 +286,12 @@ func assertSameStrings(t *testing.T, label string, canonical, served []string) {
 	}
 	for _, name := range served {
 		if !inCanonical[name] {
-			t.Errorf("served stats schema declares %s %q, which the canonical stats.json does not: served=%v canonical=%v", label, name, served, canonical)
+			t.Errorf("the served schema declares %s %q, which the canonical %s does not: served=%v canonical=%v", label, name, subject, served, canonical)
 		}
 	}
 	for _, name := range canonical {
 		if !inServed[name] {
-			t.Errorf("canonical stats.json declares %s %q, which the served stats schema does not: served=%v canonical=%v", label, name, served, canonical)
+			t.Errorf("the canonical %s declares %s %q, which the served schema does not: served=%v canonical=%v", subject, label, name, served, canonical)
 		}
 	}
 }
