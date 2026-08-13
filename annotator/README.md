@@ -31,6 +31,28 @@ Core (play-by-play, fusion, serving, eval) is **stdlib-only**; vision
 recognizers pull their stacks via extras and are skipped gracefully when
 unavailable.
 
+### What the play-by-play recognizer emits
+
+One pitch produces up to three cues. Each cue carries one role:
+
+| `event` | Keyed on | Emitted for |
+|---|---|---|
+| `pitch` | the pitcher, plus the fielding club | every pitch a rostered pitcher threw |
+| `at_bat` | the batter, plus the club at the plate | every pitch a rostered batter faced |
+| the feed's `result.eventType`: `home_run`, `strikeout`, `walk`, `single`, `double`, `field_out`, ... | the batter, plus the club at the plate | the pitch that ended the at-bat |
+
+The third cue makes the outcome of a play structured data. Before it, the
+outcome was prose inside the cue text alone, so `dir2mcp_search`'s `events`
+filter could not reach it. "Who hit home runs? List every player" fell back to
+top-k semantic search over that prose, and it answered a "list every X"
+question from a partial sample: it named a player who never homered and it
+dropped one who did. The vocabulary is MLB's own, so a client selects the real
+thing with `events: ["home_run"]` instead of a match on words.
+
+The three cues share one time span, so the answer path groups them into one
+moment (issue #784) and counts one event once. The phase-1 metric reads
+`event == "pitch"` alone, so the outcome cues do not move it.
+
 ### The overlay text reader
 
 `recognizers/overlay.py` is the reusable half of the scorebug recognizer:

@@ -1,0 +1,4695 @@
+{
+ "gamePk": 823215,
+ "gameData": {
+  "teams": {
+   "away": {
+    "name": "Washington Nationals"
+   },
+   "home": {
+    "name": "San Francisco Giants"
+   }
+  }
+ },
+ "liveData": {
+  "plays": {
+   "allPlays": [
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "James Wood grounds out, second baseman Luis Arraez to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 1,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 695578,
+       "fullName": "James Wood"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T17:46:17.665Z",
+       "details": {
+        "description": "Status Change - Pre-Game"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T19:24:39.730Z",
+       "details": {
+        "description": "Status Change - Warmup"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T19:45:35.972Z",
+       "details": {
+        "description": "Status Change - In Progress"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:46:01.493Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:46:30.271Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:46:48.885Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Curtis Mead flies out to right fielder Jung Hoo Lee."
+     },
+     "about": {
+      "inning": 1,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 678554,
+       "fullName": "Curtis Mead"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:47:20.121Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:47:36.569Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:47:54.200Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:48:13.696Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:48:36.245Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:48:55.722Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Andrés Chaparro called out on strikes."
+     },
+     "about": {
+      "inning": 1,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 665953,
+       "fullName": "Andrés Chaparro"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:49:33.962Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:49:54.885Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:50:21.926Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:50:38.907Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:50:55.801Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:51:18.078Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:51:40.435Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Casey Schmitt lines out to third baseman Curtis Mead."
+     },
+     "about": {
+      "inning": 1,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 669477,
+       "fullName": "Casey Schmitt"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:53:58.107Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:54:34.280Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:54:52.243Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:55:13.192Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:55:34.368Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Luis Arraez grounds out softly, pitcher Foster Griffin to first baseman Andrés Chaparro."
+     },
+     "about": {
+      "inning": 1,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 650333,
+       "fullName": "Luis Arraez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:56:04.011Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:56:18.332Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T19:56:30.700Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:56:37.511Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:57:00.574Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:57:21.284Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:57:44.702Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:58:16.154Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:58:34.542Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Matt Chapman singles on a sharp ground ball to third baseman Curtis Mead."
+     },
+     "about": {
+      "inning": 1,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 656305,
+       "fullName": "Matt Chapman"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:59:07.726Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:59:21.139Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:59:40.704Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T19:59:59.003Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:00:21.118Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Rafael Devers lines out to center fielder Jacob Young."
+     },
+     "about": {
+      "inning": 1,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 646240,
+       "fullName": "Rafael Devers"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:00:58.096Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:01:28.956Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:01:46.466Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:02:05.122Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:02:24.629Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:02:53.948Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Dylan Crews flies out to center fielder Jonah Cox."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 686611,
+       "fullName": "Dylan Crews"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:05:09.555Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:05:26.846Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Daylen Lile singles on a fly ball to left fielder Victor Bericoto."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 695734,
+       "fullName": "Daylen Lile"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:05:57.505Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Jacob Young flies out to center fielder Jonah Cox."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 696285,
+       "fullName": "Jacob Young"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:06:36.996Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:06:57.122Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:07:15.199Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:07:25.062Z",
+       "details": {
+        "description": "Pickoff Attempt 1B"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:07:47.916Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:08:03.566Z",
+       "details": {
+        "description": "Daylen Lile steals (6) 2nd base."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:08:25.551Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Nasim Nuñez called out on strikes."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 683083,
+       "fullName": "Nasim Nuñez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:09:07.840Z",
+       "details": {
+        "description": "Pitcher Step Off"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:09:28.620Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:09:47.545Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:10:17.722Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:10:28.875Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:10:42.640Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Jung Hoo Lee strikes out swinging."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 808982,
+       "fullName": "Jung Hoo Lee"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:13:05.010Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:13:18.835Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:13:35.112Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:14:18.872Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:14:39.881Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:15:01.543Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:15:26.882Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:15:53.741Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Bryce Eldridge flies out to left fielder Daylen Lile."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 805811,
+       "fullName": "Bryce Eldridge"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:16:23.630Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:16:37.706Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Daniel Susac singles on a line drive to left fielder Daylen Lile."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 691740,
+       "fullName": "Daniel Susac"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:17:11.815Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:17:26.077Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:17:37.938Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:17:49.670Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Victor Bericoto strikes out swinging."
+     },
+     "about": {
+      "inning": 2,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 682674,
+       "fullName": "Victor Bericoto"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:18:26.376Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:18:42.316Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:18:58.965Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:19:11.945Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:19:24.602Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:19:47.849Z",
+       "details": {
+        "description": "Swinging Strike (Blocked)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Jorbit Vivas flies out to left fielder Victor Bericoto."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 678391,
+       "fullName": "Jorbit Vivas"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:22:16.562Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:22:32.884Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Keibert Ruiz singles on a line drive to left fielder Victor Bericoto."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 660688,
+       "fullName": "Keibert Ruiz"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:23:07.045Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:23:20.771Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:23:37.171Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:23:56.316Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:24:12.259Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "home_run",
+      "description": "James Wood homers (18) on a fly ball to center field. Keibert Ruiz scores."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 695578,
+       "fullName": "James Wood"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:24:49.187Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:25:09.697Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:25:28.849Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:25:46.517Z",
+       "details": {
+        "description": "Ball In Dirt"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:26:13.554Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Curtis Mead flies out to center fielder Jonah Cox."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 678554,
+       "fullName": "Curtis Mead"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:26:58.782Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:27:14.723Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:27:29.942Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Andrés Chaparro grounds out sharply, third baseman Matt Chapman to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 665953,
+       "fullName": "Andrés Chaparro"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:28:04.317Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:28:21.797Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:28:41.787Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:28:58.456Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Jonah Cox strikes out swinging."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 813841,
+       "fullName": "Jonah Cox"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:31:11.404Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:31:25.334Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:31:44.958Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Casey Schmitt grounds out, first baseman Andrés Chaparro to pitcher Foster Griffin."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 669477,
+       "fullName": "Casey Schmitt"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:32:12.412Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:32:32.223Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:32:48.023Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:33:09.859Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:33:25.758Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Luis Arraez singles on a ground ball to left fielder Daylen Lile."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 650333,
+       "fullName": "Luis Arraez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:34:05.736Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:34:22.155Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "force_out",
+      "description": "Matt Chapman grounds into a force out, shortstop Nasim Nuñez to second baseman Jorbit Vivas. Luis Arraez out at 2nd."
+     },
+     "about": {
+      "inning": 3,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 656305,
+       "fullName": "Matt Chapman"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:35:01.052Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:35:17.703Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:35:34.809Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:35:55.624Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Dylan Crews grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 4,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 686611,
+       "fullName": "Dylan Crews"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:38:13.543Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:38:32.326Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:38:48.561Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:39:07.399Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:39:24.173Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:39:33.953Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:39:43.958Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:40:07.306Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Daylen Lile grounds out sharply, shortstop Casey Schmitt to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 4,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 695734,
+       "fullName": "Daylen Lile"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:40:41.835Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:41:23.854Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:41:39.695Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:41:49.488Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:42:06.639Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:42:24.905Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:42:44.673Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Jacob Young strikes out swinging."
+     },
+     "about": {
+      "inning": 4,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 696285,
+       "fullName": "Jacob Young"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:43:23.642Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:43:40.907Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:43:55.872Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:44:09.700Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:44:26.604Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:44:44.244Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Rafael Devers called out on strikes."
+     },
+     "about": {
+      "inning": 4,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 646240,
+       "fullName": "Rafael Devers"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:46:57.441Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:47:12.420Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:47:28.153Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:47:45.619Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Jung Hoo Lee grounds out, second baseman Jorbit Vivas to first baseman Andrés Chaparro."
+     },
+     "about": {
+      "inning": 4,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 808982,
+       "fullName": "Jung Hoo Lee"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:48:15.087Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:48:29.701Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Bryce Eldridge grounds out softly, pitcher Foster Griffin to first baseman Andrés Chaparro."
+     },
+     "about": {
+      "inning": 4,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 805811,
+       "fullName": "Bryce Eldridge"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:49:01.418Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Nasim Nuñez grounds out, shortstop Casey Schmitt to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 683083,
+       "fullName": "Nasim Nuñez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:51:20.460Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:51:38.104Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:51:39.897Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:52:12.346Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:52:32.727Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:52:48.033Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:53:08.936Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Jorbit Vivas singles on a line drive to left fielder Victor Bericoto."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 678391,
+       "fullName": "Jorbit Vivas"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:53:43.935Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:54:03.539Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Keibert Ruiz flies out to right fielder Jung Hoo Lee."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 660688,
+       "fullName": "Keibert Ruiz"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:54:39.694Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "James Wood flies out to left fielder Victor Bericoto."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 695578,
+       "fullName": "James Wood"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:55:13.960Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:55:31.091Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:55:52.660Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:56:11.764Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:56:34.159Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:56:53.436Z",
+       "details": {
+        "description": "Pitcher Step Off"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:57:08.093Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Daniel Susac grounds out, second baseman Jorbit Vivas to first baseman Andrés Chaparro."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 691740,
+       "fullName": "Daniel Susac"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T20:59:24.688Z",
+       "details": {
+        "description": "Automatic Strike - Batter Pitch Timer Violation"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:59:44.254Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T20:59:58.043Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:00:11.383Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:00:22.477Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:00:32.332Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:00:48.421Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Nationals challenged (play at 1st), call on the field was overturned: Victor Bericoto grounds out, shortstop Nasim Nuñez to first baseman Andrés Chaparro."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 682674,
+       "fullName": "Victor Bericoto"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:01:22.230Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:01:36.068Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:01:52.873Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:02:14.439Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:02:30.480Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:02:44.997Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:03:06.156Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:03:23.813Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:03:46.673Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Jonah Cox singles on a fly ball to right fielder Dylan Crews."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 813841,
+       "fullName": "Jonah Cox"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:06:00.099Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:06:15.147Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:06:29.384Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:06:44.793Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Casey Schmitt lines out sharply to center fielder Jacob Young."
+     },
+     "about": {
+      "inning": 5,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 669477,
+       "fullName": "Casey Schmitt"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:07:22.764Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:07:52.719Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:08:10.575Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Curtis Mead grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 678554,
+       "fullName": "Curtis Mead"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:10:05.363Z",
+       "details": {
+        "description": "Defensive Substitution: Drew Gilbert replaces left fielder Victor Bericoto, batting 8th, playing left field."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:10:25.905Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:10:44.421Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:10:59.588Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Andrés Chaparro grounds out, shortstop Casey Schmitt to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 665953,
+       "fullName": "Andrés Chaparro"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:11:28.905Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:11:46.469Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:12:01.961Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Dylan Crews singles on a fly ball to right fielder Jung Hoo Lee."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 686611,
+       "fullName": "Dylan Crews"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:12:32.300Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Daylen Lile singles on a fly ball to left fielder Drew Gilbert. Dylan Crews scores."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 695734,
+       "fullName": "Daylen Lile"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:13:09.875Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:13:28.460Z",
+       "details": {
+        "description": "Dylan Crews steals (2) 2nd base."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:13:45.544Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:14:06.559Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:14:24.724Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Jacob Young singles on a line drive to center fielder Jonah Cox. Daylen Lile to 3rd."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 592662,
+       "fullName": "Robbie Ray"
+      },
+      "batter": {
+       "id": 696285,
+       "fullName": "Jacob Young"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:15:06.622Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:15:25.984Z",
+       "details": {
+        "description": "Pickoff Attempt 1B"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:15:47.872Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:16:16.269Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:16:40.904Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:16:45.305Z",
+       "details": {
+        "description": "Pickoff Attempt 1B"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:17:07.483Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Nasim Nuñez singles on a ground ball to left fielder Drew Gilbert. Daylen Lile scores. Jacob Young scores."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 683083,
+       "fullName": "Nasim Nuñez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:17:38.751Z",
+       "details": {
+        "description": "Mound Visit."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:18:17.721Z",
+       "details": {
+        "description": "Pitching Change: Carson Seymour replaces Robbie Ray."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:20:11.279Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:20:28.006Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:20:58.155Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:21:25.065Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:21:37.076Z",
+       "details": {
+        "description": "Jacob Young steals (6) 2nd base."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:21:43.864Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:22:03.548Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Jorbit Vivas singles on a ground ball to right fielder Jung Hoo Lee. Nasim Nuñez scores. Jorbit Vivas to 2nd."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 678391,
+       "fullName": "Jorbit Vivas"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:22:43.257Z",
+       "details": {
+        "description": "Foul Tip"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:23:08.832Z",
+       "details": {
+        "description": "Pickoff Attempt 1B"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:23:28.529Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:23:43.491Z",
+       "details": {
+        "description": "Nasim Nuñez steals (25) 2nd base."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:23:58.505Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Keibert Ruiz pops out to shortstop Casey Schmitt."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 660688,
+       "fullName": "Keibert Ruiz"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:25:09.005Z",
+       "details": {
+        "description": "Mound Visit."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:25:26.109Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:25:41.582Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:26:09.937Z",
+       "details": {
+        "description": "Ball In Dirt"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:26:28.178Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:26:48.802Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Luis Arraez lines out to left fielder Daylen Lile."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 650333,
+       "fullName": "Luis Arraez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:29:08.061Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:29:22.280Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "home_run",
+      "description": "Matt Chapman homers (5) on a fly ball to left center field."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 656305,
+       "fullName": "Matt Chapman"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:29:54.005Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:30:10.387Z",
+       "details": {
+        "description": "Foul Tip"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:30:19.811Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:30:30.248Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:30:49.974Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:31:21.500Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Rafael Devers flies out to right fielder Dylan Crews."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 646240,
+       "fullName": "Rafael Devers"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:32:05.855Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:32:21.001Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:32:40.029Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Jung Hoo Lee singles on a line drive to right fielder Dylan Crews."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 808982,
+       "fullName": "Jung Hoo Lee"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:33:14.351Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Bryce Eldridge strikes out swinging."
+     },
+     "about": {
+      "inning": 6,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 656492,
+       "fullName": "Foster Griffin"
+      },
+      "batter": {
+       "id": 805811,
+       "fullName": "Bryce Eldridge"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:33:48.740Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:34:13.553Z",
+       "details": {
+        "description": "Wild pitch by pitcher Foster Griffin. Jung Hoo Lee to 2nd."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:34:15.905Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:34:36.979Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:34:55.010Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:35:14.459Z",
+       "details": {
+        "description": "Ball In Dirt"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:35:38.465Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "walk",
+      "description": "James Wood walks."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 695578,
+       "fullName": "James Wood"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:37:49.271Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:38:03.151Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:38:21.812Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:38:37.836Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:38:54.456Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:39:11.407Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:39:32.077Z",
+       "details": {
+        "description": "Ball"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Curtis Mead singles on a pop up to second baseman Luis Arraez."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 678554,
+       "fullName": "Curtis Mead"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:39:58.496Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:40:14.934Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:40:33.518Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:40:49.865Z",
+       "details": {
+        "description": "Wild pitch by pitcher Carson Seymour. James Wood to 2nd."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:41:00.648Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "double",
+      "description": "Luis García Jr. doubles (12) on a fly ball to left fielder Drew Gilbert. James Wood scores. Curtis Mead to 3rd."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 671277,
+       "fullName": "Luis García Jr."
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:42:01.052Z",
+       "details": {
+        "description": "Offensive Substitution: Pinch-hitter Luis García Jr. replaces Andrés Chaparro."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:42:01.054Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:42:22.290Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:42:41.203Z",
+       "details": {
+        "description": "Ball In Dirt"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:43:02.004Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Dylan Crews grounds out sharply, shortstop Casey Schmitt to first baseman Rafael Devers. Curtis Mead scores. Luis García Jr. to 3rd."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 686611,
+       "fullName": "Dylan Crews"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:43:52.720Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:44:08.053Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Daylen Lile singles on a sharp line drive to right fielder Jung Hoo Lee. Luis García Jr. scores."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 695734,
+       "fullName": "Daylen Lile"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:44:51.933Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:45:06.416Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:45:22.072Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Jacob Young called out on strikes."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 696285,
+       "fullName": "Jacob Young"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:45:57.486Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:46:12.492Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:46:28.800Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:46:53.122Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:47:12.469Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:47:36.455Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:47:58.771Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:48:17.783Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:48:40.988Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Nasim Nuñez lines out to center fielder Jonah Cox."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 693313,
+       "fullName": "Carson Seymour"
+      },
+      "batter": {
+       "id": 683083,
+       "fullName": "Nasim Nuñez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:49:08.102Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:49:39.217Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:50:03.052Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Daniel Susac pops out to first baseman Luis García Jr. in foul territory."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 691740,
+       "fullName": "Daniel Susac"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:52:01.875Z",
+       "details": {
+        "description": "Luis García Jr. remains in the game as the first baseman."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:52:01.891Z",
+       "details": {
+        "description": "Pitching Change: Paxton Schultz replaces Foster Griffin."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:52:31.319Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:52:46.188Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:53:03.103Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "walk",
+      "description": "Drew Gilbert walks."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 687551,
+       "fullName": "Drew Gilbert"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:53:38.162Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:53:53.983Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:54:12.958Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:54:29.968Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:54:44.119Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:55:01.418Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:55:19.715Z",
+       "details": {
+        "description": "Ball"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Jonah Cox strikes out swinging."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 813841,
+       "fullName": "Jonah Cox"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:55:49.702Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:56:06.682Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:56:25.429Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:56:42.291Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Casey Schmitt singles on a sharp line drive to right fielder Dylan Crews. Drew Gilbert to 2nd."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 669477,
+       "fullName": "Casey Schmitt"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:57:12.481Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:57:35.405Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Luis Arraez grounds out, shortstop Nasim Nuñez to first baseman Luis García Jr."
+     },
+     "about": {
+      "inning": 7,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 650333,
+       "fullName": "Luis Arraez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:58:12.324Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:58:30.118Z",
+       "details": {
+        "description": "Ball In Dirt"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:58:52.888Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:59:13.708Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:59:32.582Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T21:59:43.729Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T21:59:55.795Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Jorbit Vivas grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 678391,
+       "fullName": "Jorbit Vivas"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:01:43.706Z",
+       "details": {
+        "description": "Pitching Change: Reiver Sanmartin replaces Carson Seymour."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:02:20.720Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:02:30.584Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:02:52.407Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:02:55.814Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Keibert Ruiz grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 660688,
+       "fullName": "Keibert Ruiz"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:03:25.023Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:03:41.034Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:03:47.551Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:03:59.554Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:04:17.401Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:04:43.016Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "James Wood strikes out swinging."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 695578,
+       "fullName": "James Wood"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:05:12.167Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:05:22.424Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:05:33.887Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:05:46.228Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "home_run",
+      "description": "Matt Chapman homers (6) on a fly ball to center field."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 656305,
+       "fullName": "Matt Chapman"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:07:58.398Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "home_run",
+      "description": "Rafael Devers homers (9) on a fly ball to center field."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 646240,
+       "fullName": "Rafael Devers"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:08:43.522Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:08:59.373Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "walk",
+      "description": "Jung Hoo Lee walks."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 808982,
+       "fullName": "Jung Hoo Lee"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:09:49.263Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:10:05.756Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:10:20.743Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:10:38.175Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:10:56.619Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:11:13.579Z",
+       "details": {
+        "description": "Ball"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "walk",
+      "description": "Bryce Eldridge walks."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 805811,
+       "fullName": "Bryce Eldridge"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:11:31.789Z",
+       "details": {
+        "description": "Mound Visit."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:12:16.522Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:12:35.753Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:13:00.565Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:13:17.607Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:13:40.932Z",
+       "details": {
+        "description": "Jung Hoo Lee steals (3) 2nd base."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:13:44.778Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:14:17.205Z",
+       "details": {
+        "description": "Ball"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "double",
+      "description": "Daniel Susac doubles (5) on a line drive to left fielder Daylen Lile. Jung Hoo Lee scores. Bryce Eldridge to 3rd."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687606,
+       "fullName": "Paxton Schultz"
+      },
+      "batter": {
+       "id": 691740,
+       "fullName": "Daniel Susac"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:14:49.697Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:15:08.174Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:15:22.262Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:15:37.872Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:15:56.419Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:16:18.732Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:16:41.523Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:17:04.049Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Drew Gilbert grounds out, first baseman Luis García Jr. to pitcher Orlando Ribalta. Bryce Eldridge scores. Daniel Susac to 3rd."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687377,
+       "fullName": "Orlando Ribalta"
+      },
+      "batter": {
+       "id": 687551,
+       "fullName": "Drew Gilbert"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:17:55.441Z",
+       "details": {
+        "description": "Mound Visit."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:18:44.152Z",
+       "details": {
+        "description": "Pitching Change: Orlando Ribalta replaces Paxton Schultz."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:20:09.323Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:20:31.544Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:20:42.483Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:21:00.228Z",
+       "details": {
+        "description": "Ball In Dirt"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:21:28.181Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Buddy Kennedy challenged (pitch result), call on the field was confirmed: Buddy Kennedy called out on strikes."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687377,
+       "fullName": "Orlando Ribalta"
+      },
+      "batter": {
+       "id": 671083,
+       "fullName": "Buddy Kennedy"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:22:19.367Z",
+       "details": {
+        "description": "Offensive Substitution: Pinch-hitter Buddy Kennedy replaces Jonah Cox."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:22:50.657Z",
+       "details": {
+        "description": "Mound Visit."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:22:55.899Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:23:19.366Z",
+       "details": {
+        "description": "Wild pitch by pitcher Orlando Ribalta. Daniel Susac scores."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:23:33.445Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:24:02.575Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:24:22.203Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:24:50.696Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Casey Schmitt flies out to center fielder Jacob Young."
+     },
+     "about": {
+      "inning": 8,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 687377,
+       "fullName": "Orlando Ribalta"
+      },
+      "batter": {
+       "id": 669477,
+       "fullName": "Casey Schmitt"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:25:31.894Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "home_run",
+      "description": "Curtis Mead homers (10) on a fly ball to left center field."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 678554,
+       "fullName": "Curtis Mead"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:27:47.397Z",
+       "details": {
+        "description": "Defensive switch from left field to center field for Drew Gilbert."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:27:47.399Z",
+       "details": {
+        "description": "Defensive Substitution: Eric Haase replaces Buddy Kennedy, batting 9th, playing left field."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:27:47.401Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:27:58.222Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:28:21.051Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:28:34.139Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:28:47.363Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:29:14.539Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:29:14.541Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "strikeout",
+      "description": "Luis García Jr. strikes out swinging."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 671277,
+       "fullName": "Luis García Jr."
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:29:50.046Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:29:59.786Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:30:10.808Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:30:23.327Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:30:36.451Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:30:51.092Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Dylan Crews lines out sharply to second baseman Luis Arraez."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 686611,
+       "fullName": "Dylan Crews"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:31:16.288Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:31:27.333Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Daylen Lile singles on a line drive to left fielder Eric Haase."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 695734,
+       "fullName": "Daylen Lile"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:31:55.811Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "field_out",
+      "description": "Jacob Young grounds out, third baseman Matt Chapman to first baseman Rafael Devers."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": true
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 665665,
+       "fullName": "Reiver Sanmartin"
+      },
+      "batter": {
+       "id": 696285,
+       "fullName": "Jacob Young"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:32:27.745Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:32:44.202Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:33:00.642Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:33:24.714Z",
+       "details": {
+        "description": "Giants challenged (tag play), call on the field was upheld: Daylen Lile steals (7) 2nd base."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:34:35.442Z",
+       "details": {
+        "description": "In play, out(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "double",
+      "description": "Luis Arraez doubles (14) on a fly ball to right fielder Dylan Crews."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 681402,
+       "fullName": "Gus Varland"
+      },
+      "batter": {
+       "id": 650333,
+       "fullName": "Luis Arraez"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:36:48.540Z",
+       "details": {
+        "description": "Pitching Change: Gus Varland replaces Orlando Ribalta."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:37:05.259Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:37:19.850Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:37:36.156Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:38:04.678Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "double",
+      "description": "Matt Chapman doubles (17) on a sharp fly ball to right fielder Dylan Crews. Luis Arraez scores."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 681402,
+       "fullName": "Gus Varland"
+      },
+      "batter": {
+       "id": 656305,
+       "fullName": "Matt Chapman"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:38:50.632Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:39:11.100Z",
+       "details": {
+        "description": "Swinging Strike"
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:39:19.489Z",
+       "details": {
+        "description": "Batter Timeout."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:39:31.982Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "walk",
+      "description": "Rafael Devers walks."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 681402,
+       "fullName": "Gus Varland"
+      },
+      "batter": {
+       "id": 646240,
+       "fullName": "Rafael Devers"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:40:11.141Z",
+       "details": {
+        "description": "Mound Visit."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:40:59.536Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:41:14.843Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:41:35.159Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:41:53.793Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:42:14.402Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:42:34.685Z",
+       "details": {
+        "description": "Ball"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "single",
+      "description": "Jung Hoo Lee singles on a ground ball to left fielder Daylen Lile. Matt Chapman to 3rd. Rafael Devers to 2nd."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 680730,
+       "fullName": "Mitchell Parker"
+      },
+      "batter": {
+       "id": 808982,
+       "fullName": "Jung Hoo Lee"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:43:02.921Z",
+       "details": {
+        "description": "Mound Visit."
+       }
+      },
+      {
+       "isPitch": false,
+       "startTime": "2026-06-10T22:43:33.485Z",
+       "details": {
+        "description": "Pitching Change: Mitchell Parker replaces Gus Varland."
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:45:28.403Z",
+       "details": {
+        "description": "Called Strike"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:45:45.101Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:46:12.985Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:46:37.949Z",
+       "details": {
+        "description": "Foul"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:47:00.648Z",
+       "details": {
+        "description": "In play, no out"
+       }
+      }
+     ]
+    },
+    {
+     "result": {
+      "eventType": "home_run",
+      "description": "Bryce Eldridge hits a grand slam (4) to right field. Matt Chapman scores. Rafael Devers scores. Jung Hoo Lee scores."
+     },
+     "about": {
+      "inning": 9,
+      "isTopInning": false
+     },
+     "matchup": {
+      "pitcher": {
+       "id": 680730,
+       "fullName": "Mitchell Parker"
+      },
+      "batter": {
+       "id": 805811,
+       "fullName": "Bryce Eldridge"
+      }
+     },
+     "playEvents": [
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:47:41.076Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:48:01.023Z",
+       "details": {
+        "description": "Ball"
+       }
+      },
+      {
+       "isPitch": true,
+       "startTime": "2026-06-10T22:48:18.988Z",
+       "details": {
+        "description": "In play, run(s)"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
