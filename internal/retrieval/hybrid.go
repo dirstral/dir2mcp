@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 )
@@ -95,11 +96,18 @@ func fuseRRFMulti(lists [][]model.SearchHit, k int) []model.SearchHit {
 // Errors from the BM25 path are deliberately swallowed and trigger a
 // vector-only fallback rather than failing the search outright. This keeps
 // hybrid retrieval an optimization, not a hard dependency.
+//
+// filters are the query's candidate predicates. They MUST be applied to the
+// lexical candidates too (issue #856): the vector path filters its own
+// candidates in collectFilteredHits, so a filter evaluated only there was
+// undone here — fusion added back candidates no predicate had judged, and a
+// filter that selected nothing still returned the whole BM25 pool.
 func (s *Service) runHybridSearch(
 	ctx context.Context,
 	query string,
 	k int,
 	indexKind string,
+	filters model.SearchQuery,
 	vectorHits []model.SearchHit,
 ) ([]model.SearchHit, bool) {
 	s.metaMu.RLock()
@@ -129,22 +137,11 @@ func (s *Service) runHybridSearch(
 	if len(bm25Hits) == 0 {
 		return vectorHits, true
 	}
-	// Re-attach cached metadata to BM25 hits for fields the FTS query did
-	// not populate (Span, etc.). The vector path already merges metadata via
-	// searchHitForLabel, so we use the same path here for parity.
-	for i, h := range bm25Hits {
-		cached := s.searchHitForLabel(indexKind, h.ChunkID)
-		// Preserve BM25's score and snippet; pull in the better Span and any
-		// other fields the lexical query left unset.
-		if cached.Span.Kind != "" {
-			bm25Hits[i].Span = cached.Span
-		}
-		if bm25Hits[i].RepType == "" {
-			bm25Hits[i].RepType = cached.RepType
-		}
-		if bm25Hits[i].DocType == "" || bm25Hits[i].DocType == "unknown" {
-			bm25Hits[i].DocType = cached.DocType
-		}
+	lexicalHits := s.selectLexicalCandidates(indexKind, bm25Hits, filters)
+	if len(lexicalHits) == 0 {
+		// Every lexical candidate was filtered out. Return the vector candidates
+		// alone, exactly as an empty BM25 result does above.
+		return vectorHits, true
 	}
 	// Fuse into a candidate pool sized for the downstream rerank stage, not just
 	// the final k. Truncating fusion to k here would defeat the over-fetch pool
@@ -152,7 +149,95 @@ func (s *Service) runHybridSearch(
 	// never rescue a relevant chunk fused at rank k+1..pool. The caller truncates
 	// to k when rerank is disabled, so the wider pool is harmless there. This
 	// mirrors the HyDE path, which already fuses to hybridCandidatePoolSize.
-	return fuseRRF(vectorHits, bm25Hits, rerankFusionPoolSize(k, rerankPool)), true
+	return fuseRRF(vectorHits, lexicalHits, rerankFusionPoolSize(k, rerankPool)), true
+}
+
+// selectLexicalCandidates hydrates each BM25 candidate from the in-memory chunk
+// metadata and then keeps only the candidates the query's predicates admit. It
+// is the lexical half of candidate selection, and the counterpart of
+// collectFilteredHits on the vector side.
+//
+// Order matters: hydrate first, filter second. matchFilters judges a candidate
+// on the metadata the candidate carries, so a lexical retriever that returns no
+// span, language or mtime would otherwise be judged against absent values and
+// every one of its hits would be dropped by an active filter. Hydration is a
+// map lookup per candidate against metadata the service already holds, so it
+// adds no query and no I/O.
+//
+// The candidate pool is the BM25 top-N for the query text, filtered. A highly
+// selective filter may therefore leave the lexical contribution empty, which
+// costs no recall relative to a vector-only search: the vector path runs its own
+// widening overfetch loop against the same filter.
+func (s *Service) selectLexicalCandidates(
+	indexKind string,
+	bm25Hits []model.SearchHit,
+	filters model.SearchQuery,
+) []model.SearchHit {
+	out := make([]model.SearchHit, 0, len(bm25Hits))
+	for _, hit := range bm25Hits {
+		hydrated := s.hydrateLexicalHit(indexKind, hit)
+		if !matchFilters(hydrated, filters) {
+			continue
+		}
+		out = append(out, hydrated)
+	}
+	return out
+}
+
+// hydrateLexicalHit re-attaches cached metadata to one BM25 hit for the fields
+// the lexical query did not populate. The vector path merges metadata via
+// searchHitForLabel, so the same source is used here for parity.
+//
+// BM25's own score and snippet are preserved. The span, the representation and
+// document types, the recorded language and the document's calendar anchor are
+// pulled from the cache when the lexical hit lacks them; those last two are what
+// the language (SPEC §9.5) and date-window (§9.6) predicates read, and the span
+// is what the speaker (§8.6.8), media time-window (§9.8) and recognition
+// entity/event (design 0004 §7) predicates read.
+func (s *Service) hydrateLexicalHit(indexKind string, hit model.SearchHit) model.SearchHit {
+	cached := s.searchHitForLabel(indexKind, hit.ChunkID)
+	hit.Span = resolveLexicalSpan(hit.Span, cached.Span)
+	if hit.RepType == "" {
+		hit.RepType = cached.RepType
+	}
+	if hit.DocType == "" || hit.DocType == "unknown" {
+		hit.DocType = cached.DocType
+	}
+	if strings.TrimSpace(hit.Language) == "" {
+		hit.Language = cached.Language
+	}
+	if hit.MTimeUnix == 0 {
+		hit.MTimeUnix = cached.MTimeUnix
+	}
+	return hit
+}
+
+// resolveLexicalSpan merges a lexical hit's span with the cached one.
+//
+// The cached span wins when it exists, as it always has: it is the span row the
+// vector path cites, so a chunk localizes to the same place whichever retriever
+// found it. One exception keeps the filter honest: an attribution field the
+// cached span lacks is taken from the lexical span. A candidate must never be
+// judged against attribution it does not have but its chunk does, because a
+// non-empty filter rejects an attribution-less span by design and the hit would
+// be dropped for the wrong reason (issue #856).
+//
+// The two fields are merged INDEPENDENTLY. `entities` and `event` are separate
+// predicates that are ANDed, so a cached span that carries the ids but not the
+// event would otherwise lose the event and fail an `events` filter its chunk
+// satisfies.
+func resolveLexicalSpan(lexical, cached model.Span) model.Span {
+	if cached.Kind == "" {
+		return lexical
+	}
+	resolved := cached
+	if len(resolved.Entities) == 0 {
+		resolved.Entities = lexical.Entities
+	}
+	if strings.TrimSpace(resolved.Event) == "" {
+		resolved.Event = lexical.Event
+	}
+	return resolved
 }
 
 // rerankFusionPoolSize returns how many fused candidates to keep before the
