@@ -401,6 +401,38 @@ func TestSpan_ServedSpansValidateAgainstCanonicalSchema(t *testing.T) {
 	}
 }
 
+// TestSpan_CanonicalValidatorRejectsAnUndeclaredField is the negative control
+// for the check above. Validating against the canonical file only means
+// something if the validator really rejects a field the contract does not
+// declare. Without this, a validator that resolved to "accept anything" would
+// make every canonical check in this file pass vacuously.
+//
+// It uses `sources` as the undeclared field on purpose. That is the field
+// #861 asks about, and this is the machine-readable reason this PR does not
+// serve it: the canonical time branch is additionalProperties:false and does not
+// declare it, so a span carrying it would make a strict client reject the whole
+// tool result.
+func TestSpan_CanonicalValidatorRejectsAnUndeclaredField(t *testing.T) {
+	t.Parallel()
+	validator := canonicalSpanValidator(t)
+
+	conforming := map[string]interface{}{
+		"kind": "time", "start_ms": float64(0), "end_ms": float64(1000),
+		"entities": []interface{}{"player:heliot-ramos"}, "event": "home_run",
+	}
+	if err := validator.Validate(conforming); err != nil {
+		t.Fatalf("the canonical Span validator rejected a conforming time span: %v", err)
+	}
+
+	undeclared := map[string]interface{}{
+		"kind": "time", "start_ms": float64(0), "end_ms": float64(1000),
+		"sources": []interface{}{"pbp-feed"},
+	}
+	if err := validator.Validate(undeclared); err == nil {
+		t.Fatal("the canonical Span validator accepted an undeclared `sources` field, so every canonical check in this file would pass vacuously")
+	}
+}
+
 // TestSpan_AdvertisedTimeBranchMatchesCanonical pins the other direction. The
 // payload check above only sees what this corpus happens to emit. This one reads
 // the schema the server publishes through tools/list and requires the same
