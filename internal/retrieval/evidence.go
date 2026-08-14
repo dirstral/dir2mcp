@@ -9,9 +9,9 @@ import (
 // Insufficient-evidence guard (SPEC §9.4.3).
 //
 // The relevance floor (config `retrieval.min_score`, applyMinScoreFloor) is a
-// RELATIVE pruning control: it compares each hit against a score MIN-MAX
-// NORMALIZED over the result set, which is what makes it scale-free across the
-// cosine / RRF / rerank modes (#411). That normalization also makes it
+// RELATIVE pruning control: it compares each hit against the BEST score of the
+// same result set, as a ratio, which is what makes it scale-free across the
+// cosine / RRF / rerank modes (#411). That comparison also makes it
 // structurally incapable of reporting insufficiency: the top-scoring hit maps to
 // 1.0 by construction, so some hit always clears any floor whenever the set is
 // non-empty, and a uniformly weak result set survives in full. A relative floor

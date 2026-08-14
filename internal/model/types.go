@@ -813,8 +813,8 @@ type SearchHit struct {
 	// hit: a score whose meaning does not depend on the other hits in the same
 	// response (SPEC §9.4.3). Score alone cannot serve that role because a
 	// rank-based RRF fusion score encodes rank rather than relevance, and the
-	// index=both path min-max normalizes per axis; both destroy the absolute
-	// reading. EvidenceScale names the scale EvidenceScore is on, so the
+	// index=both path rescales each axis against its own best; both destroy the
+	// absolute reading. EvidenceScale names the scale EvidenceScore is on, so the
 	// insufficient-evidence threshold can be maintained per scale instead of one
 	// number applied across incommensurable scales:
 	//

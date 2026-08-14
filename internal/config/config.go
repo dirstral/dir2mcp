@@ -67,11 +67,10 @@ const (
 
 // defaultRetrievalMinScore is the shipped default for `retrieval.min_score`,
 // the RELATIVE pruning floor of SPEC §9.4.3, which requires the floor to ship
-// enabled. The floor compares a score min-max normalized over the result set,
-// so 0.05 means "drop hits sitting in the bottom 5% of the observed score
-// range"; because normalization maps the weakest hit to 0, that also always
-// drops the weakest hit of a non-degenerate set (a degenerate all-equal set
-// normalizes to all-1 and survives in full).
+// enabled. The floor compares each score as a RATIO to the best score of the
+// same result set, so 0.05 means "drop a hit that scores below 5% of the best
+// hit". A set of near-equal candidates survives in full, because a hit reaches
+// 0 only when its own score is 0 (issue #858).
 //
 // The value is deliberately permissive. §9.1.1 leaves raw scores on
 // incommensurable scales, so this floor can only ever be a relative ranking
@@ -307,10 +306,10 @@ type Config struct {
 	// rerank/truncation. Default false (every candidate is returned as before).
 	DedupRetrieval bool
 	// RetrievalMinScore is a server-side relevance floor (config
-	// `retrieval.min_score`): candidate hits whose score — MIN-MAX NORMALIZED to
-	// [0,1] over the result set — is strictly below this value are dropped after
+	// `retrieval.min_score`): candidate hits whose score — taken as a RATIO to the
+	// best score of the result set — is strictly below this value are dropped after
 	// scoring/fusion/rerank and after dedup/truncation, before results reach the
-	// model. The floor is applied on the normalized score (a RELATIVE floor in
+	// model. The floor is applied on that ratio (a RELATIVE floor in
 	// [0,1]: 0 keeps everything, 1 keeps only the top hit) rather than the raw
 	// authoritative score, because raw scores are incommensurable across retrieval
 	// modes — cosine (~0..1) vs RRF (max ≈ 0.033) vs a provider rerank scale — so a
@@ -323,8 +322,8 @@ type Config struct {
 	// SPEC §9.4.3 splits this control in two and requires this one to ship
 	// ENABLED, so it defaults to defaultRetrievalMinScore rather than to 0.
 	// `0` remains the explicit disable representation. Note what this floor is
-	// and is NOT: because it normalizes over the result set, the top hit always
-	// maps to 1.0, so some hit always clears any floor. It PRUNES weak hits
+	// and is NOT: because it measures against the result set's best hit, that hit
+	// always maps to 1.0, so some hit always clears any floor. It PRUNES weak hits
 	// relative to the best one; it can never report that the best one is itself
 	// too weak. The absolute threshold that triggers ask abstention is a
 	// separate, non-configurable control (internal/retrieval/evidence.go).
@@ -5330,14 +5329,15 @@ func (c *Config) validateMediaSTTNumericBounds() error {
 	return nil
 }
 
-// validateMinScore validates retrieval.min_score. The floor is applied to
-// MIN-MAX NORMALIZED scores in [0,1] (#411); 0 disables it. A negative floor
+// validateMinScore validates retrieval.min_score. The floor is applied to a
+// score RATIO to the result set's best hit, in [0,1] (#411, #858); 0 disables
+// it. A negative floor
 // would never drop anything, and a floor > 1 would silently drop EVERY hit, so
 // both are rejected explicitly. Split out to keep validateRetrievalNumericBounds
 // under the cyclomatic-complexity budget.
 func (c *Config) validateMinScore() error {
 	if c.RetrievalMinScore < 0 || c.RetrievalMinScore > 1 || math.IsNaN(c.RetrievalMinScore) || math.IsInf(c.RetrievalMinScore, 0) {
-		return fmt.Errorf("retrieval.min_score must be in [0,1] (normalized relevance; 0 disables the floor): %v", c.RetrievalMinScore)
+		return fmt.Errorf("retrieval.min_score must be in [0,1] (relative relevance, a ratio to the best hit; 0 disables the floor): %v", c.RetrievalMinScore)
 	}
 	return nil
 }

@@ -161,9 +161,9 @@ func TestAsk_ContextSectionStaysWithinBudget(t *testing.T) {
 // `hits`.
 //
 // The relative pruning floor (`retrieval.min_score`) cannot produce this
-// outcome: it compares a score normalized over the result set, so the top hit
-// always normalizes to 1.0 and some hit always clears any floor. Only an
-// absolute reading can report that the best hit is itself too weak.
+// outcome: it compares each score against the best of the result set, so the top
+// hit is always 1.0 and some hit always clears any floor. Only an absolute
+// reading can report that the best hit is itself too weak.
 func TestAsk_AbstainsWhenEvidenceIsAbsolutelyWeak(t *testing.T) {
 	idx := index.NewHNSWIndex("")
 	// Near-orthogonal to the query vector: cosine ~0.02, well under the shipped

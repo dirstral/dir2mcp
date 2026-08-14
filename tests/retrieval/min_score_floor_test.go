@@ -14,9 +14,13 @@ import (
 // similarity) with the server-side relevance floor configured.
 //
 // The three candidates have deterministic cosine scores against the query
-// vector {1, 0}: chunk 1 → 1.00, chunk 2 → 0.50, chunk 3 → 0.00. Because the
-// floor is applied on the result set's MIN-MAX normalized [0,1] scores (#411,
-// scale-free across cosine/RRF/rerank), these map to normalized {1.0, 0.5, 0.0}.
+// vector {1, 0}: chunk 1 → 1.00, chunk 2 → 0.50, chunk 3 → 0.00. The floor is
+// applied on each score's RATIO to the best hit of the result set (#411,
+// scale-free across cosine/RRF/rerank; #858), so these map to {1.0, 0.5, 0.0}.
+//
+// Note the WIDE spread: this fixture cannot see the #858 defect, because chunk 3
+// scores a true 0.00 and drops under either arithmetic. The near-identical
+// spread that does see it lives in min_score_floor_relative_858_test.go.
 func newMinScoreFloorService(t *testing.T, floor float64) *retrieval.Service {
 	t.Helper()
 	idx := index.NewHNSWIndex("")
