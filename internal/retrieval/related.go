@@ -260,9 +260,10 @@ func (s *Service) buildSeedVector(ctx context.Context, modelName string, texts [
 }
 
 // mergeRelatedAxes merges the per-axis candidate pools. A single-axis request
-// passes its pool through unchanged; an index=both request min-max normalizes
-// each axis's scores (they come from different embedding spaces) and keeps the
-// best-scoring occurrence of each chunk, mirroring searchBothIndices.
+// passes its pool through unchanged; an index=both request rescales each axis's
+// scores against that axis's best (they come from different embedding spaces)
+// and keeps the best-scoring occurrence of each chunk, mirroring
+// searchBothIndices.
 func mergeRelatedAxes(perAxis [][]model.SearchHit) []model.SearchHit {
 	if len(perAxis) == 0 {
 		return nil

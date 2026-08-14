@@ -52,8 +52,9 @@ func countCrossFileDupes(relPaths []string, hashByRelPath map[string]string) int
 //   - hybrid+dedup:    + retrieval-time cross-file de-duplication (#265)
 //   - hybrid+langfilt: + per-language retrieval filter (#267 item 4)
 //   - vector+minscore: vector-only + server-side relevance floor (#305), applied
-//     on the result set's min-max normalized [0,1] scores (#411), so a modest
-//     relative floor trims the low-relevance tail without dropping strong hits
+//     on each score's ratio to the result set's best hit (#411, #858), so a
+//     modest relative floor trims the low-relevance tail without dropping strong
+//     hits
 func ablationMatrix() []knobConfig {
 	return []knobConfig{
 		{name: "vector-only", hybrid: false},
@@ -237,10 +238,12 @@ func assertLangFilterDoesNotHurtRecall(t *testing.T, rows []configMetrics) {
 	}
 }
 
-// assertMinScoreTrimsWithoutRecallLoss: a modest normalized relevance floor
-// (0.1, applied on the result set's min-max normalized [0,1] scores, #411) on the
+// assertMinScoreTrimsWithoutRecallLoss: a modest relative relevance floor (0.1,
+// applied on each score's ratio to the result set's best hit, #411/#858) on the
 // vector path drops the low-relevance tail (shrinking mean hits) while keeping
-// every high-similarity relevant doc, so recall@k stays at the baseline.
+// every high-similarity relevant doc, so recall@k stays at the baseline. The
+// trimmed hits score below a tenth of the best one, so they are weak in their
+// own right and not merely last.
 func assertMinScoreTrimsWithoutRecallLoss(t *testing.T, rows []configMetrics) {
 	t.Helper()
 	base := metricsFor(rows, "vector-only")

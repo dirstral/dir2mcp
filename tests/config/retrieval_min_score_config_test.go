@@ -152,8 +152,9 @@ func TestRetrievalMinScore_ValidateRejectsNegativeProgrammatic(t *testing.T) {
 }
 
 // TestRetrievalMinScore_RejectsAboveOne pins that a floor > 1 is CONFIG_INVALID:
-// since #411 the floor is compared against MIN-MAX NORMALIZED scores in [0,1], so
-// any value above 1 would silently drop every hit — a misconfiguration.
+// since #411 the floor is compared against a relative score in [0,1] (a ratio to
+// the result set's best hit, #858), so any value above 1 would silently drop
+// every hit — a misconfiguration.
 func TestRetrievalMinScore_RejectsAboveOne(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".dir2mcp.yaml")

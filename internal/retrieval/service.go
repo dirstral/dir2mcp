@@ -258,9 +258,9 @@ type Service struct {
 	// groupKeysMu and folds the buffer into a fresh snapshot.
 	groupKeysDirty atomic.Bool
 	// minScore is a server-side relevance floor (config retrieval.min_score):
-	// hits whose score — MIN-MAX NORMALIZED to [0,1] over the result set, so the
-	// floor is scale-free across cosine/RRF/rerank modes (#411) — is strictly
-	// below it are dropped from Search results, after
+	// hits whose score — expressed as a RATIO to the best-scoring hit of the same
+	// result set, so the floor is scale-free across cosine/RRF/rerank modes
+	// (#411) — is strictly below it are dropped from Search results, after
 	// scoring/fusion/rerank/dedup/truncation. It is config-only (never an MCP tool
 	// parameter). Default 0 ⇒ disabled (pass-through). Wired from
 	// config.RetrievalMinScore at construction. See applyMinScoreFloor.
@@ -552,13 +552,13 @@ func (s *Service) SetCrossFileDedupEnabled(enabled bool) {
 }
 
 // SetMinScore wires the server-side relevance floor (config retrieval.min_score).
-// Hits whose min-max-normalized [0,1] score is strictly below floor are dropped
-// from Search results, after scoring/fusion/rerank and after dedup/truncation
-// (the floor is applied on the normalized score, not the raw authoritative one,
-// so it is scale-free across cosine/RRF/rerank modes — see applyMinScoreFloor,
-// #411). A floor <= 0 disables the cutoff (pass-through). The engine wires this
-// from config.RetrievalMinScore at construction time, mirroring
-// SetCrossFileDedupEnabled.
+// Hits whose score, taken as a RATIO to the best-scoring hit of the same result
+// set, is strictly below floor are dropped from Search results, after
+// scoring/fusion/rerank and after dedup/truncation (the floor is applied on that
+// ratio, not on the raw authoritative score, so it is scale-free across
+// cosine/RRF/rerank modes — see applyMinScoreFloor, #411). A floor <= 0 disables
+// the cutoff (pass-through). The engine wires this from config.RetrievalMinScore
+// at construction time, mirroring SetCrossFileDedupEnabled.
 func (s *Service) SetMinScore(floor float64) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
@@ -1740,20 +1740,30 @@ func (s *Service) applyRecencyDecay(ctx context.Context, hits []model.SearchHit)
 // This runs as the very last retrieval step, so the comparison sees the fully
 // resolved result set (post scoring/fusion/rerank/dedup/recency).
 //
-// The floor is compared against each hit's score MIN-MAX NORMALIZED to [0,1]
-// over the result set — NOT the raw authoritative Score — because that raw score
-// lives on an incommensurable scale per retrieval mode (#411): pure-vector is
-// cosine similarity (~0..1); hybrid / HyDE-fuse / cross-lingual is an RRF score
-// whose theoretical max is 2/(rrfK+1) ≈ 0.033; rerank is a provider-specific
-// scale. Worse, the hybrid path falls back to raw cosine hits when BM25 returns
-// nothing, so the same corpus/config can emit RRF-scaled scores for one query
-// and cosine-scaled for the next. A raw `Score < floor` comparison therefore has
-// no consistent meaning: a cosine-shaped floor (0.3–0.5) silently drops EVERY
-// RRF hit and returns empty. Normalizing per result set makes the floor
-// scale-free and mode-agnostic: it is a RELATIVE floor in [0,1] where 0 keeps
-// everything, 1 keeps only the top-scoring hit(s), and a degenerate all-equal
-// set is never wiped (normalizedRelevance maps it to all-1). The reported Score
-// field is left UNCHANGED (unnormalized), preserving the tool/citation contract.
+// The floor is compared against each hit's score expressed as a RATIO to the
+// best score in the same result set (relativeToBest) — NOT the raw authoritative
+// Score — because that raw score lives on an incommensurable scale per retrieval
+// mode (#411): pure-vector is cosine similarity (~0..1); hybrid / HyDE-fuse /
+// cross-lingual is an RRF score whose theoretical max is 2/(rrfK+1) ≈ 0.033;
+// rerank is a provider-specific scale. Worse, the hybrid path falls back to raw
+// cosine hits when BM25 returns nothing, so the same corpus/config can emit
+// RRF-scaled scores for one query and cosine-scaled for the next. A raw
+// `Score < floor` comparison therefore has no consistent meaning: a
+// cosine-shaped floor (0.3–0.5) silently drops EVERY RRF hit and returns empty.
+// A ratio to the best hit makes the floor scale-free and mode-agnostic: it is a
+// RELATIVE floor in [0,1] where 0 keeps everything and 1 keeps only the
+// top-scoring hit(s). The reported Score field is left UNCHANGED (unscaled),
+// preserving the tool/citation contract.
+//
+// The ratio replaced a MIN-MAX normalization (issue #858). Min-max maps the
+// LOWEST-scoring hit of the set to exactly 0.0 by construction, so `0.0 < floor`
+// held for every positive floor and the worst hit was deleted on every search,
+// however strong it was and however close to the best. That is not the intent
+// stated above and in evidence.go: a relative floor prunes hits that are much
+// worse than the best one, and two hits one percent apart are not. A ratio has
+// no such artificial zero — a hit reaches 0 only when its score really is 0 —
+// so a set of near-equal candidates now survives in full, which is exactly the
+// case that made a filtered enumeration return one of two matching spans.
 func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 	s.metaMu.RLock()
 	floor := s.minScore
@@ -1761,7 +1771,13 @@ func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 	if floor <= 0 || len(hits) == 0 {
 		return hits
 	}
-	rel := normalizedRelevance(hits)
+	rel, ok := relativeToBest(hits)
+	if !ok {
+		// No positive best score, so no ratio is defined (see relativeToBest).
+		// Keep the set intact rather than guess: dropping hits on an undefined
+		// comparison is the failure this floor is meant to avoid.
+		return hits
+	}
 	out := make([]model.SearchHit, 0, len(hits))
 	for i, h := range hits {
 		if rel[i] < floor {
@@ -1770,6 +1786,51 @@ func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 		out = append(out, h)
 	}
 	return out
+}
+
+// relativeToBest expresses each hit's Score as a ratio to the BEST score in the
+// pool: rel_i = score_i / max. The best hit is always 1.0, a hit one percent
+// behind it is 0.99, and a hit is near 0 only when its own score is near 0.
+//
+// The ratio is invariant under positive rescaling of the pool, which is the
+// exact difference between the retrieval modes (cosine ~O(1), RRF ~O(0.03), a
+// provider-specific rerank scale), so one configured floor keeps one meaning in
+// every mode. Unlike a min-max normalization it is NOT invariant under a shift,
+// and that is deliberate: a shift is what moves the weakest hit to zero and
+// destroys the information about how far behind the best it actually is (#858).
+//
+// It reports false when the pool has no usable best score, which is every case
+// where a ratio has no meaning:
+//
+//   - an empty pool;
+//   - max <= 0 (an all-zero pool, or a fully anti-correlated cosine pool). A
+//     ratio needs a meaningful zero and a positive reference; with a negative
+//     max the ordering would invert, and with a zero max it would divide by zero;
+//   - a +Inf max, where every finite score degenerates to a ratio of 0.
+//
+// A NaN score never wins the max comparison, so an all-NaN pool reports false
+// too, and a NaN beside real scores yields a NaN ratio, which compares false
+// against any floor and therefore keeps its hit.
+//
+// Callers treat false as "do not rescale / do not prune" (fail open).
+func relativeToBest(hits []model.SearchHit) ([]float64, bool) {
+	if len(hits) == 0 {
+		return nil, false
+	}
+	best := math.Inf(-1)
+	for _, h := range hits {
+		if h.Score > best {
+			best = h.Score
+		}
+	}
+	if !(best > 0) || math.IsInf(best, 1) {
+		return nil, false
+	}
+	rel := make([]float64, len(hits))
+	for i, h := range hits {
+		rel[i] = h.Score / best
+	}
+	return rel, true
 }
 
 // abstainOnWeakEvidence applies the insufficient-evidence guard (SPEC §9.4.3,
@@ -3172,6 +3233,12 @@ func applyMMR(hits []model.SearchHit, lambda float64) []model.SearchHit {
 // penalty regardless of the underlying score magnitude (cosine, RRF, or rerank
 // score). A degenerate pool (all-equal scores) maps to all-1, so MMR then
 // orders purely by the diversity penalty.
+//
+// This is the MMR re-ordering term ONLY. The relevance floor uses relativeToBest
+// instead (issue #858): min-max is right here, where the objective needs the
+// full [0,1] spread to trade relevance against diversity and never deletes a
+// candidate, and wrong for a floor, where mapping the weakest hit to 0.0 deletes
+// it whatever its score is.
 func normalizedRelevance(hits []model.SearchHit) []float64 {
 	rel := make([]float64, len(hits))
 	if len(hits) == 0 {
@@ -3499,31 +3566,32 @@ func (s *Service) searchBothIndices(ctx context.Context, query string, k int, te
 	return s.rerankPool(ctx, query, out, k), nil
 }
 
+// normalizeScores rescales one axis's pool onto [0,1] so the text and code pools
+// of an index=both query are comparable before they are merged (their scores
+// come from different embedding spaces). Each score becomes its RATIO to the
+// axis best (relativeToBest), so the axis best is 1.0 and the rest keep their
+// distance from it; a negative score (an anti-correlated cosine) clamps to 0, so
+// a rescaled axis stays inside [0,1]. An axis with no positive best at all is
+// left untouched, since no ratio is defined for it: its raw scores keep the
+// axis's own ordering, and the merge below then prefers the other axis, which is
+// the honest outcome for a pool the query correlates with negatively.
+//
+// The ratio replaced a MIN-MAX normalization here for the same reason as in
+// applyMinScoreFloor (issue #858): min-max mapped each axis's weakest hit to
+// exactly 0.0, so the floor that runs later on the merged pool deleted that hit
+// on every index=both search whatever its score was. Min-max also discarded the
+// axis spread — two hits one percent apart were stretched to 1.0 and 0.0 — which
+// reordered the merged pool against the raw evidence.
 func normalizeScores(hits []model.SearchHit) {
-	if len(hits) == 0 {
+	rel, ok := relativeToBest(hits)
+	if !ok {
 		return
 	}
-
-	minScore := math.Inf(1)
-	maxScore := math.Inf(-1)
-	for _, hit := range hits {
-		if hit.Score < minScore {
-			minScore = hit.Score
-		}
-		if hit.Score > maxScore {
-			maxScore = hit.Score
-		}
-	}
-	if maxScore == minScore {
-		for i := range hits {
-			hits[i].Score = 1
-		}
-		return
-	}
-
-	denom := maxScore - minScore
 	for i := range hits {
-		hits[i].Score = (hits[i].Score - minScore) / denom
+		if rel[i] < 0 {
+			rel[i] = 0
+		}
+		hits[i].Score = rel[i]
 	}
 }
 

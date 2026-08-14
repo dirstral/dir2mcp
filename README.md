@@ -758,9 +758,10 @@ Two separate controls decide what counts as evidence (SPEC §9.4.3). Both are **
 
 **1. The relevance floor (`retrieval.min_score`) is a RELATIVE pruning control.** It drops low-scoring candidate hits before they reach the model, so a query with no strongly-relevant chunks returns fewer results instead of diluting the answer with weak context.
 
-- The floor is applied **last**, after scoring/fusion, reranking, decay, and dedup/truncation, and compares each hit's final score **min-max normalized over the result set**. Raw scores are incommensurable across retrieval modes (cosine ≈ `0..1`, RRF max ≈ `0.033`, a provider-specific rerank scale), so normalizing is what makes one configured number mean the same thing in every mode. A hit whose normalized score equals the floor is **kept** (strict less-than drops).
-- It **ships enabled** at `0.05`, i.e. "drop hits sitting in the bottom 5% of the observed score range". Because normalization maps the weakest hit to `0`, that also always drops the weakest hit of a non-degenerate set; a degenerate all-equal set normalizes to all-`1` and survives in full. Set `0` to disable it explicitly. Values outside `[0,1]` are rejected as invalid config.
-- Being relative, this floor **cannot** express "the best hit is too weak": the top hit normalizes to `1.0` by construction, so some hit always clears any floor. That is the job of the second control.
+- The floor is applied **last**, after scoring/fusion, reranking, decay, and dedup/truncation, and compares each hit's final score as a **ratio to the best-scoring hit of the same result set**. Raw scores are incommensurable across retrieval modes (cosine ≈ `0..1`, RRF max ≈ `0.033`, a provider-specific rerank scale), so a ratio is what makes one configured number mean the same thing in every mode: it is unchanged when the whole set is rescaled. A hit whose ratio equals the floor is **kept** (strict less-than drops).
+- It **ships enabled** at `0.05`, i.e. "drop a hit that scores below 5% of the best hit". A set of near-equal candidates therefore survives in full, and a hit reaches `0` only when its own score is `0`. Set `0` to disable it explicitly. Values outside `[0,1]` are rejected as invalid config.
+- When the result set has no positive best score (every score is `0`, or all of them are negative), no ratio is defined and the floor keeps the set intact rather than pruning on a meaningless comparison.
+- Being relative, this floor **cannot** express "the best hit is too weak": the top hit is `1.0` by construction, so some hit always clears any floor. That is the job of the second control.
 
   ```yaml
   retrieval:
