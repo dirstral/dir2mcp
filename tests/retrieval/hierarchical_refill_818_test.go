@@ -173,6 +173,42 @@ func TestSearch_SummaryRefill_UnionIsDeduped(t *testing.T) {
 	assertOrder(t, hitIDs(hits), []uint64{11})
 }
 
+// TestSearch_SummaryRefill_MergedChunkKeepsTheEarlierRoundScore pins the merge
+// rule for a chunk BOTH rounds found: first wins, so it keeps the score of the
+// earlier, narrower round rather than the score the wider round gave it. The
+// narrower round ranked a smaller neighbourhood, so its score is the more
+// precise one, and it is the score the pool was already ordered by.
+func TestSearch_SummaryRefill_MergedChunkKeepsTheEarlierRoundScore(t *testing.T) {
+	svc, idx := roundedService(t, [][]refillCand{
+		{summaryCand(10, 0.99), fineCand(11, 0.50)},
+		{summaryCand(10, 0.99), fineCand(11, 0.95), fineCand(40, 0.40)},
+	})
+
+	hits := searchHits(t, svc, 2)
+	assertOrder(t, hitIDs(hits), []uint64{11, 40})
+	want := float64(float32(0.50))
+	if hits[0].Score != want {
+		t.Fatalf("chunk 11 scored %v, want the earlier round's %v", hits[0].Score, want)
+	}
+	assertRounds(t, idx, 2)
+}
+
+// TestSearch_SummaryRefill_TiedHitsKeepAccumulationOrder pins the tie-break:
+// hits that score the same keep the order they were accumulated in, so the
+// earlier round comes first and each round's own rank order survives.
+func TestSearch_SummaryRefill_TiedHitsKeepAccumulationOrder(t *testing.T) {
+	svc, idx := roundedService(t, [][]refillCand{
+		{summaryCand(10, 0.99), fineCand(11, 0.50)},
+		{summaryCand(10, 0.99), fineCand(12, 0.50), fineCand(41, 0.30)},
+	})
+
+	hits := searchHits(t, svc, 2)
+	assertNoSummaryHit(t, hits)
+	// 11 and 12 tie at 0.50: the round-0 hit stays first.
+	assertOrder(t, hitIDs(hits), []uint64{11, 12})
+	assertRounds(t, idx, 2)
+}
+
 // TestSearch_SummaryRefill_UnionRespectsCallerK pins the budget: accumulation
 // makes the pool BIGGER than any one round, so the final truncation must still
 // bound the result at the caller's k. Round 0 contributes one hit, round 1 three
