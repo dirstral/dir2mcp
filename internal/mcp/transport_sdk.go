@@ -246,7 +246,6 @@ func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Requ
 		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
 		return false
 	}
-	canonicalizeContentType(req)
 	if ok, _ := t.server.authorize(w, req); !ok {
 		return false
 	}
@@ -256,6 +255,10 @@ func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Requ
 	if !t.applyOriginGuard(w, req) {
 		return false
 	}
+	// Both header repairs run last, after every gate of this server has read the
+	// request as the client sent it. They exist only to satisfy the SDK handler
+	// this request is about to reach.
+	canonicalizeContentType(req)
 	negotiateAccept(req)
 	return true
 }
