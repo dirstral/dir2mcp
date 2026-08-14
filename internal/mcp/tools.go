@@ -3456,22 +3456,7 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 			"page": span.Page,
 		}
 	case "time":
-		out := map[string]interface{}{
-			"kind":     "time",
-			"start_ms": span.StartMS,
-			"end_ms":   span.EndMS,
-		}
-		// Additive (SPEC §8.6.8/§9.2): a diarized transcript's time span surfaces
-		// the stable speaker id and optional label. Omitted when absent, so a
-		// non-diarized span is byte-identical to before and consumers degrade to
-		// a flat citation.
-		if speaker := strings.TrimSpace(span.Speaker); speaker != "" {
-			out["speaker"] = speaker
-			if label := strings.TrimSpace(span.SpeakerLabel); label != "" {
-				out["speaker_label"] = label
-			}
-		}
-		return out
+		return serializeTimeSpan(span)
 	case "region":
 		return buildRegionSpan(span)
 	default:
@@ -3484,6 +3469,53 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 			"kind": "document",
 		}
 	}
+}
+
+// serializeTimeSpan renders a "time" span per df-005 0.2.0. Every optional field
+// is omitted when absent, so a plain transcript span stays byte-identical to the
+// one served before this function existed.
+//
+// speaker/speaker_label come from diarization (td-003). entities/event come from
+// the recognition capability (bs-007, design 0004 §7) and are the values the
+// `entities` and `events` filters match on. Serving them is what lets a caller
+// SEE why a hit matched: before this, a caller who asked for
+// events: ["home_run"] and received five hits could not confirm that all five
+// carry that event, nor tell a filtered result from an unfiltered one (#856).
+//
+// The values are already on the in-memory span (the store rebuilds them from the
+// span's extra_json on every chunk read), so this costs no extra query.
+//
+// `derivation` is declared by df-005 but is NOT emitted here: no producer in this
+// tree sets it yet (the captioning recognizer that needs it is issue #860), and
+// df-005 makes absent mean `observed`, which is what every current producer is.
+func serializeTimeSpan(span model.Span) map[string]interface{} {
+	out := map[string]interface{}{
+		"kind":     "time",
+		"start_ms": span.StartMS,
+		"end_ms":   span.EndMS,
+	}
+	// speaker_label is nested under speaker on purpose: a label always comes with
+	// a stable id in this tree. The subtitle assigner returns ("", "") for a cue
+	// with no voice name, the diarizer skips a segment whose id is empty, and
+	// timeSpanExtraJSON persists nothing at all when speaker is empty. So a
+	// label-only span cannot be produced or stored, and emitting one would
+	// advertise a speaker the caller cannot then filter on.
+	if speaker := strings.TrimSpace(span.Speaker); speaker != "" {
+		out["speaker"] = speaker
+		if label := strings.TrimSpace(span.SpeakerLabel); label != "" {
+			out["speaker_label"] = label
+		}
+	}
+	// NormalizeEntityIDs trims, drops blanks and dedupes, which is exactly the
+	// set model.Filter matches against. So a served hit shows the matchable
+	// values, never a blank id the filter could not have selected on.
+	if entities := model.NormalizeEntityIDs(span.Entities); len(entities) > 0 {
+		out["entities"] = entities
+	}
+	if event := strings.TrimSpace(span.Event); event != "" {
+		out["event"] = event
+	}
+	return out
 }
 
 // buildRegionSpan renders a region span per spec §15.1.1: page range plus the
@@ -3822,6 +3854,29 @@ func spanDefinitionSchema() map[string]interface{} {
 					"speaker_label": map[string]interface{}{
 						"type":        "string",
 						"description": "Optional human-readable speaker name (SPEC §8.6.8).",
+					},
+					// df-005 0.2.0. These MUST be declared: the time branch is
+					// additionalProperties:false, so a field the server emits but
+					// does not advertise makes a strict client reject the whole
+					// tool result ("Failed to call tool", the #397/#849 class).
+					"entities": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional (SPEC 5.4, design 0004): entity ids the recognizer attributed to this span. Same values the entities filter matches. Absent on a span that is not a recognition annotation.",
+					},
+					"event": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional (SPEC 5.4, design 0004): the producer's event token for this span, for example pitch or home_run. Same value the events filter matches. The vocabulary is producer-defined and not enumerated here.",
+					},
+					// Declared but never emitted by this server: no producer here
+					// sets it yet (#860). It stays in the advertised contract so a
+					// client validating against the canonical common.json and a
+					// client validating against this schema accept the same set of
+					// payloads.
+					"derivation": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"observed", "generated"},
+						"description": "Optional (SPEC 5.4): whether this span records something observed or something a model generated. Absent means observed. A client MUST NOT present a generated span as a record of what happened.",
 					},
 				},
 				"required": []string{"kind", "start_ms", "end_ms"},
