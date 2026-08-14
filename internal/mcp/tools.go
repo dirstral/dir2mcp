@@ -3471,7 +3471,7 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 	}
 }
 
-// serializeTimeSpan renders a "time" span per df-005 0.2.0. Every optional field
+// serializeTimeSpan renders a "time" span per df-005 0.3.0. Every optional field
 // is omitted when absent, so a plain transcript span stays byte-identical to the
 // one served before this function existed.
 //
@@ -3481,6 +3481,12 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 // SEE why a hit matched: before this, a caller who asked for
 // events: ["home_run"] and received five hits could not confirm that all five
 // carry that event, nor tell a filtered result from an unfiltered one (#856).
+//
+// sources names the recognizers behind the annotation (df-005 0.3.0). It answers
+// "how do you know", which entities/event do not: a scorebug reading and a face
+// match carry different weight, and until this the backend sent the tags and
+// ingestion dropped them (#861). It is PROVENANCE ONLY: no filter, score, dedup
+// or citation rule reads it, so a client that ignores it ranks identically.
 //
 // The values are already on the in-memory span (the store rebuilds them from the
 // span's extra_json on every chunk read), so this costs no extra query.
@@ -3514,6 +3520,12 @@ func serializeTimeSpan(span model.Span) map[string]interface{} {
 	}
 	if event := strings.TrimSpace(span.Event); event != "" {
 		out["event"] = event
+	}
+	// Omitted entirely when the annotation names no recognizer, never served as
+	// null or []: df-005 makes the field optional, and an empty array would
+	// claim the producer said something about provenance when it said nothing.
+	if sources := model.NormalizeSources(span.Sources); len(sources) > 0 {
+		out["sources"] = sources
 	}
 	return out
 }
@@ -3877,6 +3889,14 @@ func spanDefinitionSchema() map[string]interface{} {
 						"type":        "string",
 						"enum":        []string{"observed", "generated"},
 						"description": "Optional (SPEC 5.4): whether this span records something observed or something a model generated. Absent means observed. A client MUST NOT present a generated span as a record of what happened.",
+					},
+					// df-005 0.3.0, and declared for the same reason as the two
+					// fields above: this server emits it, so the advertised
+					// branch must accept it.
+					"sources": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional (df-005): the recognizers that contributed to this annotation, for example [\"scorebug\"] or [\"playbyplay\",\"face\"]. Producer-defined tags, not a closed set and not a relevance signal. A client MAY use them to explain or weigh a hit, and MUST render an unknown tag verbatim rather than error.",
 					},
 				},
 				"required": []string{"kind", "start_ms", "end_ms"},

@@ -325,6 +325,22 @@ type Span struct {
 	// the "time" span's extra_json.
 	Entities []string
 	Event    string
+	// Sources names the recognizers that produced this annotation, for example
+	// ["scorebug"] or ["playbyplay", "face"] (df-005 0.3.0). The vocabulary is
+	// producer-defined: a backend declares its own tags, so this side never
+	// enumerates them.
+	//
+	// It answers a different question from Entities/Event, which say WHAT the
+	// annotation is about. Sources says WHO said it, which is what lets a
+	// caller weigh a scorebug reading against a face match when the two
+	// disagree.
+	//
+	// PROVENANCE ONLY (df-005 0.3.0): no filter, no score and no dedup key
+	// reads it, and a client MUST NOT have to read it to rank or filter
+	// correctly. Metadata only, exactly like Speaker: it never changes chunk
+	// text or span bounds, and it is empty on every representation that is not
+	// a recognition annotation. Persisted in the "time" span's extra_json.
+	Sources []string
 }
 
 // WordSpan is one per-word timestamp on a "time" span (spec §8.6.1). The JSON
@@ -626,21 +642,42 @@ func (f Filter) MatchesAnnotation(span Span) bool {
 // that emitted a stray blank id would re-derive a representation whose stored
 // attribution is byte-identical.
 func NormalizeEntityIDs(ids []string) []string {
-	if len(ids) == 0 {
+	return normalizeOpaqueTags(ids)
+}
+
+// NormalizeSources applies the same rule to a span's recognizer tags (df-005
+// 0.3.0 `sources`): trim, drop empties, de-duplicate, keep first-seen order.
+// Order is the producer's, so the tag a backend names first stays first. A
+// repeated tag names the same recognizer twice and adds nothing, so it is
+// dropped exactly as a repeated entity id is.
+//
+// Ingestion and persistence share this one rule for the same reason
+// NormalizeEntityIDs is shared: the derivation hash covers what is STORED, so
+// a backend that emits a stray blank tag must not re-derive a representation
+// whose stored provenance is byte-identical.
+func NormalizeSources(sources []string) []string {
+	return normalizeOpaqueTags(sources)
+}
+
+// normalizeOpaqueTags is the shared body of NormalizeEntityIDs and
+// NormalizeSources. Both carry backend-declared opaque tokens, so both trim,
+// drop empties and de-duplicate while preserving first-seen order.
+func normalizeOpaqueTags(values []string) []string {
+	if len(values) == 0 {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(ids))
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
 			continue
 		}
-		if _, dup := seen[id]; dup {
+		if _, dup := seen[value]; dup {
 			continue
 		}
-		seen[id] = struct{}{}
-		out = append(out, id)
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	if len(out) == 0 {
 		return nil

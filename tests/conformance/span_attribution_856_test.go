@@ -353,7 +353,7 @@ func TestSpan_NonRecognitionSpanCarriesNoAttribution(t *testing.T) {
 			continue
 		}
 		checked++
-		for _, field := range []string{"entities", "event", "derivation"} {
+		for _, field := range []string{"entities", "event", "derivation", "sources"} {
 			if _, present := span[field]; present {
 				t.Errorf("a non-recognition span carries %q: %#v", field, span)
 			}
@@ -407,11 +407,15 @@ func TestSpan_ServedSpansValidateAgainstCanonicalSchema(t *testing.T) {
 // declare. Without this, a validator that resolved to "accept anything" would
 // make every canonical check in this file pass vacuously.
 //
-// It uses `sources` as the undeclared field on purpose. That is the field
-// #861 asks about, and this is the machine-readable reason this PR does not
-// serve it: the canonical time branch is additionalProperties:false and does not
-// declare it, so a span carrying it would make a strict client reject the whole
-// tool result.
+// It uses `confidence` as the undeclared field on purpose. The recognize wire
+// carries a per-annotation confidence (design 0004 §5) and the canonical time
+// branch does not declare it, so it is the shape of a real mistake rather than a
+// nonsense token: the branch is additionalProperties:false, and a span carrying
+// it would make a strict client reject the whole tool result.
+//
+// It used to use `sources`. dirstral-spec 0.52.0 (df-005 0.3.0) declares that
+// field, and #861 now serves it, so it is no longer an undeclared field and
+// would make this control pass for the wrong reason.
 func TestSpan_CanonicalValidatorRejectsAnUndeclaredField(t *testing.T) {
 	t.Parallel()
 	validator := canonicalSpanValidator(t)
@@ -419,6 +423,7 @@ func TestSpan_CanonicalValidatorRejectsAnUndeclaredField(t *testing.T) {
 	conforming := map[string]interface{}{
 		"kind": "time", "start_ms": float64(0), "end_ms": float64(1000),
 		"entities": []interface{}{"player:heliot-ramos"}, "event": "home_run",
+		"sources": []interface{}{"scorebug"},
 	}
 	if err := validator.Validate(conforming); err != nil {
 		t.Fatalf("the canonical Span validator rejected a conforming time span: %v", err)
@@ -426,10 +431,10 @@ func TestSpan_CanonicalValidatorRejectsAnUndeclaredField(t *testing.T) {
 
 	undeclared := map[string]interface{}{
 		"kind": "time", "start_ms": float64(0), "end_ms": float64(1000),
-		"sources": []interface{}{"pbp-feed"},
+		"confidence": float64(0.97),
 	}
 	if err := validator.Validate(undeclared); err == nil {
-		t.Fatal("the canonical Span validator accepted an undeclared `sources` field, so every canonical check in this file would pass vacuously")
+		t.Fatal("the canonical Span validator accepted an undeclared `confidence` field, so every canonical check in this file would pass vacuously")
 	}
 }
 

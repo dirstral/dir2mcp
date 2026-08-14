@@ -282,6 +282,7 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		text     string
 		entities []string
 		event    string
+		sources  []string
 	}
 	valid := make([]validAnnotation, 0, len(anns))
 	for _, ann := range anns {
@@ -296,6 +297,13 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			// persisting only the text made the filter unimplementable.
 			entities: model.NormalizeEntityIDs(ann.Entities),
 			event:    strings.TrimSpace(ann.Event),
+			// Carried for the same reason, but for a different question
+			// (df-005 0.3.0 `sources`): entities and event say WHAT the
+			// annotation is about, sources says WHICH recognizer said it. The
+			// backend has always sent it and this function used to drop it, so
+			// no client could tell a scorebug reading from a face match (#861).
+			// Provenance only: nothing downstream ranks or filters on it.
+			sources: model.NormalizeSources(ann.Sources),
 		})
 	}
 	sort.Slice(valid, func(i, j int) bool {
@@ -314,7 +322,7 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			Text: v.text,
 			Span: model.Span{
 				Kind: "time", StartMS: v.startMS, EndMS: v.endMS,
-				Entities: v.entities, Event: v.event,
+				Entities: v.entities, Event: v.event, Sources: v.sources,
 			},
 		})
 		// The attribution joins the derivation hash: a backend that changes
@@ -332,6 +340,26 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			v.startMS, v.endMS, len(v.text), v.text, len(v.event), v.event, len(v.entities))
 		for _, id := range v.entities {
 			fmt.Fprintf(&hashInput, "|%d:%s", len(id), id)
+		}
+		// The recognizer tags join the hash too, and for the same reason: a
+		// backend that re-attributes an annotation from the scorebug to the
+		// play-by-play feed has stored different provenance, so the
+		// representation must be re-derived rather than kept because the prose
+		// matches. Same length-prefixed encoding, because a tag is an opaque
+		// backend token that may contain any delimiter.
+		//
+		// The whole group is APPENDED ONLY WHEN PRESENT, unlike the entity
+		// count above. The entity list ends at a known count, so a line either
+		// stops there or continues with the source count: both readings are
+		// unambiguous. Emitting "|0" instead would change the hash input of
+		// every annotation that carries no sources, and that re-runs the
+		// recognition backend over a whole corpus of video to store a field
+		// those annotations do not have.
+		if len(v.sources) > 0 {
+			fmt.Fprintf(&hashInput, "|%d", len(v.sources))
+			for _, source := range v.sources {
+				fmt.Fprintf(&hashInput, "|%d:%s", len(source), source)
+			}
 		}
 		hashInput.WriteByte('\n')
 	}
