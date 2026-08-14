@@ -145,7 +145,7 @@ func TestGenerateRawTextFromContent_PastTheConfiguredCapIsRefused(t *testing.T) 
 	if !errors.Is(err, ingest.ErrFileTooLarge) {
 		t.Fatalf("content past the configured cap must be refused with ErrFileTooLarge, got: %v", err)
 	}
-	if len(st.chunks) != 0 {
-		t.Fatalf("%d chunk(s) were persisted past the cap, want 0", len(st.chunks))
+	if len(st.chunks) != 0 || len(st.reps) != 0 {
+		t.Fatalf("content past the cap persisted %d chunk(s) and %d representation(s), want 0 and 0", len(st.chunks), len(st.reps))
 	}
 }

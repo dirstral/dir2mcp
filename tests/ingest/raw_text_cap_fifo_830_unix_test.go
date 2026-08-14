@@ -80,13 +80,12 @@ func TestGenerateRawText_BoundsTheReadOnASourceAStatCannotMeasure(t *testing.T) 
 	var err error
 	select {
 	case err = <-readDone:
+	case werr := <-writeErr:
+		// The writer never attached, so the read is blocked on the fifo and the
+		// timeout below would report a bound failure for a fixture failure.
+		t.Fatalf("the fifo writer could not attach: %v", werr)
 	case <-time.After(30 * time.Second):
 		t.Fatal("GenerateRawText never returned: the read is not bounded, or no writer attached to the fifo")
-	}
-	select {
-	case werr := <-writeErr:
-		t.Fatalf("the fifo writer could not attach: %v", werr)
-	default:
 	}
 	if err == nil {
 		t.Fatal("a source that served past the cap must be refused; the read was not bounded")
@@ -94,8 +93,8 @@ func TestGenerateRawText_BoundsTheReadOnASourceAStatCannotMeasure(t *testing.T) 
 	if !errors.Is(err, ingest.ErrFileTooLarge) {
 		t.Fatalf("error is not tagged ingest.ErrFileTooLarge: %v", err)
 	}
-	if len(st.chunks) != 0 {
-		t.Fatalf("%d chunk(s) were persisted from a refused read, want 0", len(st.chunks))
+	if len(st.chunks) != 0 || len(st.reps) != 0 {
+		t.Fatalf("a refused read persisted %d chunk(s) and %d representation(s), want 0 and 0", len(st.chunks), len(st.reps))
 	}
 	// The reader must have stopped near the bound instead of draining the source.
 	sent := <-writeDone
