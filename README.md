@@ -338,6 +338,36 @@ strategy selector. The key is now unrecognized, so a config that still carries i
 with the warning above and no longer publishes the key back into the saved config or the
 effective snapshot.
 
+#### Ingest size cap
+
+```yaml
+ingest:
+  max_file_mb: 20      # default: 20
+```
+
+`ingest.max_file_mb` is the per-file size policy, and it is enforced as a bound on the
+reads themselves, not only as a check at discovery. Discovery refuses a file over it, and
+so does every read that follows: the document read, the subtitle sidecar, the
+object-store download, the multimodal media read, and the on-demand `annotate` /
+`transcribe` reads. A check only measures a file at one instant; a file that grows
+afterwards, or an object that serves more bytes than it listed, is caught by the read.
+(`open_file` answers a window rather than a whole file, so its raw-text read carries its
+own budget derived from `max_chars`; the cap still bounds the source read it needs to
+locate cached extracted text.)
+
+During indexing a file over the cap is a **skip, not an error**: it keeps a visible
+`skipped` row with reason `size_cap`, it is counted in the skip breakdown `dir2mcp status`
+reports, and its chunks leave retrieval. It was refused by policy, not by a failure, so it
+never lands in the failure list. On a tool request the refusal is reported as
+`FILE_TOO_LARGE`, which names the setting instead of a generic failure.
+
+Raw text now follows this setting exactly. Earlier releases gated raw-text indexing on a
+hard-coded 10 MiB, so a 15 MiB text file was admitted by the configured cap and then
+failed anyway. Text, code, markdown, data and HTML files between 10 MiB and the
+configured cap are indexed. To keep the old ceiling, set `max_file_mb: 10`.
+
+Zero or a negative value is not "unlimited": it selects the built-in default bound.
+
 #### Retrieval answer keys
 
 ```yaml
