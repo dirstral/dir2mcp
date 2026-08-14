@@ -86,6 +86,18 @@ type EmbeddingWorker struct {
 	// corpusFS() so callers never observe a nil backend.
 	Corpus corpusfs.CorpusFS
 
+	// MaxFileBytes is the resolved `ingest.max_file_mb` cap in bytes, supplied by
+	// the caller from the single resolver (ingest.ResolvedMaxFileBytes) so this
+	// worker enforces the SAME number discovery and the ingest source reads do
+	// (#830). It bounds the whole-file media read (image and PDF bytes), which is
+	// held in memory for the embed call.
+	//
+	// Zero or negative selects corpusfs.DefaultMaxFileSizeBytes, so a caller that
+	// forgets to set it gets the default bound rather than no bound at all. There
+	// is deliberately no unlimited setting: a 29 GB file that reached a corpus is
+	// what OOM-killed a live daemon (#682).
+	MaxFileBytes int64
+
 	// Logger is optional; if non‑nil its Printf method will be used for
 	// informational messages. When nil the standard library's log package
 	// is used. Logging is only performed for transient/retryable errors or
@@ -291,7 +303,7 @@ func (w *EmbeddingWorker) loadMediaInput(ctx context.Context, t model.ChunkTask,
 		}
 		return model.MediaInput{MimeType: mediaMIMEType(ref), Data: data}, nil
 	default: // image and other whole-file media
-		data, rerr := cache.readWholeMedia(ctx, fsys, ref)
+		data, rerr := cache.readWholeMedia(ctx, fsys, ref, w.mediaReadCapBytes())
 		if rerr != nil {
 			return model.MediaInput{}, fatalIfEscape(fmt.Errorf("read media %q: %w", ref, rerr))
 		}
@@ -357,14 +369,17 @@ func (c *mediaBatchCache) cleanup() {
 // filesystem only on the first request for that ref within the batch and serving
 // cached bytes to sibling chunks. A nil cache falls back to an uncached read so
 // the helper is usable without a batch context.
-func (c *mediaBatchCache) readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
+//
+// maxBytes bounds the read (#830). The cap is one value per worker, so it is not
+// part of the cache key: a cached entry was admitted under the same cap.
+func (c *mediaBatchCache) readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string, maxBytes int64) ([]byte, error) {
 	if c == nil {
-		return readWholeMedia(ctx, fsys, ref)
+		return readWholeMedia(ctx, fsys, ref, maxBytes)
 	}
 	if data, ok := c.wholeFile[ref]; ok {
 		return data, nil
 	}
-	data, err := readWholeMedia(ctx, fsys, ref)
+	data, err := readWholeMedia(ctx, fsys, ref, maxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -437,16 +452,50 @@ func fatalIfEscape(err error) error {
 	return err
 }
 
-// readWholeMedia reads the entire object at ref through the corpus filesystem.
-// Callers within a batch should go through mediaBatchCache.readWholeMedia so the
-// read is shared across sibling chunks of the same MediaRef (issue #279).
-func readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string) ([]byte, error) {
+// mediaReadCapBytes is the resolved per-file cap this worker bounds its media
+// reads with. It hands the caller-supplied MaxFileBytes to the shared resolver,
+// so an unset field selects the default bound and an absurd one is clamped rather
+// than allowed to overflow a limit+1 (#830).
+func (w *EmbeddingWorker) mediaReadCapBytes() int64 {
+	return corpusfs.ResolveReadCapBytes(w.MaxFileBytes)
+}
+
+// readWholeMedia reads the object at ref through the corpus filesystem under a
+// hard byte bound of maxBytes (#830). Callers within a batch should go through
+// mediaBatchCache.readWholeMedia so the read is shared across sibling chunks of
+// the same MediaRef (issue #279).
+//
+// The bound is on the READ, and that is the whole point. Discovery measured the
+// file with a stat (local) or a list entry (S3) many minutes earlier, and chunk
+// rows outlive that measurement: a file that grew after it was chunked is read
+// HERE, into memory, whole, for the embed call. A repeated size check would only
+// produce a second measurement, so it cannot constrain this read; a limit reader
+// can, and it is the only thing that catches a local file that grew.
+//
+// It reads at most maxBytes+1 bytes. The extra byte is the only evidence that
+// separates a file of exactly the cap (inside the operator's policy, embed it)
+// from a file one byte past it (refuse it). Past the cap the prefix is DROPPED
+// and corpusfs.ErrObjectTooLarge is returned, so no caller can embed part of a
+// file as though it were the whole of it.
+//
+// The error is deliberately not ErrFatal. An over-cap file is one document's
+// problem, and ErrFatal stops the worker for the whole corpus. Left non-fatal and
+// non-transient, the batch bisects, this chunk alone is marked failed with a
+// reason that names the cap, and its healthy siblings still embed.
+func readWholeMedia(ctx context.Context, fsys corpusfs.CorpusFS, ref string, maxBytes int64) ([]byte, error) {
 	rc, err := fsys.Open(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
-	return io.ReadAll(rc)
+	data, err := io.ReadAll(io.LimitReader(rc, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%w (cap %d bytes)", corpusfs.ErrObjectTooLarge, maxBytes)
+	}
+	return data, nil
 }
 
 // loadPDFPage extracts the chunk's single page (from its `page` span) into a
@@ -468,7 +517,7 @@ func (w *EmbeddingWorker) loadPDFPage(ctx context.Context, t model.ChunkTask, fs
 	if !strings.EqualFold(strings.TrimSpace(t.Metadata.Span.Kind), "page") || t.Metadata.Span.Page < 1 {
 		return nil, fmt.Errorf("%w: pdf media chunk %d has invalid page span", ErrFatal, t.Metadata.ChunkID)
 	}
-	data, err := cache.readWholeMedia(ctx, fsys, ref)
+	data, err := cache.readWholeMedia(ctx, fsys, ref, w.mediaReadCapBytes())
 	if err != nil {
 		return nil, fmt.Errorf("read media %q: %w", ref, err)
 	}

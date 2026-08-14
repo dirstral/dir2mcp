@@ -51,7 +51,7 @@ type s3RangeReader struct {
 	key    string
 	size   int64
 	// maxBytes caps the bytes this reader will deliver in total (#682). It is
-	// always positive (see resolveMaxBytes), so the reader is never unbounded.
+	// always positive (see ResolveReadCapBytes), so the reader is never unbounded.
 	maxBytes int64
 
 	offset int64

@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
 	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -209,7 +210,7 @@ func (a *App) runEmbedWorkerLoop(ctx context.Context, cfg config.Config, global 
 	logger := pickEmbedLogger(a.stderr, global.jsonOutput)
 	// The standalone embed-worker (#249) has no local IndexingState, so it needs no
 	// embedded_ok guard (the count hook is inert without a state to increment).
-	embedders := buildAxisEmbedders(chunkSource, textIx, codeIx, embedder, nil, (*appstate.IndexingState)(nil), (*embedqueue.EmbeddedGuard)(nil), textModel, codeModel, cfg.RootDir, corpusFS, logger)
+	embedders := buildAxisEmbedders(chunkSource, textIx, codeIx, embedder, nil, (*appstate.IndexingState)(nil), (*embedqueue.EmbeddedGuard)(nil), textModel, codeModel, cfg.RootDir, corpusFS, logger, ingest.ResolvedMaxFileBytes(cfg))
 	if len(embedders) == 0 {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, "CONFIG_INVALID: no index axis configured for embed-worker")
 		return exitConfigInvalid

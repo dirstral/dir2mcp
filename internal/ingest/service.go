@@ -853,6 +853,9 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.repGen = NewRepresentationGenerator(rs)
 		// Best-effort raw_text language auto-detection (SPEC §8.8), on by default.
 		svc.repGen.SetLanguageDetection(cfg.LanguageDetectionEnabled)
+		// The raw-text gate and read enforce the CONFIGURED cap, from the one
+		// resolver, not a hard-coded 10 MiB (#830).
+		svc.repGen.SetMaxFileBytes(ResolvedMaxFileBytes(cfg))
 	} else {
 		// #398/#364: the shipped store always satisfies model.RepresentationStore
 		// (enforced by a compile-time guard in the cli package). If a

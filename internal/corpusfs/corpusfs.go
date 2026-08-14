@@ -13,6 +13,7 @@ import (
 	"context"
 	"io"
 	"io/fs"
+	"math"
 	"sort"
 )
 
@@ -23,6 +24,32 @@ const defaultMaxFileSizeBytes int64 = 10 * 1024 * 1024
 // DefaultMaxFileSizeBytes returns the default discovery file-size cap.
 func DefaultMaxFileSizeBytes() int64 {
 	return defaultMaxFileSizeBytes
+}
+
+// ResolveReadCapBytes turns a plumbed per-file cap into the positive value a
+// bounded read enforces. It is the single place that decision is made, so the
+// readers outside this package (the embedding worker's media read, retrieval's
+// source hash, ingest's raw-text read) cannot each grow their own copy (#830).
+//
+// A zero or negative input selects the 10 MiB default rather than disabling the
+// bound, so a caller that forgets to plumb the value still gets one. The upper
+// clamp keeps `configured+1` representable: every bound is a limit+1, and
+// math.MaxInt64 overflows that sum to a negative number, which io.LimitReader
+// reads as "zero bytes allowed" (#682 review finding 2). A cap this large is
+// unbounded in every practical sense, so clamping it loses nothing.
+//
+// The configured value itself comes from ingest.ResolvedMaxFileBytes, the one
+// resolver for `ingest.max_file_mb`; this function only makes it safe to use as a
+// limit.
+func ResolveReadCapBytes(configured int64) int64 {
+	switch {
+	case configured <= 0:
+		return defaultMaxFileSizeBytes
+	case configured > math.MaxInt64-1:
+		return math.MaxInt64 - 1
+	default:
+		return configured
+	}
 }
 
 // StateDirName is the name of the state directory dir2mcp writes under the

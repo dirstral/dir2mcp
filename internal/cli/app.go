@@ -930,6 +930,9 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
+	// Bound the retrieval-time source reads with the SAME resolved cap ingest
+	// enforces (#830), from the one resolver.
+	ret.SetMaxFileBytes(ingest.ResolvedMaxFileBytes(cfg))
 	// Plumb ingest's ACTIVE OCR/transcript derivation identities into open_file's
 	// cache lookup so it keys the OCR/transcript cache the SAME identity-aware way
 	// ingest's writer does (issue #488). The ask path is read-only and builds no

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 	"github.com/dirstral/dir2mcp/internal/langdetect"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -105,6 +107,30 @@ type RepresentationGenerator struct {
 	// means the feature is off — the Service binds it only when contextual
 	// retrieval is effectively enabled.
 	contextualizer ChunkContextualizer
+	// maxFileBytes is the resolved `ingest.max_file_mb` cap in bytes, set by the
+	// Service from the single resolver (ResolvedMaxFileBytes). Zero means "not set"
+	// and selects the shared 10 MiB default bound.
+	//
+	// Before #830 the raw-text gate compared against a HARD-CODED 10 MiB instead,
+	// so the operator's setting was not the one enforced: with the 20 MiB default a
+	// 15 MiB text file passed discovery and then failed here, and the error did not
+	// name the reason. The configured value is authoritative now.
+	maxFileBytes int64
+}
+
+// SetMaxFileBytes plumbs the resolved `ingest.max_file_mb` cap (in bytes) into the
+// raw-text size gate and the raw-text read (#830). Callers pass
+// ResolvedMaxFileBytes(cfg) so this gate cannot enforce a different number from
+// discovery and the source reads.
+func (rg *RepresentationGenerator) SetMaxFileBytes(maxBytes int64) {
+	rg.maxFileBytes = maxBytes
+}
+
+// rawTextCapBytes is the resolved cap the raw-text paths enforce. The shared
+// resolver turns an unset value into the default bound and clamps an absurd one,
+// so `cap+1` never overflows into a negative limit.
+func (rg *RepresentationGenerator) rawTextCapBytes() int64 {
+	return corpusfs.ResolveReadCapBytes(rg.maxFileBytes)
 }
 
 // SetLanguageDetection enables or disables best-effort raw_text language
@@ -182,23 +208,40 @@ func NewRepresentationGenerator(store model.RepresentationStore) *Representation
 // - For code/text/md/data/html doc types
 // - Normalize to UTF-8 with \n line endings
 // - Route code → index_kind=code, others → index_kind=text
+//
+// The read is bounded at cap+1 bytes (#830). It used to be a stat followed by an
+// unbounded os.ReadFile, and the stat could not constrain the read: a file that
+// grew between the two was pulled into memory whole, at whatever size it had
+// reached. The stat is gone because it measured nothing the bounded read does not
+// decide for itself.
 func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc model.Document, absPath string) error {
-	info, err := os.Stat(absPath)
+	capBytes := rg.rawTextCapBytes()
+	f, err := os.Open(absPath)
 	if err != nil {
-		return fmt.Errorf("stat file %s: %w", doc.RelPath, err)
+		return fmt.Errorf("open file %s: %w", doc.RelPath, err)
 	}
-	if info.Size() > defaultMaxFileSizeBytes {
-		return fmt.Errorf("%w: file %s too large (%d bytes); limit %d", ErrFileTooLarge, doc.RelPath, info.Size(), defaultMaxFileSizeBytes)
-	}
-
-	// Read file content first so we can delegate to the new helper which
-	// accepts pre-loaded bytes.  This keeps the original behaviour intact
-	// while allowing callers that already have the content to avoid the I/O.
-	content, err := os.ReadFile(absPath)
+	defer func() { _ = f.Close() }()
+	// cap+1: the extra byte separates a file of exactly the cap (admitted) from one
+	// byte past it (refused). The prefix is dropped rather than indexed, so half a
+	// document is never stored as though it were the whole one.
+	content, err := io.ReadAll(io.LimitReader(f, capBytes+1))
 	if err != nil {
 		return fmt.Errorf("read file %s: %w", doc.RelPath, err)
 	}
+	if int64(len(content)) > capBytes {
+		return rg.rawTextOverCapError(doc.RelPath, capBytes)
+	}
 	return rg.GenerateRawTextFromContent(ctx, doc, content)
+}
+
+// rawTextOverCapError renders the over-cap verdict for the raw-text paths. It
+// wraps ErrFileTooLarge so §14.4 classification keeps reporting FILE_TOO_LARGE,
+// and it names the setting the operator has to change. It does NOT report the
+// file's size: the read stopped at cap+1 by design, so the size is unknown here,
+// and reading to the end just to measure it would spend the resources the bound
+// exists to save.
+func (rg *RepresentationGenerator) rawTextOverCapError(relPath string, capBytes int64) error {
+	return fmt.Errorf("%w: file %s passed the ingest.max_file_mb cap (%d bytes)", ErrFileTooLarge, relPath, capBytes)
 }
 
 // GenerateRawTextFromContent behaves like GenerateRawText but takes the
@@ -208,10 +251,13 @@ func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc mode
 // simply read the file to supply the content.  Removing the parameter
 // simplifies the API and avoids unused variable warnings.
 func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Context, doc model.Document, content []byte) error {
-	// Guard against huge files to avoid OOM.  We mirror the same limit used by
-	// discovery since raw-text ingestion should follow the same policy.
-	if int64(len(content)) > defaultMaxFileSizeBytes {
-		return fmt.Errorf("%w: file %s too large (%d bytes); limit %d", ErrFileTooLarge, doc.RelPath, len(content), defaultMaxFileSizeBytes)
+	// Guard against huge files to avoid OOM, against the cap the operator
+	// CONFIGURED (#830). This gate used to compare against a hard-coded 10 MiB, so
+	// with the 20 MiB default a 15 MiB text file was admitted by discovery and then
+	// refused here: the operator's `ingest.max_file_mb` was not the number enforced.
+	// The configured value wins, so a file between 10 MiB and the cap is indexed.
+	if capBytes := rg.rawTextCapBytes(); int64(len(content)) > capBytes {
+		return rg.rawTextOverCapError(doc.RelPath, capBytes)
 	}
 
 	// Validate and normalize UTF-8

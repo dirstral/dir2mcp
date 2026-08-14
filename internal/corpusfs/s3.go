@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -55,7 +54,7 @@ type S3FS struct {
 	// callers fall back to Localize.
 	presign presignFunc
 	// maxBytes is the per-object read/download cap (#682). It is always positive:
-	// resolveMaxBytes turns a zero or negative configured value into the 10 MiB
+	// ResolveReadCapBytes turns a zero or negative configured value into the 10 MiB
 	// default, so no construction path can leave the backend unbounded.
 	maxBytes int64
 }
@@ -76,26 +75,6 @@ type S3Config struct {
 	// Zero or negative selects DefaultMaxFileSizeBytes. There is deliberately no
 	// "unlimited" value: an unbounded download is the defect this field closes.
 	MaxBytes int64
-}
-
-// resolveMaxBytes turns a configured per-object cap into the positive value the
-// backend enforces. A zero or negative input selects the 10 MiB default rather
-// than disabling the bound, so a caller that forgets the field still gets one.
-//
-// The upper clamp keeps `maxBytes+1` representable. Every bound in this file is a
-// limit+1, and math.MaxInt64 would overflow that sum to a negative number, which
-// io.LimitReader reads as "zero bytes allowed": Localize would then write an empty
-// file and report SUCCESS, and a read would return an empty document. S3Config is
-// exported, so this invariant is enforced here rather than trusted to the caller.
-func resolveMaxBytes(configured int64) int64 {
-	switch {
-	case configured <= 0:
-		return defaultMaxFileSizeBytes
-	case configured > math.MaxInt64-1:
-		return math.MaxInt64 - 1
-	default:
-		return configured
-	}
 }
 
 // NewS3FS constructs an S3FS over the provided client and config. The client is
@@ -122,7 +101,12 @@ func newS3FSWithPresign(client s3API, cfg S3Config, presign presignFunc) (*S3FS,
 		prefix:   normalizeS3Prefix(cfg.Prefix),
 		cacheDir: cfg.CacheDir,
 		presign:  presign,
-		maxBytes: resolveMaxBytes(cfg.MaxBytes),
+		// S3Config is exported, so the cap is made safe HERE rather than trusted to
+		// the caller: an unclamped math.MaxInt64 overflows the backend's own
+		// `maxBytes+1` sums, and Localize would then write an empty file and report
+		// SUCCESS. ResolveReadCapBytes is shared with every other bounded reader, so
+		// the backend cannot enforce a different number from them (#830).
+		maxBytes: ResolveReadCapBytes(cfg.MaxBytes),
 	}, nil
 }
 
