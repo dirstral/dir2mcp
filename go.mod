@@ -1,6 +1,6 @@
 module github.com/dirstral/dir2mcp
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/abadojack/whatlanggo v1.0.1
