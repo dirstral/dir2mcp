@@ -205,7 +205,11 @@ type Service struct {
 	// local filesystem. It is injected only for object-store backends (S3) so a
 	// remote corpus returns content instead of failing on a missing local path
 	// (#432); nil preserves the historical local-filesystem read path exactly.
-	corpusFS        corpusfs.CorpusFS
+	corpusFS corpusfs.CorpusFS
+	// maxFileBytes is the resolved `ingest.max_file_mb` cap in bytes, plumbed in by
+	// SetMaxFileBytes from the single resolver (#830). It bounds the source-byte
+	// hash read. Zero means "not set" and selects the shared default bound.
+	maxFileBytes    int64
 	protocolVersion string
 	pathExcludes    []string
 	// cached compiled regexps for exclude patterns; keys are normalized patterns
@@ -966,6 +970,30 @@ func (s *Service) SetCorpusFS(fsys corpusfs.CorpusFS) {
 	s.metaMu.Lock()
 	s.corpusFS = fsys
 	s.metaMu.Unlock()
+}
+
+// SetMaxFileBytes plumbs the resolved `ingest.max_file_mb` cap (in bytes) into
+// the retrieval-time source reads (#830). Callers pass
+// ingest.ResolvedMaxFileBytes(cfg), the single resolver for that setting, so
+// retrieval enforces the same number discovery, the ingest source reads, the
+// object-store backend, and the MCP tool paths do.
+//
+// Zero or negative keeps the shared default (corpusfs.ResolveReadCapBytes), so a
+// caller that does not set it still reads under a bound.
+func (s *Service) SetMaxFileBytes(maxBytes int64) {
+	s.metaMu.Lock()
+	s.maxFileBytes = maxBytes
+	s.metaMu.Unlock()
+}
+
+// sourceReadCapBytes is the resolved per-file cap the retrieval source reads are
+// bounded by. The shared resolver turns an unset value into the default bound and
+// clamps an absurd one, so `cap+1` never overflows into a negative limit.
+func (s *Service) sourceReadCapBytes() int64 {
+	s.metaMu.RLock()
+	configured := s.maxFileBytes
+	s.metaMu.RUnlock()
+	return corpusfs.ResolveReadCapBytes(configured)
 }
 
 func (s *Service) SetStateDir(stateDir string) {
@@ -2262,6 +2290,22 @@ func (s *Service) openSource(ctx context.Context, corpusFS corpusfs.CorpusFS, re
 // directory target with the same DOC_TYPE_UNSUPPORTED mapping the raw-text path
 // uses. It is the fallback for ocrCacheKeyForOpen: a store that can report the
 // already-known base hash (ocrSourceHashProvider) skips this full object GET.
+//
+// The read is bounded at cap+1 bytes (#830), and the REASON differs from the other
+// bounded reads in the repository. This one streams into a hasher, so it holds
+// constant memory and cannot OOM the daemon. What it consumed without a bound was
+// BANDWIDTH and time: one open_file call on a remote corpus pulled a whole object
+// of any size, so a single client request could download tens of gigabytes (metered
+// egress, and the request occupied a server slot for as long as it took). The
+// severity is lower than the memory cases; the class is the same, because a size
+// check is still only a measurement and the object is still free to serve more than
+// it reported.
+//
+// Refusing past the cap loses nothing real. A file over the cap was refused by
+// discovery, so ingest never wrote a derivation cache entry for it, so the key this
+// hash would have produced cannot hit. The old behavior paid for the whole download
+// and then answered OCR_NOT_READY; this one stops at cap+1 and answers with the
+// cause (§14.4 FILE_TOO_LARGE, via corpusfs.ErrObjectTooLarge).
 func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string) (string, error) {
 	var reader io.Reader
 	if corpusFS != nil {
@@ -2291,9 +2335,18 @@ func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusF
 		reader = sourceFile
 	}
 
+	capBytes := s.sourceReadCapBytes()
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, reader); err != nil {
+	// cap+1: the extra byte is the only evidence that separates a file of exactly
+	// the cap (inside the operator's policy, hash it) from one byte past it. A
+	// partial hash is never returned, because a hash of a prefix is a claim about
+	// bytes that are not the file.
+	read, err := io.Copy(hasher, io.LimitReader(reader, capBytes+1))
+	if err != nil {
 		return "", err
+	}
+	if read > capBytes {
+		return "", fmt.Errorf("%w: %s (cap %d bytes)", corpusfs.ErrObjectTooLarge, relPath, capBytes)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }

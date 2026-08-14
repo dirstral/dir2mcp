@@ -2582,6 +2582,12 @@ func mapSearchError(err error) *toolExecutionError {
 // mapOpenFileError converts an open-file error into a toolExecutionError.
 func mapOpenFileError(err error) *toolExecutionError {
 	switch {
+	case errors.Is(err, corpusfs.ErrObjectTooLarge):
+		// #830: retrieval bounded its source-byte hash read, so a source past the cap
+		// stops there. The default branch would report INTERNAL_ERROR as retryable,
+		// and a retry cannot help: the file is over the operator's cap until the file
+		// or the cap changes.
+		return &toolExecutionError{Code: "FILE_TOO_LARGE", Message: "file exceeds the configured ingest.max_file_mb cap", Retryable: false}
 	case errors.Is(err, model.ErrForbidden):
 		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrPathOutsideRoot):
@@ -2900,6 +2906,11 @@ func mapFileAccessError(err error) *toolExecutionError {
 
 func mapReadDocumentError(err error) *toolExecutionError {
 	switch {
+	case errors.Is(err, corpusfs.ErrObjectTooLarge):
+		// #830: the bytes read passed the configured cap, so the read was refused.
+		// The default branch would report "permission denied", which names the wrong
+		// cause and sends the operator to the wrong setting.
+		return &toolExecutionError{Code: "FILE_TOO_LARGE", Message: "file exceeds the configured ingest.max_file_mb cap", Retryable: false}
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	case errors.Is(err, model.ErrForbidden):
@@ -2987,6 +2998,9 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 // limit).
 func annotationReadError(err error) *toolExecutionError {
 	switch {
+	case errors.Is(err, corpusfs.ErrObjectTooLarge):
+		// #830, as in mapReadDocumentError: name the cap, not "permission denied".
+		return &toolExecutionError{Code: "FILE_TOO_LARGE", Message: "file exceeds the configured ingest.max_file_mb cap", Retryable: false}
 	case errors.Is(err, os.ErrNotExist):
 		return &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	case errors.Is(err, model.ErrForbidden):
@@ -3104,13 +3118,35 @@ func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
 	return nil
 }
 
+// readDocumentContent reads a document's bytes for the on-demand tool paths
+// (annotate, transcribe) under a hard byte bound (#830).
+//
+// The bound matters for a LOCAL corpus. A remote object is already bounded by
+// Localize (#682), but for a local corpus Localize copies nothing and hands back
+// the in-root path, so the read here IS the boundary. The read used to be an
+// unbounded os.ReadFile, so a file that grew after discovery measured it was
+// pulled whole into the server process: an operator-visible OOM, on a request an
+// unprivileged client can send.
+//
+// Past the cap the prefix is dropped and corpusfs.ErrObjectTooLarge is returned,
+// which the tool error mappers report as §14.4 FILE_TOO_LARGE. Truncating instead
+// would hand the annotator or the transcriber part of a file as though it were the
+// whole of it.
 func (s *Server) readDocumentContent(ctx context.Context, relPath string) ([]byte, error) {
 	targetReal, cleanup, err := s.localizeDocument(ctx, relPath)
 	defer cleanup()
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(targetReal)
+	maxBytes := s.ingestMaxFileBytes()
+	content, tooLarge, err := readBoundedFile(targetReal, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if tooLarge {
+		return nil, fmt.Errorf("%w: %s (cap %d bytes)", corpusfs.ErrObjectTooLarge, relPath, maxBytes)
+	}
+	return content, nil
 }
 
 // noopCleanup is the cleanup returned whenever nothing was materialized, so the

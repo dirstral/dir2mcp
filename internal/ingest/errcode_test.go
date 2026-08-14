@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -68,14 +69,34 @@ func TestManifestErrorCode_FileTooLarge(t *testing.T) {
 
 // TestGenerateRawTextFromContent_OversizeTaggedFileTooLarge proves the raw-text
 // size check wraps ErrFileTooLarge, so an oversize document is classified
-// FILE_TOO_LARGE on the run manifest.
+// FILE_TOO_LARGE on the run manifest. The generator here has no cap plumbed in, so
+// the resolved bound is the shared default (#830).
 func TestGenerateRawTextFromContent_OversizeTaggedFileTooLarge(t *testing.T) {
 	rg := &RepresentationGenerator{} // size check runs before any store access
-	content := make([]byte, defaultMaxFileSizeBytes+1)
+	content := make([]byte, corpusfs.DefaultMaxFileSizeBytes()+1)
 	err := rg.GenerateRawTextFromContent(context.Background(), model.Document{RelPath: "big.txt"}, content)
 	if err == nil {
 		t.Fatal("expected an oversize error, got nil")
 	}
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("error not tagged ErrFileTooLarge: %v", err)
+	}
+	if got := manifestErrorCode(err); got != manifestErrFileTooLarge {
+		t.Fatalf("manifestErrorCode = %q, want %q", got, manifestErrFileTooLarge)
+	}
+}
+
+// TestGenerateRawTextFromContent_ConfiguredCapTaggedFileTooLarge proves the same
+// classification holds for the CONFIGURED cap (#830), not only for the default: a
+// generator with `ingest.max_file_mb` plumbed in refuses content past that value
+// with ErrFileTooLarge, so the run manifest still reports §14.4 FILE_TOO_LARGE. The
+// cap is set FAR below the default here, so a pass cannot be explained by the
+// default bound.
+func TestGenerateRawTextFromContent_ConfiguredCapTaggedFileTooLarge(t *testing.T) {
+	const configured int64 = 4096
+	rg := &RepresentationGenerator{} // the size check runs before any store access
+	rg.SetMaxFileBytes(configured)
+	err := rg.GenerateRawTextFromContent(context.Background(), model.Document{RelPath: "big.txt"}, make([]byte, configured+1))
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("error not tagged ErrFileTooLarge: %v", err)
 	}

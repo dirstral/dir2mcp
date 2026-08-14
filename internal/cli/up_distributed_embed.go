@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
 	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
@@ -100,7 +101,7 @@ func startDistributedEmbedding(
 
 	// Build a per-kind embedder reusing the in-process embedding path so the
 	// distributed worker shares all embed/media-load/index/mark logic.
-	embedders := buildAxisEmbedders(chunkSource, textIndex, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger)
+	embedders := buildAxisEmbedders(chunkSource, textIndex, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, ingest.ResolvedMaxFileBytes(cfg))
 	if len(embedders) == 0 {
 		// Post-open abort: close the broker and release the lock so its SQLite
 		// handle and the coordinator lock are not leaked.
@@ -274,6 +275,7 @@ func newEmbedStep(
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
 	logger *log.Logger,
+	maxFileBytes int64,
 	kind string,
 ) *index.EmbeddingWorker {
 	return &index.EmbeddingWorker{
@@ -289,6 +291,9 @@ func newEmbedStep(
 		Corpus:       corpusFS,
 		BatchSize:    distributedEmbedBatchSize,
 		Logger:       logger,
+		// Same bound as the in-process loop: the distributed worker runs the same
+		// media read, so it must not read past the operator's cap either (#830).
+		MaxFileBytes: maxFileBytes,
 		OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
 			// Refreshing metadata is idempotent, so it runs on every (re-)embed.
 			if ret != nil {
@@ -319,13 +324,14 @@ func buildAxisEmbedders(
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
 	logger *log.Logger,
+	maxFileBytes int64,
 ) map[string]embedqueue.Embedder {
 	embedders := make(map[string]embedqueue.Embedder)
 	if textIndex != nil {
-		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, "text")
+		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, maxFileBytes, "text")
 	}
 	if codeIndex != nil {
-		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, "code")
+		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, maxFileBytes, "code")
 	}
 	return embedders
 }

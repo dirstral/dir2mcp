@@ -99,6 +99,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
 	ret.SetStateDir(cfg.StateDir)
+	// Bound the retrieval-time source reads with the SAME resolved cap ingest
+	// enforces (#830), from the one resolver.
+	ret.SetMaxFileBytes(ingest.ResolvedMaxFileBytes(cfg))
 	ret.SetProtocolVersion(cfg.ProtocolVersion)
 	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
 	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
@@ -1357,6 +1360,7 @@ func startEmbeddingWorkers(
 	textModel, codeModel, rootDir string,
 	corpusFS corpusfs.CorpusFS,
 	lateChunking bool,
+	maxFileBytes int64,
 	wg *sync.WaitGroup,
 ) {
 	if st == nil || embedder == nil {
@@ -1379,6 +1383,10 @@ func startEmbeddingWorkers(
 			BatchSize:    32,
 			Logger:       logger,
 			LateChunking: lateChunking,
+			// The media read is bounded by the SAME cap discovery and the ingest
+			// source reads enforce (#830); the caller resolves it once via
+			// ingest.ResolvedMaxFileBytes.
+			MaxFileBytes: maxFileBytes,
 			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
 				if ret != nil {
 					ret.SetChunkMetadataForIndex(workerKind, label, metadata.ToSearchHit())
@@ -1759,7 +1767,7 @@ func startEmbeddingIfNotReadOnly(ctx context.Context, cfg config.Config, readOnl
 	if cfg.DistributedEmbed.Enabled {
 		return startDistributedEmbedding(ctx, cfg, st, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, wg)
 	}
-	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, cfg.IngestLateChunking, wg)
+	startEmbeddingWorkers(ctx, chunkSource, textIx, codeIx, embedder, ret, indexingState, embedErrCh, embedLogger, embedModelText, embedModelCode, rootDir, corpusFS, cfg.IngestLateChunking, ingest.ResolvedMaxFileBytes(cfg), wg)
 	return nil
 }
 

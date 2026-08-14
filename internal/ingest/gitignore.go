@@ -10,11 +10,6 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 )
 
-// defaultMaxFileSizeBytes mirrors corpusfs.DefaultMaxFileSizeBytes() as a
-// package constant for representation generators that compare against it
-// directly.
-const defaultMaxFileSizeBytes int64 = 10 * 1024 * 1024
-
 // shouldSkipDirectory reports whether the incremental file watch skips a
 // directory. The set comes from the same DiscoverOptions the initial scan uses
 // (DiscoverOptionsFromConfig), so the watcher applies the operator's
