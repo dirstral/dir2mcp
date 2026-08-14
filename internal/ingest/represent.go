@@ -109,12 +109,18 @@ type RepresentationGenerator struct {
 	contextualizer ChunkContextualizer
 	// maxFileBytes is the resolved `ingest.max_file_mb` cap in bytes, set by the
 	// Service from the single resolver (ResolvedMaxFileBytes). Zero means "not set"
-	// and selects the shared 10 MiB default bound.
+	// and falls back to corpusfs.ResolveReadCapBytes's own bound, which is what a
+	// caller that never plumbed the value gets.
 	//
-	// Before #830 the raw-text gate compared against a HARD-CODED 10 MiB instead,
-	// so the operator's setting was not the one enforced: with the 20 MiB default a
-	// 15 MiB text file passed discovery and then failed here, and the error did not
-	// name the reason. The configured value is authoritative now.
+	// Two different numbers meet here, so both are named. The CONFIGURED default of
+	// `ingest.max_file_mb` is 20 MiB (config.Default). The FALLBACK bound, for a
+	// generator with nothing plumbed in, is corpusfs.DefaultMaxFileSizeBytes.
+	//
+	// Before #830 this gate compared against a HARD-CODED copy of that fallback
+	// instead of the configured value, so the operator's setting was not the one
+	// enforced: on a default install a 15 MiB text file passed discovery and then
+	// failed here, and the error did not name the reason. The configured value is
+	// authoritative now.
 	maxFileBytes int64
 }
 
@@ -253,9 +259,10 @@ func (rg *RepresentationGenerator) rawTextOverCapError(relPath string, capBytes 
 func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Context, doc model.Document, content []byte) error {
 	// Guard against huge files to avoid OOM, against the cap the operator
 	// CONFIGURED (#830). This gate used to compare against a hard-coded 10 MiB, so
-	// with the 20 MiB default a 15 MiB text file was admitted by discovery and then
-	// refused here: the operator's `ingest.max_file_mb` was not the number enforced.
-	// The configured value wins, so a file between 10 MiB and the cap is indexed.
+	// with `ingest.max_file_mb` at its 20 MiB default a 15 MiB text file was admitted
+	// by discovery and then refused here: the operator's setting was not the number
+	// enforced. The configured value wins, so a file between the old hard-coded gate
+	// and the configured cap is indexed.
 	if capBytes := rg.rawTextCapBytes(); int64(len(content)) > capBytes {
 		return rg.rawTextOverCapError(doc.RelPath, capBytes)
 	}
