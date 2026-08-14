@@ -1773,14 +1773,21 @@ func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 	}
 	rel, ok := relativeToBest(hits)
 	if !ok {
-		// No positive best score, so no ratio is defined (see relativeToBest).
-		// Keep the set intact rather than guess: dropping hits on an undefined
-		// comparison is the failure this floor is meant to avoid.
+		// The SET has no positive best score, so no ratio is defined for any of
+		// its members (see relativeToBest). Keep it intact rather than guess:
+		// dropping hits on an undefined comparison is the failure this floor is
+		// meant to avoid.
 		return hits
 	}
 	out := make([]model.SearchHit, 0, len(hits))
 	for i, h := range hits {
-		if rel[i] < floor {
+		// A NaN ratio (a NaN Score, e.g. a cosine against a zero-magnitude
+		// vector) drops. It compares false against any floor, so leaving it to
+		// the test below would ADMIT it. That is the opposite call from the
+		// pass-through above, and deliberately: there the whole set was
+		// unreadable and pruning would have been arbitrary, while here one hit
+		// carries no relevance reading at all beside a set that does.
+		if math.IsNaN(rel[i]) || rel[i] < floor {
 			continue
 		}
 		out = append(out, h)
@@ -1809,8 +1816,8 @@ func (s *Service) applyMinScoreFloor(hits []model.SearchHit) []model.SearchHit {
 //   - a +Inf max, where every finite score degenerates to a ratio of 0.
 //
 // A NaN score never wins the max comparison, so an all-NaN pool reports false
-// too, and a NaN beside real scores yields a NaN ratio, which compares false
-// against any floor and therefore keeps its hit.
+// too. A NaN beside real scores yields a NaN ratio; each caller handles that
+// value explicitly, because every comparison against NaN is false.
 //
 // Callers treat false as "do not rescale / do not prune" (fail open).
 func relativeToBest(hits []model.SearchHit) ([]float64, bool) {
@@ -3570,8 +3577,10 @@ func (s *Service) searchBothIndices(ctx context.Context, query string, k int, te
 // of an index=both query are comparable before they are merged (their scores
 // come from different embedding spaces). Each score becomes its RATIO to the
 // axis best (relativeToBest), so the axis best is 1.0 and the rest keep their
-// distance from it; a negative score (an anti-correlated cosine) clamps to 0, so
-// a rescaled axis stays inside [0,1]. An axis with no positive best at all is
+// distance from it; a score that is not positive clamps to 0 (an anti-correlated
+// cosine, or a NaN from a zero-magnitude vector), so a rescaled axis stays
+// inside [0,1] and the floor downstream reads a number. An axis with no positive
+// best at all is
 // left untouched, since no ratio is defined for it: its raw scores keep the
 // axis's own ordering, and the merge below then prefers the other axis, which is
 // the honest outcome for a pool the query correlates with negatively.
@@ -3588,7 +3597,7 @@ func normalizeScores(hits []model.SearchHit) {
 		return
 	}
 	for i := range hits {
-		if rel[i] < 0 {
+		if !(rel[i] > 0) { // also catches NaN, where every comparison is false
 			rel[i] = 0
 		}
 		hits[i].Score = rel[i]

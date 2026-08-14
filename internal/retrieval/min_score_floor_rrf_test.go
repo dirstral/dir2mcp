@@ -145,6 +145,31 @@ func TestApplyMinScoreFloor_NoPositiveBestIsPassThrough(t *testing.T) {
 	}
 }
 
+// TestApplyMinScoreFloor_NaNScoreDropsBelowPositiveBest pins the NaN rule. A
+// NaN Score (a cosine against a zero-magnitude vector) carries no relevance
+// reading, and every comparison against NaN is false, so the hit would be
+// ADMITTED by a plain `rel < floor` test. It drops instead, while the readable
+// hits of the same set are judged normally.
+func TestApplyMinScoreFloor_NaNScoreDropsBelowPositiveBest(t *testing.T) {
+	hits := []model.SearchHit{
+		{ChunkID: 1, Score: 0.8},
+		{ChunkID: 2, Score: math.NaN()},
+		{ChunkID: 3, Score: 0.79},
+	}
+	if got := floorSurvivors(0.05, hits); !eqIDs(got, []uint64{1, 3}) {
+		t.Fatalf("NaN-score hit must drop, readable hits must stay; got %v", got)
+	}
+	// An all-NaN set has no readable reference at all, so the floor keeps it
+	// (relativeToBest reports no usable best).
+	allNaN := []model.SearchHit{
+		{ChunkID: 1, Score: math.NaN()},
+		{ChunkID: 2, Score: math.NaN()},
+	}
+	if got := floorSurvivors(0.05, allNaN); len(got) != 2 {
+		t.Fatalf("all-NaN set must pass through; got %v", got)
+	}
+}
+
 // TestApplyMinScoreFloor_NegativeScoreDropsBelowPositiveBest pins the other
 // half of that rule: when the best score IS positive, an anti-correlated
 // (negative) hit has a negative ratio and is pruned, which is a judgement about
