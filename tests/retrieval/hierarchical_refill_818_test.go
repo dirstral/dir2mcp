@@ -152,14 +152,19 @@ func TestSearch_SummaryRefill_RanksTheUnionByScore(t *testing.T) {
 }
 
 // TestSearch_SummaryRefill_UnionIsDeduped pins that accumulation never doubles a
-// chunk both rounds found. Chunk 11 is in both recorded rounds.
+// chunk both rounds found. Chunk 11 is in both recorded rounds, and k is 2 so
+// the refill really runs (a k the first round cannot fill from an exhausted
+// index would stop the loop before any accumulation happened).
 func TestSearch_SummaryRefill_UnionIsDeduped(t *testing.T) {
-	svc, _ := roundedService(t, [][]refillCand{
+	svc, idx := roundedService(t, [][]refillCand{
 		{summaryCand(10, 0.99), fineCand(11, 0.50)},
 		{summaryCand(10, 0.99), fineCand(11, 0.50), summaryCand(30, 0.40)},
 	})
 
-	hits := searchHits(t, svc, 5)
+	hits := searchHits(t, svc, 2)
+	// Both recorded rounds are consulted, plus one last widened round that the
+	// exhausted stub answers with nothing: chunk 11 really was accumulated twice.
+	assertRounds(t, idx, 3)
 	seen := map[uint64]int{}
 	for _, h := range hits {
 		seen[h.ChunkID]++
