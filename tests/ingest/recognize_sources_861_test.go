@@ -141,6 +141,34 @@ func TestSourceNormalisationMakesTheHashAgreeWithWhatIsStored(t *testing.T) {
 	}
 }
 
+// TestAnnotationOrderDoesNotFlapTheHash: the serve contract makes no ordering
+// guarantee, so two annotations that share bounds and text but name different
+// recognizers must sort into one fixed order. Without a tie-break past the text
+// the sort leaves them in the order the backend sent them, the hash input
+// follows, and a re-ordered response re-derives the representation for no
+// change: the exact flap the sort exists to prevent.
+func TestAnnotationOrderDoesNotFlapTheHash(t *testing.T) {
+	first := sourced("same text", "pitch", nil, []string{"scorebug"}, 1, 2)
+	second := sourced("same text", "pitch", nil, []string{"face"}, 1, 2)
+
+	forward, ha := ingest.RecognitionSegments([]model.RecognizedAnnotation{first, second})
+	reversed, hb := ingest.RecognitionSegments([]model.RecognizedAnnotation{second, first})
+
+	if ha != hb {
+		t.Fatalf("the same two annotations hash differently when re-ordered:\n%q\n%q", ha, hb)
+	}
+	if len(forward) != 2 || len(reversed) != 2 {
+		t.Fatalf("expected 2 segments each, got %d and %d", len(forward), len(reversed))
+	}
+	for i := range forward {
+		got := strings.Join(forward[i].Span.Sources, ",")
+		want := strings.Join(reversed[i].Span.Sources, ",")
+		if got != want {
+			t.Fatalf("segment %d differs by input order: %q vs %q", i, got, want)
+		}
+	}
+}
+
 // TestASourcelessAnnotationKeepsItsOldHashInput is the upgrade guard. Recognition
 // is the most expensive derivation in the tree: a changed hash input re-runs the
 // backend over every video in a corpus. An annotation that names no recognizer
