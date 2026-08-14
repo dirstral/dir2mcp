@@ -3200,7 +3200,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 			return model.Span{Kind: "lines"}
 		}
 		speaker, speakerLabel := speakerFromExtraJSON(extraJSON)
-		entities, event := annotationFromExtraJSON(extraJSON)
+		entities, event, sources := annotationFromExtraJSON(extraJSON)
 		return model.Span{
 			Kind: "time", StartMS: start, EndMS: end,
 			Words:        wordsFromExtraJSON(extraJSON),
@@ -3208,6 +3208,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 			SpeakerLabel: speakerLabel,
 			Entities:     entities,
 			Event:        event,
+			Sources:      sources,
 		}
 	case "region":
 		return regionSpanFromRow(start, end, extraJSON)
@@ -3220,22 +3221,26 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 }
 
 // annotationFromExtraJSON reconstructs a recognition annotation's structured
-// attribution (design 0004 §7) from a "time" span's stored extra_json. A
-// NULL/empty/malformed payload yields no entities and no event, so a span that
-// predates this (or comes from a transcript) degrades to exactly the behaviour
-// it had before, rather than erroring.
-func annotationFromExtraJSON(extraJSON string) (entities []string, event string) {
+// attribution (design 0004 §7) and its recognizer provenance (`sources`,
+// df-005 0.3.0) from a "time" span's stored extra_json. A NULL/empty/malformed
+// payload yields no entities, no event and no sources, so a span that predates
+// this (or comes from a transcript) degrades to exactly the behaviour it had
+// before, rather than erroring.
+func annotationFromExtraJSON(extraJSON string) (entities []string, event string, sources []string) {
 	if strings.TrimSpace(extraJSON) == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 	var payload struct {
 		Entities []string `json:"entities"`
 		Event    string   `json:"event"`
+		Sources  []string `json:"sources"`
 	}
 	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil {
-		return nil, ""
+		return nil, "", nil
 	}
-	return model.NormalizeEntityIDs(payload.Entities), strings.TrimSpace(payload.Event)
+	return model.NormalizeEntityIDs(payload.Entities),
+		strings.TrimSpace(payload.Event),
+		model.NormalizeSources(payload.Sources)
 }
 
 // wordsFromExtraJSON reconstructs per-word timing for a "time" span from its
@@ -4122,7 +4127,7 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 		if span.StartMS < 0 || span.EndMS < 0 || span.EndMS < span.StartMS {
 			return "", 0, 0, "", errors.New("invalid time span")
 		}
-		extra, eErr := timeSpanExtraJSON(span.Words, span.Speaker, span.SpeakerLabel, span.Entities, span.Event)
+		extra, eErr := timeSpanExtraJSON(span)
 		if eErr != nil {
 			return "", 0, 0, "", eErr
 		}
@@ -4135,25 +4140,27 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 }
 
 // timeSpanExtraJSON marshals the optional metadata of a "time" span into the
-// stored extra_json object: per-word timing (`words`, spec §8.6.1) plus the
-// diarized speaker attribution (`speaker`/`speaker_label`, spec §8.6.8). Each
-// field is emitted only when present (omitempty), so a transcript with neither
+// stored extra_json object: per-word timing (`words`, spec §8.6.1), the
+// diarized speaker attribution (`speaker`/`speaker_label`, spec §8.6.8), and a
+// recognition annotation's attribution (`entities`/`event`, design 0004 §7)
+// plus its recognizer provenance (`sources`, df-005 0.3.0). Each field is
+// emitted only when present (omitempty), so a transcript with none of them
 // returns the empty string (stored as SQL NULL) and round-trips byte-identically
 // to before diarization existed. speaker/speaker_label are trimmed; an empty
 // speaker drops both (a label without a stable id is not a valid attribution).
-func timeSpanExtraJSON(
-	words []model.WordSpan, speaker, speakerLabel string, entities []string, event string,
-) (string, error) {
-	speaker = strings.TrimSpace(speaker)
-	speakerLabel = strings.TrimSpace(speakerLabel)
+func timeSpanExtraJSON(span model.Span) (string, error) {
+	words := span.Words
+	speaker := strings.TrimSpace(span.Speaker)
+	speakerLabel := strings.TrimSpace(span.SpeakerLabel)
 	if speaker == "" {
 		// A label with no stable id is not a valid attribution; drop both so the
 		// stored shape never carries a dangling speaker_label.
 		speakerLabel = ""
 	}
-	entities = model.NormalizeEntityIDs(entities)
-	event = strings.TrimSpace(event)
-	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" {
+	entities := model.NormalizeEntityIDs(span.Entities)
+	event := strings.TrimSpace(span.Event)
+	sources := model.NormalizeSources(span.Sources)
+	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 {
 		return "", nil
 	}
 	payload := struct {
@@ -4162,9 +4169,10 @@ func timeSpanExtraJSON(
 		SpeakerLabel string           `json:"speaker_label,omitempty"`
 		Entities     []string         `json:"entities,omitempty"`
 		Event        string           `json:"event,omitempty"`
+		Sources      []string         `json:"sources,omitempty"`
 	}{
 		Words: words, Speaker: speaker, SpeakerLabel: speakerLabel,
-		Entities: entities, Event: event,
+		Entities: entities, Event: event, Sources: sources,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

@@ -271,10 +271,12 @@ func RecognitionSegments(anns []model.RecognizedAnnotation) ([]ChunkSegment, str
 // core does not rely on the draft schema alone): empty or whitespace-only text
 // (a non-searchable chunk), a negative start (the wire contract is 0-based, §5),
 // or a reversed span (end before start). The survivors are sorted by
-// (start, end, text) so the rep_hash and the persisted chunk order are STABLE
-// regardless of the order the backend emitted them in — the serve contract makes
-// no ordering guarantee, and an order-only change MUST NOT flap the rep_hash and
-// force a spurious re-derivation.
+// (start, end, text, canonical line) so the rep_hash and the persisted chunk
+// order are STABLE regardless of the order the backend emitted them in — the
+// serve contract makes no ordering guarantee, and an order-only change MUST NOT
+// flap the rep_hash and force a spurious re-derivation. The canonical line is
+// the last key because bounds and text alone do not identify an annotation: two
+// annotations can share all three and differ in their attribution.
 func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, string) {
 	type validAnnotation struct {
 		startMS  int
@@ -282,6 +284,45 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		text     string
 		entities []string
 		event    string
+		sources  []string
+		// hashLine is this annotation's whole contribution to the derivation
+		// hash input, and also the final sort tie-break below.
+		hashLine string
+	}
+	// canonicalLine renders one annotation as the line the rep_hash covers.
+	//
+	// The attribution joins the derivation hash: a backend that changes which
+	// entities an annotation names, or which recognizer produced it, has
+	// produced different content, and the representation must be re-derived
+	// rather than kept because the prose happens to match (§8.6.7).
+	//
+	// Every variable-length field is LENGTH-PREFIXED rather than delimited.
+	// Entity ids and recognizer tags are opaque backend-declared tokens, so any
+	// delimiter can legitimately appear inside one: joining with commas would
+	// encode ["a,b", "c"] and ["a", "b,c"] identically, and two genuinely
+	// different attributions that hash the same would silently NOT re-derive.
+	// That is the exact failure this input exists to prevent.
+	//
+	// The source group is APPENDED ONLY WHEN PRESENT, unlike the entity count.
+	// The entity list ends at a known count, so a line either stops there or
+	// continues with the source count: both readings are unambiguous. Emitting
+	// "|0" instead would change the hash input of every annotation that carries
+	// no sources, and that re-runs the recognition backend over a whole corpus
+	// of video to store a field those annotations do not have.
+	canonicalLine := func(v validAnnotation) string {
+		var line strings.Builder
+		fmt.Fprintf(&line, "%d|%d|%d:%s|%d:%s|%d",
+			v.startMS, v.endMS, len(v.text), v.text, len(v.event), v.event, len(v.entities))
+		for _, id := range v.entities {
+			fmt.Fprintf(&line, "|%d:%s", len(id), id)
+		}
+		if len(v.sources) > 0 {
+			fmt.Fprintf(&line, "|%d", len(v.sources))
+			for _, source := range v.sources {
+				fmt.Fprintf(&line, "|%d:%s", len(source), source)
+			}
+		}
+		return line.String()
 	}
 	valid := make([]validAnnotation, 0, len(anns))
 	for _, ann := range anns {
@@ -289,14 +330,23 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		if text == "" || ann.StartMS < 0 || ann.EndMS < ann.StartMS {
 			continue
 		}
-		valid = append(valid, validAnnotation{
+		v := validAnnotation{
 			startMS: ann.StartMS, endMS: ann.EndMS, text: text,
 			// Carried, not dropped: these are what an entity filter selects on
 			// (design 0004 §7). The backend is required to compute them, and
 			// persisting only the text made the filter unimplementable.
 			entities: model.NormalizeEntityIDs(ann.Entities),
 			event:    strings.TrimSpace(ann.Event),
-		})
+			// Carried for the same reason, but for a different question
+			// (df-005 0.3.0 `sources`): entities and event say WHAT the
+			// annotation is about, sources says WHICH recognizer said it. The
+			// backend has always sent it and this function used to drop it, so
+			// no client could tell a scorebug reading from a face match (#861).
+			// Provenance only: nothing downstream ranks or filters on it.
+			sources: model.NormalizeSources(ann.Sources),
+		}
+		v.hashLine = canonicalLine(v)
+		valid = append(valid, v)
 	}
 	sort.Slice(valid, func(i, j int) bool {
 		if valid[i].startMS != valid[j].startMS {
@@ -305,7 +355,18 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		if valid[i].endMS != valid[j].endMS {
 			return valid[i].endMS < valid[j].endMS
 		}
-		return valid[i].text < valid[j].text
+		if valid[i].text != valid[j].text {
+			return valid[i].text < valid[j].text
+		}
+		// Bounds and text do not identify an annotation: two of them can share
+		// all three and still name different entities, a different event or a
+		// different recognizer. sort.Slice is not stable, so without this final
+		// key the emitted order (and with it the hash input) would depend on the
+		// order the backend happened to send them in, and a re-ordered response
+		// would re-derive the representation for no change. The canonical line
+		// covers every field, so equal keys mean identical annotations and the
+		// order between them cannot matter.
+		return valid[i].hashLine < valid[j].hashLine
 	})
 	segments := make([]chunkSegment, 0, len(valid))
 	var hashInput strings.Builder
@@ -314,25 +375,10 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			Text: v.text,
 			Span: model.Span{
 				Kind: "time", StartMS: v.startMS, EndMS: v.endMS,
-				Entities: v.entities, Event: v.event,
+				Entities: v.entities, Event: v.event, Sources: v.sources,
 			},
 		})
-		// The attribution joins the derivation hash: a backend that changes
-		// which entities an annotation names has produced different content,
-		// and the representation must be re-derived rather than kept because
-		// the prose happens to match (§8.6.7).
-		//
-		// Every variable-length field is LENGTH-PREFIXED rather than delimited.
-		// Entity ids are opaque backend-declared tokens, so any delimiter can
-		// legitimately appear inside one: joining with commas would encode
-		// ["a,b", "c"] and ["a", "b,c"] identically, and two genuinely
-		// different attributions that hash the same would silently NOT
-		// re-derive. That is the exact failure this input exists to prevent.
-		fmt.Fprintf(&hashInput, "%d|%d|%d:%s|%d:%s|%d",
-			v.startMS, v.endMS, len(v.text), v.text, len(v.event), v.event, len(v.entities))
-		for _, id := range v.entities {
-			fmt.Fprintf(&hashInput, "|%d:%s", len(id), id)
-		}
+		hashInput.WriteString(v.hashLine)
 		hashInput.WriteByte('\n')
 	}
 	return segments, hashInput.String()
