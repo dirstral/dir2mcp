@@ -584,6 +584,21 @@ type Config struct {
 	// the behavior would author normative semantics this repository does not own
 	// (spec-first governance; compare dirstral-spec#68). The README says the same
 	// thing, so an operator is not told the modes work.
+	//
+	// IngestArchivesMode is the sharp case (issue #843). Its shipped default is
+	// `deep`, which names recursive expansion of an archive nested inside an
+	// archive, and no such recursion exists: extractArchiveMembers walks the top
+	// level of one container and a nested archive is stored as a skipped
+	// archive_member document. `off` is wrong in the other direction, because
+	// archives are expanded under it too. Only `shallow` happens to match the
+	// behavior, and it matches by coincidence rather than by being read.
+	//
+	// Neither the default nor the meaning of a member is changed here. The
+	// default and the enum both come from the canonical SPEC §16.2 template, so
+	// to move either one is a spec change and belongs in dirstral-spec first.
+	// What this repository owns is the retraction: the generated config carries
+	// inertIngestModeCommentLines directly above the keys, and a hand-written
+	// config that sets one of them to `off` gets warnInertIngestModesOff at load.
 	IngestPDFMode      string
 	IngestImagesMode   string
 	IngestAudioMode    string
@@ -2240,6 +2255,9 @@ func applyFileOverrides(cfg *Config, path string) error {
 			"config file %s: %d unrecognized key(s) ignored: %s",
 			path, len(fileCfg.unknownKeys), strings.Join(fileCfg.unknownKeys, ", ")))
 	}
+	// A recognized key that nothing reads is the same failure of honesty as a key
+	// nobody claimed, so it gets the same instrument (#843).
+	warnInertIngestModesOff(cfg, fileCfg, path)
 
 	// Decode the dynamic providers:/model: subtree with yaml.v3
 	// (SPEC 0.7.0 §16.2) — independent of the flat parser above.
@@ -4123,6 +4141,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("ingest_gitignore", cfg.IngestGitignore)
 	writeBool("ingest_follow_symlinks", cfg.IngestFollowSymlinks)
 	writeInt("ingest_max_file_mb", cfg.IngestMaxFileMB)
+	writeComment(inertIngestModeCommentLines...)
 	writeScalar("ingest_pdf_mode", cfg.IngestPDFMode)
 	writeScalar("ingest_images_mode", cfg.IngestImagesMode)
 	writeScalar("ingest_audio_mode", cfg.IngestAudioMode)
@@ -5085,6 +5104,94 @@ func normalizeClosedEnum(key, value, fallback string, allowed []string) (string,
 		}
 	}
 	return "", fmt.Errorf("%s must be one of %s: %q", key, strings.Join(allowed, ", "), value)
+}
+
+// inertIngestModeCommentLines is the retraction the generated config carries
+// directly above the four per-format mode keys (issue #843).
+//
+// The keys are validated (#655) but no accepted value reaches the ingestion
+// runtime, so every value behaves the same. `ingest.archives.mode` is the sharp
+// case: the shipped default is `deep`, the name promises that an archive nested
+// inside an archive is expanded, and the implementation expands the top level
+// only. An operator who reads the key in their own config file must read the
+// retraction in the same place, or the name is the only thing they have to go on.
+//
+// The text is a package-level value rather than a literal inside
+// marshalConfigYAML so a test can assert the generated file carries it without
+// restating the wording.
+var inertIngestModeCommentLines = []string{
+	"The four per-format mode keys below are VALIDATED but INERT (#655, #843).",
+	"A value outside its closed set is refused at startup, and the accepted",
+	"value is stored and reported back. No accepted value changes ingestion.",
+	"ingest_archives_mode is the one to watch: the default `deep` names",
+	"recursive expansion of an archive nested inside an archive, and no such",
+	"recursion exists. Archives are expanded at the TOP LEVEL only, under every",
+	"value including `off`. A nested archive is stored as a skipped document",
+	"with skip_reason=archive, so the gap shows in the coverage report.",
+	"The canonical spec names the members of each set without defining what any",
+	"member does, so dir2mcp refuses to invent the meaning. Knobs that DO work:",
+	"ingest_extractor (PDF/image text), stt_provider (audio/video),",
+	"ingest_on_unsupported (report a format nothing can read).",
+}
+
+// warnInertIngestModesOff warns when a config file sets a per-format mode key to
+// `off` (issue #843).
+//
+// The four keys are inert, so no value is honored, but the values do not all
+// cost the same to get wrong. `off` is the one member every reader understands
+// identically ("do not do this"), and an operator who writes it has decided that
+// content must NOT be sent to a provider or indexed. The key withholds nothing,
+// so the belief is unsafe in the direction of cost and privacy, and there IS an
+// action to take instead: ingest.extractor, stt.provider, security.path_excludes.
+//
+// The message states what still happens without overstating it. Archive
+// expansion is unconditional, so it is asserted flatly. Extraction and
+// transcription depend on a resolved extractor and STT provider, which the
+// operator may already have turned off through the keys that do work, so they
+// are qualified rather than claimed outright.
+//
+// The other members are left silent on purpose. None of them is a decision to
+// withhold anything, `deep` is the shipped default, and #628 pins that a config
+// dir2mcp itself generated loads with no warnings at all. A warning that fires
+// on every start over a default the operator cannot improve on is a warning
+// operators learn to skip, which would cost more than it buys. Their retraction
+// is the comment the generated config carries (inertIngestModeCommentLines) and
+// the README section, both read at exactly the moment the value is read.
+//
+// It is driven by the FILE fields, not by the merged Config, so `off` warns only
+// when the operator actually wrote it. It is called from applyFileOverrides, so
+// an effective-config snapshot (machine-written, carrying no operator intent)
+// stays silent, matching the #661 split.
+//
+// cfg is never nil: the one caller returns early on a nil config.
+func warnInertIngestModesOff(cfg *Config, fc fileConfig, path string) {
+	var offKeys []string
+	for _, mode := range []struct {
+		key   string
+		value *string
+	}{
+		{"ingest.pdf.mode", fc.IngestPDFMode},
+		{"ingest.images.mode", fc.IngestImagesMode},
+		{"ingest.audio.mode", fc.IngestAudioMode},
+		{"ingest.archives.mode", fc.IngestArchivesMode},
+	} {
+		// Trim and fold the same way normalizeClosedEnum does, so the warning and
+		// the gate agree on what counts as `off` (`OFF`, ` off ` included).
+		if mode.value != nil && strings.EqualFold(strings.TrimSpace(*mode.value), "off") {
+			offKeys = append(offKeys, mode.key)
+		}
+	}
+	if len(offKeys) == 0 {
+		return
+	}
+	cfg.Warnings = append(cfg.Warnings, fmt.Errorf(
+		"config file %s: %s set to \"off\" but NOT honored: the per-format mode keys are validated only, "+
+			"and no accepted value changes ingestion yet. These keys withhold nothing on their own. "+
+			"PDFs and images are still extracted, and audio and video are still transcribed, whenever the "+
+			"resolved extractor or STT provider is active; archives are still expanded at the top level "+
+			"unconditionally. To actually turn these off use ingest.extractor=off, stt.provider=off, "+
+			"or keep the files out with security.path_excludes",
+		path, strings.Join(offKeys, ", ")))
 }
 
 // validateIngestFormatModes rejects a per-format ingest mode outside its
