@@ -522,9 +522,10 @@ the keys that do work:
 
 You do not have to remember this. A generated config carries the same retraction as a
 comment directly above the four keys. A hand-written `.dir2mcp.yaml` that sets one of
-them to `off` also prints a startup warning, because `off` is the value whose failure
-costs money or privacy: nothing is withheld, and the warning names the key that does
-withhold it. The other values load silently, so a generated config stays warning-free.
+them to `off` also prints a startup warning. `off` gets the warning because it is the
+value that costs money or privacy when it is wrong: the key withholds nothing, and the
+warning names the key that does. The other values load silently, so a generated config
+stays warning-free.
 
 ##### `ingest.archives.mode: deep` promises more than dir2mcp does
 
@@ -542,9 +543,9 @@ An archive nested inside an archive is not expanded. It is stored as a skipped
 coverage it does not have and the gap appears in the coverage report.
 
 The default stays `deep`, and no member changes meaning, because both come from the
-canonical SPEC §16.2 template. To implement `deep` needs a recursion bound, a byte
-budget for the expansion, and a defined outcome at the bound and on a cycle; the spec
-defines none of those today. That decision belongs in `dirstral-spec` first.
+canonical SPEC §16.2 template. A real `deep` implementation needs a recursion bound, a
+byte budget for the expansion, and a defined outcome at the bound and on a cycle. The
+spec defines none of those today, so that decision belongs in `dirstral-spec` first.
 
 ### docling extraction over HTTP (docling-serve)
 
