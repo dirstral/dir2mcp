@@ -2187,9 +2187,15 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		// SPEC §16.1.1 precedence: env (#1) > keychain (#2) > file/.env.local (#3).
 		// Keychain is consulted before the dotenv files so a stored credential
 		// wins over .env.local but never over an explicit environment variable.
+		// The dotenv files themselves come from dotEnvSearchPaths: the config
+		// file's own directory first, then the working directory (#677).
 		loadKeychainCredentials(overrideEnv)
-		if err := loadDotEnvFiles([]string{".env.local", ".env"}, overrideEnv); err != nil {
+		loaded, err := loadDotEnvFiles(dotEnvSearchPaths(path), overrideEnv)
+		if err != nil {
 			return Config{}, fmt.Errorf("load dotenv files: %w", err)
+		}
+		if warn := dotEnvMultiDirWarning(loaded); warn != nil {
+			cfg.Warnings = append(cfg.Warnings, warn)
 		}
 	}
 	if path == "" {
@@ -6158,27 +6164,115 @@ func loadKeychainCredentials(overrideEnv map[string]string) {
 	}
 }
 
-// loadDotEnvFiles loads each dotenv path in order, stopping at the
-// first error.
-func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {
-	for _, p := range paths {
-		if err := loadDotEnvFile(p, overrideEnv); err != nil {
-			return err
+// dotEnvFileNames are the dotenv basenames read in each searched directory,
+// in precedence order: .env.local wins over .env.
+var dotEnvFileNames = []string{".env.local", ".env"}
+
+// dotEnvSearchPaths returns the dotenv files the loader reads, highest
+// precedence first.
+//
+// The directory that holds the resolved config file comes first, then the
+// process working directory. `config init` writes credentials beside the
+// selected config file, so a loader that read the working directory only lost
+// every credential an operator saved through a custom --config path (#677).
+// Both directories are read, so an existing working-directory setup keeps
+// working; the config directory wins because --config is the explicit choice.
+// Within one directory .env.local still wins over .env.
+//
+// Paths that resolve to the same file collapse, so the common case (config
+// file in the working directory) reads each file once.
+func dotEnvSearchPaths(configPath string) []string {
+	candidates := make([]string, 0, 2)
+	if trimmed := strings.TrimSpace(configPath); trimmed != "" {
+		candidates = append(candidates, filepath.Dir(trimmed))
+	}
+	candidates = append(candidates, ".")
+
+	dirs := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, dir := range candidates {
+		key := canonicalDirKey(dir)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+
+	paths := make([]string, 0, len(dirs)*len(dotEnvFileNames))
+	for _, dir := range dirs {
+		for _, name := range dotEnvFileNames {
+			paths = append(paths, filepath.Join(dir, name))
 		}
 	}
-	return nil
+	return paths
+}
+
+// canonicalDirKey returns a comparison key for a directory, so "." and an
+// absolute path to the same directory collapse to one entry. Symlinks are
+// resolved when possible (a macOS /var vs /private/var pair is the same
+// directory), and the key falls back to the absolute, then the raw, path when
+// the directory cannot be resolved.
+func canonicalDirKey(dir string) string {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(dir)
+}
+
+// dotEnvMultiDirWarning reports when dotenv files were read from more than one
+// directory. Two directories in play is the situation an operator cannot see
+// otherwise: one file supplies a variable and the other is quietly outranked
+// for it (#677). The warning names the files in precedence order and nothing
+// else: never a variable name, never a value.
+func dotEnvMultiDirWarning(loaded []string) error {
+	if len(loaded) < 2 {
+		return nil
+	}
+	dirs := make(map[string]struct{}, len(loaded))
+	for _, path := range loaded {
+		dirs[filepath.Dir(path)] = struct{}{}
+	}
+	if len(dirs) < 2 {
+		return nil
+	}
+	return fmt.Errorf(
+		"dotenv files loaded from %d directories: %s (in that order, the first file that defines a variable wins; the environment and the keychain still win over all of them)",
+		len(dirs), strings.Join(loaded, ", "))
+}
+
+// loadDotEnvFiles loads each dotenv path in order, stopping at the
+// first error. It returns the paths that existed and were read, in load
+// order, so the caller can report which files took part. Paths only: a
+// returned value never carries a variable name or a secret value.
+func loadDotEnvFiles(paths []string, overrideEnv map[string]string) ([]string, error) {
+	loaded := make([]string, 0, len(paths))
+	for _, p := range paths {
+		read, err := loadDotEnvFile(p, overrideEnv)
+		if err != nil {
+			return loaded, err
+		}
+		if read {
+			loaded = append(loaded, p)
+		}
+	}
+	return loaded, nil
 }
 
 // loadDotEnvFile parses a dotenv file (supporting "export" and
 // quoting), setting each key only when not already present and
-// non-empty. A missing file is not an error.
-func loadDotEnvFile(path string, overrideEnv map[string]string) error {
+// non-empty. It reports whether the file existed and was read. A missing
+// file is not an error; a file that exists but cannot be read is.
+func loadDotEnvFile(path string, overrideEnv map[string]string) (bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	defer func() {
 		_ = file.Close()
@@ -6208,11 +6302,11 @@ func loadDotEnvFile(path string, overrideEnv map[string]string) error {
 			continue
 		}
 		if setErr := envSet(key, unquoteEnvValue(value), overrideEnv); setErr != nil {
-			return setErr
+			return true, setErr
 		}
 	}
 
-	return scanner.Err()
+	return true, scanner.Err()
 }
 
 // envLookup reads key from overrideEnv when non-nil, otherwise from the
