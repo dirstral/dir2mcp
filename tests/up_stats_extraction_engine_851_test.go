@@ -140,8 +140,11 @@ func TestUpStatsReportsNoExtractionEngineWhenExtractionIsOff(t *testing.T) {
 		}
 	})
 
+	// The daemon's own stderr is deliberately NOT echoed here. It carries the
+	// startup banner and config diagnostics, and a test failure message is not a
+	// redaction-reviewed surface. The assertion needs only the served value.
 	ocr, _ := models["ocr"].(string)
 	if ocr != "(no extraction engine)" {
-		t.Fatalf("models.ocr = %q on a daemon with ingest_extractor=off, want the explicit no-engine marker; stderr=%s", ocr, stderr.String())
+		t.Fatalf("models.ocr = %q on a daemon with ingest_extractor=off, want the explicit no-engine marker", ocr)
 	}
 }

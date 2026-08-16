@@ -58,7 +58,10 @@ func TestActiveExtractionEngine_ReportsTheWiredEngine(t *testing.T) {
 // wire, so stats can keep naming it.
 func TestActiveExtractionEngine_ReportsTheBespokeOCRModel(t *testing.T) {
 	svc := extractionEngineService(t)
-	client := mistral.NewClient("http://127.0.0.1:9", "test-key")
+	// A closed loopback port and no credential: the accessor reads the client's
+	// declared model, so the test never makes a request and needs no key. The
+	// unroutable base URL keeps it that way if the code path ever changes.
+	client := mistral.NewClient("http://127.0.0.1:9", "")
 	client.DefaultOCRModel = "house-ocr-v3"
 	svc.SetDocumentExtractor(client)
 
