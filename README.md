@@ -12,19 +12,35 @@
 
 # dir2mcp
 
-Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations, built to maximize use of Mistral models across embedding, OCR, transcription, and generation. Optional layers include ElevenLabs voice output via a dedicated bridge binary and x402 request gating (payment/request-gating protocol).
+Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations. It works out of the box with one API key, and every capability can be rebound to a different provider without changing how the corpus is indexed or cited. Optional layers include ElevenLabs voice output via a dedicated bridge binary and x402 request gating (payment/request-gating protocol).
 
 ## Why dir2mcp
 
-- Mistral-first pipeline:
-  - Embeddings: `mistral-embed` (text) + `codestral-embed` (code)
-  - OCR: `mistral-ocr-latest`
-  - STT default: `voxtral-mini-latest`
-  - RAG generation: Mistral chat models
+- Provider-agnostic by capability. Embedding, extraction/OCR, transcription,
+  generation and reranking are bound independently, so you can mix providers or
+  move one capability without touching the rest:
+
+  | Capability | Providers you can bind |
+  |---|---|
+  | Embedding | Mistral, OpenAI, Gemini, any OpenAI-compatible endpoint, self-hosted |
+  | Extraction / OCR | docling (local), docling-serve (HTTP), pandoc, Mistral OCR |
+  | Transcription | Voxtral, Whisper (self-hosted or OpenAI-compatible) |
+  | Generation | Mistral, OpenAI, Anthropic, Gemini, OpenRouter, any OpenAI-compatible endpoint |
+  | Reranking | Cohere, ColBERT, self-hosted |
+
+- A provider activates when its credential is present, so adding a key is the
+  only step. There is no separate enable flag to forget. Mistral is the default
+  when a Mistral key is the one you supply, which keeps first-run simple without
+  making it the only option.
+- Runs fully local with no egress: docling for extraction, an OpenAI-compatible
+  local server (Ollama, vLLM, llama.cpp, LM Studio, TEI) for embedding and chat.
 - Single Go binary (`dir2mcp`) with local-first state in `.dir2mcp/`
 - Companion bridge binary (`elevenlabs-bridge`) for ElevenLabs webhook tools
 - MCP Streamable HTTP server with a stable tool surface
 - Multimodal ingestion: text/code, document extraction (docling or OCR), transcripts, structured annotations
+- Video recognition: a pluggable backend turns broadcast footage into time-anchored,
+  filterable annotations (`event`, `entities`), each naming the recognizer that
+  produced it. An answer cites a moment, and the client can play exactly that moment
 - Citation-aware retrieval and RAG-style answering
 - Optional facilitator-backed x402 payment gating for `tools/call`
 - Repo layout with two binaries:
@@ -212,8 +228,22 @@ What it verifies:
 Cloudflare quick tunnel (no account-required quick mode):
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:<PORT> --no-autoupdate
+cloudflared tunnel --url http://127.0.0.1:<PORT> --no-autoupdate \
+  --http-host-header 127.0.0.1:<PORT>
 ```
+
+> **`--http-host-header` is required, not optional.** The MCP SDK auto-enables
+> DNS-rebinding protection for a loopback-bound server, and then refuses any
+> request whose `Host` header is not a loopback name. A tunnel forwards the
+> PUBLIC hostname by default, so without this flag **every request returns 403**
+> and the body does not say why. The flag makes the forwarded `Host` truthful and
+> keeps the protection ON. Do not disable the protection instead: in the MCP Go
+> SDK the same switch also turns off the CSRF origin check. Verified on a live
+> deployment (issue #853).
+
+A quick tunnel gets a NEW random hostname every time it starts, including after a
+reboot, so treat the URL as ephemeral and re-read it from the running process
+rather than from an earlier log line.
 
 ngrok (requires verified account + authtoken):
 
@@ -307,8 +337,27 @@ Install and uninstall are also fail-safe: a supervisor step that fails during in
 | `dir2mcp_transcribe_and_ask` | Transcribe then ask over the result |
 | `dir2mcp_open_file` | Retrieve a file by path with span context |
 | `dir2mcp_open_media_clip` | Extract the audio/video snippet for a media hit (time span) |
+| `dir2mcp_related` | Find chunks related to a chunk you already have |
 | `dir2mcp_list_files` | List indexed files with metadata |
-| `dir2mcp_stats` | Corpus statistics |
+| `dir2mcp_stats` | Corpus statistics, including the extraction engine actually in use |
+
+### What a citation carries
+
+A `time` span (recognition and media content) carries more than its bounds, and a
+client can show all of it:
+
+| Field | Meaning |
+|---|---|
+| `start_ms` / `end_ms` | the span bounds, so a client can play exactly the cited moment |
+| `event` | the structured event the annotation records, for example `home_run`. Filterable |
+| `entities` | the entities the annotation names, for example `player:curtis-mead`. Filterable |
+| `sources` | which recognizer produced the annotation, for example `["playbyplay"]` or `["scorebug","face"]`. Provenance only, never a ranking signal |
+| `derivation` | `observed` or `generated`. A client MUST NOT present a `generated` span as a record of what happened |
+
+`sources` and `derivation` answer different questions. `derivation` says whether a
+span RECORDS or DESCRIBES. `sources` says WHICH component produced it, which
+matters when two recognizers both observed and disagree. Both are optional and
+omitted when absent, never served as `null` or `[]`.
 
 ## Configuration
 
