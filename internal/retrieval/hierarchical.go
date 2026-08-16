@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"sort"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 )
@@ -69,20 +70,67 @@ const summaryRefillMaxMargin = 200
 // makes exactly one retrieval call and the flat path is unchanged. The repeated
 // call re-runs retrieval only: the HyDE hypothesis and the cross-lingual query
 // variants are served from the expansion cache, so no extra generation is paid.
+//
+// Every round CONTRIBUTES to the result (#818). A wider round is not guaranteed
+// to be a superset of the round it repairs: the vector index is approximate, so
+// a larger k explores a different part of the graph, and a wider round whose
+// extra candidates are themselves summaries that expand to nothing returns fewer
+// hits than the round before it. Returning only the last round would therefore
+// LOSE results in the exact case the refill exists to fix. The rounds are
+// instead accumulated, deduped by chunk id, and ranked by score, matching what
+// collectFilteredCandidates does with its own widening fanout loop. The budget
+// test reads the accumulated pool, so the loop stops as soon as the UNION meets
+// the budget: it can end earlier than before, never later, and it never adds a
+// retrieval call.
 func (s *Service) searchWithSummaryRefill(ctx context.Context, query model.SearchQuery, poolK int) ([]model.SearchHit, error) {
 	fetchK := poolK
+	var pool []model.SearchHit
 	for round := 0; ; round++ {
 		raw, err := s.searchExpanded(ctx, query, fetchK)
 		if err != nil {
 			return nil, err
 		}
 		hits := s.expandHierarchical(ctx, query, raw, fetchK)
+		if round == 0 {
+			// The first round IS the pool: pass it through untouched (no copy, no
+			// re-sort), so a search that never refills (every corpus with no summary
+			// vectors) returns byte-identical results.
+			pool = hits
+		} else {
+			pool = mergeRefillRounds(pool, hits)
+		}
 		summaries := countSummaryHits(raw)
-		if !needSummaryRefill(len(hits), poolK, summaries, len(raw), fetchK, round) {
-			return hits, nil
+		if !needSummaryRefill(len(pool), poolK, summaries, len(raw), fetchK, round) {
+			return pool, nil
 		}
 		fetchK = poolK + summaryRefillMargin(summaries)
 	}
+}
+
+// mergeRefillRounds unions the pool accumulated so far with one refill round and
+// ranks the union by score (#818).
+//
+// Dedup is the pool's existing notion of chunk identity: appendUnseenHit, first
+// wins. A chunk found by both rounds therefore keeps the score and fields of the
+// EARLIER (narrower, so more precisely ranked) round. The sort is stable and
+// compares the authoritative Score only, so hits that tie keep accumulation
+// order: earlier round first, and within a round the rank the pipeline gave
+// them. The merged pool is NOT truncated here. The caller's k is applied in
+// search(), after the recency decay and the relevance floor have run over the
+// wider pool (#427).
+func mergeRefillRounds(pool, next []model.SearchHit) []model.SearchHit {
+	merged := make([]model.SearchHit, 0, len(pool)+len(next))
+	seen := make(map[uint64]struct{}, len(pool)+len(next))
+	for _, hit := range pool {
+		appendUnseenHit(&merged, seen, hit)
+	}
+	for _, hit := range next {
+		appendUnseenHit(&merged, seen, hit)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Score > merged[j].Score
+	})
+	return merged
 }
 
 // needSummaryRefill reports whether another, wider retrieval round can still
@@ -90,6 +138,10 @@ func (s *Service) searchWithSummaryRefill(ctx context.Context, query model.Searc
 // as the budget is met, no summary occupied a slot, the index has no more
 // candidates to give, the widened pool would not actually grow, or the round cap
 // is reached. The loop therefore always terminates.
+//
+// got is the size of the pool ACCUMULATED over every round run so far (#818),
+// not the size of the last round, so a budget the rounds meet together stops the
+// widening.
 func needSummaryRefill(got, poolK, summaries, rawLen, fetchK, round int) bool {
 	if got >= poolK || summaries == 0 {
 		return false
