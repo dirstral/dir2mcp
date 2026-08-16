@@ -6209,18 +6209,21 @@ func dotEnvSearchPaths(configPath string) []string {
 }
 
 // canonicalDirKey returns a comparison key for a directory, so "." and an
-// absolute path to the same directory collapse to one entry. Symlinks are
-// resolved when possible (a macOS /var vs /private/var pair is the same
-// directory), and the key falls back to the absolute, then the raw, path when
-// the directory cannot be resolved.
+// absolute path to the same directory collapse to one entry. The path is made
+// absolute first, because EvalSymlinks keeps a relative path relative and "."
+// would then never match its own absolute form. Symlinks are resolved when
+// possible (a macOS /var vs /private/var pair is the same directory), and the
+// key falls back to the absolute, then the raw, path when the directory cannot
+// be resolved.
 func canonicalDirKey(dir string) string {
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return filepath.Clean(dir)
+	}
+	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
 		return resolved
 	}
-	if abs, err := filepath.Abs(dir); err == nil {
-		return filepath.Clean(abs)
-	}
-	return filepath.Clean(dir)
+	return filepath.Clean(abs)
 }
 
 // dotEnvMultiDirWarning reports when dotenv files were read from more than one

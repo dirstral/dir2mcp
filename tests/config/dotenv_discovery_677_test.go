@@ -213,29 +213,43 @@ func TestLoad_NoMultiDirWarningForASingleDirectory(t *testing.T) {
 }
 
 // The default case (config file in the working directory) reads one directory,
-// so it must not warn about two.
+// so it must not warn about two. Both spellings of the same path count: the
+// relative default and an absolute --config that points at the working
+// directory must collapse to one directory (a temp directory on macOS is
+// reached through a symlink, so the absolute case also pins the symlink
+// resolution).
 func TestLoad_ConfigInWorkingDirDoesNotWarn(t *testing.T) {
-	t.Setenv(secrets.DisableEnvVar, "1")
-	t.Setenv("MISTRAL_API_KEY", "")
-	dir := t.TempDir()
-	chdir(t, dir)
-	writeFile(t, filepath.Join(dir, ".env.local"), "MISTRAL_API_KEY=same_dir\n")
+	for _, tc := range []struct {
+		name          string
+		configPathFor func(dir string) string
+	}{
+		{"relative default", func(string) string { return ".dir2mcp.yaml" }},
+		{"absolute config flag", func(dir string) string { return filepath.Join(dir, ".dir2mcp.yaml") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(secrets.DisableEnvVar, "1")
+			t.Setenv("MISTRAL_API_KEY", "")
+			dir := t.TempDir()
+			chdir(t, dir)
+			writeFile(t, filepath.Join(dir, ".env.local"), "MISTRAL_API_KEY=same_dir\n")
 
-	cfg, err := config.Load(".dir2mcp.yaml")
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w.Error(), "dotenv files loaded from") {
-			t.Fatalf("config in the working directory must not warn: %v", w)
-		}
-	}
-	prof, err := cfg.Providers().Resolve(provider.CapEmbed)
-	if err != nil {
-		t.Fatalf("resolve embed: %v", err)
-	}
-	if prof.APIKey != "same_dir" {
-		t.Fatalf("default-path key lost: got %q, want same_dir", prof.APIKey)
+			cfg, err := config.Load(tc.configPathFor(dir))
+			if err != nil {
+				t.Fatalf("config.Load: %v", err)
+			}
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w.Error(), "dotenv files loaded from") {
+					t.Fatalf("config in the working directory must not warn: %v", w)
+				}
+			}
+			prof, err := cfg.Providers().Resolve(provider.CapEmbed)
+			if err != nil {
+				t.Fatalf("resolve embed: %v", err)
+			}
+			if prof.APIKey != "same_dir" {
+				t.Fatalf("default-path key lost: got %q, want same_dir", prof.APIKey)
+			}
+		})
 	}
 }
 

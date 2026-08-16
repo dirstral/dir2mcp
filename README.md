@@ -179,11 +179,11 @@ Or build each binary directly:
 - `go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/`
 
 The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
-Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`.
+Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`; the first non-empty value wins.
 
 ### Local development environment
 
-`dir2mcp` automatically loads `.env` and `.env.local` from two directories: the directory that holds the resolved config file (the `--config` path, or `.dir2mcp.yaml` in the working directory), then the working directory itself. See [Where dotenv files are read from](#where-dotenv-files-are-read-from) for the full order. Real shell environment variables take ultimate precedence.
+`dir2mcp` automatically loads `.env` and `.env.local` from two directories: the directory that holds the resolved config file (the `--config` path, or `.dir2mcp.yaml` in the working directory), then the working directory itself. See [Where dotenv files are read from](#where-dotenv-files-are-read-from) for the full order. A **non-empty** shell environment variable takes ultimate precedence; a variable exported as an empty string is treated as unset, so a dotenv file still fills it.
 
 ### Hosted demo smoke runbook
 
@@ -473,10 +473,13 @@ path when you pass one, otherwise `.dir2mcp.yaml` in the working directory. `con
 init` writes credentials to `<config dir>/.env.local`, so the file the wizard writes
 is the first file the loader reads.
 
-The first file in that list that defines a variable wins; the later files only fill
-in variables nobody claimed yet. The environment and the OS keychain still win over
-every dotenv file (SPEC §16.1.1). When the config directory and the working directory
-are the same (the common case), the list collapses to two files and nothing changes.
+The rule is **first non-empty value wins**. The first file in that list that gives a
+variable a non-empty value wins; the later files only fill in variables nobody
+claimed yet. The environment and the OS keychain are consulted before the files
+(SPEC §16.1.1), under the same rule: a variable exported as an empty string counts
+as unset, so a dotenv file still fills it. When the config directory and the working
+directory are the same (the common case), the list collapses to two files and
+nothing changes.
 
 When dotenv files exist in **both** directories, startup prints a warning that names
 the files in precedence order. Values are never printed. A dotenv file that exists but
