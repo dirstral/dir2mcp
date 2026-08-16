@@ -242,8 +242,7 @@ func (t *SDKTransport) checkRateLimit(w http.ResponseWriter, req *http.Request) 
 }
 
 func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Request) bool {
-	ct := req.Header.Get("Content-Type")
-	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+	if !hasJSONContentType(req.Header.Get("Content-Type")) {
 		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
 		return false
 	}
@@ -256,6 +255,10 @@ func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Requ
 	if !t.applyOriginGuard(w, req) {
 		return false
 	}
+	// Both header repairs run last, after every gate of this server has read the
+	// request as the client sent it. They exist only to satisfy the SDK handler
+	// this request is about to reach.
+	canonicalizeContentType(req)
 	negotiateAccept(req)
 	return true
 }
@@ -275,6 +278,25 @@ func (t *SDKTransport) applyOriginGuard(w http.ResponseWriter, req *http.Request
 		return false
 	}
 	return true
+}
+
+// canonicalizeContentType rewrites the Content-Type header of an accepted POST
+// to the bare media type, dropping any parameters.
+//
+// Call it only after hasJSONContentType accepted the header. The MCP Go SDK
+// (v1.4.1 StreamableHTTPHandler.ServeHTTP) compares the header for exact
+// equality with "application/json", so it answers a plain-text 415 to every
+// spelling that carries a parameter, including the common
+// "application/json; charset=utf-8" (issue #841). The SDK's only switch for that
+// check also switches off its cross-origin guard, which must stay on (issue
+// #652), so this server keeps the media-type decision and hands the SDK the one
+// spelling it accepts. The parameters are dropped, not translated: RFC 8259 §11
+// defines none for application/json, so nothing downstream reads them.
+//
+// This mirrors negotiateAccept below, which repairs the Accept header of the
+// same request for the same handler.
+func canonicalizeContentType(req *http.Request) {
+	req.Header.Set("Content-Type", jsonMediaType)
 }
 
 // negotiateAccept guarantees the POST Accept header advertises BOTH

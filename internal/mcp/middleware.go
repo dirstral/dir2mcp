@@ -53,8 +53,9 @@ func (s *Server) protocolValidationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		ct := r.Header.Get("Content-Type")
-		if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		// The same media-type rule the SDK transport applies (issue #841), so the
+		// two chains cannot disagree about which request is acceptable.
+		if !hasJSONContentType(r.Header.Get("Content-Type")) {
 			writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
 			return
 		}

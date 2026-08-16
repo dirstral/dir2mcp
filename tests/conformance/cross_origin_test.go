@@ -473,37 +473,10 @@ func TestProduction_CrossOriginStillNeedsTheToken(t *testing.T) {
 	initSessionFromOrigin(t, mcpURL, allowedTestOrigin, headers)
 }
 
-// TestProduction_CharsetQualifiedContentTypeIsServed is a regression test for
-// issue #841, which this PR does not fix. It is committed and skipped so the
-// conformance suite records the gap instead of staying green over it.
-//
-// The SDK compares Content-Type for exact equality with "application/json",
-// while this server accepts the media type plus parameters. So a client that
-// sends the RFC-valid "application/json; charset=utf-8" gets a plain-text 415
-// from inside the SDK. Remove the skip with the #841 fix.
-func TestProduction_CharsetQualifiedContentTypeIsServed(t *testing.T) {
-	t.Skip("blocked on #841: the SDK requires an exact application/json Content-Type")
-	t.Parallel()
-	cfg := defaultConfig()
-	srv := newServer(t, cfg)
-	defer srv.Close()
-
-	req, err := http.NewRequest(http.MethodPost, srv.URL+cfg.MCPPath,
-		strings.NewReader(`{"jsonrpc":"2.0","id":69,"method":"initialize","params":{}}`))
-	if err != nil {
-		t.Fatalf("create POST request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		t.Fatalf("do POST: %v", err)
-	}
-	status := resp.StatusCode
-	body := readBody(t, resp)
-	if status != http.StatusOK || !hasResult(body) {
-		t.Fatalf("charset-qualified Content-Type: status=%d body=%s", status, body)
-	}
-}
+// The #841 placeholder that lived here (a skipped
+// TestProduction_CharsetQualifiedContentTypeIsServed) is now the live matrix in
+// content_type_841_test.go, which asserts the accepted spellings, the refused
+// media types and the canonical refusal envelope.
 
 // TestProduction_DNSRebindingProtectionIsKept pins the second SDK guard. A
 // loopback listener refuses a request whose Host header names another host, which
