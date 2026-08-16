@@ -520,9 +520,31 @@ the keys that do work:
 | Turn audio/video transcription off | `stt.provider: off` |
 | Report a format nothing can read | `ingest.on_unsupported: strict` |
 
-Archive handling today expands the top level of an archive. An archive nested inside
-an archive is not expanded; it is recorded as a skipped document with
-`skip_reason=archive`, so the gap appears in the coverage report.
+You do not have to remember this. A generated config carries the same retraction as a
+comment directly above the four keys. A hand-written `.dir2mcp.yaml` that sets one of
+them to `off` also prints a startup warning, because `off` is the value whose failure
+costs money or privacy: nothing is withheld, and the warning names the key that does
+withhold it. The other values load silently, so a generated config stays warning-free.
+
+##### `ingest.archives.mode: deep` promises more than dir2mcp does
+
+The default is the sharp case (issue #843). Archive handling today expands the **top
+level** of an archive and nothing more:
+
+| Value | What the name claims | What dir2mcp does |
+|---|---|---|
+| `off` | archives are not expanded | expands the top level anyway |
+| `shallow` | top level only | top level only (a coincidence, not a read value) |
+| `deep` (default) | a nested archive is expanded too | **no recursion at all** |
+
+An archive nested inside an archive is not expanded. It is stored as a skipped
+`archive_member` document with `skip_reason=archive`, so the container never reports
+coverage it does not have and the gap appears in the coverage report.
+
+The default stays `deep`, and no member changes meaning, because both come from the
+canonical SPEC §16.2 template. To implement `deep` needs a recursion bound, a byte
+budget for the expansion, and a defined outcome at the bound and on a cycle; the spec
+defines none of those today. That decision belongs in `dirstral-spec` first.
 
 ### docling extraction over HTTP (docling-serve)
 
