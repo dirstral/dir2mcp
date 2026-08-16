@@ -23,13 +23,31 @@ import (
 // These cases pin the two facts that guidance rests on, so an SDK update that
 // changes either one fails here instead of silently making the README wrong
 // (issue #853).
+// localhostGuardDisabled reports whether an MCPGODEBUG value turns the SDK's
+// localhost guard off. It reads the value the way the SDK reads it: a
+// comma-separated list of key=value pairs, each side trimmed, and only the exact
+// value "1" disables the guard. "disablelocalhostprotection=0" therefore leaves
+// the guard on, and these tests must still run.
+func localhostGuardDisabled(mcpGoDebug string) bool {
+	for _, setting := range strings.Split(mcpGoDebug, ",") {
+		key, value, ok := strings.Cut(setting, "=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(key) == "disablelocalhostprotection" && strings.TrimSpace(value) == "1" {
+			return true
+		}
+	}
+	return false
+}
+
 func startHostHeaderServer(t *testing.T) string {
 	t.Helper()
 
 	// The SDK reads this compatibility switch once, at package init. A developer
 	// who exports it turns the guard off process-wide, so say that plainly rather
 	// than report a failure the test cannot explain.
-	if strings.Contains(os.Getenv("MCPGODEBUG"), "disablelocalhostprotection") {
+	if localhostGuardDisabled(os.Getenv("MCPGODEBUG")) {
 		t.Skip("MCPGODEBUG disables the SDK localhost guard this test pins")
 	}
 
