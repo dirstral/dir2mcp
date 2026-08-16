@@ -19,9 +19,12 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -63,46 +66,82 @@ func ingestUnderArchivesMode(t *testing.T, mode string) *store.SQLiteStore {
 	return st
 }
 
-// sortedDocPaths returns the indexed rel_paths in a stable order.
-func sortedDocPaths(t *testing.T, st *store.SQLiteStore) []string {
+// corpusRecords renders every stored document as one comparable line holding
+// the state a client can observe: the path, whether it was indexed or skipped,
+// why it was skipped, how it was classified, and which representations it
+// produced.
+//
+// A rel_path set on its own is too weak to hold the promise. A build that
+// recorded `outer.zip/top.txt` as a skipped row, or that stored it with no
+// representation, would keep the same set of paths while indexing nothing, and
+// the test would still pass. The status and the representation types are what a
+// search actually depends on, so they are what is compared.
+func corpusRecords(t *testing.T, st *store.SQLiteStore) []string {
 	t.Helper()
-	paths := make([]string, 0, 8)
-	for p := range docPaths(t, st) {
-		paths = append(paths, p)
+	ctx := context.Background()
+	docs, _, err := st.ListFiles(ctx, "", "", 1000, 0)
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
 	}
-	sort.Strings(paths)
-	return paths
+	records := make([]string, 0, len(docs))
+	for _, d := range docs {
+		reps, err := st.ActiveRepresentations(ctx, d.RelPath)
+		if err != nil {
+			t.Fatalf("ActiveRepresentations(%s): %v", d.RelPath, err)
+		}
+		repTypes := make([]string, 0, len(reps))
+		for _, r := range reps {
+			repTypes = append(repTypes, r.RepType)
+		}
+		sort.Strings(repTypes)
+		records = append(records, fmt.Sprintf("%s status=%s skip=%s doc_type=%s source_type=%s reps=[%s]",
+			d.RelPath, d.Status, d.SkipReason, d.DocType, d.SourceType, strings.Join(repTypes, ",")))
+	}
+	sort.Strings(records)
+	return records
 }
 
 // TestArchivesMode_EveryValueIndexesTheSameDocuments is the honesty proof. It
-// runs one corpus under each accepted member and compares the resulting document
-// sets. They are identical, so no name in the enum describes anything the server
-// does differently.
+// runs one corpus under each accepted member and compares the resulting corpus
+// records. They are identical, so no name in the enum describes anything the
+// server does differently.
 func TestArchivesMode_EveryValueIndexesTheSameDocuments(t *testing.T) {
-	want := sortedDocPaths(t, ingestUnderArchivesMode(t, "shallow"))
+	want := corpusRecords(t, ingestUnderArchivesMode(t, "shallow"))
 	if len(want) == 0 {
 		t.Fatal("the reference run indexed nothing; the corpus fixture is broken")
 	}
 	for _, mode := range []string{"off", "deep"} {
-		got := sortedDocPaths(t, ingestUnderArchivesMode(t, mode))
-		if len(got) != len(want) {
-			t.Fatalf("ingest.archives.mode=%q indexed a different document set: got=%v want=%v", mode, got, want)
-		}
-		for i := range got {
-			if got[i] != want[i] {
-				t.Fatalf("ingest.archives.mode=%q indexed a different document set: got=%v want=%v", mode, got, want)
-			}
+		got := corpusRecords(t, ingestUnderArchivesMode(t, mode))
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("ingest.archives.mode=%q produced a different corpus:\ngot  %v\nwant %v", mode, got, want)
 		}
 	}
 }
 
 // TestArchivesMode_OffStillExpandsTheTopLevel pins the direction the name gets
 // wrong the other way round. An operator who sets `off` for a privacy or cost
-// reason still gets every top-level member of every archive indexed.
+// reason still gets every top-level member of every archive indexed, with real
+// content behind it.
 func TestArchivesMode_OffStillExpandsTheTopLevel(t *testing.T) {
-	paths := docPaths(t, ingestUnderArchivesMode(t, "off"))
-	if !paths["outer.zip/top.txt"] {
-		t.Errorf("ingest.archives.mode=off does not disable expansion today; want outer.zip/top.txt indexed, got %v", paths)
+	st := ingestUnderArchivesMode(t, "off")
+
+	member := documentByPath(t, st, "outer.zip/top.txt")
+	if member.Status != "ok" {
+		t.Errorf("ingest.archives.mode=off does not disable expansion today; outer.zip/top.txt must be status=ok, got %q (skip_reason=%q)",
+			member.Status, member.SkipReason)
+	}
+	if member.SourceType != "archive_member" {
+		t.Errorf("outer.zip/top.txt must be recorded as an archive_member; got %q", member.SourceType)
+	}
+
+	// status=ok alone would still allow an empty document. The member is only
+	// really indexed when it produced retrievable content.
+	reps, err := st.ActiveRepresentations(context.Background(), "outer.zip/top.txt")
+	if err != nil {
+		t.Fatalf("ActiveRepresentations: %v", err)
+	}
+	if len(reps) == 0 {
+		t.Error("ingest.archives.mode=off still extracts the member's content; outer.zip/top.txt must carry at least one representation")
 	}
 }
 
