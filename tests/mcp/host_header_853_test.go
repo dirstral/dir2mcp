@@ -25,21 +25,26 @@ import (
 // (issue #853).
 
 // localhostGuardDisabled reports whether an MCPGODEBUG value turns the SDK's
-// localhost guard off. It reads the value the way the SDK reads it: a
-// comma-separated list of key=value pairs, each side trimmed, and only the exact
-// value "1" disables the guard. "disablelocalhostprotection=0" therefore leaves
-// the guard on, and these tests must still run.
+// localhost guard off.
+//
+// It reads the value the way the SDK reads it: a comma-separated list of
+// key=value pairs, each side trimmed, collected into a map, so a repeated key
+// keeps its LAST value. Only the exact value "1" disables the guard, so
+// "disablelocalhostprotection=0" leaves it on and these tests must still run.
 func localhostGuardDisabled(mcpGoDebug string) bool {
+	const key = "disablelocalhostprotection"
+
+	value := ""
 	for _, setting := range strings.Split(mcpGoDebug, ",") {
-		key, value, ok := strings.Cut(setting, "=")
+		settingKey, settingValue, ok := strings.Cut(setting, "=")
 		if !ok {
 			continue
 		}
-		if strings.TrimSpace(key) == "disablelocalhostprotection" && strings.TrimSpace(value) == "1" {
-			return true
+		if strings.TrimSpace(settingKey) == key {
+			value = strings.TrimSpace(settingValue)
 		}
 	}
-	return false
+	return value == "1"
 }
 
 func startHostHeaderServer(t *testing.T) string {
