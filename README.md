@@ -329,7 +329,7 @@ dir2mcp up --listen 0.0.0.0:8087
 
 `--public` sets `0.0.0.0` for you, but it does not fix this on its own. A proxy that still connects to `127.0.0.1` still arrives on a loopback address, and the guard still refuses it. The trade is that the port becomes reachable from the whole network: keep auth on (`--public` requires auth unless `--force-insecure` is set) and restrict the port with a firewall.
 
-**Not recommended: turn the guard off.** The SDK reads `MCPGODEBUG=disablelocalhostprotection=1` and then skips the check for the whole process. dir2mcp has no setting of its own for it. The trade is real: the server accepts any `Host` from anywhere, so a page in a browser on the same machine can reach it through a rebound DNS name and read the corpus with the browser's credentials. The SDK removes this escape hatch in v1.6.0, so a deployment that depends on it breaks at the next SDK update. Fix the proxy instead.
+**Not recommended: turn the guard off.** The SDK reads `MCPGODEBUG=disablelocalhostprotection=1` and then skips the check for the whole process. dir2mcp has no setting of its own for it. Know the trade before you use it: the server then accepts any `Host` from anywhere, so a page in a browser on the same machine can reach the endpoint through a rebound DNS name. The bearer token is the only thing that stops that page, which makes `--auth none` (or a leaked token) an open door. The SDK also states that it removes this switch in v1.6.0, so a deployment that depends on it breaks at the next SDK update. Fix the proxy instead.
 
 **These settings do not help, in spite of the names.**
 
