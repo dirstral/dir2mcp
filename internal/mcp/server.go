@@ -208,6 +208,13 @@ type Server struct {
 	// thereafter. nil (the default) and a local corpus source both keep the
 	// historical local-filesystem resolution; see corpusFSForOnDemand.
 	corpusFS corpusfs.CorpusFS
+
+	// extraction is the document-extraction engine the daemon actually wired,
+	// handed over once at start through WithExtractionProvenance (#851). nil means
+	// the server was never told, which is the case for a server built without an
+	// ingest pipeline; models.ocr then falls back to the configured OCR binding.
+	// Set at construction and read-only thereafter.
+	extraction *ExtractionProvenance
 }
 
 type rpcRequest struct {
@@ -315,6 +322,37 @@ func WithCorpusFS(fsys corpusfs.CorpusFS) ServerOption {
 func WithX402Client(client x402.FacilitatorClient) ServerOption {
 	return func(s *Server) {
 		s.x402Client = client
+	}
+}
+
+// ExtractionProvenance names the document-extraction engine a daemon actually
+// wired, so dir2mcp_stats reports the engine that produced the corpus text
+// instead of a configured OCR profile that never ran (issue #851).
+//
+// The daemon resolves it ONCE, from the live ingest pipeline, and hands it over
+// with WithExtractionProvenance. It is never re-derived per request: the
+// selection that picks an engine runs exec.LookPath, a docling functional check
+// and an HTTP reachability probe, and dir2mcp_stats is a status call clients
+// poll. Sourcing it from the pipeline (not a config re-derivation) also makes it
+// impossible for the reported engine to drift from the engine ingest built.
+type ExtractionProvenance struct {
+	// Engine is the wired engine: "docling", "docling-serve", "pandoc",
+	// "mistral" (a bespoke-OCR provider profile), or "custom" for an injected
+	// extractor. EMPTY means the daemon wired NO extraction engine, and stats
+	// says exactly that rather than naming one.
+	Engine string
+	// OCRModel is the model id a bespoke-OCR Engine puts on the wire. It is empty
+	// for the local engines: docling and pandoc are tools, not models.
+	OCRModel string
+}
+
+// WithExtractionProvenance hands the server the extraction engine the daemon
+// wired (issue #851). Production `up` always supplies it, including when no
+// engine resolved (an empty Engine), so models.ocr reports the truth for that
+// case too. A server built without it keeps the configured-OCR-binding answer.
+func WithExtractionProvenance(p ExtractionProvenance) ServerOption {
+	return func(s *Server) {
+		s.extraction = &p
 	}
 }
 

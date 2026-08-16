@@ -148,6 +148,16 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return exitConfigInvalid
 	}
 
+	// The ingestor is built BEFORE the MCP server so the server can be handed the
+	// extraction engine this daemon actually wired (#851). Building it after would
+	// force either a post-construction mutation or a second, probing resolution of
+	// the extractor cascade.
+	ing, err := a.newIngestor(cfg, st)
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
+		return exitConfigInvalid
+	}
+
 	serverOptions := buildMCPServerOptions(&cfg, st, indexingState, emitter)
 	// Route the on-demand tool paths (open_media_clip, on-demand audio init,
 	// on-demand content reads) through the corpus filesystem so they work on an
@@ -155,12 +165,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// server ignores it for a local/NFS corpus, which keeps its filesystem-native
 	// resolution.
 	serverOptions = append(serverOptions, mcp.WithCorpusFS(corpusFS))
+	serverOptions = appendExtractionProvenance(serverOptions, ing)
 	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
-	ing, err := a.newIngestor(cfg, st)
-	if err != nil {
-		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("initialize ingestor: %v", err))
-		return exitConfigInvalid
-	}
 	wireIngestorHooks(ing, ingestorHooks{
 		indexingState: indexingState,
 		evict:         ret.EvictDocuments,
@@ -1582,6 +1588,36 @@ func wireDerivationCacheIdentities(ret *retrieval.Service, ing model.Ingestor) {
 		return
 	}
 	ret.SetDerivationCacheIdentities(ids.ActiveOCRIdentity(), ids.ActiveTranscriptIdentity())
+}
+
+// extractionProvenanceProvider is the subset of the ingest pipeline that
+// exposes the document-extraction engine it wired. The concrete *ingest.Service
+// implements it. It is asserted on the live ingestor so dir2mcp_stats names the
+// engine that produces the corpus text (issue #851) rather than the configured
+// OCR profile, which names nothing when docling, docling-serve or pandoc wins
+// the extractor cascade.
+type extractionProvenanceProvider interface {
+	ActiveExtractionEngine() (engine, ocrModel string)
+}
+
+// appendExtractionProvenance adds the live ingestor's extraction engine to the
+// MCP server options. Sourced from the ingestor (not a config re-derivation) so
+// it is the engine this daemon really built, and taken ONCE at start so the
+// stats handler never runs the exec/HTTP probes the cascade needs.
+//
+// An empty engine is still handed over: "this daemon extracts nothing" is a fact
+// stats must report, not a reason to omit the wiring. An ingestor that does not
+// expose it (a test fake) leaves the server on the configured-binding answer.
+func appendExtractionProvenance(opts []mcp.ServerOption, ing model.Ingestor) []mcp.ServerOption {
+	p, ok := ing.(extractionProvenanceProvider)
+	if !ok {
+		return opts
+	}
+	engine, ocrModel := p.ActiveExtractionEngine()
+	return append(opts, mcp.WithExtractionProvenance(mcp.ExtractionProvenance{
+		Engine:   engine,
+		OCRModel: ocrModel,
+	}))
 }
 
 // sourceIsRemote reports whether the configured corpus source is an object-store
