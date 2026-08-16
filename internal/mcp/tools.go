@@ -436,7 +436,7 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			}
 			return idx
 		}(),
-		"models": resolvedStatsModels(s.cfg),
+		"models": s.resolvedStatsModels(),
 	}
 	if failures := loadRecentFailuresForStats(ctx, s.store); len(failures) > 0 {
 		structured["recent_failures"] = failures
@@ -484,8 +484,8 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 //   - embed_text / embed_code: provider.EffectiveEmbedModels of the resolved
 //     embed profile, the same resolution the embed identity (SPEC 8.1.4) and both
 //     embed call sites use.
-//   - ocr: ingest.ResolveOCRProviderModel, which mirrors the extractor's own
-//     `model.ocr.provider` binding.
+//   - ocr: the extraction engine the daemon actually wired (see
+//     (*Server).resolvedOCRProvenance).
 //   - stt_provider / stt_model: resolvedSTTProvenance, already shared with the
 //     transcribe tools.
 //   - chat: the resolved chat profile's model.
@@ -495,13 +495,14 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 // resolves but names no model reports "(<profile> provider default)" rather than
 // another provider's constant: the adapter picks its own default there, and
 // naming a model would be a guess.
-func resolvedStatsModels(cfg config.Config) map[string]interface{} {
+func (s *Server) resolvedStatsModels() map[string]interface{} {
+	cfg := s.cfg
 	embedText, embedCode := resolvedEmbedProvenance(cfg)
 	sttProvider, sttModel := resolvedSTTProvenance(cfg)
 	return map[string]interface{}{
 		"embed_text":   embedText,
 		"embed_code":   embedCode,
-		"ocr":          resolvedOCRProvenance(cfg),
+		"ocr":          s.resolvedOCRProvenance(),
 		"stt_provider": sttProvider,
 		"stt_model":    sttModel,
 		"chat":         resolvedChatProvenance(cfg),
@@ -534,9 +535,69 @@ func resolvedEmbedProvenance(cfg config.Config) (embedText, embedCode string) {
 	return text, code
 }
 
-// resolvedOCRProvenance reports the OCR model of the profile the extractor binds,
-// falling back to the shipped default when no OCR-capable profile resolves.
-func resolvedOCRProvenance(cfg config.Config) string {
+// noExtractionEngineLabel is what models.ocr reports when the daemon wired NO
+// extraction engine (ingest.extractor=off, or nothing available). It is
+// deliberately not a model id and not a provider name: the parentheses mirror
+// providerDefaultLabel, so a client can tell "nothing extracts here" apart from
+// "OCR runs with profile X" without knowing the engine vocabulary.
+const noExtractionEngineLabel = "(no extraction engine)"
+
+// bespokeOCREngine is the engine name ingest reports for a bespoke-OCR provider
+// profile (a `kind: mistral` OCR endpoint). It is the one engine that HAS a
+// model identity, so it is the one engine models.ocr names by model.
+const bespokeOCREngine = "mistral"
+
+// resolvedOCRProvenance reports what actually extracts text in this deployment
+// (issue #851).
+//
+// The field used to name the resolved bespoke-OCR profile unconditionally. But
+// the engine that runs is chosen by a cascade whose first three stops are
+// docling, docling-serve and pandoc, so a deployment on `ingest.extractor:
+// docling` still read "mistral-ocr-latest" here: a model that touched no
+// document in the corpus. An operator then inspects the wrong component and
+// believes an OCR backend is active that is not. A confidently wrong provenance
+// is worse than none.
+//
+// So the answer comes from the engine the daemon WIRED, handed over once at
+// start (WithExtractionProvenance). No probe runs in this handler: resolving the
+// cascade costs an exec.LookPath, a docling functional check and an HTTP
+// reachability probe, and stats is polled.
+//
+//   - a local engine (docling, docling-serve, pandoc) reports its own name. The
+//     spec types models.ocr as a plain string with no enum (§15.6), so an engine
+//     name is a legal value; these tools have no model id to report instead.
+//   - a bespoke-OCR engine reports the model id on the wire, which is what the
+//     field has always meant for that case.
+//   - no engine at all reports noExtractionEngineLabel.
+//
+// A server built without an ingest pipeline was never told, so it keeps the
+// configured-OCR-binding answer: with no ingest there is no engine to name, and
+// the configured binding is the only fact available.
+func (s *Server) resolvedOCRProvenance() string {
+	if s.extraction == nil {
+		return configuredOCRProvenance(s.cfg)
+	}
+	engine := strings.TrimSpace(s.extraction.Engine)
+	if engine == "" {
+		return noExtractionEngineLabel
+	}
+	if ocrModel := strings.TrimSpace(s.extraction.OCRModel); ocrModel != "" {
+		return ocrModel
+	}
+	if engine == bespokeOCREngine {
+		// A bespoke-OCR client that carries no model id: name the profile the way
+		// every other capability does rather than guess a model.
+		return configuredOCRProvenance(s.cfg)
+	}
+	return engine
+}
+
+// configuredOCRProvenance reports the OCR model of the profile the extractor
+// binds, falling back to the shipped default when no OCR-capable profile
+// resolves. It answers "what is OCR configured to use", which is a weaker claim
+// than "what extracted this corpus"; see (*Server).resolvedOCRProvenance for
+// when each is the honest answer.
+func configuredOCRProvenance(cfg config.Config) string {
 	name, ocrModel, ok := ingest.ResolveOCRProviderModel(cfg)
 	if !ok {
 		return defaultOCRModel
@@ -4605,7 +4666,18 @@ func statsOutputSchema() map[string]interface{} {
 				"properties": map[string]interface{}{
 					"embed_text": map[string]interface{}{"type": "string"},
 					"embed_code": map[string]interface{}{"type": "string"},
-					"ocr":        map[string]interface{}{"type": "string"},
+					// ocr names the extraction engine actually in effect (#851), which
+					// is a model id only for a bespoke-OCR backend. docling,
+					// docling-serve and pandoc are local tools with no model id, so
+					// they report their own name; a deployment that extracts nothing
+					// reports "(no extraction engine)". The canonical schema types the
+					// field as a plain string with no enum, so every one of those is a
+					// legal value; the description is additive and tells a client how
+					// to read it.
+					"ocr": map[string]interface{}{
+						"type":        "string",
+						"description": "Extraction engine in effect. A bespoke-OCR backend reports its model id; the local engines report their own name (docling, docling-serve, pandoc); a deployment with no extraction engine reports \"(no extraction engine)\".",
+					},
 					// stt_provider is NOT a closed enum (bs-007 and stats.json:
 					// "any STT-capable provider ... is valid"). The old
 					// mistral|elevenlabs enum made a strict client reject the

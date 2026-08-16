@@ -192,6 +192,28 @@ func (s *Service) ActiveOCRIdentity() string {
 	return s.activeOCRIdentity()
 }
 
+// ActiveExtractionEngine reports the document-extraction engine this Service
+// ACTUALLY wired, and the OCR model id when that engine is a bespoke-OCR
+// backend. It is the same pair the derivation identity records in a stored
+// representation's meta_json, so it cannot drift from the engine that produced
+// the text.
+//
+// engine is "docling", "docling-serve", "pandoc", "mistral" (a bespoke-OCR
+// provider profile), or "custom" for an injected extractor. It is EMPTY when no
+// extraction engine is wired at all. ocrModel is empty for the local engines:
+// docling and pandoc are tools, not models, so they have no model id.
+//
+// It reports the PRIMARY engine only. Under `ingest.extractor: auto` the
+// capability-activated pandoc engine (#393) may run alongside the primary for
+// born-digital formats, and a single engine name cannot carry both.
+//
+// The MCP server takes this ONCE at daemon start (dir2mcp#851) so dir2mcp_stats
+// can name the engine in effect without re-running the selection, which costs an
+// exec.LookPath, a docling functional check and an HTTP reachability probe.
+func (s *Service) ActiveExtractionEngine() (engine, ocrModel string) {
+	return s.extractorProviderModel()
+}
+
 // ActiveTranscriptIdentity is the exported accessor for the transcript
 // derivation identity ingest folds into the transcript cache key it writes
 // (transcriptCacheKey). It returns EXACTLY what that key folds, which is the
