@@ -12,15 +12,28 @@
 
 # dir2mcp
 
-Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations, built to maximize use of Mistral models across embedding, OCR, transcription, and generation. Optional layers include ElevenLabs voice output via a dedicated bridge binary and x402 request gating (payment/request-gating protocol).
+Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations. It works out of the box with one API key, and every capability can be rebound to a different provider without changing how the corpus is indexed or cited. Optional layers include ElevenLabs voice output via a dedicated bridge binary and x402 request gating (payment/request-gating protocol).
 
 ## Why dir2mcp
 
-- Mistral-first pipeline:
-  - Embeddings: `mistral-embed` (text) + `codestral-embed` (code)
-  - OCR: `mistral-ocr-latest`
-  - STT default: `voxtral-mini-latest`
-  - RAG generation: Mistral chat models
+- Provider-agnostic by capability. Embedding, extraction/OCR, transcription,
+  generation and reranking are bound independently, so you can mix providers or
+  move one capability without touching the rest:
+
+  | Capability | Providers you can bind |
+  |---|---|
+  | Embedding | Mistral, OpenAI, Gemini, any OpenAI-compatible endpoint, self-hosted |
+  | Extraction / OCR | docling (local), docling-serve (HTTP), pandoc, Mistral OCR |
+  | Transcription | Voxtral, Whisper (self-hosted or OpenAI-compatible) |
+  | Generation | Mistral, OpenAI, Anthropic, Gemini, OpenRouter, any OpenAI-compatible endpoint |
+  | Reranking | Cohere, ColBERT, self-hosted |
+
+- A provider activates when its credential is present, so adding a key is the
+  only step. There is no separate enable flag to forget. Mistral is the default
+  when a Mistral key is the one you supply, which keeps first-run simple without
+  making it the only option.
+- Runs fully local with no egress: docling for extraction, an OpenAI-compatible
+  local server (Ollama, vLLM, llama.cpp, LM Studio, TEI) for embedding and chat.
 - Single Go binary (`dir2mcp`) with local-first state in `.dir2mcp/`
 - Companion bridge binary (`elevenlabs-bridge`) for ElevenLabs webhook tools
 - MCP Streamable HTTP server with a stable tool surface
