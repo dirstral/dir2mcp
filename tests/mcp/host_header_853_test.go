@@ -23,6 +23,7 @@ import (
 // These cases pin the two facts that guidance rests on, so an SDK update that
 // changes either one fails here instead of silently making the README wrong
 // (issue #853).
+
 // localhostGuardDisabled reports whether an MCPGODEBUG value turns the SDK's
 // localhost guard off. It reads the value the way the SDK reads it: a
 // comma-separated list of key=value pairs, each side trimmed, and only the exact
