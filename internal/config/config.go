@@ -5140,10 +5140,15 @@ var inertIngestModeCommentLines = []string{
 // The four keys are inert, so no value is honored, but the values do not all
 // cost the same to get wrong. `off` is the one member every reader understands
 // identically ("do not do this"), and an operator who writes it has decided that
-// content must NOT be sent to a provider or indexed. dir2mcp keeps extracting,
-// transcribing and expanding archives regardless, so the belief is unsafe in the
-// direction of cost and privacy, and there IS an action to take instead:
-// ingest.extractor, stt.provider, security.path_excludes.
+// content must NOT be sent to a provider or indexed. The key withholds nothing,
+// so the belief is unsafe in the direction of cost and privacy, and there IS an
+// action to take instead: ingest.extractor, stt.provider, security.path_excludes.
+//
+// The message states what still happens without overstating it. Archive
+// expansion is unconditional, so it is asserted flatly. Extraction and
+// transcription depend on a resolved extractor and STT provider, which the
+// operator may already have turned off through the keys that do work, so they
+// are qualified rather than claimed outright.
 //
 // The other members are left silent on purpose. None of them is a decision to
 // withhold anything, `deep` is the shipped default, and #628 pins that a config
@@ -5180,9 +5185,10 @@ func warnInertIngestModesOff(cfg *Config, fc fileConfig, path string) {
 	}
 	cfg.Warnings = append(cfg.Warnings, fmt.Errorf(
 		"config file %s: %s set to \"off\" but NOT honored: the per-format mode keys are validated only, "+
-			"and no accepted value changes ingestion yet. PDFs and images are still extracted, audio and video "+
-			"are still transcribed, and archives are still expanded at the top level. "+
-			"To actually turn these off use ingest.extractor=off, stt.provider=off, "+
+			"and no accepted value changes ingestion yet. These keys withhold nothing on their own. "+
+			"PDFs and images are still extracted, and audio and video are still transcribed, whenever the "+
+			"resolved extractor or STT provider is active; archives are still expanded at the top level "+
+			"unconditionally. To actually turn these off use ingest.extractor=off, stt.provider=off, "+
 			"or keep the files out with security.path_excludes",
 		path, strings.Join(set, ", ")))
 }
