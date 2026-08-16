@@ -153,17 +153,21 @@ func loadWarnings(t *testing.T, body string) string {
 // contents must not be indexed. dir2mcp expands them anyway, so the belief costs
 // privacy, and there is a real action to take instead.
 func TestArchivesMode_OffInAHandWrittenConfigWarns(t *testing.T) {
-	got := loadWarnings(t, "root_dir: .\ningest:\n  archives:\n    mode: off\n")
-	if !strings.Contains(got, "ingest.archives.mode") {
-		t.Fatalf("ingest.archives.mode=off must warn; warnings=%q", got)
-	}
-	for _, phrase := range []string{
-		"NOT honored",
-		"still expanded at the top level",
-		"security.path_excludes",
-	} {
-		if !strings.Contains(got, phrase) {
-			t.Errorf("the warning must state %q so the operator knows what to do instead; got %q", phrase, got)
+	// `OFF` is included because Validate() lowercases before it compares, so the
+	// warning must fold the same way or an upper-case `off` slips past silently.
+	for _, written := range []string{"off", "OFF"} {
+		got := loadWarnings(t, "root_dir: .\ningest:\n  archives:\n    mode: "+written+"\n")
+		if !strings.Contains(got, "ingest.archives.mode") {
+			t.Fatalf("ingest.archives.mode=%s must warn; warnings=%q", written, got)
+		}
+		for _, phrase := range []string{
+			"NOT honored",
+			"still expanded at the top level",
+			"security.path_excludes",
+		} {
+			if !strings.Contains(got, phrase) {
+				t.Errorf("the warning must state %q so the operator knows what to do instead; got %q", phrase, got)
+			}
 		}
 	}
 }

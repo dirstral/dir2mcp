@@ -5162,11 +5162,9 @@ var inertIngestModeCommentLines = []string{
 // when the operator actually wrote it. It is called from applyFileOverrides, so
 // an effective-config snapshot (machine-written, carrying no operator intent)
 // stays silent, matching the #661 split.
+// cfg is never nil: the one caller returns early on a nil config.
 func warnInertIngestModesOff(cfg *Config, fc fileConfig, path string) {
-	if cfg == nil {
-		return
-	}
-	var set []string
+	var offKeys []string
 	for _, mode := range []struct {
 		key   string
 		value *string
@@ -5176,11 +5174,13 @@ func warnInertIngestModesOff(cfg *Config, fc fileConfig, path string) {
 		{"ingest.audio.mode", fc.IngestAudioMode},
 		{"ingest.archives.mode", fc.IngestArchivesMode},
 	} {
+		// Trim and fold the same way normalizeClosedEnum does, so the warning and
+		// the gate agree on what counts as `off` (`OFF`, ` off ` included).
 		if mode.value != nil && strings.EqualFold(strings.TrimSpace(*mode.value), "off") {
-			set = append(set, mode.key)
+			offKeys = append(offKeys, mode.key)
 		}
 	}
-	if len(set) == 0 {
+	if len(offKeys) == 0 {
 		return
 	}
 	cfg.Warnings = append(cfg.Warnings, fmt.Errorf(
@@ -5190,7 +5190,7 @@ func warnInertIngestModesOff(cfg *Config, fc fileConfig, path string) {
 			"resolved extractor or STT provider is active; archives are still expanded at the top level "+
 			"unconditionally. To actually turn these off use ingest.extractor=off, stt.provider=off, "+
 			"or keep the files out with security.path_excludes",
-		path, strings.Join(set, ", ")))
+		path, strings.Join(offKeys, ", ")))
 }
 
 // validateIngestFormatModes rejects a per-format ingest mode outside its
