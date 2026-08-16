@@ -5162,6 +5162,7 @@ var inertIngestModeCommentLines = []string{
 // when the operator actually wrote it. It is called from applyFileOverrides, so
 // an effective-config snapshot (machine-written, carrying no operator intent)
 // stays silent, matching the #661 split.
+//
 // cfg is never nil: the one caller returns early on a nil config.
 func warnInertIngestModesOff(cfg *Config, fc fileConfig, path string) {
 	var offKeys []string
