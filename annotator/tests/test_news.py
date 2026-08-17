@@ -86,7 +86,7 @@ def bands(monkeypatch, tmp_path):
     expressed; a plain string is a legible band, where they agree.
     """
 
-    def install(script, frames=40, fps=0.5):
+    def install(script, frames=40, fps=0.5, fallback=None):
         listing = []
         for i in range(frames):
             path = tmp_path / f"frame-{i:05d}.jpg"
@@ -94,20 +94,30 @@ def bands(monkeypatch, tmp_path):
             listing.append((i / fps, path))
         index = {}
 
-        def read_band(ocr, frame, region, work):
-            i = index[frame]
-            value = script.get(tuple(region), "")
-            text = value(i) if callable(value) else value
+        def band_texts(source, frame, region):
+            value = source.get(tuple(region), "")
+            text = value(index[frame]) if callable(value) else value
             if isinstance(text, tuple):
                 return list(text)
             # Both preprocessing passes: a scripted band is a legible one, so
             # they agree, which is exactly what the interpreter looks for.
             return [text, text]
 
+        def read_band(ocr, frame, region, work):
+            return band_texts(script, frame, region)
+
+        def read_band_adaptive(ocr, frame, region, work):
+            # `fallback` is what the local-mean renderings would say about a band
+            # the shipped passes could not read. By default they say the same
+            # thing: rendering a band a third way does not put a headline where
+            # there was none.
+            return band_texts(script if fallback is None else fallback, frame, region)
+
         for i, (_, path) in enumerate(listing):
             index[path] = i
         monkeypatch.setattr(overlay, "iter_frames", lambda *a, **k: iter(listing))
         monkeypatch.setattr(overlay, "read_band", read_band)
+        monkeypatch.setattr(overlay, "read_band_adaptive", read_band_adaptive)
         return listing
 
     return install
@@ -203,13 +213,44 @@ def test_a_band_whose_passes_disagree_is_not_read(monkeypatch, tmp_path):
         path.write_text(str(i))
         listing.append((i / 0.5, path))
     monkeypatch.setattr(overlay, "iter_frames", lambda *a, **k: iter(listing))
+    noise = ["ЕЕК ЕЕЕ НЕЕ ЕЕЕЕ", "ы:евм шсп 1= ннн"]
     monkeypatch.setattr(
-        overlay,
-        "read_band",
-        lambda ocr, frame, region, work: ["ЕЕК ЕЕЕ НЕЕ ЕЕЕЕ", "ы:евм шсп 1= ннн"],
+        overlay, "read_band", lambda ocr, frame, region, work: list(noise)
+    )
+    # The fallback rendering of noise is more noise: it must not turn a band the
+    # passes disagreed about into a band that votes for itself.
+    monkeypatch.setattr(
+        overlay, "read_band_adaptive", lambda ocr, frame, region, work: list(noise)
     )
     recognizer = NewsOverlayRecognizer(workers=1)
     assert recognizer.recognize(MEDIA) == []
+
+
+def test_a_headline_only_the_fallback_could_read_still_becomes_a_cue(bands):
+    """A faint panel is this corpus's failure, and the recovered text has to
+    reach a cue like any other read.
+
+    It reaches this interpreter on the same terms as the shipped passes: the
+    fallback renders the band at two local-mean radii, so agreement is still the
+    evidence and a recovery still has to corroborate itself. Measured on the
+    frames in `_adaptive_crops`: the two radii agreed 0.75 to 1.00 about a
+    recovered headline and 0.00 on six background bands of the same frame.
+    """
+    illegible = ("ЕЕК ЕЕЕ НЕЕ ЕЕЕЕ", "ы:евм шсп 1= ннн")
+    bands({HEADLINE_BAND: illegible}, fallback={HEADLINE_BAND: HEADLINE})
+    (cue,) = only(NewsOverlayRecognizer(workers=1), "headline")
+    assert cue.text == HEADLINE
+
+
+def test_a_fallback_that_reads_noise_emits_nothing(bands):
+    """The other side of it. The rendering is noisy by nature, and this
+    interpreter's floor applies to it unchanged."""
+    illegible = ("ЕЕК ЕЕЕ НЕЕ ЕЕЕЕ", "ы:евм шсп 1= ннн")
+    bands(
+        {HEADLINE_BAND: illegible},
+        fallback={HEADLINE_BAND: ("ВВ ВВ В 4444 ННН", "штп 1= ъ 7777 еее")},
+    )
+    assert NewsOverlayRecognizer(workers=1).recognize(MEDIA) == []
 
 
 def test_cues_carry_no_entity_ids(bands):

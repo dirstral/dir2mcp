@@ -91,6 +91,11 @@ def frames(monkeypatch, tmp_path):
         monkeypatch.setattr(
             overlay, "_prepared_crops", lambda frame, region, work: iter([frame])
         )
+        # The fallback rendering of a band that missed, faked the same way: the
+        # frame's own text is what the engine sees, whichever pass asked for it.
+        monkeypatch.setattr(
+            overlay, "_adaptive_crops", lambda frame, region, work: iter([frame])
+        )
         monkeypatch.setattr(jersey, "_crop", lambda frame, bbox, work: frame)
         return lambda frame: frame.read_text()
 
@@ -277,11 +282,19 @@ def test_pooled_reader_reads_a_band_nobody_dispatched(roster, frames, tmp_path):
     assert [p.speed for p in pitches] == []
 
 
-def test_scorebug_reads_every_frame_exactly_once_per_wanted_band(roster, frames):
+def test_scorebug_reads_every_frame_exactly_once_per_wanted_band(
+    roster, frames, monkeypatch
+):
     """A speculative dispatch that is not taken must not reach the cue list,
-    and a band that is taken must not be OCR'd twice into it."""
+    and a band that is taken must not be OCR'd twice into it.
+
+    The adaptive fallback is counted separately, and pinned separately below:
+    it is a SECOND read of a band the shipped passes could not read, so mixing
+    the two counts would stop this test seeing a band read twice by mistake.
+    """
     base = frames(SCRIPT)
     seen: list[str] = []
+    retried: list[str] = []
     lock = threading.Lock()
 
     def counting_ocr(frame):
@@ -290,19 +303,40 @@ def test_scorebug_reads_every_frame_exactly_once_per_wanted_band(roster, frames)
             seen.append(frame.name)
         return text
 
+    def counting_fallback(ocr, frame, region, work):
+        with lock:
+            retried.append(frame.name)
+        return []
+
+    monkeypatch.setattr(overlay, "read_band_adaptive", counting_fallback)
     rec = ScorebugRecognizer(roster, ocr=counting_ocr, crop=WHOLE, workers=WORKERS)
     rec.recognize(MEDIA)
     # One band, one preprocessing pass per frame under the fake crop.
     assert sorted(seen) == sorted(f"frame-{i:05d}.jpg" for i in range(len(SCRIPT)))
+    # The frames a scorebug WAS read off cost nothing extra, which is the whole
+    # shape of the fallback: it is reached only where the shipped passes came
+    # back with nothing, and a run it never helps stops paying for it.
+    bug = {f"frame-{i:05d}.jpg" for i, text in enumerate(SCRIPT) if "LILE" in text}
+    assert bug and not (bug & set(retried))
+    # This script has replay frames with no bug on them, so the fallback is
+    # reached; the point is that it stays inside its budget and never touches
+    # a frame the reader already read.
+    assert retried and len(retried) <= overlay.FALLBACK_TRIALS
 
 
 def test_scorebug_reads_on_the_worker_pool(roster, frames):
     """Equality with a serial run is also what a silently serial pool would
-    give, so pin that the reads really do leave the calling thread."""
+    give, so pin that the reads really do leave the calling thread.
+
+    MainThread is allowed because the fallback re-read runs there on purpose:
+    whether a band needs it is only known after the caller has interpreted the
+    ordinary read, which happens on the reading loop's own thread.
+    """
     ocr, threads = _watching(frames(SCRIPT))
     ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, workers=WORKERS).recognize(MEDIA)
-    assert len(threads) > 1, f"reads never left the calling thread: {threads}"
-    assert all(name.startswith("scorebug") for name in threads), threads
+    pooled = {name for name in threads if name != "MainThread"}
+    assert len(pooled) > 1, f"reads never left the calling thread: {threads}"
+    assert all(name.startswith("scorebug") for name in pooled), threads
 
 
 def test_scorebug_unavailable_backend_propagates_from_a_worker(roster, frames):
@@ -444,6 +478,7 @@ def _one_scripted_frame(monkeypatch, tmp_path):
     # this test about the ENGINE being missing rather than about whether a
     # stand-in file happens to decode as a JPEG.
     monkeypatch.setattr(overlay, "_prepared_crops", lambda f, region, work: iter([f]))
+    monkeypatch.setattr(overlay, "_adaptive_crops", lambda f, region, work: iter([f]))
 
 
 @pytest.mark.parametrize("workers", [1, 2])

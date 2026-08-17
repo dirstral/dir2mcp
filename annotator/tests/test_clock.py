@@ -195,6 +195,10 @@ def frames(monkeypatch, tmp_path):
 
         monkeypatch.setattr(overlay, "iter_frames", lambda *a, **k: iter(listing))
         monkeypatch.setattr(overlay, "read_band", read_band)
+        # The fallback re-read of a band that missed: the script says what is on
+        # the frame, and a second rendering of the same pixels does not change
+        # it, so a band with no badge stays a band with no badge.
+        monkeypatch.setattr(overlay, "read_band_adaptive", read_band)
         return listing
 
     return install

@@ -16,12 +16,17 @@ none of them:
    usually never does. A handful of candidate bands are OCR'd instead, and
    whichever one actually produces reads is locked onto so the rest of the run
    pays for one crop. See `_RegionSearch`.
-2. *How.* Overlay text is light-on-dark, small and JPEG-soft. Upscaling the
-   crop to a fixed text height and binarising it turns a garbled read into a
-   clean one. The two passes (grey and hard-thresholded) disagree often enough
-   on real footage to be worth running both: on the pilot fixture 44 of 215
-   readable frames were readable ONLY after thresholding, because a fixed cut
-   handles light-on-dark that Otsu does not. See `_prepared_crops`.
+2. *How.* Overlay text is small and JPEG-soft. Upscaling the crop to a fixed
+   text height and binarising it turns a garbled read into a clean one. The two
+   passes (grey and hard-thresholded) disagree often enough on real footage to
+   be worth running both: on the pilot fixture 44 of 215 readable frames were
+   readable ONLY after thresholding, because a fixed cut handles light-on-dark
+   that Otsu does not. See `_prepared_crops`. A band those two could not read
+   gets one more try on a local-mean threshold, which is the only rendering
+   that recovers a semi-transparent light panel over a busy scene. It is a
+   fallback and not a third pass, because OCR dominates the run and a corpus
+   the shipped passes already read must not pay for it: see `_adaptive_crops`
+   and `_AdaptiveFallback`.
 3. *Fast enough.* Reading a frame costs about a second, so a three hour
    broadcast is nearly two hours of OCR. It is embarrassingly parallel, so it
    runs on a worker pool, and the pool is arranged so that completion order can
@@ -54,9 +59,12 @@ from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Self, TypeVar
+from typing import TYPE_CHECKING, Self, TypeVar
 
 from .base import RecognizerUnavailable, iter_frames
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; Pillow ships in the extra
+    from PIL import Image
 
 OcrFn = Callable[[Path], str]
 #: Fractional (x, y, w, h) box, so one set of bands fits SD, HD and 4K alike.
@@ -87,8 +95,19 @@ WIDE_REGIONS: tuple[Region, ...] = (
 TARGET_BAND_PX = 320
 MAX_UPSCALE = 4.0
 # Everything darker than this becomes black in the second pass. Overlay text is
-# near-white by design, so the cut can sit high.
+# near-white by design, so the cut can sit high. The same cut also serves DARK
+# ink on a LIGHT panel, which comes out as black text on white: polarity is not
+# what this pass is about. See `_adaptive_crops` for the case it does miss.
 BINARY_THRESHOLD = 140
+
+# The fallback rendering's local-mean radii, in pixels of the UPSCALED band, and
+# how far under that mean a pixel has to sit to count as ink. Measured in
+# `_adaptive_crops`: below 40 the mean tracks the strokes and cancels the text,
+# 60 and 90 both recover it, and two radii rather than one because an
+# interpreter's evidence may be agreement BETWEEN passes and one pass gives it
+# nothing to compare.
+ADAPTIVE_RADII: tuple[int, ...] = (60, 90)
+ADAPTIVE_BIAS = 8
 # tesseract page-segmentation mode for a cropped overlay strip: "a single
 # uniform block of text". Tesseract's default keeps hunting for page structure
 # that a 200-pixel-tall strip does not have.
@@ -98,6 +117,21 @@ OCR_PSM = 6
 # once one band has produced this many reads it is the only one OCR'd.
 SCAN_STRIDE = 4
 LOCK_AFTER_READS = 5
+
+# How many fruitless attempts the adaptive fallback gets before a run gives up
+# on it. A band that MISSES is ordinary: every background band in an unlocked
+# sweep misses, and so does the locked band whenever the graphic is off screen,
+# so "re-read every miss" is not a bounded cost. One hit arms the fallback for
+# the rest of the run, because a corpus that needs it needs it throughout.
+#
+# 24 is six full sweeps of a four-band search, which at the default fps 0.5 and
+# SCAN_STRIDE 4 is the first ~50 seconds of a file: enough for every candidate
+# band to answer once, and LOCK_AFTER_READS is then reached out of the arming.
+# The bound it buys: a run the fallback cannot help pays 24 * len(ADAPTIVE_RADII)
+# extra OCR passes, which against a three hour file sampled at 0.5 fps (about
+# 10,800 shipped passes) is under half a percent. Unbudgeted, the same file paid
+# two extra passes on every quiet frame.
+FALLBACK_TRIALS = 24
 
 # Worker pool for the per-frame read. The default is a quarter of the core
 # count, not all of it, for a measured reason: tesseract is built against
@@ -298,11 +332,20 @@ class OverlayReader:
         and none at all on a strided frame. A band that produced hits ends the
         frame: the overlay was found, the other crops are background.
 
+        A band that produced NO hits is re-read once on the adaptive rendering,
+        while `_AdaptiveFallback` still allows it, and the second read replaces
+        the first when it is the one that found something. This is the layer
+        that can do it: `read_band` returns strings and cannot know whether they
+        held anything, and only the caller's `interpret` says so. The reader
+        still judges nothing itself; it acts on the hit count it was handed,
+        exactly as the band search does.
+
         `interpret` is called on the caller's thread, in frame order, so it may
         accumulate state. The pool sits upstream of it and cannot reorder
         anything: see `_with_lookahead`.
         """
         search = _RegionSearch(self.regions)
+        fallback = _AdaptiveFallback()
         with (
             tempfile.TemporaryDirectory(prefix=f"dirstral-{self.name}-") as tmp,
             _reader(self.ocr, Path(tmp), self.workers, self.name) as pool,
@@ -317,10 +360,28 @@ class OverlayReader:
                         texts=tuple(pool.read(i, frame, region)),
                     )
                     value, hits = interpret(read)
+                    recovered = False
+                    if not hits and fallback.wanted():
+                        retry = OverlayRead(
+                            index=i,
+                            timestamp_s=timestamp,
+                            region=region,
+                            texts=tuple(pool.read_adaptive(frame, region)),
+                        )
+                        retry_value, retry_hits = interpret(retry)
+                        fallback.record(retry_hits)
+                        if retry_hits:
+                            read, value, hits = retry, retry_value, retry_hits
+                            recovered = True
                     yield read, value
-                    search.record(region, hits)
-                    if hits:
-                        break  # this band answered; skip the other crops
+                    search.record(region, hits, fallback=recovered)
+                    if hits and not recovered:
+                        # This band answered on a rendering that reads clean
+                        # text; the other crops are background. A fallback hit
+                        # is weaker than that, so it does NOT end the frame:
+                        # the remaining bands keep their chance to answer, and
+                        # a clean read among them still wins the frame.
+                        break
 
     def read_text(self, media_path: Path) -> Iterator[OverlayRead]:
         """Every band's text, and nothing else. The no-interpretation path."""
@@ -335,6 +396,16 @@ class _RegionSearch:
     pass this replaces, so unlocked sweeps are strided and the winner is locked
     in after a few reads. If the overlay moves (a graphics package change part
     way through a file) the lock releases once the locked band goes quiet.
+
+    Hits off the adaptive fallback are counted apart from the rest, and they can
+    only lock a band while NO band has produced a hit on the shipped passes.
+    That rendering recovers text the others lose, and it also emits junk tokens
+    from ordinary background texture, so a caller that counts any text as
+    evidence would see hits on the wrong band. The lock is where that matters,
+    because it decides what gets OCR'd for the rest of the file. So the two
+    kinds of evidence never compete: a clean read anywhere beats a fallback read
+    everywhere, and the fallback decides the band only when it is the sole thing
+    that read anything at all.
     """
 
     RELEASE_AFTER_MISSES = 60
@@ -343,6 +414,9 @@ class _RegionSearch:
         self.regions = regions
         self.locked: Region | None = regions[0] if len(regions) == 1 else None
         self.scores: dict[Region, int] = {}
+        #: Hits that came off the adaptive fallback, kept out of `scores` so
+        #: they cannot outvote a clean read on another band.
+        self.fallback_scores: dict[Region, int] = {}
         self.misses = 0
 
     def regions_for(self, frame_index: int) -> tuple[Region, ...]:
@@ -352,8 +426,17 @@ class _RegionSearch:
             return ()
         return self.regions
 
-    def record(self, region: Region, hits: int) -> None:
-        if hits:
+    def record(self, region: Region, hits: int, *, fallback: bool = False) -> None:
+        if hits and fallback:
+            self.fallback_scores[region] = self.fallback_scores.get(region, 0) + hits
+            self.misses = 0
+            if (
+                self.locked is None
+                and not self.scores  # a clean read anywhere outranks this
+                and self.fallback_scores[region] >= LOCK_AFTER_READS
+            ):
+                self.locked = region
+        elif hits:
             self.scores[region] = self.scores.get(region, 0) + hits
             self.misses = 0
             if self.locked is None and self.scores[region] >= LOCK_AFTER_READS:
@@ -363,7 +446,34 @@ class _RegionSearch:
             if self.misses >= self.RELEASE_AFTER_MISSES:
                 self.locked = None
                 self.scores.clear()
+                self.fallback_scores.clear()
                 self.misses = 0
+
+
+class _AdaptiveFallback:
+    """Whether the adaptive re-read is still worth attempting on this run.
+
+    One run's worth of state, built per `read()` call, so two files never share
+    a verdict. A missed band is ordinary rather than exceptional: every
+    background band in an unlocked sweep misses, and the locked band misses
+    whenever the graphic is off screen. Re-reading all of those is a cost the
+    corpora that never need it would pay for the length of every file, so a run
+    gets a fixed number of attempts to show the rendering helps, and one hit
+    arms it for the rest of the file. See FALLBACK_TRIALS for the numbers.
+    """
+
+    def __init__(self, trials: int = FALLBACK_TRIALS):
+        self._left = max(0, trials)
+        self._proven = False
+
+    def wanted(self) -> bool:
+        return self._proven or self._left > 0
+
+    def record(self, hits: int) -> None:
+        if hits:
+            self._proven = True
+        elif not self._proven:
+            self._left -= 1
 
 
 def read_band(ocr: OcrFn, frame: Path, region: Region, work: Path) -> list[str]:
@@ -375,6 +485,19 @@ def read_band(ocr: OcrFn, frame: Path, region: Region, work: Path) -> list[str]:
     order; merging them is the caller's judgement, not the engine's.
     """
     return [ocr(path) for path in _prepared_crops(frame, region, work)]
+
+
+def read_band_adaptive(
+    ocr: OcrFn, frame: Path, region: Region, work: Path
+) -> list[str]:
+    """OCR one band again, on the local-mean renderings. The fallback read.
+
+    Same contract and same purity as `read_band`, and a separate function rather
+    than a flag on it, so the two cost different amounts and a caller can see
+    which one it paid for. Only reached for a band the shipped passes could not
+    read: see `OverlayReader.read` and `_adaptive_crops`.
+    """
+    return [ocr(path) for path in _adaptive_crops(frame, region, work)]
 
 
 class Workspaces:
@@ -422,6 +545,9 @@ class _SerialReader:
 
     def read(self, index: int, frame: Path, region: Region) -> list[str]:
         return read_band(self._ocr, frame, region, self._work)
+
+    def read_adaptive(self, frame: Path, region: Region) -> list[str]:
+        return read_band_adaptive(self._ocr, frame, region, self._work)
 
     def retire(self, index: int) -> None:
         pass
@@ -473,6 +599,16 @@ class _PooledReader:
         if pending is None:
             return self._read_here(frame, region)
         return pending.result()
+
+    def read_adaptive(self, frame: Path, region: Region) -> list[str]:
+        """The fallback read, on the calling thread rather than the pool.
+
+        It cannot be dispatched ahead: whether a band needs it is only known
+        once the caller has interpreted the ordinary read, which happens here.
+        The workspace is thread-local, so this thread gets its own scratch
+        directory and cannot overwrite a worker's crop mid-read.
+        """
+        return read_band_adaptive(self._ocr, frame, region, self._workspaces.current())
 
     def retire(self, index: int) -> None:
         """Drop dispatches for frames the loop has already passed."""
@@ -582,15 +718,12 @@ def map_in_order(
         top_up()
 
 
-def _prepared_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
-    """Yield OCR-ready renderings of one band: upscaled greyscale, and the same
-    crop hard-thresholded.
+def _band_crop(frame: Path, region: Region) -> Image.Image | None:
+    """The band itself: cropped, upscaled to a readable height, autocontrasted.
 
-    Overlay text is light on dark, which Otsu handles badly when the crop also
-    catches a bright background; a fixed threshold recovers the text in exactly
-    the frames the grey pass garbles. Both are written to the reader's own temp
-    dir rather than beside the frame, because the frame directory is a cache
-    other recognizers iterate.
+    Returns None for a region that lands outside the frame or collapses to
+    nothing, which is a caller's arithmetic and not an error. Shared by every
+    rendering so they all describe the same pixels.
     """
     try:
         from PIL import Image, ImageOps  # required by the OCR extra
@@ -614,14 +747,31 @@ def _prepared_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
         min(img.height, int((y + h) * img.height)),
     )
     if box[2] <= box[0] or box[3] <= box[1]:
-        return
+        return None
     crop = img.crop(box).convert("L")
     scale = min(MAX_UPSCALE, max(1.0, TARGET_BAND_PX / max(1, crop.height)))
     if scale > 1.0:
         crop = crop.resize(
             (int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS
         )
-    crop = ImageOps.autocontrast(crop)
+    return ImageOps.autocontrast(crop)
+
+
+def _prepared_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
+    """Yield OCR-ready renderings of one band: upscaled greyscale, and the same
+    crop hard-thresholded.
+
+    Overlay text is often light on dark, which Otsu handles badly when the crop
+    also catches a bright background; a fixed threshold recovers the text in
+    exactly the frames the grey pass garbles. The same cut serves the other
+    polarity too, because dark ink on a light panel comes out of `p >
+    BINARY_THRESHOLD` as black text on white. Both are written to the reader's
+    own temp dir rather than beside the frame, because the frame directory is a
+    cache other recognizers iterate.
+    """
+    crop = _band_crop(frame, region)
+    if crop is None:
+        return
 
     grey = work / "band-grey.png"
     crop.save(grey)
@@ -630,3 +780,80 @@ def _prepared_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
     binary = work / "band-bin.png"
     crop.point(lambda p: 255 if p > BINARY_THRESHOLD else 0).save(binary)
     yield binary
+
+
+def _adaptive_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
+    """Yield local-mean binarisations of one band: the fallback renderings.
+
+    A pixel is ink when it sits at least ADAPTIVE_BIAS under the mean of its own
+    neighbourhood, so the cut follows the panel instead of the band. Pure PIL,
+    because the `ocr` extra is pytesseract plus Pillow and numpy or opencv would
+    be a dependency change.
+
+    ## What this recovers, and what already worked without it
+
+    A global cut is not polarity-bound: `BINARY_THRESHOLD` keeps `p > 140`, so
+    dark ink on a light panel arrives as black text on white, which is what the
+    engine wants. Rendered at both polarities on an opaque panel, both shipped
+    passes read Cyrillic and Latin alike. Nothing here is about polarity
+    detection, and there is no inverted pass, because there is nothing to
+    invert.
+
+    What the global cut cannot do is fit a SEMI-TRANSPARENT panel over a busy
+    scene. A light panel at low opacity is only LOCALLY light: the scene shows
+    through, so the same ink is darker over a dark patch than over a bright one
+    and no single cut holds across the band. `autocontrast` compounds it by
+    stretching over the whole band, which compresses the part the text sits in
+    when the rest of the band is brighter.
+
+    Measured on synthetic 1920x1080 JPEG q55 frames, one overlay composited at
+    varying opacity over coarse bright and dark patches, band (0, 0.80, 1, 0.10)
+    read with tesseract `eng` at OCR_PSM. "read" means every word of the
+    headline came back:
+
+      | panel opacity | light-on-dark | dark-on-light |
+      |---------------|---------------|---------------|
+      | 255 (opaque)  | shipped       | shipped       |
+      | 200           | shipped       | shipped       |
+      | 170           | shipped       | shipped       |
+      | 140           | shipped       | FALLBACK      |
+      | 110           | shipped       | FALLBACK      |
+      |  90           | FALLBACK      | FALLBACK      |
+
+    The asymmetry is real and it is not polarity as such: bright ink stays above
+    a global cut whatever shows through, and dark ink does not. Otsu was
+    measured on the same frames and rejected: a histogram threshold matched the
+    shipped passes on every case, so it adds a rendering and no reads.
+
+    ## Why these radii
+
+    The band is upscaled towards TARGET_BAND_PX, up to MAX_UPSCALE, so the
+    radius has to be read in upscaled pixels and has to be much larger than a
+    stroke or the mean tracks the text and cancels it. Sweep on the failing
+    frame: 15 and 25 return nothing usable, recovery starts at 40, and 60 and 90
+    both come back clean.
+
+    Two radii and not one, which costs a second OCR on a band that already
+    missed: an interpreter's evidence may be AGREEMENT between passes (the news
+    interpreter's is, having measured 0.00 agreement across 75 background
+    bands), and a single-pass read gives it nothing to compare, so it would
+    reject every recovery. On the frames above the two radii agreed 0.75 to 1.00
+    about the recovered headline, and on six background bands of the same frame
+    they agreed 0.00. The signal survives the fallback; the junk does not.
+    """
+    crop = _band_crop(frame, region)
+    if crop is None:
+        return
+    try:
+        from PIL import ImageChops, ImageFilter  # required by the OCR extra
+    except ImportError as exc:  # pragma: no cover - _band_crop raises first
+        raise RecognizerUnavailable("Pillow is required for overlay OCR") from exc
+
+    for radius in ADAPTIVE_RADII:
+        # subtract() clamps at 0, so the offset keeps "darker than the mean" on
+        # a scale that survives: mean-relative 0 lands at 128.
+        mean = crop.filter(ImageFilter.BoxBlur(radius))
+        diff = ImageChops.subtract(crop, mean, scale=1, offset=128)
+        path = work / f"band-adaptive-{radius}.png"
+        diff.point(lambda p: 255 if p > 128 - ADAPTIVE_BIAS else 0).save(path)
+        yield path
