@@ -214,7 +214,10 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	nextSteps := []string{}
 	if !a.embedProviderResolves(global) {
 		nextSteps = append(nextSteps, "Set env: export MISTRAL_API_KEY=<your-key>")
-		nextSteps = append(nextSteps, "Or add MISTRAL_API_KEY=<key> to .env.local in this directory")
+		// Name the exact file the loader reads first (the one beside the config
+		// file), not "this directory": with a custom --config the two differ
+		// and the vague hint sent operators to the wrong file (#677).
+		nextSteps = append(nextSteps, fmt.Sprintf("Or add MISTRAL_API_KEY=<key> to %s", envPath))
 	}
 	nextSteps = append(nextSteps, "Run: dir2mcp up")
 

@@ -195,11 +195,11 @@ Or build each binary directly:
 - `go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/`
 
 The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
-Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`.
+Non-empty shell environment variables and OS keychain entries take precedence over dotenv files. Among the dotenv files the first non-empty value wins, in the order given under [Where dotenv files are read from](#where-dotenv-files-are-read-from).
 
 ### Local development environment
 
-`dir2mcp` automatically loads both `.env` and `.env.local` from the working directory; `.env.local` overrides `.env`, and real shell environment variables take ultimate precedence.
+`dir2mcp` automatically loads `.env` and `.env.local` from two directories: the directory that holds the resolved config file (the `--config` path, or `.dir2mcp.yaml` in the working directory), then the working directory itself. See [Where dotenv files are read from](#where-dotenv-files-are-read-from) for the full order. A **non-empty** shell environment variable takes ultimate precedence; a variable exported as an empty string is treated as unset, so a dotenv file still fills it.
 
 ### Hosted demo smoke runbook
 
@@ -574,6 +574,33 @@ sources) and can be turned off entirely with `DIR2MCP_DISABLE_KEYCHAIN=1`.
 > `.env.local` first with `dir2mcp config init` (`service install` warns when no persisted
 > credential is present); the keychain is most useful for the interactive `dir2mcp up` / CLI.
 > Resolution is fail-open, so a daemon that cannot read the keychain falls back to `.env.local`.
+
+### Where dotenv files are read from
+
+`dir2mcp` reads dotenv files from two directories, in this fixed order:
+
+1. `<config dir>/.env.local`
+2. `<config dir>/.env`
+3. `<working dir>/.env.local`
+4. `<working dir>/.env`
+
+`<config dir>` is the directory that holds the resolved config file: the `--config`
+path when you pass one, otherwise `.dir2mcp.yaml` in the working directory. `config
+init` writes credentials to `<config dir>/.env.local`, so the file the wizard writes
+is the first file the loader reads.
+
+The rule is **first non-empty value wins**. The first file in that list that gives a
+variable a non-empty value wins; the later files only fill in variables nobody
+claimed yet. The environment and the OS keychain are consulted before the files
+(SPEC §16.1.1), under the same rule: a variable exported as an empty string counts
+as unset, so a dotenv file still fills it. When the config directory and the working
+directory are the same (the common case), the list collapses to two files and
+nothing changes.
+
+When dotenv files exist in **both** directories, startup prints a warning that names
+the files in precedence order. Values are never printed. A dotenv file that exists but
+cannot be read fails the load with the path in the message; a dotenv file that is
+absent is normal and silent.
 
 ### Document extraction: modes & fallback
 

@@ -149,8 +149,9 @@ func isExistingDir(p string) bool {
 // For a filesystem-backed corpus (local/nfs) this stays the absolute corpus
 // root, unchanged: that is where the operator's .dir2mcp.yaml and .env.local
 // live by convention, and both the config loader (relative ".dir2mcp.yaml") and
-// the dotenv loader (relative ".env.local") resolve against the process working
-// directory.
+// the dotenv loader resolve against the process working directory. (Since #677
+// the dotenv loader also reads the config file's own directory, so a config
+// outside the corpus root keeps its .env.local too.)
 //
 // For an object-store corpus there is no local root to boot in (SPEC §7.8), and
 // rendering the ignored RootDir as launchd's WorkingDirectory / systemd's
