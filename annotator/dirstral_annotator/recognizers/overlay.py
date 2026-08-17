@@ -795,10 +795,10 @@ def _adaptive_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
 
     A global cut is not polarity-bound: `BINARY_THRESHOLD` keeps `p > 140`, so
     dark ink on a light panel arrives as black text on white, which is what the
-    engine wants. Rendered at both polarities on an opaque panel, both shipped
-    passes read Cyrillic and Latin alike. Nothing here is about polarity
-    detection, and there is no inverted pass, because there is nothing to
-    invert.
+    engine wants. On an opaque panel both shipped passes read either polarity
+    (Latin here and in the test below; #745 measured the same for Cyrillic).
+    Nothing here is about polarity detection, and there is no inverted pass,
+    because there is nothing to invert.
 
     What the global cut cannot do is fit a SEMI-TRANSPARENT panel over a busy
     scene. A light panel at low opacity is only LOCALLY light: the scene shows
