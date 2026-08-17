@@ -305,6 +305,41 @@ func TestSidecar876_VariantsGroupOff_BareStemSidecarDoesNotBind(t *testing.T) {
 	}
 }
 
+// TestSidecar876_VariantsGroupOff_STTStillRuns is the other half of the
+// default-off guard: not binding must leave the normal ingest path running STT.
+// The fixture is the harmful case the gate prevents. "song.en.vtt" belongs to a
+// DIFFERENT work than "song_128k.mp3", so under the default it must neither bind
+// nor suppress transcription.
+func TestSidecar876_VariantsGroupOff_STTStillRuns(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song_128k.mp3"), "fake-audio")
+	writeFile(t, filepath.Join(root, "song.en.vtt"), vtt876("a different work"))
+
+	st := &fakeIngestStore{}
+	stt := &fakeTranscriber{text: "[00:00] from stt"}
+	// The default config leaves MediaVariantsGroup false.
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc.SetTranscriber(stt)
+
+	f := ingest.DiscoveredFile{RelPath: "song_128k.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	if stt.calls != 1 {
+		t.Fatalf("expected STT to run once with grouping off, got %d call(s)", stt.calls)
+	}
+	if len(st.reps) != 1 || st.reps[0].RepType != ingest.RepTypeTranscript {
+		t.Fatalf("expected one bare STT transcript rep, got %+v", st.reps)
+	}
+	if strings.Contains(st.reps[0].MetaJSON, `"source":"sidecar"`) {
+		t.Fatalf("the bare-stem sidecar must not bind, got meta %q", st.reps[0].MetaJSON)
+	}
+	if !strings.Contains(st.reps[0].MetaJSON, `"source":"stt"`) {
+		t.Fatalf("expected an STT transcript, got meta %q", st.reps[0].MetaJSON)
+	}
+}
+
 // TestSidecar876_ExactBaseIdenticalUnderBothFlagValues pins that the flag only
 // ever ADDS the normalized pass. An exact-base sidecar binds the same way, with
 // the same language and the same cues, whether grouping is off or on.
