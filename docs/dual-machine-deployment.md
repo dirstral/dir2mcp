@@ -271,6 +271,12 @@ Expose only the MCP listen address to clients; keep the inference ports bound to
 loopback. If you expose the endpoint publicly, remember that `--public` requires
 auth unless `--force-insecure` is explicitly set.
 
+If you put a reverse proxy or a tunnel in front of a loopback-bound daemon,
+configure the proxy to forward a loopback `Host` header. Without that the MCP SDK
+answers `403 Forbidden: invalid Host header` to every request, including
+`initialize`. The recipes for cloudflared, ngrok, nginx, Caddy and Traefik are in
+[Reverse proxy and tunnel: the `Host` header](../README.md#reverse-proxy-and-tunnel-the-host-header).
+
 ---
 
 ## 3. How the pieces fit (data flow)
