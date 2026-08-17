@@ -329,8 +329,9 @@ class OverlayReader:
         """Yield (read, interpretation) for every band the search wanted.
 
         One frame can yield several bands while the search is still sweeping,
-        and none at all on a strided frame. A band that produced hits ends the
-        frame: the overlay was found, the other crops are background.
+        and none at all on a strided frame. A band that produced hits on the
+        shipped passes ends the frame: the overlay was found, the other crops
+        are background.
 
         A band that produced NO hits is re-read once on the adaptive rendering,
         while `_AdaptiveFallback` still allows it, and the second read replaces
