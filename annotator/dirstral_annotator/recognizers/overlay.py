@@ -835,12 +835,13 @@ def _adaptive_crops(frame: Path, region: Region, work: Path) -> Iterator[Path]:
     both come back clean.
 
     Two radii and not one, which costs a second OCR on a band that already
-    missed: an interpreter's evidence may be AGREEMENT between passes (the news
-    interpreter's is, having measured 0.00 agreement across 75 background
-    bands), and a single-pass read gives it nothing to compare, so it would
-    reject every recovery. On the frames above the two radii agreed 0.75 to 1.00
-    about the recovered headline, and on six background bands of the same frame
-    they agreed 0.00. The signal survives the fallback; the junk does not.
+    missed. An interpreter's evidence may be AGREEMENT between the passes, which
+    is what a caller with no vocabulary to check against is left with, and a
+    single-pass read gives such a caller nothing to compare: it would reject
+    every recovery by construction. On the frames above the two radii agreed
+    0.75 to 1.00 about the recovered headline, and on six background bands of
+    the same frame they agreed 0.00. The signal survives the fallback; the junk
+    does not.
     """
     crop = _band_crop(frame, region)
     if crop is None:
