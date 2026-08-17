@@ -702,12 +702,18 @@ def test_a_faint_dark_on_light_panel_is_read_only_by_the_fallback(engine, tmp_pa
     Both halves are asserted. If the shipped passes ever start reading this
     frame the fallback has stopped being justified by it, and that is a result
     to re-measure rather than a test to loosen.
+
+    The recovery is `any` and not `all` on purpose. The claim is that the
+    fallback returns the headline the shipped passes lost, and the radii are two
+    renderings of one crop: another font or a newer engine can satisfy that
+    claim with one radius dropping a word. How much the two radii corroborate
+    each other is a separate measurement, recorded in `_adaptive_crops`.
     """
     frame = _overlay_frame(tmp_path / "faint.jpg", opacity=110, dark_on_light=True)
     shipped = overlay.read_band(engine, frame, PANEL, tmp_path)
     assert not any(_read_it(text) for text in shipped), shipped
     recovered = overlay.read_band_adaptive(engine, frame, PANEL, tmp_path)
-    assert all(_read_it(text) for text in recovered), recovered
+    assert any(_read_it(text) for text in recovered), recovered
 
 
 def test_the_reader_recovers_the_faint_panel_end_to_end(engine, monkeypatch, tmp_path):

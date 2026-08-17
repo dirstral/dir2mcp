@@ -422,6 +422,24 @@ def test_a_pass_that_reads_nothing_costs_nothing(frames):
     assert anchor is not None and anchor.conflicts == 0
 
 
+def test_a_band_the_fallback_re_read_is_still_one_band(frames):
+    """`bands_read` counts band crops, and it is the denominator of a read rate.
+
+    A band this reader found no time in is re-read on the adaptive fallback
+    rendering and arrives at the interpreter a second time. Counting that twice
+    would inflate the figure by however many frames held no badge, which is
+    exactly the footage an operator would be inspecting it for.
+    """
+    truth = ticking(21 * 3600 + 30 * 60)
+    # The badge goes dark for the second half of the file, so half the crops
+    # are misses and every one of them is re-read.
+    frames(lambda region, t: truth(region, t) if t < 60.0 else "", count=60)
+    reading = reader(crop=BADGE)  # one pinned band: one crop per frame
+    anchor = reading.anchor_from(reading.read_clock(MEDIA))
+    assert anchor is not None
+    assert anchor.bands_read == 60
+
+
 # --- turning an anchor into an instant -------------------------------------
 
 def test_no_date_means_no_epoch(frames):
