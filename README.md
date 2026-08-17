@@ -179,7 +179,7 @@ Or build each binary directly:
 - `go build -o elevenlabs-bridge ./cmd/elevenlabs-bridge/`
 
 The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
-Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`; the first non-empty value wins.
+Non-empty shell environment variables and OS keychain entries take precedence over dotenv files. Among the dotenv files the first non-empty value wins, in the order given under [Where dotenv files are read from](#where-dotenv-files-are-read-from).
 
 ### Local development environment
 
