@@ -85,9 +85,21 @@ into one moment (issue #784) and counts one event once. The phase-1 metric reads
 ### The overlay text reader
 
 `recognizers/overlay.py` is the reusable half of the scorebug recognizer:
-find the band of the frame that holds burned-in text, defeat light-on-dark
+find the band of the frame that holds burned-in text, defeat a busy background
 with a second hard-thresholded pass, OCR both, and hand back
 `(timestamp, region, texts)`. It knows nothing about sport or roster.
+
+Those two passes span both polarities: the hard cut keeps `p > 140`, so dark ink
+on a light panel arrives as black text on white already. What they lose is a
+**semi-transparent** light panel over a busy scene, because a light panel at low
+opacity is only locally light and no single cut fits the whole band. A band
+neither pass could read is therefore re-read once on a local-mean threshold. It
+is a fallback and not a third pass: OCR dominates the run, so a band that
+already read costs nothing extra, and a run the rendering never helps stops
+paying for it after `FALLBACK_TRIALS` attempts. Hits off the fallback are also
+kept out of the band contest, since the rendering emits junk tokens as well as
+recovered text: a clean read on any band outranks a fallback read on every band.
+See `_adaptive_crops` for the opacity sweep and the radii it chose.
 `ScorebugRecognizer` is one consumer of it (baseball fields against a roster);
 a news archive is another (headline banners, tickers, a burned-in clock badge
 as a wall-clock anchor), and gets there with different `regions=` and a
@@ -178,6 +190,12 @@ bands against five background bands per frame:
 No background band agreed at all, so the default floor of 0.3 keeps 93% of
 overlay reads and admits none of the 75 background ones. It is a parameter
 regardless: one corpus is one corpus.
+
+The same floor applies to the adaptive fallback, which is why that fallback
+renders the band at two local-mean radii rather than one: a single rendering
+gives this interpreter nothing to compare and it would reject every recovery.
+Measured on the frames in `_adaptive_crops`, the two radii agreed 0.75 to 1.00
+about a recovered headline and 0.00 on six background bands of the same frame.
 
 A news frame carries several overlays at once, so each role gets its own reader
 over its own bands (the clock badge is `clock.py`, which has much stronger

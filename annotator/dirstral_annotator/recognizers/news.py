@@ -41,6 +41,13 @@ inconsistently between the two renderings. They are lost, not misread: a
 dropped frame of a ticker costs nothing, because the passage is still on screen
 in the next one and `collapse_text_sightings` joins the run across the gap.
 
+A band neither shipped pass could read is re-read on the adaptive fallback, and
+this measure applies to that read unchanged: the fallback renders the band at two
+local-mean radii, so there are still two views to corroborate. Nothing here has
+to know that. It is worth recording that the fallback's second radius exists
+BECAUSE of this interpreter: a single-pass read would score 0.0 by construction
+and every recovery would be thrown away. See `_adaptive_crops`.
+
 ## Readable enough to cite
 
 Agreement decides which BAND holds an overlay. It does not decide whether the

@@ -574,11 +574,17 @@ class ClockReader:
         self.lang = self.reader.lang
         self._conflicts = 0
         self._bands = 0
+        # Which bands of the frame being interpreted have already been counted,
+        # so a fallback re-read of one of them is not a second crop.
+        self._counted_frame: int | None = None
+        self._counted_bands: set[Region] = set()
 
     def read_clock(self, media_path: Path) -> list[ClockRead]:
         """Every frame reading the badge produced, in video order."""
         self._conflicts = 0
         self._bands = 0
+        self._counted_frame = None
+        self._counted_bands = set()
         reads: list[ClockRead] = []
         # `closing` because the overlay reader holds a worker pool and a scratch
         # directory for the length of the iteration: leaving this loop early has
@@ -646,7 +652,21 @@ class ClockReader:
         read still answers, and it must not lose the band over a frame this
         method then refuses to use.
         """
-        self._bands += 1
+        # One band crop, counted once. A band this method found no time in is
+        # re-read on the adaptive fallback rendering and arrives here a second
+        # time, and `bands_read` is the denominator of a read rate: counting the
+        # retry would inflate it by however many frames held no badge.
+        #
+        # Per frame rather than "same as the last one", so this does not rest on
+        # the retry arriving immediately after its own first call. The reader
+        # yields frames in index order, so the set only ever holds one frame's
+        # bands.
+        if read.index != self._counted_frame:
+            self._counted_frame = read.index
+            self._counted_bands = set()
+        if read.region not in self._counted_bands:
+            self._counted_bands.add(read.region)
+            self._bands += 1
         seen: set[tuple[int, str]] = set()
         for text in read.texts:
             for parsed in parse_times(text, self.zones, self.default_zone):

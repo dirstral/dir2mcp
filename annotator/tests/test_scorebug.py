@@ -219,6 +219,11 @@ def fake_frames(monkeypatch, tmp_path):
         monkeypatch.setattr(
             overlay, "_prepared_crops", lambda frame, region, work: iter([frame])
         )
+        # The fallback rendering of a band the passes could not read, faked the
+        # same way: a frame with no bug on it still has no bug on it.
+        monkeypatch.setattr(
+            overlay, "_adaptive_crops", lambda frame, region, work: iter([frame])
+        )
         return lambda frame: frame.read_text()
 
     return install
