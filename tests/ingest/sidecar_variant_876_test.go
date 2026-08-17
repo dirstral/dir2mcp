@@ -19,11 +19,42 @@ import (
 // nothing and every rendition went to STT. findSidecars now tries the §8.6.5
 // normalized variant base as a second candidate, after the exact base.
 
+// The normalized pass is OPT-IN: it runs only under `media.variants.group:
+// true`, the §8.6.5 declaration that files sharing a normalized name are
+// renditions of one work. Every test below that expects a normalized binding
+// therefore sets the flag, and TestSidecar876_VariantsGroupOff_* pins the
+// default-off behaviour for every corpus that never opted in.
+
 // sha is a stand-in for the archive's sha1 episode stem.
 const sha876 = "258bc7b4b3cfcdf684ea82d20328625d27aa8e07"
 
 func vtt876(text string) string {
 	return "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n" + text + "\n"
+}
+
+// ttml876 is the archive's untagged manifest sidecar: it declares its language
+// internally (xml:lang="ru"), so it collides with an authored "<sha>.ru.vtt".
+const ttml876 = `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru">
+  <body><div>
+    <p begin="00:00:00.000" end="00:00:02.000">from the ttml</p>
+  </div></body>
+</tt>`
+
+// groupedConfig is a corpus config with §8.6.5 rendition grouping enabled.
+func groupedConfig(t *testing.T, root string) config.Config {
+	t.Helper()
+	return config.Config{RootDir: root, StateDir: t.TempDir(), MediaVariantsGroup: true}
+}
+
+// newGroupedSidecarService builds a service with rendition grouping enabled and
+// an exploding transcriber, so a stray STT call fails the test.
+func newGroupedSidecarService(t *testing.T, root, stateDir string, st model.Store) *ingest.Service {
+	t.Helper()
+	cfg := config.Config{RootDir: root, StateDir: stateDir, MediaVariantsGroup: true}
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetTranscriber(&explodingTranscriber{t: t})
+	return svc
 }
 
 // TestSidecar876_BareStemSidecarBindsToRenditionSuffixedVideo is the archive
@@ -39,7 +70,7 @@ func TestSidecar876_BareStemSidecarBindsToRenditionSuffixedVideo(t *testing.T) {
 	writeFile(t, filepath.Join(root, sha876+".en.vtt"), vtt876("The second wave"))
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newGroupedSidecarService(t, root, t.TempDir(), st)
 
 	doc := model.Document{DocID: 1, RelPath: sha876 + "_1080p.mp4", DocType: "video"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -75,15 +106,10 @@ func TestSidecar876_UntaggedTTMLYieldsToTaggedSidecars(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, sha876+"_1080p.mp4"), "fake-video")
 	writeFile(t, filepath.Join(root, sha876+".ru.vtt"), vtt876("from the vtt"))
-	writeFile(t, filepath.Join(root, sha876+".ttml"), `<?xml version="1.0" encoding="UTF-8"?>
-<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru">
-  <body><div>
-    <p begin="00:00:00.000" end="00:00:02.000">from the ttml</p>
-  </div></body>
-</tt>`)
+	writeFile(t, filepath.Join(root, sha876+".ttml"), ttml876)
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newGroupedSidecarService(t, root, t.TempDir(), st)
 
 	doc := model.Document{DocID: 1, RelPath: sha876 + "_1080p.mp4", DocType: "video"}
 	if _, err := svc.IngestSidecarTranscripts(context.Background(), doc); err != nil {
@@ -106,15 +132,10 @@ func TestSidecar876_UntaggedTTMLBindsWhenItIsTheOnlyCandidate(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, sha876+"_1080p.mp4"), "fake-video")
-	writeFile(t, filepath.Join(root, sha876+".ttml"), `<?xml version="1.0" encoding="UTF-8"?>
-<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru">
-  <body><div>
-    <p begin="00:00:00.000" end="00:00:02.000">from the ttml</p>
-  </div></body>
-</tt>`)
+	writeFile(t, filepath.Join(root, sha876+".ttml"), ttml876)
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newGroupedSidecarService(t, root, t.TempDir(), st)
 
 	doc := model.Document{DocID: 1, RelPath: sha876 + "_1080p.mp4", DocType: "video"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -141,7 +162,7 @@ func TestSidecar876_ExactBaseWinsOverNormalizedBase(t *testing.T) {
 	writeFile(t, filepath.Join(root, "clip.en.vtt"), vtt876("normalized base loses"))
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newGroupedSidecarService(t, root, t.TempDir(), st)
 
 	doc := model.Document{DocID: 1, RelPath: "clip_720p.mp4", DocType: "video"}
 	if _, err := svc.IngestSidecarTranscripts(context.Background(), doc); err != nil {
@@ -179,7 +200,7 @@ func TestSidecar876_NormalizedBase_RejectsBogusTokens(t *testing.T) {
 
 	st := &fakeIngestStore{}
 	stt := &fakeTranscriber{text: "[00:00] from stt"}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, groupedConfig(t, root), st)
 	svc.SetTranscriber(stt)
 
 	f := ingest.DiscoveredFile{RelPath: "song_128k.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
@@ -208,7 +229,7 @@ func TestSidecar876_NormalizedBase_GenuineLanguageStillBinds(t *testing.T) {
 	writeFile(t, filepath.Join(root, "song.ru.vtt"), vtt876("настоящая дорожка"))
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newGroupedSidecarService(t, root, t.TempDir(), st)
 
 	doc := model.Document{DocID: 1, RelPath: "song_128k.mp3", DocType: "audio"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -241,7 +262,7 @@ func TestSidecar876_AudioRenditionStillNeedsItsOwnSidecar(t *testing.T) {
 
 	st := &fakeIngestStore{}
 	stt := &fakeTranscriber{text: "[00:00] from stt"}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, groupedConfig(t, root), st)
 	svc.SetTranscriber(stt)
 
 	f := ingest.DiscoveredFile{RelPath: sha876 + "_audio.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
@@ -250,5 +271,83 @@ func TestSidecar876_AudioRenditionStillNeedsItsOwnSidecar(t *testing.T) {
 	}
 	if stt.calls != 1 {
 		t.Fatalf("expected STT to run once for the unmarked audio rendition, got %d call(s)", stt.calls)
+	}
+}
+
+// TestSidecar876_VariantsGroupOff_BareStemSidecarDoesNotBind is the guard for
+// every corpus that never opted in. With `media.variants.group` at its default
+// (false) the operator has NOT declared that files sharing a normalized name are
+// one work, so the normalized pass does not run: the bare-stem sidecar does not
+// bind and the media still goes to STT, exactly as before #876. Without this
+// gate a "song.en.vtt" that belongs to a DIFFERENT work would silently become
+// the transcript of "song_128k.mp3".
+func TestSidecar876_VariantsGroupOff_BareStemSidecarDoesNotBind(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, sha876+"_1080p.mp4"), "fake-video")
+	writeFile(t, filepath.Join(root, sha876+".ru.vtt"), vtt876("Вторая волна"))
+	writeFile(t, filepath.Join(root, sha876+".ttml"), ttml876)
+
+	st := &fakeIngestStore{}
+	// The default config leaves MediaVariantsGroup false.
+	svc := newSidecarService(t, root, t.TempDir(), st)
+
+	doc := model.Document{DocID: 1, RelPath: sha876 + "_1080p.mp4", DocType: "video"}
+	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
+	if err != nil {
+		t.Fatalf("IngestSidecarTranscripts: %v", err)
+	}
+	if ingested {
+		t.Fatal("with media.variants.group off, no bare-stem sidecar may bind")
+	}
+	if len(st.reps) != 0 {
+		t.Fatalf("expected no transcript rep, got %+v", st.reps)
+	}
+}
+
+// TestSidecar876_ExactBaseIdenticalUnderBothFlagValues pins that the flag only
+// ever ADDS the normalized pass. An exact-base sidecar binds the same way, with
+// the same language and the same cues, whether grouping is off or on.
+func TestSidecar876_ExactBaseIdenticalUnderBothFlagValues(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		grouped bool
+	}{
+		{name: "group_off", grouped: false},
+		{name: "group_on", grouped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, "clip_720p.mp4"), "fake-video")
+			writeFile(t, filepath.Join(root, "clip_720p.en.vtt"), vtt876("exact base cues"))
+
+			st := &fakeIngestStore{}
+			svc := newSidecarService(t, root, t.TempDir(), st)
+			if tc.grouped {
+				svc = newGroupedSidecarService(t, root, t.TempDir(), st)
+			}
+
+			doc := model.Document{DocID: 1, RelPath: "clip_720p.mp4", DocType: "video"}
+			ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
+			if err != nil {
+				t.Fatalf("IngestSidecarTranscripts: %v", err)
+			}
+			if !ingested {
+				t.Fatal("an exact-base sidecar must bind under either flag value")
+			}
+			if len(st.reps) != 1 || st.reps[0].RepType != ingest.TranscriptRepType("en") {
+				t.Fatalf("expected one en transcript, got %+v", st.reps)
+			}
+			assertSidecarMeta(t, st.reps[0].MetaJSON, "en")
+			var text strings.Builder
+			for _, c := range st.chunks {
+				text.WriteString(c.Text)
+			}
+			if !strings.Contains(text.String(), "exact base cues") {
+				t.Fatalf("expected the exact-base cues, got %q", text.String())
+			}
+		})
 	}
 }

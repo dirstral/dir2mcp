@@ -787,6 +787,47 @@ vs. flat `page` spans). Suggested phases:
 For a multi-host / GPU-VPS topology (self-hosted extractor + remote corpus), see
 [docs/dual-machine-deployment.md](docs/dual-machine-deployment.md).
 
+### Subtitle sidecars: which file becomes a transcript (SPEC §8.6.4)
+
+A subtitle file (`.vtt`, `.srt`, `.ttml`) next to an audio or video file is
+ingested as that media's transcript **instead of** running STT. The transcript is
+recorded as authored (`source: sidecar`), so an STT model change never re-derives
+it. Set `media.sidecars.enabled: false` to disable this and always run STT.
+
+Two filename shapes bind, for media `clip.mp4`:
+
+| Sidecar | Result |
+|---|---|
+| `clip.vtt` | one transcript, no language recorded |
+| `clip.en.vtt`, `clip.ru.vtt` | one transcript per language |
+
+Rules:
+
+- The single token before the subtitle extension must be a **real language tag**.
+  `clip.HD.vtt` and `clip.2024.vtt` do not bind, so they cannot record a bogus
+  language or silently suppress STT.
+- An extra dotted segment does not bind (`clip.notes.en.vtt`), and neither does
+  the media's own extension (`clip.mp4.vtt`).
+
+**Rendition-suffixed media** (`episode_1080p.mp4`, `episode_720p.mp4`) carries a
+suffix the sidecar usually does not (`episode.ru.vtt`). Set
+`media.variants.group: true` (SPEC §8.6.5) and a sidecar on the bare stem also
+binds, because that flag is your statement that files sharing a normalized name
+are renditions of one work. It is **off by default**: without it dir2mcp never
+guesses across filenames, and only the exact shapes above bind.
+
+```yaml
+media:
+  variants:
+    group: true       # off by default; also dedups renditions to one document
+    select: best      # which rendition is canonical
+```
+
+An exact match always wins over a bare-stem match, so `episode_1080p.en.vtt`
+beats `episode.en.vtt`. An untagged bare-stem sidecar (`episode.ttml`) binds only
+when no language-tagged sidecar binds, so it never overwrites an authored
+per-language transcript. Name it `episode.ru.ttml` to ingest it beside the VTTs.
+
 ### Fully local / no-egress setup
 
 The default quickstart (and `.env.example`) configures **cloud** providers, so a corpus is processed by third-party APIs (Mistral for embeddings/OCR/STT/generation, ElevenLabs for voice). If your data must **not leave the host** (data-residency / compliance / on-prem archives), configure every capability against endpoints you run — dir2mcp treats a self-hosted provider as first-class (SPEC §8.5) and needs no cloud key.

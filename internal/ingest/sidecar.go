@@ -218,6 +218,21 @@ func (s *Service) sidecarsEnabled() bool {
 	return !s.cfg.MediaSidecarsDisabled
 }
 
+// mediaVariantsGrouped reports whether the operator declared that media files
+// sharing a normalized name are renditions of ONE work (`media.variants.group`,
+// spec §8.6.5). It is false by default. It reads the same resolved options that
+// discovery uses (MediaVariantOptionsFromConfig), so grouping and sidecar
+// binding can never disagree about the flag.
+//
+// findSidecars gates its normalized-base pass on this flag. The normalized base
+// is §8.6.5's own concept, so binding by it needs §8.6.5's switch: without the
+// declaration, "song.en.vtt" may belong to a different work than "song_128k.mp3"
+// and binding it would silently give that media someone else's transcript AND
+// suppress its STT.
+func (s *Service) mediaVariantsGrouped() bool {
+	return MediaVariantOptionsFromConfig(s.cfg).Group
+}
+
 // findSidecars returns the subtitle sidecars sitting next to the media document,
 // resolved through the corpus FS so it works for any backend. A sidecar matches
 // when its path is "<base>.<ext>" (undifferentiated) or "<base>.<lang>.<ext>"
@@ -229,7 +244,10 @@ func (s *Service) sidecarsEnabled() bool {
 //     its rendition markers stripped. It binds a sidecar that sits on the bare
 //     stem of a rendition-suffixed media file ("<sha>.ru.vtt" next to
 //     "<sha>_1080p.mp4"), which §8.6.4 requires to be ingested as the transcript
-//     instead of running STT (issue #876).
+//     instead of running STT (issue #876). This pass runs ONLY when the operator
+//     set `media.variants.group: true` (§8.6.5), the declaration that files
+//     sharing a normalized name are renditions of one work. It is off by
+//     default, so a corpus that never opted in binds exactly as it did before.
 //
 // The two precedence rules in mergeSidecarCandidates keep pass 2 from
 // overriding or duplicating pass 1. Results are sorted by (language, extension,
@@ -247,7 +265,13 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 	// "clip.mp3.vtt" for media "clip.mp3" — is the media filename plus a subtitle
 	// extension, not a language-tagged sidecar, so it must be rejected.
 	mediaExt := strings.TrimPrefix(strings.ToLower(path.Ext(mediaRelPath)), ".")
-	variantBase := variantSidecarBase(mediaRelPath, base)
+	// The normalized candidate is opt-in: no `media.variants.group: true`, no
+	// inference (§8.6.5). variantBase stays "" and the loop below runs the exact
+	// pass alone, which is byte-for-byte the pre-#876 behaviour.
+	variantBase := ""
+	if s.mediaVariantsGrouped() {
+		variantBase = variantSidecarBase(mediaRelPath, base)
+	}
 	var exact, variant []sidecarFile
 	for relPath, mtime := range index {
 		ext := strings.ToLower(path.Ext(relPath))
