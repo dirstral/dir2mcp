@@ -251,4 +251,9 @@ func TestAsk880_NoRetrievalReplyFollowsTheMessage(t *testing.T) {
 	if !strings.Contains(lower, "language") || !strings.Contains(lower, "message") {
 		t.Fatalf("the no-retrieval prompt states no reply-language rule: %q", gen.lastPrompt)
 	}
+	// The mixed-language tie-break matches the grounded prompt, so one ask
+	// surface resolves one way.
+	if !strings.Contains(lower, "dominant") {
+		t.Fatalf("the no-retrieval prompt states no mixed-language rule: %q", gen.lastPrompt)
+	}
 }

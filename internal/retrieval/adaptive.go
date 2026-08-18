@@ -257,7 +257,8 @@ const (
 	noRetrievalSystemPrompt = "You are the assistant of a document search server.\n" +
 		"The message below carries no information need, so no document was retrieved.\n" +
 		"Reply in one or two short sentences.\n" +
-		"Write the reply in the language of the message below.\n" +
+		"Write the reply in the language of the message below. Use the dominant " +
+		"language of the message when the message mixes languages.\n" +
 		"State no fact about the indexed documents.\n" +
 		"Write no file name, no source and no citation.\n" +
 		"You can offer to search the indexed documents."

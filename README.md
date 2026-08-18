@@ -520,6 +520,10 @@ with the prompt, so it needs no configuration. Compliance still rests with the c
 model: a weak model can ignore any instruction, so check yours if answers arrive in the
 wrong language.
 
+A question that mixes languages resolves to its dominant language. The same rule covers
+the short conversational reply the server sends when a message asks for nothing from the
+corpus.
+
 The language of the retrieved documents does not select the answer language. A
 multilingual corpus holds several languages at once, so the context names no single one.
 The person who asks is the person who reads, so the question is the anchor.
