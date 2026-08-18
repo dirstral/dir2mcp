@@ -28,7 +28,9 @@ package tests
 // MEDIA_CLIP_FAILED. No new dependency is introduced.
 
 import (
+	"bytes"
 	"context"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,10 +41,17 @@ import (
 	"github.com/dirstral/dir2mcp/internal/avutil"
 )
 
-// clipSpan is the window both cuts must cover.
 const (
+	// clipSpanStartMS/clipSpanEndMS is the window both cuts must cover.
 	clipSpanStartMS = 1000
 	clipSpanEndMS   = 4000
+	// probeBackoffMS keeps the end-of-span probe inside the last frame.
+	probeBackoffMS = 100
+	// lumaToleranceLevels is how far a re-encoded frame may drift from the
+	// source frame it came from. Measured drift is under one level. The fixture
+	// ramps about 22 luma levels per second, so 5 levels is about a fifth of a
+	// second of timeline: tight enough to catch a misplaced cut.
+	lumaToleranceLevels = 5
 )
 
 // msArg renders a millisecond offset as the seconds string ffmpeg's -ss/-to take.
@@ -60,12 +69,23 @@ func requireFFmpegTools(t *testing.T) {
 	}
 }
 
-// writeHighBitrateSource renders a short, deliberately fat video fixture: an
-// all-intra MJPEG at the top quality level, which stands in for the pilot's
-// 20 Mbit/s recording at a size a test can afford. mjpeg and the testsrc2 lavfi
-// source are native to ffmpeg, so no third-party encoder is required. It skips
-// (never fails) when the local build cannot render the fixture, so a reduced
-// ffmpeg degrades cleanly instead of reporting a false regression.
+// writeHighBitrateSource renders a short video fixture with two properties the
+// test needs at once.
+//
+// It is deliberately FAT: an all-intra MJPEG at the top quality level over a
+// noisy pattern, which stands in for the pilot's 20 Mbit/s recording at a size a
+// test can afford.
+//
+// It is also TIME-ENCODED: brightness ramps monotonically with the source
+// timestamp, so a frame's mean luma says where on the source timeline it came
+// from. That is what lets the span be asserted on CONTENT. A duration check
+// alone would pass a 3 second clip cut from the wrong place, which is the
+// failure this test exists to exclude.
+//
+// mjpeg, testsrc2 and eq are native to ffmpeg, so no third-party encoder is
+// required. It skips (never fails) when the local build cannot render the
+// fixture, so a reduced ffmpeg degrades cleanly instead of reporting a false
+// regression.
 func writeHighBitrateSource(t *testing.T, path string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -73,12 +93,64 @@ func writeHighBitrateSource(t *testing.T, path string) {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-nostdin", "-v", "error",
 		"-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=6",
+		"-vf", "eq=brightness='-0.3+0.1*t':eval=frame",
 		"-c:v", "mjpeg", "-q:v", "1", "-pix_fmt", "yuvj420p",
 		"-y", path,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("this ffmpeg build cannot render the fixture: %v: %s", err, out)
 	}
+}
+
+// meanLuma returns the mean luma of the single frame at offsetMS. It is the
+// timeline probe: on this fixture the value maps back to a source timestamp.
+func meanLuma(t *testing.T, path string, offsetMS int) float64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-nostdin", "-v", "error",
+		"-ss", msArg(offsetMS), "-i", path,
+		"-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-",
+	)
+	var frame bytes.Buffer
+	cmd.Stdout = &frame
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("read the frame at %dms of %s: %v", offsetMS, filepath.Base(path), err)
+	}
+	pixels := frame.Bytes()
+	if len(pixels) == 0 {
+		t.Fatalf("no frame at %dms of %s", offsetMS, filepath.Base(path))
+	}
+	sum := 0
+	for _, pixel := range pixels {
+		sum += int(pixel)
+	}
+	return float64(sum) / float64(len(pixels))
+}
+
+// spanReference holds the source luma at the two ends of the requested span,
+// plus the luma at the source's own start. A cut that ignored the offset would
+// look like origin, which is what makes the check discriminating.
+type spanReference struct {
+	start  float64
+	end    float64
+	origin float64
+}
+
+// readSpanReference probes the source timeline and refuses to run the span
+// assertions on a fixture too flat to tell one moment from another.
+func readSpanReference(t *testing.T, src string) spanReference {
+	t.Helper()
+	ref := spanReference{
+		start:  meanLuma(t, src, clipSpanStartMS),
+		end:    meanLuma(t, src, clipSpanEndMS-probeBackoffMS),
+		origin: meanLuma(t, src, 0),
+	}
+	if math.Abs(ref.start-ref.origin) < 2*lumaToleranceLevels {
+		t.Skipf("this ffmpeg build renders a fixture too flat to locate a span: origin=%.1f start=%.1f", ref.origin, ref.start)
+	}
+	return ref
 }
 
 // encodePreview cuts the same span into a capped preview profile: half the
@@ -99,10 +171,17 @@ func encodePreview(t *testing.T, src, dst string) {
 	}
 }
 
-// assertCoversSpan requires that a cut still spans the requested window. Stream
-// copy can only start at the preceding keyframe, so a copy may run slightly
-// LONGER than the request; it must never run short.
-func assertCoversSpan(t *testing.T, path, label string) {
+// assertCoversSpan requires that a cut covers the requested window, on both
+// length and content.
+//
+// Length: stream copy can only start at the preceding keyframe, so a copy may
+// run slightly LONGER than the request; it must never run short.
+//
+// Content: the clip's first frame must be the source frame at clipSpanStartMS,
+// and its last frame the source frame at clipSpanEndMS. Length alone would
+// accept a clip of the right size cut from the wrong moment, which is the
+// regression a smaller-clip fix could introduce.
+func assertCoversSpan(t *testing.T, ref spanReference, path, label string) {
 	t.Helper()
 	got, err := avutil.Duration(context.Background(), path)
 	if err != nil {
@@ -114,6 +193,17 @@ func assertCoversSpan(t *testing.T, path, label string) {
 	}
 	if got > want+1500*time.Millisecond {
 		t.Fatalf("%s: duration = %v, want about %v: the clip covers far more than the requested span", label, got, want)
+	}
+
+	gotStart := meanLuma(t, path, 0)
+	if math.Abs(gotStart-ref.start) > lumaToleranceLevels {
+		t.Fatalf("%s: first frame luma = %.1f, want %.1f (the source at %dms; the source at 0ms is %.1f): the clip starts at the wrong moment",
+			label, gotStart, ref.start, clipSpanStartMS, ref.origin)
+	}
+	gotEnd := meanLuma(t, path, clipSpanEndMS-clipSpanStartMS-probeBackoffMS)
+	if math.Abs(gotEnd-ref.end) > lumaToleranceLevels {
+		t.Fatalf("%s: last frame luma = %.1f, want %.1f (the source at %dms): the clip ends at the wrong moment",
+			label, gotEnd, ref.end, clipSpanEndMS-probeBackoffMS)
 	}
 }
 
@@ -154,7 +244,9 @@ func TestClipPreviewIsFarSmallerThanTheSourceBitrateCut_878(t *testing.T) {
 			len(preview), len(copied))
 	}
 
-	// A smaller clip of the WRONG span is worse than a large correct one.
-	assertCoversSpan(t, copyPath, "stream copy")
-	assertCoversSpan(t, previewPath, "preview")
+	// A smaller clip of the WRONG span is worse than a large correct one, so
+	// both cuts are checked against the source timeline, not only for length.
+	ref := readSpanReference(t, src)
+	assertCoversSpan(t, ref, copyPath, "stream copy")
+	assertCoversSpan(t, ref, previewPath, "preview")
 }
