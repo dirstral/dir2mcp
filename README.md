@@ -511,6 +511,25 @@ the response shape is unchanged, `answer` is `""`, `citations` is `[]`, and the 
 hits are still returned. No chat provider is called. A request cannot switch generation
 back on, so `mode=answer` is served as search-only rather than refused.
 
+#### Answer language
+
+An answer comes back in the language of the **question**. A Russian question about a
+Russian archive gets a Russian answer, and the same archive answers an English question
+in English. The rule ships inside the default system prompt, so it needs no
+configuration.
+
+The language of the retrieved documents does not select the answer language. A
+multilingual corpus holds several languages at once, so the context names no single one.
+The person who asks is the person who reads, so the question is the anchor.
+
+A retrieved document cannot change the answer language. Document text reaches the model
+inside untrusted-data markers, and the prompt refuses every instruction found there, a
+language switch included.
+
+To pin one answer language for all requests, write your own `rag.system_prompt`. It
+replaces the shipped prompt in full, so your text must also keep the grounding rule, the
+`[rel_path]` citation rule and the untrusted-data warning.
+
 ### Environment variables (overrides / secrets)
 
 Sensitive keys and temporary runtime overrides are supplied via environment variables. They take

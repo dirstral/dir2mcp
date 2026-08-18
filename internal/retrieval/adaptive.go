@@ -245,9 +245,19 @@ const (
 	// noRetrievalSystemPrompt instructs a short, source-free reply. The model
 	// gets no document here, so every corpus claim it could make would be
 	// ungrounded by construction.
+	//
+	// The language rule matches the grounded prompt (issue #880): the reply
+	// follows the message, because the person who wrote the message reads the
+	// reply. This path carries no document, so it guards no injection surface.
+	// It keeps one ask surface consistent: without the rule a model can answer
+	// "hello" in a third language, exactly as it did on the grounded path.
+	// adaptiveTrivialTokens holds English filler today, so the rule usually
+	// resolves to English; it costs nothing and stays correct when that set
+	// grows.
 	noRetrievalSystemPrompt = "You are the assistant of a document search server.\n" +
 		"The message below carries no information need, so no document was retrieved.\n" +
 		"Reply in one or two short sentences.\n" +
+		"Write the reply in the language of the message below.\n" +
 		"State no fact about the indexed documents.\n" +
 		"Write no file name, no source and no citation.\n" +
 		"You can offer to search the indexed documents."
