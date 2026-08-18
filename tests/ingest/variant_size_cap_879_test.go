@@ -263,8 +263,8 @@ func TestVariantCap879_ScanIndexesTheRenditionItReports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the rendition under the cap must be ingested: %v", err)
 	}
-	if doc.SkipReason != "" {
-		t.Errorf("ep1_360p.mp4 skip_reason = %q, want empty", doc.SkipReason)
+	if doc.Status != "ok" || doc.SkipReason != "" {
+		t.Errorf("ep1_360p.mp4 status = %q skip_reason = %q, want status=ok with no skip reason", doc.Status, doc.SkipReason)
 	}
 	for _, rel := range []string{"ep1_1080p.mp4", "ep1_720p.mp4", "ep1_480p.mp4"} {
 		assertNoRow879(t, st, rel)
@@ -296,8 +296,12 @@ func TestVariantCap879_ScanKeepsTheBestRenditionWhenAllFit(t *testing.T) {
 
 	st, _ := runScan879(t, root, 100, true)
 
-	if _, err := st.GetDocumentByPath(context.Background(), "ep1_1080p.mp4"); err != nil {
+	doc, err := st.GetDocumentByPath(context.Background(), "ep1_1080p.mp4")
+	if err != nil {
 		t.Fatalf("the best rendition must be ingested: %v", err)
+	}
+	if doc.Status != "ok" || doc.SkipReason != "" {
+		t.Errorf("ep1_1080p.mp4 status = %q skip_reason = %q, want status=ok with no skip reason", doc.Status, doc.SkipReason)
 	}
 	for _, rel := range []string{"ep1_720p.mp4", "ep1_480p.mp4", "ep1_360p.mp4"} {
 		assertNoRow879(t, st, rel)
