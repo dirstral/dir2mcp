@@ -1765,18 +1765,8 @@ func (s *Service) runScan(ctx context.Context) error {
 	// registered as seen and markMissingAsDeleted does not tombstone them. The
 	// same drops are recorded on s.pendingOversize so a FILE_TOO_LARGE manifest
 	// entry (§14.4, #422) is also emitted once the batch run exists.
-	oversize := make(map[string]int64)
-	s.pendingOversize = nil
-	discoverOpts.OnOversize = func(relPath string, size int64) {
-		s.addScanned(1)
-		s.addSkipped(1)
-		oversize[relPath] = size
-		s.pendingOversize = append(s.pendingOversize, relPath)
-		s.getLogger().Printf(
-			"discovery: skipping %s (%d bytes) — exceeds ingest.max_file_mb cap (%.0f MB); raise ingest.max_file_mb to include it",
-			relPath, size, capMB,
-		)
-	}
+	oversizeDrops := s.newOversizeSink(capMB, discoverOpts.MediaVariants.Group)
+	discoverOpts.OnOversize = oversizeDrops.offer
 	// A bucket key that is not a usable rel_path is refused at discovery
 	// (#735). Logged rather than counted as a skip: it is not a corpus file
 	// dir2mcp declined to index, it is a key that could not be named safely,
@@ -1822,8 +1812,14 @@ func (s *Service) runScan(ctx context.Context) error {
 
 	// Collapse multi-rendition media to a single canonical file (spec §8.6.5)
 	// before ingestion so chunks/embeddings are not duplicated across renditions.
-	// No-op when media.variants.group is disabled (the default).
-	discovered = SelectMediaVariants(discovered, discoverOpts.MediaVariants)
+	// The over-cap files held above rejoin the candidates here, so the group is
+	// formed out of every rendition that exists and the cap decides only which of
+	// them may be ingested (#879). No-op when media.variants.group is disabled
+	// (the default): the held list is empty and the result is the input.
+	variants := SelectMediaVariantsWithCap(discovered, oversizeDrops.held, discoverOpts.MediaVariants)
+	discovered = variants.Files
+	oversizeDrops.recordHeld(variants.Oversize)
+	s.reportVariantCapInteractions(variants.Interactions, discoverOpts.MediaVariants.Select, capMB)
 
 	compiledSecrets, err := compileSecretPatterns(s.cfg.SecretPatterns)
 	if err != nil {
@@ -1866,7 +1862,7 @@ func (s *Service) runScan(ctx context.Context) error {
 
 	// Register size-capped drops as durable skipped rows before the pass(es)
 	// run so they survive markMissingAsDeleted and feed the coverage aggregate.
-	s.persistOversizeSkips(ctx, oversize, seen)
+	s.persistOversizeSkips(ctx, oversizeDrops.rows, seen)
 	s.persistSymlinkSkips(ctx, symlinks, seen)
 
 	// Optional two-phase pass split (SPEC §8.6.11): run media ingest as two ordered
@@ -3320,6 +3316,92 @@ func (s *Service) settleSizeCapSkip(ctx context.Context, doc model.Document) err
 	s.activeOutcome.markSkippedWithCode(manifestErrFileTooLarge)
 	s.notifyDocumentSkip(doc)
 	return nil
+}
+
+// oversizeSink collects the size-cap drops of one scan (#497) and decides when
+// each drop becomes real: a scanned+skipped count, a log line, a FILE_TOO_LARGE
+// manifest entry (§14.4) and, later, a size_cap document row.
+//
+// With `media.variants.group: true` a drop is HELD instead (#879). Variant
+// grouping (§8.6.5) decides which renditions the corpus has at all, and it runs
+// after the walk, so recording a drop while walking would record renditions the
+// corpus then discards. The held drops rejoin grouping as candidates and only
+// the survivors are recorded. With grouping off (the default) nothing is held
+// and every drop is recorded as it arrives, exactly as before.
+type oversizeSink struct {
+	svc   *Service
+	capMB float64
+	hold  bool
+	// held are the drops waiting for variant grouping to decide, in walk order.
+	held []OversizeCandidate
+	// rows maps rel_path to size for every recorded drop; persistOversizeSkips
+	// turns it into the durable size_cap rows.
+	rows map[string]int64
+}
+
+// newOversizeSink starts the size-cap collection for one scan. It also resets
+// the pending FILE_TOO_LARGE manifest entries, which the same drops feed.
+func (s *Service) newOversizeSink(capMB float64, holdForVariants bool) *oversizeSink {
+	s.pendingOversize = nil
+	return &oversizeSink{svc: s, capMB: capMB, hold: holdForVariants, rows: make(map[string]int64)}
+}
+
+// offer takes one size-cap drop from the walker.
+func (o *oversizeSink) offer(relPath string, size int64) {
+	if o.hold {
+		o.held = append(o.held, OversizeCandidate{RelPath: relPath, SizeBytes: size})
+		return
+	}
+	o.record(relPath, size)
+}
+
+// recordHeld records the held drops that survived variant grouping. The rest
+// are renditions grouping discarded: they leave no count, no line and no row.
+func (o *oversizeSink) recordHeld(survivors []OversizeCandidate) {
+	for _, candidate := range survivors {
+		o.record(candidate.RelPath, candidate.SizeBytes)
+	}
+}
+
+// record makes one drop observable: counted, logged, and queued for its
+// size_cap row and its manifest entry.
+func (o *oversizeSink) record(relPath string, size int64) {
+	o.svc.addScanned(1)
+	o.svc.addSkipped(1)
+	o.rows[relPath] = size
+	o.svc.pendingOversize = append(o.svc.pendingOversize, relPath)
+	o.svc.getLogger().Printf(
+		"discovery: skipping %s (%d bytes) — exceeds ingest.max_file_mb cap (%.0f MB); raise ingest.max_file_mb to include it",
+		relPath, size, o.capMB,
+	)
+}
+
+// reportVariantCapInteractions logs the media groups where `ingest.max_file_mb`
+// changed what `media.variants.select` returned (#879). Silence is what made the
+// bug expensive: the corpus served the worst rendition of every episode while
+// `status` reported a healthy scan and the skipped siblings looked like ordinary
+// size skips.
+//
+// One line per affected GROUP, never one per rendition: the line names the
+// rendition the group ends on, how many renditions the cap excluded, and both
+// settings involved, so an operator can act on it without reading the walk.
+func (s *Service) reportVariantCapInteractions(interactions []VariantCapInteraction, policy MediaVariantSelect, capMB float64) {
+	if policy == "" {
+		policy = MediaVariantSelectBest
+	}
+	for _, interaction := range interactions {
+		if interaction.Indexed {
+			s.getLogger().Printf(
+				"discovery: media.variants.select=%s chose %s: %d other rendition(s) of the same media exceed the ingest.max_file_mb cap (%.0f MB); raise ingest.max_file_mb to index the best rendition",
+				policy, interaction.Canonical, interaction.OverCap, capMB,
+			)
+			continue
+		}
+		s.getLogger().Printf(
+			"discovery: every rendition of %s exceeds the ingest.max_file_mb cap (%.0f MB), %d in total; the media is skipped as size_cap; raise ingest.max_file_mb to include it",
+			interaction.Canonical, capMB, interaction.OverCap,
+		)
+	}
 }
 
 // persistOversizeSkips upserts a minimal skipped document row for each file
