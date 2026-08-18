@@ -513,18 +513,20 @@ back on, so `mode=answer` is served as search-only rather than refused.
 
 #### Answer language
 
-An answer comes back in the language of the **question**. A Russian question about a
-Russian archive gets a Russian answer, and the same archive answers an English question
-in English. The rule ships inside the default system prompt, so it needs no
-configuration.
+The default system prompt tells the model to answer in the language of the
+**question**. It asks for a Russian answer to a Russian question about a Russian archive,
+and for an English answer when a partner asks the same archive in English. The rule ships
+with the prompt, so it needs no configuration. Compliance still rests with the chat
+model: a weak model can ignore any instruction, so check yours if answers arrive in the
+wrong language.
 
 The language of the retrieved documents does not select the answer language. A
 multilingual corpus holds several languages at once, so the context names no single one.
 The person who asks is the person who reads, so the question is the anchor.
 
-A retrieved document cannot change the answer language. Document text reaches the model
-inside untrusted-data markers, and the prompt refuses every instruction found there, a
-language switch included.
+The prompt also tells the model to refuse a language switch demanded by a retrieved
+document. Document text reaches the model inside untrusted-data markers, and the prompt
+rejects every instruction found there, a language change included.
 
 To pin one answer language for all requests, write your own `rag.system_prompt`. It
 replaces the shipped prompt in full, so your text must also keep the grounding rule, the
