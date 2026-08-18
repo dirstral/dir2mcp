@@ -285,6 +285,12 @@ func SelectMediaVariants(files []DiscoveredFile, opts MediaVariantOptions) []Dis
 //
 // Only the name and the size travel, never the bytes: an over-cap file is still
 // never opened, so the bounded-read rule (#830) holds unchanged.
+//
+// These two fields are exactly what selection reads today: variantBetter takes
+// the resolution out of the name and compares SizeBytes. So an over-cap
+// candidate can be ranked against a discovered file without stat'ing it again.
+// A future policy that reads anything else (mtime, ETag) must carry that value
+// here as well, or it would rank every over-cap candidate on a zero value.
 type OversizeCandidate struct {
 	RelPath   string
 	SizeBytes int64
@@ -314,7 +320,8 @@ type VariantCapResult struct {
 	// document row, in input order. An over-cap rendition that grouping discards
 	// is NOT here: a rendition the corpus never wanted must not leave a row.
 	Oversize []OversizeCandidate
-	// Interactions are the groups the cap changed, in first-seen group order.
+	// Interactions are the groups the cap changed, ordered by the rel_path of
+	// the rendition each group ends on.
 	Interactions []VariantCapInteraction
 }
 
@@ -433,9 +440,6 @@ func (idx variantIndex) survivingOversize(oversize []OversizeCandidate) []Oversi
 // has. Both winners are tracked because the cap is applied after grouping, so a
 // group must know what it would have picked as well as what it may pick.
 type variantGroup struct {
-	// order is the first-seen position of the group, so reporting is
-	// deterministic for a sorted walk.
-	order int
 	// members counts every rendition of the group, on both sides of the cap.
 	members int
 	// overCap counts the renditions the cap excludes.
@@ -470,7 +474,7 @@ func ensureVariantGroup(groups map[string]*variantGroup, key string) *variantGro
 	if g, ok := groups[key]; ok {
 		return g
 	}
-	g := &variantGroup{order: len(groups), underIdx: -1, overIdx: -1}
+	g := &variantGroup{underIdx: -1, overIdx: -1}
 	groups[key] = g
 	return g
 }
@@ -484,21 +488,19 @@ func variantGroupKey(relPath string) string {
 	return normalizeVariantName(relPath)
 }
 
-// variantCapInteractions reports the groups where the cap changed the outcome,
-// in first-seen group order. A group of one rendition is never reported: a lone
-// over-cap media file is an ordinary size_cap skip, not an interaction between
-// two settings.
+// variantCapInteractions reports the groups where the cap changed the outcome.
+// A group of one rendition is never reported: a lone over-cap media file is an
+// ordinary size_cap skip, not an interaction between two settings.
+//
+// The result is ordered by the rel_path each group ends on. Map iteration is
+// random and the candidates arrive in two separate lists, so the groups need an
+// order of their own, and the path is the one an operator can look up.
 func variantCapInteractions(groups map[string]*variantGroup, policy MediaVariantSelect) []VariantCapInteraction {
-	ordered := make([]*variantGroup, 0, len(groups))
+	interactions := make([]VariantCapInteraction, 0, len(groups))
 	for _, g := range groups {
-		if g.overCap > 0 && g.members > 1 {
-			ordered = append(ordered, g)
+		if g.overCap == 0 || g.members < 2 {
+			continue
 		}
-	}
-	sort.Slice(ordered, func(a, b int) bool { return ordered[a].order < ordered[b].order })
-
-	interactions := make([]VariantCapInteraction, 0, len(ordered))
-	for _, g := range ordered {
 		switch {
 		case g.underIdx < 0:
 			interactions = append(interactions, VariantCapInteraction{
@@ -512,6 +514,9 @@ func variantCapInteractions(groups map[string]*variantGroup, policy MediaVariant
 			})
 		}
 	}
+	sort.Slice(interactions, func(a, b int) bool {
+		return interactions[a].Canonical < interactions[b].Canonical
+	})
 	return interactions
 }
 

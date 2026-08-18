@@ -1753,6 +1753,13 @@ func (s *Service) runScan(ctx context.Context) error {
 	// each drop as scanned+skipped so live `status` shows a non-zero skipped, and
 	// log a clear line naming ingest.max_file_mb so the cap is discoverable and
 	// actionable rather than a silent no-op (dishonest coverage).
+	//
+	// Under `media.variants.group: true` the drop is counted and logged after the
+	// walk instead of during it (#879, see oversizeSink): variant grouping decides
+	// which renditions the corpus has, so live `status` reports the size-cap
+	// skips of a grouped corpus once the walk ends rather than as it runs. A walk
+	// that fails reports none of them, which is the same nothing the failed scan
+	// reports for every other file it did not reach.
 	capBytes := discoverOpts.MaxSizeBytes
 	if capBytes <= 0 {
 		capBytes = corpusfs.DefaultMaxFileSizeBytes()
@@ -3385,6 +3392,10 @@ func (o *oversizeSink) record(relPath string, size int64) {
 // One line per affected GROUP, never one per rendition: the line names the
 // rendition the group ends on, how many renditions the cap excluded, and both
 // settings involved, so an operator can act on it without reading the walk.
+//
+// A group that fits nothing already gets the ordinary size_cap line for its one
+// recorded rendition, so this line adds what that one cannot say (the group is
+// out, not just the file) and does not repeat the advice.
 func (s *Service) reportVariantCapInteractions(interactions []VariantCapInteraction, policy MediaVariantSelect, capMB float64) {
 	if policy == "" {
 		policy = MediaVariantSelectBest
@@ -3398,8 +3409,8 @@ func (s *Service) reportVariantCapInteractions(interactions []VariantCapInteract
 			continue
 		}
 		s.getLogger().Printf(
-			"discovery: every rendition of %s exceeds the ingest.max_file_mb cap (%.0f MB), %d in total; the media is skipped as size_cap; raise ingest.max_file_mb to include it",
-			interaction.Canonical, capMB, interaction.OverCap,
+			"discovery: no rendition of this media fits the ingest.max_file_mb cap (%.0f MB): %d renditions, recorded as one size_cap skip on %s",
+			capMB, interaction.OverCap, interaction.Canonical,
 		)
 	}
 }

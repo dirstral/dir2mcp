@@ -204,8 +204,19 @@ func writeRenditions879(t *testing.T, root string) {
 	writeCorpusFile(t, root, "ep1.ru.vtt", []byte(vtt876("Вторая волна")))
 }
 
-// runScan879 runs one full scan over root and returns the discovery log.
-func runScan879(t *testing.T, root string, capMB int, group bool) (*store.SQLiteStore, string) {
+// scan879 is one finished scan: the store it wrote, the discovery log, the run
+// counters and the §8.6.11 run manifest.
+type scan879 struct {
+	store    *store.SQLiteStore
+	log      string
+	counters appstate.IndexingSnapshot
+	manifest []map[string]any
+}
+
+// runScan879 runs one full scan over root. The run manifest is enabled on every
+// scan, so the FILE_TOO_LARGE entries (§14.4) the same size-cap drops feed are
+// observable beside the document rows.
+func runScan879(t *testing.T, root string, capMB int, group bool) scan879 {
 	t.Helper()
 	// getLogger falls back to log.Default() when no per-service logger is set,
 	// so redirect the process logger to observe the discovery lines. Mutates
@@ -216,26 +227,69 @@ func runScan879(t *testing.T, root string, capMB int, group bool) (*store.SQLite
 	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	stateDir := t.TempDir()
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
+	manifestPath := filepath.Join(stateDir, "run.jsonl")
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = stateDir
 	cfg.STTProvider = "off"
 	cfg.IngestMaxFileMB = capMB
 	cfg.MediaVariantsGroup = group
 	cfg.MediaVariantsSelect = "best"
+	cfg.MediaBatchManifest = manifestPath
 
 	svc := mustNewIngestService(t, cfg, st)
-	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
+	state := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc.SetIndexingState(state)
 	if err := svc.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	return st, logBuf.String()
+	return scan879{
+		store:    st,
+		log:      logBuf.String(),
+		counters: state.Snapshot(),
+		manifest: readManifest(t, manifestPath),
+	}
+}
+
+// logLine879 returns the one discovery line that contains every wanted
+// fragment. Matching the fragments against the whole buffer would pass on
+// fragments spread over several unrelated lines.
+func logLine879(t *testing.T, logged string, want ...string) string {
+	t.Helper()
+	for _, line := range strings.Split(logged, "\n") {
+		hit := true
+		for _, w := range want {
+			if !strings.Contains(line, w) {
+				hit = false
+				break
+			}
+		}
+		if hit {
+			return line
+		}
+	}
+	t.Errorf("no single log line contains %v; got:\n%s", want, logged)
+	return ""
+}
+
+// manifestCodes879 returns the manifest error codes recorded for a rel_path.
+func manifestCodes879(records []map[string]any, relPath string) []string {
+	out := []string{}
+	for _, rec := range records {
+		if rel, _ := rec["rel_path"].(string); rel != relPath {
+			continue
+		}
+		code, _ := rec["error_code"].(string)
+		out = append(out, code)
+	}
+	return out
 }
 
 // assertNoRow879 asserts that a rendition grouping discarded left no document
@@ -257,9 +311,9 @@ func TestVariantCap879_ScanIndexesTheRenditionItReports(t *testing.T) {
 	root := t.TempDir()
 	writeRenditions879(t, root)
 
-	st, logged := runScan879(t, root, 1, true)
+	scan := runScan879(t, root, 1, true)
 
-	doc, err := st.GetDocumentByPath(context.Background(), "ep1_360p.mp4")
+	doc, err := scan.store.GetDocumentByPath(context.Background(), "ep1_360p.mp4")
 	if err != nil {
 		t.Fatalf("the rendition under the cap must be ingested: %v", err)
 	}
@@ -267,10 +321,10 @@ func TestVariantCap879_ScanIndexesTheRenditionItReports(t *testing.T) {
 		t.Errorf("ep1_360p.mp4 status = %q skip_reason = %q, want status=ok with no skip reason", doc.Status, doc.SkipReason)
 	}
 	for _, rel := range []string{"ep1_1080p.mp4", "ep1_720p.mp4", "ep1_480p.mp4"} {
-		assertNoRow879(t, st, rel)
+		assertNoRow879(t, scan.store, rel)
 	}
 
-	stats, err := st.CorpusStats(context.Background())
+	stats, err := scan.store.CorpusStats(context.Background())
 	if err != nil {
 		t.Fatalf("CorpusStats: %v", err)
 	}
@@ -279,12 +333,24 @@ func TestVariantCap879_ScanIndexesTheRenditionItReports(t *testing.T) {
 			stats.SkipSummary.Categories[model.SkipReasonSizeCap])
 	}
 
-	// The choice must be explicit, not accidental.
-	for _, want := range []string{"media.variants.select=best", "ep1_360p.mp4", "ingest.max_file_mb"} {
-		if !strings.Contains(logged, want) {
-			t.Errorf("discovery log does not mention %q; got: %q", want, logged)
+	// A discarded rendition is not a skip of this run either: it is not counted,
+	// and it produces no FILE_TOO_LARGE manifest entry (§14.4).
+	// scanned counts the surviving rendition and the sidecar file, and nothing
+	// else: a rendition grouping discarded is not a file this run judged. (The
+	// sidecar is a skipped row of its own, for binary_ignored, so `skipped` is
+	// not the counter to read here; the size_cap total above is.)
+	if scan.counters.Scanned != 2 {
+		t.Errorf("scanned = %d, want 2 (the chosen rendition and the sidecar); a discarded rendition must not be counted",
+			scan.counters.Scanned)
+	}
+	for _, rel := range []string{"ep1_1080p.mp4", "ep1_720p.mp4", "ep1_480p.mp4"} {
+		if codes := manifestCodes879(scan.manifest, rel); len(codes) != 0 {
+			t.Errorf("%s has manifest records %v, want none (grouping discarded it)", rel, codes)
 		}
 	}
+
+	// The choice must be explicit, not accidental, and it must be ONE line.
+	logLine879(t, scan.log, "media.variants.select=best", "ep1_360p.mp4", "ingest.max_file_mb")
 }
 
 // TestVariantCap879_ScanKeepsTheBestRenditionWhenAllFit is the regression guard
@@ -294,9 +360,9 @@ func TestVariantCap879_ScanKeepsTheBestRenditionWhenAllFit(t *testing.T) {
 	root := t.TempDir()
 	writeRenditions879(t, root)
 
-	st, _ := runScan879(t, root, 100, true)
+	scan := runScan879(t, root, 100, true)
 
-	doc, err := st.GetDocumentByPath(context.Background(), "ep1_1080p.mp4")
+	doc, err := scan.store.GetDocumentByPath(context.Background(), "ep1_1080p.mp4")
 	if err != nil {
 		t.Fatalf("the best rendition must be ingested: %v", err)
 	}
@@ -304,7 +370,10 @@ func TestVariantCap879_ScanKeepsTheBestRenditionWhenAllFit(t *testing.T) {
 		t.Errorf("ep1_1080p.mp4 status = %q skip_reason = %q, want status=ok with no skip reason", doc.Status, doc.SkipReason)
 	}
 	for _, rel := range []string{"ep1_720p.mp4", "ep1_480p.mp4", "ep1_360p.mp4"} {
-		assertNoRow879(t, st, rel)
+		assertNoRow879(t, scan.store, rel)
+	}
+	if strings.Contains(scan.log, "media.variants.select=") {
+		t.Errorf("the cap excluded nothing, so no group may be reported; got: %q", scan.log)
 	}
 }
 
@@ -315,16 +384,24 @@ func TestVariantCap879_ScanWithGroupingOffIsUnchanged(t *testing.T) {
 	root := t.TempDir()
 	writeRenditions879(t, root)
 
-	st, logged := runScan879(t, root, 1, false)
+	scan := runScan879(t, root, 1, false)
 
 	for _, rel := range []string{"ep1_1080p.mp4", "ep1_720p.mp4", "ep1_480p.mp4"} {
-		assertSkipReason(t, context.Background(), st, rel, "skipped", model.SkipReasonSizeCap)
+		assertSkipReason(t, context.Background(), scan.store, rel, "skipped", model.SkipReasonSizeCap)
+		// Each drop is still counted, logged and reported to the manifest.
+		logLine879(t, scan.log, "discovery: skipping "+rel, "ingest.max_file_mb")
+		if codes := manifestCodes879(scan.manifest, rel); len(codes) != 1 || codes[0] != "FILE_TOO_LARGE" {
+			t.Errorf("%s manifest records = %v, want one FILE_TOO_LARGE", rel, codes)
+		}
 	}
-	if _, err := st.GetDocumentByPath(context.Background(), "ep1_360p.mp4"); err != nil {
+	if scan.counters.Skipped < 3 {
+		t.Errorf("skipped = %d, want at least the 3 over-cap renditions", scan.counters.Skipped)
+	}
+	if _, err := scan.store.GetDocumentByPath(context.Background(), "ep1_360p.mp4"); err != nil {
 		t.Fatalf("the rendition under the cap must still be ingested: %v", err)
 	}
-	if strings.Contains(logged, "media.variants.select=") {
-		t.Errorf("grouping is off, so no group may be reported; got: %q", logged)
+	if strings.Contains(scan.log, "media.variants.select=") {
+		t.Errorf("grouping is off, so no group may be reported; got: %q", scan.log)
 	}
 }
 
@@ -341,15 +418,23 @@ func TestVariantCap879_ScanSkipsTheWholeGroupWhenNothingFits(t *testing.T) {
 		writeCorpusFile(t, root, rel, bytes.Repeat([]byte("v"), size))
 	}
 
-	st, logged := runScan879(t, root, 1, true)
+	scan := runScan879(t, root, 1, true)
 
-	assertSkipReason(t, context.Background(), st, "ep1_1080p.mp4", "skipped", model.SkipReasonSizeCap)
+	assertSkipReason(t, context.Background(), scan.store, "ep1_1080p.mp4", "skipped", model.SkipReasonSizeCap)
 	for _, rel := range []string{"ep1_720p.mp4", "ep1_480p.mp4"} {
-		assertNoRow879(t, st, rel)
+		assertNoRow879(t, scan.store, rel)
+		if codes := manifestCodes879(scan.manifest, rel); len(codes) != 0 {
+			t.Errorf("%s has manifest records %v, want none (grouping discarded it)", rel, codes)
+		}
 	}
-	if !strings.Contains(logged, "every rendition of ep1_1080p.mp4") {
-		t.Errorf("discovery log does not report the whole group as excluded; got: %q", logged)
+	// One media out of the corpus is one skip, one manifest entry and one line.
+	if scan.counters.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1: the media is one coverage gap, not three", scan.counters.Skipped)
 	}
+	if codes := manifestCodes879(scan.manifest, "ep1_1080p.mp4"); len(codes) != 1 || codes[0] != "FILE_TOO_LARGE" {
+		t.Errorf("ep1_1080p.mp4 manifest records = %v, want one FILE_TOO_LARGE", codes)
+	}
+	logLine879(t, scan.log, "no rendition of this media fits", "ep1_1080p.mp4", "3 renditions")
 }
 
 // TestVariantCap879_UpgradeTombstonesTheStrayRows covers the upgrade a deployment
@@ -364,7 +449,7 @@ func TestVariantCap879_UpgradeTombstonesTheStrayRows(t *testing.T) {
 
 	// Stand in for the old ordering: judged one by one, the three large
 	// renditions each get a size_cap row.
-	st, _ := runScan879(t, root, 1, false)
+	st := runScan879(t, root, 1, false).store
 	for _, rel := range []string{"ep1_1080p.mp4", "ep1_720p.mp4", "ep1_480p.mp4"} {
 		assertSkipReason(t, ctx, st, rel, "skipped", model.SkipReasonSizeCap)
 	}
@@ -399,5 +484,58 @@ func TestVariantCap879_UpgradeTombstonesTheStrayRows(t *testing.T) {
 	if stats.SkipSummary != nil && stats.SkipSummary.Categories[model.SkipReasonSizeCap] != 0 {
 		t.Errorf("size_cap skips = %d, want 0 after the stray rows are retired",
 			stats.SkipSummary.Categories[model.SkipReasonSizeCap])
+	}
+}
+
+// TestVariantCap879_WorseOverCapSiblingIsSilent pins the quiet half of the rule.
+// The best rendition fits the cap and a WORSE rendition does not. Grouping would
+// discard the worse one anyway, so it leaves no row, no count and no line: the
+// cap changed nothing that an operator has to act on.
+func TestVariantCap879_WorseOverCapSiblingIsSilent(t *testing.T) {
+	t.Parallel()
+	fits := []ingest.DiscoveredFile{df("ep1_1080p.mp4", 500)}
+	over := []ingest.OversizeCandidate{oc("ep1_480p.mp4", 65000)}
+
+	got := ingest.SelectMediaVariantsWithCap(fits, over, groupBest())
+
+	if !slices.Equal(relPaths(got.Files), []string{"ep1_1080p.mp4"}) {
+		t.Fatalf("expected the best rendition, got %v", relPaths(got.Files))
+	}
+	if len(got.Oversize) != 0 {
+		t.Errorf("the worse over-cap rendition must leave no size_cap row, got %v", oversizePaths(got.Oversize))
+	}
+	if len(got.Interactions) != 0 {
+		t.Errorf("the cap did not change the choice, so nothing must be reported: %+v", got.Interactions)
+	}
+}
+
+// TestVariantCap879_InteractionsOrderedByPath pins the reporting order. The
+// groups come out of a map and their candidates arrive in two separate lists, so
+// the order needs a rule of its own: the rel_path each group ends on.
+func TestVariantCap879_InteractionsOrderedByPath(t *testing.T) {
+	t.Parallel()
+	fits := []ingest.DiscoveredFile{
+		df("b/ep_360p.mp4", 500),
+		df("a/ep_360p.mp4", 500),
+	}
+	over := []ingest.OversizeCandidate{
+		oc("b/ep_1080p.mp4", 65000),
+		oc("a/ep_1080p.mp4", 65000),
+		oc("c/ep_1080p.mp4", 65000),
+		oc("c/ep_720p.mp4", 40000),
+	}
+
+	got := ingest.SelectMediaVariantsWithCap(fits, over, groupBest())
+
+	want := []string{"a/ep_360p.mp4", "b/ep_360p.mp4", "c/ep_1080p.mp4"}
+	reported := make([]string, 0, len(got.Interactions))
+	for _, interaction := range got.Interactions {
+		reported = append(reported, interaction.Canonical)
+	}
+	if !slices.Equal(reported, want) {
+		t.Fatalf("reported groups = %v, want %v", reported, want)
+	}
+	if got.Interactions[2].Indexed {
+		t.Errorf("the c/ group fits nothing, so it must not be reported as indexed: %+v", got.Interactions[2])
 	}
 }
