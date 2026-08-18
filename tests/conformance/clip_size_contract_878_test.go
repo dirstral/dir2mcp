@@ -98,20 +98,15 @@ func TestOpenMediaClip_CanonicalOutputCannotNameWhatItServed_878(t *testing.T) {
 		"data", "doc_type", "duration_ms", "expires_unix",
 		"mime_type", "rel_path", "return", "size_bytes", "span", "uri",
 	}
+	// Read the list above as the finding: no member of it can report a served
+	// rendition. mime_type is the only field that describes the bytes, and it
+	// names the container, not the fidelity. A 360p preview and a 1080p source
+	// cut are both "video/mp4", so it cannot carry the distinction.
 	got := schemaPropertyNames(t, output, "canonical open_media_clip output")
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("canonical open_media_clip output properties = %v, want %v.\n"+
 			"If a field naming the served rendition was added by a merged dirstral-spec PR, this gate is OPEN: "+
 			"emit it from internal/mcp and update this test (#878).", got, want)
-	}
-	// mime_type is the only field that describes the bytes, and it names the
-	// container, not the fidelity. A 360p preview and a 1080p source cut are
-	// both "video/mp4", so it cannot carry the distinction.
-	for _, name := range got {
-		switch name {
-		case "quality", "rendition", "variant", "preview", "max_bytes", "bitrate":
-			t.Fatalf("canonical open_media_clip output declares %q: the #878 gate is open, wire it up", name)
-		}
 	}
 }
 

@@ -180,7 +180,9 @@ func encodePreview(t *testing.T, src, dst string) {
 // Content: the clip's first frame must be the source frame at clipSpanStartMS,
 // and its last frame the source frame at clipSpanEndMS. Length alone would
 // accept a clip of the right size cut from the wrong moment, which is the
-// regression a smaller-clip fix could introduce.
+// regression a smaller-clip fix could introduce. The content check can be exact
+// here because the fixture is all-intra: every frame is a keyframe, so the copy
+// has no keyframe drift to absorb.
 func assertCoversSpan(t *testing.T, ref spanReference, path, label string) {
 	t.Helper()
 	got, err := avutil.Duration(context.Background(), path)
