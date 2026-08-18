@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"testing"
 )
@@ -135,6 +136,47 @@ func TestOpenMediaClip_ServedInputMatchesTheCanonicalContract_878(t *testing.T) 
 		t.Fatalf("served open_media_clip input properties = %v, canonical = %v", got, want)
 	}
 }
+
+// TestOpenMediaClip_ServedOutputMatchesTheCanonicalContract_878 is the output
+// half of the same guard: the code must not open the #878 gate by declaring a
+// field the canonical schema does not have.
+//
+// It carries ONE known exception, `reference_fallback`, and pins it exactly.
+// The server declares and emits that field; the canonical output object does
+// not declare it and closes itself with additionalProperties:false, so a
+// canonically validating client rejects every return=reference response. That
+// is the #850 defect class in a smaller blast radius, it is NOT part of #878,
+// and it has its own issue: dir2mcp #884. The allowlist is deliberate, so this
+// test still fails on any NEW undeclared field, and fails again when #884 lands
+// and the exception must be deleted.
+func TestOpenMediaClip_ServedOutputMatchesTheCanonicalContract_878(t *testing.T) {
+	t.Parallel()
+	schemas := toolsListSchemas(t)
+	raw, ok := schemas["dir2mcp_open_media_clip"]
+	if !ok {
+		t.Fatal("tools/list advertises no dir2mcp_open_media_clip")
+	}
+	served, ok := raw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("served open_media_clip outputSchema is not an object: %#v", raw)
+	}
+	assertClosedObject(t, served, "served open_media_clip outputSchema")
+
+	want := schemaPropertyNames(t, canonicalOpenMediaClipSection(t, "output"), "canonical open_media_clip output")
+	want = append(want, knownServedClipOutputDrift...)
+	sort.Strings(want)
+
+	got := schemaPropertyNames(t, served, "served open_media_clip outputSchema")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("served open_media_clip output properties = %v, want canonical plus the known #884 drift %v.\n"+
+			"A new name here is undeclared drift: a canonically validating client rejects the whole call (#850). "+
+			"A missing name means #884 landed: delete the exception in knownServedClipOutputDrift.", got, want)
+	}
+}
+
+// knownServedClipOutputDrift lists the served output properties the canonical
+// schema does not declare. It must only ever shrink. See dir2mcp #884.
+var knownServedClipOutputDrift = []string{"reference_fallback"}
 
 // TestOpenMediaClip_RejectsASizeArgument_878 pins the gate on observable
 // behavior, not only on a schema literal. A caller who has read #878 and tries

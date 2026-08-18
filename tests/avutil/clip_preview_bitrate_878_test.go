@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +128,64 @@ func meanLuma(t *testing.T, path string, offsetMS int) float64 {
 		sum += int(pixel)
 	}
 	return float64(sum) / float64(len(pixels))
+}
+
+// videoCodec returns the codec name of a file's first video stream.
+func videoCodec(t *testing.T, path string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=codec_name",
+		"-of", "default=nw=1:nk=1",
+		path,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("probe the codec of %s: %v", filepath.Base(path), err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// byteRate returns a file's mean bytes per second: its size over its duration.
+// It is derived rather than read from the container, because a container may
+// omit the bitrate tag while the file on the wire still costs what it costs.
+func byteRate(t *testing.T, path string, sizeBytes int) float64 {
+	t.Helper()
+	duration, err := avutil.Duration(context.Background(), path)
+	if err != nil {
+		t.Fatalf("%s: Duration: %v", filepath.Base(path), err)
+	}
+	if duration <= 0 {
+		t.Fatalf("%s: duration = %v, want > 0", filepath.Base(path), duration)
+	}
+	return float64(sizeBytes) / duration.Seconds()
+}
+
+// assertCutKeepsSourceFidelity pins the CURRENT default: ExtractSegment stream
+// copies, so the clip keeps the source codec and costs the source bitrate.
+//
+// This is the baseline half of the measurement, and it is the guard the size
+// comparison alone does not give. A future re-encode inside ExtractSegment could
+// still leave the preview three times smaller and pass the size assertion while
+// silently downgrading every caller that asked for nothing. That downgrade is
+// exactly what #878 must NOT do without a spec change, so it is asserted here.
+func assertCutKeepsSourceFidelity(t *testing.T, srcPath string, srcSize int, copyPath string, copySize int) {
+	t.Helper()
+	srcCodec := videoCodec(t, srcPath)
+	copyCodec := videoCodec(t, copyPath)
+	if copyCodec != srcCodec {
+		t.Fatalf("stream copy re-encoded: codec = %q, source = %q. open_media_clip must keep source fidelity by default (#878)", copyCodec, srcCodec)
+	}
+
+	srcRate := byteRate(t, srcPath, srcSize)
+	copyRate := byteRate(t, copyPath, copySize)
+	if math.Abs(copyRate-srcRate) > 0.25*srcRate {
+		t.Fatalf("stream copy byte rate = %.0f B/s, source = %.0f B/s: the cut no longer costs the source bitrate, so this measurement no longer measures #878",
+			copyRate, srcRate)
+	}
 }
 
 // spanReference holds the source luma at the two ends of the requested span,
@@ -238,6 +297,15 @@ func TestClipPreviewIsFarSmallerThanTheSourceBitrateCut_878(t *testing.T) {
 
 	t.Logf("stream copy = %d bytes, preview = %d bytes, ratio = %.1fx",
 		len(copied), len(preview), float64(len(copied))/float64(len(preview)))
+
+	// The baseline must still BE the baseline: same codec, same bitrate as the
+	// source. Without this the size comparison below would also pass for a
+	// server that had quietly started re-encoding every clip.
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	assertCutKeepsSourceFidelity(t, src, int(srcInfo.Size()), copyPath, len(copied))
 
 	// Deliberately loose: the point is an order of magnitude, not an exact
 	// encoder output, which varies by ffmpeg build.
