@@ -218,13 +218,42 @@ func (s *Service) sidecarsEnabled() bool {
 	return !s.cfg.MediaSidecarsDisabled
 }
 
+// mediaVariantsGrouped reports whether the operator declared that media files
+// sharing a normalized name are renditions of ONE work (`media.variants.group`,
+// spec §8.6.5). It is false by default. It reads the same resolved options that
+// discovery uses (MediaVariantOptionsFromConfig), so grouping and sidecar
+// binding can never disagree about the flag.
+//
+// findSidecars gates its normalized-base pass on this flag. The normalized base
+// is §8.6.5's own concept, so binding by it needs §8.6.5's switch: without the
+// declaration, "song.en.vtt" may belong to a different work than "song_128k.mp3"
+// and binding it would silently give that media someone else's transcript AND
+// suppress its STT.
+func (s *Service) mediaVariantsGrouped() bool {
+	return MediaVariantOptionsFromConfig(s.cfg).Group
+}
+
 // findSidecars returns the subtitle sidecars sitting next to the media document,
 // resolved through the corpus FS so it works for any backend. A sidecar matches
-// when its path is "<media-without-ext>.<ext>" (undifferentiated) or
-// "<media-without-ext>.<lang>.<ext>" (per-language). Results are sorted by
-// (language, extension) for deterministic selection. When the scan-built index
-// is unavailable (e.g. a direct GenerateTranscriptRepresentation call in tests),
-// it falls back to walking the corpus once.
+// when its path is "<base>.<ext>" (undifferentiated) or "<base>.<lang>.<ext>"
+// (per-language), for either of two candidate bases, in this precedence order:
+//
+//  1. the EXACT base, the media path without its extension. This is the only
+//     base that ever bound, so every existing binding is unchanged.
+//  2. the NORMALIZED variant base (§8.6.5 normalized name), the media path with
+//     its rendition markers stripped. It binds a sidecar that sits on the bare
+//     stem of a rendition-suffixed media file ("<sha>.ru.vtt" next to
+//     "<sha>_1080p.mp4"), which §8.6.4 requires to be ingested as the transcript
+//     instead of running STT (issue #876). This pass runs ONLY when the operator
+//     set `media.variants.group: true` (§8.6.5), the declaration that files
+//     sharing a normalized name are renditions of one work. It is off by
+//     default, so a corpus that never opted in binds exactly as it did before.
+//
+// The two precedence rules in mergeSidecarCandidates keep pass 2 from
+// overriding or duplicating pass 1. Results are sorted by (language, extension,
+// rel_path) for deterministic selection. When the scan-built index is
+// unavailable (e.g. a direct GenerateTranscriptRepresentation call in tests), it
+// falls back to walking the corpus once.
 func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidecarFile {
 	index := s.sidecarIndexOrWalk(ctx)
 	if len(index) == 0 {
@@ -236,59 +265,169 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 	// "clip.mp3.vtt" for media "clip.mp3" — is the media filename plus a subtitle
 	// extension, not a language-tagged sidecar, so it must be rejected.
 	mediaExt := strings.TrimPrefix(strings.ToLower(path.Ext(mediaRelPath)), ".")
-	var out []sidecarFile
+	// The normalized candidate is opt-in: no `media.variants.group: true`, no
+	// inference (§8.6.5). variantBase stays "" and the loop below runs the exact
+	// pass alone, which is byte-for-byte the pre-#876 behaviour.
+	variantBase := ""
+	if s.mediaVariantsGrouped() {
+		variantBase = variantSidecarBase(mediaRelPath, base)
+	}
+	var exact, variant []sidecarFile
 	for relPath, mtime := range index {
 		ext := strings.ToLower(path.Ext(relPath))
 		if !isSidecarExt(ext) {
 			continue
 		}
-		// stem is the sidecar path without its subtitle extension. tail is the
-		// remainder after the media base. Only the documented shapes bind:
-		//   "<base><ext>"        → tail == ""        (no language)
-		//   "<base>.<lang><ext>" → tail == ".<lang>" (single token, no extra dots)
-		// Anything else — an extra dotted segment ("clip.notes.en.vtt") or the
-		// media extension reused as the token ("clip.mp3.vtt") for media
-		// "clip.mp3" — is NOT this media's sidecar and is skipped, so it cannot
-		// wrongly suppress STT.
+		// stem is the sidecar path without its subtitle extension.
 		stem := strings.TrimSuffix(relPath, ext)
-		if !strings.HasPrefix(stem, base) {
+		if lang, ok := sidecarLangForBase(stem, base, mediaExt); ok {
+			exact = append(exact, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
 			continue
 		}
-		tail := strings.TrimPrefix(stem, base)
-		lang := ""
-		switch {
-		case tail == "":
-			// undifferentiated sidecar, no language tag
-		case strings.HasPrefix(tail, ".") && !strings.Contains(tail[1:], "."):
-			lang = strings.TrimSpace(tail[1:])
-			if lang == "" {
-				continue
-			}
-			if mediaExt != "" && strings.EqualFold(lang, mediaExt) {
-				// e.g. "clip.mp3.vtt" for media "clip.mp3": the token is the
-				// media's own extension, not a language tag.
-				continue
-			}
-			if !isKnownLanguageTag(lang) {
-				// The single tail token is not a real language tag but a stray
-				// filename fragment — "clip.HD.vtt" (token "HD"), "clip.2024.vtt"
-				// (token "2024"), or a cross-media extension "clip.mp4.vtt" bound to
-				// "clip.mp3" (token "mp4"). Binding such a token would record a bogus
-				// language ("HD"/"2024"/"mp4") AND suppress real STT, so it is not
-				// this media's sidecar and is skipped (issue #431 §8.6.4).
-				continue
-			}
-		default:
+		if variantBase == "" {
 			continue
 		}
-		out = append(out, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
+		// The normalized base is lower-cased (it is a §8.6.5 grouping key), so the
+		// stem is lower-cased for this comparison only. The recorded language token
+		// is therefore lower-case too, which §9.5 matches case-insensitively.
+		if lang, ok := sidecarLangForBase(strings.ToLower(stem), variantBase, mediaExt); ok {
+			variant = append(variant, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
+		}
 	}
+	out := mergeSidecarCandidates(exact, variant)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Lang != out[j].Lang {
 			return out[i].Lang < out[j].Lang
 		}
-		return out[i].Ext < out[j].Ext
+		if out[i].Ext != out[j].Ext {
+			return out[i].Ext < out[j].Ext
+		}
+		return out[i].RelPath < out[j].RelPath
 	})
+	return out
+}
+
+// sidecarLangForBase reports whether a sidecar stem (its path without the
+// subtitle extension) binds to the given media base, and returns the language
+// token it declares. tail is the remainder after the base; only the two
+// documented §8.6.4 shapes bind:
+//
+//	"<base><ext>"        → tail == ""        (no language)
+//	"<base>.<lang><ext>" → tail == ".<lang>" (single token, no extra dots)
+//
+// Anything else — an extra dotted segment ("clip.notes.en.vtt") or the media
+// extension reused as the token ("clip.mp3.vtt") for media "clip.mp3" — is NOT
+// this media's sidecar and is rejected, so it cannot wrongly suppress STT. Both
+// candidate bases run through this one function, so every guard below applies to
+// the normalized base exactly as it applies to the exact base.
+func sidecarLangForBase(stem, base, mediaExt string) (string, bool) {
+	if !strings.HasPrefix(stem, base) {
+		return "", false
+	}
+	tail := strings.TrimPrefix(stem, base)
+	switch {
+	case tail == "":
+		// undifferentiated sidecar, no language tag
+		return "", true
+	case strings.HasPrefix(tail, ".") && !strings.Contains(tail[1:], "."):
+		lang := strings.TrimSpace(tail[1:])
+		if lang == "" {
+			return "", false
+		}
+		if mediaExt != "" && strings.EqualFold(lang, mediaExt) {
+			// e.g. "clip.mp3.vtt" for media "clip.mp3": the token is the media's
+			// own extension, not a language tag.
+			return "", false
+		}
+		if !isKnownLanguageTag(lang) {
+			// The single tail token is not a real language tag but a stray filename
+			// fragment — "clip.HD.vtt" (token "HD"), "clip.2024.vtt" (token "2024"),
+			// or a cross-media extension "clip.mp4.vtt" bound to "clip.mp3" (token
+			// "mp4"). Binding such a token would record a bogus language
+			// ("HD"/"2024"/"mp4") AND suppress real STT, so it is not this media's
+			// sidecar and is rejected (issue #431 §8.6.4).
+			return "", false
+		}
+		return lang, true
+	default:
+		return "", false
+	}
+}
+
+// variantSidecarBase returns the second candidate sidecar base for a media path:
+// its §8.6.5 normalized name (rendition markers stripped) without the extension.
+// It returns "" when there is no usable second candidate, so the caller runs the
+// exact pass alone.
+func variantSidecarBase(mediaRelPath, exactBase string) string {
+	// Only a media rendition has a rendition marker to strip; §8.6.5 grouping is
+	// scoped to the same extension set.
+	if !isMediaVariantFile(mediaRelPath) {
+		return ""
+	}
+	normalized := stripExt(normalizeVariantName(mediaRelPath))
+	// The stem collapsed entirely into rendition markers ("1080p.mp4"), leaving an
+	// empty base or a bare directory. Such a base is a prefix of every sidecar in
+	// the corpus (or in that directory), so it is refused rather than bound.
+	if normalized == "" || strings.HasSuffix(normalized, "/") {
+		return ""
+	}
+	// No marker was stripped: the normalized base differs from the exact base only
+	// in case (normalizeVariantName lower-cases its key). The exact pass already
+	// covers it, and a case-only second pass would bind a genuinely different
+	// file's sidecar on a case-sensitive filesystem.
+	if strings.EqualFold(normalized, exactBase) {
+		return ""
+	}
+	return normalized
+}
+
+// mergeSidecarCandidates combines the exact-base and normalized-base matches
+// under two precedence rules. Both exist to stop the inferred (normalized) base
+// from overriding, or duplicating, what the exact base already states:
+//
+//  1. An exact-base sidecar WINS for its language: a normalized-base sidecar of
+//     the same language is dropped. Without this, "<sha>_1080p.en.vtt" and
+//     "<sha>.en.vtt" would both feed the "en" transcript and duplicate its cues.
+//  2. An UNTAGGED normalized-base sidecar ("<sha>.ttml", no language token)
+//     binds ONLY when no language-tagged sidecar binds to this media. The exact
+//     base is an explicit statement of intent, but a normalized base is
+//     inferred, so an untagged file found there declares neither which work nor
+//     which language it belongs to. A TTML additionally carries its own xml:lang
+//     internally, so binding it beside an authored "<sha>.ru.vtt" would silently
+//     append a second copy of the same language's cues. When it is the only
+//     candidate it still binds, so a lone untagged sidecar is never lost.
+//
+// Rule 2 applies to the normalized pass only; an exact-base untagged sidecar is
+// unaffected. An operator who wants a TTML ingested next to per-language VTTs
+// names it "<sha>.<lang>.ttml", which binds under rule 1.
+func mergeSidecarCandidates(exact, variant []sidecarFile) []sidecarFile {
+	if len(variant) == 0 {
+		return exact
+	}
+	exactLangs := make(map[string]struct{}, len(exact))
+	tagged := false
+	for _, sc := range exact {
+		exactLangs[strings.ToLower(sc.Lang)] = struct{}{}
+		if sc.Lang != "" {
+			tagged = true
+		}
+	}
+	for _, sc := range variant {
+		if sc.Lang != "" {
+			tagged = true
+		}
+	}
+	out := make([]sidecarFile, 0, len(exact)+len(variant))
+	out = append(out, exact...)
+	for _, sc := range variant {
+		if _, ok := exactLangs[strings.ToLower(sc.Lang)]; ok {
+			continue // rule 1: the exact base already supplies this language
+		}
+		if sc.Lang == "" && tagged {
+			continue // rule 2: an untagged inferred sidecar yields to a tagged one
+		}
+		out = append(out, sc)
+	}
 	return out
 }
 
