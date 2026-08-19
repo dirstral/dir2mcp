@@ -4247,14 +4247,17 @@ func (s *Service) degradeIncompleteRecognition(
 	secretPatterns []*regexp.Regexp,
 	alreadyCounted bool,
 ) bool {
-	s.getLogger().Printf("recognition incomplete for %s: %v; keeping the representations already indexed "+
+	// Redact once, then use the same message for both sinks. The recognizer contract
+	// does not promise a secret-free error, so the log must not carry the raw one.
+	message := RedactSecretsInMessage(cause.Error(), secretPatterns)
+	s.getLogger().Printf("recognition incomplete for %s: %s; keeping the representations already indexed "+
 		"and retrying on the next scan (raise recognize.timeout / recognize.timeout_per_media_second)",
-		doc.RelPath, cause)
+		doc.RelPath, message)
 	s.recognizeIncompleteThisDoc = true
 	if !alreadyCounted {
 		s.addErrors(1)
 	}
-	s.markActiveErrored(manifestErrRecognizeFailed, RedactSecretsInMessage(cause.Error(), secretPatterns))
+	s.markActiveErrored(manifestErrRecognizeFailed, message)
 	return true
 }
 

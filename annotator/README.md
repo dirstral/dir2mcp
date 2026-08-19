@@ -327,10 +327,11 @@ recognize_timeout_per_media_second: 2.0   # wall-clock seconds per second of med
 
 With those defaults a 3h24m broadcast gets 6h48m. Raise the ratio when the
 cascade is wider than the host can keep up with. A call that runs out of its
-budget does not fail the document: the annotations and transcripts already
-indexed stay searchable, the run reports the error, and the next scan retries
-that file. See the README section "Recognition: how long one media file may
-take".
+budget does not fail a file that already carries indexed content: its annotations,
+transcripts, and media chunks stay searchable, the run reports the error, and the
+next scan retries that file. A file with nothing indexed yet has no searchable
+content to protect, so it is still recorded as an error. See the README section
+"Recognition: how long one media file may take".
 
 ### Configuration files
 

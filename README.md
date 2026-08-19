@@ -904,19 +904,26 @@ Rules:
   alone.
 - A negative value for either key is `CONFIG_INVALID` at startup.
 
-**When recognition runs out of that budget, the document is NOT failed.** Whatever
-the pipeline already indexed for it (a subtitle transcript, a derived transcript,
-media chunks, annotations from an earlier run) stays searchable, a warning names
-the file and the budget, the run's error count includes it, and the document's
-done marker is withheld so the next scan retries recognition. A document marked
-`status="error"` hides **all** of its chunks from search, so failing it on a
-timeout would empty a corpus that was answering questions a minute earlier.
+**When recognition runs out of that budget, a document that already has indexed
+content is NOT failed.** Whatever the pipeline produced for it (a subtitle
+transcript, a derived transcript, media chunks, annotations from an earlier run)
+stays searchable, a warning names the file and the budget, the run's error count
+includes it, and the document's done marker is withheld so the next scan retries
+recognition. A document marked `status="error"` hides **all** of its chunks from
+search, so failing it on a timeout would empty a corpus that was answering
+questions a minute earlier.
+
+A media file with **nothing** indexed is the exception: it has no chunks that the
+stamp could hide and it genuinely is not searchable, so it is still recorded as
+`status="error"` and retried. That keeps the gap durable and visible in
+`dir2mcp_stats` rather than reported as an indexed document that answers nothing.
 
 A backend that is unreachable, misconfigured, or answers with an error status is a
 different case and still fails the document loudly. That is deliberate: a typo'd
-`base_url` must not quietly index nothing. Only an expired deadline degrades,
-because an expired deadline is evidence the backend accepted the call and was
-working.
+`base_url` must not quietly index nothing. Only an expired deadline degrades, and
+only when dir2mcp cannot prove the request never reached the backend (a route that
+drops packets also hangs until the clock runs out, and that is a misconfiguration,
+not a slow recognizer).
 
 ### Fully local / no-egress setup
 

@@ -510,3 +510,84 @@ func TestRecognizeServeClient_FallbackDeadlineDoesNotBreakTheCall(t *testing.T) 
 		t.Fatalf("recognizer identity not decoded: %+v", res)
 	}
 }
+
+// TestRecognizeTimeout_UnreachableBackendIsNotATimeout is the connection-stage
+// half of the classification. A refused port fails fast, but a route that DROPS
+// packets hangs until the clock runs out, so an unreachable or firewalled
+// base_url can present as a deadline and would otherwise be degraded like a slow
+// recognizer. The serve client reports when it can prove the request never
+// reached the backend, and that keeps the hard path where a misconfiguration
+// belongs.
+//
+// The address is RFC 5737 TEST-NET-1, reserved for documentation and never
+// routable. The assertion holds whichever way the host behaves: a dropped route
+// expires the deadline, an immediate unreachable error returns sooner, and in both
+// cases the request was never delivered.
+func TestRecognizeTimeout_UnreachableBackendIsNotATimeout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = t.TempDir()
+	cfg.RecognizeTimeout = 150 * time.Millisecond
+	cfg.RecognizeTimeoutPerMediaSecond = 0
+
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetRecognizer(ingest.NewRecognizeServeClient("http://192.0.2.1:9"))
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, os.ErrNotExist }
+
+	doc := model.Document{DocID: 1, RelPath: "game7.mp4", DocType: "video"}
+	err := svc.GenerateRecognitionRepresentation(context.Background(), doc)
+	if err == nil {
+		t.Fatal("expected an unreachable backend to be reported")
+	}
+	if errors.Is(err, ingest.ErrRecognizeTimeout) {
+		t.Fatalf("err = %v, must NOT be a recognition timeout: the request never reached a backend, "+
+			"which is the misconfiguration hard propagation exists to catch", err)
+	}
+	if !errors.Is(err, ingest.ErrRecognitionProviderFailure) {
+		t.Fatalf("err = %v, want RECOGNIZE_FAILED classification", err)
+	}
+}
+
+// TestRecognizeTimeout_DeliveredRequestThatStallsIsATimeout is the positive side of
+// the delivery evidence, through the real serve client. The backend accepts the
+// connection and the whole request, then answers nothing: that is a working
+// backend that ran out of wall clock, so it MUST classify as a recognition
+// timeout and not as a broken binding.
+func TestRecognizeTimeout_DeliveredRequestThatStallsIsATimeout(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = t.TempDir()
+	cfg.RecognizeTimeout = 60 * time.Millisecond
+	cfg.RecognizeTimeoutPerMediaSecond = 0
+
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetRecognizer(ingest.NewRecognizeServeClient(srv.URL))
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, os.ErrNotExist }
+
+	doc := model.Document{DocID: 1, RelPath: "game7.mp4", DocType: "video"}
+	err := svc.GenerateRecognitionRepresentation(context.Background(), doc)
+	if err == nil {
+		t.Fatal("expected the expired budget to be reported")
+	}
+	if !errors.Is(err, ingest.ErrRecognizeTimeout) {
+		t.Fatalf("err = %v, want a recognition timeout: the backend took the whole request "+
+			"and was still working when the budget ran out", err)
+	}
+}

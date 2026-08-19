@@ -9,10 +9,12 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptrace"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -57,6 +59,17 @@ const (
 //     the document from search, see store.liveParentDocument), which is how a
 //     3h24m broadcast that had 892 indexed annotations ended up serving nothing.
 var ErrRecognizeTimeout = fmt.Errorf("%w: recognition deadline exceeded", ErrRecognitionProviderFailure)
+
+// errRecognizeUndelivered marks a serve-client failure that happened BEFORE the
+// request reached the backend: DNS, dial, TLS handshake, or writing the request
+// body. It is what keeps a blackholed or firewalled `base_url` on the hard path
+// even when the failure presents as a deadline (a dropped-packet route hangs until
+// the clock runs out, so it looks exactly like a slow recognizer otherwise).
+//
+// The polarity is deliberate: this marks what the client can PROVE did not arrive.
+// A recognizer that cannot report its transport phase (any other provider, a test
+// double) simply never carries the marker, and the general rule applies to it.
+var errRecognizeUndelivered = errors.New("recognize request never reached the backend")
 
 // RecognizeCallTimeout is the exported counterpart of recognizeCallTimeout so the
 // tests/ tree can pin the arithmetic of the bound without reading the code.
@@ -167,6 +180,21 @@ func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (m
 	if err != nil {
 		return model.RecognizeResult{}, fmt.Errorf("marshal recognize request: %w", err)
 	}
+	// Record whether the request ever reached the backend. WroteRequest fires once
+	// the whole request (headers and body) is on the wire, so it proves the name
+	// resolved, the connection came up, and the backend took the bytes. Without this
+	// evidence a hung dial to a blackholed address is indistinguishable from a
+	// recognizer that is genuinely working, and the ingest service would degrade a
+	// misconfigured base_url instead of failing it. The callback runs on the
+	// transport's goroutine, hence the atomic.
+	var delivered atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				delivered.Store(true)
+			}
+		},
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/recognize", bytes.NewReader(payload))
 	if err != nil {
 		return model.RecognizeResult{}, fmt.Errorf("build recognize request: %w", err)
@@ -175,6 +203,10 @@ func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (m
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if !delivered.Load() {
+			return model.RecognizeResult{}, fmt.Errorf("%w: recognize backend request: %w",
+				errRecognizeUndelivered, err)
+		}
 		return model.RecognizeResult{}, fmt.Errorf("recognize backend request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -541,10 +573,18 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 		// Our own budget expired while the PARENT context is still live: the backend
 		// was reachable and working, it just did not finish in the wall clock it was
 		// given. Tag it so the media pipeline degrades instead of failing the whole
-		// document (#894). The parent-context check matters: a cancelled or expired
-		// parent means the DAEMON is going away (shutdown, an outer deadline), which
-		// is not evidence about the backend, so that keeps the hard path below.
-		if callCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+		// document (#894). Two guards narrow this to that case only:
+		//
+		//   - The PARENT context must still be live. A cancelled or expired parent
+		//     means the DAEMON is going away (shutdown, an outer deadline), which is
+		//     not evidence about the backend.
+		//   - The request must not be known-undelivered. A route that drops packets
+		//     hangs until the clock runs out, so an unreachable or firewalled
+		//     base_url can also present as a deadline; the serve client reports when
+		//     it can prove the request never reached the backend, and that stays on
+		//     the hard path where a misconfiguration belongs.
+		if callCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil &&
+			!errors.Is(err, errRecognizeUndelivered) {
 			return false, fmt.Errorf("%w: recognize %s after %s: %w", ErrRecognizeTimeout, doc.RelPath, budget, err)
 		}
 		// Tag with the provider-failure sentinel so a transient recognize-backend
