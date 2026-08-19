@@ -349,8 +349,12 @@ func TestVariantCap879_ScanIndexesTheRenditionItReports(t *testing.T) {
 		}
 	}
 
-	// The choice must be explicit, not accidental, and it must be ONE line.
-	logLine879(t, scan.log, "media.variants.select=best", "ep1_360p.mp4", "ingest.max_file_mb")
+	// The choice must be explicit, not accidental, and it must be ONE line. The
+	// excluded count is asserted too: README promises discovery reports how many
+	// renditions the cap kept out, and without this the count could be dropped
+	// from the line and this test would still pass.
+	logLine879(t, scan.log, "media.variants.select=best", "ep1_360p.mp4",
+		"3 other rendition(s)", "ingest.max_file_mb")
 }
 
 // TestVariantCap879_ScanKeepsTheBestRenditionWhenAllFit is the regression guard
