@@ -76,7 +76,11 @@ func recognizeCallTimeout(base time.Duration, perMediaSecond float64, media time
 	if base <= 0 {
 		base = config.DefaultRecognizeTimeout
 	}
-	if perMediaSecond <= 0 || media <= 0 {
+	// NaN fails every comparison, so it must be rejected explicitly: without this
+	// the ratio would reach a float-to-int conversion whose result Go leaves
+	// implementation-defined. The config parser already rejects NaN, and this keeps
+	// a programmatic caller of the exported wrapper on the same footing.
+	if math.IsNaN(perMediaSecond) || perMediaSecond <= 0 || media <= 0 {
 		return base
 	}
 	scaled := float64(media) * perMediaSecond

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"math"
+
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -85,6 +87,9 @@ func TestRecognizeCallTimeout_Arithmetic(t *testing.T) {
 		{"negative base falls back", -5 * time.Minute, 0, 0, config.DefaultRecognizeTimeout},
 		// A ratio of 1 is "real time": one wall-clock second per second of media.
 		{"real time ratio", 0, 1, 4 * hour, 4 * hour},
+		// NaN fails every comparison, so it must be rejected explicitly rather than
+		// reaching a float-to-int conversion Go leaves implementation-defined.
+		{"nan ratio", 30 * time.Minute, math.NaN(), 4 * hour, 30 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,9 +107,12 @@ func TestRecognizeCallTimeout_Arithmetic(t *testing.T) {
 // worst possible failure of a bound meant to be generous.
 func TestRecognizeCallTimeout_OverflowClamps(t *testing.T) {
 	t.Parallel()
-	got := ingest.RecognizeCallTimeout(10*time.Minute, 1e18, 10000*time.Hour)
-	if got <= 0 {
-		t.Fatalf("bound = %s, want a positive clamp, never a wrapped negative deadline", got)
+	for _, ratio := range []float64{1e18, math.Inf(1)} {
+		got := ingest.RecognizeCallTimeout(10*time.Minute, ratio, 10000*time.Hour)
+		if got <= 0 {
+			t.Fatalf("bound for ratio %v = %s, want a positive clamp, never a wrapped negative deadline",
+				ratio, got)
+		}
 	}
 }
 
@@ -387,5 +395,119 @@ func TestRecognizeTimeout_EmptyDocumentStillFailsLoudly(t *testing.T) {
 	}
 	if doc.ContentHash != "" {
 		t.Errorf("content_hash = %q, want it withheld so the next scan retries", doc.ContentHash)
+	}
+}
+
+// TestRecognizeTimeout_ParentCancellationIsNotATimeout pins the parent-context half
+// of the classification. A cancelled parent means the DAEMON is going away
+// (shutdown, an outer deadline), which says nothing about the backend, so it must
+// keep the hard path and must NOT be degraded as a recognition timeout.
+func TestRecognizeTimeout_ParentCancellationIsNotATimeout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = t.TempDir()
+	// Generous, so the only expiry that can happen is the parent's cancellation.
+	cfg.RecognizeTimeout = time.Hour
+	cfg.RecognizeTimeoutPerMediaSecond = 0
+
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, cfg, st)
+	entered := make(chan struct{})
+	svc.SetRecognizer(&signallingBlockingRecognizer{entered: entered})
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, os.ErrNotExist }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-entered
+		cancel()
+	}()
+	defer cancel()
+
+	doc := model.Document{DocID: 1, RelPath: "game7.mp4", DocType: "video"}
+	err := svc.GenerateRecognitionRepresentation(ctx, doc)
+	if err == nil {
+		t.Fatal("expected the cancelled parent to be reported")
+	}
+	if errors.Is(err, ingest.ErrRecognizeTimeout) {
+		t.Fatalf("err = %v, must NOT be a recognition timeout: the daemon was shutting down", err)
+	}
+	if !errors.Is(err, ingest.ErrRecognitionProviderFailure) {
+		t.Fatalf("err = %v, want RECOGNIZE_FAILED classification", err)
+	}
+}
+
+// TestRecognizeTimeout_ParentDeadlineIsNotATimeout is the case the parent-context
+// guard exists for. A cancelled parent is already distinguishable (the child
+// context reports Canceled), but an EXPIRED parent makes the child report
+// DeadlineExceeded too. The budget this daemon granted was nowhere near spent, so
+// that is not evidence about the backend and must keep the hard path.
+func TestRecognizeTimeout_ParentDeadlineIsNotATimeout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = t.TempDir()
+	cfg.RecognizeTimeout = time.Hour
+	cfg.RecognizeTimeoutPerMediaSecond = 0
+
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetRecognizer(&blockingRecognizer{})
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, os.ErrNotExist }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	doc := model.Document{DocID: 1, RelPath: "game7.mp4", DocType: "video"}
+	err := svc.GenerateRecognitionRepresentation(ctx, doc)
+	if err == nil {
+		t.Fatal("expected the expired parent to be reported")
+	}
+	if errors.Is(err, ingest.ErrRecognizeTimeout) {
+		t.Fatalf("err = %v, must NOT be a recognition timeout: the recognition budget was 1h "+
+			"and it was the caller's own deadline that expired", err)
+	}
+	if !errors.Is(err, ingest.ErrRecognitionProviderFailure) {
+		t.Fatalf("err = %v, want RECOGNIZE_FAILED classification", err)
+	}
+}
+
+// signallingBlockingRecognizer announces that it was entered, then blocks until its
+// context ends. It lets a test cancel the parent context at a deterministic point.
+type signallingBlockingRecognizer struct{ entered chan struct{} }
+
+func (s *signallingBlockingRecognizer) Recognize(ctx context.Context, _ string) (model.RecognizeResult, error) {
+	close(s.entered)
+	<-ctx.Done()
+	return model.RecognizeResult{}, ctx.Err()
+}
+
+// TestRecognizeServeClient_FallbackDeadlineDoesNotBreakTheCall covers the bare
+// client's no-deadline path: a caller that supplies no deadline still gets a bound,
+// and that bound must be the shipped default, not a zero (already-expired) one.
+// The 10-minute value itself cannot be observed from outside the client without
+// adding injection API purely for a test, so what is pinned here is that the
+// fallback leaves a normal call working.
+func TestRecognizeServeClient_FallbackDeadlineDoesNotBreakTheCall(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"recognizer":{"name":"r","version":"1"},"annotations":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ingest.NewRecognizeServeClient(srv.URL)
+	res, err := client.Recognize(context.Background(), "/corpus/game7.mp4")
+	if err != nil {
+		t.Fatalf("a call with no caller deadline must still succeed: %v", err)
+	}
+	if res.Name != "r" {
+		t.Fatalf("recognizer identity not decoded: %+v", res)
 	}
 }
