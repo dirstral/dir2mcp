@@ -3938,7 +3938,7 @@ func normalizeMaxContextChars(maxContextChars int) int {
 // legitimate deployment needs the fence explained less. An operator who wants
 // stricter wording adds it to their own prompt; the guard still follows.
 //
-// A prompt that already carries the guard (an operator who copied the shipped
+// A prompt that already ENDS with the guard (an operator who copied the shipped
 // prompt and edited the domain lines) is returned unchanged, so the rule is
 // stated once. The shipped default takes that path, which is why an operator
 // who configures nothing gets a byte-identical prompt.
@@ -3947,13 +3947,18 @@ func composeSystemPrompt(prompt string) string {
 	if prompt == "" {
 		return defaultRAGSystemPrompt
 	}
-	if carriesInjectionGuard(prompt) {
+	if endsWithInjectionGuard(prompt) {
 		return prompt
 	}
 	return prompt + "\n" + ragInjectionGuard
 }
 
-// carriesInjectionGuard reports whether prompt already states the guard.
+// endsWithInjectionGuard reports whether prompt already states the guard AS ITS
+// LAST instruction. Anything less is not enough to skip the append: a prompt
+// that quotes the guard in the middle and then adds its own wording would leave
+// operator text after the security rule, which is the one placement the whole
+// design rules out. Such a prompt gets the canonical guard appended, so the
+// rule is stated twice and the last statement is the server's.
 //
 // The comparison ignores how the text is wrapped: a prompt pasted into a YAML
 // block scalar comes back with different line breaks and indentation, and that
@@ -3961,12 +3966,12 @@ func composeSystemPrompt(prompt string) string {
 // words otherwise. A paraphrase is not recognized, so the canonical guard is
 // appended next to it; stating the rule twice is safe, while accepting a
 // paraphrase would let a weakened restatement suppress the real one.
-func carriesInjectionGuard(prompt string) bool {
-	return strings.Contains(collapseSpaces(prompt), collapsedInjectionGuard)
+func endsWithInjectionGuard(prompt string) bool {
+	return strings.HasSuffix(collapseSpaces(prompt), collapsedInjectionGuard)
 }
 
 // collapsedInjectionGuard is the guard with every whitespace run reduced to one
-// space. Precomputed: carriesInjectionGuard runs on every ask.
+// space. Precomputed: endsWithInjectionGuard runs on every ask.
 var collapsedInjectionGuard = collapseSpaces(ragInjectionGuard)
 
 // collapseSpaces reduces every run of whitespace to a single space and trims
