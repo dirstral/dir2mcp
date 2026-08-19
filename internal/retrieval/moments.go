@@ -40,9 +40,8 @@ type moment struct {
 // primary returns the index of the best-ranked member. That member fixes the
 // moment's rank and supplies the header of its context block; the block's text
 // comes from every member (momentContextText). It returns -1 for a moment with
-// no member, which
-// groupMoments never builds, so a caller can range over any moment slice
-// safely.
+// no member, which groupMoments never builds, so a caller can range over any
+// moment slice safely.
 func (m moment) primary() int {
 	if len(m.members) == 0 {
 		return -1
