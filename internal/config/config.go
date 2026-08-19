@@ -65,6 +65,22 @@ const (
 	DefaultMediaClipMaxBytes      = 26214400
 )
 
+// DefaultRecognizeTimeout / DefaultRecognizeTimeoutPerMediaSecond are the
+// shipped bounds on one /recognize call (design 0004 §5, issue #894).
+//
+// The bound is the LARGER of the two: a flat floor, and the media's own duration
+// multiplied by the ratio. The floor keeps a short clip from being held for
+// hours by a wedged backend. The ratio is what makes the capability usable at
+// all on long media: recognition analyses frames across the whole file, so its
+// cost scales with duration, and a single flat ceiling that suits a 30-second
+// clip cannot also suit a 3-hour broadcast. 2 wall-clock seconds per second of
+// media is generous enough for the measured CPU-only cascade (a 3h24m 1080p
+// broadcast) and still bounds the run in proportion to the corpus.
+const (
+	DefaultRecognizeTimeout               = 10 * time.Minute
+	DefaultRecognizeTimeoutPerMediaSecond = 2.0
+)
+
 // defaultRetrievalMinScore is the shipped default for `retrieval.min_score`,
 // the RELATIVE pruning floor of SPEC §9.4.3, which requires the floor to ship
 // enabled. The floor compares each score as a RATIO to the best score of the
@@ -685,6 +701,19 @@ type Config struct {
 	// terminate it on daemon shutdown — instead of connecting to an
 	// operator-started process.
 	RecognizeServeCommand string
+	// RecognizeTimeout is the FLOOR of the wall-clock bound on one /recognize
+	// call (`recognize.timeout`, default DefaultRecognizeTimeout). It governs
+	// short media on its own; long media is governed by the duration-scaled
+	// bound below, whichever is larger (#894).
+	RecognizeTimeout time.Duration
+	// RecognizeTimeoutPerMediaSecond scales the /recognize bound by the media's
+	// own duration (`recognize.timeout_per_media_second`, default
+	// DefaultRecognizeTimeoutPerMediaSecond): wall-clock seconds allowed per
+	// second of media. Recognition cost scales with duration, so a single flat
+	// ceiling either starves a four-hour broadcast or lets a wedged backend hold
+	// a thirty-second clip for hours (#894). 0 disables the scaling and leaves
+	// RecognizeTimeout as the only bound.
+	RecognizeTimeoutPerMediaSecond float64
 
 	// MediaSidecarsDisabled opts OUT of subtitle sidecar ingestion (spec
 	// §8.6.4). Sidecar ingestion is enabled by default (spec default
@@ -1267,6 +1296,8 @@ type fileConfig struct {
 	RecognizeProvider                  *string
 	RecognizeServeURL                  *string
 	RecognizeServeCommand              *string
+	RecognizeTimeout                   *time.Duration
+	RecognizeTimeoutPerMediaSecond     *float64
 	QualityGatesEnabled                *bool
 	LanguageDetectionEnabled           *bool
 	MediaSidecarsDisabled              *bool
@@ -1429,6 +1460,8 @@ type persistedConfig struct {
 	RecognizeProvider                  string        `yaml:"recognize_provider"`
 	RecognizeServeURL                  string        `yaml:"recognize_serve_url"`
 	RecognizeServeCommand              string        `yaml:"recognize_serve_command"`
+	RecognizeTimeout                   time.Duration `yaml:"recognize_timeout"`
+	RecognizeTimeoutPerMediaSecond     float64       `yaml:"recognize_timeout_per_media_second"`
 	QualityGatesEnabled                bool          `yaml:"quality_gates_enabled"`
 	LanguageDetectionEnabled           bool          `yaml:"language_detection_enabled"`
 	MediaSidecarsDisabled              bool          `yaml:"media_sidecars_disabled"`
@@ -1652,37 +1685,39 @@ func Default() Config {
 		RetrievalHierarchicalPromptVersion: DefaultHierarchicalPromptVersion,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
-		RerankProvider:            "cohere",
-		CohereAPIKey:              "",
-		CohereBaseURL:             "",
-		RerankModel:               "rerank-v3.5",
-		RerankCandidatePool:       50,
-		ChunkingMaxTokens:         0,
-		ChunkingOverlapTokens:     0,
-		IngestGitignore:           true,
-		IngestFollowSymlinks:      false,
-		IngestMaxFileMB:           20,
-		IngestExcludeDirs:         corpusfs.DefaultExcludedDirs(),
-		IngestPDFMode:             "ocr",
-		IngestImagesMode:          "ocr_auto",
-		IngestAudioMode:           "auto",
-		IngestArchivesMode:        "deep",
-		IngestExtractor:           "auto",
-		IngestOnUnsupported:       "lenient",
-		IndexBackend:              "memory",
-		IngestScanCache:           false,
-		IngestLateChunking:        false,
-		IngestWatch:               false,
-		IngestWatchDebounce:       500 * time.Millisecond,
-		STTProvider:               "mistral",
-		RecognizeProvider:         "off",
-		STTMistralModel:           "voxtral-mini-latest",
-		STTElevenLabsModel:        "scribe_v1",
-		STTElevenLabsLanguageCode: "",
-		QualityGatesEnabled:       true,
-		LanguageDetectionEnabled:  true,
-		MediaClipMaxDurationMS:    DefaultMediaClipMaxDurationMS,
-		MediaClipMaxBytes:         DefaultMediaClipMaxBytes,
+		RerankProvider:                 "cohere",
+		CohereAPIKey:                   "",
+		CohereBaseURL:                  "",
+		RerankModel:                    "rerank-v3.5",
+		RerankCandidatePool:            50,
+		ChunkingMaxTokens:              0,
+		ChunkingOverlapTokens:          0,
+		IngestGitignore:                true,
+		IngestFollowSymlinks:           false,
+		IngestMaxFileMB:                20,
+		IngestExcludeDirs:              corpusfs.DefaultExcludedDirs(),
+		IngestPDFMode:                  "ocr",
+		IngestImagesMode:               "ocr_auto",
+		IngestAudioMode:                "auto",
+		IngestArchivesMode:             "deep",
+		IngestExtractor:                "auto",
+		IngestOnUnsupported:            "lenient",
+		IndexBackend:                   "memory",
+		IngestScanCache:                false,
+		IngestLateChunking:             false,
+		IngestWatch:                    false,
+		IngestWatchDebounce:            500 * time.Millisecond,
+		STTProvider:                    "mistral",
+		RecognizeProvider:              "off",
+		RecognizeTimeout:               DefaultRecognizeTimeout,
+		RecognizeTimeoutPerMediaSecond: DefaultRecognizeTimeoutPerMediaSecond,
+		STTMistralModel:                "voxtral-mini-latest",
+		STTElevenLabsModel:             "scribe_v1",
+		STTElevenLabsLanguageCode:      "",
+		QualityGatesEnabled:            true,
+		LanguageDetectionEnabled:       true,
+		MediaClipMaxDurationMS:         DefaultMediaClipMaxDurationMS,
+		MediaClipMaxBytes:              DefaultMediaClipMaxBytes,
 		// 0 = use the whisper client's built-in caps (#510, #511).
 		MediaSTTMaxPayloadMB:      0,
 		MediaSTTRequestTimeoutSec: 0,
@@ -1849,6 +1884,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RecognizeProvider:                  cfg.RecognizeProvider,
 		RecognizeServeURL:                  cfg.RecognizeServeURL,
 		RecognizeServeCommand:              cfg.RecognizeServeCommand,
+		RecognizeTimeout:                   cfg.RecognizeTimeout,
+		RecognizeTimeoutPerMediaSecond:     cfg.RecognizeTimeoutPerMediaSecond,
 		QualityGatesEnabled:                cfg.QualityGatesEnabled,
 		LanguageDetectionEnabled:           cfg.LanguageDetectionEnabled,
 		MediaSidecarsDisabled:              cfg.MediaSidecarsDisabled,
@@ -2744,6 +2781,12 @@ func applySTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RecognizeServeCommand != nil {
 		cfg.RecognizeServeCommand = *fc.RecognizeServeCommand
 	}
+	if fc.RecognizeTimeout != nil {
+		cfg.RecognizeTimeout = *fc.RecognizeTimeout
+	}
+	if fc.RecognizeTimeoutPerMediaSecond != nil {
+		cfg.RecognizeTimeoutPerMediaSecond = *fc.RecognizeTimeoutPerMediaSecond
+	}
 	if fc.STTMistralModel != nil {
 		cfg.STTMistralModel = *fc.STTMistralModel
 	}
@@ -3419,9 +3462,11 @@ var configKeyAliases = map[string]string{
 	// binding either (#624). Note recognize_serve_url maps to recognize.base_url —
 	// a rename, not a mechanical "_" -> "." substitution, which is why it was
 	// missed.
-	"recognize_provider":      "recognize.provider",
-	"recognize_serve_url":     "recognize.base_url",
-	"recognize_serve_command": "recognize.serve_command",
+	"recognize_provider":                 "recognize.provider",
+	"recognize_serve_url":                "recognize.base_url",
+	"recognize_serve_command":            "recognize.serve_command",
+	"recognize_timeout":                  "recognize.timeout",
+	"recognize_timeout_per_media_second": "recognize.timeout_per_media_second",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
@@ -3664,6 +3709,8 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.ContextCompressionTargetRatio
 	case "retrieval.mmr.lambda":
 		target = &cfg.RetrievalMMRLambda
+	case "recognize.timeout_per_media_second":
+		target = &cfg.RecognizeTimeoutPerMediaSecond
 	default:
 		return nil
 	}
@@ -3694,6 +3741,8 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.IngestWatchDebounce
 	case "retrieval.recency_half_life":
 		target = &cfg.RetrievalRecencyHalfLife
+	case "recognize.timeout":
+		target = &cfg.RecognizeTimeout
 	default:
 		return nil
 	}
@@ -4163,6 +4212,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("recognize_provider", cfg.RecognizeProvider)
 	writeScalar("recognize_serve_url", cfg.RecognizeServeURL)
 	writeScalar("recognize_serve_command", cfg.RecognizeServeCommand)
+	writeScalar("recognize_timeout", cfg.RecognizeTimeout.String())
+	writeScalar("recognize_timeout_per_media_second",
+		strconv.FormatFloat(cfg.RecognizeTimeoutPerMediaSecond, 'f', -1, 64))
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
@@ -4710,6 +4762,7 @@ func (c *Config) Validate() error {
 		c.validateSTTLanguageProviders,
 		c.validateMediaSTTOnUncoveredLanguage,
 		c.validateRecognizeProvider,
+		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
 		c.validateMediaSubtitles,
 		c.validateMediaDiarize,
@@ -4853,6 +4906,23 @@ func (c *Config) validateRecognizeProvider() error {
 	}
 	return fmt.Errorf("CONFIG_INVALID: recognize.provider %q is not a recognized recognition backend; "+
 		"use serve or off", c.RecognizeProvider)
+}
+
+// validateRecognizeTimeouts rejects a /recognize bound that cannot express a
+// deadline (#894). A negative flat timeout or a negative per-media-second ratio
+// is a config error, not a value to silently coerce: an operator who writes
+// -1 means something the daemon cannot honour. Zero is legal for BOTH keys and
+// means "this half does not constrain the call"; the effective bound falls back
+// to DefaultRecognizeTimeout when both are zero, so a call is never unbounded.
+func (c *Config) validateRecognizeTimeouts() error {
+	if c.RecognizeTimeout < 0 {
+		return fmt.Errorf("CONFIG_INVALID: recognize.timeout must be non-negative, got %s", c.RecognizeTimeout)
+	}
+	if c.RecognizeTimeoutPerMediaSecond < 0 {
+		return fmt.Errorf("CONFIG_INVALID: recognize.timeout_per_media_second must be non-negative, got %v",
+			c.RecognizeTimeoutPerMediaSecond)
+	}
+	return nil
 }
 
 // validateMediaBatch enforces the media.batch (SPEC §8.6.11) invariants. All

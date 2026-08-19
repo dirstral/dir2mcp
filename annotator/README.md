@@ -317,6 +317,21 @@ backend; a backend failure is recorded per-document exactly like an STT
 failure, and in managed mode a backend that never becomes healthy fails
 startup loudly instead.
 
+The vision cascade is slow on long media, above all on a CPU-only host, so the
+bound on one `/recognize` call scales with the media's duration:
+
+```yaml
+recognize_timeout: 10m                    # flat floor; governs short media
+recognize_timeout_per_media_second: 2.0   # wall-clock seconds per second of media
+```
+
+With those defaults a 3h24m broadcast gets 6h48m. Raise the ratio when the
+cascade is wider than the host can keep up with. A call that runs out of its
+budget does not fail the document: the annotations and transcripts already
+indexed stay searchable, the run reports the error, and the next scan retries
+that file. See the README section "Recognition: how long one media file may
+take".
+
 ### Configuration files
 
 `roster.json` — the entity vocabulary:

@@ -874,6 +874,50 @@ beats `episode.en.vtt`. An untagged bare-stem sidecar (`episode.ttml`) binds onl
 when no language-tagged sidecar binds, so it never overwrites an authored
 per-language transcript. Name it `episode.ru.ttml` to ingest it beside the VTTs.
 
+### Recognition: how long one media file may take
+
+The `recognize` capability (design 0004) hands each media file to a recognition
+backend, which analyses frames across the whole file. Its cost therefore scales
+with **duration**, so the bound on one call is the LARGER of a flat floor and a
+per-second-of-media allowance:
+
+```yaml
+recognize:
+  provider: serve                  # off by default
+  base_url: http://127.0.0.1:8765
+  timeout: 10m                     # flat floor; governs short media
+  timeout_per_media_second: 2.0    # wall-clock seconds allowed per second of media
+```
+
+| Media | Effective bound with the defaults |
+|---|---|
+| a 30-second clip | 10m (the floor) |
+| a 3h24m broadcast | 6h48m (12240s x 2.0) |
+
+Rules:
+
+- The bound is `max(timeout, duration x timeout_per_media_second)`, so the ratio
+  can never make a call tighter than the floor.
+- Set `timeout_per_media_second: 0` to disable the scaling and bound every call by
+  `timeout` alone.
+- The duration comes from `ffprobe`. When it cannot be read, the floor governs
+  alone.
+- A negative value for either key is `CONFIG_INVALID` at startup.
+
+**When recognition runs out of that budget, the document is NOT failed.** Whatever
+the pipeline already indexed for it (a subtitle transcript, a derived transcript,
+media chunks, annotations from an earlier run) stays searchable, a warning names
+the file and the budget, the run's error count includes it, and the document's
+done marker is withheld so the next scan retries recognition. A document marked
+`status="error"` hides **all** of its chunks from search, so failing it on a
+timeout would empty a corpus that was answering questions a minute earlier.
+
+A backend that is unreachable, misconfigured, or answers with an error status is a
+different case and still fails the document loudly. That is deliberate: a typo'd
+`base_url` must not quietly index nothing. Only an expired deadline degrades,
+because an expired deadline is evidence the backend accepted the call and was
+working.
+
 ### Fully local / no-egress setup
 
 The default quickstart (and `.env.example`) configures **cloud** providers, so a corpus is processed by third-party APIs (Mistral for embeddings/OCR/STT/generation, ElevenLabs for voice). If your data must **not leave the host** (data-residency / compliance / on-prem archives), configure every capability against endpoints you run — dir2mcp treats a self-hosted provider as first-class (SPEC §8.5) and needs no cloud key.
