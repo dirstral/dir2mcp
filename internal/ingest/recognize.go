@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -26,8 +27,15 @@ import (
 // derivation identity.
 const recognizeSource = "recognize"
 
-// recognizeMaxResponseBytes bounds the decoded response body.
-const recognizeMaxResponseBytes = 64 << 20
+const (
+	// recognizeMaxResponseBytes bounds the decoded response body.
+	recognizeMaxResponseBytes = 64 << 20
+	// recognizeProbeDurationTimeout bounds the ffprobe call that reads a media
+	// file's duration for the duration-scaled /recognize bound (#894). Reading a
+	// local container header is sub-second, so this is generous; the point is that
+	// the step which computes a bound is itself bounded.
+	recognizeProbeDurationTimeout = 30 * time.Second
+)
 
 // ErrRecognizeTimeout marks the one recognition failure that is NOT evidence of a
 // broken backend: the call was accepted and answered nothing before the budget
@@ -599,13 +607,31 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 // Best-effort by design: an absent ffprobe, an undecodable container, or a
 // non-positive result yields 0, which makes recognizeCallTimeout fall back to the
 // flat floor. A failed probe must never fail recognition.
+//
+// The probe gets its OWN short deadline. It shells out to ffprobe, and this
+// function exists to compute a bound: it must not become an unbounded step itself.
+// Reading a local container's header is a sub-second operation, so
+// recognizeProbeDurationTimeout is generous, and a probe that exceeds it is
+// treated as unknown rather than allowed to stall the scan. A file whose duration
+// cannot be read is named in the log, because it is the reason the bound fell back
+// to the flat floor; a host with no ffprobe at all is a known one-time condition
+// and stays silent.
 func (s *Service) recognizeMediaDuration(ctx context.Context, absPath string) time.Duration {
 	probe := s.ProbeDurationFunc
 	if probe == nil {
 		probe = avutil.Duration
 	}
-	d, err := probe(ctx, absPath)
-	if err != nil || d <= 0 {
+	probeCtx, cancel := context.WithTimeout(ctx, recognizeProbeDurationTimeout)
+	defer cancel()
+	d, err := probe(probeCtx, absPath)
+	if err != nil {
+		if !errors.Is(err, avutil.ErrToolNotFound) {
+			s.getLogger().Printf("recognize: media duration unknown for %s (%v); "+
+				"bounding the call by recognize.timeout alone", filepath.Base(absPath), err)
+		}
+		return 0
+	}
+	if d <= 0 {
 		return 0
 	}
 	return d
