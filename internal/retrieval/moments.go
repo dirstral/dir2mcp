@@ -37,8 +37,10 @@ type moment struct {
 	members []int
 }
 
-// primary returns the index of the best-ranked member. That member represents
-// the moment in the prompt. It returns -1 for a moment with no member, which
+// primary returns the index of the best-ranked member. That member fixes the
+// moment's rank and supplies the header of its context block; the block's text
+// comes from every member (momentContextText). It returns -1 for a moment with
+// no member, which
 // groupMoments never builds, so a caller can range over any moment slice
 // safely.
 func (m moment) primary() int {
@@ -98,15 +100,82 @@ func groupMoments(hits []model.SearchHit) []moment {
 	return out
 }
 
-// momentMemberIndices returns the hit indices of the given moments, in rank
-// order. The answer cites every member of each moment it used, because each
-// member is real provenance for the same seconds of the same file. Only the
-// count of events changes, not the evidence a caller can open.
-func momentMemberIndices(moments []moment) []int {
-	out := make([]int, 0, len(moments))
-	for _, m := range moments {
-		out = append(out, m.members...)
+// momentContextText renders the prompt text of one moment and reports the hit
+// indices of the members that text came from.
+//
+// EVERY member is placed, not the best-ranked one alone (issue #890). The first
+// version of this file placed the primary and cited all the members, on the
+// assumption that a moment's members report one event once per role, so the
+// siblings only repeat what the primary already says. On a recognition corpus
+// built from a structured feed the members are complementary, not redundant:
+// one home run carries the batter in `at_bat`, the exit velocity and the
+// distance in `batted_ball`, the index in `captivating` and the running score in
+// `scoring_play`. Dropping the siblings dropped the facts, and citing them
+// anyway made the answer name text the model never read, which SPEC §9.4.2
+// forbids and which the truncation path of issue #403 already refuses to do.
+//
+// The moment stays ONE context block, so the #784 fix holds: the generator reads
+// one document per event and cannot count a role-split annotation twice.
+//
+// Two rules keep the block honest and bounded:
+//
+//   - A member whose text repeats an already-placed member's text VERBATIM adds
+//     nothing, so it is written once. It stays cited, because that one copy is
+//     its text. Only exact repetition collapses; a near-duplicate is kept,
+//     because on this corpus the sibling that looks like a paraphrase is the one
+//     carrying the numbers.
+//   - budget bounds the block's text in runes. Members are added in rank order
+//     while they fit, and a member left out by the budget is NOT reported as
+//     placed, so it is not cited either. The first text-carrying member is
+//     always placed: an over-budget one is windowed by the caller exactly as a
+//     single long chunk is, which keeps the matched region in the prompt
+//     (§9.4.2).
+//
+// A member with no text at all (a media-only hit) places nothing and stays
+// cited: the block quotes the same seconds of the same file, and no claim is
+// made about text the model did not read.
+func momentContextText(hits []model.SearchHit, fullTexts []string, m moment, budget int) (string, []int) {
+	var b strings.Builder
+	placed := make([]int, 0, len(m.members))
+	seen := make(map[string]struct{}, len(m.members))
+	used := 0
+	for _, idx := range m.members {
+		if idx < 0 || idx >= len(hits) {
+			continue
+		}
+		text := strings.TrimSpace(docTextAt(fullTexts, idx))
+		if text == "" {
+			text = strings.TrimSpace(hits[idx].Snippet)
+		}
+		if text == "" {
+			placed = append(placed, idx)
+			continue
+		}
+		if _, dup := seen[text]; dup {
+			placed = append(placed, idx)
+			continue
+		}
+		cost := len([]rune(text))
+		if b.Len() > 0 {
+			cost++ // the newline that separates two members
+		}
+		if b.Len() > 0 && used+cost > budget {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(text)
+		used += cost
+		seen[text] = struct{}{}
+		placed = append(placed, idx)
 	}
-	sort.Ints(out)
-	return out
+	return b.String(), placed
+}
+
+// sortedIndices returns the given hit indices in ascending order. The answer's
+// citations follow the retrieval order, not the order the prompt placed them.
+func sortedIndices(idx []int) []int {
+	sort.Ints(idx)
+	return idx
 }
