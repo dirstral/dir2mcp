@@ -557,8 +557,8 @@ so keep in your text the ones you still want.
 #### The untrusted-data guard is not replaceable
 
 `rag.system_prompt` supplies domain rules only. The server appends the untrusted-data
-guard to every system prompt, after your text, and there is no setting that switches it
-off. The guard explains the markers that wrap each retrieved document, so it must reach
+guard to every RAG system prompt, after your text, and there is no setting that switches
+it off. The guard explains the markers that wrap each retrieved document, so it must reach
 the model whatever the prompt says. A prompt that already ends with the guard, for
 example a copy of the shipped one, keeps a single copy: nothing is appended twice. A
 prompt that quotes the guard and then writes more still gets the guard appended, because
