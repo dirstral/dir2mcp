@@ -3849,14 +3849,26 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 // ragContextDocLimit returns how many moments may become context documents.
 // The character budget decides, not a fixed count (issue #891): each document
 // gets an equal share of the budget, and the share may not fall below
-// ragMinDocShareChars. A budget too small for one share imposes no count limit
-// here, and ragMinDocTextChars then rejects the blocks that do not fit.
+// ragMinDocShareChars.
+//
+// A budget below one share still holds ONE complete fenced block, so the
+// ceiling never falls under one document. Dividing such a budget across the
+// whole candidate set instead would leave every document a fragment, and
+// ragMinDocTextChars would then reject them all and ground the answer in
+// nothing. The single document still has to fit: ragMinDocTextChars rejects it
+// when the budget cannot even hold the fence plus a usable window.
 func ragContextDocLimit(moments, maxContextChars int) int {
-	limit := moments
-	if ceiling := maxContextChars / ragMinDocShareChars; ceiling > 0 && limit > ceiling {
-		limit = ceiling
+	if moments <= 0 {
+		return 0
 	}
-	return limit
+	ceiling := maxContextChars / ragMinDocShareChars
+	if ceiling < 1 {
+		ceiling = 1
+	}
+	if moments > ceiling {
+		return ceiling
+	}
+	return moments
 }
 
 // normalizeMaxContextChars clamps a configured context budget into the
@@ -3968,7 +3980,8 @@ func ragMomentBlock(
 		return "", nil, false
 	}
 	text, placed := momentContextText(hits, fullTexts, m, budget)
-	return header + ragDocSnippet(question, h, text, budget, compressor) + ragDocCloseBlock, placed, true
+	snippet := ragDocSnippet(question, h, text, budget, compressor)
+	return header + snippet + ragDocCloseBlock, membersInSnippet(hits, fullTexts, m.primary(), placed, snippet), true
 }
 
 // limitOrOne guards the per-document division against a zero document count.

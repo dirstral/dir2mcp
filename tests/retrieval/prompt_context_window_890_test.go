@@ -304,6 +304,12 @@ func TestAsk891_ContextSectionStaysWithinBudget(t *testing.T) {
 		if got := len([]rune(promptContext(t, gen.lastPrompt))); got > budget {
 			t.Fatalf("budget=%d: context section is %d runes, over budget", budget, got)
 		}
+		// A budget under one document share must still ground the answer. 40
+		// candidates sharing 300 chars would leave 7 chars each, so the count
+		// follows the budget down to one document rather than starving.
+		if n := countBlocks(t, gen.lastPrompt); n < 1 {
+			t.Fatalf("budget=%d: no document reached the prompt", budget)
+		}
 	}
 }
 

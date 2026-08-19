@@ -335,8 +335,11 @@ func TestAsk_SendsWholeChunkWhenItFitsTheBudget(t *testing.T) {
 // caller cannot tell apart from a well-sourced answer (SPEC 9.4.1). The budget
 // is clamped only against <= 0 and the upper bound, so config can reach this.
 func TestAsk_DiscardsReplyWhenNoDocumentFitsTheBudget(t *testing.T) {
-	// Eight hits sharing a 120 char budget leaves 15 chars per document, below
-	// what one fenced block needs; this is the reviewer's exact scenario.
+	// An 80 char budget cannot hold ONE fenced block: the two fence markers of
+	// the block alone run to 74 chars, which leaves 6 for the text and the
+	// builder needs 16. Issue #891 made the document count follow the budget,
+	// so a budget that starves the prompt is one too small for a single block,
+	// not one too small for a fair share across eight hits.
 	idx := index.NewHNSWIndex("")
 	texts := map[uint64]string{}
 	for id := uint64(1); id <= 8; id++ {
@@ -356,7 +359,7 @@ func TestAsk_DiscardsReplyWhenNoDocumentFitsTheBudget(t *testing.T) {
 			Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 4},
 		})
 	}
-	svc.SetMaxContextChars(120) // positive, but 15 chars per doc across 8 hits
+	svc.SetMaxContextChars(80) // positive, but under one complete fenced block
 
 	res, err := svc.Ask(context.Background(), "when does it terminate?", model.SearchQuery{K: 8})
 	if err != nil {

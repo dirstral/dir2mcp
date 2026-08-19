@@ -143,10 +143,7 @@ func momentContextText(hits []model.SearchHit, fullTexts []string, m moment, bud
 		if idx < 0 || idx >= len(hits) {
 			continue
 		}
-		text := strings.TrimSpace(docTextAt(fullTexts, idx))
-		if text == "" {
-			text = strings.TrimSpace(hits[idx].Snippet)
-		}
+		text := memberText(hits, fullTexts, idx)
 		if text == "" {
 			placed = append(placed, idx)
 			continue
@@ -171,6 +168,46 @@ func momentContextText(hits []model.SearchHit, fullTexts []string, m moment, bud
 		placed = append(placed, idx)
 	}
 	return b.String(), placed
+}
+
+// memberText returns the prompt text of one member: its resolved full chunk
+// text, or the hit's store snippet when the full text is unavailable, or "" for
+// a member that carries no text at all.
+func memberText(hits []model.SearchHit, fullTexts []string, idx int) string {
+	if idx < 0 || idx >= len(hits) {
+		return ""
+	}
+	if text := strings.TrimSpace(docTextAt(fullTexts, idx)); text != "" {
+		return text
+	}
+	return strings.TrimSpace(hits[idx].Snippet)
+}
+
+// membersInSnippet narrows the members momentContextText selected to the ones
+// whose text SURVIVED rendering, and it is what makes the citation set a subset
+// of the prompt rather than of the builder's intent (issue #890).
+//
+// Rendering can still remove a member's text after the join: evidence
+// compression (issue #335) drops sentences, marker neutralization (issue #445)
+// grows adversarial text past the budget it was measured against, and the
+// match-centered window then cuts the tail. A member the prompt no longer
+// quotes is not citable.
+//
+// Two members stay regardless. A member with no text quotes nothing to look
+// for, and it cites the same seconds of the same file as the block. The primary
+// defines the block and is cited exactly as a lone chunk is: its window is
+// match-centered, so it carries the region the citation names (SPEC §9.4.2),
+// and narrowing it here would drop the citation of every compressed single-hit
+// document.
+func membersInSnippet(hits []model.SearchHit, fullTexts []string, primary int, placed []int, snippet string) []int {
+	out := make([]int, 0, len(placed))
+	for _, idx := range placed {
+		text := memberText(hits, fullTexts, idx)
+		if idx == primary || text == "" || strings.Contains(snippet, neutralizeRAGMarkers(text)) {
+			out = append(out, idx)
+		}
+	}
+	return out
 }
 
 // sortedIndices returns the given hit indices in ascending order. The answer's

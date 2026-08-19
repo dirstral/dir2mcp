@@ -510,12 +510,14 @@ The value carries the same `1..50` bound as the request field. A value outside i
 at startup with `CONFIG_INVALID`, because a default that asks for a `k` the tools forbid
 would otherwise only fail later, on a request the operator never wrote.
 
-`k` also sets how much evidence the answer reasons over. Every retrieved hit that fits
-`rag.max_context_chars` (20000 by default) is placed in the answer prompt, so a larger `k`
-gives the model more documents and not only a longer citation list. The character budget
-is the bound: it caps the prompt, and it caps how many documents fit. Short chunks (a
-recognition annotation runs to about 130 characters) therefore fit the whole result set,
-while long ones (a PDF page) fill the budget sooner and stop the list there.
+`k` also sets how much evidence the answer reasons over, up to `rag.max_context_chars`
+(20000 by default). That character budget is the only bound: a larger `k` gives the model
+more documents and not only a longer citation list. The budget is divided into equal
+shares, one per document, and no share falls below 400 characters, so the budget caps the
+document count as well. A document longer than its share is sent as a match-centered
+window of that share, and the text past the window does not reach the model. Short chunks
+(a recognition annotation runs to about 130 characters) therefore fit whole and the whole
+result set can reach the prompt; long ones (a PDF page) fill the budget sooner.
 
 The served tool schemas advertise the **effective** value. `tools/list` reports
 `"default": <your k_default>` for `k`, so a client that reads the schema and sends the
