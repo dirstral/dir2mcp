@@ -4,17 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptrace"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/avutil"
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -25,13 +30,91 @@ import (
 const recognizeSource = "recognize"
 
 const (
-	// recognizeServeTimeout bounds one /recognize call. Recognition samples
-	// frames across a whole video, so this mirrors the docling-serve ceiling
-	// rather than the API-provider default.
-	recognizeServeTimeout = 10 * time.Minute
 	// recognizeMaxResponseBytes bounds the decoded response body.
 	recognizeMaxResponseBytes = 64 << 20
+	// recognizeProbeDurationTimeout bounds the ffprobe call that reads a media
+	// file's duration for the duration-scaled /recognize bound (#894). Reading a
+	// local container header is sub-second, so this is generous; the point is that
+	// the step which computes a bound is itself bounded.
+	recognizeProbeDurationTimeout = 30 * time.Second
 )
+
+// ErrRecognizeTimeout marks the one recognition failure that is NOT evidence of a
+// broken backend: the call was accepted and answered nothing before the budget
+// this daemon granted it ran out (#894).
+//
+// It wraps ErrRecognitionProviderFailure, so every existing classification keeps
+// working unchanged — manifestErrorCode still records RECOGNIZE_FAILED — while the
+// media pipeline can tell the two cases apart. The distinction is deliberate and
+// narrow:
+//
+//   - A misconfigured or unreachable backend (bad URL, refused connection, non-200,
+//     undecodable body, unreadable media) is a HARD per-document error, exactly as
+//     before. Hard propagation is what stops a typo'd base_url from silently
+//     indexing nothing, and every one of those failures is instant and explicit.
+//   - A deadline expiry is the opposite evidence: something answered the startup
+//     health probe, accepted the POST, and was still working on the media when the
+//     clock ran out. Failing the whole document on that discards representations
+//     the pipeline already produced (SPEC §7.7 status="error" hides every chunk of
+//     the document from search, see store.liveParentDocument), which is how a
+//     3h24m broadcast that had 892 indexed annotations ended up serving nothing.
+var ErrRecognizeTimeout = fmt.Errorf("%w: recognition deadline exceeded", ErrRecognitionProviderFailure)
+
+// errRecognizeUndelivered marks a serve-client failure that happened BEFORE the
+// request reached the backend: DNS, dial, TLS handshake, or writing the request
+// body. It is what keeps a blackholed or firewalled `base_url` on the hard path
+// even when the failure presents as a deadline (a dropped-packet route hangs until
+// the clock runs out, so it looks exactly like a slow recognizer otherwise).
+//
+// The polarity is deliberate: this marks what the client can PROVE did not arrive.
+// A recognizer that cannot report its transport phase (any other provider, a test
+// double) simply never carries the marker, and the general rule applies to it.
+var errRecognizeUndelivered = errors.New("recognize request never reached the backend")
+
+// RecognizeCallTimeout is the exported counterpart of recognizeCallTimeout so the
+// tests/ tree can pin the arithmetic of the bound without reading the code.
+func RecognizeCallTimeout(base time.Duration, perMediaSecond float64, media time.Duration) time.Duration {
+	return recognizeCallTimeout(base, perMediaSecond, media)
+}
+
+// recognizeCallTimeout resolves the wall-clock bound for ONE /recognize call
+// (#894). The bound is the LARGER of two parts:
+//
+//   - base (`recognize.timeout`): a flat floor. It alone governs short media and
+//     media whose duration cannot be probed.
+//   - media * perMediaSecond (`recognize.timeout_per_media_second`): wall-clock
+//     seconds allowed per second of media. Recognition analyses frames across the
+//     whole file, so its cost scales with duration; a flat ceiling that suits a
+//     30-second clip cannot also suit a four-hour broadcast, which is the ceiling
+//     that made the capability unusable on long media.
+//
+// Taking the maximum (rather than only the ratio) means the ratio can never make
+// the bound TIGHTER than the flat floor, so lowering media duration or losing the
+// probe never shortens a deadline. A non-positive base falls back to
+// config.DefaultRecognizeTimeout, so the returned bound is always > 0: a
+// /recognize call is never unbounded, whatever the config says.
+func recognizeCallTimeout(base time.Duration, perMediaSecond float64, media time.Duration) time.Duration {
+	if base <= 0 {
+		base = config.DefaultRecognizeTimeout
+	}
+	// NaN fails every comparison, so it must be rejected explicitly: without this
+	// the ratio would reach a float-to-int conversion whose result Go leaves
+	// implementation-defined. The config parser already rejects NaN, and this keeps
+	// a programmatic caller of the exported wrapper on the same footing.
+	if math.IsNaN(perMediaSecond) || perMediaSecond <= 0 || media <= 0 {
+		return base
+	}
+	scaled := float64(media) * perMediaSecond
+	// A huge duration or ratio would overflow int64 and wrap to a negative
+	// duration, i.e. an already-expired deadline. Clamp instead.
+	if scaled >= math.MaxInt64 {
+		return time.Duration(math.MaxInt64)
+	}
+	if d := time.Duration(scaled); d > base {
+		return d
+	}
+	return base
+}
 
 // RecognizeServeClient talks to a locally served recognition backend
 // (`recognize.provider: serve`, design 0004 §5) such as the reference
@@ -45,11 +128,25 @@ type RecognizeServeClient struct {
 
 var _ model.Recognizer = (*RecognizeServeClient)(nil)
 
+// NewRecognizeServeClient builds a serve-provider client. The client carries NO
+// fixed http.Client.Timeout: the bound on one call is per-DOCUMENT (it scales with
+// media duration, #894) and therefore arrives on the request context. A
+// client-level ceiling would silently cap that context and reinstate the very
+// ten-minute wall this closed, because whichever bound fires first wins.
 func NewRecognizeServeClient(baseURL string) *RecognizeServeClient {
 	return &RecognizeServeClient{
 		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		httpClient: &http.Client{Timeout: recognizeServeTimeout},
+		httpClient: &http.Client{},
 	}
+}
+
+// HTTPClientTimeout reports the serve client's fixed http.Client.Timeout. It is
+// exposed so a test can pin that the client carries NO client-level ceiling
+// (#894): any non-zero value here would silently cap the per-document deadline the
+// ingest service puts on the request context, whichever is shorter, and so
+// reinstate the ten-minute wall that made recognition unusable on long media.
+func (c *RecognizeServeClient) HTTPClientTimeout() time.Duration {
+	return c.httpClient.Timeout
 }
 
 // recognizeWireResponse is the serve wire contract (design 0004 §5;
@@ -71,10 +168,33 @@ type recognizeWireResponse struct {
 }
 
 func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (model.RecognizeResult, error) {
+	// The ingest service always supplies the per-document deadline. A caller that
+	// does not (a bare client in a test or a tool) still gets a bound, so no call
+	// can hang forever now that the client itself carries no Timeout.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, config.DefaultRecognizeTimeout)
+		defer cancel()
+	}
 	payload, err := json.Marshal(map[string]string{"path": absPath})
 	if err != nil {
 		return model.RecognizeResult{}, fmt.Errorf("marshal recognize request: %w", err)
 	}
+	// Record whether the request ever reached the backend. WroteRequest fires once
+	// the whole request (headers and body) is on the wire, so it proves the name
+	// resolved, the connection came up, and the backend took the bytes. Without this
+	// evidence a hung dial to a blackholed address is indistinguishable from a
+	// recognizer that is genuinely working, and the ingest service would degrade a
+	// misconfigured base_url instead of failing it. The callback runs on the
+	// transport's goroutine, hence the atomic.
+	var delivered atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				delivered.Store(true)
+			}
+		},
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/recognize", bytes.NewReader(payload))
 	if err != nil {
 		return model.RecognizeResult{}, fmt.Errorf("build recognize request: %w", err)
@@ -83,6 +203,10 @@ func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (m
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if !delivered.Load() {
+			return model.RecognizeResult{}, fmt.Errorf("%w: recognize backend request: %w",
+				errRecognizeUndelivered, err)
+		}
 		return model.RecognizeResult{}, fmt.Errorf("recognize backend request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -435,8 +559,34 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 		return false, fmt.Errorf("%w: resolve media path for %s: %w", ErrRecognitionProviderFailure, doc.RelPath, err)
 	}
 
-	result, err := s.recognizer.Recognize(ctx, absPath)
+	// The bound on this call scales with the media's own duration (#894), so it is
+	// resolved per document and carried on the context. The probe is best-effort:
+	// an absent ffprobe or an undecodable input yields 0 and the flat
+	// `recognize.timeout` floor governs alone.
+	budget := recognizeCallTimeout(s.cfg.RecognizeTimeout, s.cfg.RecognizeTimeoutPerMediaSecond,
+		s.recognizeMediaDuration(ctx, absPath))
+	callCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	result, err := s.recognizer.Recognize(callCtx, absPath)
 	if err != nil {
+		// Our own budget expired while the PARENT context is still live: the backend
+		// was reachable and working, it just did not finish in the wall clock it was
+		// given. Tag it so the media pipeline degrades instead of failing the whole
+		// document (#894). Two guards narrow this to that case only:
+		//
+		//   - The PARENT context must still be live. A cancelled or expired parent
+		//     means the DAEMON is going away (shutdown, an outer deadline), which is
+		//     not evidence about the backend.
+		//   - The request must not be known-undelivered. A route that drops packets
+		//     hangs until the clock runs out, so an unreachable or firewalled
+		//     base_url can also present as a deadline; the serve client reports when
+		//     it can prove the request never reached the backend, and that stays on
+		//     the hard path where a misconfiguration belongs.
+		if callCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil &&
+			!errors.Is(err, errRecognizeUndelivered) {
+			return false, fmt.Errorf("%w: recognize %s after %s: %w", ErrRecognizeTimeout, doc.RelPath, budget, err)
+		}
 		// Tag with the provider-failure sentinel so a transient recognize-backend
 		// failure classifies as RECOGNIZE_FAILED (manifestErrorCode), parallel to
 		// the STT/OCR provider sentinels — not the generic EXTRACT_FAILED.
@@ -487,4 +637,42 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 	}
 	s.addRepresentations(1)
 	return true, nil
+}
+
+// recognizeMediaDuration resolves the media's duration for the duration-scaled
+// /recognize bound (#894). It reuses the service's injectable probe
+// (ProbeDurationFunc, default avutil.Duration) and takes the ALREADY-localized
+// absolute path, so it never localizes the media a second time.
+//
+// Best-effort by design: an absent ffprobe, an undecodable container, or a
+// non-positive result yields 0, which makes recognizeCallTimeout fall back to the
+// flat floor. A failed probe must never fail recognition.
+//
+// The probe gets its OWN short deadline. It shells out to ffprobe, and this
+// function exists to compute a bound: it must not become an unbounded step itself.
+// Reading a local container's header is a sub-second operation, so
+// recognizeProbeDurationTimeout is generous, and a probe that exceeds it is
+// treated as unknown rather than allowed to stall the scan. A file whose duration
+// cannot be read is named in the log, because it is the reason the bound fell back
+// to the flat floor; a host with no ffprobe at all is a known one-time condition
+// and stays silent.
+func (s *Service) recognizeMediaDuration(ctx context.Context, absPath string) time.Duration {
+	probe := s.ProbeDurationFunc
+	if probe == nil {
+		probe = avutil.Duration
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, recognizeProbeDurationTimeout)
+	defer cancel()
+	d, err := probe(probeCtx, absPath)
+	if err != nil {
+		if !errors.Is(err, avutil.ErrToolNotFound) {
+			s.getLogger().Printf("recognize: media duration unknown for %s (%v); "+
+				"bounding the call by recognize.timeout alone", filepath.Base(absPath), err)
+		}
+		return 0
+	}
+	if d <= 0 {
+		return 0
+	}
+	return d
 }

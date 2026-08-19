@@ -365,6 +365,16 @@ type Service struct {
 	// even when a document produces several (transcript + per-language translations).
 	quarantinedThisDoc bool
 
+	// recognizeIncompleteThisDoc records that the recognition backend ran out of
+	// its wall-clock budget on the document currently being processed (#894). The
+	// document is NOT failed — status="error" would hide every chunk it already has
+	// (store.liveParentDocument) — so this flag is what withholds the #402 done
+	// marker instead, leaving content_hash empty so the next incremental scan
+	// retries recognition. Per-document state with the same lifecycle as
+	// quarantinedThisDoc: authoritatively reset at processDocument entry, and
+	// re-scoped per archive member in generateRepresentations.
+	recognizeIncompleteThisDoc bool
+
 	// docSecretPatterns holds the compiled security.secret_patterns set for the
 	// document currently being processed. It is the SAME slice the caller passes
 	// down the raw-byte path, captured at the document entry points
@@ -2201,6 +2211,9 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// sequential archive members, which run as separate processDocumentFromContent
 	// calls under a single processDocument entry.
 	s.quarantinedThisDoc = false
+	// Same authoritative per-document reset for the #894 incomplete-recognition
+	// flag, which withholds the done marker for one document only.
+	s.recognizeIncompleteThisDoc = false
 	// Open the per-document secret scope (#681) at the same authoritative point,
 	// and before any branch below can produce a derived text. It captures the
 	// pattern set this call was given, so the derived-text scan always uses the
@@ -2405,6 +2418,14 @@ func withholdArchiveContentHash(doc *model.Document, needsProcessing bool) {
 // complexity limit.
 func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, willGenerateReps bool, contentHash string) error {
 	if !willGenerateReps {
+		return nil
+	}
+	if s.recognizeIncompleteThisDoc {
+		// #894: recognition ran out of its budget on this document. It keeps every
+		// representation it produced and stays out of status="error" (which would hide
+		// them all), so the ONLY thing left to make the next scan retry is to leave
+		// the #402 done marker unstamped — the same mechanism the #413 guard uses for
+		// an out-of-band soft error, applied without the error status.
 		return nil
 	}
 	return s.finalizeContentHash(ctx, doc, contentHash)
@@ -4020,8 +4041,12 @@ func isEmbeddableAudio(relPath string) bool {
 func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) (bool, error) {
 	// Reset the per-document quality-gate quarantine flag (§8.6.6 / #426). The scan
 	// loop is sequential, so this scopes the flag to the document about to be
-	// processed even though it is Service-level state.
+	// processed even though it is Service-level state. The #894
+	// incomplete-recognition flag is re-scoped here for the same reason: an archive
+	// member whose recognition timed out must not withhold the done marker of the
+	// members processed after it.
 	s.quarantinedThisDoc = false
+	s.recognizeIncompleteThisDoc = false
 	if s.repGen == nil {
 		return false, nil
 	}
@@ -4134,7 +4159,25 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, noVideoRep, transcriptSoftFailed bool) (bool, error) {
 	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
 	if err != nil {
-		return transcriptSoftFailed, err
+		if !errors.Is(err, ErrRecognizeTimeout) {
+			return transcriptSoftFailed, err
+		}
+		// Recognition ran out of its wall-clock budget (#894). Degrade ONLY when this
+		// document has something to lose. status="error" hides every chunk a document
+		// has (store.liveParentDocument), so on a document that already carries
+		// representations the stamp destroys working retrieval and must not be
+		// applied; returning no error here is what keeps them live, and returning
+		// BEFORE the noVideoRep verdict below is what stops that verdict from
+		// stamping the same status by another road.
+		//
+		// A document with NOTHING indexed is the opposite case: the stamp hides
+		// nothing, and it is the honest, DURABLE record that this document is not
+		// searchable, visible in recent_failures after a restart. So that one keeps
+		// failing hard, exactly as before.
+		if !s.hasIndexedRepresentations(ctx, doc.RelPath) {
+			return transcriptSoftFailed, err
+		}
+		return s.degradeIncompleteRecognition(doc, err, secretPatterns, transcriptSoftFailed), nil
 	}
 	// #681: recognition itself was withheld, so the document is terminal. Same
 	// reasoning as the transcript guard: a withheld document must not also be
@@ -4155,6 +4198,97 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 		return true, nil
 	}
 	return transcriptSoftFailed, nil
+}
+
+// degradeIncompleteRecognition settles a document whose recognition ran out of its
+// wall-clock budget (#894) WITHOUT failing the document.
+//
+// It is the whole point of the #894 fix, so the reasoning is spelled out. A
+// per-document status="error" is not a neutral diagnostic: store.liveParentDocument
+// binds every chunk's liveness to its parent document, so stamping "error" hides
+// EVERY chunk the document already has — its sidecar, its transcript, its media
+// chunks, and any annotations a previous good run indexed — from lexical search,
+// from vector search, and from the embed queue. Applying that to a recognition
+// timeout is how a broadcast with 892 indexed annotations came to serve nothing.
+// The annotations that arrived are the honest outcome, so they stay live.
+//
+// The failure is still recorded, three ways, all on surfaces that already exist:
+//
+//   - a warning naming the document and the budget it exceeded;
+//   - the run's error counter, so the ingest summary never claims a clean run;
+//   - RECOGNIZE_FAILED on the batch run manifest record (§8.6.11), when a batch
+//     run is active.
+//
+// It also sets recognizeIncompleteThisDoc, which withholds the #402 done marker
+// (finalizeIfGenerated): the document keeps an empty content_hash, so the next
+// incremental scan retries recognition instead of treating the timed-out document
+// as finished. Withholding the marker — rather than stamping status="error" — is
+// what buys the retry without hiding anything.
+//
+// A DURABLE record that this document's recognition is incomplete (so
+// dir2mcp_stats reports it after a restart, not only in-run) needs a field or an
+// enum value that SPEC §15.2/§7.7 does not have today: `skip_reasons` is a closed
+// enum keyed to status="skipped" documents, and `recent_failures` is keyed to
+// status="error" documents — the two states this path deliberately avoids. That
+// half is spec-first and is tracked in #894.
+//
+// alreadyCounted is the transcript path's own soft-failure verdict. When it is
+// true the document has ALREADY been counted exactly once — as an error, or as an
+// uncovered-language skip — so this path must not count it a second time, or
+// errors+skipped for one document would exceed 1 and the run totals would exceed
+// the number of documents scanned (#426).
+//
+// The returned bool is the #426 suppressCredit signal: this document is counted as
+// an error (here or by the transcript path), so it must not ALSO be credited as
+// indexed.
+func (s *Service) degradeIncompleteRecognition(
+	doc model.Document,
+	cause error,
+	secretPatterns []*regexp.Regexp,
+	alreadyCounted bool,
+) bool {
+	// Redact once, then use the same message for both sinks. The recognizer contract
+	// does not promise a secret-free error, so the log must not carry the raw one.
+	message := RedactSecretsInMessage(cause.Error(), secretPatterns)
+	s.getLogger().Printf("recognition incomplete for %s: %s; keeping the representations already indexed "+
+		"and retrying on the next scan (raise recognize.timeout / recognize.timeout_per_media_second)",
+		doc.RelPath, message)
+	s.recognizeIncompleteThisDoc = true
+	if !alreadyCounted {
+		s.addErrors(1)
+	}
+	s.markActiveErrored(manifestErrRecognizeFailed, message)
+	return true
+}
+
+// hasIndexedRepresentations reports whether the document currently has at least
+// one ACTIVE representation, i.e. whether it has anything a status="error" stamp
+// would hide (#894).
+//
+// It reads the store rather than this run's flags on purpose: the representations
+// worth protecting are usually the ones an EARLIER scan committed (the pilot's 892
+// annotations), which no in-run flag knows about.
+//
+// It uses the same optional store capability as output reconciliation. A store that
+// does not implement it answers true, which routes to the degrade path: when the
+// daemon cannot tell whether a document has indexed content, keeping that content
+// live is the safe direction, and the failure is still counted and retried. A read
+// error answers true for the same reason.
+func (s *Service) hasIndexedRepresentations(ctx context.Context, relPath string) bool {
+	lister, ok := s.store.(activeRepresentationLister)
+	if !ok {
+		return true
+	}
+	reps, err := lister.ActiveRepresentations(ctx, relPath)
+	if err != nil {
+		if isNotFoundError(err) {
+			// No document row at all, so there is nothing indexed to protect.
+			return false
+		}
+		s.getLogger().Printf("recognition timeout: list representations for %s failed: %v", relPath, err)
+		return true
+	}
+	return len(reps) > 0
 }
 
 // htmlRoutesToStructured reports whether an html document should be promoted to
