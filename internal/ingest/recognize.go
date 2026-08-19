@@ -115,6 +115,15 @@ func NewRecognizeServeClient(baseURL string) *RecognizeServeClient {
 	}
 }
 
+// HTTPClientTimeout reports the serve client's fixed http.Client.Timeout. It is
+// exposed so a test can pin that the client carries NO client-level ceiling
+// (#894): any non-zero value here would silently cap the per-document deadline the
+// ingest service puts on the request context, whichever is shorter, and so
+// reinstate the ten-minute wall that made recognition unusable on long media.
+func (c *RecognizeServeClient) HTTPClientTimeout() time.Duration {
+	return c.httpClient.Timeout
+}
+
 // recognizeWireResponse is the serve wire contract (design 0004 §5;
 // draft schema 0004-recognize-response.schema.json in dirstral-spec).
 type recognizeWireResponse struct {

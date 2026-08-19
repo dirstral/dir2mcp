@@ -264,6 +264,13 @@ func TestRecognizeServeClient_HonoursCallerDeadline(t *testing.T) {
 	t.Cleanup(func() { close(release); srv.Close() })
 
 	client := ingest.NewRecognizeServeClient(srv.URL)
+	// A fixed client-level ceiling would cap the per-document deadline the service
+	// computes, whichever is shorter, which is exactly the ten-minute wall #894
+	// removed. There must be none.
+	if got := client.HTTPClientTimeout(); got != 0 {
+		t.Fatalf("http.Client.Timeout = %s, want none: a client-level ceiling caps every "+
+			"configured per-document bound", got)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
 	if _, err := client.Recognize(ctx, "/corpus/game7.mp4"); !errors.Is(err, context.DeadlineExceeded) {
@@ -331,5 +338,46 @@ func TestRecognizeTimeout_DoesNotEmptyTheCorpus(t *testing.T) {
 	}
 	if len(hits) == 0 {
 		t.Fatal("the transcript that DID arrive is no longer searchable: the timeout emptied the corpus")
+	}
+}
+
+// TestRecognizeTimeout_EmptyDocumentStillFailsLoudly pins the other half of the
+// degrade rule. A video with NOTHING indexed — no sidecar, no transcript, no
+// earlier annotations — has no chunks that a status="error" stamp could hide, and
+// it genuinely is not searchable. That document keeps failing hard, so the failure
+// is recorded durably and shows up in recent_failures after a restart, instead of
+// being reported as an indexed document that answers nothing.
+func TestRecognizeTimeout_EmptyDocumentStillFailsLoudly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video-bytes")
+
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.RecognizeProvider = "serve"
+	cfg.RecognizeTimeout = 40 * time.Millisecond
+	cfg.RecognizeTimeoutPerMediaSecond = 0
+
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetRecognizer(&blockingRecognizer{})
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, os.ErrNotExist }
+
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	doc := documentByPath(t, st, "clip.mp4")
+	if doc.Status != "error" {
+		t.Fatalf("status = %q, want \"error\": a document with nothing indexed loses nothing to "+
+			"the stamp, and an unsearchable document must be recorded durably", doc.Status)
+	}
+	if doc.ContentHash != "" {
+		t.Errorf("content_hash = %q, want it withheld so the next scan retries", doc.ContentHash)
 	}
 }

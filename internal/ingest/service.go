@@ -4162,7 +4162,22 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 		if !errors.Is(err, ErrRecognizeTimeout) {
 			return transcriptSoftFailed, err
 		}
-		return s.degradeIncompleteRecognition(doc, err, secretPatterns), nil
+		// Recognition ran out of its wall-clock budget (#894). Degrade ONLY when this
+		// document has something to lose. status="error" hides every chunk a document
+		// has (store.liveParentDocument), so on a document that already carries
+		// representations the stamp destroys working retrieval and must not be
+		// applied; returning no error here is what keeps them live, and returning
+		// BEFORE the noVideoRep verdict below is what stops that verdict from
+		// stamping the same status by another road.
+		//
+		// A document with NOTHING indexed is the opposite case: the stamp hides
+		// nothing, and it is the honest, DURABLE record that this document is not
+		// searchable, visible in recent_failures after a restart. So that one keeps
+		// failing hard, exactly as before.
+		if !s.hasIndexedRepresentations(ctx, doc.RelPath) {
+			return transcriptSoftFailed, err
+		}
+		return s.degradeIncompleteRecognition(doc, err, secretPatterns, transcriptSoftFailed), nil
 	}
 	// #681: recognition itself was withheld, so the document is terminal. Same
 	// reasoning as the transcript guard: a withheld document must not also be
@@ -4217,16 +4232,60 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 // status="error" documents — the two states this path deliberately avoids. That
 // half is spec-first and is tracked in #894.
 //
-// The returned bool is the #426 suppressCredit signal: an error was counted for
-// this document, so it must not ALSO be credited as indexed.
-func (s *Service) degradeIncompleteRecognition(doc model.Document, cause error, secretPatterns []*regexp.Regexp) bool {
+// alreadyCounted is the transcript path's own soft-failure verdict. When it is
+// true the document has ALREADY been counted exactly once — as an error, or as an
+// uncovered-language skip — so this path must not count it a second time, or
+// errors+skipped for one document would exceed 1 and the run totals would exceed
+// the number of documents scanned (#426).
+//
+// The returned bool is the #426 suppressCredit signal: this document is counted as
+// an error (here or by the transcript path), so it must not ALSO be credited as
+// indexed.
+func (s *Service) degradeIncompleteRecognition(
+	doc model.Document,
+	cause error,
+	secretPatterns []*regexp.Regexp,
+	alreadyCounted bool,
+) bool {
 	s.getLogger().Printf("recognition incomplete for %s: %v; keeping the representations already indexed "+
 		"and retrying on the next scan (raise recognize.timeout / recognize.timeout_per_media_second)",
 		doc.RelPath, cause)
 	s.recognizeIncompleteThisDoc = true
-	s.addErrors(1)
+	if !alreadyCounted {
+		s.addErrors(1)
+	}
 	s.markActiveErrored(manifestErrRecognizeFailed, RedactSecretsInMessage(cause.Error(), secretPatterns))
 	return true
+}
+
+// hasIndexedRepresentations reports whether the document currently has at least
+// one ACTIVE representation, i.e. whether it has anything a status="error" stamp
+// would hide (#894).
+//
+// It reads the store rather than this run's flags on purpose: the representations
+// worth protecting are usually the ones an EARLIER scan committed (the pilot's 892
+// annotations), which no in-run flag knows about.
+//
+// It uses the same optional store capability as output reconciliation. A store that
+// does not implement it answers true, which routes to the degrade path: when the
+// daemon cannot tell whether a document has indexed content, keeping that content
+// live is the safe direction, and the failure is still counted and retried. A read
+// error answers true for the same reason.
+func (s *Service) hasIndexedRepresentations(ctx context.Context, relPath string) bool {
+	lister, ok := s.store.(activeRepresentationLister)
+	if !ok {
+		return true
+	}
+	reps, err := lister.ActiveRepresentations(ctx, relPath)
+	if err != nil {
+		if isNotFoundError(err) {
+			// No document row at all, so there is nothing indexed to protect.
+			return false
+		}
+		s.getLogger().Printf("recognition timeout: list representations for %s failed: %v", relPath, err)
+		return true
+	}
+	return len(reps) > 0
 }
 
 // htmlRoutesToStructured reports whether an html document should be promoted to
