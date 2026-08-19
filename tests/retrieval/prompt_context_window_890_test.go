@@ -205,15 +205,28 @@ func TestAsk890_DropsTheCitationOfAMemberTheBudgetExcluded(t *testing.T) {
 	if len(got.Citations) == len(chunks) {
 		t.Fatalf("every member is cited, but the %d char budget cannot hold them all", 220)
 	}
-	textByID := make(map[uint64]string, len(chunks))
-	for _, c := range chunks {
-		textByID[c.id] = c.text
-	}
+	// The citation set must be exactly the members the block quotes: no member
+	// the budget excluded, and no member it kept.
 	ctxSection := promptContext(t, gen.lastPrompt)
+	want := make(map[uint64]bool, len(chunks))
+	for _, c := range chunks {
+		if strings.Contains(ctxSection, c.text) {
+			want[c.id] = true
+		}
+	}
+	cited := make(map[uint64]bool, len(got.Citations))
 	for _, c := range got.Citations {
-		if !strings.Contains(ctxSection, textByID[c.ChunkID]) {
+		cited[c.ChunkID] = true
+	}
+	for id := range want {
+		if !cited[id] {
+			t.Fatalf("chunk %d is quoted in the prompt but is not cited:\n%s", id, ctxSection)
+		}
+	}
+	for id := range cited {
+		if !want[id] {
 			t.Fatalf("chunk %d is cited but the budget kept its text out of the prompt:\n%s",
-				c.ChunkID, ctxSection)
+				id, ctxSection)
 		}
 	}
 }
