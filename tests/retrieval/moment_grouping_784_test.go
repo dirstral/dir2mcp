@@ -105,8 +105,26 @@ func TestAsk_ShowsOneRoleSplitMomentOnce(t *testing.T) {
 	if got := countBlocks(t, gen.lastPrompt); got != 2 {
 		t.Fatalf("prompt held %d context blocks, want 2 (the walk and the grand slam)\n%s", got, gen.lastPrompt)
 	}
-	if got := strings.Count(gen.lastPrompt, "walks."); got != 1 {
-		t.Fatalf("the walk is stated %d times in the prompt, want 1\n%s", got, gen.lastPrompt)
+	// One event is one DOCUMENT. Both role-keyed annotations of the walk sit
+	// inside the same fenced block, so the generator reads one document for one
+	// event and cannot count the walk twice. The block quotes both annotations
+	// (issue #890): on a recognition corpus the sibling carries facts the
+	// primary lacks, and citing a sibling the model never read is what §9.4.2
+	// forbids. What must never happen again is TWO blocks for one moment.
+	_, ctxSection, ok := strings.Cut(gen.lastPrompt, "\n\nContext:\n")
+	if !ok {
+		t.Fatalf("prompt has no Context section:\n%s", gen.lastPrompt)
+	}
+	walkBlock, _, ok := strings.Cut(ctxSection, "<<<END UNTRUSTED DOCUMENT>>>")
+	if !ok {
+		t.Fatalf("no closed fence in the context:\n%s", ctxSection)
+	}
+	if !strings.Contains(walkBlock, "At bat: Bryce Eldridge") ||
+		!strings.Contains(walkBlock, "Pitch: Paxton Schultz") {
+		t.Fatalf("the two annotations of the walk are not in one block:\n%s", ctxSection)
+	}
+	if strings.Contains(walkBlock, "grand slam") {
+		t.Fatalf("a different moment leaked into the walk's block:\n%s", ctxSection)
 	}
 	if !strings.Contains(gen.lastPrompt, "grand slam") {
 		t.Fatalf("grouping dropped the other moment\n%s", gen.lastPrompt)

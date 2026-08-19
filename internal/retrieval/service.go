@@ -141,6 +141,10 @@ const (
 	ragDocOpenMarkerEnd = ">>>"
 	ragDocCloseMarker   = "<<<END UNTRUSTED DOCUMENT>>>"
 
+	// ragDocCloseBlock is the close marker as the builder writes it: on its own
+	// line, and followed by a newline that separates two context blocks.
+	ragDocCloseBlock = "\n" + ragDocCloseMarker + "\n"
+
 	// ragDocMarkerRedaction replaces any occurrence of the fence markers found
 	// inside corpus-derived text (snippet, rel_path, title) so a poisoned
 	// document cannot spoof or prematurely close the untrusted fence and smuggle
@@ -2026,10 +2030,20 @@ func (s *Service) generateGroundedAnswer(
 	// Group the candidates that report one moment before the model reads them
 	// (issue #784). A recognition backend reports one moment once per role, so
 	// two candidates can carry the same time span on the same file. One block
-	// per moment stops the generator from counting one event twice. Every
-	// member of a used moment stays citable; see moments.go.
+	// per moment stops the generator from counting one event twice. The block
+	// quotes every member the budget affords, and only a member it quoted is
+	// citable (issue #890); see moments.go.
 	moments := groupMoments(hits)
-	prompt, usedIdx := buildRAGPrompt(question, hits, moments, s.contextTexts(ctx, hits, moments), systemPrompt, maxContextChars, compressor)
+	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
+	prompt, usedIdx := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	// Report a partial reasoning window. The citation list cannot show it: it
+	// reports provenance, not how much of the retrieved evidence the model read
+	// (issue #891). An aggregate answer built on a partial window is a sample,
+	// so an operator debugging one needs to see the split.
+	if len(usedIdx) < len(hits) {
+		s.logf("rag: prompt placed %d of %d retrieved chunks (%d moments, budget %d chars); the answer reasons over the placed set only",
+			len(usedIdx), len(hits), len(moments), maxContextChars)
+	}
 	var generated string
 	genErr := usage.TimeStage(ctx, usage.StageGenerate, func() error {
 		var gErr error
@@ -3759,8 +3773,31 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 	return strings.Join(lines, "\n")
 }
 
-// ragMaxContextDocs caps how many retrieved chunks may be placed in the prompt.
-const ragMaxContextDocs = 8
+// ragMinDocShareChars is the smallest share of the context budget the builder
+// divides that budget into, and it is what bounds the document count now
+// (issue #891).
+//
+// A fixed cap of 8 documents used to bound it. That constant was a proxy for
+// cost, and it measured cost in the wrong unit: `rag.max_context_chars` already
+// bounds the prompt directly, so a 130 char recognition annotation and a 3000
+// char PDF page were given the same slot. The effect was that `k` above 8 grew
+// only the citation list. The reasoning window stayed at 8 documents, so every
+// superlative over more than 8 candidates answered the maximum of a sample.
+//
+// The count is now derived: at most maxContextChars/ragMinDocShareChars
+// documents, each with an equal share of the budget. The share is what has to
+// stay useful. Below a few hundred runes a match-centered window degrades into
+// a fragment that cannot carry the region its citation names (§9.4.2), so the
+// builder prefers fewer, readable documents to many unusable ones. At the
+// default 20000 char budget the ceiling is 50 documents, which is exactly the
+// upper bound the `search`/`ask` tool schema puts on `k`: a caller can now
+// widen the evidence up to the whole result set, and cannot ask for a prompt
+// wider than the budget the operator configured.
+//
+// A budget smaller than one share leaves the count unbounded here; the
+// per-block minimum (ragMinDocTextChars) then decides how many complete fenced
+// blocks fit, exactly as it did before.
+const ragMinDocShareChars = 400
 
 // ragMinDocTextChars is the smallest per-document text window worth emitting.
 // Below it the fence markers would dominate the block and the window could not
@@ -3774,17 +3811,15 @@ const ragMinDocTextChars = 16
 // chunkByIDer capability exactly as rerankDocs does; entries stay empty when the
 // store lacks the capability, the chunk id is zero, the lookup fails, or the
 // chunk carries no text (a media chunk), and the builder then falls back to the
-// hit's Snippet. At most ragMaxContextDocs lookups run per ask.
+// hit's Snippet.
 //
-// moments carries the answer-time grouping (issue #784). Only the primary
-// member of a moment reaches the prompt, so only a primary needs its text. The
-// returned slice stays indexed by HIT index, and an entry that no moment uses
-// stays empty.
-func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, moments []moment) []string {
-	limit := len(moments)
-	if limit > ragMaxContextDocs {
-		limit = ragMaxContextDocs
-	}
+// moments carries the answer-time grouping (issue #784). EVERY member of a
+// moment that can reach the prompt needs its text, because the block quotes
+// every member (issue #890, momentContextText). The returned slice stays indexed
+// by HIT index, and an entry that no moment uses stays empty. One lookup runs
+// per member of the moments the budget can reach, so at most one per hit.
+func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, moments []moment, maxContextChars int) []string {
+	limit := ragContextDocLimit(len(moments), normalizeMaxContextChars(maxContextChars))
 	texts := make([]string, len(hits))
 	// Copy the store under the guard like every other accessor in this file
 	// (applyRecencyDecay, rerankPool): the field can be reassigned after
@@ -3797,25 +3832,64 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 		return texts
 	}
 	for i := 0; i < limit; i++ {
-		p := moments[i].primary()
-		if p < 0 || p >= len(hits) || hits[p].ChunkID == 0 {
-			continue
+		for _, member := range moments[i].members {
+			if member < 0 || member >= len(hits) || hits[member].ChunkID == 0 {
+				continue
+			}
+			task, _, err := fetcher.ChunkTaskByID(ctx, hits[member].ChunkID)
+			if err != nil {
+				continue
+			}
+			texts[member] = strings.TrimSpace(task.Text)
 		}
-		task, _, err := fetcher.ChunkTaskByID(ctx, hits[p].ChunkID)
-		if err != nil {
-			continue
-		}
-		texts[p] = strings.TrimSpace(task.Text)
 	}
 	return texts
+}
+
+// ragContextDocLimit returns how many moments may become context documents.
+// The character budget decides, not a fixed count (issue #891): each document
+// gets an equal share of the budget, and the share may not fall below
+// ragMinDocShareChars.
+//
+// A budget below one share still holds ONE complete fenced block, so the
+// ceiling never falls under one document. Dividing such a budget across the
+// whole candidate set instead would leave every document a fragment, and
+// ragMinDocTextChars would then reject them all and ground the answer in
+// nothing. The single document still has to fit: ragMinDocTextChars rejects it
+// when the budget cannot even hold the fence plus a usable window.
+func ragContextDocLimit(moments, maxContextChars int) int {
+	if moments <= 0 {
+		return 0
+	}
+	ceiling := maxContextChars / ragMinDocShareChars
+	if ceiling < 1 {
+		ceiling = 1
+	}
+	if moments > ceiling {
+		return ceiling
+	}
+	return moments
+}
+
+// normalizeMaxContextChars clamps a configured context budget into the
+// supported range. buildRAGPrompt and contextTexts must agree on the budget,
+// because both derive the document count from it.
+func normalizeMaxContextChars(maxContextChars int) int {
+	if maxContextChars <= 0 {
+		return defaultRAGMaxContext
+	}
+	if maxContextChars > maxRAGMaxContext {
+		return maxRAGMaxContext
+	}
+	return maxContextChars
 }
 
 // buildRAGPrompt assembles the system+question+context prompt sent to the
 // generator and returns, alongside the prompt string, the indices (into hits)
 // of the chunks that were actually placed in the context window. Only those
 // chunks were seen by the model, so callers MUST restrict the answer's
-// citations to this set, since a chunk dropped by the doc-count cap
-// (ragMaxContextDocs) or the maxContextChars budget was never given to the LLM
+// citations to this set, since a chunk dropped by the document limit
+// (ragContextDocLimit) or the maxContextChars budget was never given to the LLM
 // and citing it overstates grounding (issue #403 F1).
 //
 // fullTexts carries the resolved full chunk text per hit (see contextTexts) and
@@ -3828,24 +3902,25 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 // reaches the model that cites it.
 //
 // moments groups the candidates that report one event (issue #784, see
-// moments.go). One block is emitted per moment, and the text of its best-ranked
-// member fills that block. The model therefore reads one moment once, and it
-// can no longer count a role-split recognition annotation as two events. The
-// returned indices name EVERY member of each moment that reached the context,
-// so provenance is unchanged: each member cites the same seconds of the same
-// file that the block quoted. A corpus without recognition annotations groups
-// one hit per moment, so the prompt is byte-identical to before.
+// moments.go). One block is emitted per moment, and the text of EVERY member
+// fills that block (issue #890). The model therefore reads one moment once, so
+// it cannot count a role-split recognition annotation as two events, and it
+// reads all of what that moment records, so the answer is not blind to the
+// sibling annotation that carries the number the question asks for. The
+// returned indices name the members the block actually quoted, and only those:
+// a member the budget left out is not citable, because citing it would name
+// text the model was never shown (§9.4.2). A corpus without recognition
+// annotations groups one hit per moment, so the prompt is byte-identical to
+// before.
+//
+// How many moments reach the prompt is decided by the character budget
+// (ragContextDocLimit, issue #891), not by a fixed document count.
 func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
 	systemPrompt = strings.TrimSpace(systemPrompt)
 	if systemPrompt == "" {
 		systemPrompt = defaultRAGSystemPrompt
 	}
-	if maxContextChars <= 0 {
-		maxContextChars = defaultRAGMaxContext
-	}
-	if maxContextChars > maxRAGMaxContext {
-		maxContextChars = maxRAGMaxContext
-	}
+	maxContextChars = normalizeMaxContextChars(maxContextChars)
 
 	var b strings.Builder
 	b.WriteString(systemPrompt)
@@ -3855,18 +3930,15 @@ func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, f
 	b.WriteString("\n\nContext:\n")
 
 	remaining := maxContextChars
-	limit := len(moments)
-	if limit > ragMaxContextDocs {
-		limit = ragMaxContextDocs
-	}
+	limit := ragContextDocLimit(len(moments), maxContextChars)
 	perDoc := maxContextChars / limitOrOne(limit)
-	used := make([]moment, 0, limit)
+	used := make([]int, 0, len(hits))
 	for i := 0; i < limit && remaining > 0; i++ {
 		p := moments[i].primary()
 		if p < 0 || p >= len(hits) {
 			continue
 		}
-		block, ok := ragDocBlock(question, hits[p], docTextAt(fullTexts, p), perDoc, remaining, compressor)
+		block, placed, ok := ragMomentBlock(question, hits[p], hits, fullTexts, moments[i], perDoc, remaining, compressor)
 		if !ok {
 			// The remaining budget cannot hold a complete, fenced block for this
 			// document. Stop rather than emit a partial one: a truncated block
@@ -3876,9 +3948,40 @@ func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, f
 		}
 		b.WriteString(block)
 		remaining -= len([]rune(block))
-		used = append(used, moments[i])
+		used = append(used, placed...)
 	}
-	return b.String(), momentMemberIndices(used)
+	return b.String(), sortedIndices(used)
+}
+
+// ragMomentBlock renders one fenced context block for a moment and reports the
+// hit indices whose text it placed, or false when the remaining budget cannot
+// hold a complete block.
+//
+// h is the moment's primary hit. Its document names the block's header, which
+// every member shares: a moment groups on (rel_path, start_ms, end_ms), so one
+// header is accurate for all of them. The block's text carries every member the
+// budget affords (issue #890), and the members it could not fit are absent from
+// the reported indices, so they are not cited.
+func ragMomentBlock(
+	question string, h model.SearchHit, hits []model.SearchHit, fullTexts []string, m moment,
+	perDoc, remaining int, compressor contextCompressor,
+) (string, []int, bool) {
+	header := ragDocHeader(h)
+	// The window budget is the document's fair share, narrowed to whatever the
+	// global budget still leaves once both fence markers are accounted for. A
+	// budget-boundary document therefore gets a SMALLER match-centered window
+	// instead of a head-truncated one, which keeps the matched region (and hence
+	// the text its citation names) inside the prompt.
+	budget := perDoc
+	if avail := remaining - len([]rune(header)) - len([]rune(ragDocCloseBlock)); avail < budget {
+		budget = avail
+	}
+	if budget < ragMinDocTextChars {
+		return "", nil, false
+	}
+	text, placed := momentContextText(hits, fullTexts, m, budget)
+	snippet := ragDocSnippet(question, h, text, budget, compressor)
+	return header + snippet + ragDocCloseBlock, membersInSnippet(hits, fullTexts, m.primary(), placed, snippet), true
 }
 
 // limitOrOne guards the per-document division against a zero document count.
@@ -3898,11 +4001,11 @@ func docTextAt(fullTexts []string, i int) string {
 	return fullTexts[i]
 }
 
-// ragDocBlock renders one fenced context block for a hit, or reports false when
-// the remaining budget cannot hold a complete block. The returned block always
-// carries a complete opening marker and a complete closing marker, so the
-// untrusted fence is never left partial or straddled (issue #445).
-func ragDocBlock(question string, h model.SearchHit, fullText string, perDoc, remaining int, compressor contextCompressor) (string, bool) {
+// ragDocHeader renders the opening marker of one fenced context block. It is
+// paired with ragDocCloseBlock: a block always carries a complete opening
+// marker and a complete closing marker, so the untrusted fence is never left
+// partial or straddled (issue #445).
+func ragDocHeader(h model.SearchHit) string {
 	// Preserve the bracketed [rel_path] citation tag structurally so the
 	// answering model (and ensureAnswerAttributions) can match it, but note
 	// the tag's contents may be sanitized by neutralizeHeaderField for
@@ -3919,22 +4022,7 @@ func ragDocBlock(question string, h model.SearchHit, fullText string, perDoc, re
 	if title := strings.TrimSpace(h.Title); title != "" {
 		header += " (" + neutralizeHeaderField(title) + ")"
 	}
-	header += ragDocOpenMarkerEnd + "\n"
-	closing := "\n" + ragDocCloseMarker + "\n"
-
-	// The window budget is the document's fair share, narrowed to whatever the
-	// global budget still leaves once both fence markers are accounted for. A
-	// budget-boundary document therefore gets a SMALLER match-centered window
-	// instead of a head-truncated one, which keeps the matched region (and hence
-	// the text its citation names) inside the prompt.
-	budget := perDoc
-	if avail := remaining - len([]rune(header)) - len([]rune(closing)); avail < budget {
-		budget = avail
-	}
-	if budget < ragMinDocTextChars {
-		return "", false
-	}
-	return header + ragDocSnippet(question, h, fullText, budget, compressor) + closing, true
+	return header + ragDocOpenMarkerEnd + "\n"
 }
 
 // ragDocSnippet produces the model-facing text for one hit: the full chunk text
