@@ -303,6 +303,10 @@ func TestRecognizeTimeout_DoesNotEmptyTheCorpus(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.RootDir = root
+	// An isolated state dir: the default is ./.dir2mcp relative to the process
+	// working directory, which these parallel tests would otherwise share with each
+	// other and leave behind in the package directory.
+	cfg.StateDir = t.TempDir()
 	cfg.RecognizeProvider = "serve"
 	cfg.RecognizeTimeout = 40 * time.Millisecond
 	cfg.RecognizeTimeoutPerMediaSecond = 0
@@ -360,6 +364,10 @@ func TestRecognizeTimeout_EmptyDocumentStillFailsLoudly(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.RootDir = root
+	// An isolated state dir: the default is ./.dir2mcp relative to the process
+	// working directory, which these parallel tests would otherwise share with each
+	// other and leave behind in the package directory.
+	cfg.StateDir = t.TempDir()
 	cfg.RecognizeProvider = "serve"
 	cfg.RecognizeTimeout = 40 * time.Millisecond
 	cfg.RecognizeTimeoutPerMediaSecond = 0
