@@ -4,6 +4,7 @@ import (
 	"context"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -272,41 +273,251 @@ func isMediaVariantFile(relPath string) bool {
 // are grouped and a single canonical rendition per group is kept; non-media and
 // single-rendition files are unaffected. Output order matches the input order
 // of the surviving files, so the result stays deterministic for a sorted walk.
+//
+// It is SelectMediaVariantsWithCap with no over-cap candidates, for callers that
+// have no size-cap drops to hand back to grouping.
 func SelectMediaVariants(files []DiscoveredFile, opts MediaVariantOptions) []DiscoveredFile {
-	if !opts.Group || len(files) == 0 {
-		return files
+	return SelectMediaVariantsWithCap(files, nil, opts).Files
+}
+
+// OversizeCandidate names a file that discovery dropped because its size passes
+// the `ingest.max_file_mb` cap.
+//
+// Only the name and the size travel, never the bytes: an over-cap file is still
+// never opened, so the bounded-read rule (#830) holds unchanged.
+//
+// These two fields are exactly what selection reads today: variantBetter takes
+// the resolution out of the name and compares SizeBytes. So an over-cap
+// candidate can be ranked against a discovered file without stat'ing it again.
+// A future policy that reads anything else (mtime, ETag) must carry that value
+// here as well, or it would rank every over-cap candidate on a zero value.
+type OversizeCandidate struct {
+	RelPath   string
+	SizeBytes int64
+}
+
+// VariantCapInteraction reports one media group where `ingest.max_file_mb`
+// changed what `media.variants.select` could return (#879). Discovery logs it so
+// the interaction of the two settings is visible instead of silent.
+type VariantCapInteraction struct {
+	// Canonical is the rendition the group ends on: the selected rendition under
+	// the cap when Indexed is true, or the rendition the policy would have picked
+	// when Indexed is false and the whole group is over the cap.
+	Canonical string
+	// OverCap counts the renditions of the group the cap excluded.
+	OverCap int
+	// Indexed reports whether Canonical fits the cap and is ingested. False means
+	// no rendition of the group fits and the group is skipped as size_cap.
+	Indexed bool
+}
+
+// VariantCapResult is the outcome of grouping renditions first and applying the
+// size cap second (#879).
+type VariantCapResult struct {
+	// Files are the survivors to ingest, in input order.
+	Files []DiscoveredFile
+	// Oversize are the over-cap candidates that still deserve a size_cap
+	// document row, in input order. An over-cap rendition that grouping discards
+	// is NOT here: a rendition the corpus never wanted must not leave a row.
+	Oversize []OversizeCandidate
+	// Interactions are the groups the cap changed, ordered by the rel_path of
+	// the rendition each group ends on.
+	Interactions []VariantCapInteraction
+}
+
+// SelectMediaVariantsWithCap groups media renditions (spec §8.6.5) BEFORE the
+// `ingest.max_file_mb` cap decides anything, then applies the cap inside each
+// group (#879).
+//
+// Order matters. The cap used to run first, inside the walker, so a group was
+// formed out of whatever happened to be small enough and `select: best` picked
+// the best of the leftovers: an operator who asked for `best` silently got the
+// worst rendition. Group membership is now computed over every rendition that
+// exists, over-cap ones included, so the cap can no longer change which files
+// form a group nor which renditions the corpus knows about.
+//
+// The cap then applies within the group, as an admission filter on the
+// candidates:
+//
+//   - a group with at least one rendition under the cap keeps the best
+//     ADMISSIBLE rendition, and every other rendition is dropped by grouping
+//     with no document row, whichever side of the cap it fell (the bookkeeping
+//     half of #879);
+//   - a group with NO rendition under the cap is skipped as size_cap, recorded
+//     once on the rendition the policy would have chosen, so an unindexable
+//     group reports one honest coverage gap instead of one per rendition.
+//
+// When opts.Group is false the inputs are returned untouched, so the default
+// deployment (grouping off) behaves exactly as before.
+func SelectMediaVariantsWithCap(files []DiscoveredFile, oversize []OversizeCandidate, opts MediaVariantOptions) VariantCapResult {
+	if !opts.Group || (len(files) == 0 && len(oversize) == 0) {
+		return VariantCapResult{Files: files, Oversize: oversize}
 	}
 	selectPolicy := opts.Select
 	if selectPolicy == "" {
 		selectPolicy = MediaVariantSelectBest
 	}
 
-	// winners maps normalized group key -> index (into files) of the canonical
-	// rendition chosen so far.
-	winners := make(map[string]int)
+	idx := indexVariantGroups(files, oversize, selectPolicy)
+	return VariantCapResult{
+		Files:        idx.survivingFiles(files),
+		Oversize:     idx.survivingOversize(oversize),
+		Interactions: variantCapInteractions(idx.groups, selectPolicy),
+	}
+}
+
+// variantIndex is the grouping of one discovery result: the groups themselves
+// plus the group key of every candidate, positionally, so the survivors can be
+// filtered without normalizing any name twice.
+type variantIndex struct {
+	groups map[string]*variantGroup
+	// fileKeys[i] is the group key of files[i], "" for a non-media file.
+	fileKeys []string
+	// overKeys[j] is the group key of oversize[j], "" for a non-media file.
+	overKeys []string
+}
+
+// indexVariantGroups forms the groups out of every rendition that exists, on
+// both sides of the size cap.
+func indexVariantGroups(files []DiscoveredFile, oversize []OversizeCandidate, policy MediaVariantSelect) variantIndex {
+	idx := variantIndex{
+		groups:   make(map[string]*variantGroup),
+		fileKeys: make([]string, len(files)),
+		overKeys: make([]string, len(oversize)),
+	}
 	for i := range files {
-		if !isMediaVariantFile(files[i].RelPath) {
+		idx.fileKeys[i] = variantGroupKey(files[i].RelPath)
+		if idx.fileKeys[i] == "" {
 			continue
 		}
-		key := normalizeVariantName(files[i].RelPath)
-		cur, ok := winners[key]
-		if !ok || variantBetter(files[i], files[cur], selectPolicy) {
-			winners[key] = i
-		}
+		ensureVariantGroup(idx.groups, idx.fileKeys[i]).addUnderCap(i, files[i], policy)
 	}
+	for j := range oversize {
+		idx.overKeys[j] = variantGroupKey(oversize[j].RelPath)
+		if idx.overKeys[j] == "" {
+			continue
+		}
+		candidate := DiscoveredFile{RelPath: oversize[j].RelPath, SizeBytes: oversize[j].SizeBytes}
+		ensureVariantGroup(idx.groups, idx.overKeys[j]).addOverCap(j, candidate, policy)
+	}
+	return idx
+}
 
+// survivingFiles keeps the canonical rendition of every group, plus every file
+// that takes no part in grouping, in input order.
+func (idx variantIndex) survivingFiles(files []DiscoveredFile) []DiscoveredFile {
 	out := make([]DiscoveredFile, 0, len(files))
 	for i := range files {
-		if !isMediaVariantFile(files[i].RelPath) {
-			out = append(out, files[i])
-			continue
-		}
-		key := normalizeVariantName(files[i].RelPath)
-		if winners[key] == i {
+		if idx.fileKeys[i] == "" || idx.groups[idx.fileKeys[i]].underIdx == i {
 			out = append(out, files[i])
 		}
 	}
 	return out
+}
+
+// survivingOversize keeps the size-cap drops that still deserve a size_cap
+// document row, in input order.
+func (idx variantIndex) survivingOversize(oversize []OversizeCandidate) []OversizeCandidate {
+	out := make([]OversizeCandidate, 0, len(oversize))
+	for j := range oversize {
+		if idx.overKeys[j] == "" {
+			// A non-media over-cap file never takes part in grouping.
+			out = append(out, oversize[j])
+			continue
+		}
+		// An over-cap rendition keeps its row only when it is the rendition the
+		// group would have used, that is when nothing in the group fits.
+		g := idx.groups[idx.overKeys[j]]
+		if g.underIdx < 0 && g.overIdx == j {
+			out = append(out, oversize[j])
+		}
+	}
+	return out
+}
+
+// variantGroup is the running state of one normalized-name group: the best
+// rendition under the cap, the best rendition over it, and how many members it
+// has. Both winners are tracked because the cap is applied after grouping, so a
+// group must know what it would have picked as well as what it may pick.
+type variantGroup struct {
+	// members counts every rendition of the group, on both sides of the cap.
+	members int
+	// overCap counts the renditions the cap excludes.
+	overCap int
+	// underIdx indexes the best under-cap rendition in the discovered files, or
+	// -1 when no rendition of the group fits the cap.
+	underIdx  int
+	underFile DiscoveredFile
+	// overIdx indexes the best over-cap rendition in the oversize candidates, or
+	// -1 when every rendition of the group fits the cap.
+	overIdx  int
+	overFile DiscoveredFile
+}
+
+func (g *variantGroup) addUnderCap(idx int, file DiscoveredFile, policy MediaVariantSelect) {
+	g.members++
+	if g.underIdx < 0 || variantBetter(file, g.underFile, policy) {
+		g.underIdx, g.underFile = idx, file
+	}
+}
+
+func (g *variantGroup) addOverCap(idx int, file DiscoveredFile, policy MediaVariantSelect) {
+	g.members++
+	g.overCap++
+	if g.overIdx < 0 || variantBetter(file, g.overFile, policy) {
+		g.overIdx, g.overFile = idx, file
+	}
+}
+
+// ensureVariantGroup returns the group for key, creating it on first sight.
+func ensureVariantGroup(groups map[string]*variantGroup, key string) *variantGroup {
+	if g, ok := groups[key]; ok {
+		return g
+	}
+	g := &variantGroup{underIdx: -1, overIdx: -1}
+	groups[key] = g
+	return g
+}
+
+// variantGroupKey returns the grouping key of a media rendition, or "" for a
+// file that does not take part in variant grouping at all.
+func variantGroupKey(relPath string) string {
+	if !isMediaVariantFile(relPath) {
+		return ""
+	}
+	return normalizeVariantName(relPath)
+}
+
+// variantCapInteractions reports the groups where the cap changed the outcome.
+// A group of one rendition is never reported: a lone over-cap media file is an
+// ordinary size_cap skip, not an interaction between two settings.
+//
+// The result is ordered by the rel_path each group ends on. Map iteration is
+// random and the candidates arrive in two separate lists, so the groups need an
+// order of their own, and the path is the one an operator can look up.
+func variantCapInteractions(groups map[string]*variantGroup, policy MediaVariantSelect) []VariantCapInteraction {
+	interactions := make([]VariantCapInteraction, 0, len(groups))
+	for _, g := range groups {
+		if g.overCap == 0 || g.members < 2 {
+			continue
+		}
+		switch {
+		case g.underIdx < 0:
+			interactions = append(interactions, VariantCapInteraction{
+				Canonical: g.overFile.RelPath, OverCap: g.overCap, Indexed: false,
+			})
+		case variantBetter(g.overFile, g.underFile, policy):
+			// The cap overruled the selection policy: an excluded rendition
+			// would have won the group.
+			interactions = append(interactions, VariantCapInteraction{
+				Canonical: g.underFile.RelPath, OverCap: g.overCap, Indexed: true,
+			})
+		}
+	}
+	sort.Slice(interactions, func(a, b int) bool {
+		return interactions[a].Canonical < interactions[b].Canonical
+	})
+	return interactions
 }
 
 // variantBetter reports whether candidate should replace the current canonical

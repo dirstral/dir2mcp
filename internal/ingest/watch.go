@@ -683,6 +683,14 @@ func (w *fsWatchLoop) indexableFile(absPath, rel string, info os.FileInfo) (Disc
 	if info.Size() > w.opts.MaxSizeBytes {
 		// Discovery records an over-size file as a durable skipped row (#497), so
 		// the watcher records the same row when a file grows past the cap.
+		//
+		// One divergence, under `media.variants.group: true`: the scan groups the
+		// renditions first and records no row for a rendition grouping discards
+		// (#879), while the watcher judges the single changed path and knows
+		// nothing about its group. So a touched over-cap rendition still gets a
+		// row here, and the next full scan tombstones it. The watcher does not
+		// group renditions at all (it would also index a non-canonical rendition
+		// as its own document), so teaching it §8.6.5 is one change, not this one.
 		return DiscoveredFile{}, watchSkip{reason: model.SkipReasonSizeCap, sizeBytes: info.Size()}, false
 	}
 	if w.opts.UseGitIgnore {

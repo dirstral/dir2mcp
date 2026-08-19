@@ -477,6 +477,15 @@ reports, and its chunks leave retrieval. It was refused by policy, not by a fail
 never lands in the failure list. On a tool request the refusal is reported as
 `FILE_TOO_LARGE`, which names the setting instead of a generic failure.
 
+With `media.variants.group: true` (SPEC §8.6.5) the cap judges the rendition the group
+ends on, not every rendition. Grouping runs first, over every rendition that exists, and
+the cap then decides which of them may be ingested: the media is indexed as the best
+rendition that fits. A rendition grouping discards leaves no row at all, whichever side
+of the cap it fell. Discovery says so when the two settings meet: it logs which rendition
+the media ends on and how many renditions the cap excluded, and, when no rendition fits,
+it records one `size_cap` skip for the media on the rendition the policy would have
+chosen. With grouping off (the default) every file is judged on its own, as before.
+
 Raw text now follows this setting exactly. Earlier releases gated raw-text indexing on a
 hard-coded 10 MiB, so a 15 MiB text file was admitted by the configured cap and then
 failed anyway. Text, code, markdown, data and HTML files between 10 MiB and the
@@ -847,6 +856,9 @@ media:
     group: true       # off by default; also dedups renditions to one document
     select: best      # which rendition is canonical
 ```
+
+`select` picks from the renditions that fit `ingest.max_file_mb`, so an archive of large
+renditions needs a cap that admits the quality you want. See [Ingest size cap](#ingest-size-cap).
 
 An exact match always wins over a bare-stem match, so `episode_1080p.en.vtt`
 beats `episode.en.vtt`. An untagged bare-stem sidecar (`episode.ttml`) binds only
