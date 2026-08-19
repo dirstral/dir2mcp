@@ -226,14 +226,14 @@ func TestAsk880_OperatorPromptStillReplacesTheDefault(t *testing.T) {
 		Snippet: "alpha",
 		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
 	})
-	svc.SetRAGSystemPrompt("Always answer in Russian. Cite as [rel_path].")
+	const operator = "Always answer in Russian. Cite as [rel_path]."
+	svc.SetRAGSystemPrompt(operator)
 
 	if _, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1}); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 
 	system, _ := promptRegions880(t, gen.lastPrompt)
-	const operator = "Always answer in Russian. Cite as [rel_path]."
 	if !strings.HasPrefix(system, operator) {
 		t.Fatalf("operator prompt was not used verbatim: %q", system)
 	}
