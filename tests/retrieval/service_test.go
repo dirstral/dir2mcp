@@ -1065,7 +1065,7 @@ func TestAsk_UsesConfiguredSystemPromptAndContextBudget(t *testing.T) {
 		t.Fatalf("expected custom system prompt, got %q", gen.lastPrompt)
 	}
 	if strings.Contains(gen.lastPrompt, "Answer the question using only the provided context.") {
-		t.Fatalf("expected default system prompt to be replaced, got %q", gen.lastPrompt)
+		t.Fatalf("expected the shipped domain rules to be replaced, got %q", gen.lastPrompt)
 	}
 	parts := strings.SplitN(gen.lastPrompt, "\n\nContext:\n", 2)
 	if len(parts) != 2 {

@@ -101,6 +101,11 @@ const (
 	ProfileCode    Profile = "code"
 )
 
+// legalSystemPrompt and codeSystemPrompt carry domain instructions only. The
+// server appends the prompt-injection guard to whatever system prompt is in
+// force (internal/retrieval, issue #885), so a preset cannot drop it. Before
+// #885 these presets replaced the whole prompt and did drop it: the legal
+// preset reads statutes and contracts, which an adversary may supply.
 const legalSystemPrompt = `You answer questions strictly from the provided legal documents: statutes,
 amendment acts, regulations, and codes of practice. Cite the specific act,
 section, and page for every statement. When provisions conflict, prefer the

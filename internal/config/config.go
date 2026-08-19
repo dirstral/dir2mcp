@@ -278,6 +278,10 @@ type Config struct {
 	// field is intentionally not persisted to disk.
 	Warnings []error
 
+	// RAGSystemPrompt is `rag.system_prompt` (SPEC §16). It supplies the domain
+	// rules of the RAG system prompt and replaces the shipped ones. It does not
+	// replace the prompt-injection guard: the retrieval service appends that to
+	// every system prompt, and no setting switches it off (issue #885).
 	RAGSystemPrompt string
 	// RAGGenerateAnswer is `rag.generate_answer` (SPEC §16). false withholds
 	// answer generation on every ask-family surface: the server returns the

@@ -212,24 +212,35 @@ func TestAsk880_EnglishQuestionUnaffected(t *testing.T) {
 }
 
 // TestAsk880_OperatorPromptStillReplacesTheDefault documents the escape hatch.
-// rag_system_prompt remains a full replacement: the server appends no language
-// rule to an operator's wording, so an operator who wants one fixed answer
-// language writes it into their own prompt.
+// rag_system_prompt still replaces every shipped DOMAIN rule: the server
+// appends no language rule to an operator's wording, so an operator who wants
+// one fixed answer language writes it into their own prompt.
+//
+// It no longer replaces the injection guard (issue #885). The server appends
+// that guard after the operator's text, so the assertion below covers the
+// operator's half only. tests/retrieval/system_prompt_guard_885_test.go covers
+// the appended half.
 func TestAsk880_OperatorPromptStillReplacesTheDefault(t *testing.T) {
 	svc, gen := newAskService880(t, model.SearchHit{
 		RelPath: "docs/a.md",
 		Snippet: "alpha",
 		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
 	})
-	svc.SetRAGSystemPrompt("Always answer in Russian. Cite as [rel_path].")
+	const operator = "Always answer in Russian. Cite as [rel_path]."
+	svc.SetRAGSystemPrompt(operator)
 
 	if _, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1}); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 
 	system, _ := promptRegions880(t, gen.lastPrompt)
-	if system != "Always answer in Russian. Cite as [rel_path]." {
+	if !strings.HasPrefix(system, operator) {
 		t.Fatalf("operator prompt was not used verbatim: %q", system)
+	}
+	// The shipped answer-language rule is gone: the operator's own rule stands
+	// alone, which is the point of the escape hatch.
+	if strings.Contains(system, "Write the answer in the language of the question") {
+		t.Fatalf("the shipped answer-language rule survived the replacement: %q", system)
 	}
 }
 
