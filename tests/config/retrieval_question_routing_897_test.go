@@ -96,11 +96,14 @@ func TestQuestionRouting897_SnapshotRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
+	// The failure message names the missing key only. The snapshot is a whole
+	// effective configuration, so dumping it into a CI log is a habit worth not
+	// having even when this one carries nothing sensitive.
 	if !strings.Contains(string(raw), "retrieval_question_routing_enabled: true") {
-		t.Fatalf("snapshot must persist retrieval_question_routing_enabled: true:\n%s", raw)
+		t.Fatal("snapshot must persist retrieval_question_routing_enabled: true")
 	}
 	if !strings.Contains(string(raw), "superlative") {
-		t.Fatalf("snapshot must persist the route list:\n%s", raw)
+		t.Fatal("snapshot must persist the superlative route in hyde_routes")
 	}
 
 	loaded, _, err := config.LoadEffectiveSnapshot(path)
