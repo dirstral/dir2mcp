@@ -22,9 +22,13 @@ import (
 // question text, first match wins. It costs no round trip, adds no failure mode
 // on the critical path, and is testable without a live model.
 //
-// SAFETY PROPERTY OF THE ORDER. The two routes that turn HyDE ON sit LAST in the
-// table. Every earlier route leaves HyDE off. A misclassification therefore
-// degrades toward today's behaviour, never toward more query transformation.
+// SAFETY PROPERTY OF THE SHIPPED TABLE. The two routes the shipped table turns
+// HyDE ON for are matched LAST, so every earlier route leaves HyDE off and a
+// misclassification degrades toward today's behaviour rather than toward more
+// query transformation. This is a property of the shipped table, not of the
+// classifier: an operator who names an earlier-matching route in
+// retrieval.question_routing.hyde_routes gives that route HyDE and gives the
+// property up.
 
 // QuestionRoute names the shape of a question. The set is CLOSED: a closed enum
 // is testable and can be pinned by a conformance fixture, while an open set
@@ -104,8 +108,9 @@ type RouteProfile struct {
 // The order is: negative control, then the routes by ascending measured HyDE
 // benefit. Negative control is first because its failure mode is fabrication
 // rather than a miss, and fabrication is the worse outcome. The rest follow the
-// table in #897, so a question that reads as two shapes takes the more
-// HyDE-averse one.
+// table in #897, so under the SHIPPED profile table a question that reads as two
+// shapes takes the more HyDE-averse one. A custom table can name an
+// earlier-matching route and lose that.
 var questionRoutePatterns = []struct {
 	route    QuestionRoute
 	patterns []*regexp.Regexp

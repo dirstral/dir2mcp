@@ -346,10 +346,13 @@ func TestRouting897_ConfigAndRetrievalVocabulariesAgree(t *testing.T) {
 	}
 }
 
-// TestRouting897_MisclassificationDegradesTowardTodaysBehaviour pins the safety
-// property of the table order: the two routes that turn HyDE ON sit last, so any
-// earlier match leaves HyDE off. A question carrying two shapes therefore takes
-// the more HyDE-averse one, never the other way round.
+// TestRouting897_MisclassificationDegradesTowardTodaysBehaviour pins the
+// classification order that gives the SHIPPED table its safety property: the two
+// routes the shipped table turns HyDE on for are matched last, so a question
+// carrying two shapes takes the more HyDE-averse one. The property belongs to
+// that table, not to the classifier: a custom hyde_routes naming an
+// earlier-matching route gives it up, which is why this test asserts the ORDER
+// and the shipped-table test above asserts the profiles.
 func TestRouting897_MisclassificationDegradesTowardTodaysBehaviour(t *testing.T) {
 	for _, tc := range []struct {
 		question string

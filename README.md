@@ -1178,10 +1178,12 @@ no tool input/output schema and the route is not reported to a client.
   threshold or `retrieval.min_score` (SPEC §9.4.3), `k` (SPEC §9.1 binds the
   advertised default to what an omitted field actually produces) or the rerank
   decision (SPEC §9.1.1 fixes when reranking is active).
-- **Safe misclassification**: the two routes that turn HyDE on sit last in the
-  table, so a question matching two shapes takes the more HyDE-averse one. A
-  wrong guess degrades toward today's behaviour, never toward more query
-  transformation.
+- **Safe misclassification, under the shipped list**: the two routes the shipped
+  `hyde_routes` turns HyDE on for are matched last, so a question carrying two
+  shapes takes the more HyDE-averse one and a wrong guess degrades toward today's
+  behaviour. This is a property of that list, not of the classifier: a custom
+  `hyde_routes` that names an earlier-matching route (`negative_control` is
+  matched first) gives that route HyDE and removes the property.
 - **Cost**: enabling it pays one bounded, cached generation for a question that
   routes to a HyDE-on profile. With no chat provider configured HyDE is a no-op,
   so routing is inert.
