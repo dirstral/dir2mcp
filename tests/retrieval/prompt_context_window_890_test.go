@@ -107,8 +107,11 @@ func promptContext(t *testing.T, prompt string) string {
 	// rag.max_context_chars for the same reason the system prompt is: the budget
 	// bounds the RETRIEVED context, and the assertions below are about the
 	// documents. Cutting here keeps this test measuring exactly that.
-	if before, _, found := strings.Cut(ctxSection, "\nReminder:\n"); found {
-		return before
+	// LastIndex, not Cut: buildRAGPrompt appends the reminder LAST, and document
+	// text is untrusted, so a document containing this literal would make a
+	// first-match cut under-measure the context and hide a budget violation.
+	if i := strings.LastIndex(ctxSection, "\nReminder:\n"); i >= 0 {
+		return ctxSection[:i]
 	}
 	return ctxSection
 }

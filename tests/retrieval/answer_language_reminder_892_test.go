@@ -22,6 +22,12 @@ import (
 
 const reminderMarker = "\nReminder:\n"
 
+// docOpenMarker is retrieval's untrusted-document open fence, duplicated here
+// because it is unexported. A previous version of this test looked for "-----",
+// which appears nowhere in the prompt, so the assertion below could never fail
+// and verified nothing.
+const docOpenMarker = "<<<BEGIN UNTRUSTED DOCUMENT"
+
 func askAndCapture(t *testing.T, prompt string) string {
 	t.Helper()
 	gen := &fakeGenerator{out: "Matt Chapman homered in the sixth. [" + pilotFile + "]"}
@@ -48,8 +54,15 @@ func TestAsk892_ReminderIsTheLastThingTheModelReads(t *testing.T) {
 	if j := strings.Index(prompt, "\n\nContext:\n"); i < j {
 		t.Fatalf("reminder at %d precedes the context at %d; it must follow it", i, j)
 	}
+	// Assert the fence is in the prompt at all before asserting it is absent
+	// after the reminder. Without this, renaming the marker would silently turn
+	// the check below into a tautology, which is how it was broken before.
+	if !strings.Contains(prompt, docOpenMarker) {
+		t.Fatalf("no %q in the prompt, so the check below proves nothing; "+
+			"the marker was probably renamed:\n%s", docOpenMarker, prompt)
+	}
 	tail := prompt[i+len(reminderMarker):]
-	if strings.Contains(tail, "-----") {
+	if strings.Contains(tail, docOpenMarker) {
 		t.Fatalf("a document fence follows the reminder, so it is not last:\n%s", tail)
 	}
 	for _, want := range []string{"language of the question", "Question section"} {
