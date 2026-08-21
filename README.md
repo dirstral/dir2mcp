@@ -1150,6 +1150,54 @@ An optional **recency time-decay** boosts newer content for dated corpora (news,
       mode: fuse       # fuse (default) | replace
   ```
 
+### Question routing with per-route profiles (optional)
+
+HyDE is not good or bad: it is right for some question shapes and wrong for
+others. Measured end to end on one real corpus (37 graded questions), HyDE
+doubled the superlative score (2/5 to 4/5) and made point lookups perfect
+(12/12), while dropping negative controls, enumerations and time-scoped
+questions. Inventing a plausible answer is the opposite of what a question about
+ABSENCE needs. A single global flag forces one choice on all five shapes.
+
+**Question routing** classifies the question and applies the profile measured to
+suit its shape, so a superlative can use HyDE while a negative control does not.
+It is **server-side and config-only** (not an MCP tool parameter), so it changes
+no tool input/output schema and the route is not reported to a client.
+
+- **Default off**: with nothing configured the global `retrieval.hyde.enabled`
+  decides every question, exactly as before.
+- **Deterministic classifier**: an ordered table of patterns over the question
+  text, first match wins. No model call, so no extra round trip and no new
+  failure mode on the query path.
+- **Closed route set**: `point_lookup`, `enumeration`, `superlative`,
+  `negative_control`, `time_scoped`, plus the `default` fallback. A question that
+  matches nothing takes `default`, which always inherits the global settings.
+  `default` may not be named in the table.
+- **Narrow profile surface**: a route may set the HyDE decision and nothing else.
+  It cannot change the system prompt or its injection guard, the abstention
+  threshold or `retrieval.min_score` (SPEC §9.4.3), `k` (SPEC §9.1 binds the
+  advertised default to what an omitted field actually produces) or the rerank
+  decision (SPEC §9.1.1 fixes when reranking is active).
+- **Safe misclassification**: the two routes that turn HyDE on sit last in the
+  table, so a question matching two shapes takes the more HyDE-averse one. A
+  wrong guess degrades toward today's behaviour, never toward more query
+  transformation.
+- **Cost**: enabling it pays one bounded, cached generation for a question that
+  routes to a HyDE-on profile. With no chat provider configured HyDE is a no-op,
+  so routing is inert.
+- **Language**: the built-in patterns are English. A question in another language
+  falls to `default`, which is today's behaviour, so a non-English corpus is never
+  made worse.
+
+  ```yaml
+  retrieval:
+    question_routing:
+      enabled: false                        # set true to opt in
+      hyde_routes: [superlative, point_lookup]   # routes whose profile turns HyDE ON;
+                                            #   every other classified route runs without it.
+                                            #   Empty => this shipped list.
+  ```
+
 ### Hierarchical (coarse-to-fine) retrieval (optional)
 
 For long documents and long media the answer often needs document-level context that no single chunk carries. **Hierarchical retrieval** (the RAPTOR / parent-document technique) derives a short model-generated **`summary` representation** per document, embeds it alongside that document's fine chunks, and — when a summary matches the query — **expands it to the fine chunks beneath it** before dedup/rerank. It is **server-side and config-only** (not an MCP tool parameter), so it changes no tool input/output schema.

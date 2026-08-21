@@ -117,6 +117,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetAdaptiveRetrieval(cfg.RetrievalAdaptiveEnabled, cfg.RetrievalAdaptiveKMin, cfg.RetrievalAdaptiveKMax)
 	ret.SetMMR(cfg.RetrievalMMREnabled, cfg.RetrievalMMRLambda)
 	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
+	// Per-route retrieval profiles (#897): opt-in, and a no-op while off.
+	a.configureQuestionRouting(ret, cfg)
 	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): gates only the expand
 	// step; summary hits are never citable regardless of this flag.
 	ret.SetHierarchical(cfg.RetrievalHierarchicalEnabled)

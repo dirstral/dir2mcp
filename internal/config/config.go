@@ -434,6 +434,26 @@ type Config struct {
 	// hypothetical-document embedding alone. Ignored when RetrievalHyDEEnabled is
 	// false. An empty value normalizes to "fuse".
 	RetrievalHyDEMode string
+	// RetrievalQuestionRoutingEnabled opts IN to per-route retrieval profiles
+	// (config `retrieval.question_routing.enabled`, issue #897): the question is
+	// classified into a closed route set and that route's profile decides the HyDE
+	// transform for that question alone, so a superlative can use HyDE while a
+	// negative control does not. Off by default; with it off the global
+	// RetrievalHyDEEnabled decides every question exactly as before.
+	//
+	// Enabling it costs generation calls: the shipped table turns HyDE on for the
+	// superlative and point-lookup routes, so those questions pay one bounded
+	// generation each (cached per query). With no chat provider configured HyDE is
+	// a safe no-op, so routing is then inert.
+	RetrievalQuestionRoutingEnabled bool
+	// RetrievalQuestionRoutingHyDERoutes lists the routes whose profile turns the
+	// HyDE transform ON (config `retrieval.question_routing.hyde_routes`). Every
+	// other classified route runs without HyDE; the `default` route (an
+	// unclassifiable question) always inherits RetrievalHyDEEnabled and may not be
+	// named here. An empty list means "use the shipped table", which is
+	// `[superlative, point_lookup]` — the routes the #897 measurement showed HyDE
+	// helps. A name outside the closed route set is CONFIG_INVALID.
+	RetrievalQuestionRoutingHyDERoutes []string
 	// RetrievalContextualEnabled opts IN to contextual retrieval (SPEC §8.1.8,
 	// config `retrieval.contextual.enabled`, issue #330): before a chunk is
 	// embedded, a short LLM-generated, document-aware context string is prepended
@@ -1255,6 +1275,8 @@ type fileConfig struct {
 	RetrievalMMRLambda                 *float64
 	RetrievalHyDEEnabled               *bool
 	RetrievalHyDEMode                  *string
+	RetrievalQuestionRoutingEnabled    *bool
+	RetrievalQuestionRoutingHyDERoutes []string
 	RetrievalContextualEnabled         *bool
 	RetrievalContextualProvider        *string
 	RetrievalContextualModel           *string
@@ -1420,6 +1442,8 @@ type persistedConfig struct {
 	RetrievalMMRLambda                 float64       `yaml:"retrieval_mmr_lambda"`
 	RetrievalHyDEEnabled               bool          `yaml:"retrieval_hyde_enabled"`
 	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
+	RetrievalQuestionRoutingEnabled    bool          `yaml:"retrieval_question_routing_enabled"`
+	RetrievalQuestionRoutingHyDERoutes []string      `yaml:"retrieval_question_routing_hyde_routes"`
 	RetrievalContextualEnabled         bool          `yaml:"retrieval_contextual_enabled"`
 	RetrievalContextualProvider        string        `yaml:"retrieval_contextual_provider"`
 	RetrievalContextualModel           string        `yaml:"retrieval_contextual_model"`
@@ -1660,6 +1684,14 @@ func Default() Config {
 		// RetrievalHyDEMode defaults to "fuse": when HyDE is enabled the
 		// hypothetical-document hits are RRF-fused with the raw-query hits.
 		RetrievalHyDEMode: HyDEModeFuse,
+		// RetrievalQuestionRoutingEnabled defaults to false: with no
+		// question_routing config the global HyDE decision serves every question,
+		// which is the pre-#897 behaviour byte for byte.
+		RetrievalQuestionRoutingEnabled: false,
+		// RetrievalQuestionRoutingHyDERoutes defaults to nil, which means "use the
+		// shipped table" once routing is enabled. It is never consulted while
+		// routing is off.
+		RetrievalQuestionRoutingHyDERoutes: nil,
 		// Contextual retrieval (SPEC §8.1.8, #330) defaults to OFF: chunks embed
 		// raw and the embed identity's terminal component stays "off", so an
 		// existing corpus is byte-identical to before the feature existed. The
@@ -1844,6 +1876,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalMMRLambda:                 cfg.RetrievalMMRLambda,
 		RetrievalHyDEEnabled:               cfg.RetrievalHyDEEnabled,
 		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
+		RetrievalQuestionRoutingEnabled:    cfg.RetrievalQuestionRoutingEnabled,
+		RetrievalQuestionRoutingHyDERoutes: append([]string(nil), cfg.RetrievalQuestionRoutingHyDERoutes...),
 		RetrievalContextualEnabled:         cfg.RetrievalContextualEnabled,
 		RetrievalContextualProvider:        cfg.RetrievalContextualProvider,
 		RetrievalContextualModel:           cfg.RetrievalContextualModel,
@@ -2626,6 +2660,12 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalHyDEMode != nil {
 		cfg.RetrievalHyDEMode = *fc.RetrievalHyDEMode
 	}
+	if fc.RetrievalQuestionRoutingEnabled != nil {
+		cfg.RetrievalQuestionRoutingEnabled = *fc.RetrievalQuestionRoutingEnabled
+	}
+	if fc.RetrievalQuestionRoutingHyDERoutes != nil {
+		cfg.RetrievalQuestionRoutingHyDERoutes = normalizeStringSlice(fc.RetrievalQuestionRoutingHyDERoutes)
+	}
 	if fc.CrossLingualEnabled != nil {
 		cfg.CrossLingualEnabled = *fc.CrossLingualEnabled
 	}
@@ -3308,6 +3348,8 @@ var configKeyAliases = map[string]string{
 	"retrieval_hybrid_enabled":                "retrieval.hybrid.enabled",
 	"hybrid_enabled":                          "retrieval.hybrid.enabled",
 	"dedup_retrieval":                         "dedup.retrieval",
+	"retrieval_question_routing_enabled":      "retrieval.question_routing.enabled",
+	"retrieval_question_routing_hyde_routes":  "retrieval.question_routing.hyde_routes",
 	"retrieval_min_score":                     "retrieval.min_score",
 	"min_score":                               "retrieval.min_score",
 	"retrieval_recency_half_life":             "retrieval.recency_half_life",
@@ -3503,7 +3545,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	}
 	switch key {
-	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.contextual", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.question_routing", "retrieval.contextual", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -3586,6 +3628,9 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"retrieval.adaptive.enabled": func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
 	"retrieval.mmr.enabled":      func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
 	"retrieval.hyde.enabled":     func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
+	"retrieval.question_routing.enabled": func(c *fileConfig) **bool {
+		return &c.RetrievalQuestionRoutingEnabled
+	},
 	"retrieval.contextual.enabled": func(c *fileConfig) **bool {
 		return &c.RetrievalContextualEnabled
 	},
@@ -4062,6 +4107,8 @@ func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
 		appendConfigListValue(&cfg.RetrievalHierarchicalSourceReps, value)
 	case "retrieval.hierarchical.levels":
 		appendConfigListValue(&cfg.RetrievalHierarchicalLevels, value)
+	case "retrieval.question_routing.hyde_routes":
+		appendConfigListValue(&cfg.RetrievalQuestionRoutingHyDERoutes, value)
 	default:
 		return false
 	}
@@ -4073,7 +4120,7 @@ func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels", "retrieval.question_routing.hyde_routes":
 		return true
 	default:
 		return false
@@ -4162,6 +4209,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("retrieval_mmr_lambda", strconv.FormatFloat(cfg.RetrievalMMRLambda, 'f', -1, 64))
 	writeBool("retrieval_hyde_enabled", cfg.RetrievalHyDEEnabled)
 	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
+	writeBool("retrieval_question_routing_enabled", cfg.RetrievalQuestionRoutingEnabled)
+	writeList("retrieval_question_routing_hyde_routes", cfg.RetrievalQuestionRoutingHyDERoutes)
 	writeBool("retrieval_contextual_enabled", cfg.RetrievalContextualEnabled)
 	writeScalar("retrieval_contextual_provider", cfg.RetrievalContextualProvider)
 	writeScalar("retrieval_contextual_model", cfg.RetrievalContextualModel)
@@ -5557,6 +5606,9 @@ func (c *Config) validateRetrievalNumericBounds() error {
 	if err := c.normalizeHyDEMode(); err != nil {
 		return err
 	}
+	if err := c.normalizeQuestionRouting(); err != nil {
+		return err
+	}
 	if err := c.validateAdaptiveBounds(); err != nil {
 		return err
 	}
@@ -5684,6 +5736,67 @@ func (c *Config) normalizeHyDEMode() error {
 	default:
 		return fmt.Errorf("retrieval.hyde.mode must be one of %q, %q: %q", HyDEModeFuse, HyDEModeReplace, c.RetrievalHyDEMode)
 	}
+	return nil
+}
+
+// QuestionRoutingRouteNames lists the route names an operator may name in
+// retrieval.question_routing.hyde_routes. It mirrors the closed route set in
+// internal/retrieval; the two are pinned equal by a test, because
+// internal/retrieval imports this package and so cannot be imported back.
+//
+// `default` is deliberately absent. That route is the fallback for a question
+// the classifier does not recognize, and its profile always inherits
+// retrieval.hyde.enabled: naming it in the table would break the guarantee that
+// an unclassifiable question is retrieved exactly as it is today.
+func QuestionRoutingRouteNames() []string {
+	return []string{
+		"enumeration",
+		"negative_control",
+		"point_lookup",
+		"superlative",
+		"time_scoped",
+	}
+}
+
+// normalizeQuestionRouting normalizes retrieval.question_routing.hyde_routes in
+// place: each entry is lowercased and de-duplicated, and a name outside the
+// closed route set is CONFIG_INVALID so a typo fails at config time rather than
+// silently disabling routing for that shape of question (#624). It runs
+// regardless of RetrievalQuestionRoutingEnabled, so a stale name is caught even
+// while routing is off.
+//
+// The surface it accepts is the WHOLE surface a route profile has. There is no
+// key here for the system prompt, the abstention signal, retrieval.min_score, k
+// or the rerank decision, so no route table can weaken the #885 injection guard
+// or the SPEC §9.4.3 evidence rules.
+func (c *Config) normalizeQuestionRouting() error {
+	allowed := make(map[string]struct{}, 5)
+	for _, name := range QuestionRoutingRouteNames() {
+		allowed[name] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(c.RetrievalQuestionRoutingHyDERoutes))
+	out := make([]string, 0, len(c.RetrievalQuestionRoutingHyDERoutes))
+	for _, raw := range c.RetrievalQuestionRoutingHyDERoutes {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" {
+			continue
+		}
+		if _, ok := allowed[name]; !ok {
+			return fmt.Errorf(
+				"retrieval.question_routing.hyde_routes must name one of %s: %q",
+				strings.Join(QuestionRoutingRouteNames(), ", "), raw)
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		c.RetrievalQuestionRoutingHyDERoutes = nil
+		return nil
+	}
+	c.RetrievalQuestionRoutingHyDERoutes = out
 	return nil
 }
 

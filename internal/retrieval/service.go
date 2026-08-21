@@ -435,6 +435,20 @@ type Service struct {
 	// never become a Citation.snippet or an answer quote whatever the config says
 	// (the §9.7 citation-faithfulness invariant).
 	hierarchicalEnabled bool
+	// questionRoutingEnabled toggles per-route retrieval profiles (#897): the
+	// question is classified into one of the closed QuestionRoute set and that
+	// route's RouteProfile decides the HyDE transform for this question alone.
+	// Default false ⇒ the global retrieval.hyde.enabled decides every question,
+	// exactly as before. Wired from config.RetrievalQuestionRoutingEnabled at
+	// construction. Config-only (never an MCP tool parameter): reporting the route
+	// to a client would change the result structure, which is spec surface
+	// (SPEC §9.2).
+	questionRoutingEnabled bool
+	// questionRoutes is the route → profile table consulted when
+	// questionRoutingEnabled is set. Built once at construction and read-only
+	// afterwards. A nil table means "inherit the global settings for every
+	// question", so a nil is always safe.
+	questionRoutes *QuestionRouteTable
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -754,6 +768,25 @@ func (s *Service) SetHyDE(enabled bool, mode string) {
 	defer s.metaMu.Unlock()
 	s.hydeEnabled = enabled
 	s.hydeMode = mode
+}
+
+// SetQuestionRouting wires per-route retrieval profiles (#897). When enabled,
+// each question is classified by ClassifyQuestion and the resolved
+// RouteProfile decides that question's HyDE transform, so a superlative can use
+// HyDE while a negative control does not. A nil table, or a question that lands
+// on RouteDefault, inherits the global retrieval.hyde.enabled, so passing
+// enabled=false leaves retrieval byte-identical to the un-routed path.
+//
+// A profile can change nothing else. RouteProfile has no field for the system
+// prompt (so the #885 injection guard is out of reach), none for the abstention
+// signal or retrieval.min_score (SPEC §9.4.3), none for k (SPEC §9.1) and none
+// for the rerank decision (SPEC §9.1.1). Config-only; the engine wires this from
+// config at construction time, mirroring SetHyDE.
+func (s *Service) SetQuestionRouting(enabled bool, table *QuestionRouteTable) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.questionRoutingEnabled = enabled
+	s.questionRoutes = table
 }
 
 // SetCrossLingual wires server-side cross-lingual query expansion (#325). When
@@ -1687,7 +1720,15 @@ func (s *Service) searchWithHyDE(ctx context.Context, query model.SearchQuery, k
 	enabled := s.hydeEnabled
 	mode := s.hydeMode
 	gen := s.gen
+	routingEnabled := s.questionRoutingEnabled
+	routes := s.questionRoutes
 	s.metaMu.RUnlock()
+
+	// Per-route profile (#897). With question routing off this returns the global
+	// decision unchanged, so the un-routed path is byte-identical. With it on, the
+	// route classified from THIS question's text decides, and a question that
+	// classifies as RouteDefault still inherits the global decision.
+	enabled = resolveRouteHyDE(routingEnabled, routes, query.Query, enabled)
 
 	if !enabled || gen == nil {
 		return s.searchByMode(ctx, query.Query, k, query, true)

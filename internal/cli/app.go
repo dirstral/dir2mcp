@@ -847,6 +847,32 @@ func resolveRerankProfile(cfg config.Config, asked bool) (provider.Profile, erro
 //	*true  -> require it; warn + fail-open if none resolves
 //
 // Fail-open optimization, not a hard dependency. Shared by `up`/`ask`.
+// configureQuestionRouting wires per-route retrieval profiles (#897). Off by
+// default: with retrieval.question_routing.enabled unset the service is never
+// told about routing and the global retrieval.hyde.enabled decides every
+// question, exactly as before.
+//
+// An empty hyde_routes list means "use the shipped table"
+// ([superlative, point_lookup], the routes the #897 measurement showed HyDE
+// helps). Config validation already rejects an unknown route name, so the table
+// build can only fail on a programmatically-injected config; that case warns and
+// leaves routing off rather than guessing a table.
+func (a *App) configureQuestionRouting(ret *retrieval.Service, cfg config.Config) {
+	if !cfg.RetrievalQuestionRoutingEnabled {
+		return
+	}
+	table := retrieval.DefaultQuestionRouteTable()
+	if len(cfg.RetrievalQuestionRoutingHyDERoutes) > 0 {
+		built, err := retrieval.NewQuestionRouteTable(cfg.RetrievalQuestionRoutingHyDERoutes)
+		if err != nil {
+			writef(a.stderr, "warning: retrieval.question_routing.hyde_routes unusable (%v); question routing disabled\n", err)
+			return
+		}
+		table = built
+	}
+	ret.SetQuestionRouting(true, table)
+}
+
 func (a *App) configureReranker(ret *retrieval.Service, cfg config.Config) {
 	explicit := cfg.RerankEnabled != nil
 	if explicit && !*cfg.RerankEnabled {
@@ -960,6 +986,8 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetAdaptiveRetrieval(cfg.RetrievalAdaptiveEnabled, cfg.RetrievalAdaptiveKMin, cfg.RetrievalAdaptiveKMax)
 	ret.SetMMR(cfg.RetrievalMMREnabled, cfg.RetrievalMMRLambda)
 	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
+	// Per-route retrieval profiles (#897): opt-in, and a no-op while off.
+	a.configureQuestionRouting(ret, cfg)
 	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): gates only the expand
 	// step; summary hits are never citable regardless of this flag.
 	ret.SetHierarchical(cfg.RetrievalHierarchicalEnabled)
