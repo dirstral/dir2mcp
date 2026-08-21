@@ -132,6 +132,7 @@ def test_static_overlay_collapses_exactly_as_identity_collapsing_does():
     sightings.append((16.0, "КИМ ЧЕН ЫН ВСТРЕТИТСЯ С ПУТИНЫМ", 0.9))
 
     identity = collapse_sightings(sightings, source="overlay", event="banner",
+                                  describe=lambda read: read,
                                   frame_gap=2.0)
     text = collapse_text_sightings(sightings, source="overlay", event="banner",
                                    frame_gap=2.0)
@@ -148,7 +149,8 @@ def test_scrolling_window_becomes_one_cue_where_identity_gives_one_per_frame():
              "увеличенной", "дальности", "ERAM", "Пентагон"]
     sightings = [(float(i), " ".join(words[i:i + 8]), 0.6) for i in range(5)]
 
-    assert len(collapse_sightings(sightings, source="t", event="e", frame_gap=1.0)) == 5
+    assert len(collapse_sightings(sightings, source="t", event="e", frame_gap=1.0,
+                                  describe=lambda read: read)) == 5
     cues = collapse_text_sightings(sightings, source="t", event="e", frame_gap=1.0)
     assert len(cues) == 1
     assert cues[0].start_s == 0.0 and cues[0].end_s == 5.0
@@ -226,6 +228,7 @@ def test_real_ticker_collapses_by_more_than_an_order_of_magnitude():
     per frame because every frame's OCR differs; this emits a handful."""
     sightings = ticker_sightings()
     identity = collapse_sightings(sightings, source="ticker", event="overlay_text",
+                                  describe=lambda read: read,
                                   frame_gap=0.5)
     cues = collapse_text_sightings(sightings, source="ticker", event="overlay_text",
                                    frame_gap=0.5)

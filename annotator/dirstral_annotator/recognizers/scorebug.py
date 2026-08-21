@@ -44,8 +44,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..model import Cue
-from ..roster import Roster
-from .base import collapse_sightings
+from ..roster import Roster, display_name
+from .base import appearance_text, collapse_sightings
 from .overlay import (
     OCR_PSM,
     OcrFn,
@@ -381,9 +381,24 @@ class ScorebugRecognizer:
         gap = 1.0 / self.fps
         confirmed = batters + appearances
         appearances += [s for s in loose if _corroborated(s, confirmed)]
-        cues = collapse_sightings(batters, source=self.name, event="at_bat", frame_gap=gap)
+        # An at_bat read from the scorebug used to carry no text of its own. It
+        # survived only where play-by-play named the same at_bat and lent it
+        # words, so on an archive with no feed (the case #739 calls the one that
+        # transfers) these cues were dropped at ingest. They now say what they
+        # saw (#899).
+        cues = collapse_sightings(
+            batters,
+            source=self.name,
+            event="at_bat",
+            frame_gap=gap,
+            describe=lambda pid: f"{display_name(self.roster, pid)} at bat",
+        )
         cues += collapse_sightings(
-            appearances, source=self.name, event="appearance", frame_gap=gap
+            appearances,
+            source=self.name,
+            event="appearance",
+            frame_gap=gap,
+            describe=lambda pid: appearance_text(display_name(self.roster, pid)),
         )
         if self.pitch_cues:
             graphic_cues = self._pitch_cues(graphics, pitchers)
