@@ -396,6 +396,14 @@ func TestRouting897_MisclassificationDegradesTowardTodaysBehaviour(t *testing.T)
 		{"What was the fastest pitch during the first half?", retrieval.RouteTimeScoped},
 		// Superlative wording plus an enumeration marker: enumeration wins.
 		{"List the fastest pitches.", retrieval.RouteEnumeration},
+		// The canonical absence probes. Each reads as a yes/no question, so nothing
+		// else in the table catches it, yet each is the shape HyDE hurts most.
+		{"Did any pitcher throw a perfect inning?", retrieval.RouteNegativeControl},
+		{"Was there ever a bases-loaded situation?", retrieval.RouteNegativeControl},
+		{"Was any run scored unearned?", retrieval.RouteNegativeControl},
+		// "every" must not be read as "ever": that would move enumerations onto the
+		// negative-control route.
+		{"Name every substitution made.", retrieval.RouteEnumeration},
 	} {
 		if got := retrieval.ClassifyQuestion(tc.question); got != tc.want {
 			t.Fatalf("question %q classified as %q, want %q", tc.question, got, tc.want)

@@ -132,6 +132,12 @@ var questionRoutePatterns = []struct {
 			// as a client typed it.
 			`n['\x{2019}]t\b`,
 			`\b(?:was|were|is|are)\s+there\s+any\b`,
+			// The canonical absence probe: "did any batter reach base", "was any run
+			// scored", "was there ever a lead". It reads as a yes/no question, so
+			// nothing else in the table catches it, and it is the shape HyDE hurts
+			// most. Over-matching here is safe: this route only turns HyDE OFF.
+			`\b(?:did|do|does|was|were|is|are|has|have|had)\s+any\b`,
+			`\bever\b`,
 			`\bany\b.*\bat\s+all\b`,
 		),
 	},
