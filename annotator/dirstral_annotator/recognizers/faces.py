@@ -30,8 +30,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..model import Cue
-from ..roster import Roster
-from .base import RecognizerUnavailable, collapse_sightings, iter_frames
+from ..roster import Roster, display_name
+from .base import RecognizerUnavailable, appearance_text, collapse_sightings, iter_frames
 
 Embedding = list[float]
 # (frame jpeg) -> [(embedding, (x, y, w, h))]
@@ -426,5 +426,9 @@ class FaceRecognizer:
                 if hit:
                     sightings.append((t, hit[0], hit[1]))
         return collapse_sightings(
-            sightings, source=self.name, event="appearance", frame_gap=1.0 / self.fps
+            sightings,
+            source=self.name,
+            event="appearance",
+            frame_gap=1.0 / self.fps,
+            describe=lambda pid: appearance_text(display_name(self.roster, pid)),
         )

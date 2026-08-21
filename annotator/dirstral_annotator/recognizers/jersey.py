@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Self
 
 from ..model import Cue
-from ..roster import Roster
-from .base import RecognizerUnavailable, collapse_sightings, iter_frames
+from ..roster import Roster, display_name
+from .base import RecognizerUnavailable, appearance_text, collapse_sightings, iter_frames
 from .overlay import (
     OcrFn,
     Workspaces,
@@ -108,7 +108,11 @@ class JerseyRecognizer:
                     if player:
                         sightings.append((t, player.id, CONFIDENCE_CEILING))
         return collapse_sightings(
-            sightings, source=self.name, event="appearance", frame_gap=1.0 / self.fps
+            sightings,
+            source=self.name,
+            event="appearance",
+            frame_gap=1.0 / self.fps,
+            describe=lambda pid: appearance_text(display_name(self.roster, pid)),
         )
 
     def _reader(self, work: Path) -> _SerialReader | _PooledReader:

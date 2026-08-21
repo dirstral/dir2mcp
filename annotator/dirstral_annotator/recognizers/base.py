@@ -17,7 +17,7 @@ import tempfile
 import threading
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -256,11 +256,24 @@ def iter_frames(
             _FRAME_LOCK.notify_all()
 
 
+def appearance_text(label: str) -> str:
+    """What an appearance cue says.
+
+    A sighting is a statement about presence and nothing more, so the text
+    says exactly that: the recognizer saw this person, and it does not know
+    what they were doing. One definition, because face, jersey and scorebug all
+    emit the same claim and a chunk is indexed on these exact words (#899).
+    """
+    return f"{label} on screen"
+
+
 def collapse_sightings(
     sightings: list[tuple[float, str, float]],
     source: str,
     event: str,
     frame_gap: float,
+    *,
+    describe: Callable[[str], str],
 ) -> list[Cue]:
     """Collapse per-frame (t, entity_id, confidence) hits into per-run cues.
 
@@ -268,6 +281,18 @@ def collapse_sightings(
     A run of consecutive sightings of one entity becomes one cue spanning
     first..last sighting (extended by one frame interval so a single-frame
     sighting still has nonzero duration); confidence is the run's max.
+
+    `describe(entity_id)` supplies the cue text and is REQUIRED, with no
+    default, because an empty text is not merely unhelpful: design 0004's
+    response schema requires `text` with `minLength: 1`, and dir2mcp's ingest
+    drops any annotation whose text is blank
+    (`internal/ingest/recognize.go`). Every cue this function built used to
+    carry no text at all, so a recognizer whose output nothing else
+    corroborated was computed in full and then discarded before storage: face
+    and jersey produced zero retrievable spans, and scorebug's `at_bat` cues
+    survived only where play-by-play happened to supply the words for them
+    (#899). A keyword with no default makes that failure impossible to
+    reintroduce by omission.
     """
     runs: dict[str, list[tuple[float, float, float, float]]] = {}
     for t, pid, conf in sorted(sightings):
@@ -289,6 +314,7 @@ def collapse_sightings(
                     event=event,
                     entity_ids=(pid,),
                     confidence=round(conf, 4),
+                    text=describe(pid),
                 )
             )
     cues.sort(key=lambda c: (c.start_s, c.entity_ids))

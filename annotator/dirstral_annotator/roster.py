@@ -26,6 +26,20 @@ from .model import Player
 MATCH_THRESHOLD = 0.72
 
 
+def display_name(roster: "Roster | None", player_id: str) -> str:
+    """The human-readable label for an entity id.
+
+    Falls back to the id's own slug when the roster does not know the player,
+    so a caller always has something printable. `emit.build_response` uses the
+    same rule for the wire `entities` dictionary, and a recognizer uses it for
+    cue text, so the two can never disagree about what a player is called.
+    """
+    player = roster.get(player_id) if roster else None
+    if player:
+        return player.name
+    return player_id.split(":", 1)[-1].replace("-", " ").title()
+
+
 class Roster:
     def __init__(self, players: list[Player], mlbam_ids: dict[int, str] | None = None):
         self.players = players

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 from .model import Document
-from .roster import Roster
+from .roster import Roster, display_name
 
 
 def build_response(doc: Document, roster: Roster | None = None) -> dict:
@@ -24,7 +24,7 @@ def build_response(doc: Document, roster: Roster | None = None) -> dict:
                 {"id": player.id, "label": player.name, "aliases": list(player.all_names()[1:])}
             )
         else:
-            entities.append({"id": pid, "label": pid.split(":", 1)[-1].replace("-", " ").title()})
+            entities.append({"id": pid, "label": display_name(roster, pid)})
     return {
         "recognizer": {"name": doc.recognizer.name, "version": doc.recognizer.version},
         "entities": entities,
