@@ -102,6 +102,14 @@ func promptContext(t *testing.T, prompt string) string {
 	if !ok {
 		t.Fatalf("prompt has no Context section:\n%s", prompt)
 	}
+	// The Context section ends where the trailing Reminder section begins
+	// (issue #892). The reminder is a fixed-size server instruction, outside
+	// rag.max_context_chars for the same reason the system prompt is: the budget
+	// bounds the RETRIEVED context, and the assertions below are about the
+	// documents. Cutting here keeps this test measuring exactly that.
+	if before, _, found := strings.Cut(ctxSection, "\nReminder:\n"); found {
+		return before
+	}
 	return ctxSection
 }
 

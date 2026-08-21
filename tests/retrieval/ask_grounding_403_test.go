@@ -148,7 +148,15 @@ func TestAsk_ContextSectionStaysWithinBudget(t *testing.T) {
 		if start == -1 {
 			t.Fatalf("budget=%d: expected a Context section", budget)
 		}
-		if got := len([]rune(gen.lastPrompt[start+len("Context:\n"):])); got > budget {
+		// The Context section ends where the trailing Reminder section begins
+		// (issue #892): that reminder is a fixed-size server instruction, outside
+		// rag.max_context_chars for the same reason the system prompt is. This
+		// assertion is about the documents, so it measures only them.
+		ctxSection := gen.lastPrompt[start+len("Context:\n"):]
+		if before, _, found := strings.Cut(ctxSection, "\nReminder:\n"); found {
+			ctxSection = before
+		}
+		if got := len([]rune(ctxSection)); got > budget {
 			t.Fatalf("budget=%d: context section is %d runes, over budget", budget, got)
 		}
 	}
