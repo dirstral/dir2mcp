@@ -157,6 +157,39 @@ func TestQuestionRouting897_UnknownRouteIsConfigInvalid(t *testing.T) {
 	}
 }
 
+// TestQuestionRouting897_ErrorDoesNotEchoAnUnboundedValue pins that a rejected
+// route name reaches the error bounded. The value is kept, because with five
+// configurable routes an error that does not say WHICH entry is wrong is not
+// actionable; it is trimmed, so an accidentally pasted credential is not echoed
+// whole into a message an operator may forward or a log may keep.
+func TestQuestionRouting897_ErrorDoesNotEchoAnUnboundedValue(t *testing.T) {
+	const pasted = "sk-live-0123456789abcdefghijklmnopqrstuvwxyz-THE-SECRET-TAIL"
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, "retrieval_question_routing_hyde_routes:\n  - "+pasted+"\n")
+
+	_, err := config.LoadFile(path)
+	if err == nil {
+		t.Fatal("a pasted non-route value must be rejected")
+	}
+	if strings.Contains(err.Error(), pasted) {
+		t.Fatalf("the error must not echo the whole value: %v", err)
+	}
+	if strings.Contains(err.Error(), "THE-SECRET-TAIL") {
+		t.Fatalf("the error must not echo the value's tail: %v", err)
+	}
+	if !strings.Contains(err.Error(), "retrieval.question_routing.hyde_routes") {
+		t.Fatalf("the error must still name the key: %v", err)
+	}
+	// A real typo is short, so it stays fully visible and the error stays useful.
+	writeFile(t, path, "retrieval_question_routing_hyde_routes:\n  - superlatives\n")
+	_, err = config.LoadFile(path)
+	if err == nil || !strings.Contains(err.Error(), "superlatives") {
+		t.Fatalf("a short typo must stay visible in the error: %v", err)
+	}
+}
+
 // TestQuestionRouting897_DefaultRouteIsNotConfigurable pins that the fallback
 // route cannot be named. Its profile always inherits retrieval.hyde.enabled,
 // which is what makes "an unclassifiable question behaves as it does today" a

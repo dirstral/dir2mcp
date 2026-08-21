@@ -288,9 +288,14 @@ func NewQuestionRouteTable(hydeRouteNames []string) (*QuestionRouteTable, error)
 		}
 		route, ok := ParseQuestionRoute(name)
 		if !ok {
+			// The rejected name is NOT repeated here. A name from a config file is
+			// already rejected by config validation, which names the offending entry
+			// for the operator; this path is only reachable from a programmatically
+			// built list whose caller already holds it. Repeating it would put an
+			// arbitrary operator string into an error the CLI writes to stderr.
 			return nil, fmt.Errorf(
-				"unknown question route %q: must be one of %s",
-				name, strings.Join(ConfigurableQuestionRouteNames(), ", "))
+				"unknown question route in hyde_routes: must be one of %s",
+				strings.Join(ConfigurableQuestionRouteNames(), ", "))
 		}
 		routes = append(routes, route)
 	}

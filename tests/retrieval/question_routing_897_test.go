@@ -310,6 +310,20 @@ func TestRouting897_TableRejectsAnUnknownRoute(t *testing.T) {
 	if _, err := retrieval.NewQuestionRouteTable([]string{"superlative", "time_scoped"}); err != nil {
 		t.Fatalf("valid route names must be accepted: %v", err)
 	}
+	// The table error does not repeat the rejected name at all: config validation
+	// already names the offending entry for the operator, and the CLI writes this
+	// error to stderr.
+	const pasted = "sk-live-0123456789-THE-SECRET-TAIL"
+	_, err := retrieval.NewQuestionRouteTable([]string{pasted})
+	if err == nil {
+		t.Fatal("a pasted non-route value must be rejected")
+	}
+	if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "sk-live") {
+		t.Fatalf("the table error must not repeat the rejected value: %v", err)
+	}
+	if !strings.Contains(err.Error(), "hyde_routes") {
+		t.Fatalf("the table error must still name the setting: %v", err)
+	}
 	// A blank entry is padding in a YAML list, not a typo: it is skipped.
 	if _, err := retrieval.NewQuestionRouteTable([]string{"", "  ", "superlative"}); err != nil {
 		t.Fatalf("a blank entry must be skipped, not rejected: %v", err)

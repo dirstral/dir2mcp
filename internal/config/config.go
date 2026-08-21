@@ -5758,6 +5758,24 @@ func QuestionRoutingRouteNames() []string {
 	}
 }
 
+// routeNameErrorMaxChars bounds how much of a rejected route name an error
+// message repeats. A real route name is at most 16 characters, so the bound
+// never hides a typo; it stops an arbitrary pasted value from being echoed whole
+// into an error an operator may forward or a log may keep.
+const routeNameErrorMaxChars = 24
+
+// boundRouteNameForError trims a rejected route name to routeNameErrorMaxChars
+// so the diagnostic stays actionable without repeating an unbounded operator
+// string. The value is not dropped: with five configurable routes an error that
+// does not say WHICH entry is wrong is not actionable.
+func boundRouteNameForError(name string) string {
+	r := []rune(name)
+	if len(r) <= routeNameErrorMaxChars {
+		return name
+	}
+	return string(r[:routeNameErrorMaxChars]) + "..."
+}
+
 // normalizeQuestionRouting normalizes retrieval.question_routing.hyde_routes in
 // place: each entry is lowercased and de-duplicated, and a name outside the
 // closed route set is CONFIG_INVALID so a typo fails at config time rather than
@@ -5784,7 +5802,7 @@ func (c *Config) normalizeQuestionRouting() error {
 		if _, ok := allowed[name]; !ok {
 			return fmt.Errorf(
 				"retrieval.question_routing.hyde_routes must name one of %s: %q",
-				strings.Join(QuestionRoutingRouteNames(), ", "), raw)
+				strings.Join(QuestionRoutingRouteNames(), ", "), boundRouteNameForError(raw))
 		}
 		if _, dup := seen[name]; dup {
 			continue
