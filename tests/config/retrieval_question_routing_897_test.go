@@ -56,6 +56,29 @@ func TestQuestionRouting897_NestedYAMLRoundTrips(t *testing.T) {
 	}
 }
 
+// TestQuestionRouting897_InlineListParses pins the inline form the README shows.
+// A documented form that does not parse is a broken document, so it gets its own
+// assertion rather than relying on the block form above.
+func TestQuestionRouting897_InlineListParses(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, strings.Join([]string{
+		"retrieval:",
+		"  question_routing:",
+		"    enabled: true",
+		"    hyde_routes: [superlative, point_lookup]",
+		"",
+	}, "\n"))
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if got := strings.Join(cfg.RetrievalQuestionRoutingHyDERoutes, ","); got != "superlative,point_lookup" {
+		t.Fatalf("inline hyde_routes = %q, want %q", got, "superlative,point_lookup")
+	}
+}
+
 // TestQuestionRouting897_FlatAliasRoundTrips pins the flat snake_case aliases.
 func TestQuestionRouting897_FlatAliasRoundTrips(t *testing.T) {
 	tmp := t.TempDir()

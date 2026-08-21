@@ -329,6 +329,24 @@ func TestRouting897_DefaultRouteIsNotConfigurable(t *testing.T) {
 	}
 }
 
+// TestRouting897_ProfileIsACopy pins that a caller cannot rewrite the table
+// through a profile it read. One table serves every concurrent query, so a shared
+// pointer would let one caller change the routing for the whole deployment.
+func TestRouting897_ProfileIsACopy(t *testing.T) {
+	table := retrieval.DefaultQuestionRouteTable()
+
+	got := table.Profile(retrieval.RouteNegativeControl)
+	if got.HyDE == nil || *got.HyDE {
+		t.Fatalf("precondition: the negative-control profile must carry HyDE off, got %v", got.HyDE)
+	}
+	*got.HyDE = true
+
+	again := table.Profile(retrieval.RouteNegativeControl)
+	if again.HyDE == nil || *again.HyDE {
+		t.Fatal("writing through a read profile must not change the table")
+	}
+}
+
 // TestRouting897_ConfigAndRetrievalVocabulariesAgree pins the two copies of the
 // closed route set together. internal/retrieval imports internal/config, so
 // config cannot import the enum back and validates against its own list; this

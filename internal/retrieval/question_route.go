@@ -316,11 +316,20 @@ func newTable(hydeRoutes []QuestionRoute) *QuestionRouteTable {
 // Profile returns the table entry for a route. A route with no entry (always
 // RouteDefault) gets the inherit-everything profile, a RouteProfile whose HyDE
 // is nil.
+//
+// The returned pointer is a fresh copy, never the table's own. One table serves
+// every concurrent query, so handing out its pointer would let a caller rewrite
+// a profile for the whole deployment through a value it was only meant to read.
 func (t *QuestionRouteTable) Profile(route QuestionRoute) RouteProfile {
 	if t == nil {
 		return RouteProfile{}
 	}
-	return t.profiles[route]
+	profile := t.profiles[route]
+	if profile.HyDE != nil {
+		hyde := *profile.HyDE
+		profile.HyDE = &hyde
+	}
+	return profile
 }
 
 // resolveRouteHyDE applies a route's profile to the server's global HyDE
