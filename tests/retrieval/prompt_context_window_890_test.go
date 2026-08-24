@@ -102,6 +102,17 @@ func promptContext(t *testing.T, prompt string) string {
 	if !ok {
 		t.Fatalf("prompt has no Context section:\n%s", prompt)
 	}
+	// The Context section ends where the trailing Reminder section begins
+	// (issue #892). The reminder is a fixed-size server instruction, outside
+	// rag.max_context_chars for the same reason the system prompt is: the budget
+	// bounds the RETRIEVED context, and the assertions below are about the
+	// documents. Cutting here keeps this test measuring exactly that.
+	// LastIndex, not Cut: buildRAGPrompt appends the reminder LAST, and document
+	// text is untrusted, so a document containing this literal would make a
+	// first-match cut under-measure the context and hide a budget violation.
+	if i := strings.LastIndex(ctxSection, "\nReminder:\n"); i >= 0 {
+		return ctxSection[:i]
+	}
 	return ctxSection
 }
 
