@@ -546,6 +546,14 @@ type Config struct {
 	// cue that scrubs to empty is dropped. Empty by default. Only affects VTT/SRT.
 	MediaSubtitlesScrubPhrases []string
 
+	// MediaSubtitlesExpectScript names the Unicode script the track's language
+	// is written in (config `media.subtitles.expect_script`, e.g. "cyrillic").
+	// An exported cue containing letters but not ONE letter of that script is
+	// wrong-script STT gibberish hallucinated over non-speech and is dropped
+	// (subtitle.ScriptGuard); cues with digits or mixed scripts always survive.
+	// Empty by default = off. Only affects VTT/SRT export.
+	MediaSubtitlesExpectScript string
+
 	// MediaTrimLeadingSilence opts IN to trimming leading silence from media
 	// transcripts (dir2mcp#258, config `media.trim_leading_silence`). When true
 	// and ffmpeg is available, the duration of dead air before the first speech
@@ -768,6 +776,7 @@ type fileConfig struct {
 	MediaSubtitlesGlossary             []string
 	MediaSubtitlesDropPhrases          []string
 	MediaSubtitlesScrubPhrases         []string
+	MediaSubtitlesExpectScript         *string
 	MediaSubtitlesCollapseRepeats      *int
 	MediaSubtitlesDropURLs             *bool
 	MediaTrimLeadingSilence            *bool
@@ -906,6 +915,7 @@ type persistedConfig struct {
 	MediaSubtitlesGlossary             []string      `yaml:"media_subtitles_glossary"`
 	MediaSubtitlesDropPhrases          []string      `yaml:"media_subtitles_drop_phrases"`
 	MediaSubtitlesScrubPhrases         []string      `yaml:"media_subtitles_scrub_phrases"`
+	MediaSubtitlesExpectScript         string        `yaml:"media_subtitles_expect_script"`
 	MediaSubtitlesCollapseRepeats      int           `yaml:"media_subtitles_collapse_repeats"`
 	MediaSubtitlesDropURLs             bool          `yaml:"media_subtitles_drop_urls"`
 	MediaTrimLeadingSilence            bool          `yaml:"media_trim_leading_silence"`
@@ -1135,6 +1145,7 @@ func Default() Config {
 		MediaSubtitlesGlossary:        nil,
 		MediaSubtitlesDropPhrases:     nil,
 		MediaSubtitlesScrubPhrases:    nil,
+		MediaSubtitlesExpectScript:    "",
 		MediaSubtitlesCollapseRepeats: 0,
 		MediaSubtitlesDropURLs:        false,
 		ServerTLSCertFile:             "",
@@ -1265,6 +1276,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSubtitlesGlossary:             append([]string(nil), cfg.MediaSubtitlesGlossary...),
 		MediaSubtitlesDropPhrases:          append([]string(nil), cfg.MediaSubtitlesDropPhrases...),
 		MediaSubtitlesScrubPhrases:         append([]string(nil), cfg.MediaSubtitlesScrubPhrases...),
+		MediaSubtitlesExpectScript:         cfg.MediaSubtitlesExpectScript,
 		MediaSubtitlesCollapseRepeats:      cfg.MediaSubtitlesCollapseRepeats,
 		MediaSubtitlesDropURLs:             cfg.MediaSubtitlesDropURLs,
 		MediaTrimLeadingSilence:            cfg.MediaTrimLeadingSilence,
@@ -2098,6 +2110,9 @@ func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesScrubPhrases != nil {
 		cfg.MediaSubtitlesScrubPhrases = normalizeStringSlice(fc.MediaSubtitlesScrubPhrases)
 	}
+	if fc.MediaSubtitlesExpectScript != nil {
+		cfg.MediaSubtitlesExpectScript = *fc.MediaSubtitlesExpectScript
+	}
 	if fc.MediaSubtitlesCollapseRepeats != nil {
 		cfg.MediaSubtitlesCollapseRepeats = *fc.MediaSubtitlesCollapseRepeats
 	}
@@ -2409,6 +2424,7 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_glossary":                "media.subtitles.glossary",
 	"media_subtitles_drop_phrases":            "media.subtitles.drop_phrases",
 	"media_subtitles_scrub_phrases":           "media.subtitles.scrub_phrases",
+	"media_subtitles_expect_script":           "media.subtitles.expect_script",
 	"media_subtitles_collapse_repeats":        "media.subtitles.collapse_repeats",
 	"media_subtitles_drop_urls":               "media.subtitles.drop_urls",
 	"media_trim_leading_silence":              "media.trim_leading_silence",
@@ -2858,6 +2874,8 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaTranslateEngine = strPtr(value)
 	case "media.subtitles.segmentation":
 		cfg.MediaSubtitlesSegmentation = strPtr(value)
+	case "media.subtitles.expect_script":
+		cfg.MediaSubtitlesExpectScript = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -3053,6 +3071,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("media_subtitles_glossary", cfg.MediaSubtitlesGlossary)
 	writeList("media_subtitles_drop_phrases", cfg.MediaSubtitlesDropPhrases)
 	writeList("media_subtitles_scrub_phrases", cfg.MediaSubtitlesScrubPhrases)
+	writeScalar("media_subtitles_expect_script", cfg.MediaSubtitlesExpectScript)
 	writeInt("media_subtitles_collapse_repeats", cfg.MediaSubtitlesCollapseRepeats)
 	writeBool("media_subtitles_drop_urls", cfg.MediaSubtitlesDropURLs)
 	writeBool("media_trim_leading_silence", cfg.MediaTrimLeadingSilence)
@@ -3795,6 +3814,11 @@ func (c *Config) validateMediaSubtitles() error {
 	}
 	if _, err := subtitle.NewDropSet(c.MediaSubtitlesScrubPhrases); err != nil {
 		return fmt.Errorf("media.subtitles.scrub_phrases: %w", err)
+	}
+	// Fail fast on an unknown script name at config time rather than at export
+	// time. subtitle.NewScriptGuard owns the recognized-name list.
+	if _, err := subtitle.NewScriptGuard(c.MediaSubtitlesExpectScript); err != nil {
+		return fmt.Errorf("media.subtitles.expect_script: %w", err)
 	}
 	return nil
 }
