@@ -184,6 +184,11 @@ type CleanOptions struct {
 	// DropURLs drops any cue whose text looks like a hallucinated URL / domain /
 	// credit line (whisper emits these over silence or music).
 	DropURLs bool
+	// Script drops any cue whose letters lie entirely outside the track's
+	// expected script (wrong-script STT gibberish hallucinated over non-speech;
+	// see ScriptGuard). Cues with any digit or any expected-script letter
+	// survive. Nil/inactive = no drops.
+	Script *ScriptGuard
 	// Drop drops any cue composed entirely of configured hallucination phrases
 	// (whisper keyword-spam over non-speech). Nil/inactive = no drops.
 	Drop *DropSet
@@ -203,7 +208,7 @@ type CleanOptions struct {
 // Active reports whether any cleaning is configured. When false, CleanCues
 // returns its input unchanged so the empty-config export path is a no-op.
 func (o CleanOptions) Active() bool {
-	return o.DropURLs || o.Drop.Active() || o.Scrub.Active() || o.CollapseRepeats >= 2 || o.Glossary.Active()
+	return o.DropURLs || o.Script.Active() || o.Drop.Active() || o.Scrub.Active() || o.CollapseRepeats >= 2 || o.Glossary.Active()
 }
 
 // urlCueRE matches a hallucinated URL / bare domain in cue text. It mirrors the
@@ -229,6 +234,9 @@ func CleanCues(cues []Cue, opts CleanOptions) []Cue {
 			continue
 		}
 		if opts.DropURLs && urlCueRE.MatchString(text) {
+			continue
+		}
+		if opts.Script.IsForeign(text) {
 			continue
 		}
 		if opts.Drop.IsSpam(text) {

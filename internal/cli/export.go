@@ -98,8 +98,14 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.scrub_phrases: %v", err))
 		return exitConfigInvalid
 	}
+	script, err := subtitle.NewScriptGuard(cfg.MediaSubtitlesExpectScript)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, fmt.Sprintf("invalid media.subtitles.expect_script: %v", err))
+		return exitConfigInvalid
+	}
 	clean := subtitle.CleanOptions{
 		DropURLs:        cfg.MediaSubtitlesDropURLs,
+		Script:          script,
 		Drop:            drop,
 		Scrub:           scrub,
 		CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,

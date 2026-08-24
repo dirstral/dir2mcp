@@ -13,10 +13,16 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// seedCleanExportStore seeds a transcript exercising every cue-cleaning pass: a
-// name to be rewritten by the glossary, a long identical run to collapse, a URL
-// hallucination to drop, and ordinary speech that must survive.
-func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
+// seedChunk is one time-coded transcript chunk for seedTranscriptChunks.
+type seedChunk struct {
+	text  string
+	start int
+	end   int
+}
+
+// seedTranscriptChunks seeds a transcript document with the given time-coded
+// chunks, the minimal store state the export command needs.
+func seedTranscriptChunks(t *testing.T, stateDir, relPath string, chunks []seedChunk) {
 	t.Helper()
 	ctx := context.Background()
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -43,21 +49,6 @@ func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
 		if err != nil {
 			return err
 		}
-		chunks := []struct {
-			text  string
-			start int
-			end   int
-		}{
-			{"Letter signed by Ajubei", 0, 2000}, // glossary -> Adzhubei
-			{"No.", 2000, 3000},                  // run of 4 identical "No."
-			{"No.", 3000, 4000},
-			{"No.", 4000, 5000},                           // 3rd -> dropped (threshold 3)
-			{"No.", 5000, 6000},                           // 4th -> dropped
-			{"Subtitles by www.spam.com", 6000, 8000},     // URL -> dropped
-			{"Crimea, NATO.", 8000, 9000},                 // phrase-only -> dropped by drop_phrases
-			{"Crimea, NATO. Genuine words.", 9000, 10000}, // leaked phrase -> scrubbed, sentence kept
-			{"Real closing line", 10000, 11000},
-		}
 		for i, c := range chunks {
 			if _, err := tx.InsertChunkWithSpans(ctx,
 				model.Chunk{RepID: repID, Ordinal: i, Text: c.text, IndexKind: "text"},
@@ -71,6 +62,24 @@ func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
 	if err != nil {
 		t.Fatalf("seed transcript: %v", err)
 	}
+}
+
+// seedCleanExportStore seeds a transcript exercising every cue-cleaning pass: a
+// name to be rewritten by the glossary, a long identical run to collapse, a URL
+// hallucination to drop, and ordinary speech that must survive.
+func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
+	t.Helper()
+	seedTranscriptChunks(t, stateDir, relPath, []seedChunk{
+		{"Letter signed by Ajubei", 0, 2000}, // glossary -> Adzhubei
+		{"No.", 2000, 3000},                  // run of 4 identical "No."
+		{"No.", 3000, 4000},
+		{"No.", 4000, 5000},                           // 3rd -> dropped (threshold 3)
+		{"No.", 5000, 6000},                           // 4th -> dropped
+		{"Subtitles by www.spam.com", 6000, 8000},     // URL -> dropped
+		{"Crimea, NATO.", 8000, 9000},                 // phrase-only -> dropped by drop_phrases
+		{"Crimea, NATO. Genuine words.", 9000, 10000}, // leaked phrase -> scrubbed, sentence kept
+		{"Real closing line", 10000, 11000},
+	})
 }
 
 // TestExportAppliesCueCleaning pins the end-to-end cleaning path: glossary
@@ -122,6 +131,65 @@ func TestExportAppliesCueCleaning(t *testing.T) {
 	}
 	if !strings.Contains(out, "Real closing line") {
 		t.Errorf("real closing cue missing:\n%s", out)
+	}
+}
+
+// TestExportDropsForeignScriptCues pins the media.subtitles.expect_script path
+// end-to-end: with a Cyrillic track configured, an all-Latin gibberish cue is
+// dropped while Cyrillic speech, a mixed-script cue, and a digit-bearing cue
+// all survive; with no expect_script the gibberish cue is exported unchanged.
+func TestExportDropsForeignScriptCues(t *testing.T) {
+	seed := func(t *testing.T, tmp string) {
+		t.Helper()
+		seedTranscriptChunks(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", []seedChunk{
+			{"Elola alolo.", 0, 1000},           // wrong-script gibberish
+			{"Обычная речь.", 1000, 2000},       // expected script
+			{"Смотрите на YouTube.", 2000, 3000}, // mixed scripts survives
+			{"COVID-19.", 3000, 4000},           // digit guard survives
+		})
+	}
+
+	tmp := t.TempDir()
+	seed(t, tmp)
+	cfgYAML := strings.Join([]string{
+		"media:",
+		"  subtitles:",
+		"    expect_script: cyrillic",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(tmp, ".dir2mcp.yaml"), []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		if code := app.RunWithContext(context.Background(),
+			[]string{"export", "--format", "srt", "media/talk.mp3"}); code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+		}
+	})
+	out := stdout.String()
+	if strings.Contains(out, "Elola alolo.") {
+		t.Errorf("wrong-script cue not dropped:\n%s", out)
+	}
+	for _, want := range []string{"Обычная речь.", "Смотрите на YouTube.", "COVID-19."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("cue %q missing from export:\n%s", want, out)
+		}
+	}
+
+	// Without expect_script the gibberish cue must survive untouched.
+	tmp2 := t.TempDir()
+	seed(t, tmp2)
+	var stdout2, stderr2 bytes.Buffer
+	app2 := cli.NewAppWithIO(&stdout2, &stderr2)
+	withWorkingDir(t, tmp2, func() {
+		if code := app2.RunWithContext(context.Background(),
+			[]string{"export", "--format", "srt", "media/talk.mp3"}); code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, stderr2.String())
+		}
+	})
+	if !strings.Contains(stdout2.String(), "Elola alolo.") {
+		t.Errorf("unconfigured export dropped the cue:\n%s", stdout2.String())
 	}
 }
 

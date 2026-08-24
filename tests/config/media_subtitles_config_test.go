@@ -111,6 +111,7 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	cfg.MediaSubtitlesGlossary = []string{"Aju?bei=>Adzhubei"}
 	cfg.MediaSubtitlesDropPhrases = []string{"Донбасс|Крым|НАТО"}
 	cfg.MediaSubtitlesScrubPhrases = []string{`Крым,?\s*НАТО`}
+	cfg.MediaSubtitlesExpectScript = "cyrillic"
 	cfg.MediaSubtitlesCollapseRepeats = 3
 	cfg.MediaSubtitlesDropURLs = true
 
@@ -139,6 +140,9 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	if len(loaded.MediaSubtitlesScrubPhrases) != 1 || loaded.MediaSubtitlesScrubPhrases[0] != `Крым,?\s*НАТО` {
 		t.Fatalf("scrub_phrases did not round-trip: %#v", loaded.MediaSubtitlesScrubPhrases)
 	}
+	if loaded.MediaSubtitlesExpectScript != "cyrillic" {
+		t.Fatalf("expect_script did not round-trip: %q", loaded.MediaSubtitlesExpectScript)
+	}
 	if loaded.MediaSubtitlesCollapseRepeats != 3 {
 		t.Fatalf("collapse_repeats = %d, want 3", loaded.MediaSubtitlesCollapseRepeats)
 	}
@@ -159,6 +163,9 @@ func TestMediaSubtitlesCleaning_DefaultsOff(t *testing.T) {
 	}
 	if len(cfg.MediaSubtitlesScrubPhrases) != 0 {
 		t.Fatalf("scrub_phrases should default empty, got %#v", cfg.MediaSubtitlesScrubPhrases)
+	}
+	if cfg.MediaSubtitlesExpectScript != "" {
+		t.Fatalf("expect_script should default empty, got %q", cfg.MediaSubtitlesExpectScript)
 	}
 	if cfg.MediaSubtitlesCollapseRepeats != 0 {
 		t.Fatalf("collapse_repeats should default 0, got %d", cfg.MediaSubtitlesCollapseRepeats)
@@ -188,6 +195,7 @@ func TestMediaSubtitlesCleaning_NestedYAMLApplies(t *testing.T) {
 		"      - Донбасс|Крым|Украина|Иван|Плющ|НАТО",
 		"    scrub_phrases:",
 		"      - Донбасс.*НАТО",
+		"    expect_script: cyrillic",
 		"    collapse_repeats: 3",
 		"    drop_urls: true",
 	}, "\n")+"\n")
@@ -204,6 +212,9 @@ func TestMediaSubtitlesCleaning_NestedYAMLApplies(t *testing.T) {
 	}
 	if len(cfg.MediaSubtitlesScrubPhrases) != 1 {
 		t.Fatalf("nested scrub_phrases not applied: %#v", cfg.MediaSubtitlesScrubPhrases)
+	}
+	if cfg.MediaSubtitlesExpectScript != "cyrillic" {
+		t.Fatalf("nested expect_script not applied: %q", cfg.MediaSubtitlesExpectScript)
 	}
 	if cfg.MediaSubtitlesCollapseRepeats != 3 {
 		t.Fatalf("nested collapse_repeats = %d, want 3", cfg.MediaSubtitlesCollapseRepeats)
@@ -244,6 +255,12 @@ func TestMediaSubtitlesCleaning_RejectsBadConfig(t *testing.T) {
 	badScrub.MediaSubtitlesScrubPhrases = []string{"a(b"}
 	if err := badScrub.Validate(); err == nil {
 		t.Fatalf("invalid scrub_phrases regexp should be rejected")
+	}
+
+	badScript := config.Default()
+	badScript.MediaSubtitlesExpectScript = "klingon"
+	if err := badScript.Validate(); err == nil {
+		t.Fatalf("unknown expect_script name should be rejected")
 	}
 }
 
