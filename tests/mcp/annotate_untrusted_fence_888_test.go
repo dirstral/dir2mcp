@@ -122,9 +122,15 @@ func TestAnnotate888_DocumentIsFencedAndTheFenceIsExplained(t *testing.T) {
 func TestAnnotate888_GuardIsStatedBeforeTheDocument(t *testing.T) {
 	prompt := annotatePrompt(t, "report.txt", []byte("plain body text"))
 	guard := strings.Index(prompt, promptfence.Guard("annotate"))
-	open := strings.Index(prompt, promptfence.OpenMarker)
+	// LastIndex: the guard sentence itself NAMES the marker, so the first
+	// occurrence is the guard's mention. The real fence is the last one.
+	open := strings.LastIndex(prompt, promptfence.OpenMarker)
 	if guard < 0 || open < 0 || guard > open {
 		t.Fatalf("guard at %d does not precede the fence at %d:\n%s", guard, open, prompt)
+	}
+	if open < guard+len(promptfence.Guard("annotate")) {
+		t.Fatalf("the only open marker found is the guard's own mention at %d; there is no fence:\n%s",
+			open, prompt)
 	}
 }
 
@@ -133,7 +139,10 @@ func TestAnnotate888_GuardIsStatedBeforeTheDocument(t *testing.T) {
 // document sits between the first statement of the output rule and the answer.
 func TestAnnotate888_OutputRuleIsRestatedAfterTheDocument(t *testing.T) {
 	prompt := annotatePrompt(t, "report.txt", []byte("plain body text"))
-	closeAt := strings.Index(prompt, promptfence.CloseMarker)
+	// LastIndex: the guard sentence names the close marker too, and cutting at
+	// the guard's mention would put the whole document into the tail, where its
+	// text could satisfy the assertion by accident.
+	closeAt := strings.LastIndex(prompt, promptfence.CloseMarker)
 	if closeAt < 0 {
 		t.Fatalf("no fence in prompt:\n%s", prompt)
 	}
