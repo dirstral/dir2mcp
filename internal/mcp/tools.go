@@ -25,6 +25,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
@@ -1742,12 +1743,23 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 			Retryable: false,
 		}
 	}
+	// The document is FENCED and the fence is explained (issue #888). This path
+	// is the one that closes a loop: the model's output is parsed and persisted
+	// by StoreAnnotationRepresentations and then indexed, so a document that
+	// steered its own annotation would put attacker-chosen text into the corpus,
+	// where a later answer can cite it.
+	//
+	// The output rule is stated twice, before and after the document. The nearest
+	// instruction wins on a small model, and the document sits between the two,
+	// which is the same positioning failure #892 measured on the ask path.
 	prompt := strings.Join([]string{
 		"Extract a JSON object that strictly conforms to this schema:",
 		string(schemaBytes),
 		"Return only valid JSON object, no markdown, no prose.",
+		promptfence.Guard("annotate"),
 		"Document content:",
-		sourceText,
+		promptfence.Wrap(relPath, sourceText),
+		"Return only the valid JSON object described by the schema above, with no markdown and no prose.",
 	}, "\n\n")
 
 	// guard against overly large inputs that would blow past the model's
