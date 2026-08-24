@@ -4536,7 +4536,7 @@ func openMediaClipOutputSchema() map[string]interface{} {
 			"data":               map[string]interface{}{"type": "string", "contentEncoding": "base64", "description": "Present when return=inline: base64 clip bytes."},
 			"uri":                map[string]interface{}{"type": "string", "description": "Present when return=reference: short-lived fetch URI."},
 			"expires_unix":       map[string]interface{}{"type": "integer", "description": "Present when return=reference: expiry of uri."},
-			"reference_fallback": map[string]interface{}{"type": "string", "description": "Set when reference was requested but inline was returned instead."},
+			"reference_fallback": map[string]interface{}{"type": "string", "description": "Present ONLY when the caller asked for return=reference and the server served inline instead; explains why. Its PRESENCE is the signal that the returned return value is not the one asked for, so a caller tests presence and does not parse the text. Absent whenever the requested carrier was honoured."},
 		},
 		"required": []string{"rel_path", "doc_type", "span", "mime_type", "return"},
 		"allOf": []interface{}{

@@ -28,7 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"testing"
 )
@@ -97,12 +96,20 @@ func TestOpenMediaClip_CanonicalOutputCannotNameWhatItServed_878(t *testing.T) {
 
 	want := []string{
 		"data", "doc_type", "duration_ms", "expires_unix",
-		"mime_type", "rel_path", "return", "size_bytes", "span", "uri",
+		"mime_type", "reference_fallback", "rel_path", "return", "size_bytes",
+		"span", "uri",
 	}
 	// Read the list above as the finding: no member of it can report a served
 	// rendition. mime_type is the only field that describes the bytes, and it
 	// names the container, not the fidelity. A 360p preview and a 1080p source
 	// cut are both "video/mp4", so it cannot carry the distinction.
+	//
+	// reference_fallback joined the list in dirstral-spec 0.53.0 and does NOT
+	// open this gate. It reports the CARRIER, not the fidelity: it says the
+	// caller asked for a reference and got inline bytes. A server that quietly
+	// served a 360p cut instead of the source would set neither this field nor
+	// any other, so a preview is still indistinguishable from the original and
+	// #878 stays blocked on the input half of the contract.
 	got := schemaPropertyNames(t, output, "canonical open_media_clip output")
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("canonical open_media_clip output properties = %v, want %v.\n"+
@@ -141,14 +148,13 @@ func TestOpenMediaClip_ServedInputMatchesTheCanonicalContract_878(t *testing.T) 
 // half of the same guard: the code must not open the #878 gate by declaring a
 // field the canonical schema does not have.
 //
-// It carries ONE known exception, `reference_fallback`, and pins it exactly.
-// The server declares and emits that field; the canonical output object does
-// not declare it and closes itself with additionalProperties:false, so a
-// canonically validating client rejects every return=reference response. That
-// is the #850 defect class in a smaller blast radius, it is NOT part of #878,
-// and it has its own issue: dir2mcp #884. The allowlist is deliberate, so this
-// test still fails on any NEW undeclared field, and fails again when #884 lands
-// and the exception must be deleted.
+// It used to carry one known exception, `reference_fallback`: the server
+// declared and emitted that field while the canonical output object did not
+// declare it and closed itself with additionalProperties:false, so a
+// canonically validating client rejected every return=reference response
+// (dir2mcp #884, the #850 defect class in a smaller blast radius). dirstral-spec
+// 0.53.0 declares the field, so served and canonical agree exactly and the
+// exception is gone. There is no allowlist left: any difference here is drift.
 func TestOpenMediaClip_ServedOutputMatchesTheCanonicalContract_878(t *testing.T) {
 	t.Parallel()
 	schemas := toolsListSchemas(t)
@@ -163,20 +169,14 @@ func TestOpenMediaClip_ServedOutputMatchesTheCanonicalContract_878(t *testing.T)
 	assertClosedObject(t, served, "served open_media_clip outputSchema")
 
 	want := schemaPropertyNames(t, canonicalOpenMediaClipSection(t, "output"), "canonical open_media_clip output")
-	want = append(want, knownServedClipOutputDrift...)
-	sort.Strings(want)
-
 	got := schemaPropertyNames(t, served, "served open_media_clip outputSchema")
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("served open_media_clip output properties = %v, want canonical plus the known #884 drift %v.\n"+
-			"A new name here is undeclared drift: a canonically validating client rejects the whole call (#850). "+
-			"A missing name means #884 landed: delete the exception in knownServedClipOutputDrift.", got, want)
+		t.Fatalf("served open_media_clip output properties = %v, canonical = %v.\n"+
+			"Any difference is drift: the canonical output object closes itself with "+
+			"additionalProperties:false, so a canonically validating client rejects the "+
+			"whole call on an undeclared field (#850).", got, want)
 	}
 }
-
-// knownServedClipOutputDrift lists the served output properties the canonical
-// schema does not declare. It must only ever shrink. See dir2mcp #884.
-var knownServedClipOutputDrift = []string{"reference_fallback"}
 
 // TestOpenMediaClip_RejectsASizeArgument_878 pins the gate on observable
 // behavior, not only on a schema literal. A caller who has read #878 and tries
