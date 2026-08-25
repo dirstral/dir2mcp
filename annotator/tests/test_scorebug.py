@@ -250,7 +250,7 @@ def test_pitch_graphic_becomes_one_pitch_cue_for_the_pitcher(roster, fake_frames
                if c.event == "pitch"]
     assert len(pitches) == 1
     assert pitches[0].entity_ids == ("player:robbie-ray",)
-    assert pitches[0].text == "SLIDER 88 MPH"
+    assert pitches[0].text == "Pitch by Robbie Ray: SLIDER 88 MPH"
     assert pitches[0].start_s < 2.0 < pitches[0].end_s
 
 
@@ -380,7 +380,7 @@ def test_a_count_that_goes_backwards_resets_rather_than_emits(roster, fake_frame
                        "RAY P: 13", "RAY P: 13"])
     cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
     pitches = [c for c in cues if c.event == "pitch"]
-    assert len(pitches) == 1 and pitches[0].text == "pitch 13"
+    assert len(pitches) == 1 and pitches[0].text == "Pitch 13 by Robbie Ray"
 
 
 def test_a_pitch_a_graphic_already_reported_is_not_reported_twice(roster, fake_frames):
@@ -422,7 +422,7 @@ def test_a_real_step_survives_a_neighbouring_misread(roster, fake_frames):
                        "RAY P: 88", "RAY P: 88", "RAY P: 88"])
     cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
     pitches = [c for c in cues if c.event == "pitch"]
-    assert len(pitches) == 1 and pitches[0].text == "pitch 88"
+    assert len(pitches) == 1 and pitches[0].text == "Pitch 88 by Robbie Ray"
 
 
 # --- the count reader is opt-in ---------------------------------------------
