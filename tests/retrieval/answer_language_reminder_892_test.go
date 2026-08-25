@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/setupwizard"
 )
 
 // Issue #892: the answer-language rule from #880 still drifts. Measured over 740
@@ -132,5 +134,20 @@ func TestAsk892_RuleIsMatchedIgnoringWrapping(t *testing.T) {
 		"Include concise source attributions in the form [rel_path].\n"
 	if prompt := askAndCapture(t, rewrapped); !strings.Contains(prompt, reminderMarker) {
 		t.Fatalf("rewrapped rule was not recognized:\n%s", prompt)
+	}
+}
+
+// TestAsk906_WizardPresetsReArmTheReminder closes the #906 loop from the
+// retrieval side: the wizard presets state the answer-language rule in the
+// shipped wording, so carriesAnswerLanguageRule must recognize it THROUGH the
+// preset's own line-wrapping and the trailing reminder must fire. Before #906
+// a preset prompt got neither the rule nor the reminder.
+func TestAsk906_WizardPresetsReArmTheReminder(t *testing.T) {
+	for _, profile := range []setupwizard.Profile{setupwizard.ProfileLegal, setupwizard.ProfileCode} {
+		cfg := config.Default()
+		setupwizard.ApplyCorpusProfile(&cfg, profile)
+		if prompt := askAndCapture(t, cfg.RAGSystemPrompt); !strings.Contains(prompt, reminderMarker) {
+			t.Errorf("%s preset prompt does not trigger the #892 trailing reminder:\n%s", profile, prompt)
+		}
 	}
 }
