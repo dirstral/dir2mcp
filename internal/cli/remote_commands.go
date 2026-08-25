@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -49,11 +50,36 @@ type mcpToolCallResult struct {
 	StructuredContent map[string]interface{} `json:"structuredContent"`
 }
 
+const (
+	// remoteDialTimeout and remoteTLSHandshakeTimeout bound connection
+	// establishment only. They stay short so an unreachable daemon fails fast.
+	remoteDialTimeout         = 10 * time.Second
+	remoteTLSHandshakeTimeout = 10 * time.Second
+
+	// remoteInitializeTimeout bounds the MCP initialize handshake. It keeps
+	// the pre-#662 fail-fast behavior for session setup, which never runs a
+	// tool and so never runs long.
+	remoteInitializeTimeout = 45 * time.Second
+
+	// remoteToolCallTimeout is the default backstop for tools/call. The
+	// server intentionally runs with no WriteTimeout because LLM/OCR-backed
+	// tools can take minutes; the client must not re-impose a short flat
+	// deadline (issue #662). The caller context stays the primary
+	// cancellation mechanism.
+	remoteToolCallTimeout = 10 * time.Minute
+)
+
 type remoteMCPClient struct {
 	endpoint   string
 	authHeader string
 	connection remoteConnection
 	httpClient *http.Client
+
+	// initializeTimeout bounds ensureSession; toolCallTimeout bounds
+	// CallTool. A non-positive value disables that bound, so cancellation
+	// comes from the caller context alone.
+	initializeTimeout time.Duration
+	toolCallTimeout   time.Duration
 
 	mu        sync.Mutex
 	initMu    sync.Mutex
@@ -67,13 +93,37 @@ func newRemoteMCPClient(endpoint, authHeader string, connection remoteConnection
 		authHeader: strings.TrimSpace(authHeader),
 		connection: connection,
 		httpClient: &http.Client{
-			Timeout: 45 * time.Second,
+			// No flat Client.Timeout: it would span the whole exchange and
+			// abort legitimate long tool calls (issue #662). Short timeouts
+			// live at the transport (connect/TLS) level instead. There is no
+			// ResponseHeaderTimeout on purpose: a JSON-RPC POST sends its
+			// response headers only after the tool finishes, so a header
+			// timeout would recreate the same defect.
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   remoteDialTimeout,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout: remoteTLSHandshakeTimeout,
+			},
 			// connection.json can hold any header, including a custom
 			// credential header that Go copies onto a redirect target. Stop at
 			// the 3xx instead (issue #704).
 			CheckRedirect: protocol.RefuseRedirect,
 		},
+		initializeTimeout: remoteInitializeTimeout,
+		toolCallTimeout:   remoteToolCallTimeout,
 	}
+}
+
+// withCallTimeout applies a per-call deadline on top of the caller context.
+// A non-positive timeout returns the caller context unchanged.
+func withCallTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (c *remoteMCPClient) nextRequestID() int64 { return c.nextID.Add(1) }
@@ -158,7 +208,10 @@ func (c *remoteMCPClient) ensureSession(ctx context.Context) error {
 		return nil
 	}
 
-	resp, body, err := c.doRPC(ctx, rpcRequest{
+	initCtx, cancel := withCallTimeout(ctx, c.initializeTimeout)
+	defer cancel()
+
+	resp, body, err := c.doRPC(initCtx, rpcRequest{
 		JSONRPC: "2.0",
 		ID:      c.nextRequestID(),
 		Method:  protocol.RPCMethodInitialize,
@@ -199,7 +252,10 @@ func (c *remoteMCPClient) CallTool(ctx context.Context, name string, arguments m
 		return nil, err
 	}
 
-	resp, body, err := c.doRPC(ctx, rpcRequest{
+	callCtx, cancel := withCallTimeout(ctx, c.toolCallTimeout)
+	defer cancel()
+
+	resp, body, err := c.doRPC(callCtx, rpcRequest{
 		JSONRPC: "2.0",
 		ID:      c.nextRequestID(),
 		Method:  protocol.RPCMethodToolsCall,
