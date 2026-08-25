@@ -24,6 +24,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
@@ -208,23 +209,16 @@ const (
 	// per-document [rel_path] citation tag that ensureAnswerAttributions
 	// relies on is appended after it, followed by ragDocOpenMarkerEnd. The
 	// close marker is a fixed sentinel and carries no rel_path.
-	ragDocOpenMarker    = "<<<BEGIN UNTRUSTED DOCUMENT"
-	ragDocOpenMarkerEnd = ">>>"
-	ragDocCloseMarker   = "<<<END UNTRUSTED DOCUMENT>>>"
+	// Taken from promptfence so ingest and mcp fence corpus text with the SAME
+	// literals (issue #888). The values are unchanged, so every pinned prompt
+	// string in the tests is byte-identical.
+	ragDocOpenMarker    = promptfence.OpenMarker
+	ragDocOpenMarkerEnd = promptfence.OpenMarkerEnd
+	ragDocCloseMarker   = promptfence.CloseMarker
 
 	// ragDocCloseBlock is the close marker as the builder writes it: on its own
 	// line, and followed by a newline that separates two context blocks.
 	ragDocCloseBlock = "\n" + ragDocCloseMarker + "\n"
-
-	// ragDocMarkerRedaction replaces any occurrence of the fence markers found
-	// inside corpus-derived text (snippet, rel_path, title) so a poisoned
-	// document cannot spoof or prematurely close the untrusted fence and smuggle
-	// content past the injection guard (issue #445). Deliberately contains no
-	// square brackets (which would nest inside the [rel_path] citation tag and
-	// confuse ensureAnswerAttributions' matching) and no fence characters
-	// ('<'/'>', which could re-introduce a fence spoof); guillemets keep it a
-	// clearly-legible redaction marker.
-	ragDocMarkerRedaction = "«UNTRUSTED-DOCUMENT-MARKER-REDACTED»"
 )
 
 // Service implements retrieval operations over embedded data.
@@ -4233,9 +4227,7 @@ func ragDocSnippet(question string, h model.SearchHit, fullText string, budget i
 // prematurely close the fence and smuggle content past the injection guard
 // (issue #445).
 func neutralizeRAGMarkers(s string) string {
-	s = strings.ReplaceAll(s, ragDocCloseMarker, ragDocMarkerRedaction)
-	s = strings.ReplaceAll(s, ragDocOpenMarker, ragDocMarkerRedaction)
-	return s
+	return promptfence.Neutralize(s)
 }
 
 // neutralizeHeaderField sanitizes values interpolated into the open-fence
@@ -4244,9 +4236,7 @@ func neutralizeRAGMarkers(s string) string {
 // i.e. ">>>") so a crafted RelPath/Title cannot prematurely close the opening
 // fence and smuggle content past the injection guard (issue #445).
 func neutralizeHeaderField(s string) string {
-	s = neutralizeRAGMarkers(s)
-	s = strings.ReplaceAll(s, ragDocOpenMarkerEnd, ragDocMarkerRedaction)
-	return s
+	return promptfence.NeutralizeLabel(s)
 }
 
 func truncateSnippet(s string, maxRunes int) string {
