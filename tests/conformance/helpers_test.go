@@ -210,8 +210,21 @@ func sendRPC(t *testing.T, mcpURL, sessionID, body string, extraHeaders map[stri
 	return resp
 }
 
-// initSession calls MCP initialize and returns the session ID.
+// initSession completes the full bs-005 handshake (initialize followed by
+// notifications/initialized) and returns the session ID. The server rejects
+// non-lifecycle requests on a session that skipped the notification (issue
+// #656), so every helper-established session must complete the handshake.
 func initSession(t *testing.T, mcpURL string) string {
+	t.Helper()
+	sid := initSessionWithoutInitialized(t, mcpURL)
+	sendInitialized(t, mcpURL, sid)
+	return sid
+}
+
+// initSessionWithoutInitialized calls MCP initialize only and returns the
+// session ID. Use it to pin the server's handling of clients that violate
+// bs-005 by skipping notifications/initialized.
+func initSessionWithoutInitialized(t *testing.T, mcpURL string) string {
 	t.Helper()
 	resp := sendRPC(t, mcpURL, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil)
 	defer func() { _ = resp.Body.Close() }()
@@ -224,6 +237,18 @@ func initSession(t *testing.T, mcpURL string) string {
 		t.Fatalf("initialize did not return a session ID")
 	}
 	return sid
+}
+
+// sendInitialized sends notifications/initialized on the session and asserts
+// the HTTP 202 the server must answer with (bs-004).
+func sendInitialized(t *testing.T, mcpURL, sid string) {
+	t.Helper()
+	resp := sendRPC(t, mcpURL, sid, `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("notifications/initialized: status=%d want=202 body=%s", resp.StatusCode, body)
+	}
 }
 
 // readBody reads and returns the full body from resp, closing it.

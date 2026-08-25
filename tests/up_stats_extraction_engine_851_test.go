@@ -75,6 +75,13 @@ func statsModelsOverHTTP(t *testing.T, mcpURL string) map[string]interface{} {
 		t.Fatalf("initialize: status=%d session=%q", initResp.StatusCode, sessionID)
 	}
 
+	// Complete the bs-005 handshake; the daemon rejects tools/* before it (#656).
+	notifResp := post(sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`)
+	_ = notifResp.Body.Close()
+	if notifResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("notifications/initialized: status=%d want=202", notifResp.StatusCode)
+	}
+
 	statsResp := post(sessionID, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"`+protocol.ToolNameStats+`","arguments":{}}}`)
 	body, err := io.ReadAll(statsResp.Body)
 	_ = statsResp.Body.Close()

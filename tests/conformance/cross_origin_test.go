@@ -52,6 +52,13 @@ func initSessionFromOrigin(t *testing.T, mcpURL, origin string, headers map[stri
 	if sid == "" {
 		t.Fatalf("initialize from %s returned no session id", origin)
 	}
+	// Complete the bs-005 handshake from the same origin; the server rejects
+	// tools/* on a session that skipped notifications/initialized (issue #656).
+	notif := sendRPC(t, mcpURL, sid, `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, headers)
+	notifBody := readBody(t, notif)
+	if notif.StatusCode != http.StatusAccepted {
+		t.Fatalf("notifications/initialized from %s: status=%d want=202 body=%s", origin, notif.StatusCode, notifBody)
+	}
 	return sid
 }
 

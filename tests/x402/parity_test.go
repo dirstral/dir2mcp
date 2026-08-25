@@ -94,7 +94,9 @@ func baseX402Config(t *testing.T, facilitatorURL string) config.Config {
 	return cfg
 }
 
-// parityInitSession calls MCP initialize and returns the session ID.
+// parityInitSession completes the full bs-005 handshake (initialize followed
+// by notifications/initialized) and returns the session ID. The server rejects
+// non-lifecycle requests on a session that skipped the notification (#656).
 func parityInitSession(t *testing.T, mcpURL string) string {
 	t.Helper()
 	resp := paritySendRPC(t, mcpURL, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil)
@@ -106,6 +108,12 @@ func parityInitSession(t *testing.T, mcpURL string) string {
 	sid := resp.Header.Get(protocol.MCPSessionHeader)
 	if sid == "" {
 		t.Fatalf("initialize did not return a session ID")
+	}
+	notif := paritySendRPC(t, mcpURL, sid, `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, nil)
+	defer func() { _ = notif.Body.Close() }()
+	if notif.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(notif.Body)
+		t.Fatalf("notifications/initialized: status=%d want=202 body=%s", notif.StatusCode, body)
 	}
 	return sid
 }

@@ -364,6 +364,12 @@ func (t *SDKTransport) serveSessionTermination(w http.ResponseWriter, req *http.
 	if !t.applyOriginGuard(w, req) {
 		return
 	}
+	// DELETE is a post-initialize request, so the bs-004 header rule applies to
+	// it as well. Session termination is itself lifecycle cleanup, so it is NOT
+	// gated on handshake completion: a client may abandon a half-open session.
+	if !t.server.enforceProtocolVersion(w, req, nil) {
+		return
+	}
 	sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
 	if sessionID == "" {
 		writeError(w, http.StatusNotFound, nil, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
@@ -422,14 +428,18 @@ func (t *SDKTransport) parseSDKRequestAndID(w http.ResponseWriter, body []byte) 
 }
 
 func (t *SDKTransport) dispatchSDKRequest(w http.ResponseWriter, req *http.Request, parsedReq rpcRequest, id interface{}, hasID bool, sdkHandler http.Handler) {
-	if !t.validateSDKSession(w, req, parsedReq.Method, id) {
+	// gatePostInitialize validates the version header, the session and the
+	// bs-005 handshake state immediately before dispatch, which keeps the
+	// session TOCTOU window closed. It is the same helper the direct handler
+	// chain runs, so the two chains cannot drift.
+	if !t.server.gatePostInitialize(w, req, parsedReq.Method, id) {
 		return
 	}
 	switch parsedReq.Method {
 	case protocol.RPCMethodInitialize:
 		t.handleSDKInitialize(w, req, id, hasID, sdkHandler)
 	case protocol.RPCMethodNotificationsInitialized:
-		t.handleSDKNotificationsInitialized(w, id, hasID)
+		t.handleSDKNotificationsInitialized(w, req, id, hasID)
 	case protocol.RPCMethodNotificationsCancelled:
 		t.handleSDKNotificationsCancelled(w, req, id, hasID, sdkHandler)
 	case protocol.RPCMethodToolsList:
@@ -439,28 +449,6 @@ func (t *SDKTransport) dispatchSDKRequest(w http.ResponseWriter, req *http.Reque
 	default:
 		t.handleSDKUnknownMethod(w, id, hasID)
 	}
-}
-
-func (t *SDKTransport) validateSDKSession(w http.ResponseWriter, req *http.Request, method string, id interface{}) bool {
-	// Validate session immediately before dispatch to eliminate the TOCTOU
-	// window between a prior check and handler invocation. initialize does not
-	// require a pre-existing session — it creates one.
-	if method == protocol.RPCMethodInitialize {
-		return true
-	}
-	sessionID := strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader))
-	if sessionID == "" {
-		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-		return false
-	}
-	if ok, reason := t.server.hasActiveSession(sessionID, time.Now()); !ok {
-		if reason != "" {
-			w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
-		}
-		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-		return false
-	}
-	return true
 }
 
 func (t *SDKTransport) handleSDKInitialize(w http.ResponseWriter, req *http.Request, id interface{}, hasID bool, sdkHandler http.Handler) {
@@ -478,7 +466,12 @@ func (t *SDKTransport) handleSDKInitialize(w http.ResponseWriter, req *http.Requ
 	copyBufferedResponse(w, rec)
 }
 
-func (t *SDKTransport) handleSDKNotificationsInitialized(w http.ResponseWriter, id interface{}, hasID bool) {
+func (t *SDKTransport) handleSDKNotificationsInitialized(w http.ResponseWriter, req *http.Request, id interface{}, hasID bool) {
+	// Mark the handshake complete on both the well-formed notification and the
+	// malformed request-shaped variant: the client's intent is the same, and
+	// the response contract for each shape is unchanged. gatePostInitialize has
+	// already confirmed the session exists.
+	t.server.markSessionInitialized(strings.TrimSpace(req.Header.Get(protocol.MCPSessionHeader)))
 	if !hasID {
 		w.WriteHeader(http.StatusAccepted)
 		return

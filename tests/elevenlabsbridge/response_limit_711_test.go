@@ -58,6 +58,11 @@ func oversizedUpstream(t *testing.T, toolStatus int, declare bool) *httptest.Ser
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}`))
 			return
 		}
+		if payload.Method == protocol.RPCMethodNotificationsInitialized {
+			// bs-004: an accepted notification is answered with HTTP 202.
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		w.WriteHeader(toolStatus)
 		writeOversizedBody(w, declare)
 	}))
@@ -176,6 +181,11 @@ func TestBridgeClearsSessionOnOversizedExpiredSessionResponse(t *testing.T) {
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}`))
 			return
 		}
+		if payload.Method == protocol.RPCMethodNotificationsInitialized {
+			// bs-004: an accepted notification is answered with HTTP 202.
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		w.Header().Set(protocol.MCPSessionExpiredHeader, "true")
 		w.WriteHeader(http.StatusNotFound)
 		writeOversizedBody(w, false)
@@ -242,6 +252,11 @@ func TestBridgePassesResponseUnderTheLimit(t *testing.T) {
 		if payload.Method == protocol.RPCMethodInitialize {
 			w.Header().Set(protocol.MCPSessionHeader, "session-711")
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}`))
+			return
+		}
+		if payload.Method == protocol.RPCMethodNotificationsInitialized {
+			// bs-004: an accepted notification is answered with HTTP 202.
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		big := strings.Repeat("b", 1<<20)
