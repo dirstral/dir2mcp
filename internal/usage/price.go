@@ -44,6 +44,9 @@ func DefaultPriceTable() *PriceTable {
 		"gemini-2.5-pro":   {InputPer1K: 0.00125, OutputPer1K: 0.01},
 		// Gemini (embed)
 		"gemini-embedding-001": {InputPer1K: 0.00015},
+		// Anthropic (chat)
+		"claude-sonnet-4-6": {InputPer1K: 0.003, OutputPer1K: 0.015},
+		"claude-haiku-4-5":  {InputPer1K: 0.001, OutputPer1K: 0.005},
 		// Cohere (rerank: priced per search, not tokens; left out so cost is
 		// omitted rather than mis-stated)
 		"command-r":      {InputPer1K: 0.00015, OutputPer1K: 0.0006},
