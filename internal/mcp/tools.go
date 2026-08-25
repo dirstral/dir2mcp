@@ -1999,11 +1999,15 @@ type mediaClipRequest struct {
 // materialized, so it falls back to inline and notes it.
 func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
-		"chunk_id": {}, "rel_path": {}, "start_ms": {}, "end_ms": {}, "return": {},
+		"chunk_id": {}, "rel_path": {}, "start_ms": {}, "end_ms": {}, "return": {}, "max_bytes": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 	returnMode, toolErr := parseMediaClipReturnArg(args)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	callerMaxBytes, toolErr := parseMediaClipMaxBytesArg(args)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -2051,11 +2055,52 @@ func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]in
 		// bytes/span is deterministic) — distinct from OCR_NOT_READY.
 		return toolCallResult{}, &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip extraction failed", Retryable: false}
 	}
-	if len(data) > maxBytes {
-		return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("extracted clip is %d bytes, exceeds max %d; request a shorter span", len(data), maxBytes), Retryable: false}
+	// The effective byte bound is min(max_bytes, media.clip.max_bytes)
+	// (SPEC §15.11, spec 0.54.0). The caller's ceiling can only narrow the
+	// server's, never widen it.
+	effectiveMaxBytes := maxBytes
+	if callerMaxBytes > 0 && callerMaxBytes < effectiveMaxBytes {
+		effectiveMaxBytes = callerMaxBytes
 	}
-
 	mimeType := mediaClipMIMEForPath(req.relPath, req.docType)
+	previewRendition := ""
+	if len(data) > effectiveMaxBytes {
+		// Without a caller ceiling this stays exactly the pre-0.54.0 refusal: the
+		// server MAY re-encode, and deliberately does not, so a caller that never
+		// asked for a byte budget never receives silently reduced fidelity.
+		if callerMaxBytes <= 0 {
+			return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("extracted clip is %d bytes, exceeds max %d; request a shorter span", len(data), maxBytes), Retryable: false}
+		}
+		isVideo := strings.EqualFold(strings.TrimSpace(req.docType), "video")
+		extractPreview := s.extractSegmentPreview
+		if extractPreview == nil {
+			extractPreview = avutil.ExtractSegmentPreview
+		}
+		pdata, rendition, perr := extractPreview(ctx, absPath, req.startMS, req.endMS, effectiveMaxBytes, isVideo)
+		if perr != nil {
+			// A server that cannot re-encode has no preview to offer (§15.11): the
+			// source cut does not fit the effective bound, so the honest answer is
+			// the same CLIP_TOO_LARGE an oversized span produces. Any other encode
+			// failure is deterministic for these bytes, exactly like the source
+			// extraction above.
+			if errors.Is(perr, avutil.ErrToolNotFound) {
+				return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("source-fidelity clip is %d bytes, exceeds max_bytes %d, and this server cannot re-encode a preview; raise max_bytes or request a shorter span", len(data), effectiveMaxBytes), Retryable: false}
+			}
+			return toolCallResult{}, &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip preview encoding failed", Retryable: false}
+		}
+		if len(pdata) > effectiveMaxBytes {
+			return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("even a re-encoded preview is %d bytes, exceeds max_bytes %d; raise max_bytes or request a shorter span", len(pdata), effectiveMaxBytes), Retryable: false}
+		}
+		data = pdata
+		previewRendition = rendition
+		// The preview is a NEW container (mp4 for video, m4a for audio), not the
+		// source's: the mime type must describe the bytes actually served.
+		if isVideo {
+			mimeType = "video/mp4"
+		} else {
+			mimeType = "audio/mp4"
+		}
+	}
 	encoded := base64.StdEncoding.EncodeToString(data)
 	structured := map[string]interface{}{
 		"rel_path":    req.relPath,
@@ -2071,6 +2116,13 @@ func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]in
 	// note it (never error solely because reference was asked for, per §15.11).
 	if returnMode == "reference" {
 		structured["reference_fallback"] = "reference return not supported; falling back to inline"
+	}
+	// Present exactly when the served bytes are a re-encode rather than a
+	// source-fidelity cut (spec 0.54.0). Presence is the machine signal, so a
+	// source cut must never carry the field, or a preview would be mistakable
+	// for the original.
+	if previewRendition != "" {
+		structured["preview"] = previewRendition
 	}
 	contentType := "audio"
 	if strings.EqualFold(strings.TrimSpace(req.docType), "video") {
@@ -2121,6 +2173,24 @@ func parseMediaClipReturnArg(args map[string]interface{}) (string, *toolExecutio
 	default:
 		return "", &toolExecutionError{Code: "INVALID_FIELD", Message: "return must be one of inline,reference", Retryable: false}
 	}
+}
+
+// parseMediaClipMaxBytesArg reads the optional max_bytes argument (spec
+// 0.54.0): the caller's ceiling on the CLIP bytes. 0 means "not supplied". A
+// non-integer or non-positive value is INVALID_FIELD rather than a silent
+// ignore, for the same reason unknown arguments are rejected: a typo that
+// quietly disables the budget would hand the caller a 22 MB clip it asked not
+// to receive.
+func parseMediaClipMaxBytesArg(args map[string]interface{}) (int, *toolExecutionError) {
+	raw, ok := args["max_bytes"]
+	if !ok {
+		return 0, nil
+	}
+	f, ok := raw.(float64)
+	if !ok || f != float64(int(f)) || int(f) < 1 {
+		return 0, &toolExecutionError{Code: "INVALID_FIELD", Message: "max_bytes must be an integer >= 1", Retryable: false}
+	}
+	return int(f), nil
 }
 
 // resolveMediaClipRequest resolves the open_media_clip selection rules into a
@@ -4520,11 +4590,12 @@ func openMediaClipInputSchema() map[string]interface{} {
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
-			"chunk_id": map[string]interface{}{"type": "integer", "description": "Hit chunk id; resolved to its source media and time span."},
-			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
-			"start_ms": map[string]interface{}{"type": "integer", "minimum": 0},
-			"end_ms":   map[string]interface{}{"type": "integer", "minimum": 0},
-			"return":   map[string]interface{}{"type": "string", "enum": []string{"inline", "reference"}, "default": "inline"},
+			"chunk_id":  map[string]interface{}{"type": "integer", "description": "Hit chunk id; resolved to its source media and time span."},
+			"rel_path":  map[string]interface{}{"type": "string", "minLength": 1},
+			"start_ms":  map[string]interface{}{"type": "integer", "minimum": 0},
+			"end_ms":    map[string]interface{}{"type": "integer", "minimum": 0},
+			"return":    map[string]interface{}{"type": "string", "enum": []string{"inline", "reference"}, "default": "inline"},
+			"max_bytes": map[string]interface{}{"type": "integer", "minimum": 1, "description": "Optional caller ceiling on the CLIP bytes (not the response). The effective bound is min(max_bytes, media.clip.max_bytes). The server MAY re-encode to a reduced-fidelity preview to fit under it, and MUST say so via the output preview field; when even a preview cannot fit the span under the effective bound, CLIP_TOO_LARGE."},
 		},
 		"anyOf": []interface{}{
 			map[string]interface{}{"required": []string{"chunk_id"}},
@@ -4549,6 +4620,7 @@ func openMediaClipOutputSchema() map[string]interface{} {
 			"uri":                map[string]interface{}{"type": "string", "description": "Present when return=reference: short-lived fetch URI."},
 			"expires_unix":       map[string]interface{}{"type": "integer", "description": "Present when return=reference: expiry of uri."},
 			"reference_fallback": map[string]interface{}{"type": "string", "description": "Present ONLY when the caller asked for return=reference and the server served inline instead; explains why. Its PRESENCE is the signal that the returned return value is not the one asked for, so a caller tests presence and does not parse the text. Absent whenever the requested carrier was honoured."},
+			"preview":            map[string]interface{}{"type": "string", "minLength": 1, "description": "Present ONLY when the served bytes are a reduced-fidelity re-encode rather than a source-fidelity cut; names the rendition for a human (codec, resolution, approximate bitrate). Its PRESENCE is the signal that the clip is a preview, so a caller tests presence and does not parse the text. Absent whenever the bytes are cut at source fidelity."},
 		},
 		"required": []string{"rel_path", "doc_type", "span", "mime_type", "return"},
 		"allOf": []interface{}{

@@ -460,6 +460,114 @@ func ExtractSegmentURL(ctx context.Context, url, srcExt string, startMS, endMS i
 	return extractSegment(ctx, url, srcExt, startMS, endMS)
 }
 
+// ExtractSegmentPreview cuts [startMS, endMS) from a local media file and
+// RE-ENCODES it to fit under maxBytes, for dir2mcp_open_media_clip's max_bytes
+// contract (SPEC §15.11, spec 0.54.0; dir2mcp #878). It is the reduced-fidelity
+// counterpart of ExtractSegment: where that stream-copies at source bitrate,
+// this one budgets a bitrate from the byte ceiling and the span duration.
+//
+// The returned string names the rendition for a human (codec, resolution,
+// bitrate) and becomes the response's `preview` field verbatim, whose PRESENCE
+// tells the caller the bytes are not a source-fidelity cut.
+//
+// The budget spends 92% of maxBytes, leaving headroom for container overhead
+// and encoder rate-control drift; single-pass rate control is approximate, so
+// the CALLER must still verify the result fits and refuse when it does not.
+// Bitrates are floored (video 80 kbps, audio 24 kbps) because below those the
+// output is noise that happens to fit; when the floor does not fit the span,
+// the result is over maxBytes and the caller's verification refuses it, which
+// keeps "cannot fit" a caller-visible CLIP_TOO_LARGE rather than a garbage
+// clip. Video previews are additionally capped at 480p (h264 + aac in mp4,
+// +faststart); audio previews are aac in m4a. It returns ErrToolNotFound when
+// ffmpeg is not installed.
+func ExtractSegmentPreview(ctx context.Context, path string, startMS, endMS, maxBytes int, video bool) ([]byte, string, error) {
+	if startMS < 0 || endMS <= startMS {
+		return nil, "", fmt.Errorf("avutil: invalid segment [%d,%d) for %q", startMS, endMS, redactInput(path))
+	}
+	if maxBytes <= 0 {
+		return nil, "", fmt.Errorf("avutil: preview needs a positive byte budget, got %d", maxBytes)
+	}
+	bin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, "", ErrToolNotFound
+	}
+
+	durS := float64(endMS-startMS) / 1000.0
+	budgetBits := float64(maxBytes) * 8 * 0.92
+
+	tmpDir, err := os.MkdirTemp("", "dir2mcp-avprev-")
+	if err != nil {
+		return nil, "", fmt.Errorf("avutil: temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	var args []string
+	var outPath, rendition string
+	if video {
+		audioBps := 64_000
+		videoBps := int(budgetBits/durS) - audioBps
+		if videoBps < 80_000 {
+			// Try to save the video by shrinking the audio before giving up on
+			// the floor; a tiny budget still produces a floored (over-budget)
+			// encode, which the caller's size check then refuses.
+			audioBps = 32_000
+			videoBps = int(budgetBits/durS) - audioBps
+			if videoBps < 80_000 {
+				videoBps = 80_000
+			}
+		}
+		outPath = filepath.Join(tmpDir, "preview.mp4")
+		args = []string{
+			"-nostdin", "-v", "error",
+			"-ss", msToSeconds(startMS), "-to", msToSeconds(endMS),
+			"-i", path,
+			"-vf", "scale=-2:'min(480,ih)'",
+			"-c:v", "libx264", "-preset", "veryfast",
+			"-b:v", strconv.Itoa(videoBps),
+			"-maxrate", strconv.Itoa(videoBps),
+			"-bufsize", strconv.Itoa(2 * videoBps),
+			"-c:a", "aac", "-b:a", strconv.Itoa(audioBps),
+			"-movflags", "+faststart",
+			"-y", outPath,
+		}
+		rendition = fmt.Sprintf("h264 <=480p ~%dkbps + aac %dkbps, re-encoded to fit max_bytes", videoBps/1000, audioBps/1000)
+	} else {
+		audioBps := int(budgetBits / durS)
+		if audioBps < 24_000 {
+			audioBps = 24_000
+		}
+		if audioBps > 192_000 {
+			audioBps = 192_000
+		}
+		outPath = filepath.Join(tmpDir, "preview.m4a")
+		args = []string{
+			"-nostdin", "-v", "error",
+			"-ss", msToSeconds(startMS), "-to", msToSeconds(endMS),
+			"-i", path,
+			"-vn",
+			"-c:a", "aac", "-b:a", strconv.Itoa(audioBps),
+			"-movflags", "+faststart",
+			"-y", outPath,
+		}
+		rendition = fmt.Sprintf("aac ~%dkbps, re-encoded to fit max_bytes", audioBps/1000)
+	}
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, "", fmt.Errorf("ffmpeg preview %q [%d,%d): %w: %s", redactInput(path), startMS, endMS, err, redactStderr(stderr.String(), path))
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("avutil: read preview: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("avutil: ffmpeg produced an empty preview for %q [%d,%d)", redactInput(path), startMS, endMS)
+	}
+	return data, rendition, nil
+}
+
 // ExtractAudioTrack demuxes the audio stream of the media at a local filesystem
 // path and re-encodes it into a compact mono 16 kHz AAC (.m4a) clip suitable for
 // speech-to-text, returning the container bytes. The video stream is dropped

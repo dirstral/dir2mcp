@@ -202,6 +202,12 @@ type Server struct {
 	// extraction without ffmpeg on PATH.
 	extractSegment func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)
 
+	// extractSegmentPreview re-encodes [startMS, endMS) to fit under maxBytes and
+	// reports the rendition it produced, for the max_bytes contract (SPEC §15.11,
+	// spec 0.54.0; #878). It defaults to avutil.ExtractSegmentPreview and is an
+	// injectable seam so tests can exercise the preview path without ffmpeg.
+	extractSegmentPreview func(ctx context.Context, path string, startMS, endMS, maxBytes int, video bool) ([]byte, string, error)
+
 	// corpusFS supplies the bytes for the on-demand tool paths (open_media_clip,
 	// on-demand audio init, on-demand content reads) when the corpus lives on a
 	// non-local backend (#759). It is set once at construction and read-only
@@ -297,6 +303,17 @@ func WithTTS(tts TTSSynthesizer) ServerOption {
 func WithExtractSegment(fn func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)) ServerOption {
 	return func(s *Server) {
 		s.extractSegment = fn
+	}
+}
+
+// WithExtractSegmentPreview overrides the reduced-fidelity re-encode used by
+// dir2mcp_open_media_clip to satisfy max_bytes (SPEC §15.11, spec 0.54.0; #878).
+// Production leaves it unset so the server falls back to
+// avutil.ExtractSegmentPreview; tests inject a stub to exercise the preview path
+// without ffmpeg on PATH.
+func WithExtractSegmentPreview(fn func(ctx context.Context, path string, startMS, endMS, maxBytes int, video bool) ([]byte, string, error)) ServerOption {
+	return func(s *Server) {
+		s.extractSegmentPreview = fn
 	}
 }
 
