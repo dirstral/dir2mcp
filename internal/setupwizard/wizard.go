@@ -106,15 +106,28 @@ const (
 // force (internal/retrieval, issue #885), so a preset cannot drop it. Before
 // #885 these presets replaced the whole prompt and did drop it: the legal
 // preset reads statutes and contracts, which an adversary may supply.
+//
+// Both presets MUST state the [rel_path] citation sentence, in the shipped
+// prompt's exact wording (issue #889). The server parses inline [rel_path]
+// tags out of the answer (citationsReferencedByAnswer) to build the machine-
+// readable citations the ask response carries; an answer that cites only in
+// prose, however correctly, yields citations: []. The presets asked for prose
+// citations and never for the tag, so choosing a domain preset silently
+// disabled the product's citation feature. The wording is kept identical to
+// defaultRAGDomainRules so the two cannot drift apart in meaning, and
+// tests/setupwizard pins the sentence in both presets.
 const legalSystemPrompt = `You answer questions strictly from the provided legal documents: statutes,
 amendment acts, regulations, and codes of practice. Cite the specific act,
-section, and page for every statement. When provisions conflict, prefer the
+section, and page for every statement.
+Include concise source attributions in the form [rel_path].
+When provisions conflict, prefer the
 most recent and say which one applies. If the documents do not cover the
 question, say so plainly. Do not give legal advice or speculate beyond the
 cited text.`
 
 const codeSystemPrompt = `You answer questions strictly from the provided source code and project
 documentation. Cite file paths and line ranges, and quote the relevant code.
+Include concise source attributions in the form [rel_path].
 If the indexed code does not cover the question, say so plainly rather than
 guessing.`
 

@@ -226,3 +226,34 @@ func TestSecretDestConstants(t *testing.T) {
 		t.Fatalf("unexpected dest values: file=%q keychain=%q", setupwizard.DestFile, setupwizard.DestKeychain)
 	}
 }
+
+// TestApplyCorpusProfile_PresetsStateTheCitationContract is the #889
+// regression. The server builds the ask response's machine-readable citations
+// by parsing inline [rel_path] tags out of the answer
+// (citationsReferencedByAnswer in internal/retrieval); an answer that cites
+// only in prose yields citations: []. Both domain presets replaced the shipped
+// prompt and asked for prose citations only, so choosing legal or code
+// silently disabled citations.
+//
+// The sentence is pinned in the SHIPPED WORDING, not just any mention of the
+// tag: identical wording is what keeps the presets and defaultRAGDomainRules
+// from drifting apart in meaning.
+func TestApplyCorpusProfile_PresetsStateTheCitationContract(t *testing.T) {
+	const citationRule = "Include concise source attributions in the form [rel_path]."
+	for _, profile := range []setupwizard.Profile{setupwizard.ProfileLegal, setupwizard.ProfileCode} {
+		cfg := config.Default()
+		setupwizard.ApplyCorpusProfile(&cfg, profile)
+		if !strings.Contains(cfg.RAGSystemPrompt, citationRule) {
+			t.Errorf("%s preset does not state the citation contract %q; the ask response would carry citations: []\nprompt:\n%s",
+				profile, citationRule, cfg.RAGSystemPrompt)
+		}
+	}
+	// The general profile inherits the shipped prompt (empty override), so the
+	// server default applies and already carries the rule; pin that the wizard
+	// did not start overriding it.
+	cfg := config.Default()
+	setupwizard.ApplyCorpusProfile(&cfg, setupwizard.ProfileGeneral)
+	if cfg.RAGSystemPrompt != config.Default().RAGSystemPrompt {
+		t.Errorf("general profile overrides the system prompt; it must inherit the shipped default")
+	}
+}
