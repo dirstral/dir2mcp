@@ -22,6 +22,7 @@ func completeHandshakeOverHTTP(client *http.Client, url, sessionID string) error
 		return fmt.Errorf("create notifications/initialized request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
 	req.Header.Set("MCP-Session-Id", sessionID)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -176,6 +177,7 @@ func TestSDKTransport_Serve(t *testing.T) {
 		t.Fatalf("create tools/list request: %v", err)
 	}
 	listReq.Header.Set("Content-Type", "application/json")
+	listReq.Header.Set("MCP-Protocol-Version", "2025-11-25")
 	listReq.Header.Set("MCP-Session-Id", sessionID)
 	listResp, err := client.Do(listReq)
 	if err != nil {
@@ -260,6 +262,7 @@ func TestSDKTransport_X402MissingPaymentSignature(t *testing.T) {
 		t.Fatalf("create tools/call request: %v", err)
 	}
 	callReq.Header.Set("Content-Type", "application/json")
+	callReq.Header.Set("MCP-Protocol-Version", "2025-11-25")
 	callReq.Header.Set("MCP-Session-Id", sessionID)
 	callResp, err := client.Do(callReq)
 	if err != nil {

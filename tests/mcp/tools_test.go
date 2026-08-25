@@ -2303,6 +2303,10 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Send the pinned protocol version like a conformant client (bs-004). The
+	// server also accepts a missing header; that permissive path is pinned by
+	// its own conformance test, not by this helper.
+	req.Header.Set(protocol.MCPProtocolVersionHeader, protocol.ProtocolDefaultVersion)
 	if sessionID != "" {
 		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}
