@@ -38,7 +38,7 @@ from __future__ import annotations
 import difflib
 import re
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -404,7 +404,13 @@ class ScorebugRecognizer:
             graphic_cues = self._pitch_cues(graphics, pitchers)
             cues += graphic_cues
             if self.count_pitch_cues:
-                cues += _count_pitch_cues(counted, graphic_cues, self.name, gap)
+                cues += _count_pitch_cues(
+                    counted,
+                    graphic_cues,
+                    self.name,
+                    gap,
+                    label=lambda pid: display_name(self.roster, pid),
+                )
         cues.sort(key=lambda c: (c.start_s, c.event, c.entity_ids))
         return cues
 
@@ -473,7 +479,13 @@ class ScorebugRecognizer:
                     event="pitch",
                     entity_ids=(pid,),
                     confidence=PITCH_CONFIDENCE,
-                    text=best.describe(),
+                    # The pitcher's name goes into the TEXT, not only the entity
+                    # ids: a chunk is indexed on its text and the ask prompt
+                    # shows the model the text, so "FOUR SEAM 94" with no name
+                    # was unanswerable about the pitcher on a no-feed corpus
+                    # (#909). On a feed corpus fusion hid this by merging with
+                    # play-by-play's sentence and keeping the longer text.
+                    text=f"Pitch by {display_name(self.roster, pid)}: {best.describe()}",
                 )
             )
         return cues
@@ -627,6 +639,8 @@ def _count_pitch_cues(
     graphic_cues: list[Cue],
     source: str,
     gap: float,
+    *,
+    label: Callable[[str], str],
 ) -> list[Cue]:
     """One `pitch` cue per observed increment of the bug's pitch count.
 
@@ -677,7 +691,9 @@ def _count_pitch_cues(
                 event="pitch",
                 entity_ids=(pid,),
                 confidence=COUNT_PITCH_CONFIDENCE,
-                text=f"pitch {candidate}",
+                # Named for the same reason as the graphic cues above (#909):
+                # "pitch 13" is not answerable text without the pitcher.
+                text=f"Pitch {candidate} by {label(pid)}",
             )
         )
     return _drop_pitches_already_reported(cues, graphic_cues)
