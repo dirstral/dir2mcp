@@ -233,8 +233,35 @@ func (s *S3FS) Walk(ctx context.Context, _ string, opts Options) ([]DiscoveredFi
 		}
 	}
 
+	// The size cap runs AFTER the gitignore filter, matching the local walker,
+	// which drops an ignored path before it ever looks at the size (#886). The
+	// order matters because OnOversize is not a passive hook: ingest counts the
+	// file as scanned+skipped, persists a skip_reason=size_cap document row and
+	// emits a FILE_TOO_LARGE manifest entry. A gitignored object is not a corpus
+	// file, so it must produce none of that on either backend; before this, S3
+	// reported coverage gaps that were not gaps and told the operator to raise a
+	// cap that would have changed nothing.
+	files = dropOversize(files, opts)
+
 	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
 	return files, nil
+}
+
+// dropOversize applies the MaxSizeBytes policy to the surviving files, firing
+// Options.OnOversize (issue #497) for each dropped one, in listing order so the
+// hook sequence is deterministic.
+func dropOversize(files []DiscoveredFile, opts Options) []DiscoveredFile {
+	kept := files[:0]
+	for _, f := range files {
+		if f.SizeBytes > opts.MaxSizeBytes {
+			if opts.OnOversize != nil {
+				opts.OnOversize(f.RelPath, f.SizeBytes)
+			}
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
 }
 
 // listObjects paginates the bucket listing, converting in-scope objects to
@@ -355,8 +382,10 @@ func (s *S3FS) getGitIgnoreObject(ctx context.Context, rel string) ([]byte, erro
 }
 
 // discoveredFromObject converts a listed object into a DiscoveredFile, applying
-// the directory-key skip, excluded-dir, and size-cap policies. ok=false means
-// the object is skipped.
+// the directory-key skip and excluded-dir policies. ok=false means the object is
+// skipped. The size cap is deliberately NOT applied here: it runs in Walk, after
+// the gitignore filter, so a gitignored over-cap object is never reported as a
+// size_cap skip (#886).
 func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options, excluded ExcludedDirSet) (DiscoveredFile, bool) {
 	key := aws.ToString(obj.Key)
 	rel, err := s.relForKey(key)
@@ -379,12 +408,6 @@ func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options, excluded E
 		return DiscoveredFile{}, false
 	}
 	size := aws.ToInt64(obj.Size)
-	if size > opts.MaxSizeBytes {
-		if opts.OnOversize != nil {
-			opts.OnOversize(rel, size)
-		}
-		return DiscoveredFile{}, false
-	}
 	var mtime int64
 	if obj.LastModified != nil {
 		mtime = obj.LastModified.Unix()
