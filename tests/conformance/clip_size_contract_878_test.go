@@ -1,27 +1,24 @@
 package conformance
 
-// dir2mcp_open_media_clip cuts at the SOURCE bitrate, so an 8 second clip of a
-// 20 Mbit/s recording is about 22 MB, and about 30 MB base64 on the wire (#878).
-// A pilot viewer read that latency as a broken play button.
+// dir2mcp_open_media_clip cut at the SOURCE bitrate, so an 8 second clip of a
+// 20 Mbit/s recording was about 22 MB, and about 30 MB base64 on the wire
+// (#878). A pilot viewer read that latency as a broken play button.
 //
-// The fix a caller needs has two halves: a way to ASK for a smaller clip, and a
-// response that SAYS which rendition it got. Both are tool-contract changes, and
-// both are blocked on dirstral-spec today. The canonical `open_media_clip.json`
-// closes the input object AND the output object with
-// `additionalProperties: false` and enumerates every property, so:
+// dirstral-spec 0.54.0 opened the contract this file used to pin shut, and
+// these tests now pin the OPENED contract instead, still on the schema inside
+// the dirstral-spec submodule rather than on a copy, so a spec-side change
+// reaches them through the submodule pin (the
+// tests/conformance/stats_canonical_schema_850_test.go idiom):
 //
-//   - there is no room for a `max_bytes` / `quality` / `rendition` argument, and
-//     a strict client could not send one even if the server honored it (#645);
-//   - there is no room for a field that tells a preview from the source, so a
-//     server that quietly served a smaller clip would be UNDETECTABLE. A caller
-//     could not tell a preview from the original, which is worse than the size.
+//   - `max_bytes` (input): the caller's ceiling on the CLIP bytes; the
+//     effective bound is min(max_bytes, media.clip.max_bytes).
+//   - `preview` (output): present exactly when the served bytes are a
+//     reduced-fidelity re-encode. PRESENCE is the signal, mirroring
+//     reference_fallback, so a preview is never mistakable for a source cut.
 //
-// These tests pin that gate on the schema inside the dirstral-spec submodule,
-// not on a copy, so a spec-side change reaches them through the submodule pin
-// (the tests/conformance/stats_canonical_schema_850_test.go idiom). When the
-// spec PR opens the contract, TestOpenMediaClip_CanonicalInputHasNoSizeControl
-// MUST fail. Update it then, together with the code that serves the smaller
-// clip, and only with the merged spec change behind it.
+// Both objects stay closed with `additionalProperties: false`, so any OTHER
+// size/quality argument (`quality`, `rendition`) is still rejected, and any
+// undeclared output field is still drift (#850).
 
 import (
 	"encoding/json"
@@ -69,52 +66,37 @@ func assertClosedObject(t *testing.T, schema map[string]interface{}, label strin
 	}
 }
 
-// TestOpenMediaClip_CanonicalInputHasNoSizeControl_878 pins the input half of
-// the #878 gate: the canonical argument list is closed and holds no way to ask
-// for fewer bytes.
-func TestOpenMediaClip_CanonicalInputHasNoSizeControl_878(t *testing.T) {
+// TestOpenMediaClip_CanonicalInputCarriesMaxBytes_878 pins the input half of
+// the opened contract: max_bytes is declared, and the object stays closed so no
+// OTHER size argument can appear undeclared.
+func TestOpenMediaClip_CanonicalInputCarriesMaxBytes_878(t *testing.T) {
 	t.Parallel()
 	input := canonicalOpenMediaClipSection(t, "input")
 	assertClosedObject(t, input, "canonical open_media_clip input")
 
-	want := []string{"chunk_id", "end_ms", "rel_path", "return", "start_ms"}
+	want := []string{"chunk_id", "end_ms", "max_bytes", "rel_path", "return", "start_ms"}
 	got := schemaPropertyNames(t, input, "canonical open_media_clip input")
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("canonical open_media_clip input properties = %v, want %v.\n"+
-			"If a size/quality argument was added by a merged dirstral-spec PR, this gate is OPEN: "+
-			"implement it in internal/mcp and update this test (#878).", got, want)
+		t.Fatalf("canonical open_media_clip input properties = %v, want %v (spec 0.54.0)", got, want)
 	}
 }
 
-// TestOpenMediaClip_CanonicalOutputCannotNameWhatItServed_878 pins the output
-// half of the gate: no declared field can report a rendition or a quality, so a
-// preview would be indistinguishable from the source.
-func TestOpenMediaClip_CanonicalOutputCannotNameWhatItServed_878(t *testing.T) {
+// TestOpenMediaClip_CanonicalOutputNamesAPreview_878 pins the output half of
+// the opened contract: preview is declared, and the object stays closed so a
+// server cannot report fidelity through any undeclared side channel.
+func TestOpenMediaClip_CanonicalOutputNamesAPreview_878(t *testing.T) {
 	t.Parallel()
 	output := canonicalOpenMediaClipSection(t, "output")
 	assertClosedObject(t, output, "canonical open_media_clip output")
 
 	want := []string{
 		"data", "doc_type", "duration_ms", "expires_unix",
-		"mime_type", "reference_fallback", "rel_path", "return", "size_bytes",
-		"span", "uri",
+		"mime_type", "preview", "reference_fallback", "rel_path", "return",
+		"size_bytes", "span", "uri",
 	}
-	// Read the list above as the finding: no member of it can report a served
-	// rendition. mime_type is the only field that describes the bytes, and it
-	// names the container, not the fidelity. A 360p preview and a 1080p source
-	// cut are both "video/mp4", so it cannot carry the distinction.
-	//
-	// reference_fallback joined the list in dirstral-spec 0.53.0 and does NOT
-	// open this gate. It reports the CARRIER, not the fidelity: it says the
-	// caller asked for a reference and got inline bytes. A server that quietly
-	// served a 360p cut instead of the source would set neither this field nor
-	// any other, so a preview is still indistinguishable from the original and
-	// #878 stays blocked on the input half of the contract.
 	got := schemaPropertyNames(t, output, "canonical open_media_clip output")
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("canonical open_media_clip output properties = %v, want %v.\n"+
-			"If a field naming the served rendition was added by a merged dirstral-spec PR, this gate is OPEN: "+
-			"emit it from internal/mcp and update this test (#878).", got, want)
+		t.Fatalf("canonical open_media_clip output properties = %v, want %v (spec 0.54.0)", got, want)
 	}
 }
 
@@ -178,11 +160,13 @@ func TestOpenMediaClip_ServedOutputMatchesTheCanonicalContract_878(t *testing.T)
 	}
 }
 
-// TestOpenMediaClip_RejectsASizeArgument_878 pins the gate on observable
-// behavior, not only on a schema literal. A caller who has read #878 and tries
-// the obvious argument must be told it does not exist, rather than have it
-// silently ignored.
-func TestOpenMediaClip_RejectsASizeArgument_878(t *testing.T) {
+// TestOpenMediaClip_RejectsAnUndeclaredSizeArgument_878 pins the closure on
+// observable behavior, not only on a schema literal. max_bytes is real now, so
+// only the arguments the contract still does NOT declare are rejected as
+// unknown; a malformed max_bytes is rejected as INVALID_FIELD rather than
+// silently ignored, because a typo that quietly disables the budget would hand
+// the caller the 22 MB clip it asked not to receive.
+func TestOpenMediaClip_RejectsAnUndeclaredSizeArgument_878(t *testing.T) {
 	t.Parallel()
 	cfg, opts, chunkID := seedMediaClipCorpus(t, "clip.mp4", "video")
 	srv := newServer(t, cfg, opts...)
@@ -190,9 +174,20 @@ func TestOpenMediaClip_RejectsASizeArgument_878(t *testing.T) {
 
 	mcpURL := srv.URL + cfg.MCPPath
 	sid := initSession(t, mcpURL)
-	for _, property := range []string{"max_bytes", "quality", "rendition"} {
+	for _, property := range []string{"quality", "rendition"} {
 		args := `{"chunk_id":` + strconv.FormatInt(chunkID, 10) + `,"` + property + `":1}`
 		envelope := callToolRaw(t, mcpURL, sid, "dir2mcp_open_media_clip", args)
 		assertUnknownArgument(t, "dir2mcp_open_media_clip", property, envelope)
+	}
+	for _, bad := range []string{"0", "-1", "1.5", `"big"`} {
+		args := `{"chunk_id":` + strconv.FormatInt(chunkID, 10) + `,"max_bytes":` + bad + `}`
+		envelope := callToolRaw(t, mcpURL, sid, "dir2mcp_open_media_clip", args)
+		errObj := envelope.Result.StructuredContent.Error
+		if errObj == nil {
+			t.Fatalf("max_bytes=%s accepted; a malformed budget must fail loudly", bad)
+		}
+		if errObj.Code != "INVALID_FIELD" {
+			t.Fatalf("max_bytes=%s: code=%q message=%q, want INVALID_FIELD", bad, errObj.Code, errObj.Message)
+		}
 	}
 }
