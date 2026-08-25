@@ -228,12 +228,13 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	if gotLanguage != "fr" {
 		t.Fatalf("expected language hint to be forwarded, got %q", gotLanguage)
 	}
-	// The reported provider is the resolved STT profile name (issue #440 F5),
+	// The reported stt_provider is the resolved STT profile name (issue #440 F5),
 	// which for the default/Mistral STT path is the Voxtral-backed `mistral-ocr`
 	// profile — matching the derivation provenance — not the old hardcoded
-	// "mistral" constant.
-	if got := envelope.Result.StructuredContent["provider"]; got != "mistral-ocr" {
-		t.Fatalf("unexpected provider: %#v", got)
+	// "mistral" constant. The field name is the canonical transcribe.json one,
+	// `stt_provider`, not the pre-#643 `provider`.
+	if got := envelope.Result.StructuredContent["stt_provider"]; got != "mistral-ocr" {
+		t.Fatalf("unexpected stt_provider: %#v", got)
 	}
 	if got, ok := envelope.Result.StructuredContent["transcribed"].(bool); !ok || !got {
 		t.Fatalf("expected transcribed=true, got %#v", envelope.Result.StructuredContent["transcribed"])
@@ -244,6 +245,9 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	if got, ok := envelope.Result.StructuredContent["indexed"].(bool); !ok || !got {
 		t.Fatalf("expected indexed=true, got %#v", envelope.Result.StructuredContent["indexed"])
 	}
+	// The whole successful payload must validate against the closed canonical
+	// output object, not only the fields asserted above (#643).
+	assertCanonicalToolPayload(t, "transcribe.json", envelope.Result.StructuredContent)
 }
 
 func TestMCPToolsCallTranscribe_CreatesAudioDocWhenNotYetIndexed(t *testing.T) {
@@ -497,10 +501,15 @@ func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 		t.Fatalf("unexpected answer: %#v", got)
 	}
 	// Resolved STT profile name (issue #440 F5): the Voxtral-backed `mistral-ocr`
-	// profile, not the old hardcoded "mistral" constant.
-	if got := envelope.Result.StructuredContent["transcript_provider"]; got != "mistral-ocr" {
-		t.Fatalf("unexpected transcript_provider: %#v", got)
+	// profile, not the old hardcoded "mistral" constant. The field name is the
+	// canonical transcribe_and_ask.json one, `stt_provider`, not the pre-#643
+	// `transcript_provider`.
+	if got := envelope.Result.StructuredContent["stt_provider"]; got != "mistral-ocr" {
+		t.Fatalf("unexpected stt_provider: %#v", got)
 	}
+	// The whole successful payload must validate against the closed canonical
+	// output object, not only the fields asserted above (#643).
+	assertCanonicalToolPayload(t, "transcribe_and_ask.json", envelope.Result.StructuredContent)
 }
 
 // withMistralUpstream rebuilds cfg so the named Mistral provider profile

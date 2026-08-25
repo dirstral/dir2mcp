@@ -1634,7 +1634,7 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 	sttProvider, sttModel := resolvedSTTProvenance(s.cfg)
 	structured := map[string]interface{}{
 		"rel_path":        relPath,
-		"provider":        sttProvider,
+		"stt_provider":    sttProvider,
 		"model":           sttModel,
 		"indexed":         indexed,
 		"segments":        segments,
@@ -1879,7 +1879,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	if !ok {
 		structured = map[string]interface{}{}
 	}
-	structured["transcript_provider"] = sttProvider
+	structured["stt_provider"] = sttProvider
 	structured["transcript_model"] = sttModel
 	structured["transcribed"] = strings.TrimSpace(transcriptText) != ""
 	structured["transcribed_now"] = transcribedNow
@@ -4468,11 +4468,13 @@ func transcribeOutputSchema() map[string]interface{} {
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
 			"rel_path": map[string]interface{}{"type": "string"},
-			// provider is the resolved STT profile name (issue #440 F5), which may be
-			// any STT-capable profile (mistral-ocr, elevenlabs, whisper, gemini, a
+			// stt_provider is the resolved STT profile name (issue #440 F5), which may
+			// be any STT-capable profile (mistral-ocr, elevenlabs, whisper, gemini, a
 			// user-declared profile, …), so it is an open string rather than a pinned
-			// enum that would exclude the very backends the field now reports truthfully.
-			"provider":        map[string]interface{}{"type": "string"},
+			// enum that would exclude the very backends the field now reports
+			// truthfully. The field NAME is the canonical transcribe.json one; the
+			// runtime used to say `provider` and broke canonical validation (#643).
+			"stt_provider":    map[string]interface{}{"type": "string"},
 			"model":           map[string]interface{}{"type": "string"},
 			"indexed":         map[string]interface{}{"type": "boolean"},
 			"transcribed":     map[string]interface{}{"type": "boolean"},
@@ -4491,7 +4493,7 @@ func transcribeOutputSchema() map[string]interface{} {
 				},
 			},
 		},
-		"required": []string{"rel_path", "provider", "model", "indexed", "transcribed"},
+		"required": []string{"rel_path", "stt_provider", "model", "indexed", "transcribed"},
 	}
 }
 
@@ -4559,10 +4561,12 @@ func transcribeAndAskOutputSchema() map[string]interface{} {
 		return askOutputSchema()
 	}
 
-	// transcript_provider is the resolved STT profile name (issue #440 F5); like
-	// transcribe's `provider` it is an open string, not a pinned two-value enum,
-	// so whisper/gemini/user-profile backends are reported truthfully.
-	properties["transcript_provider"] = map[string]interface{}{"type": "string"}
+	// stt_provider is the resolved STT profile name (issue #440 F5); like
+	// transcribe's `stt_provider` it is an open string, not a pinned two-value
+	// enum, so whisper/gemini/user-profile backends are reported truthfully. The
+	// field NAME is the canonical transcribe_and_ask.json one; the runtime used
+	// to say `transcript_provider` and broke canonical validation (#643).
+	properties["stt_provider"] = map[string]interface{}{"type": "string"}
 	properties["transcript_model"] = map[string]interface{}{"type": "string"}
 	properties["transcribed"] = map[string]interface{}{"type": "boolean"}
 	properties["transcribed_now"] = map[string]interface{}{"type": "boolean"}
@@ -4580,7 +4584,7 @@ func transcribeAndAskOutputSchema() map[string]interface{} {
 		}
 	}
 	if len(requiredSlice) > 0 {
-		requiredSlice = append(requiredSlice, "transcript_provider", "transcript_model", "transcribed")
+		requiredSlice = append(requiredSlice, "stt_provider", "transcript_model", "transcribed")
 		schema["required"] = requiredSlice
 	}
 

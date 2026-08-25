@@ -358,7 +358,7 @@ func TestTranscribeAndAskOutputSchemaConformance(t *testing.T) {
 		Hits:             []model.SearchHit{fullSearchHit()},
 		IndexingComplete: true,
 	})
-	structured["transcript_provider"] = "mistral"
+	structured["stt_provider"] = "mistral"
 	structured["transcript_model"] = "voxtral-mini-latest"
 	structured["transcribed"] = true
 	structured["transcribed_now"] = false
@@ -441,7 +441,7 @@ func TestListFilesOutputSchemaConformance(t *testing.T) {
 func TestTranscribeOutputSchemaConformance(t *testing.T) {
 	structured := map[string]interface{}{
 		"rel_path":        "media/clip.mp3",
-		"provider":        "mistral",
+		"stt_provider":    "mistral",
 		"model":           "voxtral-mini-latest",
 		"indexed":         true,
 		"transcribed":     true,
