@@ -1575,7 +1575,12 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// incremental-reindex staleness of issue #409. Done LAST, on the small final
 	// result set, so at most k store lookups run per query and deleted content is
 	// never returned (nor cited) even before the next restart.
-	return s.pruneTombstonedHits(ctx, hits), nil
+	hits = s.pruneTombstonedHits(ctx, hits)
+	// Name each hit's absolute evidence verdict (SPEC §9.4.3, spec 0.55.0) as
+	// the last step, so the verdict describes the hit the caller actually
+	// receives, after every re-scoring stage above.
+	stampEvidenceVerdicts(hits)
+	return hits, nil
 }
 
 // searchByMode runs the index-mode dispatch (text/code/both/auto) for one query
@@ -1991,6 +1996,9 @@ func (s *Service) abstainOnWeakEvidence(ctx context.Context, question string, hi
 		Citations:        []model.Citation{},
 		Hits:             hits,
 		IndexingComplete: indexingComplete,
+		// The structured form of this abstention (spec 0.55.0): the guard fired,
+		// so by definition the eligible set's aggregate is "insufficient".
+		EvidenceVerdict: verdictInsufficient,
 	}, true
 }
 
@@ -2077,6 +2085,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		Citations:        citations,
 		Hits:             hits,
 		IndexingComplete: indexingComplete,
+		// The eligible set's named verdict (SPEC §9.4.3, spec 0.55.0). hits is
+		// already the eligible set (the pruning floor ran inside search), and the
+		// aggregation delegates to the same classifyEvidence the abstention guard
+		// uses, so this can never disagree with the abstention decision above. An
+		// empty set carries no absolute signal, so it aggregates to "unknown",
+		// which also covers the adaptive skip-retrieval path where no lookup ran.
+		EvidenceVerdict: aggregateEvidenceVerdict(hits),
 	}, nil
 }
 

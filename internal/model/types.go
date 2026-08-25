@@ -863,6 +863,14 @@ type SearchHit struct {
 	// (the §9.2 hit structure is unchanged), mirroring Language / MTimeUnix above.
 	EvidenceScore float64
 	EvidenceScale string
+	// EvidenceVerdict is the NAMED absolute verdict for this hit (SPEC §9.4.3,
+	// spec 0.55.0): "sufficient" / "insufficient" against the shipped threshold
+	// for EvidenceScale, or "unknown" when the hit carries no absolute signal.
+	// The name travels across retrieval modes where the raw score cannot
+	// (§9.1.1). Empty means retrieval never classified this hit, and the wire
+	// field is omitted. Stamped by internal/retrieval; see evidence.go for the
+	// vocabulary and why "strong" is not emitted yet.
+	EvidenceVerdict string
 }
 
 type ChunkMetadata struct {
@@ -1008,6 +1016,13 @@ type AskResult struct {
 	Citations        []Citation
 	Hits             []SearchHit
 	IndexingComplete bool
+	// EvidenceVerdict is the named absolute verdict of the ELIGIBLE set behind
+	// the answer (SPEC §9.4.3, spec 0.55.0), aggregated by the spec's normative
+	// rule: the strongest eligible hit's verdict, with "unknown" only when no
+	// eligible hit carries an absolute signal. An abstaining answer carries
+	// "insufficient", the structured form of the abstention distinction §9.4.3
+	// requires. Empty means not computed, and the wire field is omitted.
+	EvidenceVerdict string
 }
 
 type CorpusStats struct {
