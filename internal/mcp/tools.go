@@ -3961,6 +3961,12 @@ func serializeHit(h model.SearchHit) map[string]interface{} {
 	if mediaRef := strings.TrimSpace(h.MediaRef); mediaRef != "" {
 		out["media_ref"] = mediaRef
 	}
+	// The named absolute verdict (SPEC §9.4.3, spec 0.55.0). Omitted when
+	// retrieval never classified the hit: the field is optional and the Hit
+	// object is closed, so absence is well-defined.
+	if verdict := strings.TrimSpace(h.EvidenceVerdict); verdict != "" {
+		out["evidence"] = verdict
+	}
 	return out
 }
 
@@ -4019,13 +4025,20 @@ func buildAskStructuredContent(result model.AskResult) map[string]interface{} {
 		hits = append(hits, serializeHit(hit))
 	}
 
-	return map[string]interface{}{
+	structured := map[string]interface{}{
 		"question":          result.Question,
 		"answer":            result.Answer,
 		"citations":         citations,
 		"hits":              hits,
 		"indexing_complete": result.IndexingComplete,
 	}
+	// The eligible set's aggregate verdict (spec 0.55.0). An abstaining answer
+	// carries "insufficient", the structured form of the abstention distinction
+	// §9.4.3 requires; absence means the retriever never computed one.
+	if verdict := strings.TrimSpace(result.EvidenceVerdict); verdict != "" {
+		structured["evidence"] = verdict
+	}
+	return structured
 }
 
 func spanDefinitionSchema() map[string]interface{} {
@@ -4160,6 +4173,7 @@ func hitDefinitionSchema() map[string]interface{} {
 			// the search/ask failures on docling corpora (issue #387).
 			"modality":  map[string]interface{}{"type": "string"},
 			"media_ref": map[string]interface{}{"type": "string"},
+			"evidence":  map[string]interface{}{"type": "string", "enum": []string{"strong", "sufficient", "insufficient", "unknown"}, "description": "Optional absolute evidence verdict for this hit (SPEC 9.4.3). Never a raw score (SPEC 9.1.1)."},
 		},
 		"required": []string{"chunk_id", "rel_path", "score", "snippet", "span"},
 	}
@@ -4397,6 +4411,7 @@ func askOutputSchema() map[string]interface{} {
 			},
 			"hits":              map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/definitions/Hit"}},
 			"indexing_complete": map[string]interface{}{"type": "boolean"},
+			"evidence":          map[string]interface{}{"type": "string", "enum": []string{"strong", "sufficient", "insufficient", "unknown"}, "description": "Optional absolute verdict of the eligible set behind the answer, aggregated as the strongest eligible hit's verdict (SPEC 9.4.3); insufficient is the structured form of abstention."},
 		},
 		"required":    []string{"question", "answer", "citations", "hits", "indexing_complete"},
 		"definitions": sharedDefinitions(),

@@ -92,6 +92,60 @@ const (
 	evidenceUnknown
 )
 
+// Wire names for the evidence verdict (SPEC §9.4.3, spec 0.55.0). One closed
+// vocabulary shared by the per-hit field and the ask-level aggregate. "strong"
+// is part of the spec vocabulary but is NOT emitted here: the spec lets a
+// server emit it only if it documents a stronger per-scale threshold than the
+// abstention one, and this server documents only the abstention thresholds
+// above. Adding a strong tier is a thresholds decision, not a wiring change.
+const (
+	verdictSufficient   = "sufficient"
+	verdictInsufficient = "insufficient"
+	verdictUnknown      = "unknown"
+)
+
+// hitEvidenceVerdict names the absolute verdict for ONE hit: its EvidenceScore
+// measured against the shipped threshold for its own scale, or "unknown" when
+// the hit carries no absolute signal (empty or unrecognized scale). This is the
+// per-hit half of the §9.4.3 exposure (#785); the aggregate half reuses
+// classifyEvidence below so the two can never disagree.
+func hitEvidenceVerdict(h model.SearchHit) string {
+	threshold, ok := evidenceThresholds[h.EvidenceScale]
+	if !ok {
+		return verdictUnknown
+	}
+	if h.EvidenceScore >= threshold {
+		return verdictSufficient
+	}
+	return verdictInsufficient
+}
+
+// stampEvidenceVerdicts writes each hit's named verdict onto the slice, in
+// place, just before hits leave retrieval. Stamped here rather than in the MCP
+// layer so the verdict and the thresholds it is measured against live in one
+// package and cannot drift.
+func stampEvidenceVerdicts(hits []model.SearchHit) {
+	for i := range hits {
+		hits[i].EvidenceVerdict = hitEvidenceVerdict(hits[i])
+	}
+}
+
+// aggregateEvidenceVerdict names the verdict of the ELIGIBLE set, by the
+// normative aggregation of spec 0.55.0: the strongest eligible hit's verdict,
+// with "unknown" only when NO eligible hit carries an absolute signal. It is
+// classifyEvidence with a wire name, and delegates to it so the exposed
+// aggregate and the abstention decision cannot diverge.
+func aggregateEvidenceVerdict(hits []model.SearchHit) string {
+	switch classifyEvidence(hits) {
+	case evidenceSufficient:
+		return verdictSufficient
+	case evidenceInsufficient:
+		return verdictInsufficient
+	default:
+		return verdictUnknown
+	}
+}
+
 // classifyEvidence applies the absolute insufficient-evidence test (§9.4.3) to
 // the eligible hit set. See the package comment above for the signal, its scale,
 // the shipped thresholds and the aggregation rule.
