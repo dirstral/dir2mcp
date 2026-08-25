@@ -2022,16 +2022,9 @@ func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]in
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "start_ms must be < end_ms", Retryable: false}
 	}
 
-	maxDurationMS := s.cfg.MediaClipMaxDurationMS
-	if maxDurationMS <= 0 {
-		maxDurationMS = config.DefaultMediaClipMaxDurationMS
-	}
-	maxBytes := s.cfg.MediaClipMaxBytes
-	if maxBytes <= 0 {
-		maxBytes = config.DefaultMediaClipMaxBytes
-	}
-	if req.endMS-req.startMS > maxDurationMS {
-		return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("requested clip duration %dms exceeds max %dms; request a shorter span", req.endMS-req.startMS, maxDurationMS), Retryable: false}
+	maxBytes, toolErr := s.mediaClipDurationGate(req)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
 	}
 
 	// The clip is cut from a real local path, so a non-local corpus materializes
@@ -2055,51 +2048,9 @@ func (s *Server) handleOpenMediaClipTool(ctx context.Context, args map[string]in
 		// bytes/span is deterministic) — distinct from OCR_NOT_READY.
 		return toolCallResult{}, &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip extraction failed", Retryable: false}
 	}
-	// The effective byte bound is min(max_bytes, media.clip.max_bytes)
-	// (SPEC §15.11, spec 0.54.0). The caller's ceiling can only narrow the
-	// server's, never widen it.
-	effectiveMaxBytes := maxBytes
-	if callerMaxBytes > 0 && callerMaxBytes < effectiveMaxBytes {
-		effectiveMaxBytes = callerMaxBytes
-	}
-	mimeType := mediaClipMIMEForPath(req.relPath, req.docType)
-	previewRendition := ""
-	if len(data) > effectiveMaxBytes {
-		// Without a caller ceiling this stays exactly the pre-0.54.0 refusal: the
-		// server MAY re-encode, and deliberately does not, so a caller that never
-		// asked for a byte budget never receives silently reduced fidelity.
-		if callerMaxBytes <= 0 {
-			return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("extracted clip is %d bytes, exceeds max %d; request a shorter span", len(data), maxBytes), Retryable: false}
-		}
-		isVideo := strings.EqualFold(strings.TrimSpace(req.docType), "video")
-		extractPreview := s.extractSegmentPreview
-		if extractPreview == nil {
-			extractPreview = avutil.ExtractSegmentPreview
-		}
-		pdata, rendition, perr := extractPreview(ctx, absPath, req.startMS, req.endMS, effectiveMaxBytes, isVideo)
-		if perr != nil {
-			// A server that cannot re-encode has no preview to offer (§15.11): the
-			// source cut does not fit the effective bound, so the honest answer is
-			// the same CLIP_TOO_LARGE an oversized span produces. Any other encode
-			// failure is deterministic for these bytes, exactly like the source
-			// extraction above.
-			if errors.Is(perr, avutil.ErrToolNotFound) {
-				return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("source-fidelity clip is %d bytes, exceeds max_bytes %d, and this server cannot re-encode a preview; raise max_bytes or request a shorter span", len(data), effectiveMaxBytes), Retryable: false}
-			}
-			return toolCallResult{}, &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip preview encoding failed", Retryable: false}
-		}
-		if len(pdata) > effectiveMaxBytes {
-			return toolCallResult{}, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("even a re-encoded preview is %d bytes, exceeds max_bytes %d; raise max_bytes or request a shorter span", len(pdata), effectiveMaxBytes), Retryable: false}
-		}
-		data = pdata
-		previewRendition = rendition
-		// The preview is a NEW container (mp4 for video, m4a for audio), not the
-		// source's: the mime type must describe the bytes actually served.
-		if isVideo {
-			mimeType = "video/mp4"
-		} else {
-			mimeType = "audio/mp4"
-		}
+	data, mimeType, previewRendition, toolErr := s.fitMediaClipUnderBound(ctx, req, absPath, data, maxBytes, callerMaxBytes)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
 	}
 	encoded := base64.StdEncoding.EncodeToString(data)
 	structured := map[string]interface{}{
@@ -2173,6 +2124,75 @@ func parseMediaClipReturnArg(args map[string]interface{}) (string, *toolExecutio
 	default:
 		return "", &toolExecutionError{Code: "INVALID_FIELD", Message: "return must be one of inline,reference", Retryable: false}
 	}
+}
+
+// mediaClipDurationGate resolves the configured clip bounds to their defaults,
+// refuses a span over the duration cap (SPEC §15.11), and returns the server's
+// byte cap for the size gate that runs after extraction.
+func (s *Server) mediaClipDurationGate(req mediaClipRequest) (int, *toolExecutionError) {
+	maxDurationMS := s.cfg.MediaClipMaxDurationMS
+	if maxDurationMS <= 0 {
+		maxDurationMS = config.DefaultMediaClipMaxDurationMS
+	}
+	maxBytes := s.cfg.MediaClipMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = config.DefaultMediaClipMaxBytes
+	}
+	if req.endMS-req.startMS > maxDurationMS {
+		return 0, &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("requested clip duration %dms exceeds max %dms; request a shorter span", req.endMS-req.startMS, maxDurationMS), Retryable: false}
+	}
+	return maxBytes, nil
+}
+
+// fitMediaClipUnderBound enforces the effective byte bound
+// min(max_bytes, media.clip.max_bytes) on an extracted clip (SPEC §15.11, spec
+// 0.54.0; #878): the caller's ceiling can only narrow the server's, never widen
+// it. It returns the bytes to serve, the mime type that describes THEM, and the
+// preview rendition ("" for a source-fidelity cut).
+//
+// Without a caller ceiling an over-cap cut keeps exactly the pre-0.54.0
+// refusal: the server MAY re-encode, and deliberately does not, so a caller
+// that never asked for a byte budget never receives silently reduced fidelity.
+// With one, the span is re-encoded to fit; the encoder aims (single-pass rate
+// control is approximate) and this function verifies, so an over-budget preview
+// is refused with CLIP_TOO_LARGE, never served. A server that cannot re-encode
+// (no ffmpeg) answers the same CLIP_TOO_LARGE: it has no preview to offer, and
+// the source cut does not fit. An encode FAILURE stays MEDIA_CLIP_FAILED,
+// deterministic for these bytes like the source extraction. A served preview is
+// a NEW container (mp4 for video, m4a for audio), so the returned mime type
+// describes the bytes actually served, not the source's.
+func (s *Server) fitMediaClipUnderBound(ctx context.Context, req mediaClipRequest, absPath string, data []byte, serverMaxBytes, callerMaxBytes int) ([]byte, string, string, *toolExecutionError) {
+	mimeType := mediaClipMIMEForPath(req.relPath, req.docType)
+	effectiveMaxBytes := serverMaxBytes
+	if callerMaxBytes > 0 && callerMaxBytes < effectiveMaxBytes {
+		effectiveMaxBytes = callerMaxBytes
+	}
+	if len(data) <= effectiveMaxBytes {
+		return data, mimeType, "", nil
+	}
+	if callerMaxBytes <= 0 {
+		return nil, "", "", &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("extracted clip is %d bytes, exceeds max %d; request a shorter span", len(data), serverMaxBytes), Retryable: false}
+	}
+	isVideo := strings.EqualFold(strings.TrimSpace(req.docType), "video")
+	extractPreview := s.extractSegmentPreview
+	if extractPreview == nil {
+		extractPreview = avutil.ExtractSegmentPreview
+	}
+	pdata, rendition, perr := extractPreview(ctx, absPath, req.startMS, req.endMS, effectiveMaxBytes, isVideo)
+	if perr != nil {
+		if errors.Is(perr, avutil.ErrToolNotFound) {
+			return nil, "", "", &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("source-fidelity clip is %d bytes, exceeds max_bytes %d, and this server cannot re-encode a preview; raise max_bytes or request a shorter span", len(data), effectiveMaxBytes), Retryable: false}
+		}
+		return nil, "", "", &toolExecutionError{Code: "MEDIA_CLIP_FAILED", Message: "media clip preview encoding failed", Retryable: false}
+	}
+	if len(pdata) > effectiveMaxBytes {
+		return nil, "", "", &toolExecutionError{Code: "CLIP_TOO_LARGE", Message: fmt.Sprintf("even a re-encoded preview is %d bytes, exceeds max_bytes %d; raise max_bytes or request a shorter span", len(pdata), effectiveMaxBytes), Retryable: false}
+	}
+	previewMIME := "audio/mp4"
+	if isVideo {
+		previewMIME = "video/mp4"
+	}
+	return pdata, previewMIME, rendition, nil
 }
 
 // parseMediaClipMaxBytesArg reads the optional max_bytes argument (spec
