@@ -396,7 +396,7 @@ func TestMCPTranscribeAndAsk_GenerateAnswerFalseWithholdsGeneration(t *testing.T
 		t.Fatalf("Ask ran %d times; generation is disabled", calls)
 	}
 	// The transcript provenance is still reported: only generation is withheld.
-	if _, ok := structured["transcript_provider"].(string); !ok {
-		t.Fatalf("transcript_provider missing from a search-only transcribe_and_ask: %#v", structured)
+	if _, ok := structured["stt_provider"].(string); !ok {
+		t.Fatalf("stt_provider missing from a search-only transcribe_and_ask: %#v", structured)
 	}
 }
