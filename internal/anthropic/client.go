@@ -22,6 +22,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/providerhttp"
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 const (
@@ -101,6 +102,30 @@ type generateResponse struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`
+	// Usage carries Anthropic's token accounting for the call
+	// (usage.input_tokens / usage.output_tokens on every successful
+	// Messages API response).
+	Usage struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+// tokenUsage normalizes the Anthropic usage object into the shared Usage
+// shape, returning ok=false when no counts were present so callers keep
+// the "unknown, not zero" distinction (mirrors internal/cohere).
+func (r generateResponse) tokenUsage() (usage.Usage, bool) {
+	in := r.Usage.InputTokens
+	out := r.Usage.OutputTokens
+	if in == 0 && out == 0 {
+		return usage.Usage{}, false
+	}
+	return usage.Usage{
+		PromptTokens:     in,
+		CompletionTokens: out,
+		TotalTokens:      in + out,
+		Reported:         true,
+	}, true
 }
 
 // Generate implements model.Generator via {base}/v1/messages.
@@ -167,6 +192,9 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 	var parsed generateResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "ANTHROPIC_FAILED", Message: "failed to decode generation response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
+	}
+	if u, ok := parsed.tokenUsage(); ok {
+		usage.Report(ctx, usage.StageGenerate, u)
 	}
 	text := strings.TrimSpace(contentToText(parsed))
 	if text == "" {

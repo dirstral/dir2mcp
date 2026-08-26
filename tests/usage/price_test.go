@@ -61,10 +61,25 @@ func TestPriceTable_OverridesReplaceDefaults(t *testing.T) {
 
 func TestPriceTable_DefaultsCoverCommonModels(t *testing.T) {
 	pt := usage.DefaultPriceTable()
-	for _, m := range []string{"mistral-small-2506", "mistral-embed", "gpt-4o-mini", "gemini-2.5-flash"} {
+	for _, m := range []string{"mistral-small-2506", "mistral-embed", "gpt-4o-mini", "gemini-2.5-flash", "claude-sonnet-4-6", "claude-haiku-4-5"} {
 		if _, ok := pt.Lookup(m); !ok {
 			t.Errorf("default table missing common model %q", m)
 		}
+	}
+}
+
+// TestPriceTable_AnthropicGenerateCost pins that Anthropic generation usage
+// is priced by the default table (issue #672: cost accounting must include
+// Anthropic spend).
+func TestPriceTable_AnthropicGenerateCost(t *testing.T) {
+	pt := usage.DefaultPriceTable()
+	cost, ok := pt.Cost("claude-sonnet-4-6", usage.Usage{PromptTokens: 1000, CompletionTokens: 1000})
+	if !ok {
+		t.Fatal("expected default table to price claude-sonnet-4-6")
+	}
+	// 1000/1000*0.003 + 1000/1000*0.015 = 0.018
+	if !approxEqual(cost, 0.018) {
+		t.Fatalf("cost=%v, want 0.018", cost)
 	}
 }
 

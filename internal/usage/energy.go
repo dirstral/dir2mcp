@@ -69,6 +69,9 @@ func DefaultEnergyTable() *EnergyTable {
 		"gemini-2.5-pro":   {WhPer1K: 1.00},
 		// Gemini (embed)
 		"gemini-embedding-001": {WhPer1K: 0.02},
+		// Anthropic (chat)
+		"claude-sonnet-4-6": {WhPer1K: 0.60},
+		"claude-haiku-4-5":  {WhPer1K: 0.20},
 		// Cohere (chat)
 		"command-r":      {WhPer1K: 0.30},
 		"command-r-plus": {WhPer1K: 1.00},
