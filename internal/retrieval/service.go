@@ -464,6 +464,9 @@ type Service struct {
 	// never become a Citation.snippet or an answer quote whatever the config says
 	// (the §9.7 citation-faithfulness invariant).
 	hierarchicalEnabled bool
+	// hydeSuperlative additionally enables HyDE for superlative questions only
+	// (#897, retrieval.hyde.superlative); see superlative.go.
+	hydeSuperlative bool
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -774,6 +777,16 @@ func (s *Service) SetMMR(enabled bool, lambda float64) {
 // unrecognized mode normalizes to "fuse". A generation failure degrades
 // gracefully to the raw query (never fatal). Config-only; the engine wires this
 // from config at construction time, mirroring SetMinScore.
+// SetHyDESuperlative wires superlative-only HyDE (issue #897, config
+// retrieval.hyde.superlative): when set, a question whose surface form is a
+// superlative has the HyDE transform enabled even while the global flag is
+// off. Additive only; see superlative.go for the measurement behind the scope.
+func (s *Service) SetHyDESuperlative(enabled bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.hydeSuperlative = enabled
+}
+
 func (s *Service) SetHyDE(enabled bool, mode string) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != hydeModeReplace {
@@ -1721,7 +1734,14 @@ func (s *Service) searchWithHyDE(ctx context.Context, query model.SearchQuery, k
 	enabled := s.hydeEnabled
 	mode := s.hydeMode
 	gen := s.gen
+	superlative := s.hydeSuperlative
 	s.metaMu.RUnlock()
+
+	// Superlative-only HyDE (#897): additive, never subtractive. A question
+	// that does not read as a superlative follows the global flag unchanged.
+	if superlative && !enabled && isSuperlativeQuestion(query.Query) {
+		enabled = true
+	}
 
 	if !enabled || gen == nil {
 		return s.searchByMode(ctx, query.Query, k, query, true)

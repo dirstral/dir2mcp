@@ -434,6 +434,18 @@ type Config struct {
 	// hypothetical-document embedding alone. Ignored when RetrievalHyDEEnabled is
 	// false. An empty value normalizes to "fuse".
 	RetrievalHyDEMode string
+	// RetrievalHyDESuperlative additionally enables the HyDE transform for
+	// SUPERLATIVE questions only (config `retrieval.hyde.superlative`, issue
+	// #897), independently of RetrievalHyDEEnabled. The #897 measurement found
+	// one global HyDE flag cannot serve every question shape: HyDE doubled the
+	// superlative category (2/5 to 4/5) while degrading three others, and the
+	// superlative surface form is the ONE shape a lexical classifier identified
+	// perfectly (5/5 on the graded set; every other route misclassified, worst
+	// of all negative controls at 0/8, which is why the full per-route table of
+	// PR #898 is not shipped). Additive only: a non-superlative question always
+	// follows RetrievalHyDEEnabled, and this flag never turns HyDE OFF for
+	// anything. Default false ⇒ unchanged behavior.
+	RetrievalHyDESuperlative bool
 	// RetrievalContextualEnabled opts IN to contextual retrieval (SPEC §8.1.8,
 	// config `retrieval.contextual.enabled`, issue #330): before a chunk is
 	// embedded, a short LLM-generated, document-aware context string is prepended
@@ -1255,6 +1267,7 @@ type fileConfig struct {
 	RetrievalMMRLambda                 *float64
 	RetrievalHyDEEnabled               *bool
 	RetrievalHyDEMode                  *string
+	RetrievalHyDESuperlative           *bool
 	RetrievalContextualEnabled         *bool
 	RetrievalContextualProvider        *string
 	RetrievalContextualModel           *string
@@ -1420,6 +1433,7 @@ type persistedConfig struct {
 	RetrievalMMRLambda                 float64       `yaml:"retrieval_mmr_lambda"`
 	RetrievalHyDEEnabled               bool          `yaml:"retrieval_hyde_enabled"`
 	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
+	RetrievalHyDESuperlative           bool          `yaml:"retrieval_hyde_superlative"`
 	RetrievalContextualEnabled         bool          `yaml:"retrieval_contextual_enabled"`
 	RetrievalContextualProvider        string        `yaml:"retrieval_contextual_provider"`
 	RetrievalContextualModel           string        `yaml:"retrieval_contextual_model"`
@@ -1660,6 +1674,9 @@ func Default() Config {
 		// RetrievalHyDEMode defaults to "fuse": when HyDE is enabled the
 		// hypothetical-document hits are RRF-fused with the raw-query hits.
 		RetrievalHyDEMode: HyDEModeFuse,
+		// RetrievalHyDESuperlative defaults to false: superlative-only HyDE is
+		// opt-in, so default behavior is unchanged (#897).
+		RetrievalHyDESuperlative: false,
 		// Contextual retrieval (SPEC §8.1.8, #330) defaults to OFF: chunks embed
 		// raw and the embed identity's terminal component stays "off", so an
 		// existing corpus is byte-identical to before the feature existed. The
@@ -1844,6 +1861,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalMMRLambda:                 cfg.RetrievalMMRLambda,
 		RetrievalHyDEEnabled:               cfg.RetrievalHyDEEnabled,
 		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
+		RetrievalHyDESuperlative:           cfg.RetrievalHyDESuperlative,
 		RetrievalContextualEnabled:         cfg.RetrievalContextualEnabled,
 		RetrievalContextualProvider:        cfg.RetrievalContextualProvider,
 		RetrievalContextualModel:           cfg.RetrievalContextualModel,
@@ -2626,6 +2644,9 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalHyDEMode != nil {
 		cfg.RetrievalHyDEMode = *fc.RetrievalHyDEMode
 	}
+	if fc.RetrievalHyDESuperlative != nil {
+		cfg.RetrievalHyDESuperlative = *fc.RetrievalHyDESuperlative
+	}
 	if fc.CrossLingualEnabled != nil {
 		cfg.CrossLingualEnabled = *fc.CrossLingualEnabled
 	}
@@ -3329,6 +3350,8 @@ var configKeyAliases = map[string]string{
 	"hyde_enabled":                            "retrieval.hyde.enabled",
 	"retrieval_hyde_mode":                     "retrieval.hyde.mode",
 	"hyde_mode":                               "retrieval.hyde.mode",
+	"retrieval_hyde_superlative":              "retrieval.hyde.superlative",
+	"hyde_superlative":                        "retrieval.hyde.superlative",
 	"retrieval_contextual_enabled":            "retrieval.contextual.enabled",
 	"contextual_enabled":                      "retrieval.contextual.enabled",
 	"retrieval_contextual_provider":           "retrieval.contextual.provider",
@@ -3586,6 +3609,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"retrieval.adaptive.enabled": func(c *fileConfig) **bool { return &c.RetrievalAdaptiveEnabled },
 	"retrieval.mmr.enabled":      func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
 	"retrieval.hyde.enabled":     func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
+	"retrieval.hyde.superlative": func(c *fileConfig) **bool { return &c.RetrievalHyDESuperlative },
 	"retrieval.contextual.enabled": func(c *fileConfig) **bool {
 		return &c.RetrievalContextualEnabled
 	},
@@ -4162,6 +4186,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("retrieval_mmr_lambda", strconv.FormatFloat(cfg.RetrievalMMRLambda, 'f', -1, 64))
 	writeBool("retrieval_hyde_enabled", cfg.RetrievalHyDEEnabled)
 	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
+	writeBool("retrieval_hyde_superlative", cfg.RetrievalHyDESuperlative)
 	writeBool("retrieval_contextual_enabled", cfg.RetrievalContextualEnabled)
 	writeScalar("retrieval_contextual_provider", cfg.RetrievalContextualProvider)
 	writeScalar("retrieval_contextual_model", cfg.RetrievalContextualModel)
