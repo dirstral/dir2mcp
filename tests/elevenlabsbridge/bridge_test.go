@@ -276,6 +276,9 @@ func handleMCPBackend(w http.ResponseWriter, r *http.Request, mu *sync.Mutex, re
 		w.Header().Set("MCP-Session-Id", "session-123")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"capabilities":{},"serverInfo":{"name":"dir2mcp","version":"test"}}}`))
+	case "notifications/initialized":
+		// bs-004: an accepted notification is answered with HTTP 202.
+		w.WriteHeader(http.StatusAccepted)
 	case "tools/call":
 		if !handleToolsCall(w, payload.Params, &rec, errCh) {
 			return
@@ -312,26 +315,33 @@ func handleToolsCall(w http.ResponseWriter, params map[string]interface{}, rec *
 
 func assertAskRequestSequence(t *testing.T, requests []recordedMCPRequest) {
 	t.Helper()
-	if len(requests) != 2 {
+	// This pins the bundled client's bs-005-conformant sequence: initialize,
+	// then notifications/initialized on the assigned session, then tool traffic.
+	if len(requests) != 3 {
 		t.Fatalf("unexpected request count: %#v", requests)
 	}
-	if requests[0].Method != "initialize" || requests[1].Method != "tools/call" {
+	if requests[0].Method != "initialize" || requests[1].Method != "notifications/initialized" || requests[2].Method != "tools/call" {
 		t.Fatalf("unexpected method sequence: %#v", requests)
 	}
-	if requests[0].Authorization != "Bearer bridge-token" || requests[1].Authorization != "Bearer bridge-token" {
-		t.Fatalf("expected authorization header to be forwarded: %#v", requests)
+	for i, req := range requests {
+		if req.Authorization != "Bearer bridge-token" {
+			t.Fatalf("expected authorization header to be forwarded on request %d: %#v", i, requests)
+		}
 	}
 	if requests[1].SessionID != "session-123" {
-		t.Fatalf("expected session id to be forwarded, got %#v", requests[1].SessionID)
+		t.Fatalf("expected session id on notifications/initialized, got %#v", requests[1].SessionID)
 	}
-	if requests[1].ToolName != "dir2mcp_ask" {
-		t.Fatalf("tool=%q", requests[1].ToolName)
+	if requests[2].SessionID != "session-123" {
+		t.Fatalf("expected session id to be forwarded, got %#v", requests[2].SessionID)
 	}
-	if requests[1].Question != "what is alpha?" {
-		t.Fatalf("question=%q", requests[1].Question)
+	if requests[2].ToolName != "dir2mcp_ask" {
+		t.Fatalf("tool=%q", requests[2].ToolName)
 	}
-	if requests[1].K != 7 {
-		t.Fatalf("k=%d", requests[1].K)
+	if requests[2].Question != "what is alpha?" {
+		t.Fatalf("question=%q", requests[2].Question)
+	}
+	if requests[2].K != 7 {
+		t.Fatalf("k=%d", requests[2].K)
 	}
 }
 

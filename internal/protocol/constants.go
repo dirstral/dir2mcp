@@ -23,8 +23,16 @@ const (
 const (
 	ErrorCodeUnauthorized    = "UNAUTHORIZED"
 	ErrorCodeSessionNotFound = "SESSION_NOT_FOUND"
-	ErrorCodeIndexNotReady   = "INDEX_NOT_READY"
-	ErrorCodeFileNotFound    = "FILE_NOT_FOUND"
+	// ErrorCodeSessionNotInitialized rejects a non-lifecycle message on a
+	// session that has not completed the initialize ->
+	// notifications/initialized handshake that bs-005 requires from clients.
+	ErrorCodeSessionNotInitialized = "SESSION_NOT_INITIALIZED"
+	// ErrorCodeUnsupportedProtocolVersion rejects a post-initialize request
+	// whose MCP-Protocol-Version header names a version this server does not
+	// support (bs-004; MCP 2025-11-25 transport).
+	ErrorCodeUnsupportedProtocolVersion = "UNSUPPORTED_PROTOCOL_VERSION"
+	ErrorCodeIndexNotReady              = "INDEX_NOT_READY"
+	ErrorCodeFileNotFound               = "FILE_NOT_FOUND"
 	// ErrorCodeForbidden is the canonical §14.2 code for a path or content
 	// blocked by policy (exclusion globs, secret-pattern match). Distinct from
 	// ErrorCodePermissionDenied, which is reserved for OS-level access failures.

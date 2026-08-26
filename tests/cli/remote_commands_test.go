@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
@@ -199,6 +200,133 @@ func TestAskCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	}
 }
 
+// TestRemoteClientCompletesHandshakeBeforeToolTraffic pins the bundled
+// client's bs-005-conformant wire sequence: initialize, then
+// notifications/initialized carrying the session id and no id field, then the
+// tool call. Every request must carry the pinned MCP-Protocol-Version header.
+func TestRemoteClientCompletesHandshakeBeforeToolTraffic(t *testing.T) {
+	type recorded struct {
+		method  string
+		hasID   bool
+		session string
+		proto   string
+	}
+	var (
+		mu       sync.Mutex
+		sequence []recorded
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		var req map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		var method string
+		_ = json.Unmarshal(req["method"], &method)
+		_, hasID := req["id"]
+		mu.Lock()
+		sequence = append(sequence, recorded{
+			method:  method,
+			hasID:   hasID,
+			session: r.Header.Get(protocol.MCPSessionHeader),
+			proto:   r.Header.Get(protocol.MCPProtocolVersionHeader),
+		})
+		mu.Unlock()
+
+		switch method {
+		case protocol.RPCMethodInitialize:
+			w.Header().Set(protocol.MCPSessionHeader, "session-656")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "result": map[string]interface{}{}})
+		case protocol.RPCMethodNotificationsInitialized:
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0", "id": 2,
+				"result": map[string]interface{}{
+					"isError":           false,
+					"structuredContent": map[string]interface{}{"limit": 200, "offset": 0, "total": 0, "files": []interface{}{}},
+				},
+			})
+		}
+	}))
+	defer ts.Close()
+
+	tmp := t.TempDir()
+	writeConnectionMetadata(t, tmp, ts.URL, "")
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"list-files"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sequence) != 3 {
+		t.Fatalf("unexpected request count: %#v", sequence)
+	}
+	want := []string{protocol.RPCMethodInitialize, protocol.RPCMethodNotificationsInitialized, protocol.RPCMethodToolsCall}
+	for i, method := range want {
+		if sequence[i].method != method {
+			t.Fatalf("request %d method=%q want=%q sequence=%#v", i, sequence[i].method, method, sequence)
+		}
+		if sequence[i].proto != protocol.ProtocolDefaultVersion {
+			t.Fatalf("request %d %s=%q want=%q", i, protocol.MCPProtocolVersionHeader, sequence[i].proto, protocol.ProtocolDefaultVersion)
+		}
+	}
+	if sequence[1].hasID {
+		t.Fatalf("notifications/initialized must carry no id field: %#v", sequence[1])
+	}
+	if sequence[1].session != "session-656" || sequence[2].session != "session-656" {
+		t.Fatalf("expected the assigned session id on post-initialize requests: %#v", sequence)
+	}
+}
+
+// TestRemoteClientFailsWhenInitializedIsNotAccepted verifies the bundled
+// client checks the HTTP 202 on notifications/initialized: a server that
+// refuses the notification must fail the command instead of silently starting
+// tool traffic on a half-open session.
+func TestRemoteClientFailsWhenInitializedIsNotAccepted(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		var req struct {
+			Method string `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		switch req.Method {
+		case protocol.RPCMethodInitialize:
+			w.Header().Set(protocol.MCPSessionHeader, "session-656")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "result": map[string]interface{}{}})
+		case protocol.RPCMethodNotificationsInitialized:
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "error": map[string]interface{}{"code": -32603, "message": "refused"}})
+		default:
+			t.Fatalf("tool traffic must not start after a refused handshake: %s", req.Method)
+		}
+	}))
+	defer ts.Close()
+
+	tmp := t.TempDir()
+	writeConnectionMetadata(t, tmp, ts.URL, "")
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"list-files"})
+		if code == 0 {
+			t.Fatalf("expected non-zero exit code, stdout=%s", stdout.String())
+		}
+	})
+	if !strings.Contains(stderr.String(), "notifications/initialized") {
+		t.Fatalf("expected the error to name the failed handshake step, stderr=%s", stderr.String())
+	}
+}
+
 func newMCPTestServer(t *testing.T, onToolCall func(name string, args map[string]interface{}) map[string]interface{}) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -228,6 +356,16 @@ func newMCPTestServer(t *testing.T, onToolCall func(name string, args map[string
 					"protocolVersion": protocol.ProtocolDefaultVersion,
 				},
 			})
+			return
+		}
+
+		// bs-005: the bundled client must complete the handshake right after
+		// initialize and carry the session id on the notification.
+		if req.Method == protocol.RPCMethodNotificationsInitialized {
+			if got := r.Header.Get(protocol.MCPSessionHeader); got == "" {
+				t.Fatal("expected MCP session header on notifications/initialized")
+			}
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 

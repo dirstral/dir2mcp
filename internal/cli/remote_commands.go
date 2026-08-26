@@ -33,6 +33,14 @@ type rpcRequest struct {
 	Params  interface{} `json:"params,omitempty"`
 }
 
+// rpcNotification is a JSON-RPC notification: it carries no id field at all,
+// which is what makes the server answer HTTP 202 instead of a result envelope.
+type rpcNotification struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params,omitempty"`
+}
+
 type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int64           `json:"id"`
@@ -148,7 +156,7 @@ func (c *remoteMCPClient) setSessionID(sessionID string) {
 	c.sessionID = strings.TrimSpace(sessionID)
 }
 
-func (c *remoteMCPClient) doRPC(ctx context.Context, reqBody rpcRequest, includeSession bool) (*http.Response, []byte, error) {
+func (c *remoteMCPClient) doRPC(ctx context.Context, reqBody interface{}, includeSession bool) (*http.Response, []byte, error) {
 	if strings.TrimSpace(c.endpoint) == "" {
 		return nil, nil, errors.New("connection url is empty")
 	}
@@ -244,6 +252,32 @@ func (c *remoteMCPClient) ensureSession(ctx context.Context) error {
 		return fmt.Errorf("initialize response missing %s", protocol.MCPSessionHeader)
 	}
 	c.setSessionID(sid)
+
+	// bs-005: the client MUST complete the handshake with
+	// notifications/initialized before other requests. The server confirms an
+	// accepted notification with HTTP 202 (bs-004). On any failure the session
+	// is dropped so the next call restarts the whole handshake.
+	if err := c.sendInitialized(ctx); err != nil {
+		c.setSessionID("")
+		return err
+	}
+	return nil
+}
+
+// sendInitialized sends the notifications/initialized notification on the
+// current session and verifies the HTTP 202 the server must answer with.
+func (c *remoteMCPClient) sendInitialized(ctx context.Context) error {
+	resp, body, err := c.doRPC(ctx, rpcNotification{
+		JSONRPC: "2.0",
+		Method:  protocol.RPCMethodNotificationsInitialized,
+		Params:  map[string]interface{}{},
+	}, true)
+	if err != nil {
+		return fmt.Errorf("notifications/initialized: %w", err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("notifications/initialized failed with HTTP %d: %s", resp.StatusCode, rpcErrorSummary(body))
+	}
 	return nil
 }
 

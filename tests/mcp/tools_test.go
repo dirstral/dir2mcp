@@ -2260,9 +2260,21 @@ func assertToolCallErrorCodeAndMessage(t *testing.T, resp *http.Response, wantCo
 	}
 }
 
-// initializeSession performs MCP initialize and returns the session id used
-// for subsequent tools/list and tools/call requests.
+// initializeSession completes the full bs-005 handshake (initialize followed
+// by notifications/initialized) and returns the session id used for subsequent
+// tools/list and tools/call requests. The server rejects non-lifecycle
+// requests on a session that skipped the notification (issue #656).
 func initializeSession(t *testing.T, url string) string {
+	t.Helper()
+	sessionID := initializeOnly(t, url)
+	notifyInitialized(t, url, sessionID)
+	return sessionID
+}
+
+// initializeOnly performs MCP initialize and returns the session id WITHOUT
+// completing the handshake. Use it to pin the server's handling of clients
+// that skip notifications/initialized.
+func initializeOnly(t *testing.T, url string) string {
 	t.Helper()
 	resp := postRPC(t, url, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	defer func() {
@@ -2279,6 +2291,18 @@ func initializeSession(t *testing.T, url string) string {
 	return sessionID
 }
 
+// notifyInitialized sends notifications/initialized on the session and asserts
+// the HTTP 202 the server must answer with (bs-004).
+func notifyInitialized(t *testing.T, url, sessionID string) {
+	t.Helper()
+	resp := postRPC(t, url, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusAccepted {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("notifications/initialized: status=%d want=%d body=%s", resp.StatusCode, http.StatusAccepted, string(payload))
+	}
+}
+
 // postRPC sends a JSON-RPC POST request to the MCP endpoint with an optional
 // MCP session header.
 func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
@@ -2288,6 +2312,10 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Send the pinned protocol version like a conformant client (bs-004). The
+	// server also accepts a missing header; that permissive path is pinned by
+	// its own conformance test, not by this helper.
+	req.Header.Set(protocol.MCPProtocolVersionHeader, protocol.ProtocolDefaultVersion)
 	if sessionID != "" {
 		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}

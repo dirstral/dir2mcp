@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +13,27 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
 )
+
+// completeHandshakeOverHTTP sends notifications/initialized on the session and
+// verifies the HTTP 202 the server must answer with (bs-004/bs-005).
+func completeHandshakeOverHTTP(client *http.Client, url, sessionID string) error {
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`))
+	if err != nil {
+		return fmt.Errorf("create notifications/initialized request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST notifications/initialized: %w", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("notifications/initialized status=%d want=%d", resp.StatusCode, http.StatusAccepted)
+	}
+	return nil
+}
 
 func TestNewTransport_IsSDK(t *testing.T) {
 	srv := mcp.NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
@@ -143,12 +165,19 @@ func TestSDKTransport_Serve(t *testing.T) {
 		t.Fatal("expected MCP-Session-Id header from SDK transport initialize")
 	}
 
+	// Complete the bs-005 handshake; the transport rejects tools/* before it.
+	if err := completeHandshakeOverHTTP(client, url, sessionID); err != nil {
+		cancel()
+		t.Fatalf("complete handshake: %v", err)
+	}
+
 	listReq, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	if err != nil {
 		cancel()
 		t.Fatalf("create tools/list request: %v", err)
 	}
 	listReq.Header.Set("Content-Type", "application/json")
+	listReq.Header.Set("MCP-Protocol-Version", "2025-11-25")
 	listReq.Header.Set("MCP-Session-Id", sessionID)
 	listResp, err := client.Do(listReq)
 	if err != nil {
@@ -221,12 +250,19 @@ func TestSDKTransport_X402MissingPaymentSignature(t *testing.T) {
 		t.Fatal("expected session id from initialize")
 	}
 
+	// Complete the bs-005 handshake; the transport rejects tools/* before it.
+	if err := completeHandshakeOverHTTP(client, url, sessionID); err != nil {
+		cancel()
+		t.Fatalf("complete handshake: %v", err)
+	}
+
 	callReq, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`))
 	if err != nil {
 		cancel()
 		t.Fatalf("create tools/call request: %v", err)
 	}
 	callReq.Header.Set("Content-Type", "application/json")
+	callReq.Header.Set("MCP-Protocol-Version", "2025-11-25")
 	callReq.Header.Set("MCP-Session-Id", sessionID)
 	callResp, err := client.Do(callReq)
 	if err != nil {

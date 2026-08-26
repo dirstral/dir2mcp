@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
-	"time"
 
 	"github.com/dirstral/dir2mcp/internal/protocol"
 )
@@ -120,19 +118,8 @@ func (s *Server) rpcEnvelopeMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if req.Method != protocol.RPCMethodInitialize {
-			sessionID := strings.TrimSpace(r.Header.Get(protocol.MCPSessionHeader))
-			if sessionID == "" {
-				writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-				return
-			}
-			if ok, reason := s.hasActiveSession(sessionID, time.Now()); !ok {
-				if reason != "" {
-					w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
-				}
-				writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
-				return
-			}
+		if !s.gatePostInitialize(w, r, req.Method, id) {
+			return
 		}
 
 		// Preserve authScope from existing context if present

@@ -140,8 +140,18 @@ class HTTPClient:
                        "clientInfo": {"name": "release-smoke", "version": "1"}}})
         _check_init(msg, "http")
         self.sid = sid
+        # bs-005: complete the handshake before any tool traffic. The server
+        # confirms the accepted notification with HTTP 202 and now rejects
+        # tools/* on a session that skipped it.
+        _, _, status = self._post_raw({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        if status != 202:
+            raise RuntimeError(f"http: notifications/initialized failed with HTTP {status}")
 
     def _post(self, body):
+        out, sid, _ = self._post_raw(body)
+        return out, sid
+
+    def _post_raw(self, body):
         req = urllib.request.Request(self.url, data=json.dumps(body).encode(), method="POST")
         req.add_header("Authorization", f"Bearer {self.token}")
         req.add_header("Content-Type", "application/json")
@@ -160,7 +170,7 @@ class HTTPClient:
                     out = json.loads(line)
                 except json.JSONDecodeError:
                     pass
-        return out, resp.headers.get("Mcp-Session-Id")
+        return out, resp.headers.get("Mcp-Session-Id"), resp.status
 
     def call(self, name, args):
         d, _ = self._post({"jsonrpc": "2.0", "id": 99, "method": "tools/call",

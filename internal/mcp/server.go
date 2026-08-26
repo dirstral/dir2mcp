@@ -96,6 +96,13 @@ type sessionInfo struct {
 	created   time.Time
 	lastSeen  time.Time
 	authScope string
+	// initialized records whether the client completed the bs-005 handshake
+	// (initialize -> notifications/initialized) on this session. Non-lifecycle
+	// requests are rejected until it is set. The flag is in-memory only: a
+	// session restored from the persistence store is treated as initialized,
+	// because it predates this process and its client will not repeat the
+	// handshake.
+	initialized bool
 }
 
 type sessionPersistenceStore interface {
@@ -532,6 +539,93 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	return transport.Serve(ctx, s.Handler())
 }
 
+// handshakeExemptMethod reports whether a method may run before the bs-005
+// handshake completes: initialize starts it, notifications/initialized
+// completes it, and notifications/cancelled may target the initialize request
+// itself (MCP 2025-11-25 lifecycle).
+func handshakeExemptMethod(method string) bool {
+	switch method {
+	case protocol.RPCMethodInitialize,
+		protocol.RPCMethodNotificationsInitialized,
+		protocol.RPCMethodNotificationsCancelled:
+		return true
+	}
+	return false
+}
+
+// enforceProtocolVersion validates the MCP-Protocol-Version header on a
+// post-initialize message (bs-004 / SPEC §10.2). A missing header stays
+// accepted: bs-004 places the MUST on the client, and the canonical MCP
+// transport only mandates a 400 for an invalid or unsupported value (the
+// session already fixed the negotiated version at initialize). Both the SDK
+// transport and the direct handler chain call this helper so the two cannot
+// drift.
+func (s *Server) enforceProtocolVersion(w http.ResponseWriter, r *http.Request, id interface{}) bool {
+	got := strings.TrimSpace(r.Header.Get(protocol.MCPProtocolVersionHeader))
+	if got == "" {
+		return true
+	}
+	pinned := strings.TrimSpace(s.cfg.ProtocolVersion)
+	if pinned == "" {
+		pinned = protocol.ProtocolDefaultVersion
+	}
+	if got == pinned {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, id, -32600,
+		fmt.Sprintf("unsupported MCP-Protocol-Version %q (this server supports %q)", got, pinned),
+		protocol.ErrorCodeUnsupportedProtocolVersion, false)
+	return false
+}
+
+// gatePostInitialize applies every gate a post-initialize message must pass,
+// in a fixed order: MCP-Protocol-Version header validity first (stateless,
+// bs-004), then session existence (404), then bs-005 handshake completion. It
+// returns false after writing the refusal. initialize itself passes untouched:
+// it carries no session yet and negotiates the version in its body. Both the
+// SDK transport and the direct handler chain call this single helper, so the
+// two cannot drift. Callers run it immediately before dispatch, which keeps
+// the session TOCTOU window closed.
+func (s *Server) gatePostInitialize(w http.ResponseWriter, r *http.Request, method string, id interface{}) bool {
+	if method == protocol.RPCMethodInitialize {
+		return true
+	}
+	if !s.enforceProtocolVersion(w, r, id) {
+		return false
+	}
+	sessionID := strings.TrimSpace(r.Header.Get(protocol.MCPSessionHeader))
+	if sessionID == "" {
+		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+		return false
+	}
+	if ok, reason := s.hasActiveSession(sessionID, time.Now()); !ok {
+		if reason != "" {
+			w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+		}
+		writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+		return false
+	}
+	if !handshakeExemptMethod(method) && !s.enforceInitializedHandshake(w, sessionID, id) {
+		return false
+	}
+	return true
+}
+
+// enforceInitializedHandshake rejects a non-lifecycle message on a session that
+// has not completed initialize -> notifications/initialized. bs-005 requires
+// the client to finish that handshake before issuing other requests; this is
+// the server-side check of that MUST. Callers validate the session first, so a
+// false return here always means "known session, handshake incomplete".
+func (s *Server) enforceInitializedHandshake(w http.ResponseWriter, sessionID string, id interface{}) bool {
+	if s.sessionHandshakeComplete(sessionID) {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, id, -32002,
+		"session not initialized: send notifications/initialized after initialize before other requests",
+		protocol.ErrorCodeSessionNotInitialized, false)
+	return false
+}
+
 func parseCanonicalCode(err error) string {
 	var vErr validationError
 	if errors.As(err, &vErr) && vErr.canonicalCode != "" {
@@ -551,6 +645,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	case protocol.RPCMethodInitialize:
 		s.handleInitialize(w, r, rc.id, rc.hasID)
 	case protocol.RPCMethodNotificationsInitialized:
+		// Mark the handshake complete on both the well-formed notification and
+		// the malformed request-shaped variant: the client's intent is the
+		// same, and the response contract for each shape is unchanged.
+		s.markSessionInitialized(strings.TrimSpace(r.Header.Get(protocol.MCPSessionHeader)))
 		if !rc.hasID {
 			w.WriteHeader(http.StatusAccepted)
 			return
@@ -814,6 +912,32 @@ func (s *Server) storeSession(id string, authScope string) {
 	s.persistSession(id, si, seq)
 }
 
+// markSessionInitialized records that the client completed the bs-005
+// handshake on this session. It only flips the in-memory flag: the flag is not
+// persisted (see sessionInfo), so no store write is ordered here. Marking an
+// unknown session is a no-op; the notification's own session validation has
+// already answered SESSION_NOT_FOUND in that case.
+func (s *Server) markSessionInitialized(id string) {
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if si, ok := s.sessions[id]; ok && !si.initialized {
+		si.initialized = true
+		s.sessions[id] = si
+	}
+}
+
+// sessionHandshakeComplete reports whether the session exists and has completed
+// the bs-005 handshake.
+func (s *Server) sessionHandshakeComplete(id string) bool {
+	s.sessionMu.RLock()
+	defer s.sessionMu.RUnlock()
+	si, ok := s.sessions[id]
+	return ok && si.initialized
+}
+
 // forgetSession removes a session from the in-memory map and the persistence
 // store. It is used for explicit DELETE session termination so the id cannot be
 // replayed after the client tears the session down.
@@ -997,7 +1121,11 @@ func (s *Server) restoreSessions(ctx context.Context) {
 			_ = store.DeleteMCPSession(ctx, id)
 			continue
 		}
-		s.sessions[id] = sessionInfo{created: rec.Created, lastSeen: rec.LastSeen, authScope: rec.AuthScope}
+		// A restored session predates this process, so its client completed (or
+		// was never held to) the handshake before the restart and will not send
+		// notifications/initialized again. Treat it as initialized rather than
+		// bricking every reconnecting client after a daemon restart.
+		s.sessions[id] = sessionInfo{created: rec.Created, lastSeen: rec.LastSeen, authScope: rec.AuthScope, initialized: true}
 	}
 }
 
