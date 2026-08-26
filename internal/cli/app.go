@@ -59,6 +59,11 @@ const (
 	x402FacilitatorTokenEnvVar = "DIR2MCP_X402_FACILITATOR_TOKEN"
 	connectionFileName         = "connection.json"
 	secretTokenName            = "secret.token"
+	// authFlagUsage documents the --auth flag. The value is a mode, not a
+	// literal bearer token; a literal token goes in DIR2MCP_AUTH_TOKEN. The
+	// up flag parser and the top-level usage screen share this string so the
+	// two surfaces cannot drift apart again (#660).
+	authFlagUsage = "auth mode: auto | none | file:<path> (literal token: set " + authTokenEnvVar + ")"
 )
 
 var commands = map[string]struct{}{
@@ -677,7 +682,7 @@ func (a *App) printUsage() {
 		{"--mcp-path <path>", "HTTP route for the MCP endpoint"},
 		{"--public", "bind to all interfaces (requires auth or --force-insecure)"},
 		{"--read-only", "disable write operations"},
-		{"--auth <token>", "bearer token (or set DIR2MCP_AUTH_TOKEN)"},
+		{"--auth <mode>", authFlagUsage},
 		{"--tls-cert / --tls-key", "TLS certificate and key files"},
 		{"--allowed-origins <csv>", "CORS allowed origins"},
 	}
@@ -1586,7 +1591,7 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.x402PayTo, "x402-pay-to", "", "x402 pay-to address")
 	toolsCallEnabledFlag := &optionalBoolFlag{}
 	fs.Var(toolsCallEnabledFlag, "x402-tools-call-enabled", "enable x402 gating for tools/call")
-	fs.StringVar(&opts.auth, "auth", "", "auth mode: auto|none|file:<path>")
+	fs.StringVar(&opts.auth, "auth", "", authFlagUsage)
 	fs.StringVar(&opts.listen, "listen", "", "listen address")
 	fs.StringVar(&opts.mcpPath, "mcp-path", "", "MCP route path")
 	fs.StringVar(&opts.tlsCert, "tls-cert", "", "path to TLS certificate file (PEM)")

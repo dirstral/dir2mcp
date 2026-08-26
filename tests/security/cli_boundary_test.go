@@ -220,6 +220,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"up_graceful_stop_test.go":               {},
 		"up_shutdown.go":                         {},
 		"up_shutdown_test.go":                    {},
+		"usage_auth_660_test.go":                 {},
 		"watch_source_gate_695_test.go":          {},
 	}
 
