@@ -171,7 +171,7 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 	// Exact idempotent retry of the same (nonce, request): re-surface the
 	// recorded outcome (driving a pending settle to completion). Never a second
 	// execution or re-charge.
-	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, pc) {
+	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, pc, leaveWindow) {
 		return
 	}
 
@@ -532,7 +532,7 @@ func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, ope
 	writeError(w, statusCode, id, -32000, facErr.Message, facErr.Code, facErr.Retryable)
 }
 
-func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.ResponseWriter, id interface{}, pc paymentContext) bool {
+func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.ResponseWriter, id interface{}, pc paymentContext, leaveWindow leaveCancelWindow) bool {
 	executionKey := pc.executionKey
 	outcome, ok := s.getPaymentExecutionOutcome(executionKey)
 	if !ok {
@@ -543,7 +543,17 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 		return true
 	}
 
-	settleResponse, settleErr := s.x402Client.Settle(ctx, pc.signature, s.x402Requirement)
+	// Driving a PENDING settle to completion is settlement, so it gets the same
+	// protection as the first attempt: leave the cancellable window and settle
+	// on a context the client cannot reach. The tool already ran on the
+	// original request; aborting this retry would leave the facilitator's state
+	// unknown to us while the cached outcome stays retryable, so a later
+	// request could submit settlement again. That is the double settlement
+	// #657 forbids, reached by the retry path instead of the first one.
+	if leaveWindow != nil {
+		leaveWindow()
+	}
+	settleResponse, settleErr := s.x402Client.Settle(context.WithoutCancel(ctx), pc.signature, s.x402Requirement)
 	if settleErr != nil {
 		s.handlePaymentFailure(w, id, "settle", settleErr, executionKey)
 		return true

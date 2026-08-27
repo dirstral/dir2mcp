@@ -79,7 +79,11 @@ func renderRPCID(id interface{}) string {
 	case json.Number:
 		return strings.TrimSpace(v.String())
 	default:
-		return fmt.Sprintf("%v", v)
+		// JSON-RPC 2.0 allows an id to be a string, a number, or null, and
+		// nothing else. Rendering anything else with %v would coin a key from a
+		// boolean, array or object: `true` would become "true" and could target
+		// a call whose id is the STRING "true". Refuse instead of inventing.
+		return ""
 	}
 }
 

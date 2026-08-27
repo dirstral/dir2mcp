@@ -3,6 +3,7 @@ package x402_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -261,5 +262,94 @@ func TestX402Cancel657_UnknownRequestIDIsAccepted(t *testing.T) {
 		if resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("cancellation %q status=%d want=202", body, resp.StatusCode)
 		}
+	}
+}
+
+// ctxProbeClient is a facilitator client that records the context each call
+// receives, so a test can assert the INVARIANT directly: settlement must run
+// on a context the client's cancellation cannot reach.
+//
+// Asserting through a real HTTP facilitator is impossible here: the vendored
+// x402 SDK client does not honour the context on its outbound request, so a
+// cancellable context and a non-cancellable one behave identically end to end.
+// A test written that way passes with the bug present, which is worse than no
+// test. This seam makes the property observable.
+type ctxProbeClient struct {
+	settleCtx   chan context.Context
+	failFirst   atomic.Bool
+	settleCalls atomic.Int64
+}
+
+func (c *ctxProbeClient) Verify(context.Context, string, x402.Requirement) (json.RawMessage, error) {
+	return json.RawMessage(`{"ok":true,"isValid":true,"payer":"payer-1"}`), nil
+}
+
+func (c *ctxProbeClient) Settle(ctx context.Context, _ string, _ x402.Requirement) (json.RawMessage, error) {
+	n := c.settleCalls.Add(1)
+	select {
+	case c.settleCtx <- ctx:
+	default:
+	}
+	if n == 1 && c.failFirst.Load() {
+		// Transient failure: the outcome caches as pending and stays retryable.
+		return nil, errors.New("settle temporarily unavailable")
+	}
+	return json.RawMessage(`{"ok":true,"success":true,"transaction":"tx-1","txHash":"tx-1","network":"eip155:8453"}`), nil
+}
+
+// TestX402Cancel657_RetrySettlementRunsOnAnUncancellableContext pins the second
+// settlement window. The first attempt fails, so the cached outcome stays
+// retryable and a retry of the same (nonce, request) drives settlement again.
+// That retry IS settlement and must get the same protection as the first
+// attempt: aborting it would leave the facilitator's state unknown while the
+// outcome stays retryable, so a later request could settle again.
+func TestX402Cancel657_RetrySettlementRunsOnAnUncancellableContext(t *testing.T) {
+	probe := &ctxProbeClient{settleCtx: make(chan context.Context, 4)}
+	probe.failFirst.Store(true)
+
+	f := newParityFacilitator()
+	fac := httptest.NewServer(f)
+	defer fac.Close()
+	cfg := baseX402Config(t, fac.URL)
+	cfg.X402.Mode = x402.ModeRequired
+	srv := httptest.NewServer(mcp.NewServer(cfg, okRetriever{}, mcp.WithX402Client(probe)).Handler())
+	defer srv.Close()
+	mcpURL := srv.URL + cfg.MCPPath
+	sid := parityInitSession(t, mcpURL)
+	sig := validV2Signature(t, cfg)
+
+	// First attempt: the tool runs, then settlement fails transiently.
+	first := paritySendRPC(t, mcpURL, sid, toolsCallBody(90), map[string]string{
+		x402.HeaderPaymentSignature: sig,
+	})
+	_, _ = io.Copy(io.Discard, first.Body)
+	_ = first.Body.Close()
+	if n := probe.settleCalls.Load(); n != 1 {
+		t.Fatalf("settle attempts after the first call = %d, want 1", n)
+	}
+	<-probe.settleCtx // drain the first attempt's context
+
+	// Retry the SAME (nonce, request): this drives the pending settlement.
+	retry := paritySendRPC(t, mcpURL, sid, toolsCallBody(90), map[string]string{
+		x402.HeaderPaymentSignature: sig,
+	})
+	_, _ = io.Copy(io.Discard, retry.Body)
+	_ = retry.Body.Close()
+	if n := probe.settleCalls.Load(); n != 2 {
+		t.Fatalf("settle attempts after the retry = %d, want 2 (the retry must drive the pending settle)", n)
+	}
+
+	var retryCtx context.Context
+	select {
+	case retryCtx = <-probe.settleCtx:
+	default:
+		t.Fatal("the retry never reached settlement")
+	}
+
+	// The invariant: the retry settled on a context the caller's cancellation
+	// cannot reach. A cancellable context here is the double-settlement hazard,
+	// even though the vendored SDK happens not to act on it today.
+	if retryCtx.Done() != nil {
+		t.Fatal("retry settlement ran on a CANCELLABLE context; a cancellation could abort it and leave the facilitator's state unknown while the outcome stays retryable")
 	}
 }
