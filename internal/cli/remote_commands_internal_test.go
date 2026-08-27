@@ -16,6 +16,11 @@ import (
 // fakeMCPServer answers initialize immediately and delays tools/call by
 // toolDelay. The delay aborts early when the request context is canceled, so
 // cancellation tests finish fast.
+//
+// It must also answer notifications/initialized with 202: since #656 the
+// client completes the bs-005 handshake before any tool call and treats a
+// failed notification as fatal, so a fake that rejects it fails every test
+// here for a reason that has nothing to do with timeouts.
 func fakeMCPServer(t *testing.T, toolDelay time.Duration) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +34,8 @@ func fakeMCPServer(t *testing.T, toolDelay time.Duration) *httptest.Server {
 			w.Header().Set(protocol.MCPSessionHeader, "test-session")
 			w.Header().Set("Content-Type", "application/json")
 			writeRPCResult(w, req.ID, map[string]interface{}{})
+		case protocol.RPCMethodNotificationsInitialized:
+			w.WriteHeader(http.StatusAccepted)
 		case protocol.RPCMethodToolsCall:
 			select {
 			case <-time.After(toolDelay):
