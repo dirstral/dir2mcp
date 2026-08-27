@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"testing"
 )
 
@@ -151,13 +150,11 @@ func TestTranscribe_ServedOutputMatchesTheCanonicalContract_643(t *testing.T) {
 }
 
 // TestTranscribeAndAsk_ServedOutputMatchesTheCanonicalContract_643 is the same
-// guard for dir2mcp_transcribe_and_ask, with one pinned exception: the served
-// schema inherits ask's optional `evidence` verdict (#896), which the canonical
-// transcribe_and_ask.json does not declare yet. Declaring it is a spec-side
-// change, so the exception is tolerated only while the canonical schema lacks
-// the name; the moment the spec declares `evidence`, the filter below stops
-// removing it and the comparison tightens to exact equality on its own. Any
-// OTHER difference is drift today.
+// guard for dir2mcp_transcribe_and_ask. It briefly tolerated one extra: the
+// served schema inherits ask's optional `evidence` verdict (#896), which the
+// canonical transcribe_and_ask.json did not declare. dirstral-spec 0.56.0
+// declares it, so the tolerance is gone and this is a plain exact-equality
+// guard again. Any difference is drift.
 func TestTranscribeAndAsk_ServedOutputMatchesTheCanonicalContract_643(t *testing.T) {
 	t.Parallel()
 	served := servedOutputSchema(t, "dir2mcp_transcribe_and_ask")
@@ -166,7 +163,6 @@ func TestTranscribeAndAsk_ServedOutputMatchesTheCanonicalContract_643(t *testing
 	canonical := canonicalToolOutput(t, "transcribe_and_ask.json")
 	wantProps := schemaPropertyNames(t, canonical, "canonical transcribe_and_ask output")
 	gotProps := schemaPropertyNames(t, served, "served transcribe_and_ask outputSchema")
-	gotProps = withoutKnownExtras(gotProps, wantProps, []string{"evidence"})
 	if !reflect.DeepEqual(gotProps, wantProps) {
 		t.Fatalf("served transcribe_and_ask output properties = %v, canonical = %v (#643)", gotProps, wantProps)
 	}
@@ -176,28 +172,4 @@ func TestTranscribeAndAsk_ServedOutputMatchesTheCanonicalContract_643(t *testing
 	if !reflect.DeepEqual(gotRequired, wantRequired) {
 		t.Fatalf("served transcribe_and_ask output required = %v, canonical = %v (#643)", gotRequired, wantRequired)
 	}
-}
-
-// withoutKnownExtras drops the named extras from got, but only while the
-// canonical set does not declare them, so a later spec-side declaration
-// tightens the guard automatically instead of leaving a stale allowlist.
-func withoutKnownExtras(got, want, extras []string) []string {
-	wantSet := make(map[string]bool, len(want))
-	for _, name := range want {
-		wantSet[name] = true
-	}
-	extraSet := make(map[string]bool, len(extras))
-	for _, name := range extras {
-		if !wantSet[name] {
-			extraSet[name] = true
-		}
-	}
-	out := make([]string, 0, len(got))
-	for _, name := range got {
-		if !extraSet[name] {
-			out = append(out, name)
-		}
-	}
-	sort.Strings(out)
-	return out
 }
