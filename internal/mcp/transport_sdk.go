@@ -441,7 +441,7 @@ func (t *SDKTransport) dispatchSDKRequest(w http.ResponseWriter, req *http.Reque
 	case protocol.RPCMethodNotificationsInitialized:
 		t.handleSDKNotificationsInitialized(w, req, id, hasID)
 	case protocol.RPCMethodNotificationsCancelled:
-		t.handleSDKNotificationsCancelled(w, req, id, hasID, sdkHandler)
+		t.handleSDKNotificationsCancelled(w, req, parsedReq.Params, id, hasID, sdkHandler)
 	case protocol.RPCMethodToolsList:
 		t.handleSDKToolsList(w, req, hasID, sdkHandler)
 	case protocol.RPCMethodToolsCall:
@@ -485,10 +485,14 @@ func (t *SDKTransport) handleSDKNotificationsInitialized(w http.ResponseWriter, 
 // handleSDKUnknownMethod and was 202'd without ever reaching the SDK, so a
 // client cancelling a long ask/transcribe could not stop the server from
 // continuing to spend provider quota (issue #404). Cancellation only reaches an
-// in-flight tool call on the SDK-dispatched path (the default, non-x402 path);
-// the x402 path routes tools/call outside the SDK, so a cancel there is a
-// well-formed 202 no-op rather than an interrupt.
-func (t *SDKTransport) handleSDKNotificationsCancelled(w http.ResponseWriter, req *http.Request, id interface{}, hasID bool, sdkHandler http.Handler) {
+// in-flight tool call on the SDK-dispatched path (the default, non-x402 path).
+//
+// The x402 path routes tools/call outside the SDK, so the SDK cannot cancel it
+// either; that call registers itself in server.paidInFlight and is cancelled
+// here by (session, requestId) before the notification is forwarded (issue
+// #657). The forward still happens in both cases, because the SDK owns
+// cancellation for every non-gated request and must see the notification.
+func (t *SDKTransport) handleSDKNotificationsCancelled(w http.ResponseWriter, req *http.Request, rawParams json.RawMessage, id interface{}, hasID bool, sdkHandler http.Handler) {
 	if hasID {
 		// notifications/cancelled is a notification; an id makes it malformed.
 		// Preserve the JSON-RPC error contract rather than forwarding a
@@ -496,6 +500,9 @@ func (t *SDKTransport) handleSDKNotificationsCancelled(w http.ResponseWriter, re
 		writeError(w, http.StatusOK, id, -32600, "notifications/cancelled must not carry an id", "INVALID_FIELD", false)
 		return
 	}
+	// Session-scoped: a JSON-RPC id is unique only within a session, so an
+	// unscoped lookup would let one client cancel another's paid work.
+	t.server.cancelPaidToolCall(req, rawParams)
 	sdkHandler.ServeHTTP(w, req)
 }
 
@@ -513,7 +520,14 @@ func (t *SDKTransport) handleSDKToolsCall(w http.ResponseWriter, req *http.Reque
 		return
 	}
 	if t.server.x402Enabled {
-		t.server.handleToolsCallRequest(req.Context(), w, req, rawParams, id)
+		// The gated path never enters the SDK, so the SDK cannot cancel it.
+		// Register the call under (session, requestId) for exactly the window
+		// in which cancelling is safe; handleToolsCallRequest releases the
+		// entry before settlement begins (issue #657, paid_inflight.go).
+		ctx, release, cancel := t.server.beginCancellableToolCall(req, id)
+		defer cancel()
+		defer release()
+		t.server.handleToolsCallRequest(ctx, w, req, rawParams, id, release)
 		return
 	}
 	sdkHandler.ServeHTTP(w, req)

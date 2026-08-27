@@ -104,7 +104,17 @@ func buildPaymentResourceURL(baseURL, mcpPath string) string {
 	return baseURL + mcpPath
 }
 
-func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, rawParams json.RawMessage, id interface{}) {
+// leaveCancelWindow is called once the request passes the point where
+// cancelling is safe. See paid_inflight.go: settlement must not be
+// interruptible, or an aborted settle leaves the facilitator's state unknown
+// and a retry could double settle. A nil value means the caller registered no
+// cancellable entry (the non-gated path, or a call with no usable id).
+type leaveCancelWindow func()
+
+func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, rawParams json.RawMessage, id interface{}, leaveWindow leaveCancelWindow) {
+	if leaveWindow == nil {
+		leaveWindow = func() {}
+	}
 	if !s.x402Enabled {
 		s.handleToolsCall(ctx, w, rawParams, id)
 		return
@@ -161,7 +171,7 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 	// Exact idempotent retry of the same (nonce, request): re-surface the
 	// recorded outcome (driving a pending settle to completion). Never a second
 	// execution or re-charge.
-	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, pc) {
+	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, pc, leaveWindow) {
 		return
 	}
 
@@ -193,7 +203,7 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		return
 	}
 
-	s.executeAndSettlePaidToolCall(ctx, w, id, rawParams, pc)
+	s.executeAndSettlePaidToolCall(ctx, w, id, rawParams, pc, leaveWindow)
 }
 
 // handleNonceDecision writes the appropriate response for a non-proceed nonce
@@ -232,7 +242,9 @@ func (s *Server) handleNonceDecision(w http.ResponseWriter, id interface{}, dec 
 // payment, then settles. It owns the reserve->commit/rollback transitions: a
 // tool error rolls the reservation back (no charge), a transient settle failure
 // keeps it held for retry, and settlement success durably consumes the nonce.
-func (s *Server) executeAndSettlePaidToolCall(ctx context.Context, w http.ResponseWriter, id interface{}, rawParams json.RawMessage, pc paymentContext) {
+func (s *Server) executeAndSettlePaidToolCall(ctx context.Context, w http.ResponseWriter, id interface{}, rawParams json.RawMessage, pc paymentContext, leaveWindow leaveCancelWindow) {
+	// Execution IS cancellable: a cancel here aborts the tool, and the error
+	// paths below release the nonce reservation so nothing is charged.
 	result, statusCode, rpcErr := s.processToolsCall(ctx, rawParams)
 	outcome := paymentExecutionOutcome{
 		StatusCode: statusCode,
@@ -272,7 +284,15 @@ func (s *Server) executeAndSettlePaidToolCall(ctx context.Context, w http.Respon
 		return
 	}
 
-	settleResponse, err := s.x402Client.Settle(ctx, pc.signature, s.x402Requirement)
+	// Past this point the tool has run and produced a real result, so the
+	// payment is committed to. Leave the cancellable window BEFORE settling and
+	// settle on a context the client's cancellation cannot reach: an aborted
+	// settle leaves the facilitator's state unknown to us, and a later retry of
+	// the same (nonce, request) could then double settle, which is exactly what
+	// #657 forbids. A cancellation arriving now finds no entry and is a
+	// truthful no-op (issue #657, paid_inflight.go).
+	leaveWindow()
+	settleResponse, err := s.x402Client.Settle(context.WithoutCancel(ctx), pc.signature, s.x402Requirement)
 	if err != nil {
 		// Transient/other settle failure: the executed outcome stays cached and
 		// the reservation stays held so a retry of the same (nonce, request)
@@ -512,7 +532,7 @@ func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, ope
 	writeError(w, statusCode, id, -32000, facErr.Message, facErr.Code, facErr.Retryable)
 }
 
-func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.ResponseWriter, id interface{}, pc paymentContext) bool {
+func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.ResponseWriter, id interface{}, pc paymentContext, leaveWindow leaveCancelWindow) bool {
 	executionKey := pc.executionKey
 	outcome, ok := s.getPaymentExecutionOutcome(executionKey)
 	if !ok {
@@ -523,7 +543,17 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 		return true
 	}
 
-	settleResponse, settleErr := s.x402Client.Settle(ctx, pc.signature, s.x402Requirement)
+	// Driving a PENDING settle to completion is settlement, so it gets the same
+	// protection as the first attempt: leave the cancellable window and settle
+	// on a context the client cannot reach. The tool already ran on the
+	// original request; aborting this retry would leave the facilitator's state
+	// unknown to us while the cached outcome stays retryable, so a later
+	// request could submit settlement again. That is the double settlement
+	// #657 forbids, reached by the retry path instead of the first one.
+	if leaveWindow != nil {
+		leaveWindow()
+	}
+	settleResponse, settleErr := s.x402Client.Settle(context.WithoutCancel(ctx), pc.signature, s.x402Requirement)
 	if settleErr != nil {
 		s.handlePaymentFailure(w, id, "settle", settleErr, executionKey)
 		return true
