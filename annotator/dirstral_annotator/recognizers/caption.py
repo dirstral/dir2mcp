@@ -145,6 +145,7 @@ class SceneCaptionRecognizer:
         batch_size: int = 8,
         min_confidence: float = 0.0,
         windows: Iterable[tuple[float, float]] | None = None,
+        floor_fps: float | None = None,
         similarity: float = CAPTION_RUN_SIMILARITY,
     ):
         if captioner is None:
@@ -168,6 +169,15 @@ class SceneCaptionRecognizer:
         # between a capability and a demo that finds nothing. None means
         # caption every sampled frame (tier B, the floor).
         self.windows = tuple(windows) if windows is not None else None
+        # Tier B, the floor (#860). Aiming alone is an EXCLUSIVE filter, and
+        # #860 measured why that loses the capability: 54 of the 84 plays are
+        # invisible to the aimed tier, and the one fan cutaway found in the
+        # game (a bodyboard rider at t=2294 s) sits in dead time BETWEEN plays,
+        # which is exactly where a broadcast puts its human-interest shots. So
+        # a low rate across the whole file runs alongside the windows, never
+        # instead of them. None means no floor, which is only correct when the
+        # caller has no windows either (then every frame is already captioned).
+        self.floor_fps = floor_fps
         self.similarity = similarity
 
     def _in_window(self, t: float) -> bool:
@@ -175,11 +185,32 @@ class SceneCaptionRecognizer:
             return True
         return any(start <= t <= end for start, end in self.windows)
 
+    def _select(self, frames: list[tuple[float, Path]]) -> list[tuple[float, Path]]:
+        """Pick the frames to caption: every aimed frame, plus a floor tick.
+
+        One extraction pass feeds both tiers, so the floor costs decode it was
+        already paying and adds only its own model time. Selection is by
+        timestamp, so a frame that satisfies both tiers is captioned once: the
+        deduplication is structural rather than a later pass.
+        """
+        if self.windows is None:
+            return frames
+        step = 1.0 / self.floor_fps if self.floor_fps else None
+        next_tick = 0.0
+        selected: list[tuple[float, Path]] = []
+        for t, path in frames:
+            aimed = self._in_window(t)
+            floored = step is not None and t >= next_tick
+            if floored:
+                # Advance past t so a dense aimed window cannot consume many
+                # ticks at once and starve the rest of the file.
+                next_tick = t + step
+            if aimed or floored:
+                selected.append((t, path))
+        return selected
+
     def recognize(self, media_path: Path) -> list[Cue]:
-        frames: list[tuple[float, Path]] = [
-            (t, frame) for t, frame in iter_frames(media_path, fps=self.fps)
-            if self._in_window(t)
-        ]
+        frames = self._select(list(iter_frames(media_path, fps=self.fps)))
         sightings: list[tuple[float, str, float]] = []
         for i in range(0, len(frames), self.batch_size):
             batch = frames[i:i + self.batch_size]

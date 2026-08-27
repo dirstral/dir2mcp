@@ -141,6 +141,40 @@ def test_low_confidence_frames_are_dropped(fake_frames):
     assert len(ungated) == 2, "no gate ships by default; both frames survive"
 
 
+def test_the_floor_runs_alongside_the_windows(fake_frames):
+    """#860's tier B. Aiming alone is an EXCLUSIVE filter, and the measurement
+    says that loses the capability: 54 of the 84 plays are invisible to the
+    aimed tier, and the one fan cutaway in the game sits in dead time BETWEEN
+    plays, which is where a broadcast puts human-interest shots. So the floor
+    must reach frames no window selected.
+    """
+    captions = [("the pitcher throws from the mound", 0.9)] * 12
+    # The moment nobody aimed at: a fan cutaway in dead time.
+    captions[8] = ("a man on a yellow bodyboard in the water", 0.9)
+    captioner, seen = fake_frames(captions)
+
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, windows=[(1.0, 2.0)], floor_fps=0.25
+    ).recognize(MEDIA)
+
+    events = [c.event for c in cues]
+    assert SCENE_OTHER in events, (
+        "the floor never reached the cutaway at t=8; aiming stayed exclusive: %r" % events
+    )
+    # And the floor is a FLOOR, not a second full pass: far fewer than 12.
+    assert sum(seen["batches"]) < 12
+
+
+def test_a_frame_in_both_tiers_is_captioned_once(fake_frames):
+    """The tiers overlap by construction, so selection dedupes by timestamp
+    rather than paying the model twice for one frame."""
+    captioner, seen = fake_frames([("the pitcher throws from the mound", 0.9)] * 4)
+    SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, windows=[(0.0, 3.0)], floor_fps=1.0
+    ).recognize(MEDIA)
+    assert sum(seen["batches"]) == 4, "a frame in both tiers was captioned twice"
+
+
 def test_windows_aim_the_captioner(fake_frames):
     """#860 measured uniform sampling finding 0 of 8 celebration or crowd
     frames, against 6 of 8 when aimed at high-captivatingIndex plays. Aiming is
@@ -151,6 +185,8 @@ def test_windows_aim_the_captioner(fake_frames):
         ("teammates celebrating at home plate", 0.9),
         ("an aerial view of the stadium", 0.9),
     ])
+    # No floor here, so this pins the AIMED tier in isolation: with floor_fps
+    # unset the windows select alone, which is what makes the cost saving real.
     cues = SceneCaptionRecognizer(
         captioner=captioner, fps=1.0, windows=[(1.0, 1.0)]
     ).recognize(MEDIA)

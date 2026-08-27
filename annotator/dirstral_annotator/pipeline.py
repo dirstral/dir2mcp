@@ -185,6 +185,12 @@ class Pipeline:
     caption_fn: object | None = None
     caption_fps: float = 1.0
     caption_windows: tuple[tuple[float, float], ...] | None = None
+    #: Tier B (#860): a low rate across the WHOLE file, alongside the aimed
+    #: windows rather than instead of them. Aiming alone is exclusive, and #860
+    #: measured that 54 of 84 plays are invisible to it while the one fan
+    #: cutaway sits in dead time between plays. Inert when caption_windows is
+    #: None, because then every sampled frame is captioned already.
+    caption_floor_fps: float | None = None
     fps: float = 0.5
     min_confidence: float = 0.0
 
@@ -309,11 +315,13 @@ class Pipeline:
                 # The captioner itself joins the key: a different backend (or a
                 # different prompt behind it) must rebuild rather than silently
                 # reuse a recognizer built for the previous one.
-                (self.caption_fn, self.caption_fps, self.caption_windows),
+                (self.caption_fn, self.caption_fps, self.caption_windows,
+                 self.caption_floor_fps),
                 lambda: SceneCaptionRecognizer(
                     captioner=self.caption_fn,
                     fps=self.caption_fps,
                     windows=self.caption_windows,
+                    floor_fps=self.caption_floor_fps,
                 ),
             )
         if self.news:
