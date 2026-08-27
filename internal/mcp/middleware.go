@@ -153,6 +153,11 @@ func (s *Server) x402Middleware(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		s.handleToolsCallRequest(r.Context(), w, r, rc.req.Params, rc.id)
+		// The direct handler chain reaches the gated path too, so it registers
+		// the call for cancellation exactly as the SDK chain does (issue #657).
+		ctx, release, cancel := s.beginCancellableToolCall(r, rc.id)
+		defer cancel()
+		defer release()
+		s.handleToolsCallRequest(ctx, w, r, rc.req.Params, rc.id, release)
 	})
 }

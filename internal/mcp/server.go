@@ -163,6 +163,11 @@ type Server struct {
 	x402Client      x402.FacilitatorClient
 	x402Requirement x402.Requirement
 	x402Enabled     bool
+	// paidInFlight tracks cancellable x402-gated tool calls by (session,
+	// requestId) so notifications/cancelled can reach a path the SDK never
+	// dispatched (issue #657). See paid_inflight.go for the payment semantics,
+	// in particular why settlement is deliberately outside the window.
+	paidInFlight    *paidInFlightRegistry
 	paymentLogPath  string
 	paymentMu       sync.RWMutex
 	paymentOutcomes map[string]paymentExecutionOutcome
@@ -402,6 +407,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		cfg:             cfg,
 		authToken:       loadAuthToken(cfg),
 		retriever:       retriever,
+		paidInFlight:    newPaidInFlightRegistry(),
 		sessions:        make(map[string]sessionInfo),
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
 
@@ -654,6 +660,16 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeResult(w, http.StatusOK, rc.id, map[string]interface{}{})
+	case protocol.RPCMethodNotificationsCancelled:
+		// The direct chain used to fall through to the default case and 202 a
+		// cancellation without acting on it. It dispatches gated tool calls, so
+		// it must route the cancellation too (issue #657).
+		if rc.hasID {
+			writeError(w, http.StatusOK, rc.id, -32600, "notifications/cancelled must not carry an id", "INVALID_FIELD", false)
+			return
+		}
+		s.cancelPaidToolCall(r, rc.req.Params)
+		w.WriteHeader(http.StatusAccepted)
 	case protocol.RPCMethodToolsList:
 		if !rc.hasID {
 			w.WriteHeader(http.StatusAccepted)
