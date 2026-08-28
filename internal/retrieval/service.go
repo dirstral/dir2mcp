@@ -2179,7 +2179,7 @@ func (s *Service) generateGroundedAnswer(
 	// citable (issue #890); see moments.go.
 	moments := groupMoments(hits)
 	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
-	prompt, usedIdx := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	prompt, usedIdx, contextSection := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
 	// Report a partial reasoning window. The citation list cannot show it: it
 	// reports provenance, not how much of the retrieved evidence the model read
 	// (issue #891). An aggregate answer built on a partial window is a sample,
@@ -2232,24 +2232,7 @@ func (s *Service) generateGroundedAnswer(
 		}
 	}
 
-	return answer, citations, ragContextSection(prompt)
-}
-
-// ragContextSection returns the Context region of a built RAG prompt: the
-// fenced document blocks and nothing else. It stops at the trailing Reminder
-// section (#892), which is server instruction rather than retrieved evidence
-// and would otherwise be handed to the verifier as if it were a passage.
-func ragContextSection(prompt string) string {
-	_, section, ok := strings.Cut(prompt, "\n\nContext:\n")
-	if !ok {
-		return ""
-	}
-	// LastIndex: a document could carry this literal, and cutting at the first
-	// occurrence would hand the verifier a truncated context.
-	if i := strings.LastIndex(section, "\n"+ragReminderHeader); i >= 0 {
-		section = section[:i]
-	}
-	return strings.TrimSpace(section)
+	return answer, citations, contextSection
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
@@ -4143,7 +4126,7 @@ func collapseSpaces(s string) string {
 // mandatory injection guard here, at the one place that also writes the
 // document fence, so the fence and the rule that explains it cannot separate
 // (issue #885).
-func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
+func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int, string) {
 	systemPrompt = composeSystemPrompt(systemPrompt)
 	maxContextChars = normalizeMaxContextChars(maxContextChars)
 
@@ -4153,6 +4136,13 @@ func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, f
 	b.WriteString("Question:\n")
 	b.WriteString(question)
 	b.WriteString("\n\nContext:\n")
+	// Where the retrieved evidence starts. Recorded as an offset while the
+	// prompt is being written, because the caller (#336) needs these exact
+	// bytes and MUST NOT recover them by searching the finished string: the
+	// question is written above this point and an attacker who puts the
+	// Context marker inside a question would otherwise hand their own text to
+	// the verifier as evidence.
+	contextStart := b.Len()
 
 	remaining := maxContextChars
 	limit := ragContextDocLimit(len(moments), maxContextChars)
@@ -4184,10 +4174,16 @@ func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, f
 	// It is not deducted from maxContextChars. That budget bounds the retrieved
 	// CONTEXT, and this is server instruction text, counted the same way the
 	// system prompt and the question already are.
+	//
+	// The context region ends here, before the reminder: the reminder is server
+	// instruction, not retrieved evidence, and handing it to the verifier as a
+	// passage would let the server's own words support a claim.
+	full := b.String()
+	contextSection := strings.TrimSpace(full[contextStart:])
 	if carriesAnswerLanguageRule(systemPrompt) {
 		b.WriteString(ragLanguageReminder)
 	}
-	return b.String(), sortedIndices(used)
+	return b.String(), sortedIndices(used), contextSection
 }
 
 // carriesAnswerLanguageRule reports whether the prompt in force states the

@@ -75,8 +75,13 @@ func buildFaithfulnessPrompt(question, answer, contextSection string) string {
 	b.WriteString(faithfulUnsupportedToken)
 	b.WriteString(".\n\n")
 	b.WriteString(promptfence.Guard("check"))
+	// The question is fenced for the same reason the answer is: it is caller
+	// input, and the verifier reads it in the same window as the evidence. An
+	// unfenced question that carries its own "Context:" heading would sit above
+	// the real passages and read as evidence, which is exactly the claim the
+	// verifier exists to refuse (CWE-74).
 	b.WriteString("\n\nQuestion:\n")
-	b.WriteString(question)
+	b.WriteString(promptfence.Wrap("", question))
 	b.WriteString("\n\nPassages:\n")
 	b.WriteString(contextSection)
 	b.WriteString("\n\nAnswer to check:\n")
