@@ -49,8 +49,9 @@ func (f *contextAwareTranslator) Generate(_ context.Context, prompt string) (str
 	f.mu.Unlock()
 
 	if !isBatch {
-		parts := strings.Split(prompt, "\n\n")
-		return "T[" + strings.TrimSpace(parts[len(parts)-1]) + "]", nil
+		// The source sits inside the untrusted-data fence (#888); the prompt no
+		// longer ends with it, because the instruction is restated after.
+		return "T[" + fencedPayload(prompt) + "]", nil
 	}
 	// Echo exactly the numbered targets, translated; stop at the context margin.
 	var out []string
@@ -96,8 +97,8 @@ func (f *malformedBatchTranslator) Generate(_ context.Context, prompt string) (s
 		return "here is the whole translation as one blob with no numbering at all", nil
 	}
 	f.lineCalls++
-	parts := strings.Split(prompt, "\n\n")
-	return "T[" + strings.TrimSpace(parts[len(parts)-1]) + "]", nil
+	// Per-line fallback: the source is inside the fence (#888).
+	return "T[" + fencedPayload(prompt) + "]", nil
 }
 
 func (f *malformedBatchTranslator) counts() (batch, line int) {

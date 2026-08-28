@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/promptfence"
+
 	"github.com/dirstral/dir2mcp/internal/config"
 )
 
@@ -30,24 +32,38 @@ func TestBuildTranslatePrompt_GlossaryInjectedDeterministic(t *testing.T) {
 	if ai >= mi || mi >= zi {
 		t.Errorf("glossary entries not in sorted order (Aegis<Mistral<Zephyr): %d,%d,%d\n%s", ai, mi, zi, got)
 	}
-	if !strings.HasSuffix(got, "The Aegis holds.") {
-		t.Errorf("source text lost from prompt:\n%s", got)
+	// The prompt no longer ENDS with the source: since #888 the source sits
+	// inside the untrusted-data fence and the instruction is restated after it.
+	payload, ok := promptfence.Payload(got)
+	if !ok {
+		t.Fatalf("source text is not fenced:\n%s", got)
+	}
+	if payload != "The Aegis holds." {
+		t.Errorf("fenced source = %q, want the source text", payload)
 	}
 }
 
 // TestBuildTranslatePrompt_NoGlossaryUnchanged asserts an empty/nil glossary
-// injects nothing and reproduces the historical prompt (blank line before the
-// source text) byte-for-byte, so today's behaviour is preserved.
+// injects nothing, comparing the whole prompt byte-for-byte so a change
+// anywhere in it (not just the tail) is caught.
+//
+// The expected string changed with #888: the prompt now carries the
+// untrusted-data guard, fences the source, and restates the output rule after
+// it. That is a DELIBERATE break of the previous byte-for-byte guarantee, and
+// the derivation identity carries a fence tag so no cached translation
+// produced by the old prompt is served as if it came from this one. The
+// assertion stays a full comparison rather than relaxing to Contains, so the
+// new form is pinned exactly as tightly as the old one was.
 func TestBuildTranslatePrompt_NoGlossaryUnchanged(t *testing.T) {
-	// The exact pre-#574 prompt: the fixed instruction line, a blank line, then the
-	// source text — with NO glossary block. Compared in full so a change anywhere in
-	// the legacy prompt (not just the tail) fails the compat guarantee.
-	const historical = "Translate the following text into es. Preserve meaning faithfully. " +
-		"Return only the translated text, with no preamble, quotes, or explanation.\n\nhello"
+	want := "Translate the following text into es. Preserve meaning faithfully. " +
+		"Return only the translated text, with no preamble, quotes, or explanation.\n" +
+		"\n" + promptfence.Guard("translate") + "\n" +
+		promptfence.Wrap("", "hello") +
+		"\nReturn only the translated text."
 	for _, g := range []map[string]string{nil, {}} {
 		got := buildTranslatePrompt("hello", "es", g)
-		if got != historical {
-			t.Errorf("empty-glossary prompt diverged from the historical form byte-for-byte:\n got=%q\nwant=%q", got, historical)
+		if got != want {
+			t.Errorf("prompt diverged byte-for-byte:\n got=%q\nwant=%q", got, want)
 		}
 	}
 }
