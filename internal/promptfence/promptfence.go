@@ -117,9 +117,20 @@ func Payload(s string) (string, bool) {
 	if closeAt < 0 {
 		return "", false
 	}
-	open := strings.LastIndex(s[:closeAt], OpenMarkerEnd+"\n")
+	// Anchor on the OPEN MARKER, then take ITS terminator, rather than
+	// scanning back for the nearest terminator. Neutralize deliberately leaves
+	// a bare ">>>" inside body text alone, because within the fence it cannot
+	// terminate anything, so a cue containing "\n>>>\n" carries a terminator
+	// that is not the fence's. Scanning back found that one and returned only
+	// the text after it, silently dropping everything before.
+	open := strings.LastIndex(s[:closeAt], OpenMarker)
 	if open < 0 {
 		return "", false
 	}
-	return strings.TrimSpace(s[open+len(OpenMarkerEnd)+1 : closeAt]), true
+	term := strings.Index(s[open:closeAt], OpenMarkerEnd+"\n")
+	if term < 0 {
+		return "", false
+	}
+	start := open + term + len(OpenMarkerEnd) + 1
+	return strings.TrimSpace(s[start:closeAt]), true
 }

@@ -154,3 +154,26 @@ func TestPayloadTakesTheLastFenceWhenSeveralArePresent(t *testing.T) {
 		t.Fatalf("Payload = %q (ok=%v), want the LAST fenced block", got, ok)
 	}
 }
+
+// TestPayloadSurvivesABareTerminatorInsideTheBody is the case a backward scan
+// got wrong. Neutralize deliberately leaves a bare ">>>" in body text alone,
+// because inside the fence it terminates nothing, so a cue can legitimately
+// contain one. Scanning back for the nearest terminator found THAT one and
+// returned only the text after it, silently dropping everything before.
+func TestPayloadSurvivesABareTerminatorInsideTheBody(t *testing.T) {
+	body := "first\n" + OpenMarkerEnd + "\nsecond"
+	got, ok := Payload(Wrap("", body))
+	if !ok {
+		t.Fatal("no fence found")
+	}
+	if got != body {
+		t.Fatalf("Payload = %q, want the whole body %q (text before the embedded terminator was dropped)", got, body)
+	}
+}
+
+func TestPayloadStillWorksWithALabel(t *testing.T) {
+	got, ok := Payload(Guard("translate") + "\n" + Wrap("notes.txt", "the body"))
+	if !ok || got != "the body" {
+		t.Fatalf("Payload = %q (ok=%v), want %q", got, ok, "the body")
+	}
+}
