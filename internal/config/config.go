@@ -51,7 +51,21 @@ const (
 	// domain-free) summary prompt template, part of the summary derivation
 	// identity (§8.6.7).
 	DefaultHierarchicalMaxTokens     = 512
-	DefaultHierarchicalPromptVersion = "v1"
+	DefaultHierarchicalPromptVersion = HierarchicalPromptVersionV2
+	// HierarchicalPromptVersionV1 is the original summary prompt, which sent the
+	// document to the model as plain prompt. HierarchicalPromptVersionV2 fences
+	// it as untrusted DATA (issue #888); the summary is embedded and retrieved,
+	// so a file that talked its way into its own summary would steer how it is
+	// found. v2 is the default and v1 stays selectable for an operator
+	// deferring the re-derivation it costs.
+	//
+	// Unlike the contextual prompt these are not template SELECTORS with a
+	// registry: the built-in instructions live in ingest.buildSummaryPrompt and
+	// the version chooses whether they are fenced. The version reaches the
+	// summary cache key through activeSummaryIdentity, so bumping it invalidates
+	// cached summaries, which is what makes changing the built-in text safe.
+	HierarchicalPromptVersionV1 = "v1"
+	HierarchicalPromptVersionV2 = "v2"
 )
 
 const EffectiveConfigSnapshotFile = ".dir2mcp.yaml.snapshot"

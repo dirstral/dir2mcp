@@ -11,6 +11,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/statefs"
@@ -341,6 +342,14 @@ func (s *Service) summaryCacheKey(sourceText string) string {
 	return computeContentHash([]byte(strings.Join(parts, "\x00")))
 }
 
+// BuildSummaryPromptForTest exposes the assembled summary prompt to tests in
+// the tests/ tree, so the #888 fence can be asserted on the exact string the
+// model receives rather than on a reconstruction of it.
+func (s *Service) BuildSummaryPromptForTest(sourceText string) string {
+	return buildSummaryPrompt(sourceText, s.cfg.RetrievalHierarchicalPrompt,
+		strings.TrimSpace(s.cfg.RetrievalHierarchicalPromptVersion))
+}
+
 // SummaryCacheKey exposes summaryCacheKey for tests in the tests/ tree so the
 // {source, provider/model, effective prompt} → key binding (SPEC §8.6.7) can be
 // asserted directly.
@@ -382,7 +391,8 @@ func (s *Service) readOrComputeSummary(ctx context.Context, sourceText string) (
 // model.BoundedGenerator (a non-positive bound falls back to the generator's own
 // default, per the BoundedGenerator contract).
 func (s *Service) generateSummaryText(ctx context.Context, sourceText string) (string, error) {
-	prompt := buildSummaryPrompt(sourceText, s.cfg.RetrievalHierarchicalPrompt)
+	prompt := buildSummaryPrompt(sourceText, s.cfg.RetrievalHierarchicalPrompt,
+		strings.TrimSpace(s.cfg.RetrievalHierarchicalPromptVersion))
 	maxTokens := s.cfg.RetrievalHierarchicalMaxTokens
 	if maxTokens > 0 {
 		if bg, ok := s.summarizer.(model.BoundedGenerator); ok {
@@ -399,8 +409,9 @@ func (s *Service) generateSummaryText(ctx context.Context, sourceText string) (s
 // An operator override replaces the instruction block verbatim; the source text
 // is always appended under a fixed delimiter so the override cannot silently
 // drop the material being summarized.
-func buildSummaryPrompt(sourceText, override string) string {
+func buildSummaryPrompt(sourceText, override, version string) string {
 	instructions := strings.TrimSpace(override)
+	fenced := instructions == "" && version != config.HierarchicalPromptVersionV1
 	if instructions == "" {
 		instructions = strings.Join([]string{
 			"Write a concise summary of the document below.",
@@ -411,7 +422,23 @@ func buildSummaryPrompt(sourceText, override string) string {
 	}
 	var b strings.Builder
 	b.WriteString(instructions)
+	if !fenced {
+		// v1, or an operator's own instructions. An override is the operator's
+		// prompt to write, and silently fencing it would change the prompt they
+		// authored, so the fence is only added to the text this file owns.
+		b.WriteString("\n\nDocument:\n")
+		b.WriteString(sourceText)
+		return b.String()
+	}
+	// v2 (#888): the document is untrusted DATA. The summary this produces is
+	// EMBEDDED and retrieved, so a file that talked its way into its own
+	// summary would steer how it is found.
+	b.WriteString("\n\n")
+	b.WriteString(promptfence.Guard("summarize"))
 	b.WriteString("\n\nDocument:\n")
-	b.WriteString(sourceText)
+	b.WriteString(promptfence.Wrap("", sourceText))
+	// Restated after the document, per #892: the nearest instruction wins on a
+	// small model, and the document sits between the instructions and the answer.
+	b.WriteString("\n\nOutput only the summary text, with no preamble, heading, or commentary.")
 	return b.String()
 }
