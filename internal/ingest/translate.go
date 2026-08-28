@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 )
 
@@ -162,15 +163,30 @@ func (s *Service) translateContextLines() int {
 // that explicit opt-out. It is chat-engine only: the whisper engine keys its own
 // cache on the STT identity (readOrComputeWhisperTranslation) and never consults
 // this identity, so its cache is untouched.
+// translatePromptFenceTag joins the translate derivation identity so the #888
+// fence change misses stale caches. It is a version marker, not a knob: unlike
+// the contextual and summary prompts, translate has no prompt_version config
+// surface, and inventing one here would be adding an opt-out for a security
+// fix rather than preserving an existing choice.
+const translatePromptFenceTag = "f2"
+
 func (s *Service) translateWindowShape() string {
 	if s.translateEngine == "whisper" {
+		// Whisper translates audio directly and never sees these prompts, so
+		// the fence tag below must not reach it: folding it in would re-derive
+		// every whisper translation for a prompt change that cannot affect it.
 		return ""
 	}
-	w, m := s.translateWindowLines(), s.translateContextLines()
-	if w <= 1 && m == 0 {
-		return ""
+	shape := ""
+	if w, m := s.translateWindowLines(), s.translateContextLines(); w > 1 || m != 0 {
+		shape = fmt.Sprintf("cw%dc%d", w, m)
 	}
-	return fmt.Sprintf("cw%dc%d", w, m)
+	// The chat prompts are fenced since #888, which changes what the model is
+	// asked and therefore what it returns. A stale cached translation would be
+	// mislabeled by the rep's recorded provider/model, exactly as the window
+	// shape comment above reasons, so the fence joins the identity and the
+	// change misses the cache.
+	return shape + translatePromptFenceTag
 }
 
 // translateWindow translates order[start:end] in a single numbered batch, giving
@@ -327,8 +343,15 @@ func buildTranslatePrompt(text, targetLang string, glossary map[string]string) s
 	b.WriteString(". Preserve meaning faithfully. Return only the translated text, ")
 	b.WriteString("with no preamble, quotes, or explanation.\n")
 	writeGlossaryGuidance(&b, glossary)
+	// The cue is untrusted DATA (#888): a subtitle line saying "ignore the
+	// above" is text an attacker may have written, and the translation is
+	// stored and indexed.
 	b.WriteString("\n")
-	b.WriteString(text)
+	b.WriteString(promptfence.Guard("translate"))
+	b.WriteString("\n")
+	b.WriteString(promptfence.Wrap("", text))
+	// Restated after the data, per #892: the nearest instruction wins.
+	b.WriteString("\nReturn only the translated text.")
 	return b.String()
 }
 
@@ -355,36 +378,69 @@ func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []
 	b.WriteString("merge, renumber, or reorder lines, and never output the context lines. ")
 	b.WriteString("No preamble, quotes, or explanation.\n")
 	writeGlossaryGuidance(&b, glossary)
+	b.WriteString("\n")
+	b.WriteString(promptfence.Guard("translate"))
+	b.WriteString("\n")
 
+	// ONE fence around the whole payload region, not one per line (#888). The
+	// numbered structure has to survive intact inside it: the response contract
+	// is positional ("N: <translation>", verified 1:1 by
+	// parseNumberedTranslations, which safe-degrades on any mismatch), so
+	// per-line markers would put marker text between the number and the cue and
+	// risk silently dropping a whole window's translations.
+	var payload strings.Builder
 	writeContext := func(heading string, idxs []int) {
 		if len(idxs) == 0 {
 			return
 		}
-		b.WriteString("\n")
-		b.WriteString(heading)
-		b.WriteString("\n")
+		payload.WriteString("\n")
+		payload.WriteString(heading)
+		payload.WriteString("\n")
 		for _, idx := range idxs {
-			b.WriteString("- ")
-			b.WriteString(cells[idx].body)
-			b.WriteString("\n")
+			payload.WriteString("- ")
+			payload.WriteString(cells[idx].body)
+			payload.WriteString("\n")
 		}
 	}
 
 	writeContext("Context before (do NOT translate or return):", before)
-	b.WriteString("\nLines to translate:\n")
+	payload.WriteString("\nLines to translate:\n")
 	for n, idx := range targets {
-		b.WriteString(strconv.Itoa(n + 1))
-		b.WriteString(": ")
-		b.WriteString(cells[idx].body)
-		b.WriteString("\n")
+		payload.WriteString(strconv.Itoa(n + 1))
+		payload.WriteString(": ")
+		payload.WriteString(cells[idx].body)
+		payload.WriteString("\n")
 	}
 	writeContext("Context after (do NOT translate or return):", after)
+
+	b.WriteString(promptfence.Wrap("", payload.String()))
+	// Restated after the data, per #892: the nearest instruction wins, and the
+	// numbering contract is the one that must survive.
+	b.WriteString("\nReturn EXACTLY one translated line per numbered input, in the form ")
+	b.WriteString("\"N: <translation>\", and never output the context lines.")
 	return b.String()
 }
 
 // numberedTranslationRE matches a "N: <text>" / "N. <text>" / "N) <text>"
 // response line, capturing the 1-based index and the translated text.
 var numberedTranslationRE = regexp.MustCompile(`^\s*(\d+)\s*[:.)]\s?(.*)$`)
+
+// stripFenceEcho removes fence markers a model echoed back into a translation.
+// The prompt now carries them (#888), and a model that repeats one would
+// otherwise write it into a stored, indexed subtitle: the parser treats an
+// unnumbered line as a continuation and would append it to the translation
+// above. Defensive, cheap, and it cannot damage real subtitle text, which does
+// not contain these literals.
+func stripFenceEcho(s string) string {
+	for _, marker := range []string{
+		promptfence.OpenMarker + promptfence.OpenMarkerEnd,
+		promptfence.CloseMarker,
+		promptfence.OpenMarker,
+	} {
+		s = strings.ReplaceAll(s, marker, "")
+	}
+	return strings.TrimSpace(s)
+}
 
 // parseNumberedTranslations parses a windowed batch response into exactly n
 // translations, indexed 0..n-1 by the model's 1-based numbering. It enforces the
@@ -423,6 +479,11 @@ func parseNumberedTranslations(raw string, n int) ([]string, bool) {
 	}
 	if filled != n {
 		return nil, false
+	}
+	// Drop any fence marker the model echoed back (#888) before the text is
+	// stored and indexed.
+	for i := range out {
+		out[i] = stripFenceEcho(out[i])
 	}
 	return out, true
 }
@@ -480,3 +541,38 @@ func formatTimestampMarker(ms int) string {
 	}
 	return "[" + base + "]"
 }
+
+// Test seams for the tests/ tree (issue #888): the fence must be asserted on
+// the exact strings the model receives and on the identity that guards the
+// cache, not on reconstructions of them.
+
+// BuildTranslatePromptForTest exposes the per-line prompt.
+func BuildTranslatePromptForTest(text, targetLang string, glossary map[string]string) string {
+	return buildTranslatePrompt(text, targetLang, glossary)
+}
+
+// BuildWindowTranslatePromptForTest exposes the windowed prompt, taking cue
+// bodies directly so a test does not have to build translateCell values.
+func BuildWindowTranslatePromptForTest(before, targets, after []string, targetLang string) string {
+	cells := make([]translateCell, 0, len(before)+len(targets)+len(after))
+	idx := func(bodies []string) []int {
+		out := make([]int, 0, len(bodies))
+		for _, body := range bodies {
+			cells = append(cells, translateCell{body: body})
+			out = append(out, len(cells)-1)
+		}
+		return out
+	}
+	beforeIdx, targetIdx, afterIdx := idx(before), idx(targets), idx(after)
+	return buildWindowTranslatePrompt(cells, beforeIdx, targetIdx, afterIdx, targetLang, nil)
+}
+
+// ParseNumberedTranslationsForTest exposes the 1:1 batch parser, including its
+// defensive stripping of echoed fence markers.
+func ParseNumberedTranslationsForTest(raw string, n int) ([]string, bool) {
+	return parseNumberedTranslations(raw, n)
+}
+
+// TranslateWindowShapeForTest exposes the shape folded into the translate
+// derivation identity.
+func (s *Service) TranslateWindowShapeForTest() string { return s.translateWindowShape() }

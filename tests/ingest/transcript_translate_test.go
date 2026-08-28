@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
@@ -28,11 +29,47 @@ func (f *fakeTranslator) Generate(_ context.Context, prompt string) (string, err
 	defer f.mu.Unlock()
 	f.calls++
 	f.prompt = prompt
-	// The prompt ends with the source line text after a blank line; echo a
-	// translated marker plus the original so output is non-empty and traceable.
-	parts := strings.Split(prompt, "\n\n")
-	src := parts[len(parts)-1]
-	return "translated:" + src, nil
+	// The source text is what sits INSIDE the untrusted-data fence (#888).
+	// Reading it from the fence rather than from "the last blank-line-separated
+	// block" keeps this fake conformant: the prompt no longer ends with the
+	// payload, because the instruction is restated after it.
+	return "translated:" + fencedPayload(prompt), nil
+}
+
+// numberedEcho answers a windowed batch with the strict "N: <translation>"
+// contract the caller verifies 1:1, so a fake exercises the windowed path
+// instead of tripping the safe-degrade to per-line.
+func numberedEcho(payload string) string {
+	var out []string
+	inTargets := false
+	for _, line := range strings.Split(payload, "\n") {
+		switch {
+		case strings.HasPrefix(line, "Lines to translate:"):
+			inTargets = true
+		case strings.HasPrefix(line, "Context after"):
+			inTargets = false
+		case inTargets && strings.TrimSpace(line) != "":
+			if m := strings.SplitN(line, ": ", 2); len(m) == 2 {
+				out = append(out, m[0]+": translated:"+m[1])
+			}
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// fencedPayload returns the text inside the fence, or the whole prompt when
+// there is none (which would itself be a defect worth surfacing in whichever
+// assertion consumes this).
+//
+// It delegates to promptfence.Payload rather than scanning for markers here:
+// the guard sentence names both markers, so a forward scan finds the guard's
+// mention instead of the fence and returns the guard's tail glued to the
+// payload. That is exactly the bug this helper had.
+func fencedPayload(prompt string) string {
+	if payload, ok := promptfence.Payload(prompt); ok {
+		return payload
+	}
+	return prompt
 }
 
 func (f *fakeTranslator) callCount() int {
@@ -359,8 +396,7 @@ func (b *boundedFakeTranslator) Generate(_ context.Context, prompt string) (stri
 	defer b.mu.Unlock()
 	b.calls++
 	b.lastMaxToken = 0
-	parts := strings.Split(prompt, "\n\n")
-	return "translated:" + parts[len(parts)-1], nil
+	return "translated:" + fencedPayload(prompt), nil
 }
 
 func (b *boundedFakeTranslator) GenerateWithMaxTokens(_ context.Context, prompt string, maxTokens int) (string, error) {
@@ -368,8 +404,13 @@ func (b *boundedFakeTranslator) GenerateWithMaxTokens(_ context.Context, prompt 
 	defer b.mu.Unlock()
 	b.calls++
 	b.lastMaxToken = maxTokens
-	parts := strings.Split(prompt, "\n\n")
-	return "translated:" + parts[len(parts)-1], nil
+	// A windowed batch must answer the numbered contract, or the caller
+	// safe-degrades to per-line and this fake would silently measure the wrong
+	// path (it did: the cap assertion saw 512 instead of 512*targets).
+	if payload := fencedPayload(prompt); strings.Contains(payload, "Lines to translate:") {
+		return numberedEcho(payload), nil
+	}
+	return "translated:" + fencedPayload(prompt), nil
 }
 
 func (b *boundedFakeTranslator) observed() (calls, lastMaxToken int) {

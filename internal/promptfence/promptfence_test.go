@@ -123,3 +123,34 @@ func TestGuardFallsBackToANeutralVerb(t *testing.T) {
 		}
 	}
 }
+
+// TestPayloadIgnoresTheGuardsOwnMentionOfTheMarkers pins the trap this helper
+// exists for. Guard() names both markers, so a forward scan finds the guard
+// sentence rather than the fence and returns the guard's tail glued to the
+// payload. That bug appeared four separate times before the helper existed.
+func TestPayloadIgnoresTheGuardsOwnMentionOfTheMarkers(t *testing.T) {
+	prompt := "Do the thing.\n" + Guard("translate") + "\n" + Wrap("", "the real payload")
+	got, ok := Payload(prompt)
+	if !ok {
+		t.Fatalf("no fence found in:\n%s", prompt)
+	}
+	if got != "the real payload" {
+		t.Fatalf("Payload = %q, want %q (the guard's marker mention leaked in)", got, "the real payload")
+	}
+}
+
+func TestPayloadReportsAbsenceRatherThanGuessing(t *testing.T) {
+	for _, s := range []string{"", "no fence here", Guard("translate")} {
+		if got, ok := Payload(s); ok {
+			t.Fatalf("Payload(%q) reported a fence and returned %q", s, got)
+		}
+	}
+}
+
+func TestPayloadTakesTheLastFenceWhenSeveralArePresent(t *testing.T) {
+	prompt := Wrap("document", "first") + "\n" + Wrap("chunk", "second")
+	got, ok := Payload(prompt)
+	if !ok || got != "second" {
+		t.Fatalf("Payload = %q (ok=%v), want the LAST fenced block", got, ok)
+	}
+}
