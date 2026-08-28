@@ -1686,7 +1686,7 @@ func Default() Config {
 		RetrievalContextualProvider:      "",
 		RetrievalContextualModel:         "",
 		RetrievalContextualMaxTokens:     DefaultContextualMaxTokens,
-		RetrievalContextualPromptVersion: ContextualPromptVersionV1,
+		RetrievalContextualPromptVersion: ContextualPromptVersionV2,
 		RetrievalContextualPrompt:        "",
 		// CrossLingualEnabled defaults to false (disabled): cross-lingual query
 		// expansion is off unless explicitly enabled. The target-langs list is
