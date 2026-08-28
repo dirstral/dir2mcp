@@ -467,6 +467,9 @@ type Service struct {
 	// hydeSuperlative additionally enables HyDE for superlative questions only
 	// (#897, retrieval.hyde.superlative); see superlative.go.
 	hydeSuperlative bool
+	// verifyFaithfulnessEnabled turns on the post-generation grounding check
+	// (#336, rag.verify_faithfulness); see faithfulness.go.
+	verifyFaithfulnessEnabled bool
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -769,14 +772,15 @@ func (s *Service) SetMMR(enabled bool, lambda float64) {
 	s.mmrLambda = lambda
 }
 
-// SetHyDE wires the opt-in HyDE (Hypothetical Document Embeddings) query
-// transform (config retrieval.hyde.enabled / retrieval.hyde.mode). When enabled
-// and a generator is configured, Search generates a short hypothetical answer to
-// the query, embeds it, and retrieves with that text — fused with the raw-query
-// results (mode "fuse", the default) or used alone (mode "replace"). An empty or
-// unrecognized mode normalizes to "fuse". A generation failure degrades
-// gracefully to the raw query (never fatal). Config-only; the engine wires this
-// from config at construction time, mirroring SetMinScore.
+// SetVerifyFaithfulness wires the post-generation grounding check (#336). When
+// enabled, every answered ask costs one extra generation call, and an answer
+// the verifier cannot support is replaced by an explicit refusal.
+func (s *Service) SetVerifyFaithfulness(enabled bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.verifyFaithfulnessEnabled = enabled
+}
+
 // SetHyDESuperlative wires superlative-only HyDE (issue #897, config
 // retrieval.hyde.superlative): when set, a question whose surface form is a
 // superlative has the HyDE transform enabled even while the global flag is
@@ -787,6 +791,14 @@ func (s *Service) SetHyDESuperlative(enabled bool) {
 	s.hydeSuperlative = enabled
 }
 
+// SetHyDE wires the opt-in HyDE (Hypothetical Document Embeddings) query
+// transform (config retrieval.hyde.enabled / retrieval.hyde.mode). When enabled
+// and a generator is configured, Search generates a short hypothetical answer to
+// the query, embeds it, and retrieves with that text — fused with the raw-query
+// results (mode "fuse", the default) or used alone (mode "replace"). An empty or
+// unrecognized mode normalizes to "fuse". A generation failure degrades
+// gracefully to the raw query (never fatal). Config-only; the engine wires this
+// from config at construction time, mirroring SetMinScore.
 func (s *Service) SetHyDE(enabled bool, mode string) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != hydeModeReplace {
@@ -2090,7 +2102,30 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		// obtained (#685). Answer without retrieval and keep citations empty.
 		answer = s.answerWithoutRetrieval(ctx, question)
 	case s.gen != nil && len(hits) > 0:
-		answer, citations = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
+		var shown string
+		answer, citations, shown = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
+		// Grounding check (#336): read the answer back against the exact
+		// context the model was shown. An unsupported answer is withheld
+		// rather than published, because the absolute evidence threshold
+		// cannot catch a claim the passages do not make; only this can.
+		if s.verifyFaithfulness(ctx, question, answer, shown) == faithfulnessUnsupported {
+			s.logf("faithfulness: withholding an answer the verifier could not support against %d retrieved chunks", len(hits))
+			indexingComplete, _ := s.IndexingComplete(ctx)
+			return model.AskResult{
+				Question: question,
+				Answer:   unfaithfulAnswer(),
+				// Empty, like every other refusal: citing the passages would
+				// attach them to a claim they were just judged not to support.
+				Citations:        []model.Citation{},
+				Hits:             hits,
+				IndexingComplete: indexingComplete,
+				// The retrieved evidence was strong enough to answer from; what
+				// failed is the answer, so the eligible set's verdict is
+				// reported honestly rather than downgraded to look like a
+				// weak-evidence abstention.
+				EvidenceVerdict: aggregateEvidenceVerdict(hits),
+			}, nil
+		}
 	}
 	answer = ensureAnswerAttributions(answer, citations)
 
@@ -2119,9 +2154,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 // citations that survive it. Extracted from Ask purely to keep Ask's
 // cyclomatic complexity within the repo's gocyclo budget; the logic is
 // unchanged.
+// It additionally returns the VERBATIM context region of the prompt it built,
+// so the #336 grounding check verifies against the exact bytes the model was
+// shown rather than a re-rendered approximation. That region is "" when nothing
+// was placed.
 func (s *Service) generateGroundedAnswer(
 	ctx context.Context, question, fallback string, hits []model.SearchHit, citations []model.Citation,
-) (string, []model.Citation) {
+) (string, []model.Citation, string) {
 	answer := fallback
 	s.metaMu.RLock()
 	systemPrompt := s.ragSystemPrompt
@@ -2193,7 +2232,24 @@ func (s *Service) generateGroundedAnswer(
 		}
 	}
 
-	return answer, citations
+	return answer, citations, ragContextSection(prompt)
+}
+
+// ragContextSection returns the Context region of a built RAG prompt: the
+// fenced document blocks and nothing else. It stops at the trailing Reminder
+// section (#892), which is server instruction rather than retrieved evidence
+// and would otherwise be handed to the verifier as if it were a passage.
+func ragContextSection(prompt string) string {
+	_, section, ok := strings.Cut(prompt, "\n\nContext:\n")
+	if !ok {
+		return ""
+	}
+	// LastIndex: a document could carry this literal, and cutting at the first
+	// occurrence would hand the verifier a truncated context.
+	if i := strings.LastIndex(section, "\n"+ragReminderHeader); i >= 0 {
+		section = section[:i]
+	}
+	return strings.TrimSpace(section)
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {

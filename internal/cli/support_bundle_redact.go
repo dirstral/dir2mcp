@@ -129,6 +129,7 @@ var snapshotAllowedKeys = map[string]bool{
 	"retrieval_mmr_lambda":                  true,
 	"retrieval_hyde_enabled":                true,
 	"retrieval_hyde_superlative":            true,
+	"rag_verify_faithfulness":               true,
 	"retrieval_hyde_mode":                   true,
 	"retrieval_contextual_enabled":          true,
 	"retrieval_contextual_provider":         true,

@@ -448,6 +448,22 @@ type Config struct {
 	// hypothetical-document embedding alone. Ignored when RetrievalHyDEEnabled is
 	// false. An empty value normalizes to "fuse".
 	RetrievalHyDEMode string
+	// RAGVerifyFaithfulness turns on the post-generation grounding check
+	// (config `rag.verify_faithfulness`, issue #336). After an answer is
+	// generated and its citations narrowed to the in-context set, a second
+	// generation call is asked whether every claim in the answer is supported
+	// by the context the model was actually shown. An unsupported answer is
+	// replaced by an explicit refusal rather than published.
+	//
+	// Measured motivation: on the pilot corpus "who was ejected from the game"
+	// returned a NAMED player, although the word never appears in any of the
+	// 892 chunks. Retrieval was not at fault; the nearest chunk describes the
+	// same player CHALLENGING a call, and the model made the leap. The
+	// absolute evidence threshold cannot catch that, because the evidence is
+	// genuinely relevant: only reading the answer against the context can.
+	//
+	// Off by default: it costs one extra generation call per answered ask.
+	RAGVerifyFaithfulness bool
 	// RetrievalHyDESuperlative additionally enables the HyDE transform for
 	// SUPERLATIVE questions only (config `retrieval.hyde.superlative`, issue
 	// #897), independently of RetrievalHyDEEnabled. The #897 measurement found
@@ -1282,6 +1298,7 @@ type fileConfig struct {
 	RetrievalHyDEEnabled               *bool
 	RetrievalHyDEMode                  *string
 	RetrievalHyDESuperlative           *bool
+	RAGVerifyFaithfulness              *bool
 	RetrievalContextualEnabled         *bool
 	RetrievalContextualProvider        *string
 	RetrievalContextualModel           *string
@@ -1448,6 +1465,7 @@ type persistedConfig struct {
 	RetrievalHyDEEnabled               bool          `yaml:"retrieval_hyde_enabled"`
 	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
 	RetrievalHyDESuperlative           bool          `yaml:"retrieval_hyde_superlative"`
+	RAGVerifyFaithfulness              bool          `yaml:"rag_verify_faithfulness"`
 	RetrievalContextualEnabled         bool          `yaml:"retrieval_contextual_enabled"`
 	RetrievalContextualProvider        string        `yaml:"retrieval_contextual_provider"`
 	RetrievalContextualModel           string        `yaml:"retrieval_contextual_model"`
@@ -1691,6 +1709,9 @@ func Default() Config {
 		// RetrievalHyDESuperlative defaults to false: superlative-only HyDE is
 		// opt-in, so default behavior is unchanged (#897).
 		RetrievalHyDESuperlative: false,
+		// RAGVerifyFaithfulness defaults to false: the grounding check costs a
+		// second generation call per answered ask (#336).
+		RAGVerifyFaithfulness: false,
 		// Contextual retrieval (SPEC §8.1.8, #330) defaults to OFF: chunks embed
 		// raw and the embed identity's terminal component stays "off", so an
 		// existing corpus is byte-identical to before the feature existed. The
@@ -1876,6 +1897,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalHyDEEnabled:               cfg.RetrievalHyDEEnabled,
 		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
 		RetrievalHyDESuperlative:           cfg.RetrievalHyDESuperlative,
+		RAGVerifyFaithfulness:              cfg.RAGVerifyFaithfulness,
 		RetrievalContextualEnabled:         cfg.RetrievalContextualEnabled,
 		RetrievalContextualProvider:        cfg.RetrievalContextualProvider,
 		RetrievalContextualModel:           cfg.RetrievalContextualModel,
@@ -2661,6 +2683,9 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RetrievalHyDESuperlative != nil {
 		cfg.RetrievalHyDESuperlative = *fc.RetrievalHyDESuperlative
 	}
+	if fc.RAGVerifyFaithfulness != nil {
+		cfg.RAGVerifyFaithfulness = *fc.RAGVerifyFaithfulness
+	}
 	if fc.CrossLingualEnabled != nil {
 		cfg.CrossLingualEnabled = *fc.CrossLingualEnabled
 	}
@@ -3366,6 +3391,8 @@ var configKeyAliases = map[string]string{
 	"hyde_mode":                               "retrieval.hyde.mode",
 	"retrieval_hyde_superlative":              "retrieval.hyde.superlative",
 	"hyde_superlative":                        "retrieval.hyde.superlative",
+	"rag_verify_faithfulness":                 "rag.verify_faithfulness",
+	"verify_faithfulness":                     "rag.verify_faithfulness",
 	"retrieval_contextual_enabled":            "retrieval.contextual.enabled",
 	"contextual_enabled":                      "retrieval.contextual.enabled",
 	"retrieval_contextual_provider":           "retrieval.contextual.provider",
@@ -3624,6 +3651,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"retrieval.mmr.enabled":      func(c *fileConfig) **bool { return &c.RetrievalMMREnabled },
 	"retrieval.hyde.enabled":     func(c *fileConfig) **bool { return &c.RetrievalHyDEEnabled },
 	"retrieval.hyde.superlative": func(c *fileConfig) **bool { return &c.RetrievalHyDESuperlative },
+	"rag.verify_faithfulness":    func(c *fileConfig) **bool { return &c.RAGVerifyFaithfulness },
 	"retrieval.contextual.enabled": func(c *fileConfig) **bool {
 		return &c.RetrievalContextualEnabled
 	},
@@ -4201,6 +4229,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("retrieval_hyde_enabled", cfg.RetrievalHyDEEnabled)
 	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
 	writeBool("retrieval_hyde_superlative", cfg.RetrievalHyDESuperlative)
+	writeBool("rag_verify_faithfulness", cfg.RAGVerifyFaithfulness)
 	writeBool("retrieval_contextual_enabled", cfg.RetrievalContextualEnabled)
 	writeScalar("retrieval_contextual_provider", cfg.RetrievalContextualProvider)
 	writeScalar("retrieval_contextual_model", cfg.RetrievalContextualModel)

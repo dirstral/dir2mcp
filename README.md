@@ -529,6 +529,30 @@ the response shape is unchanged, `answer` is `""`, `citations` is `[]`, and the 
 hits are still returned. No chat provider is called. A request cannot switch generation
 back on, so `mode=answer` is served as search-only rather than refused.
 
+#### Grounding check
+
+`rag.verify_faithfulness: true` reads each generated answer back against the exact
+passages the model was shown, and withholds the answer when a claim is not supported.
+It is **off by default**, because it costs one extra generation call per answered
+request.
+
+The evidence verdict and this check answer different questions. The verdict says whether
+the retrieved material is relevant. It cannot say whether the answer reports what that
+material states, and the two come apart. A corpus that records `Buddy Kennedy
+challenged (pitch result), call on the field was confirmed` can answer "who was ejected"
+with `Buddy Kennedy was ejected`: the passage really is the nearest material to the
+question, so the verdict correctly reads `sufficient`, and the rename from `challenged`
+to `ejected` survives. Only reading the answer back catches it.
+
+A withheld answer keeps the shape of every other refusal: the answer text says the claim
+could not be verified, `citations` is empty, and the retrieval hits are still returned so
+the reader can judge the material. `evidence_verdict` still reports what the evidence was
+worth, because what failed is the answer and not the retrieval.
+
+The check fails open. When the verifier cannot be reached the answer is published
+unchecked and the failure is logged, because dropping every answer during a provider
+outage would turn a trust feature into an availability problem.
+
 #### Answer language
 
 The default system prompt tells the model to answer in the language of the
