@@ -177,6 +177,20 @@ class Pipeline:
     news_min_agreement: float | None = None
     ocr_lang: str | None = None
     faces_bank: Path | None = None
+    #: Opt-in: describe what each sampled frame SHOWS (issue #860). Off by
+    #: default and heavier than every other recognizer: #860 measured a caption
+    #: at about 10x a face embedding on the pilot GPU. `caption_windows` aims
+    #: it at the moments a feed says are notable; None captions every sampled
+    #: frame, which is the feed-free floor.
+    caption_fn: object | None = None
+    caption_fps: float = 1.0
+    caption_windows: tuple[tuple[float, float], ...] | None = None
+    #: Tier B (#860): a low rate across the WHOLE file, alongside the aimed
+    #: windows rather than instead of them. Aiming alone is exclusive, and #860
+    #: measured that 54 of 84 plays are invisible to it while the one fan
+    #: cutaway sits in dead time between plays. Inert when caption_windows is
+    #: None, because then every sampled frame is captioned already.
+    caption_floor_fps: float | None = None
     fps: float = 0.5
     min_confidence: float = 0.0
 
@@ -292,6 +306,23 @@ class Pipeline:
                 "face",
                 (self.roster, self.faces_bank, self.fps),
                 lambda: FaceRecognizer(self.roster, self.faces_bank, fps=self.fps),
+            )
+        if self.caption_fn is not None:
+            from .recognizers.caption import SceneCaptionRecognizer
+
+            try_recognizer(
+                "caption",
+                # The captioner itself joins the key: a different backend (or a
+                # different prompt behind it) must rebuild rather than silently
+                # reuse a recognizer built for the previous one.
+                (self.caption_fn, self.caption_fps, self.caption_windows,
+                 self.caption_floor_fps),
+                lambda: SceneCaptionRecognizer(
+                    captioner=self.caption_fn,
+                    fps=self.caption_fps,
+                    windows=self.caption_windows,
+                    floor_fps=self.caption_floor_fps,
+                ),
             )
         if self.news:
             # The only recognizer here that reads no roster: overlay text is

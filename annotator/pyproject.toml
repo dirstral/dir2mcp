@@ -16,6 +16,10 @@ dependencies = []
 ocr = ["pytesseract>=0.3", "Pillow>=10"]
 face = ["insightface>=0.7", "opencv-python-headless>=4.9", "onnxruntime>=1.17"]
 jersey = ["ultralytics>=8.2", "pytesseract>=0.3", "Pillow>=10"]
+# Scene captioning (#860). torch is far heavier than insightface, so this extra
+# is deliberately NOT part of `all`: pulling it in CI would add gigabytes for a
+# recognizer whose absence already degrades through RecognizerUnavailable.
+caption = ["torch>=2.4", "transformers>=4.51", "accelerate>=1.0", "Pillow>=10"]
 # Test runner + the schema-agreement contract test's validator. The tested
 # code is stdlib-only; the runner and jsonschema are external test tooling.
 test = ["pytest>=8", "jsonschema>=4"]
