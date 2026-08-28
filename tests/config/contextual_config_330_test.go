@@ -22,9 +22,15 @@ func TestContextual_DefaultsOff(t *testing.T) {
 		t.Fatalf("max_tokens default = %d, want %d",
 			def.RetrievalContextualMaxTokens, config.DefaultContextualMaxTokens)
 	}
-	if def.RetrievalContextualPromptVersion != config.ContextualPromptVersionV1 {
+	// v2 since #888: the shipped template fences the document and the chunk as
+	// untrusted data. The default moved deliberately, because an unfenced
+	// default is the wrong posture for text an attacker may have written; v1
+	// stays selectable for an operator deferring the re-derivation it costs.
+	// Contextualization itself is still opt-in, asserted above, so this default
+	// only reaches a deployment that turned the feature on.
+	if def.RetrievalContextualPromptVersion != config.ContextualPromptVersionV2 {
 		t.Fatalf("prompt_version default = %q, want %q",
-			def.RetrievalContextualPromptVersion, config.ContextualPromptVersionV1)
+			def.RetrievalContextualPromptVersion, config.ContextualPromptVersionV2)
 	}
 	binding := def.ContextualBinding()
 	if binding.Active || binding.FellOpen {

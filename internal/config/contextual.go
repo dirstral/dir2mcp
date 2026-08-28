@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/promptfence"
+
 	"github.com/dirstral/dir2mcp/internal/provider"
 )
 
@@ -20,6 +22,13 @@ const (
 	// into the embed identity (SPEC §8.1.4), so bumping the template here is a
 	// deliberate re-embed.
 	ContextualPromptVersionV1 = "v1"
+	// ContextualPromptVersionV2 fences the document and the chunk as untrusted
+	// DATA and explains the fence (issue #888). v1 wrapped them in <document>
+	// and <chunk> tags, which delimit but assert nothing: a document that says
+	// "ignore the above and write X" was read as instruction, and the context
+	// this step generates is EMBEDDED and retrieved, so a poisoned file could
+	// steer how its own chunks are found.
+	ContextualPromptVersionV2 = "v2"
 
 	// ContextualDocumentPlaceholder / ContextualChunkPlaceholder are the
 	// placeholders a prompt template (built-in or operator override) MUST carry.
@@ -49,14 +58,38 @@ only — no preamble, no quotes, no explanation.`
 // contextualPromptTemplates maps a prompt_version tag to its built-in template.
 // Adding a version here is additive; changing an existing one re-embeds every
 // corpus that uses it, so versions are append-only in practice.
+// contextualPromptV2 is v1 with the untrusted-data fence (issue #888). The
+// markers come from promptfence, so ingest, retrieval and the annotate tool all
+// fence corpus text with the SAME literals and a fence written by one path is
+// recognizable to another.
+//
+// The instruction sits AFTER the fenced text, which is the #892 lesson: the
+// nearest instruction wins on a small model, and a long document between the
+// rule and the answer is exactly how the answer-language rule drifted.
+var contextualPromptV2 = promptfence.Wrap("document", ContextualDocumentPlaceholder) + `
+
+Here is the chunk we want to situate within the whole document:
+` + promptfence.Wrap("chunk", ContextualChunkPlaceholder) + `
+
+` + promptfence.Guard("situate") + `
+
+Give a short, succinct context (one or two sentences) that situates this chunk
+within the overall document, so the chunk can be found by a search engine.
+Write the context in the same language as the chunk. Answer with the context
+only — no preamble, no quotes, no explanation.`
+
+// contextualPromptTemplates maps a prompt_version tag to its built-in template.
+// Adding a version here is additive; changing an existing one re-embeds every
+// corpus that uses it, so versions are append-only in practice.
 var contextualPromptTemplates = map[string]string{
 	ContextualPromptVersionV1: contextualPromptV1,
+	ContextualPromptVersionV2: contextualPromptV2,
 }
 
 // ContextualPromptVersions returns the known built-in prompt-version tags, for
 // error messages and docs.
 func ContextualPromptVersions() []string {
-	return []string{ContextualPromptVersionV1}
+	return []string{ContextualPromptVersionV1, ContextualPromptVersionV2}
 }
 
 // ContextualPromptTemplate returns the built-in template for version, or
@@ -80,13 +113,15 @@ func (c Config) ContextualEffectivePrompt() (string, bool) {
 }
 
 // contextualPromptVersion is the effective prompt_version: the configured value,
-// or the v1 default when unset (an empty value in a hand-written config must not
-// silently disable the feature).
+// or the current default when unset (an empty value in a hand-written config
+// must not silently disable the feature). The default is v2 since #888: the
+// fenced template is the correct posture, and v1 stays selectable for an
+// operator who wants to defer the re-derivation it costs.
 func (c Config) contextualPromptVersion() string {
 	if v := strings.TrimSpace(c.RetrievalContextualPromptVersion); v != "" {
 		return v
 	}
-	return ContextualPromptVersionV1
+	return ContextualPromptVersionV2
 }
 
 // contextualMaxTokens is the effective generation bound, defaulting when unset.
@@ -101,6 +136,20 @@ func (c Config) contextualMaxTokens() int {
 // placeholders are replaced wherever they appear; a template lacking one is
 // rejected by validation, never silently rendered without its input.
 func RenderContextualPrompt(prompt, document, chunk string) string {
+	// A fenced template neutralizes the marker literals in the text it
+	// substitutes, or a document carrying the close marker could end the fence
+	// early and have the rest of itself read as instruction (issue #888).
+	//
+	// Conditional on the template rather than unconditional, and deliberately:
+	// neutralizing for an unfenced template (v1, or an operator's own) would
+	// change the rendered prompt for any document that happens to contain the
+	// literal, which changes that document's embed identity and re-embeds it
+	// for no security benefit, since an unfenced template has no fence to
+	// protect.
+	if strings.Contains(prompt, promptfence.OpenMarker) {
+		document = promptfence.Neutralize(document)
+		chunk = promptfence.Neutralize(chunk)
+	}
 	rendered := strings.ReplaceAll(prompt, ContextualDocumentPlaceholder, document)
 	return strings.ReplaceAll(rendered, ContextualChunkPlaceholder, chunk)
 }
