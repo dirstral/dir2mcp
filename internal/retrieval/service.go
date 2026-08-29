@@ -467,6 +467,9 @@ type Service struct {
 	// hydeSuperlative additionally enables HyDE for superlative questions only
 	// (#897, retrieval.hyde.superlative); see superlative.go.
 	hydeSuperlative bool
+	// verifyFaithfulnessEnabled turns on the post-generation grounding check
+	// (#336, rag.verify_faithfulness); see faithfulness.go.
+	verifyFaithfulnessEnabled bool
 }
 
 // compile-time assertion that Service implements model.Retriever.  This
@@ -769,14 +772,15 @@ func (s *Service) SetMMR(enabled bool, lambda float64) {
 	s.mmrLambda = lambda
 }
 
-// SetHyDE wires the opt-in HyDE (Hypothetical Document Embeddings) query
-// transform (config retrieval.hyde.enabled / retrieval.hyde.mode). When enabled
-// and a generator is configured, Search generates a short hypothetical answer to
-// the query, embeds it, and retrieves with that text — fused with the raw-query
-// results (mode "fuse", the default) or used alone (mode "replace"). An empty or
-// unrecognized mode normalizes to "fuse". A generation failure degrades
-// gracefully to the raw query (never fatal). Config-only; the engine wires this
-// from config at construction time, mirroring SetMinScore.
+// SetVerifyFaithfulness wires the post-generation grounding check (#336). When
+// enabled, every answered ask costs one extra generation call, and an answer
+// the verifier cannot support is replaced by an explicit refusal.
+func (s *Service) SetVerifyFaithfulness(enabled bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.verifyFaithfulnessEnabled = enabled
+}
+
 // SetHyDESuperlative wires superlative-only HyDE (issue #897, config
 // retrieval.hyde.superlative): when set, a question whose surface form is a
 // superlative has the HyDE transform enabled even while the global flag is
@@ -787,6 +791,14 @@ func (s *Service) SetHyDESuperlative(enabled bool) {
 	s.hydeSuperlative = enabled
 }
 
+// SetHyDE wires the opt-in HyDE (Hypothetical Document Embeddings) query
+// transform (config retrieval.hyde.enabled / retrieval.hyde.mode). When enabled
+// and a generator is configured, Search generates a short hypothetical answer to
+// the query, embeds it, and retrieves with that text — fused with the raw-query
+// results (mode "fuse", the default) or used alone (mode "replace"). An empty or
+// unrecognized mode normalizes to "fuse". A generation failure degrades
+// gracefully to the raw query (never fatal). Config-only; the engine wires this
+// from config at construction time, mirroring SetMinScore.
 func (s *Service) SetHyDE(enabled bool, mode string) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != hydeModeReplace {
@@ -2090,7 +2102,30 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		// obtained (#685). Answer without retrieval and keep citations empty.
 		answer = s.answerWithoutRetrieval(ctx, question)
 	case s.gen != nil && len(hits) > 0:
-		answer, citations = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
+		var shown string
+		answer, citations, shown = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
+		// Grounding check (#336): read the answer back against the exact
+		// context the model was shown. An unsupported answer is withheld
+		// rather than published, because the absolute evidence threshold
+		// cannot catch a claim the passages do not make; only this can.
+		if s.verifyFaithfulness(ctx, question, answer, shown) == faithfulnessUnsupported {
+			s.logf("faithfulness: withholding an answer the verifier could not support against %d retrieved chunks", len(hits))
+			indexingComplete, _ := s.IndexingComplete(ctx)
+			return model.AskResult{
+				Question: question,
+				Answer:   unfaithfulAnswer(),
+				// Empty, like every other refusal: citing the passages would
+				// attach them to a claim they were just judged not to support.
+				Citations:        []model.Citation{},
+				Hits:             hits,
+				IndexingComplete: indexingComplete,
+				// The retrieved evidence was strong enough to answer from; what
+				// failed is the answer, so the eligible set's verdict is
+				// reported honestly rather than downgraded to look like a
+				// weak-evidence abstention.
+				EvidenceVerdict: aggregateEvidenceVerdict(hits),
+			}, nil
+		}
 	}
 	answer = ensureAnswerAttributions(answer, citations)
 
@@ -2119,9 +2154,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 // citations that survive it. Extracted from Ask purely to keep Ask's
 // cyclomatic complexity within the repo's gocyclo budget; the logic is
 // unchanged.
+// It additionally returns the VERBATIM context region of the prompt it built,
+// so the #336 grounding check verifies against the exact bytes the model was
+// shown rather than a re-rendered approximation. That region is "" when nothing
+// was placed.
 func (s *Service) generateGroundedAnswer(
 	ctx context.Context, question, fallback string, hits []model.SearchHit, citations []model.Citation,
-) (string, []model.Citation) {
+) (string, []model.Citation, string) {
 	answer := fallback
 	s.metaMu.RLock()
 	systemPrompt := s.ragSystemPrompt
@@ -2140,7 +2179,7 @@ func (s *Service) generateGroundedAnswer(
 	// citable (issue #890); see moments.go.
 	moments := groupMoments(hits)
 	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
-	prompt, usedIdx := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	prompt, usedIdx, contextSection := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
 	// Report a partial reasoning window. The citation list cannot show it: it
 	// reports provenance, not how much of the retrieved evidence the model read
 	// (issue #891). An aggregate answer built on a partial window is a sample,
@@ -2193,7 +2232,7 @@ func (s *Service) generateGroundedAnswer(
 		}
 	}
 
-	return answer, citations
+	return answer, citations, contextSection
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
@@ -4087,7 +4126,7 @@ func collapseSpaces(s string) string {
 // mandatory injection guard here, at the one place that also writes the
 // document fence, so the fence and the rule that explains it cannot separate
 // (issue #885).
-func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int) {
+func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int, string) {
 	systemPrompt = composeSystemPrompt(systemPrompt)
 	maxContextChars = normalizeMaxContextChars(maxContextChars)
 
@@ -4097,6 +4136,13 @@ func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, f
 	b.WriteString("Question:\n")
 	b.WriteString(question)
 	b.WriteString("\n\nContext:\n")
+	// Where the retrieved evidence starts. Recorded as an offset while the
+	// prompt is being written, because the caller (#336) needs these exact
+	// bytes and MUST NOT recover them by searching the finished string: the
+	// question is written above this point and an attacker who puts the
+	// Context marker inside a question would otherwise hand their own text to
+	// the verifier as evidence.
+	contextStart := b.Len()
 
 	remaining := maxContextChars
 	limit := ragContextDocLimit(len(moments), maxContextChars)
@@ -4128,10 +4174,16 @@ func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, f
 	// It is not deducted from maxContextChars. That budget bounds the retrieved
 	// CONTEXT, and this is server instruction text, counted the same way the
 	// system prompt and the question already are.
+	//
+	// The context region ends here, before the reminder: the reminder is server
+	// instruction, not retrieved evidence, and handing it to the verifier as a
+	// passage would let the server's own words support a claim.
+	full := b.String()
+	contextSection := strings.TrimSpace(full[contextStart:])
 	if carriesAnswerLanguageRule(systemPrompt) {
 		b.WriteString(ragLanguageReminder)
 	}
-	return b.String(), sortedIndices(used)
+	return b.String(), sortedIndices(used), contextSection
 }
 
 // carriesAnswerLanguageRule reports whether the prompt in force states the

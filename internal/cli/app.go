@@ -967,6 +967,8 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
 	// Superlative-only HyDE (#897): additive opt-in, off by default.
 	ret.SetHyDESuperlative(cfg.RetrievalHyDESuperlative)
+	// Post-generation grounding check (#336): opt-in, one extra call when on.
+	ret.SetVerifyFaithfulness(cfg.RAGVerifyFaithfulness)
 	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): gates only the expand
 	// step; summary hits are never citable regardless of this flag.
 	ret.SetHierarchical(cfg.RetrievalHierarchicalEnabled)
