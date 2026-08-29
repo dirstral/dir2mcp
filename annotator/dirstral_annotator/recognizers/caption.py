@@ -51,6 +51,7 @@ the cost of leaving it off is the 0.35 precision measured above.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -180,6 +181,17 @@ _SCENE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def _is_probability(value: object) -> bool:
+    """True when `value` is a real number in [0, 1].
+
+    bool is rejected on purpose: `True >= 0.99` is a silent pass, and a backend
+    that returns a bare yes/no has not supplied the confidence this gate reads.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and 0.0 <= float(value) <= 1.0
+
+
 def classify_scene(caption: str) -> str:
     """Map a caption onto the closed vocabulary. Deterministic and a pure
     function of the text, so a fixture pins the mapping without a model."""
@@ -209,11 +221,16 @@ class SceneCaptionRecognizer:
         fps: float = 1.0,
         batch_size: int = 8,
         min_confidence: float = 0.0,
-        prober: ProbeFn | None = None,
-        claim_threshold: float = CLAIM_THRESHOLD,
         windows: Iterable[tuple[float, float]] | None = None,
         floor_fps: float | None = None,
         similarity: float = CAPTION_RUN_SIMILARITY,
+        # Keyword-only, and appended rather than inserted: the positional
+        # contract predates #923, and a caller passing `windows` positionally
+        # would otherwise bind its tuple to `prober` and fail deep inside a
+        # gated run instead of at the call site.
+        *,
+        prober: ProbeFn | None = None,
+        claim_threshold: float = CLAIM_THRESHOLD,
     ):
         if captioner is None:
             raise RecognizerUnavailable(
@@ -235,7 +252,16 @@ class SceneCaptionRecognizer:
         # activates the gate; nothing else switches it on, so the capability
         # follows the backend rather than a flag that can disagree with it.
         self.prober = prober
-        self.claim_threshold = claim_threshold
+        # A threshold outside [0,1] silently inverts the gate: below zero every
+        # score clears it, so the check would publish exactly the claims it
+        # exists to withhold. Rejected at construction, where the operator can
+        # still see it, rather than at the first crowd shot.
+        if not _is_probability(claim_threshold):
+            raise RecognizerUnavailable(
+                "caption claim_threshold must be a real number in [0, 1], got "
+                f"{claim_threshold!r}"
+            )
+        self.claim_threshold = float(claim_threshold)
         # Aimed windows (#860 tier A). Uniform sampling MEASURED 0 of 8 frames
         # showing a celebration or crowd reaction, against 6 of 8 for frames
         # aimed at high-captivatingIndex plays, so aiming is the difference
@@ -298,6 +324,16 @@ class SceneCaptionRecognizer:
                 f"probe backend returned {len(scores)} scores for "
                 f"{len(frames)} frames; the contract is one P(yes) per frame"
             )
+        for score in scores:
+            # A backend that answers inf, NaN or 1.7 is not answering the
+            # question asked. Trusting it would clear any threshold and publish
+            # an unverified claim, so a malformed probe is unavailability, not
+            # a yes.
+            if not _is_probability(score):
+                raise RecognizerUnavailable(
+                    "probe backend returned a score outside the probability "
+                    f"domain: {score!r}"
+                )
         return any(float(score) >= self.claim_threshold for score in scores)
 
     def recognize(self, media_path: Path) -> list[Cue]:

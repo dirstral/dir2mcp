@@ -377,3 +377,77 @@ def test_923_gated_events_stay_inside_the_closed_vocabulary():
     """The gate must not invent a value the section 6.2 filter cannot serve."""
     assert set(caption_mod.CLAIM_PROBES) <= set(SCENE_EVENTS)
     assert SCENE_OTHER in SCENE_EVENTS
+
+
+def test_923_the_positional_contract_survives_the_gate():
+    """#923 appended its parameters; it must not have renumbered the old ones.
+
+    A caller that passed `windows` positionally predates the gate. If the new
+    parameters had been inserted, that tuple would bind to `prober` and fail
+    deep inside a gated run instead of at the call site.
+    """
+    import inspect
+
+    params = list(inspect.signature(SceneCaptionRecognizer.__init__).parameters)
+    positional = params[: params.index("similarity") + 1]
+    assert positional == [
+        "self",
+        "captioner",
+        "fps",
+        "batch_size",
+        "min_confidence",
+        "windows",
+        "floor_fps",
+        "similarity",
+    ]
+    sig = inspect.signature(SceneCaptionRecognizer.__init__)
+    for name in ("prober", "claim_threshold"):
+        assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.1, float("inf"), float("nan"), "0.99", True, None])
+def test_923_a_threshold_outside_the_probability_domain_is_refused(bad):
+    """Below zero every score clears the gate, so it would publish exactly the
+    claims it exists to withhold. Caught at construction, not at runtime."""
+    with pytest.raises(RecognizerUnavailable, match="claim_threshold"):
+        SceneCaptionRecognizer(
+            captioner=lambda paths: [], fps=1.0, claim_threshold=bad
+        )
+
+
+@pytest.mark.parametrize("bad", [float("inf"), 1.5, -0.2, float("nan"), True, "yes", None])
+def test_923_a_probe_score_outside_the_domain_is_unavailability(fake_frames, bad):
+    """inf clears any threshold. A malformed probe must fail closed, not yes."""
+    captioner, _ = fake_frames(
+        [("The crowd erupts in the stands, fans cheering wildly.", 0.9)]
+    )
+
+    def rogue(frames, question):
+        return [bad] * len(frames)
+
+    with pytest.raises(RecognizerUnavailable, match="probability domain"):
+        SceneCaptionRecognizer(
+            captioner=captioner, fps=1.0, prober=rogue
+        ).recognize(MEDIA)
+
+
+def test_923_the_domain_check_does_not_reject_the_endpoints(fake_frames):
+    """0.0 and 1.0 are legitimate answers and must survive validation."""
+    captioner, _ = fake_frames(
+        [("The crowd erupts in the stands, fans cheering wildly.", 0.9)]
+    )
+    assert (
+        SceneCaptionRecognizer(captioner=captioner, fps=1.0, prober=_prober(1.0))
+        .recognize(MEDIA)[0]
+        .event
+        == SCENE_CROWD
+    )
+    assert (
+        SceneCaptionRecognizer(captioner=captioner, fps=1.0, prober=_prober(0.0))
+        .recognize(MEDIA)[0]
+        .event
+        == SCENE_OTHER
+    )
+    # A threshold of exactly 0 or 1 is an operator's call to make.
+    SceneCaptionRecognizer(captioner=captioner, fps=1.0, claim_threshold=0.0)
+    SceneCaptionRecognizer(captioner=captioner, fps=1.0, claim_threshold=1.0)
