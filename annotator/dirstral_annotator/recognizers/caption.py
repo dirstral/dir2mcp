@@ -14,18 +14,44 @@ callable, exactly as `faces.py` injects `EmbedFn`, so the package still imports
 with no vision-language model present and the whole thing is testable without a
 GPU.
 
-WHAT IT DELIBERATELY DOES NOT SHIP. A confidence gate. #860 measured the raw
-model at 0.63 precision on the exact claim behind "show me the crowd reaction",
-with all three failures being FALSE POSITIVES in the direction that sells the
-feature (a seated, static crowd described as "cheering"). #751 found the same
-shape on overlay text: 0.40 precision unfiltered, 0.90 after a MEASURED gate.
-A gate invented here without the 300-frame labelled set #860 specifies would be
-a number chosen to look good, so `min_confidence` stays an operator input with
-no shipped default, and the caption text says plainly that it is generated.
+THE CLAIM GATE (#923), and why it is not a confidence threshold. #860 left the
+gate unshipped because no labelled set existed. One now does: 400 uniformly
+sampled frames from the pilot game, hand labelled. It says two things.
+
+First, the caption is mostly RIGHT. Scene type measured ~0.94. What fails is
+one clause inside an otherwise correct sentence, so any WHOLE-CAPTION score is
+dominated by the correct majority and cannot isolate the wrong clause. Measured
+over those 400 frames, as area under the ROC curve for separating true from
+false reaction claims:
+
+    self-reported confidence   0.514   <- what a `min_confidence` gate reads
+    caption min-token logprob  0.507
+    caption mean-token logprob 0.338   <- below chance: fluent captions are, if
+    claim-span logprob         0.247      anything, slightly MORE likely wrong
+    targeted binary probe      0.991
+
+The self-reported number returned exactly 0.95 on 96.7% of frames, including a
+caption that invented a team and a score. Thresholding it can only pass
+everything or drop everything. That is why `min_confidence` survives as a
+backend-liveness knob and is NOT the gate.
+
+Second, asking the claim DIRECTLY works. A yes/no question about the exact
+claim, scored by the probability of the answer token, is a scalar attached to
+the thing that fails. Gating on it moved the reaction claim from 0.35 precision
+to 0.92 on that sample.
+
+So the gate is a ProbeFn, injected like the captioner, and it guards the two
+events that carry a claim rather than a description. Scene type keeps coming
+from the caption, because at ~0.94 it needs no gate.
+
+WITHOUT A PROBER the recognizer behaves exactly as it did before: the events
+pass ungated. That is capability-driven activation, not a silent default, and
+the cost of leaving it off is the 0.35 precision measured above.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -38,6 +64,12 @@ from .base import RecognizerUnavailable, collapse_text_sightings, iter_frames
 #: that matters: a batch of 8 cut the per-frame cost 2.3x on the pilot's A2,
 #: while halving the pixel budget changed the ANSWER rather than the price.
 CaptionFn = Callable[[list[Path]], list[tuple[str, float]]]
+
+#: A batch of frames and ONE yes/no question in, one P(yes) per frame out.
+#: The question is asked about the specific claim being gated, and the float is
+#: the probability the backend assigns to answering "yes". Batch-shaped for the
+#: same reason CaptionFn is. Supplying this activates the #923 claim gate.
+ProbeFn = Callable[[list[Path], str], list[float]]
 
 #: The closed event vocabulary. `event` is what retrieval FILTERS on (design
 #: 0004 section 6.2, and recognitionSegments persists it on the chunk span), so
@@ -71,6 +103,40 @@ SCENE_EVENTS = (
 #: #860 measured the latter wrong about a third of the time on that claim.
 #: df-005's `derivation` field carries the same distinction structurally; this
 #: carries it in the words, because the words are what reaches the answer.
+#: The gated events and the question that decides each. Only events that assert
+#: something ABOUT the people in frame are here. scene_field, scene_graphic,
+#: scene_replay and scene_dugout describe where the camera is pointing, which
+#: measured ~0.94 and needs no gate.
+#:
+#: The wording is the measured wording. These are the exact questions scored in
+#: the 400-frame run, so a reworded question invalidates the threshold below.
+CLAIM_PROBES: dict[str, str] = {
+    SCENE_CELEBRATION: (
+        "Look at this broadcast frame. Are players visibly celebrating "
+        "(high-fives, embraces, raised arms)? Answer with one word: yes or no."
+    ),
+    SCENE_CROWD: (
+        "Look at this broadcast frame. Is the camera showing the crowd or "
+        "stands as the main subject? Answer with one word: yes or no."
+    ),
+}
+
+#: Default claim threshold. Deliberately severe, and the reason is the corpus
+#: this feeds: a WRONG span is worse than a MISSING one, because a false
+#: "crowd celebrating" is served against a timestamp as though the archive
+#: recorded it, while a missed one only leaves the moment unlabelled.
+#:
+#: Measured on the 400-frame set, per gated event, at this threshold:
+#:     scene_celebration   precision 0.83, recall 0.63
+#:     scene_crowd         precision 0.86, recall 0.43
+#:
+#: Honest about the sample: it holds 14 positives, so the difference between
+#: 0.90 and 0.99 is a single frame and is NOT statistically separable. 0.99 is
+#: chosen on the precision-first principle above, not because the data
+#: distinguishes it. An operator who would rather find more and verify by hand
+#: should lower it; the recall column is what they buy.
+CLAIM_THRESHOLD = 0.99
+
 CAPTION_PREFIX = "Scene (auto description, not the game feed): "
 
 #: Similarity above which two consecutive captions are treated as one passage.
@@ -115,6 +181,17 @@ _SCENE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def _is_probability(value: object) -> bool:
+    """True when `value` is a real number in [0, 1].
+
+    bool is rejected on purpose: `True >= 0.99` is a silent pass, and a backend
+    that returns a bare yes/no has not supplied the confidence this gate reads.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and 0.0 <= float(value) <= 1.0
+
+
 def classify_scene(caption: str) -> str:
     """Map a caption onto the closed vocabulary. Deterministic and a pure
     function of the text, so a fixture pins the mapping without a model."""
@@ -147,6 +224,13 @@ class SceneCaptionRecognizer:
         windows: Iterable[tuple[float, float]] | None = None,
         floor_fps: float | None = None,
         similarity: float = CAPTION_RUN_SIMILARITY,
+        # Keyword-only, and appended rather than inserted: the positional
+        # contract predates #923, and a caller passing `windows` positionally
+        # would otherwise bind its tuple to `prober` and fail deep inside a
+        # gated run instead of at the call site.
+        *,
+        prober: ProbeFn | None = None,
+        claim_threshold: float = CLAIM_THRESHOLD,
     ):
         if captioner is None:
             raise RecognizerUnavailable(
@@ -163,6 +247,21 @@ class SceneCaptionRecognizer:
         # the batch amortizes the weight reads.
         self.batch_size = max(1, int(batch_size))
         self.min_confidence = min_confidence
+        # #923. None leaves the claim events ungated, which is what shipped
+        # before and measured 0.35 precision on the reaction claim. Present
+        # activates the gate; nothing else switches it on, so the capability
+        # follows the backend rather than a flag that can disagree with it.
+        self.prober = prober
+        # A threshold outside [0,1] silently inverts the gate: below zero every
+        # score clears it, so the check would publish exactly the claims it
+        # exists to withhold. Rejected at construction, where the operator can
+        # still see it, rather than at the first crowd shot.
+        if not _is_probability(claim_threshold):
+            raise RecognizerUnavailable(
+                "caption claim_threshold must be a real number in [0, 1], got "
+                f"{claim_threshold!r}"
+            )
+        self.claim_threshold = float(claim_threshold)
         # Aimed windows (#860 tier A). Uniform sampling MEASURED 0 of 8 frames
         # showing a celebration or crowd reaction, against 6 of 8 for frames
         # aimed at high-captivatingIndex plays, so aiming is the difference
@@ -209,9 +308,40 @@ class SceneCaptionRecognizer:
                 selected.append((t, path))
         return selected
 
+    def _claim_holds(self, event: str, frames: list[Path]) -> bool:
+        """Ask the backend directly whether the claim in `event` is true.
+
+        A run is several frames, and the claim is about the run, so the run
+        passes when its STRONGEST frame passes. Max rather than mean is
+        deliberate: a celebration that occupies two frames of a six-frame run
+        is still a celebration, and averaging would let the quiet frames
+        outvote the one that carries the event.
+        """
+        question = CLAIM_PROBES[event]
+        scores = self.prober(frames, question)
+        if len(scores) != len(frames):
+            raise RecognizerUnavailable(
+                f"probe backend returned {len(scores)} scores for "
+                f"{len(frames)} frames; the contract is one P(yes) per frame"
+            )
+        for score in scores:
+            # A backend that answers inf, NaN or 1.7 is not answering the
+            # question asked. Trusting it would clear any threshold and publish
+            # an unverified claim, so a malformed probe is unavailability, not
+            # a yes.
+            if not _is_probability(score):
+                raise RecognizerUnavailable(
+                    "probe backend returned a score outside the probability "
+                    f"domain: {score!r}"
+                )
+        return any(float(score) >= self.claim_threshold for score in scores)
+
     def recognize(self, media_path: Path) -> list[Cue]:
         frames = self._select(list(iter_frames(media_path, fps=self.fps)))
         sightings: list[tuple[float, str, float]] = []
+        # Timestamp -> frame, so a collapsed run can be re-probed on the exact
+        # frames it came from rather than on a re-extraction.
+        frame_at: dict[float, Path] = {}
         for i in range(0, len(frames), self.batch_size):
             batch = frames[i:i + self.batch_size]
             results = self.captioner([path for _, path in batch])
@@ -221,10 +351,11 @@ class SceneCaptionRecognizer:
                     f"{len(results)} results for {len(batch)} frames; the "
                     "contract is one (text, confidence) pair per frame"
                 )
-            for (t, _), (text, confidence) in zip(batch, results):
+            for (t, fpath), (text, confidence) in zip(batch, results):
                 text = " ".join(str(text).split())
                 if not text or confidence < self.min_confidence:
                     continue
+                frame_at[t] = fpath
                 # The RAW caption is what gets compared: prefixing first would
                 # add a constant this module chose to every side of every
                 # comparison, and measurably did (0.500 -> 0.706), making the
@@ -249,15 +380,31 @@ class SceneCaptionRecognizer:
             frame_gap=1.0 / self.fps,
             similarity=self.similarity,
         ):
+            # The event is classified from the surviving text, so a collapsed
+            # run is labelled by the passage it kept rather than by whichever
+            # frame happened to be first.
+            event = classify_scene(cue.text)
+            # #923. An event that ASSERTS something about the people in frame
+            # is checked against the frames before it is published. The caption
+            # keeps its prose either way: what the gate withdraws is the
+            # FILTERABLE claim, which is what "show me the crowd reaction"
+            # searches and therefore what a false positive corrupts. Demoted to
+            # scene_other rather than dropped, because the passage still
+            # describes a real moment and the timestamp is still worth keeping.
+            if self.prober is not None and event in CLAIM_PROBES:
+                run = [
+                    frame_at[t]
+                    for t, _, _ in sightings
+                    if cue.start_s <= t <= cue.end_s and t in frame_at
+                ]
+                if run and not self._claim_holds(event, run):
+                    event = SCENE_OTHER
             cues.append(
                 Cue(
                     source=cue.source,
                     start_s=cue.start_s,
                     end_s=cue.end_s,
-                    # The event is classified from the surviving text, so a
-                    # collapsed run is labelled by the passage it kept rather
-                    # than by whichever frame happened to be first.
-                    event=classify_scene(cue.text),
+                    event=event,
                     # Empty on purpose. A crowd has nobody the roster owns, and
                     # inventing `entity:crowd` would put a non-entity into the
                     # namespace the roster owns and into the section 6.2 entity

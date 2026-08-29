@@ -246,3 +246,208 @@ def test_the_generated_marker_does_not_influence_grouping(fake_frames):
     assert len(cues) == 2, [c.text for c in cues]
     # And the marker still reaches the emitted text.
     assert all(c.text.startswith(CAPTION_PREFIX) for c in cues)
+
+
+# --- #923: the claim gate ---------------------------------------------------
+#
+# The 400-frame labelled run said the caption is mostly right and one clause
+# inside it is not, so a whole-caption confidence cannot isolate the failure
+# (AUC 0.514) while asking the claim directly can (AUC 0.991). These pin the
+# gate that follows from that: it guards the FILTERABLE event, it is activated
+# by the presence of a backend rather than a flag, and it fails toward saying
+# less rather than more.
+
+
+def _prober(score, seen=None):
+    """A ProbeFn returning a fixed P(yes), recording the questions it was asked."""
+
+    def probe(frames, question):
+        if seen is not None:
+            seen.append(question)
+        return [score] * len(frames)
+
+    return probe
+
+
+def test_923_an_unsupported_crowd_claim_is_withdrawn(fake_frames):
+    """The measured failure: a static seated crowd described as cheering."""
+    captioner, _ = fake_frames([("The crowd erupts in the stands, fans cheering wildly.", 0.9)])
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=_prober(0.01)
+    ).recognize(MEDIA)
+    assert len(cues) == 1
+    # The filterable claim is gone, so "show me the crowd reaction" cannot
+    # return this moment.
+    assert cues[0].event == SCENE_OTHER
+    # The prose survives. The gate withdraws the claim, not the description.
+    assert "crowd erupts" in cues[0].text
+
+
+def test_923_a_supported_crowd_claim_survives(fake_frames):
+    captioner, _ = fake_frames([("The crowd erupts in the stands, fans cheering wildly.", 0.9)])
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=_prober(1.0)
+    ).recognize(MEDIA)
+    assert cues[0].event == SCENE_CROWD
+
+
+def test_923_a_supported_celebration_survives(fake_frames):
+    captioner, _ = fake_frames([("Teammates celebrate with high fives near the dugout.", 0.9)])
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=_prober(1.0)
+    ).recognize(MEDIA)
+    assert cues[0].event == SCENE_CELEBRATION
+
+
+def test_923_the_gate_is_off_without_a_prober(fake_frames):
+    """Capability-driven: no backend, no gate, and the old behaviour intact."""
+    captioner, _ = fake_frames([("The crowd erupts in the stands, fans cheering wildly.", 0.9)])
+    cues = SceneCaptionRecognizer(captioner=captioner, fps=1.0).recognize(MEDIA)
+    assert cues[0].event == SCENE_CROWD
+
+
+def test_923_describing_events_are_never_probed(fake_frames):
+    """scene_field measured ~0.94, so gating it would only cost recall."""
+    asked = []
+    captioner, _ = fake_frames([("The pitcher delivers to the batter from the mound.", 0.9)])
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=_prober(0.0, asked)
+    ).recognize(MEDIA)
+    assert cues[0].event == SCENE_FIELD
+    assert asked == [], "a describing event must not cost a probe call"
+
+
+def test_923_each_claim_asks_its_own_question(fake_frames):
+    """A shared question would gate one claim with another claim's evidence."""
+    asked = []
+    captioner, _ = fake_frames([("Teammates celebrate with high fives near the dugout.", 0.9)])
+    SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=_prober(1.0, asked)
+    ).recognize(MEDIA)
+    assert asked and asked[0] == caption_mod.CLAIM_PROBES[SCENE_CELEBRATION]
+    assert asked[0] != caption_mod.CLAIM_PROBES[SCENE_CROWD]
+
+
+def test_923_the_threshold_is_severe_by_default(fake_frames):
+    """0.99, not 0.5: a wrong span is worse than a missing one in an archive."""
+    captioner, _ = fake_frames([("The crowd erupts in the stands, fans cheering wildly.", 0.9)])
+    # Comfortably "probably yes", and still not enough.
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=_prober(0.90)
+    ).recognize(MEDIA)
+    assert cues[0].event == SCENE_OTHER
+    # An operator who wants recall can say so.
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=_prober(0.90), claim_threshold=0.85
+    ).recognize(MEDIA)
+    assert cues[0].event == SCENE_CROWD
+
+
+def test_923_a_run_passes_on_its_strongest_frame(fake_frames):
+    """A celebration filling two frames of a longer run is still a celebration."""
+    captioner, _ = fake_frames(
+        [("Teammates celebrate with high fives near the dugout.", 0.9)] * 4
+    )
+    scores = [0.0, 0.0, 1.0, 0.0]
+
+    def probe(frames, question):
+        return scores[: len(frames)]
+
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0, prober=probe
+    ).recognize(MEDIA)
+    assert len(cues) == 1, "identical captions should collapse into one run"
+    assert cues[0].event == SCENE_CELEBRATION
+
+
+def test_923_a_probe_that_breaks_its_contract_is_reported(fake_frames):
+    """Silently trusting a short result would gate a run on another run's score."""
+    captioner, _ = fake_frames([("The crowd erupts in the stands, fans cheering wildly.", 0.9)])
+
+    def short(frames, question):
+        return []
+
+    with pytest.raises(RecognizerUnavailable, match="one P\\(yes\\) per frame"):
+        SceneCaptionRecognizer(
+            captioner=captioner, fps=1.0, prober=short
+        ).recognize(MEDIA)
+
+
+def test_923_gated_events_stay_inside_the_closed_vocabulary():
+    """The gate must not invent a value the section 6.2 filter cannot serve."""
+    assert set(caption_mod.CLAIM_PROBES) <= set(SCENE_EVENTS)
+    assert SCENE_OTHER in SCENE_EVENTS
+
+
+def test_923_the_positional_contract_survives_the_gate():
+    """#923 appended its parameters; it must not have renumbered the old ones.
+
+    A caller that passed `windows` positionally predates the gate. If the new
+    parameters had been inserted, that tuple would bind to `prober` and fail
+    deep inside a gated run instead of at the call site.
+    """
+    import inspect
+
+    params = list(inspect.signature(SceneCaptionRecognizer.__init__).parameters)
+    positional = params[: params.index("similarity") + 1]
+    assert positional == [
+        "self",
+        "captioner",
+        "fps",
+        "batch_size",
+        "min_confidence",
+        "windows",
+        "floor_fps",
+        "similarity",
+    ]
+    sig = inspect.signature(SceneCaptionRecognizer.__init__)
+    for name in ("prober", "claim_threshold"):
+        assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.1, float("inf"), float("nan"), "0.99", True, None])
+def test_923_a_threshold_outside_the_probability_domain_is_refused(bad):
+    """Below zero every score clears the gate, so it would publish exactly the
+    claims it exists to withhold. Caught at construction, not at runtime."""
+    with pytest.raises(RecognizerUnavailable, match="claim_threshold"):
+        SceneCaptionRecognizer(
+            captioner=lambda paths: [], fps=1.0, claim_threshold=bad
+        )
+
+
+@pytest.mark.parametrize("bad", [float("inf"), 1.5, -0.2, float("nan"), True, "yes", None])
+def test_923_a_probe_score_outside_the_domain_is_unavailability(fake_frames, bad):
+    """inf clears any threshold. A malformed probe must fail closed, not yes."""
+    captioner, _ = fake_frames(
+        [("The crowd erupts in the stands, fans cheering wildly.", 0.9)]
+    )
+
+    def rogue(frames, question):
+        return [bad] * len(frames)
+
+    with pytest.raises(RecognizerUnavailable, match="probability domain"):
+        SceneCaptionRecognizer(
+            captioner=captioner, fps=1.0, prober=rogue
+        ).recognize(MEDIA)
+
+
+def test_923_the_domain_check_does_not_reject_the_endpoints(fake_frames):
+    """0.0 and 1.0 are legitimate answers and must survive validation."""
+    captioner, _ = fake_frames(
+        [("The crowd erupts in the stands, fans cheering wildly.", 0.9)]
+    )
+    assert (
+        SceneCaptionRecognizer(captioner=captioner, fps=1.0, prober=_prober(1.0))
+        .recognize(MEDIA)[0]
+        .event
+        == SCENE_CROWD
+    )
+    assert (
+        SceneCaptionRecognizer(captioner=captioner, fps=1.0, prober=_prober(0.0))
+        .recognize(MEDIA)[0]
+        .event
+        == SCENE_OTHER
+    )
+    # A threshold of exactly 0 or 1 is an operator's call to make.
+    SceneCaptionRecognizer(captioner=captioner, fps=1.0, claim_threshold=0.0)
+    SceneCaptionRecognizer(captioner=captioner, fps=1.0, claim_threshold=1.0)
