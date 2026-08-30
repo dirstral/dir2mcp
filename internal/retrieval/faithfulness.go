@@ -118,6 +118,31 @@ func parseFaithfulnessVerdict(reply string) faithfulnessVerdict {
 	}
 }
 
+// Wire names for the verdict (SPEC §9.4.4, spec 0.57.0). One closed vocabulary
+// shared by ask, ask_audio and transcribe_and_ask.
+const (
+	faithfulnessWireVerified    = "verified"
+	faithfulnessWireUnsupported = "unsupported"
+	faithfulnessWireUnchecked   = "unchecked"
+)
+
+// wireName renders the verdict for the tool contract.
+//
+// faithfulnessUnchecked reports "unchecked" rather than "" so a caller can tell
+// "this server checked and found nothing wrong" from "this server did not
+// check". Both were previously indistinguishable, and §9.4.4 makes the
+// difference explicit: unchecked is NOT a weak verified.
+func (v faithfulnessVerdict) wireName() string {
+	switch v {
+	case faithfulnessSupported:
+		return faithfulnessWireVerified
+	case faithfulnessUnsupported:
+		return faithfulnessWireUnsupported
+	default:
+		return faithfulnessWireUnchecked
+	}
+}
+
 // verifyFaithfulness runs the grounding check and reports its verdict. It
 // returns faithfulnessUnchecked when the feature is off, when there is nothing
 // to check, or when the verifier could not be reached.

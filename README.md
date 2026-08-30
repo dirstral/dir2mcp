@@ -546,8 +546,25 @@ to `ejected` survives. Only reading the answer back catches it.
 
 A withheld answer keeps the shape of every other refusal: the answer text says the claim
 could not be verified, `citations` is empty, and the retrieval hits are still returned so
-the reader can judge the material. `evidence_verdict` still reports what the evidence was
+the reader can judge the material. `evidence` still reports what the evidence was
 worth, because what failed is the answer and not the retrieval.
+
+The result carries a second verdict, `faithfulness`, so a client can tell these apart
+without reading prose:
+
+| value | meaning |
+| --- | --- |
+| `verified` | the answer was checked and every claim was supported |
+| `unsupported` | at least one claim was not supported, so the answer was withheld |
+| `unchecked` | verification produced no verdict, and this is the default |
+
+`unchecked` is not a weak `verified`. It says no answer-level judgement is available,
+which happens both when the check is off and when it ran and could not finish.
+
+Read the two verdicts together. `evidence` describes the **retrieval**, `faithfulness`
+describes the **answer**, and they move independently: a withheld answer can carry
+`evidence: strong`. A client that reads only `evidence` sees `sufficient` on a refusal
+and takes it for an answer, which is the reason the second field exists.
 
 The check fails open. When the verifier cannot be reached the answer is published
 unchecked and the failure is logged, because dropping every answer during a provider

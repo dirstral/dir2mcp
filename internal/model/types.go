@@ -1023,6 +1023,20 @@ type AskResult struct {
 	// "insufficient", the structured form of the abstention distinction §9.4.3
 	// requires. Empty means not computed, and the wire field is omitted.
 	EvidenceVerdict string
+	// Faithfulness is the named verdict on the ANSWER rather than the retrieval
+	// (SPEC §9.4.4, spec 0.57.0): "verified", "unsupported" or "unchecked".
+	//
+	// Orthogonal to EvidenceVerdict on purpose. That one describes whether the
+	// retrieved material was relevant; this one describes whether the answer
+	// reports what that material says, and a withheld answer may sit on
+	// "strong" evidence. A caller keying only on EvidenceVerdict would read
+	// "sufficient" on a refusal and treat it as an answer, which is the gap
+	// this field closes.
+	//
+	// Empty means the same as "unchecked" and omits the wire field. The two are
+	// not distinguished because both say the identical thing: no answer-level
+	// judgement is available.
+	Faithfulness string
 }
 
 type CorpusStats struct {
