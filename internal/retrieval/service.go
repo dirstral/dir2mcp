@@ -2031,6 +2031,12 @@ func (s *Service) abstainOnWeakEvidence(ctx context.Context, question string, hi
 		// The structured form of this abstention (spec 0.55.0): the guard fired,
 		// so by definition the eligible set's aggregate is "insufficient".
 		EvidenceVerdict: verdictInsufficient,
+		// No answer was generated, so nothing was verified (spec 0.57.0). Stated
+		// rather than left empty: every other path that publishes or withholds
+		// reports a verdict, and a field that is present on some refusals and
+		// absent on others makes a client special-case the shape instead of
+		// reading the value.
+		Faithfulness: faithfulnessUnchecked.wireName(),
 	}, true
 }
 
@@ -2095,6 +2101,10 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	}
 
 	answer := buildFallbackAnswer(question, hits)
+	// faithfulness is the #336 answer-level verdict. It stays Unchecked on
+	// every path that does not verify, which §9.4.4 defines as "no judgement"
+	// rather than as a weak pass.
+	faithfulness := faithfulnessUnchecked
 	switch {
 	case skipRetrieval:
 		// The adaptive gate found no information need, so no lookup ran and the
@@ -2108,7 +2118,8 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		// context the model was shown. An unsupported answer is withheld
 		// rather than published, because the absolute evidence threshold
 		// cannot catch a claim the passages do not make; only this can.
-		if s.verifyFaithfulness(ctx, question, answer, shown) == faithfulnessUnsupported {
+		faithfulness = s.verifyFaithfulness(ctx, question, answer, shown)
+		if faithfulness == faithfulnessUnsupported {
 			s.logf("faithfulness: withholding an answer the verifier could not support against %d retrieved chunks", len(hits))
 			indexingComplete, _ := s.IndexingComplete(ctx)
 			return model.AskResult{
@@ -2124,6 +2135,11 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 				// reported honestly rather than downgraded to look like a
 				// weak-evidence abstention.
 				EvidenceVerdict: aggregateEvidenceVerdict(hits),
+				// The answer-level verdict (SPEC §9.4.4, spec 0.57.0). A caller
+				// keying only on EvidenceVerdict would read "sufficient" here
+				// and take the refusal for an answer; this is what tells the two
+				// apart without parsing prose.
+				Faithfulness: faithfulness.wireName(),
 			}, nil
 		}
 	}
@@ -2147,6 +2163,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		// empty set carries no absolute signal, so it aggregates to "unknown",
 		// which also covers the adaptive skip-retrieval path where no lookup ran.
 		EvidenceVerdict: aggregateEvidenceVerdict(hits),
+		// The answer-level verdict (SPEC §9.4.4, spec 0.57.0). Every path that
+		// reaches here published an answer, so this is "verified" only when the
+		// check actually ran and passed; the paths that never verify (feature
+		// off, no generator, no hits, verifier unreachable) all report
+		// "unchecked", which §9.4.4 defines as carrying no judgement rather
+		// than as a weak pass.
+		Faithfulness: faithfulness.wireName(),
 	}, nil
 }
 

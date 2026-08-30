@@ -333,6 +333,12 @@ func TestAskOutputSchemaConformance(t *testing.T) {
 		}},
 		Hits:             []model.SearchHit{fullSearchHit()},
 		IndexingComplete: true,
+		// Both verdicts are populated on purpose. A fixture that leaves them
+		// empty omits the wire fields entirely and therefore never checks them
+		// against the schema, which is exactly how an undeclared-field leak
+		// (the #387 class) reaches a strict client unnoticed.
+		EvidenceVerdict: "sufficient",
+		Faithfulness:    "verified",
 	}
 	assertConforms(t, "ask", askOutputSchema(), buildAskStructuredContent(result))
 }
@@ -343,6 +349,8 @@ func TestAskAudioOutputSchemaConformance(t *testing.T) {
 		Answer:           "a",
 		Hits:             []model.SearchHit{fullSearchHit()},
 		IndexingComplete: true,
+		EvidenceVerdict:  "sufficient",
+		Faithfulness:     "unsupported",
 	})
 	structured["audio"] = map[string]interface{}{
 		"mime_type": "audio/mpeg",
@@ -357,6 +365,8 @@ func TestTranscribeAndAskOutputSchemaConformance(t *testing.T) {
 		Answer:           "a",
 		Hits:             []model.SearchHit{fullSearchHit()},
 		IndexingComplete: true,
+		EvidenceVerdict:  "sufficient",
+		Faithfulness:     "unchecked",
 	})
 	structured["stt_provider"] = "mistral"
 	structured["transcript_model"] = "voxtral-mini-latest"

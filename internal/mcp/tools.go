@@ -4038,6 +4038,19 @@ func buildAskStructuredContent(result model.AskResult) map[string]interface{} {
 	if verdict := strings.TrimSpace(result.EvidenceVerdict); verdict != "" {
 		structured["evidence"] = verdict
 	}
+	// The answer-level verdict (spec 0.57.0, SPEC §9.4.4). Orthogonal to
+	// "evidence": that one reports whether the retrieval was relevant, this one
+	// whether the answer reports what the retrieved passages say. A withheld
+	// answer can carry evidence "strong", so a caller that reads only
+	// "evidence" would take a refusal for an answer.
+	//
+	// Absent when empty rather than defaulted to "unchecked": the retriever
+	// that never set it has said nothing, and §15.1.1 forbids emitting a field
+	// the served schema does not declare. The schema does declare it, so this
+	// is only about not inventing a verdict on a caller's behalf.
+	if verdict := strings.TrimSpace(result.Faithfulness); verdict != "" {
+		structured["faithfulness"] = verdict
+	}
 	return structured
 }
 
@@ -4412,6 +4425,7 @@ func askOutputSchema() map[string]interface{} {
 			"hits":              map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/definitions/Hit"}},
 			"indexing_complete": map[string]interface{}{"type": "boolean"},
 			"evidence":          map[string]interface{}{"type": "string", "enum": []string{"strong", "sufficient", "insufficient", "unknown"}, "description": "Optional absolute verdict of the eligible set behind the answer, aggregated as the strongest eligible hit's verdict (SPEC 9.4.3); insufficient is the structured form of abstention."},
+			"faithfulness":      map[string]interface{}{"type": "string", "enum": []string{"verified", "unsupported", "unchecked"}, "description": "Optional verdict on the ANSWER rather than the retrieval (SPEC 9.4.4): unsupported means the answer was withheld, so answer carries a refusal and citations is empty; unchecked means verification produced no verdict (not configured, or attempted and unable to complete), which is the default and is NOT a quality signal. Orthogonal to evidence."},
 		},
 		"required":    []string{"question", "answer", "citations", "hits", "indexing_complete"},
 		"definitions": sharedDefinitions(),
