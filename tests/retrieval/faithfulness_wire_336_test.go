@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
 // SPEC §9.4.4 (spec 0.57.0): the answer-level verdict on the wire.
@@ -150,5 +152,38 @@ func TestAsk336_TheVocabularyIsClosed(t *testing.T) {
 		if !allowed[got.Faithfulness] {
 			t.Errorf("%s: Faithfulness = %q, outside the closed vocabulary", tc.name, got.Faithfulness)
 		}
+	}
+}
+
+// TestAsk336_WeakEvidenceAbstentionReportsUnchecked closes the third refusal
+// shape. §9.4.3 abstention returns before any answer is generated, so nothing
+// is verified, but the field must still be PRESENT: a value that appears on
+// some refusals and vanishes on others forces a client to special-case the
+// response shape instead of reading the verdict.
+//
+// This path is easy to miss because it returns early, ahead of the code that
+// computes the verdict for every other path.
+func TestAsk336_WeakEvidenceAbstentionReportsUnchecked(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	// Near-orthogonal to the query, so the absolute threshold refuses it.
+	addVec(t, idx, 1, []float32{0.02, 1})
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, &faithScriptedGenerator{answer: "must not run", verdict: "SUPPORTED"})
+	svc.SetChunkMetadata(1, model.SearchHit{
+		ChunkID: 1, RelPath: "docs/a.md", Snippet: "unrelated text",
+		Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
+	})
+	svc.SetVerifyFaithfulness(true)
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if got.EvidenceVerdict != "insufficient" {
+		t.Fatalf("EvidenceVerdict = %q, want insufficient (this must be the abstention path)", got.EvidenceVerdict)
+	}
+	if got.Faithfulness != "unchecked" {
+		t.Fatalf("Faithfulness = %q, want unchecked", got.Faithfulness)
 	}
 }

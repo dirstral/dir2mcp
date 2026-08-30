@@ -2031,6 +2031,12 @@ func (s *Service) abstainOnWeakEvidence(ctx context.Context, question string, hi
 		// The structured form of this abstention (spec 0.55.0): the guard fired,
 		// so by definition the eligible set's aggregate is "insufficient".
 		EvidenceVerdict: verdictInsufficient,
+		// No answer was generated, so nothing was verified (spec 0.57.0). Stated
+		// rather than left empty: every other path that publishes or withholds
+		// reports a verdict, and a field that is present on some refusals and
+		// absent on others makes a client special-case the shape instead of
+		// reading the value.
+		Faithfulness: faithfulnessUnchecked.wireName(),
 	}, true
 }
 

@@ -562,9 +562,10 @@ without reading prose:
 which happens both when the check is off and when it ran and could not finish.
 
 Read the two verdicts together. `evidence` describes the **retrieval**, `faithfulness`
-describes the **answer**, and they move independently: a withheld answer can carry
-`evidence: strong`. A client that reads only `evidence` sees `sufficient` on a refusal
-and takes it for an answer, which is the reason the second field exists.
+describes the **answer**, and they move independently: a withheld answer still carries
+the verdict its retrieval earned, normally `evidence: sufficient`. A client that reads
+only `evidence` therefore sees a healthy verdict on a refusal and takes it for an
+answer, which is the reason the second field exists.
 
 The check fails open. When the verifier cannot be reached the answer is published
 unchecked and the failure is logged, because dropping every answer during a provider
