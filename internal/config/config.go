@@ -429,9 +429,36 @@ type Config struct {
 	RetrievalMMREnabled bool
 	// RetrievalMMRLambda is the MMR relevance-vs-diversity trade-off
 	// (config `retrieval.mmr.lambda`) in [0,1]: 1.0 = pure relevance (no
-	// diversity penalty), 0.0 = pure diversity. Default 0.5 balances the two. It
-	// is only consulted when RetrievalMMREnabled is true. Values outside [0,1]
-	// (or NaN/Inf) are CONFIG_INVALID.
+	// diversity penalty), 0.0 = pure diversity. It is only consulted when
+	// RetrievalMMREnabled is true. Values outside [0,1] (or NaN/Inf) are
+	// CONFIG_INVALID.
+	//
+	// The shipped 0.5 is the canonical MMR balance point, and it is a POOR
+	// choice for a corpus whose records are near-duplicates by construction:
+	// an event log, a play-by-play feed, a transcript of one long meeting.
+	// applyMMR scores diversity with Jaccard over snippet tokens, so rows that
+	// differ by a few tokens look redundant to it, and at 0.5 that penalty
+	// outweighs relevance gaps that are genuinely decisive.
+	//
+	// MEASURED on the dir2mcp pilot corpus (issue #928), a baseball
+	// play-by-play index, over five "what happened in the Nth inning" queries
+	// at k=12, alongside a coverage probe on four broad queries. Coverage is
+	// the only thing diversification buys, so both are reported:
+	//
+	//    lambda      correct innings   distinct minutes covered
+	//    disabled          60/60         9.8
+	//    0.50              47/60        11.2   <- costs 13 for +1.5
+	//    0.70              58/60        10.8
+	//    0.85              59/60         9.8   <- no coverage gain at all
+	//    1.00              60/60         9.8
+	//
+	// Two things follow. On such a corpus 0.5 trades away a fifth of the
+	// precision for a small spread gain, and a lambda high enough to keep the
+	// precision buys no coverage over simply leaving MMR off. Read that as an
+	// argument for measuring on YOUR corpus rather than as a shipped verdict:
+	// this is one corpus, MMR is off by default, and 0.5 remains the right
+	// starting point for prose, where near-duplicate rows are the exception
+	// rather than the format.
 	RetrievalMMRLambda float64
 	// RetrievalHyDEEnabled toggles the opt-in HyDE (Hypothetical Document
 	// Embeddings) query transform (config `retrieval.hyde.enabled`). When true,
