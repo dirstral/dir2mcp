@@ -445,12 +445,16 @@ type Config struct {
 	// at k=12, alongside a coverage probe on four broad queries. Coverage is
 	// the only thing diversification buys, so both are reported:
 	//
+	// Coverage is a mean over the four broad queries, so it lands on exact
+	// quarters and is reported unrounded: rounding 11.25 to one decimal reads
+	// as 11.2 and makes the +1.50 gain below look like +1.4.
+	//
 	//    lambda      correct innings   distinct minutes covered
-	//    disabled          60/60         9.8
-	//    0.50              47/60        11.2   <- costs 13 for +1.5
-	//    0.70              58/60        10.8
-	//    0.85              59/60         9.8   <- no coverage gain at all
-	//    1.00              60/60         9.8
+	//    disabled          60/60         9.75
+	//    0.50              47/60        11.25   <- costs 13 for +1.50
+	//    0.70              58/60        10.75
+	//    0.85              59/60         9.75   <- no coverage gain at all
+	//    1.00              60/60         9.75
 	//
 	// Two things follow. On such a corpus 0.5 trades away a fifth of the
 	// precision for a small spread gain, and a lambda high enough to keep the
