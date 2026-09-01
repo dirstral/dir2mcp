@@ -1,0 +1,25 @@
+name: go install with retries
+description: >
+  Install a pinned Go tool, retrying transient module-proxy/checksum-db
+  failures. Motivated by 2026-09-01, when a green, merged PR turned main red
+  because "go install golangci-lint" hit "sum.golang.org/tile/...: stream
+  error: INTERNAL_ERROR" during the download. The package is pinned by the
+  caller, so a retry can only re-fetch the same bytes; three attempts with
+  linear backoff ride out the blip without masking a real failure.
+inputs:
+  package:
+    description: Fully qualified package path including the pinned @version.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: go install (3 attempts)
+      shell: bash
+      run: |
+        for i in 1 2 3; do
+          go install "${{ inputs.package }}" && exit 0
+          echo "::warning::go install ${{ inputs.package }} attempt $i failed; retrying"
+          sleep $((i * 20))
+        done
+        echo "::error::go install ${{ inputs.package }} failed after 3 attempts"
+        exit 1
