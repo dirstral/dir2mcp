@@ -4710,7 +4710,7 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 }
 
 // FormatCitation renders a human-readable citation string for a span (SPEC §9.3).
-// The base forms are path-only ([rel_path]), page ([rel_path@p=N]), line range
+// The base forms are path-only ([rel_path]), page ([rel_path#p=N]), line range
 // ([rel_path@L12-48]), and time ([rel_path@t=02:13-02:41]). On a diarized
 // transcript a time span MAY append the speaker — preferring the human-readable
 // label, falling back to the stable id — as " › Speaker" (§8.6.8), e.g.
