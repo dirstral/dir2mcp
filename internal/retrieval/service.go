@@ -130,7 +130,9 @@ const (
 	// rag.system_prompt.
 	defaultRAGDomainRules = "Answer the question using only the provided context.\n" +
 		ragAnswerLanguageRule +
-		"Include concise source attributions in the form [rel_path].\n"
+		"Cite by copying the bracketed tag of the document each statement is " +
+		"drawn from, exactly as the tag appears in that document's header, " +
+		"for example [interview.mp4@t=02:13-02:41] or [notes.md].\n"
 
 	// ragAnswerLanguageRule is the answer-language half of the domain rules,
 	// named so the trailing reminder below can be keyed on it. Concatenating it
@@ -4294,7 +4296,18 @@ func ragDocHeader(h model.SearchHit) string {
 	// directions embedded inside these markers. The guard rides on EVERY
 	// system prompt, not only the shipped one (issue #885), so a fence is
 	// never written without the rule that explains it.
-	header := ragDocOpenMarker + " [" + neutralizeHeaderField(h.RelPath) + "]"
+	// The tag is the FULL 9.3 citation for this chunk's span, not the bare
+	// path (#934). The bare form destroyed claim-to-moment mapping at
+	// generation time: in a single-file corpus every inline marker was the
+	// same string, so no client could trace a sentence to its second. The
+	// model cites by copying this tag (see defaultRAGDomainRules), and the
+	// downstream tag parsing (citationTagPath) has accepted the suffixed
+	// forms all along. Only the path is untrusted input; the span suffix is
+	// server-rendered and contains no character NeutralizeLabel acts on, so
+	// wrapping the path alone and wrapping the whole tag are equivalent today.
+	// The path-only form is kept because it states the trust boundary rather
+	// than relying on the redactor never matching server text.
+	header := ragDocOpenMarker + " " + FormatCitation(neutralizeHeaderField(h.RelPath), h.Span)
 	if title := strings.TrimSpace(h.Title); title != "" {
 		header += " (" + neutralizeHeaderField(title) + ")"
 	}

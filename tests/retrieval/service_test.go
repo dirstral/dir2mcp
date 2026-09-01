@@ -1123,7 +1123,7 @@ func TestAsk_PromptDelimitsUntrustedCorpusContent(t *testing.T) {
 	}
 
 	// The corpus snippet must be fenced by BEGIN/END markers.
-	open := strings.Index(gen.lastPrompt, "<<<BEGIN UNTRUSTED DOCUMENT [docs/evil.md]")
+	open := strings.Index(gen.lastPrompt, "<<<BEGIN UNTRUSTED DOCUMENT [docs/evil.md")
 	if open == -1 {
 		t.Fatalf("expected BEGIN marker for the retrieved document, got %q", gen.lastPrompt)
 	}
@@ -1167,7 +1167,7 @@ func TestAsk_NeutralizesSpoofedCloseMarker(t *testing.T) {
 		t.Fatalf("Ask failed: %v", err)
 	}
 
-	open := strings.Index(gen.lastPrompt, "<<<BEGIN UNTRUSTED DOCUMENT [docs/evil.md]")
+	open := strings.Index(gen.lastPrompt, "<<<BEGIN UNTRUSTED DOCUMENT [docs/evil.md")
 	if open == -1 {
 		t.Fatalf("expected BEGIN marker, got %q", gen.lastPrompt)
 	}
@@ -1205,7 +1205,7 @@ func TestAsk_TruncatedDocumentKeepsCloseMarker(t *testing.T) {
 		t.Fatalf("Ask failed: %v", err)
 	}
 
-	open := strings.Index(gen.lastPrompt, "<<<BEGIN UNTRUSTED DOCUMENT [docs/big.md]")
+	open := strings.Index(gen.lastPrompt, "<<<BEGIN UNTRUSTED DOCUMENT [docs/big.md")
 	if open == -1 {
 		t.Fatalf("expected BEGIN marker, got %q", gen.lastPrompt)
 	}
@@ -1298,7 +1298,7 @@ func TestAsk_TinyBudgetSkipsPartialBeginMarker(t *testing.T) {
 	// Match the "<<<BEGIN" prefix so a marker cut mid-word (e.g. shorter than
 	// "...DOCUMENT") is still caught.
 	if strings.Contains(ctx, "<<<BEGIN") &&
-		!strings.Contains(ctx, "<<<BEGIN UNTRUSTED DOCUMENT [docs/big.md]>>>") {
+		!strings.Contains(ctx, "<<<BEGIN UNTRUSTED DOCUMENT [docs/big.md") {
 		t.Fatalf("emitted a partial BEGIN marker at a tiny budget, got %q", ctx)
 	}
 }

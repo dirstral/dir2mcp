@@ -145,7 +145,7 @@ func TestAsk880_DocumentCannotChangeTheAnswerLanguage(t *testing.T) {
 
 	// The hijack text sits strictly between the untrusted-document markers, so
 	// the model reads it as DATA.
-	open := strings.Index(rest, "<<<BEGIN UNTRUSTED DOCUMENT [docs/poisoned.ru.vtt]")
+	open := strings.Index(rest, "<<<BEGIN UNTRUSTED DOCUMENT [docs/poisoned.ru.vtt")
 	if open == -1 {
 		t.Fatalf("no BEGIN marker for the poisoned document: %q", rest)
 	}
@@ -199,7 +199,7 @@ func TestAsk880_EnglishQuestionUnaffected(t *testing.T) {
 	if !strings.Contains(rest, "When is rent due?") {
 		t.Fatalf("question missing from the prompt: %q", rest)
 	}
-	if !strings.Contains(rest, "<<<BEGIN UNTRUSTED DOCUMENT [docs/lease.md]") {
+	if !strings.Contains(rest, "<<<BEGIN UNTRUSTED DOCUMENT [docs/lease.md") {
 		t.Fatalf("document fence missing: %q", rest)
 	}
 	// The rule names no fixed language, so an English question carries no

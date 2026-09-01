@@ -302,7 +302,7 @@ func TestAsk_SendsMatchCenteredWindowOfFullChunk(t *testing.T) {
 		t.Fatalf("expected a match-centered window, got the head of the chunk: %q", promptCtx)
 	}
 	// The fence must stay intact around the window (issue #445).
-	if !strings.Contains(promptCtx, "<<<BEGIN UNTRUSTED DOCUMENT [docs/lease.md]>>>") ||
+	if !strings.Contains(promptCtx, "<<<BEGIN UNTRUSTED DOCUMENT [docs/lease.md") ||
 		!strings.Contains(promptCtx, "<<<END UNTRUSTED DOCUMENT>>>") {
 		t.Fatalf("expected a complete untrusted-document fence, got %q", promptCtx)
 	}
