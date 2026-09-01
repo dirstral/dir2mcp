@@ -16,10 +16,25 @@ runs:
     - name: go install (3 attempts)
       shell: bash
       run: |
+        # The safety argument is "a retry can only re-fetch the same bytes",
+        # which is only true of a pinned version. Enforce it rather than
+        # trust every future caller: @latest or a bare path would make the
+        # attempts non-deterministic.
+        case "${{ inputs.package }}" in
+          *@latest|*@main|*@master)
+            echo "::error::go-install-retry requires a pinned @version, got ${{ inputs.package }}"
+            exit 1 ;;
+          *@*) ;;
+          *)
+            echo "::error::go-install-retry requires a pinned @version, got ${{ inputs.package }}"
+            exit 1 ;;
+        esac
         for i in 1 2 3; do
           go install "${{ inputs.package }}" && exit 0
-          echo "::warning::go install ${{ inputs.package }} attempt $i failed; retrying"
-          sleep $((i * 20))
+          if [ "$i" -lt 3 ]; then
+            echo "::warning::go install ${{ inputs.package }} attempt $i failed; retrying"
+            sleep $((i * 20))
+          fi
         done
         echo "::error::go install ${{ inputs.package }} failed after 3 attempts"
         exit 1
