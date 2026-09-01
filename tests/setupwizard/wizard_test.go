@@ -239,7 +239,7 @@ func TestSecretDestConstants(t *testing.T) {
 // tag: identical wording is what keeps the presets and defaultRAGDomainRules
 // from drifting apart in meaning.
 func TestApplyCorpusProfile_PresetsStateTheCitationContract(t *testing.T) {
-	const citationRule = "Include concise source attributions in the form [rel_path]."
+	const citationRule = "Cite by copying the bracketed tag of the document each statement is drawn from, exactly as the tag appears in that document's header, for example [interview.mp4@t=02:13-02:41] or [notes.md]."
 	for _, profile := range []setupwizard.Profile{setupwizard.ProfileLegal, setupwizard.ProfileCode} {
 		cfg := config.Default()
 		setupwizard.ApplyCorpusProfile(&cfg, profile)

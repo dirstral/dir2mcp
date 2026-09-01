@@ -4302,12 +4302,13 @@ func ragDocHeader(h model.SearchHit) string {
 	// same string, so no client could trace a sentence to its second. The
 	// model cites by copying this tag (see defaultRAGDomainRules), and the
 	// downstream tag parsing (citationTagPath) has accepted the suffixed
-	// forms all along. Only the path is untrusted input; the span suffix is
-	// server-rendered and contains no character NeutralizeLabel acts on, so
-	// wrapping the path alone and wrapping the whole tag are equivalent today.
-	// The path-only form is kept because it states the trust boundary rather
-	// than relying on the redactor never matching server text.
-	header := ragDocOpenMarker + " " + FormatCitation(neutralizeHeaderField(h.RelPath), h.Span)
+	// forms all along. The WHOLE tag is neutralized, not only the path: a
+	// diarized time span appends span.SpeakerLabel, which is WebVTT voice-tag
+	// text from the corpus, so the tag can carry attacker-authored words in
+	// two fields. Wrapping the finished tag covers both and every field a
+	// future span form adds; wrapping the path alone was reviewed as a
+	// header-injection hole (CWE-74) precisely because of the speaker field.
+	header := ragDocOpenMarker + " " + neutralizeHeaderField(FormatCitation(h.RelPath, h.Span))
 	if title := strings.TrimSpace(h.Title); title != "" {
 		header += " (" + neutralizeHeaderField(title) + ")"
 	}
@@ -4722,8 +4723,12 @@ func FormatCitation(relPath string, span model.Span) string {
 	speaker := ""
 	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
 	case "page":
+		// "#p=", not "@p=": SPEC 9.3 mandates [path#p=<page>], and #934 made
+		// these tags model-visible in every block header, so the drift stopped
+		// being cosmetic. citationTagPath has always cut both separators, so
+		// answers citing the old form keep parsing.
 		if span.Page > 0 {
-			suffix = fmt.Sprintf("@p=%d", span.Page)
+			suffix = fmt.Sprintf("#p=%d", span.Page)
 		}
 	case "lines":
 		if span.StartLine > 0 && span.EndLine >= span.StartLine {
