@@ -1,0 +1,50 @@
+name: go install with retries
+description: >
+  Install a pinned Go tool, retrying transient module-proxy/checksum-db
+  failures. Motivated by 2026-09-01, when a green, merged PR turned main red
+  because "go install golangci-lint" hit "sum.golang.org/tile/...: stream
+  error: INTERNAL_ERROR" during the download. The package is pinned by the
+  caller, so a retry can only re-fetch the same bytes; three attempts with
+  linear backoff ride out the blip without masking a real failure.
+inputs:
+  package:
+    description: Fully qualified package path including the pinned @version.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: go install (3 attempts)
+      shell: bash
+      # The package flows in through the step ENVIRONMENT, never by expression
+      # interpolation into the script source: an inputs expression pasted into
+      # bash IS the script, so a crafted input carrying `;` or `$(` would
+      # execute (CWE-78). An env var is data however it is spelled.
+      env:
+        PACKAGE: ${{ inputs.package }}
+      run: |
+        # The safety argument is "a retry can only re-fetch the same bytes",
+        # which is only true of a pinned version. Enforce it as an ALLOWLIST
+        # (a denylist cannot name every moving ref), and enforce the FULL Go
+        # semver grammar: prerelease starts with "-", build metadata with "+",
+        # so "v1.2.3.foo" is rejected rather than resolved as a tag or branch
+        # that different attempts could see at different commits. The other
+        # provably-pinned form is a commit hash.
+        ver="${PACKAGE##*@}"
+        if [ "$ver" = "$PACKAGE" ]; then
+          echo "::error::go-install-retry requires a pinned @version, got $PACKAGE"
+          exit 1
+        fi
+        if [[ ! "$ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] \
+           && [[ ! "$ver" =~ ^[0-9a-fA-F]{12,40}$ ]]; then
+          echo "::error::go-install-retry requires a semver or commit-hash pin, got @$ver"
+          exit 1
+        fi
+        for i in 1 2 3; do
+          go install "$PACKAGE" && exit 0
+          if [ "$i" -lt 3 ]; then
+            echo "::warning::go install $PACKAGE attempt $i failed; retrying"
+            sleep $((i * 20))
+          fi
+        done
+        echo "::error::go install $PACKAGE failed after 3 attempts"
+        exit 1

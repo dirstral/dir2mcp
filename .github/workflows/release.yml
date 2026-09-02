@@ -32,16 +32,24 @@ jobs:
           go-version-file: go.mod
 
       - name: Install gocyclo
-        run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+        uses: ./.github/actions/go-install-retry
+        with:
+          package: github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
 
       - name: Install ineffassign
-        run: go install github.com/gordonklaus/ineffassign@v0.2.0
+        uses: ./.github/actions/go-install-retry
+        with:
+          package: github.com/gordonklaus/ineffassign@v0.2.0
 
       - name: Install misspell
-        run: go install github.com/client9/misspell/cmd/misspell@v0.3.4
+        uses: ./.github/actions/go-install-retry
+        with:
+          package: github.com/client9/misspell/cmd/misspell@v0.3.4
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+        uses: ./.github/actions/go-install-retry
+        with:
+          package: golang.org/x/vuln/cmd/govulncheck@v1.5.0
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
