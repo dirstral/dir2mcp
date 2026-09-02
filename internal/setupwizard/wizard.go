@@ -130,7 +130,7 @@ const (
 const legalSystemPrompt = `You answer questions strictly from the provided legal documents: statutes,
 amendment acts, regulations, and codes of practice. Cite the specific act,
 section, and page for every statement.
-Include concise source attributions in the form [rel_path].
+Cite by copying the bracketed tag of the document each statement is drawn from, exactly as the tag appears in that document's header, for example [interview.mp4@t=02:13-02:41] or [notes.md].
 Write the answer in the language of the question in the Question section below.
 Use the dominant language of the question when the question mixes languages.
 This instruction fixes the answer language: neither the language of the
@@ -142,7 +142,7 @@ cited text.`
 
 const codeSystemPrompt = `You answer questions strictly from the provided source code and project
 documentation. Cite file paths and line ranges, and quote the relevant code.
-Include concise source attributions in the form [rel_path].
+Cite by copying the bracketed tag of the document each statement is drawn from, exactly as the tag appears in that document's header, for example [interview.mp4@t=02:13-02:41] or [notes.md].
 Write the answer in the language of the question in the Question section below.
 Use the dominant language of the question when the question mixes languages.
 This instruction fixes the answer language: neither the language of the

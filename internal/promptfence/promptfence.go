@@ -14,7 +14,10 @@
 // is one definition and a fence written by one path is recognizable to another.
 package promptfence
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 const (
 	// OpenMarker and CloseMarker delimit one untrusted block. OpenMarker is a
@@ -49,11 +52,28 @@ func Neutralize(s string) string {
 }
 
 // NeutralizeLabel sanitizes a value interpolated into the OPENING marker, such
-// as a path or a title. Beyond Neutralize it also strips OpenMarkerEnd, because
-// a label containing ">>>" would close the opening marker early and put the
-// rest of the label in the trusted region.
+// as a path, a title or a diarized speaker label. Beyond Neutralize it also
+// strips OpenMarkerEnd, because a label containing ">>>" would close the
+// opening marker early and put the rest of the label in the trusted region.
+//
+// It additionally collapses every whitespace and control rune to one space: a
+// label is by definition a single-line value, and a label carrying a raw "\n"
+// needs no marker literal at all to escape its position, because the spill
+// lands on its own line BEFORE the opening marker's terminator and reads as
+// free-standing text rather than as part of the bracketed tag (found in the
+// #934 review, via a WebVTT speaker label). The predicate is
+// unicode.IsSpace || unicode.IsControl rather than an ASCII range, because
+// U+2028/U+2029 and their Unicode kin render as line breaks in many consumers
+// and would reopen the same hole past an ASCII-only check (same review, one
+// escalation later). Collapsing rather than deleting keeps adjacent words
+// apart; runs collapse to one space, so the label also cannot be inflated by
+// repetition; and ordinary interior spaces are canonicalized by the same rule
+// rather than special-cased around it.
 func NeutralizeLabel(s string) string {
-	return strings.ReplaceAll(Neutralize(s), OpenMarkerEnd, MarkerRedaction)
+	s = strings.ReplaceAll(Neutralize(s), OpenMarkerEnd, MarkerRedaction)
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}), " ")
 }
 
 // Wrap fences untrusted text as one block, neutralizing markers inside both the

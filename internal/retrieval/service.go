@@ -130,7 +130,9 @@ const (
 	// rag.system_prompt.
 	defaultRAGDomainRules = "Answer the question using only the provided context.\n" +
 		ragAnswerLanguageRule +
-		"Include concise source attributions in the form [rel_path].\n"
+		"Cite by copying the bracketed tag of the document each statement is " +
+		"drawn from, exactly as the tag appears in that document's header, " +
+		"for example [interview.mp4@t=02:13-02:41] or [notes.md].\n"
 
 	// ragAnswerLanguageRule is the answer-language half of the domain rules,
 	// named so the trailing reminder below can be keyed on it. Concatenating it
@@ -4294,7 +4296,19 @@ func ragDocHeader(h model.SearchHit) string {
 	// directions embedded inside these markers. The guard rides on EVERY
 	// system prompt, not only the shipped one (issue #885), so a fence is
 	// never written without the rule that explains it.
-	header := ragDocOpenMarker + " [" + neutralizeHeaderField(h.RelPath) + "]"
+	// The tag is the FULL 9.3 citation for this chunk's span, not the bare
+	// path (#934). The bare form destroyed claim-to-moment mapping at
+	// generation time: in a single-file corpus every inline marker was the
+	// same string, so no client could trace a sentence to its second. The
+	// model cites by copying this tag (see defaultRAGDomainRules), and the
+	// downstream tag parsing (citationTagPath) has accepted the suffixed
+	// forms all along. The WHOLE tag is neutralized, not only the path: a
+	// diarized time span appends span.SpeakerLabel, which is WebVTT voice-tag
+	// text from the corpus, so the tag can carry attacker-authored words in
+	// two fields. Wrapping the finished tag covers both and every field a
+	// future span form adds; wrapping the path alone was reviewed as a
+	// header-injection hole (CWE-74) precisely because of the speaker field.
+	header := ragDocOpenMarker + " " + neutralizeHeaderField(FormatCitation(h.RelPath, h.Span))
 	if title := strings.TrimSpace(h.Title); title != "" {
 		header += " (" + neutralizeHeaderField(title) + ")"
 	}
@@ -4696,7 +4710,7 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 }
 
 // FormatCitation renders a human-readable citation string for a span (SPEC §9.3).
-// The base forms are path-only ([rel_path]), page ([rel_path@p=N]), line range
+// The base forms are path-only ([rel_path]), page ([rel_path#p=N]), line range
 // ([rel_path@L12-48]), and time ([rel_path@t=02:13-02:41]). On a diarized
 // transcript a time span MAY append the speaker — preferring the human-readable
 // label, falling back to the stable id — as " › Speaker" (§8.6.8), e.g.
@@ -4709,8 +4723,12 @@ func FormatCitation(relPath string, span model.Span) string {
 	speaker := ""
 	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
 	case "page":
+		// "#p=", not "@p=": SPEC 9.3 mandates [path#p=<page>], and #934 made
+		// these tags model-visible in every block header, so the drift stopped
+		// being cosmetic. citationTagPath has always cut both separators, so
+		// answers citing the old form keep parsing.
 		if span.Page > 0 {
-			suffix = fmt.Sprintf("@p=%d", span.Page)
+			suffix = fmt.Sprintf("#p=%d", span.Page)
 		}
 	case "lines":
 		if span.StartLine > 0 && span.EndLine >= span.StartLine {
