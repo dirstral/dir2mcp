@@ -148,10 +148,10 @@ func TestFormatCitation_AppendsSpeaker(t *testing.T) {
 			name: "page span (no speaker surface)",
 			path: "doc.pdf",
 			span: model.Span{Kind: "page", Page: 4},
-			want:// "#p=", not "@p=", since #934: SPEC 9.3 mandates the # delimiter, and the
-			// tag became model-visible in every block header, so conformance stopped
-			// being cosmetic.
-			"[doc.pdf#p=4]",
+			// "#p=", not "@p=", since #934: SPEC 9.3 mandates the # delimiter,
+			// and the tag became model-visible in every block header, so
+			// conformance stopped being cosmetic.
+			want: "[doc.pdf#p=4]",
 		},
 	}
 	for _, tc := range cases {
