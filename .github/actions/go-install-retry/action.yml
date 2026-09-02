@@ -18,17 +18,23 @@ runs:
       run: |
         # The safety argument is "a retry can only re-fetch the same bytes",
         # which is only true of a pinned version. Enforce it rather than
-        # trust every future caller: @latest or a bare path would make the
-        # attempts non-deterministic.
-        case "${{ inputs.package }}" in
-          *@latest|*@main|*@master)
-            echo "::error::go-install-retry requires a pinned @version, got ${{ inputs.package }}"
-            exit 1 ;;
-          *@*) ;;
-          *)
-            echo "::error::go-install-retry requires a pinned @version, got ${{ inputs.package }}"
-            exit 1 ;;
-        esac
+        # trust every future caller, and enforce it as an ALLOWLIST: the
+        # first version of this guard denied @latest/@main/@master and was
+        # reviewed as too permissive, since @develop or any branch name
+        # sailed through and different attempts could resolve to different
+        # commits. Only two forms provably name one commit: a semantic
+        # version (pseudo-versions included, their commit is in the suffix)
+        # and a commit hash itself.
+        pkg="${{ inputs.package }}"
+        ver="${pkg##*@}"
+        if [ "$ver" = "$pkg" ]; then
+          echo "::error::go-install-retry requires a pinned @version, got $pkg"
+          exit 1
+        fi
+        if [[ ! "$ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+.-].*)?$ ]] && [[ ! "$ver" =~ ^[0-9a-fA-F]{12,40}$ ]]; then
+          echo "::error::go-install-retry requires a semver or commit-hash pin, got @$ver"
+          exit 1
+        fi
         for i in 1 2 3; do
           go install "${{ inputs.package }}" && exit 0
           if [ "$i" -lt 3 ]; then
