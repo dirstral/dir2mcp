@@ -14,7 +14,10 @@
 // is one definition and a fence written by one path is recognizable to another.
 package promptfence
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 const (
 	// OpenMarker and CloseMarker delimit one untrusted block. OpenMarker is a
@@ -53,18 +56,23 @@ func Neutralize(s string) string {
 // strips OpenMarkerEnd, because a label containing ">>>" would close the
 // opening marker early and put the rest of the label in the trusted region.
 //
-// It additionally collapses every control character, newlines included, to one
-// space: a label is by definition a single-line value, and a label carrying a
-// raw "\n" needs no marker literal at all to escape its position, because the
-// spill lands on its own line BEFORE the opening marker's terminator and reads
-// as free-standing text rather than as part of the bracketed tag (found in the
-// #934 review, via a WebVTT speaker label). Collapsing rather than deleting
-// keeps adjacent words apart, and runs collapse to one space so a label cannot
-// be inflated by repetition.
+// It additionally collapses every whitespace and control rune to one space: a
+// label is by definition a single-line value, and a label carrying a raw "\n"
+// needs no marker literal at all to escape its position, because the spill
+// lands on its own line BEFORE the opening marker's terminator and reads as
+// free-standing text rather than as part of the bracketed tag (found in the
+// #934 review, via a WebVTT speaker label). The predicate is
+// unicode.IsSpace || unicode.IsControl rather than an ASCII range, because
+// U+2028/U+2029 and their Unicode kin render as line breaks in many consumers
+// and would reopen the same hole past an ASCII-only check (same review, one
+// escalation later). Collapsing rather than deleting keeps adjacent words
+// apart; runs collapse to one space, so the label also cannot be inflated by
+// repetition; and ordinary interior spaces are canonicalized by the same rule
+// rather than special-cased around it.
 func NeutralizeLabel(s string) string {
 	s = strings.ReplaceAll(Neutralize(s), OpenMarkerEnd, MarkerRedaction)
 	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
-		return r < 0x20 || r == 0x7f
+		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}), " ")
 }
 
