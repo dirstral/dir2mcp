@@ -28,19 +28,28 @@ def build_response(doc: Document, roster: Roster | None = None) -> dict:
     return {
         "recognizer": {"name": doc.recognizer.name, "version": doc.recognizer.version},
         "entities": entities,
-        "annotations": [
-            {
-                "start_s": round(a.start_s, 3),
-                "end_s": round(a.end_s, 3),
-                "event": a.event,
-                "entities": list(a.entity_ids),
-                "text": a.text,
-                "confidence": a.confidence,
-                "sources": list(a.sources),
-            }
-            for a in doc.annotations
-        ],
+        "annotations": [_annotation_dict(a) for a in doc.annotations],
     }
+
+
+def _annotation_dict(a) -> dict:
+    out = {
+        "start_s": round(a.start_s, 3),
+        "end_s": round(a.end_s, 3),
+        "event": a.event,
+        "entities": list(a.entity_ids),
+        "text": a.text,
+        "confidence": a.confidence,
+        "sources": list(a.sources),
+    }
+    # Present only when the annotation states a scope: an absent map and an
+    # empty one are the same claim ("no attributes"), and omitting it keeps
+    # the payload byte-identical to pre-attributes responses, so dir2mcp's
+    # derivation hash does not re-derive annotations that gained nothing
+    # (SPEC §8.6.7, the sources precedent). Keys sorted for a stable wire.
+    if a.attributes:
+        out["attributes"] = dict(sorted(a.attributes.items()))
+    return out
 
 
 def response_json(doc: Document, roster: Roster | None = None) -> str:
