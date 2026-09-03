@@ -3200,7 +3200,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 			return model.Span{Kind: "lines"}
 		}
 		speaker, speakerLabel := speakerFromExtraJSON(extraJSON)
-		entities, event, sources := annotationFromExtraJSON(extraJSON)
+		entities, event, sources, attributes := annotationFromExtraJSON(extraJSON)
 		return model.Span{
 			Kind: "time", StartMS: start, EndMS: end,
 			Words:        wordsFromExtraJSON(extraJSON),
@@ -3209,6 +3209,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 			Entities:     entities,
 			Event:        event,
 			Sources:      sources,
+			Attributes:   attributes,
 		}
 	case "region":
 		return regionSpanFromRow(start, end, extraJSON)
@@ -3226,21 +3227,23 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 // payload yields no entities, no event and no sources, so a span that predates
 // this (or comes from a transcript) degrades to exactly the behaviour it had
 // before, rather than erroring.
-func annotationFromExtraJSON(extraJSON string) (entities []string, event string, sources []string) {
+func annotationFromExtraJSON(extraJSON string) (entities []string, event string, sources []string, attributes map[string]string) {
 	if strings.TrimSpace(extraJSON) == "" {
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 	var payload struct {
-		Entities []string `json:"entities"`
-		Event    string   `json:"event"`
-		Sources  []string `json:"sources"`
+		Entities   []string          `json:"entities"`
+		Event      string            `json:"event"`
+		Sources    []string          `json:"sources"`
+		Attributes map[string]string `json:"attributes"`
 	}
 	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil {
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 	return model.NormalizeEntityIDs(payload.Entities),
 		strings.TrimSpace(payload.Event),
-		model.NormalizeSources(payload.Sources)
+		model.NormalizeSources(payload.Sources),
+		model.NormalizeAttributes(payload.Attributes)
 }
 
 // wordsFromExtraJSON reconstructs per-word timing for a "time" span from its
@@ -4160,19 +4163,21 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 	entities := model.NormalizeEntityIDs(span.Entities)
 	event := strings.TrimSpace(span.Event)
 	sources := model.NormalizeSources(span.Sources)
-	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 {
+	attributes := model.NormalizeAttributes(span.Attributes)
+	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 {
 		return "", nil
 	}
 	payload := struct {
-		Words        []model.WordSpan `json:"words,omitempty"`
-		Speaker      string           `json:"speaker,omitempty"`
-		SpeakerLabel string           `json:"speaker_label,omitempty"`
-		Entities     []string         `json:"entities,omitempty"`
-		Event        string           `json:"event,omitempty"`
-		Sources      []string         `json:"sources,omitempty"`
+		Words        []model.WordSpan  `json:"words,omitempty"`
+		Speaker      string            `json:"speaker,omitempty"`
+		SpeakerLabel string            `json:"speaker_label,omitempty"`
+		Entities     []string          `json:"entities,omitempty"`
+		Event        string            `json:"event,omitempty"`
+		Sources      []string          `json:"sources,omitempty"`
+		Attributes   map[string]string `json:"attributes,omitempty"`
 	}{
 		Words: words, Speaker: speaker, SpeakerLabel: speakerLabel,
-		Entities: entities, Event: event, Sources: sources,
+		Entities: entities, Event: event, Sources: sources, Attributes: attributes,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

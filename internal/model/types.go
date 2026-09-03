@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -325,6 +326,13 @@ type Span struct {
 	// the "time" span's extra_json.
 	Entities []string
 	Event    string
+	// Attributes are the producer-defined key/value scopes the recognizer
+	// attached to this annotation (SPEC §9.10, design 0006), for example
+	// {"inning": "8", "half": "bottom"}. Keys and values are opaque strings in
+	// the producer's documented canonical form; the server compares bytes.
+	// Metadata only, like Entities: never changes chunk text or span bounds.
+	// Nil on any span that is not a recognition annotation.
+	Attributes map[string]string
 	// Sources names the recognizers that produced this annotation, for example
 	// ["scorebug"] or ["playbyplay", "face"] (df-005 0.3.0). The vocabulary is
 	// producer-defined: a backend declares its own tags, so this side never
@@ -541,6 +549,14 @@ type Filter struct {
 	// re-check.
 	Entities []string
 	Events   []string
+	// Attributes restricts hits to recognition annotations whose attributes
+	// match (SPEC §9.10): for each key with a non-empty value list, the
+	// annotation must carry that key and its value must equal ANY listed value
+	// (OR within a key). Across keys, and against every other filter, AND.
+	// A key mapped to an empty list is ignored as if not sent, and a nil/empty
+	// map disables the filter entirely: only a stated value ever narrows a
+	// result. Values match literally, case-sensitively, as strings.
+	Attributes map[string][]string
 }
 
 // IsZero reports whether the filter has no active predicate.
@@ -552,7 +568,8 @@ func (f Filter) IsZero() bool {
 		strings.TrimSpace(f.Speaker) == "" &&
 		len(f.Languages) == 0 &&
 		len(f.Entities) == 0 &&
-		len(f.Events) == 0
+		len(f.Events) == 0 &&
+		!f.hasAttributeConstraint()
 }
 
 // Match reports whether the payload satisfies every active predicate. It
@@ -630,7 +647,97 @@ func (f Filter) MatchesAnnotation(span Span) bool {
 	if len(f.Events) > 0 && !MatchesAnyLiteral(f.Events, []string{span.Event}) {
 		return false
 	}
+	for key, values := range f.Attributes {
+		// A key mapped to an empty list is ignored as if not sent (SPEC §9.10):
+		// only a stated value ever narrows a result, so a client serialization
+		// quirk cannot turn "no filter" into "match nothing".
+		if len(values) == 0 {
+			continue
+		}
+		got, ok := span.Attributes[key]
+		// An annotation that lacks a requested key does not match, and a
+		// non-annotation span (nil map) matches no attribute constraint at all,
+		// mirroring how the entity/event filter admits only annotation-derived
+		// hits.
+		if !ok || !MatchesAnyLiteral(values, []string{got}) {
+			return false
+		}
+	}
 	return true
+}
+
+// hasAttributeConstraint reports whether the attributes filter actually
+// constrains anything: a nil map, an empty map, and a map whose every key holds
+// an empty list are all "no filter" (SPEC §9.10). IsZero needs the distinction,
+// because {"inning": []} arriving from a client must not make an otherwise-zero
+// filter look active.
+func (f Filter) hasAttributeConstraint() bool {
+	for _, values := range f.Attributes {
+		if len(values) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeAttributes trims keys and values and drops pairs where either side
+// is empty after trimming. It deliberately does NOT change case or padding:
+// SPEC §9.10 makes the canonical form the PRODUCER's, documented by the
+// producer, and the server compares bytes. Returns nil for an empty result so
+// an annotation without attributes stores and serializes nothing.
+//
+// Raw keys are visited in sorted order so the result is a pure function of
+// the input: when two raw keys trim to the same key, the lexically greatest
+// raw key's value wins, every time. Ingestion rejects an annotation whose
+// keys collide with DIFFERENT values before this function's result is ever
+// stored (AttributeKeyConflict), so the winner rule only decides benign
+// duplicates and guards defensive callers; it must still be deterministic,
+// because a value that flapped with Go's map iteration order would flap the
+// derivation hash, the persisted extra_json and the filter's answer across
+// identical inputs.
+func NormalizeAttributes(attrs map[string]string) map[string]string {
+	if len(attrs) == 0 {
+		return nil
+	}
+	rawKeys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		rawKeys = append(rawKeys, k)
+	}
+	sort.Strings(rawKeys)
+	out := make(map[string]string, len(attrs))
+	for _, rawKey := range rawKeys {
+		k, v := strings.TrimSpace(rawKey), strings.TrimSpace(attrs[rawKey])
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// AttributeKeyConflict reports whether two raw keys trim to the same key with
+// DIFFERENT surviving values. SPEC §9.10 requires the producer to emit each
+// key in one canonical form, so such a map does not say which value the
+// producer meant; ingestion treats the annotation as malformed and drops it
+// (design 0004 §5), the same as a reserved key. Duplicates that agree on the
+// value are not a conflict: they collapse to the one pair the producer meant.
+// Pairs that normalization would drop (blank key or value) cannot conflict.
+func AttributeKeyConflict(attrs map[string]string) bool {
+	seen := make(map[string]string, len(attrs))
+	for rawKey, rawValue := range attrs {
+		k, v := strings.TrimSpace(rawKey), strings.TrimSpace(rawValue)
+		if k == "" || v == "" {
+			continue
+		}
+		if prev, ok := seen[k]; ok && prev != v {
+			return true
+		}
+		seen[k] = v
+	}
+	return false
 }
 
 // NormalizeEntityIDs trims, drops empties, and de-duplicates entity ids while
@@ -749,6 +856,13 @@ type SearchQuery struct {
 	// hits. Absent/empty disables the filter (unchanged behavior).
 	Entities []string
 	Events   []string
+	// Attributes optionally restricts hits to recognition annotations whose
+	// producer-defined attributes match (SPEC §9.10): OR within a key's value
+	// list, AND across keys and against every other filter, literal string
+	// equality. Nil/empty map, and any key mapped to an empty list, disable
+	// that constraint. Only annotation-derived hits can match a non-empty
+	// filter. Callers validate shape upstream; values pass through verbatim.
+	Attributes map[string][]string
 	// DateFrom / DateTo optionally restrict hits to a document-date window (SPEC
 	// §9.6), compared against each candidate's source-document calendar anchor
 	// (mtime_unix). Both are Unix seconds and both bounds are inclusive; 0 means

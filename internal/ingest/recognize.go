@@ -157,13 +157,14 @@ type recognizeWireResponse struct {
 		Version string `json:"version"`
 	} `json:"recognizer"`
 	Annotations []struct {
-		StartS     float64  `json:"start_s"`
-		EndS       float64  `json:"end_s"`
-		Event      string   `json:"event"`
-		Entities   []string `json:"entities"`
-		Text       string   `json:"text"`
-		Confidence float64  `json:"confidence"`
-		Sources    []string `json:"sources"`
+		StartS     float64           `json:"start_s"`
+		EndS       float64           `json:"end_s"`
+		Event      string            `json:"event"`
+		Entities   []string          `json:"entities"`
+		Text       string            `json:"text"`
+		Confidence float64           `json:"confidence"`
+		Sources    []string          `json:"sources"`
+		Attributes map[string]string `json:"attributes"`
 	} `json:"annotations"`
 }
 
@@ -230,6 +231,7 @@ func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (m
 			Text:       a.Text,
 			Confidence: a.Confidence,
 			Sources:    a.Sources,
+			Attributes: a.Attributes,
 		})
 	}
 	return out, nil
@@ -409,6 +411,12 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		entities []string
 		event    string
 		sources  []string
+		// attrKeys is the SORTED key list, computed once: maps iterate in
+		// random order, and both the canonical hash line and the stored span
+		// must see one deterministic order or identical annotations would hash
+		// differently run to run.
+		attrs    map[string]string
+		attrKeys []string
 		// hashLine is this annotation's whole contribution to the derivation
 		// hash input, and also the final sort tie-break below.
 		hashLine string
@@ -446,6 +454,20 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 				fmt.Fprintf(&line, "|%d:%s", len(source), source)
 			}
 		}
+		// Attributes join the derivation hash the same way sources did (#9.10):
+		// APPENDED ONLY WHEN PRESENT, so every existing annotation's hash input
+		// is byte-identical and no corpus re-derives just because the field now
+		// exists. The group is tagged "A" because it must never be confusable
+		// with a sources group under any count: both are append-only optional
+		// suffixes, and a bare count could make {2 sources} and {2 attributes}
+		// collide. Keys are length-prefixed like every other opaque token, and
+		// iterated in sorted order because map order is random per run.
+		if len(v.attrKeys) > 0 {
+			fmt.Fprintf(&line, "|A%d", len(v.attrKeys))
+			for _, k := range v.attrKeys {
+				fmt.Fprintf(&line, "|%d:%s|%d:%s", len(k), k, len(v.attrs[k]), v.attrs[k])
+			}
+		}
 		return line.String()
 	}
 	valid := make([]validAnnotation, 0, len(anns))
@@ -468,7 +490,19 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			// no client could tell a scorebug reading from a face match (#861).
 			// Provenance only: nothing downstream ranks or filters on it.
 			sources: model.NormalizeSources(ann.Sources),
+			attrs:   model.NormalizeAttributes(ann.Attributes),
 		}
+		// A reserved dir2mcp: key or two keys trimming to the same name with
+		// different values both make the annotation malformed (SPEC §9.10),
+		// and the established malformed-annotation behaviour is to DROP it
+		// while its siblings proceed (design 0004 §5, same as a reversed
+		// span), not to repair it: a stripped key would store an annotation
+		// the producer never sent, and a picked collision winner would store
+		// a value the producer may not have meant.
+		if malformedAttributes(ann.Attributes, v.attrs) {
+			continue
+		}
+		v.attrKeys = sortedAttributeKeys(v.attrs)
 		v.hashLine = canonicalLine(v)
 		valid = append(valid, v)
 	}
@@ -500,12 +534,48 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			Span: model.Span{
 				Kind: "time", StartMS: v.startMS, EndMS: v.endMS,
 				Entities: v.entities, Event: v.event, Sources: v.sources,
+				Attributes: v.attrs,
 			},
 		})
 		hashInput.WriteString(v.hashLine)
 		hashInput.WriteByte('\n')
 	}
 	return segments, hashInput.String()
+}
+
+// malformedAttributes reports whether the annotation's attributes disqualify
+// it: a reserved key (checked on the normalized map, where the key survives
+// trimming) or a key collision with different values (checked on the RAW wire
+// map, because normalization already collapsed the collision away and its
+// deterministic winner is not evidence of what the producer meant).
+func malformedAttributes(raw, normalized map[string]string) bool {
+	return hasReservedAttributeKey(normalized) || model.AttributeKeyConflict(raw)
+}
+
+// hasReservedAttributeKey reports whether any attribute key carries the
+// dir2mcp: prefix SPEC §9.10 reserves for future core semantics.
+func hasReservedAttributeKey(attrs map[string]string) bool {
+	for k := range attrs {
+		if strings.HasPrefix(k, "dir2mcp:") {
+			return true
+		}
+	}
+	return false
+}
+
+// sortedAttributeKeys returns the map's keys in sorted order: maps iterate
+// randomly, and both the canonical hash line and any deterministic rendering
+// need ONE order or identical annotations would differ run to run.
+func sortedAttributeKeys(attrs map[string]string) []string {
+	if len(attrs) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // GenerateRecognitionRepresentation runs the configured recognition backend

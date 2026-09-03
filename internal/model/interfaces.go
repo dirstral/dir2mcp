@@ -321,6 +321,11 @@ type RecognizedAnnotation struct {
 	Text       string
 	Confidence float64
 	Sources    []string
+	// Attributes are producer-defined key/value scopes (SPEC §9.10, design
+	// 0006). Keys with the reserved dir2mcp: prefix are a contract violation
+	// the producer MUST NOT emit; ingestion drops such an annotation as
+	// malformed while its siblings proceed (design 0004 §5).
+	Attributes map[string]string
 }
 
 // RecognizeResult is a recognition backend's full response for one media
