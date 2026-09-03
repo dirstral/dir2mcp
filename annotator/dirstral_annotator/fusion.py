@@ -104,6 +104,20 @@ def _merge(group: list[Cue]) -> Annotation:
     confidence = round(1.0 - miss, 4)
 
     entity_ids = tuple(dict.fromkeys(e for c in group for e in c.entity_ids))
+    # Attributes union across the group, but a key two cues DISAGREE on is
+    # dropped outright: the fused annotation must not state a scope only one
+    # of its sources claimed, and dir2mcp treats a conflicted key as a
+    # malformed annotation (SPEC §9.10), which would silently drop the whole
+    # fused claim. Cues sort by (start_s, end_s) before grouping, so the
+    # iteration below is deterministic.
+    attributes: dict[str, str] = {}
+    conflicted: set[str] = set()
+    for c in group:
+        for key, value in c.attributes.items():
+            if attributes.setdefault(key, value) != value:
+                conflicted.add(key)
+    for key in conflicted:
+        del attributes[key]
     # Prefer the richest text a recognizer produced (play-by-play beats a
     # bare face sighting), falling back to any non-empty one.
     text = max((c.text for c in group), key=len, default="")
@@ -115,4 +129,5 @@ def _merge(group: list[Cue]) -> Annotation:
         text=text,
         confidence=confidence,
         sources=tuple(sorted(best_per_source)),
+        attributes=attributes,
     )

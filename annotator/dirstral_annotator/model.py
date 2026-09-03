@@ -41,6 +41,12 @@ class Cue:
     entity_ids: tuple[str, ...]
     confidence: float
     text: str = ""
+    #: Structured scopes that are neither an entity nor an event (SPEC §9.10):
+    #: `{"inning": "8", "half": "bottom"}`. Keys and values are opaque strings
+    #: in ONE canonical form of this producer's choosing; dir2mcp compares
+    #: bytes, so "08" and "8" are different values. Keys must never carry the
+    #: reserved `dir2mcp:` prefix — the server drops the whole annotation.
+    attributes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.end_s < self.start_s:
@@ -61,6 +67,10 @@ class Annotation:
     text: str
     confidence: float
     sources: tuple[str, ...]
+    #: Fused from the cues' attributes; a key two cues disagree on is dropped
+    #: (see fusion._merge), so what remains is only what every stating cue
+    #: agreed on.
+    attributes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

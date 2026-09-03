@@ -149,6 +149,25 @@ def _number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
+def _inning_attributes(ev: PitchEvent) -> dict[str, str]:
+    """The inning as a REQUIRABLE scope (SPEC §9.10), not just prose.
+
+    The half-inning already rides in the cue text ("bottom of the 8th"), which
+    lets an inning query be PREFERRED by similarity — and rank a talkative 7th
+    above a quiet 8th (#928 measured exactly that). The attributes are the
+    structured form a filter can require: `{"inning": ["8"]}` on search/ask
+    matches these values byte-for-byte.
+
+    Canonical forms, fixed here and compared verbatim by the server: the
+    inning as an unpadded decimal ("8", "10"), the half as lowercase "top" or
+    "bottom". An event without an inning (feed gap) states no scope at all
+    rather than a made-up one.
+    """
+    if ev.inning <= 0:
+        return {}
+    return {"inning": str(ev.inning), "half": "top" if ev.top_inning else "bottom"}
+
+
 def _with_team(player_id: str, team: str) -> tuple[str, ...]:
     """The acting player, plus the club they are acting for.
 
@@ -200,6 +219,13 @@ class PlayByPlayRecognizer:
             half = ev.half_inning()
             where = f" ({half})" if half else ""
             desc = f" — {ev.description}" if ev.description else ""
+            # The inning ALSO rides as structured attributes (SPEC §9.10), on
+            # every cue of the event: the prose above lets an inning be
+            # preferred by similarity, the attributes let it be REQUIRED
+            # ({"attributes": {"inning": ["8"]}} on search/ask). Values are the
+            # canonical forms dir2mcp will compare byte-for-byte: the inning
+            # unpadded ("8", "10"), the half lowercase "top"/"bottom".
+            attrs = _inning_attributes(ev)
             if pitcher is not None:
                 # A pitch thrown BY a rostered player — the event the phase-1
                 # metric scores (recall/precision are pitcher-keyed).
@@ -212,6 +238,7 @@ class PlayByPlayRecognizer:
                         entity_ids=_with_team(pitcher.id, ev.pitching_team()),
                         confidence=CONFIDENCE,
                         text=f"Pitch: {pitcher_name} to {batter_name}{where}{desc}",
+                        attributes=dict(attrs),
                     )
                 )
             if batter is not None:
@@ -228,6 +255,7 @@ class PlayByPlayRecognizer:
                         entity_ids=_with_team(batter.id, ev.batting_team()),
                         confidence=CONFIDENCE,
                         text=f"At bat: {batter_name} vs {pitcher_name}{where}{desc}",
+                        attributes=dict(attrs),
                     )
                 )
             outcome = ev.event_type.strip()
@@ -257,6 +285,7 @@ class PlayByPlayRecognizer:
                             f"{outcome_label(outcome)}: {batter_name} "
                             f"vs {pitcher_name}{where}{desc}"
                         ),
+                        attributes=dict(attrs),
                     )
                 )
             if batter is not None:
@@ -299,6 +328,8 @@ class PlayByPlayRecognizer:
         """
         keyed = _with_team(batter_id, ev.batting_team())
 
+        attrs = _inning_attributes(ev)
+
         def cue(event: str, text: str) -> Cue:
             return Cue(
                 source=self.name,
@@ -308,6 +339,7 @@ class PlayByPlayRecognizer:
                 entity_ids=keyed,
                 confidence=CONFIDENCE,
                 text=text,
+                attributes=dict(attrs),
             )
 
         out = []
