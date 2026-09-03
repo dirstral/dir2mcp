@@ -492,14 +492,14 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			sources: model.NormalizeSources(ann.Sources),
 			attrs:   model.NormalizeAttributes(ann.Attributes),
 		}
-		// The dir2mcp: key prefix is reserved for future core semantics and a
-		// producer MUST NOT emit it (SPEC §9.10; the wire schema rejects it via
-		// propertyNames). An annotation that carries one is malformed, and the
-		// established malformed-annotation behaviour is to DROP it while its
-		// siblings proceed (design 0004 §5, same as a reversed span), not to
-		// silently strip the key: a stripped key would store an annotation the
-		// producer never sent.
-		if hasReservedAttributeKey(v.attrs) {
+		// A reserved dir2mcp: key or two keys trimming to the same name with
+		// different values both make the annotation malformed (SPEC §9.10),
+		// and the established malformed-annotation behaviour is to DROP it
+		// while its siblings proceed (design 0004 §5, same as a reversed
+		// span), not to repair it: a stripped key would store an annotation
+		// the producer never sent, and a picked collision winner would store
+		// a value the producer may not have meant.
+		if malformedAttributes(ann.Attributes, v.attrs) {
 			continue
 		}
 		v.attrKeys = sortedAttributeKeys(v.attrs)
@@ -541,6 +541,15 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 		hashInput.WriteByte('\n')
 	}
 	return segments, hashInput.String()
+}
+
+// malformedAttributes reports whether the annotation's attributes disqualify
+// it: a reserved key (checked on the normalized map, where the key survives
+// trimming) or a key collision with different values (checked on the RAW wire
+// map, because normalization already collapsed the collision away and its
+// deterministic winner is not evidence of what the producer meant).
+func malformedAttributes(raw, normalized map[string]string) bool {
+	return hasReservedAttributeKey(normalized) || model.AttributeKeyConflict(raw)
 }
 
 // hasReservedAttributeKey reports whether any attribute key carries the

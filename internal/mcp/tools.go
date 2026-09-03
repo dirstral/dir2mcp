@@ -2582,6 +2582,13 @@ func parseSearchScopeFilters(args map[string]interface{}) (temporalFilters, []st
 // must not trim, lowercase or otherwise "help". Empty object and empty arrays
 // pass through too; the model layer defines them as disabled, and rejecting
 // them here would make "no constraint" an error.
+//
+// An explicit JSON null is treated as omitted, deliberately: every optional
+// filter on these tools reads null that way (parseOptionalStringSlice for
+// entities/events/languages), client libraries routinely serialize an absent
+// optional as null, and §9.10's rule that no serialization quirk may turn "no
+// filter" into an error or "match nothing" points the same direction. Making
+// attributes alone reject null would split the surface's convention.
 func parseAttributesArg(args map[string]interface{}) (map[string][]string, *toolExecutionError) {
 	raw, present := args["attributes"]
 	if !present || raw == nil {

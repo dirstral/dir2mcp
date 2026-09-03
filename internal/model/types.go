@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -684,13 +685,28 @@ func (f Filter) hasAttributeConstraint() bool {
 // SPEC §9.10 makes the canonical form the PRODUCER's, documented by the
 // producer, and the server compares bytes. Returns nil for an empty result so
 // an annotation without attributes stores and serializes nothing.
+//
+// Raw keys are visited in sorted order so the result is a pure function of
+// the input: when two raw keys trim to the same key, the lexically greatest
+// raw key's value wins, every time. Ingestion rejects an annotation whose
+// keys collide with DIFFERENT values before this function's result is ever
+// stored (AttributeKeyConflict), so the winner rule only decides benign
+// duplicates and guards defensive callers; it must still be deterministic,
+// because a value that flapped with Go's map iteration order would flap the
+// derivation hash, the persisted extra_json and the filter's answer across
+// identical inputs.
 func NormalizeAttributes(attrs map[string]string) map[string]string {
 	if len(attrs) == 0 {
 		return nil
 	}
+	rawKeys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		rawKeys = append(rawKeys, k)
+	}
+	sort.Strings(rawKeys)
 	out := make(map[string]string, len(attrs))
-	for k, v := range attrs {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+	for _, rawKey := range rawKeys {
+		k, v := strings.TrimSpace(rawKey), strings.TrimSpace(attrs[rawKey])
 		if k == "" || v == "" {
 			continue
 		}
@@ -700,6 +716,28 @@ func NormalizeAttributes(attrs map[string]string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+// AttributeKeyConflict reports whether two raw keys trim to the same key with
+// DIFFERENT surviving values. SPEC §9.10 requires the producer to emit each
+// key in one canonical form, so such a map does not say which value the
+// producer meant; ingestion treats the annotation as malformed and drops it
+// (design 0004 §5), the same as a reserved key. Duplicates that agree on the
+// value are not a conflict: they collapse to the one pair the producer meant.
+// Pairs that normalization would drop (blank key or value) cannot conflict.
+func AttributeKeyConflict(attrs map[string]string) bool {
+	seen := make(map[string]string, len(attrs))
+	for rawKey, rawValue := range attrs {
+		k, v := strings.TrimSpace(rawKey), strings.TrimSpace(rawValue)
+		if k == "" || v == "" {
+			continue
+		}
+		if prev, ok := seen[k]; ok && prev != v {
+			return true
+		}
+		seen[k] = v
+	}
+	return false
 }
 
 // NormalizeEntityIDs trims, drops empties, and de-duplicates entity ids while

@@ -152,3 +152,42 @@ func TestHashInputGolden(t *testing.T) {
 		t.Fatalf("derivation hash input changed for attribute-less annotations:\ngot  %q\nwant %q", hash, golden)
 	}
 }
+
+// Two raw keys that trim to the same key with DIFFERENT values do not say
+// which value the producer meant (§9.10 requires ONE canonical form per key),
+// so the annotation is malformed and drops while siblings proceed (design
+// 0004 §5) — the same policy as a reserved key. Repairing it by picking a
+// winner would store a value the producer may not have meant, and letting map
+// iteration pick would flap the derivation hash across identical inputs.
+func TestAttributeKeyCollisionDropsTheAnnotation(t *testing.T) {
+	segments, _ := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+		attributed("Pitch: X to Y",
+			map[string]string{"inning": "8", " inning ": "9"}, 1000, 2000),
+		attributed("Pitch: A to B",
+			map[string]string{"inning": "8"}, 3000, 4000),
+	})
+	if len(segments) != 1 {
+		t.Fatalf("expected the colliding annotation dropped and its sibling kept, got %d segments", len(segments))
+	}
+	if segments[0].Text != "Pitch: A to B" {
+		t.Fatalf("wrong survivor: %q", segments[0].Text)
+	}
+}
+
+// Duplicates that AGREE on the value are not ambiguous: they collapse to the
+// one pair the producer meant, deterministically, and the annotation stays.
+func TestAttributeKeyDuplicateWithSameValueCollapses(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		segments, _ := ingest.RecognitionSegments([]model.RecognizedAnnotation{
+			attributed("Pitch: X to Y",
+				map[string]string{"inning": "8", " inning ": " 8 "}, 1000, 2000),
+		})
+		if len(segments) != 1 {
+			t.Fatalf("benign duplicate dropped the annotation")
+		}
+		got := segments[0].Span.Attributes
+		if len(got) != 1 || got["inning"] != "8" {
+			t.Fatalf("span.Attributes = %v, want exactly inning=8", got)
+		}
+	}
+}

@@ -113,6 +113,11 @@ func TestAttributes928_EmptyShapesPassThroughDisabled(t *testing.T) {
 	for name, args := range map[string]string{
 		"empty object": `{"query":"q","attributes":{}}`,
 		"empty array":  `{"query":"q","attributes":{"inning":[]}}`,
+		// An explicit null reads as omitted, pinned deliberately: it is how
+		// every optional filter on these tools reads null (entities, events,
+		// languages), and client libraries routinely serialize an absent
+		// optional as null.
+		"explicit null": `{"query":"q","attributes":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			ret := &attrRecordingRetriever{}
