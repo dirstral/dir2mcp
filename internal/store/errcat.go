@@ -3,9 +3,12 @@ package store
 import (
 	"errors"
 	"net"
+	"net/http"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // ErrorCategory is a coarse classification for chunk-embedding failures.
@@ -189,7 +192,21 @@ var transientNetKeywords = []string{
 // stays under the cyclomatic-complexity budget and so new keywords
 // can be added with a single-line edit rather than a new switch case.
 var classifierRules = []classifierRule{
-	{ErrorCategoryRateLimit, []string{"429", "rate limit", "rate-limit", "quota exceeded", "too many requests"}},
+	// The spellings here are what providers ACTUALLY emit, not what the phrase
+	// looks like in prose. `rate_limit` is the code form every adapter in this
+	// repo uses (GEMINI_RATE_LIMIT, MISTRAL_RATE_LIMIT, OPENAI_RATE_LIMIT), and
+	// a lowercased code never contains "rate limit" with a space. The quota
+	// wordings are Gemini's and OpenAI's own: both answer an exhausted quota
+	// with 429 and the sentence "You exceeded your current quota", which
+	// reverses "quota exceeded" and so matched nothing (#932). Getting this set
+	// wrong is not cosmetic: IsRateLimitError below is the embed worker's retry
+	// gate, and a rate limit misread as permanent marks the whole remaining
+	// corpus embedding_status=error.
+	{ErrorCategoryRateLimit, []string{
+		"429", "rate limit", "rate-limit", "rate_limit",
+		"quota exceeded", "exceeded your current quota", "insufficient_quota",
+		"too many requests",
+	}},
 	{ErrorCategoryPayloadTooLarge, []string{"413", "payload too large", "request entity too large", "file too large", "exceeds maximum size"}},
 	{ErrorCategoryAuth, []string{"401", "403", "unauthorized", "forbidden", "invalid api key", "authentication"}},
 	{ErrorCategoryTransientNet, transientNetKeywords},
@@ -214,6 +231,21 @@ func IsTransientError(err error) bool {
 	return containsAny(strings.ToLower(err.Error()), transientNetKeywords)
 }
 
+// IsRateLimitError reports whether err is an upstream rate limit or exhausted
+// quota. It is deliberately the SAME keyword set ClassifyError labels
+// rate_limit with, for the reason IsTransientError shares transientNetKeywords
+// (#412): the embed worker's retry gate and the category the diagnostics
+// surface reports must never disagree about one error. A rate limit is not
+// transient_net — it is a property of the ACCOUNT, not the connection or the
+// chunk — so it needs its own predicate rather than a keyword bolted onto the
+// network set. nil ⇒ false.
+func IsRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return ClassifyError(err) == ErrorCategoryRateLimit
+}
+
 // ClassifyError returns the ErrorCategory that best describes err.
 // Classification is keyword/pattern-based against the error message
 // and well-known wrapped types (net errors, http status codes folded
@@ -226,6 +258,17 @@ func ClassifyError(err error) ErrorCategory {
 	if isNetTransient(err) {
 		return ErrorCategoryTransientNet
 	}
+	// A ProviderError already carries the upstream HTTP status, which is a
+	// FACT about the failure, while everything below is a guess about its
+	// prose. Read the fact first (#932). Measured: Gemini answers a bad key
+	// with "API key not valid. Please pass a valid API key." — the keyword set
+	// looks for "invalid api key", the other word order, so a 401 classified
+	// as `unknown` and the embed worker's auth guard (which exists to stop a
+	// corpus-wide rejection from exploding into O(n) bisection calls) never
+	// fired.
+	if cat := categoryForStatus(err); cat != "" {
+		return cat
+	}
 	msg := strings.ToLower(err.Error())
 	for _, rule := range classifierRules {
 		if containsAny(msg, rule.keywords) {
@@ -233,6 +276,34 @@ func ClassifyError(err error) ErrorCategory {
 		}
 	}
 	return ErrorCategoryUnknown
+}
+
+// categoryForStatus maps a structured *model.ProviderError's HTTP status onto
+// its category, or "" when err carries no provider status to read. Only the
+// statuses whose meaning is unambiguous are mapped; anything else falls
+// through to the keyword table, so a provider that returns a 400 with a
+// descriptive body still classifies on that body.
+//
+// This exists because a status code cannot be paraphrased and a message can:
+// every provider spells its own rate limit and auth failure differently, and
+// three of those spellings had already drifted past the keyword table (#932).
+func categoryForStatus(err error) ErrorCategory {
+	var provErr *model.ProviderError
+	if !errors.As(err, &provErr) || provErr == nil {
+		return ""
+	}
+	switch provErr.StatusCode {
+	case http.StatusTooManyRequests:
+		return ErrorCategoryRateLimit
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return ErrorCategoryAuth
+	case http.StatusRequestEntityTooLarge:
+		return ErrorCategoryPayloadTooLarge
+	}
+	if provErr.StatusCode >= http.StatusInternalServerError {
+		return ErrorCategoryTransientNet
+	}
+	return ""
 }
 
 // containsAny reports whether s contains any of the needles. Pulled
