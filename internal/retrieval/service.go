@@ -3606,6 +3606,9 @@ func filterFromQuery(q model.SearchQuery) model.Filter {
 		// authoritative check still runs in matchFilters, which sees the span.
 		Entities: q.Entities,
 		Events:   q.Events,
+		// §9.10: pushed down like entities/events when the index can filter;
+		// the authoritative re-check runs in matchFilters, which sees the span.
+		Attributes: q.Attributes,
 	}
 }
 
@@ -4813,7 +4816,7 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	// vocabulary is imposed here. A hit whose span carries no attribution —
 	// every non-annotation chunk — never matches a non-empty filter, mirroring
 	// the speaker filter above. Empty filters are a no-op.
-	if !(model.Filter{Entities: query.Entities, Events: query.Events}).MatchesAnnotation(hit.Span) {
+	if !(model.Filter{Entities: query.Entities, Events: query.Events, Attributes: query.Attributes}).MatchesAnnotation(hit.Span) {
 		return false
 	}
 

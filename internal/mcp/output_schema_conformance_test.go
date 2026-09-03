@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"encoding/json"
+	"math"
 	"reflect"
 	"testing"
 
@@ -165,16 +167,17 @@ func resolveRef(ref string, root map[string]interface{}) map[string]interface{} 
 // (mirrors the release-smoke validator guarding Python's bool<:int), as is any
 // float — the dir2mcp serializers emit native ints for integer fields.
 func isIntegerKind(inst interface{}) bool {
-	if _, ok := inst.(bool); ok {
-		return false
+	// Instances are validated post json.Marshal (jsonRoundTrip), so every JSON
+	// number arrives as float64. JSON Schema's "integer" accepts 42 and rejects
+	// 42.5, which is the integral-value check, not a Go-type check.
+	if f, ok := inst.(float64); ok {
+		return f == math.Trunc(f)
 	}
-	switch reflect.ValueOf(inst).Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	switch inst.(type) {
+	case int, int32, int64, uint, uint32, uint64:
 		return true
-	default:
-		return false
 	}
+	return false
 }
 
 // isNumberKind reports whether inst is a Go numeric value (integer or float),
@@ -276,11 +279,31 @@ func fullSearchHit() model.SearchHit {
 	}
 }
 
+// jsonRoundTrip re-materializes an instance through encoding/json before
+// validation, because that is what a client receives. The serializers place Go
+// values like map[string]string and []model.WordSpan into structuredContent,
+// and the mini-validator's type switches only see the post-marshal shapes; a
+// span carrying attributes validated as 0-of-oneOf purely because the
+// validator met a map[string]string it did not recognize, while the wire bytes
+// were conformant.
+func jsonRoundTrip(t *testing.T, instance interface{}) interface{} {
+	t.Helper()
+	raw, err := json.Marshal(instance)
+	if err != nil {
+		t.Fatalf("marshal instance: %v", err)
+	}
+	var out interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal instance: %v", err)
+	}
+	return out
+}
+
 // assertConforms fails the test if the instance does not validate against the
 // schema, printing every error path.
 func assertConforms(t *testing.T, name string, schema, instance map[string]interface{}) {
 	t.Helper()
-	if errs := schemaErrors(schema, instance, schema, "$"); len(errs) != 0 {
+	if errs := schemaErrors(schema, jsonRoundTrip(t, instance), schema, "$"); len(errs) != 0 {
 		for _, e := range errs {
 			t.Errorf("%s: structuredContent violates outputSchema: %s", name, e)
 		}
@@ -540,6 +563,14 @@ func TestSpanVariantsConformToSpanSchema(t *testing.T) {
 		{"page", model.Span{Kind: "page", Page: 3}},
 		{"time", model.Span{Kind: "time", StartMS: 1000, EndMS: 5000}},
 		{"time_diarized", model.Span{Kind: "time", StartMS: 1000, EndMS: 5000, Speaker: "S1", SpeakerLabel: "Alice"}},
+		// A recognition annotation carrying every structured field, attributes
+		// included (SPEC 9.10): populated so the served time branch's
+		// additionalProperties:false is actually exercised against the new
+		// field (the #387 class fails whole calls on a strict client).
+		{"time_annotation", model.Span{Kind: "time", StartMS: 1000, EndMS: 5000,
+			Entities: []string{"player:m-chapman"}, Event: "home_run",
+			Sources:    []string{"playbyplay"},
+			Attributes: map[string]string{"inning": "8", "half": "bottom"}}},
 		{"region", fullSearchHit().Span},
 		// A region span whose payload/bbox is absent degrades to a page or
 		// document span; cover that path too.
@@ -550,7 +581,7 @@ func TestSpanVariantsConformToSpanSchema(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			built := buildOpenFileSpan(tc.span)
-			if errs := schemaErrors(spanRoot, built, spanRoot, "$"); len(errs) != 0 {
+			if errs := schemaErrors(spanRoot, jsonRoundTrip(t, built), spanRoot, "$"); len(errs) != 0 {
 				for _, e := range errs {
 					t.Errorf("span kind %q violates Span schema: %s", tc.span.Kind, e)
 				}

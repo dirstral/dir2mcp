@@ -1091,7 +1091,7 @@ func normalizedListRelPath(relPath string) (string, bool) {
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
-		"entities": {}, "events": {},
+		"entities": {}, "events": {}, "attributes": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -1126,7 +1126,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
-	tw, entities, events, toolErr := parseSearchScopeFilters(args)
+	tw, entities, events, attributes, toolErr := parseSearchScopeFilters(args)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1136,7 +1136,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	sq := model.SearchQuery{
 		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
 		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
-		Entities: entities, Events: events,
+		Entities: entities, Events: events, Attributes: attributes,
 	}
 	// index_used MUST be the index the query was actually routed to (SPEC §15.2),
 	// not the requested name. Prefer AxisSearcher so the reported axis is read back
@@ -1350,7 +1350,7 @@ func askFamilyArguments(extra ...string) map[string]struct{} {
 		"path_prefix": {}, "file_glob": {}, "doc_types": {},
 		"languages": {}, "language_match": {},
 		"date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
-		"entities": {}, "events": {},
+		"entities": {}, "events": {}, "attributes": {},
 	}
 	for _, name := range extra {
 		allowed[name] = struct{}{}
@@ -1411,7 +1411,7 @@ func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}, defa
 	if toolErr != nil {
 		return askRequest{}, toolErr
 	}
-	tw, entities, events, toolErr := parseSearchScopeFilters(args)
+	tw, entities, events, attributes, toolErr := parseSearchScopeFilters(args)
 	if toolErr != nil {
 		return askRequest{}, toolErr
 	}
@@ -1425,7 +1425,7 @@ func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}, defa
 			DateFrom: tw.dateFrom, DateTo: tw.dateTo,
 			HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS,
 			HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
-			Entities: entities, Events: events,
+			Entities: entities, Events: events, Attributes: attributes,
 		},
 	}, nil
 }
@@ -2558,16 +2558,59 @@ func parseAnnotationFilters(args map[string]interface{}) (entities, events []str
 // entity/event attribution (design 0004 §7). Grouped into one call so the tool
 // handler stays within the repo's cyclomatic budget; each half is unchanged and
 // still validated independently.
-func parseSearchScopeFilters(args map[string]interface{}) (temporalFilters, []string, []string, *toolExecutionError) {
+func parseSearchScopeFilters(args map[string]interface{}) (temporalFilters, []string, []string, map[string][]string, *toolExecutionError) {
 	tw, toolErr := parseTemporalFilters(args)
 	if toolErr != nil {
-		return temporalFilters{}, nil, nil, toolErr
+		return temporalFilters{}, nil, nil, nil, toolErr
 	}
 	entities, events, toolErr := parseAnnotationFilters(args)
 	if toolErr != nil {
-		return temporalFilters{}, nil, nil, toolErr
+		return temporalFilters{}, nil, nil, nil, toolErr
 	}
-	return tw, entities, events, nil
+	attributes, toolErr := parseAttributesArg(args)
+	if toolErr != nil {
+		return temporalFilters{}, nil, nil, nil, toolErr
+	}
+	return tw, entities, events, attributes, nil
+}
+
+// parseAttributesArg parses the optional §9.10 attributes filter: an object
+// mapping producer-defined keys to arrays of acceptable string values. Any
+// other shape is INVALID_FIELD, because a silently coerced filter would narrow
+// (or fail to narrow) results the caller never asked about. Values pass
+// through verbatim: canonicalization is the producer's (§9.10), so the server
+// must not trim, lowercase or otherwise "help". Empty object and empty arrays
+// pass through too; the model layer defines them as disabled, and rejecting
+// them here would make "no constraint" an error.
+func parseAttributesArg(args map[string]interface{}) (map[string][]string, *toolExecutionError) {
+	raw, present := args["attributes"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	obj, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, &toolExecutionError{Code: "INVALID_FIELD",
+			Message: "attributes must be an object mapping keys to arrays of strings", Retryable: false}
+	}
+	out := make(map[string][]string, len(obj))
+	for key, rawValues := range obj {
+		list, ok := rawValues.([]interface{})
+		if !ok {
+			return nil, &toolExecutionError{Code: "INVALID_FIELD",
+				Message: fmt.Sprintf("attributes[%q] must be an array of strings", key), Retryable: false}
+		}
+		values := make([]string, 0, len(list))
+		for _, v := range list {
+			str, ok := v.(string)
+			if !ok {
+				return nil, &toolExecutionError{Code: "INVALID_FIELD",
+					Message: fmt.Sprintf("attributes[%q] must contain only strings", key), Retryable: false}
+			}
+			values = append(values, str)
+		}
+		out[key] = values
+	}
+	return out, nil
 }
 
 func parseLanguagesArg(args map[string]interface{}) ([]string, *toolExecutionError) {
@@ -3726,6 +3769,13 @@ func serializeTimeSpan(span model.Span) map[string]interface{} {
 	if sources := model.NormalizeSources(span.Sources); len(sources) > 0 {
 		out["sources"] = sources
 	}
+	// SPEC 9.10 MUST: when the annotation carries attributes, the served span
+	// includes them — a server that accepts the attributes filter and hides the
+	// values it filtered by would leave a client unable to render or verify the
+	// scope. Omitted only when the annotation has none, mirroring sources.
+	if attributes := model.NormalizeAttributes(span.Attributes); len(attributes) > 0 {
+		out["attributes"] = attributes
+	}
 	return out
 }
 
@@ -4105,6 +4155,12 @@ func spanDefinitionSchema() map[string]interface{} {
 						"type":        "string",
 						"description": "Optional (SPEC 5.4, design 0004): the producer's event token for this span, for example pitch or home_run. Same value the events filter matches. The vocabulary is producer-defined and not enumerated here.",
 					},
+					"attributes": map[string]interface{}{
+						"type":                 "object",
+						"additionalProperties": map[string]interface{}{"type": "string"},
+						"propertyNames":        map[string]interface{}{"not": map[string]interface{}{"pattern": "^dir2mcp:"}},
+						"description":          "Optional (SPEC 9.10, design 0006): the producer-defined key/value scopes the recognizer attached to this annotation, for example {\"inning\": \"8\"}. Same values the attributes filter matches. Present whenever the stored annotation carries attributes (9.10 MUST); absent on a span that is not a recognition annotation or whose annotation has none.",
+					},
 					// Declared but never emitted by this server: no producer here
 					// sets it yet (#860). It stays in the advertised contract so a
 					// client validating against the canonical common.json and a
@@ -4242,6 +4298,11 @@ func searchInputSchema(defaultK int) map[string]interface{} {
 				"items":       map[string]interface{}{"type": "string"},
 				"description": "Optional (design 0004 §7): restrict hits to recognition annotations whose event equals ANY of these values (logical OR), matched literally. Event strings are declared by the recognition backend, so there is no fixed vocabulary here. AND-ed with `entities`.",
 			},
+			"attributes": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"description":          "Optional (SPEC 9.10): restrict hits to annotation-derived ones whose attributes match. Each key maps to an array of acceptable values: OR within a key, AND across keys and against every other filter, literal string equality, no vocabulary defined. Absent, {}, or a key with [] disables that constraint.",
+			},
 			"date_from": map[string]interface{}{
 				"type":        "string",
 				"description": "Optional (SPEC §9.6): restrict hits to documents whose date (mtime) is on or after this bound (inclusive). Accepts an RFC 3339 timestamp (2026-04-01T00:00:00Z) or a bare YYYY-MM-DD date (start of that UTC day). Absent = open lower bound.",
@@ -4377,6 +4438,11 @@ func askInputSchema(defaultK int) map[string]interface{} {
 				"type":        "array",
 				"items":       map[string]interface{}{"type": "string"},
 				"description": "Optional (design 0004 §7): restrict retrieved contexts to recognition annotations whose event equals ANY of these values (logical OR), matched literally. Event strings are declared by the recognition backend, so there is no fixed vocabulary here. AND-ed with `entities`.",
+			},
+			"attributes": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"description":          "Optional (SPEC 9.10): restrict hits to annotation-derived ones whose attributes match. Each key maps to an array of acceptable values: OR within a key, AND across keys and against every other filter, literal string equality, no vocabulary defined. Absent, {}, or a key with [] disables that constraint.",
 			},
 			"date_from": map[string]interface{}{
 				"type":        "string",
