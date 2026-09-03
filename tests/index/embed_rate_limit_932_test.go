@@ -87,6 +87,14 @@ func TestRateLimitedBatchLeavesEveryChunkPending_932(t *testing.T) {
 		"plain error, gemini wording": errors.New(
 			`GEMINI_RATE_LIMIT: {"error":{"code":429,"message":"You exceeded your current quota"}}`),
 		"plain error, code form only": errors.New("embed failed: gemini_rate_limit"),
+		// Not a rate limit at all, but the same class of harm: a structured 5xx
+		// whose adapter did NOT set Retryable and whose prose names no keyword
+		// (the set carries 503 and 529, not 500). ClassifyError already reports
+		// it as transient_net because it reads the status, so a worker that
+		// called it permanent would bisect an upstream outage into dead chunks
+		// while its own diagnostics said the failure was retryable.
+		"structured 500, flag unset, prose names nothing": &model.ProviderError{
+			Code: "X_FAILED", Message: "upstream exploded", StatusCode: http.StatusInternalServerError},
 	}
 	for name, provErr := range cases {
 		t.Run(name, func(t *testing.T) {

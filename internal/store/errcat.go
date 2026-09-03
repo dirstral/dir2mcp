@@ -228,6 +228,18 @@ func IsTransientError(err error) bool {
 	if isNetTransient(err) {
 		return true
 	}
+	// A structured 5xx is transient by its status, whatever its prose says.
+	// This keeps the promise the doc comment above makes: the retry gate and
+	// the transient_net LABEL are the same set. Without it they had already
+	// split — ClassifyError calls a structured 500 transient_net (it reads the
+	// status) while this returned false, because the keyword set lists 503 and
+	// 529 but not 500/502/504 and a provider's prose need not name any of
+	// them. That gap is the #932 failure shape exactly: an error every
+	// diagnostic reports as retryable, which the embed worker nonetheless
+	// treats as permanent and bisects into dead chunks.
+	if categoryForStatus(err) == ErrorCategoryTransientNet {
+		return true
+	}
 	return containsAny(strings.ToLower(err.Error()), transientNetKeywords)
 }
 

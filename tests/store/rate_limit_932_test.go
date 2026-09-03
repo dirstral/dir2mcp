@@ -1,10 +1,11 @@
-package store
+package tests
 
 import (
 	"errors"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // The exact strings the providers emit. They are quoted from the real
@@ -46,8 +47,8 @@ func TestIsRateLimitError_RealProviderShapes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := IsRateLimitError(tc.err); got != tc.want {
-				t.Errorf("IsRateLimitError(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := store.IsRateLimitError(tc.err); got != tc.want {
+				t.Errorf("store.IsRateLimitError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
@@ -55,18 +56,18 @@ func TestIsRateLimitError_RealProviderShapes(t *testing.T) {
 
 // The retry gate and the reported category are one fact, not two (#412's
 // argument, which #932 proved by counterexample: the classifier said
-// rate_limit while the worker said permanent). Whatever IsRateLimitError
+// rate_limit while the worker said permanent). Whatever store.IsRateLimitError
 // accepts must also be LABELLED rate_limit, or an operator reading diagnostics
 // sees a different story than the worker acted on.
 func TestRateLimitVerdictAndLabelAgree(t *testing.T) {
 	for _, msg := range []string{geminiQuota, mistralRateLimit, openaiInsufficient,
 		"gemini_rate_limit", "rate limit exceeded", "upstream returned 429"} {
 		err := errors.New(msg)
-		if !IsRateLimitError(err) {
-			t.Fatalf("IsRateLimitError(%q) = false", msg)
+		if !store.IsRateLimitError(err) {
+			t.Fatalf("store.IsRateLimitError(%q) = false", msg)
 		}
-		if got := ClassifyError(err); got != ErrorCategoryRateLimit {
-			t.Errorf("ClassifyError(%q) = %q, want %q", msg, got, ErrorCategoryRateLimit)
+		if got := store.ClassifyError(err); got != store.ErrorCategoryRateLimit {
+			t.Errorf("store.ClassifyError(%q) = %q, want %q", msg, got, store.ErrorCategoryRateLimit)
 		}
 	}
 }
@@ -82,35 +83,63 @@ func TestClassifyError_ReadsProviderStatusBeforeProse(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
-		want ErrorCategory
+		want store.ErrorCategory
 	}{
 		{"gemini bad key, prose the table misses",
 			&model.ProviderError{Code: "GEMINI_AUTH", Message: "API key not valid. Please pass a valid API key.",
-				StatusCode: 401}, ErrorCategoryAuth},
+				StatusCode: 401}, store.ErrorCategoryAuth},
 		{"403 forbidden",
-			&model.ProviderError{Code: "X_AUTH", Message: "no access", StatusCode: 403}, ErrorCategoryAuth},
+			&model.ProviderError{Code: "X_AUTH", Message: "no access", StatusCode: 403}, store.ErrorCategoryAuth},
 		{"429 with prose that names no limit",
-			&model.ProviderError{Code: "X_LIMIT", Message: "slow down", StatusCode: 429}, ErrorCategoryRateLimit},
+			&model.ProviderError{Code: "X_LIMIT", Message: "slow down", StatusCode: 429}, store.ErrorCategoryRateLimit},
 		{"413 payload",
-			&model.ProviderError{Code: "X_BIG", Message: "nope", StatusCode: 413}, ErrorCategoryPayloadTooLarge},
+			&model.ProviderError{Code: "X_BIG", Message: "nope", StatusCode: 413}, store.ErrorCategoryPayloadTooLarge},
 		{"503 upstream",
-			&model.ProviderError{Code: "X_DOWN", Message: "nope", StatusCode: 503}, ErrorCategoryTransientNet},
+			&model.ProviderError{Code: "X_DOWN", Message: "nope", StatusCode: 503}, store.ErrorCategoryTransientNet},
 		// A 400 is NOT unambiguous: it is the provider rejecting THIS input, and
 		// the body says why. It must fall through to the keyword table so a
 		// poison chunk still classifies on its message.
 		{"400 falls through to the prose",
 			&model.ProviderError{Code: "X_FAILED", Message: "input exceeds maximum context length; cannot embed vector",
-				StatusCode: 400}, ErrorCategoryEmbeddingFailure},
+				StatusCode: 400}, store.ErrorCategoryEmbeddingFailure},
 		// No status at all: prose is all there is.
 		{"no status, prose decides",
-			&model.ProviderError{Code: "X_FAILED", Message: "connection refused"}, ErrorCategoryTransientNet},
+			&model.ProviderError{Code: "X_FAILED", Message: "connection refused"}, store.ErrorCategoryTransientNet},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ClassifyError(tc.err); got != tc.want {
-				t.Errorf("ClassifyError(%v) = %q, want %q", tc.err, got, tc.want)
+			if got := store.ClassifyError(tc.err); got != tc.want {
+				t.Errorf("store.ClassifyError(%v) = %q, want %q", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// The retry gate and the transient_net LABEL must be the same set, which is
+// the promise IsTransientError's own contract makes (#412). A structured 5xx
+// is where they had split: ClassifyError reads the status and says
+// transient_net, while the keyword set lists 503 and 529 but not 500/502/504
+// — and a provider's prose need not name any of them. An error that every
+// diagnostic calls retryable while the embed worker treats it as permanent is
+// the #932 failure shape exactly.
+func TestStructured5xxIsTransientWhateverItsProseSays(t *testing.T) {
+	for _, status := range []int{500, 502, 503, 504, 599} {
+		// Retryable deliberately FALSE and prose that names nothing: the status
+		// alone has to carry it, so this cannot pass by another route.
+		err := &model.ProviderError{Code: "X_FAILED", Message: "upstream exploded", StatusCode: status}
+		if !store.IsTransientError(err) {
+			t.Errorf("status %d: IsTransientError = false, want true", status)
+		}
+		if got := store.ClassifyError(err); got != store.ErrorCategoryTransientNet {
+			t.Errorf("status %d: ClassifyError = %q, want %q", status, got, store.ErrorCategoryTransientNet)
+		}
+	}
+	// The boundary in the other direction: a 4xx is the provider rejecting THIS
+	// input, so it must stay non-transient or a genuinely bad chunk retries
+	// forever.
+	bad := &model.ProviderError{Code: "X_FAILED", Message: "input exceeds maximum context length", StatusCode: 400}
+	if store.IsTransientError(bad) {
+		t.Error("a 400 must not be transient: it is this input being rejected, and retrying it cannot help")
 	}
 }
 
@@ -119,10 +148,10 @@ func TestClassifyError_ReadsProviderStatusBeforeProse(t *testing.T) {
 // operator diagnosing "why did indexing stall" needs to know which one it was.
 func TestRateLimitIsNotClassifiedAsTransientNet(t *testing.T) {
 	err := errors.New(geminiQuota)
-	if IsTransientError(err) {
+	if store.IsTransientError(err) {
 		t.Error("a quota exhaustion must not be labelled transient_net")
 	}
-	if !IsRateLimitError(err) {
+	if !store.IsRateLimitError(err) {
 		t.Error("a quota exhaustion must be a rate limit")
 	}
 }
