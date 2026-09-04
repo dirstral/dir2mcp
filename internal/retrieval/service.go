@@ -2975,6 +2975,13 @@ func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
 	// canonical skip_reasons field (SPEC §15.6). Dropping it here made a corpus
 	// with skipped documents look fully covered to every MCP client (#646).
 	base.SkipSummary = corpus.SkipSummary
+	// FailureSummary travels for exactly the same reason, and dropping it had
+	// exactly the same effect (#939): the store computes the standing
+	// chunk-failure aggregate, this function threw it away, and so every MCP
+	// consumer saw a corpus with hundreds of dead chunks as a healthy one. It
+	// is the aggregate dir2mcp_stats reports as indexing.failed_chunks
+	// (SPEC §15.6).
+	base.FailureSummary = corpus.FailureSummary
 	if len(corpus.DocCounts) == 0 {
 		base.DocCounts = map[string]int64{}
 	} else {

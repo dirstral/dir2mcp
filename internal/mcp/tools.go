@@ -435,6 +435,15 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			if snapshot.WatchActive {
 				idx["watch_overflows"] = snapshot.WatchOverflows
 			}
+			// Optional additive field (#939, SPEC §15.6): the STANDING count of
+			// terminally embed-failed chunks, which `errors` above (current run
+			// only) structurally cannot show. Emitted whenever the corpus-stats
+			// path ran — including at zero, because "zero" and "cannot tell"
+			// must not look alike — and omitted otherwise so absence reads as
+			// unknown rather than as a healthy corpus.
+			if failed := failedChunksForStats(retrievedStats.FailureSummary, statsFromRetriever); failed != nil {
+				idx["failed_chunks"] = failed
+			}
 			return idx
 		}(),
 		"models": s.resolvedStatsModels(),
@@ -4867,6 +4876,34 @@ func statsOutputSchema() map[string]interface{} {
 					// the additionalProperties:false gate; not required (omitted when
 					// no watcher is running).
 					"watch_overflows": map[string]interface{}{"type": "integer", "minimum": 0},
+					// Optional additive (spec 0.60.0 / stats.json, #939): the
+					// standing corpus-wide count of terminally embed-failed
+					// chunks. MUST be declared here even though it is optional:
+					// this object is additionalProperties:false, so an
+					// undeclared field makes every response carrying it invalid
+					// for a strictly-validating client (the #387 class).
+					"failed_chunks": map[string]interface{}{
+						"type":                 "object",
+						"additionalProperties": false,
+						"properties": map[string]interface{}{
+							"total":     map[string]interface{}{"type": "integer", "minimum": 0},
+							"retryable": map[string]interface{}{"type": "integer", "minimum": 0},
+							"by_category": map[string]interface{}{
+								"type": "array",
+								"items": map[string]interface{}{
+									"type":                 "object",
+									"additionalProperties": false,
+									"properties": map[string]interface{}{
+										"category":  map[string]interface{}{"type": "string"},
+										"count":     map[string]interface{}{"type": "integer", "minimum": 1},
+										"retryable": map[string]interface{}{"type": "boolean"},
+									},
+									"required": []string{"category", "count", "retryable"},
+								},
+							},
+						},
+						"required": []string{"total", "retryable", "by_category"},
+					},
 				},
 				"required": []string{"job_id", "running", "mode", "scanned", "indexed", "skipped", "deleted", "representations", "chunks_total", "embedded_ok", "errors"},
 			},
