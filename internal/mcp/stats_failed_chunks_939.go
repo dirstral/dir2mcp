@@ -23,7 +23,9 @@ import (
 // chunks that are CURRENTLY in a failed state, not the failures observed
 // during the run" (#783) — only the MCP surface never carried it.
 //
-// derivable says whether the corpus-stats path actually ran. It is the whole
+// derivable is model.Stats.CorpusStatsAvailable: whether the store's own
+// aggregate produced these stats, as opposed to the ListFiles-only fallback
+// that cannot see chunk failures and returns success anyway. It is the whole
 // difference between "zero failed chunks" and "this server cannot tell you",
 // which SPEC §15.6 requires a client to distinguish: when the counts ARE
 // derivable the object is emitted even at zero (silence must never be the way

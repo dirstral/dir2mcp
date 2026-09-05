@@ -27,6 +27,10 @@ import (
 type failedChunksRetriever struct {
 	summary *model.FailureSummary
 	err     error
+	// fallback models a Stats() that SUCCEEDED via the ListFiles-only path
+	// (Store.CorpusStats -> ErrNotImplemented): counters present, no
+	// FailureSummary, and no claim that anyone counted the chunks.
+	fallback bool
 }
 
 func (r *failedChunksRetriever) Search(context.Context, model.SearchQuery) ([]model.SearchHit, error) {
@@ -48,6 +52,7 @@ func (r *failedChunksRetriever) Stats(context.Context) (model.Stats, error) {
 		return model.Stats{}, r.err
 	}
 	return model.Stats{
+		CorpusStatsAvailable: !r.fallback,
 		CorpusStats: model.CorpusStats{
 			DocCounts:      map[string]int64{"video": 1},
 			ChunksTotal:    1570,
@@ -211,6 +216,23 @@ func TestOmittedWhenNotDerivable_939(t *testing.T) {
 	indexing := sc["indexing"].(map[string]interface{})
 	if _, present := indexing["failed_chunks"]; present {
 		t.Fatalf("failed_chunks must be omitted when not derivable: %#v", indexing)
+	}
+}
+
+// The review finding on #940. retrieval.Service.Stats also SUCCEEDS from its
+// ListFiles-only fallback when the store has no CorpusStats aggregate, and
+// that path carries no FailureSummary. Gating on "the retriever answered"
+// would report that unknown as a confident zero — the precise misreading the
+// field exists to prevent. Provenance, not success, decides.
+func TestFallbackStatsOmitRatherThanClaimZero_939(t *testing.T) {
+	indexing := statsIndexingWith(t, &failedChunksRetriever{summary: nil, fallback: true})
+	if got, present := indexing["failed_chunks"]; present {
+		t.Fatalf("a ListFiles-only fallback cannot see chunk failures, so it must OMIT rather than report zero; got %#v", got)
+	}
+	// The rest of the snapshot is still served: the fallback is a legitimate
+	// degraded mode, not an error.
+	if _, ok := indexing["chunks_total"]; !ok {
+		t.Fatalf("fallback stats must still carry the counters: %#v", indexing)
 	}
 }
 

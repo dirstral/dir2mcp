@@ -2960,6 +2960,11 @@ type docStatusCounts struct {
 }
 
 func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
+	// This is the ONLY path that may claim the aggregate is real. The
+	// ListFiles-only fallback below returns a successful Stats too, but it
+	// cannot see chunk failures, so without this flag a caller could not tell
+	// "no failed chunks" from "nobody counted" (#939 review).
+	base.CorpusStatsAvailable = true
 	base.Scanned = corpus.Scanned
 	base.Indexed = corpus.Indexed
 	base.Skipped = corpus.Skipped

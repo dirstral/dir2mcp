@@ -1266,6 +1266,18 @@ type Stats struct {
 	StateDir        string `json:"state_dir"`
 	ProtocolVersion string `json:"protocol_version"`
 
+	// CorpusStatsAvailable records PROVENANCE: true only when the embedded
+	// CorpusStats came from the store's own aggregate (Store.CorpusStats), false
+	// when they were reconstructed from the ListFiles-only fallback. The two
+	// look identical in the counters but differ in what is knowable: the
+	// fallback cannot see chunk-level failures at all, so a nil FailureSummary
+	// under it means "unknown", while under a real aggregate it means "none".
+	// dir2mcp_stats must tell those apart (SPEC 15.6 failed_chunks: emit zero
+	// when derivable, omit when not), and a successful Stats() call alone
+	// cannot, because the fallback also returns success (#939 review).
+	// Never serialized: it describes the snapshot, it is not part of it.
+	CorpusStatsAvailable bool `json:"-"`
+
 	// embed corpus statistics so that the various lifecycle counters are
 	// promoted.
 	//

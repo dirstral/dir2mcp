@@ -437,11 +437,17 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 			}
 			// Optional additive field (#939, SPEC §15.6): the STANDING count of
 			// terminally embed-failed chunks, which `errors` above (current run
-			// only) structurally cannot show. Emitted whenever the corpus-stats
-			// path ran — including at zero, because "zero" and "cannot tell"
+			// only) structurally cannot show. Emitted whenever the store's real
+			// aggregate ran — including at zero, because "zero" and "cannot tell"
 			// must not look alike — and omitted otherwise so absence reads as
 			// unknown rather than as a healthy corpus.
-			if failed := failedChunksForStats(retrievedStats.FailureSummary, statsFromRetriever); failed != nil {
+			//
+			// The gate is CorpusStatsAvailable, NOT statsFromRetriever: the
+			// retriever also answers successfully from its ListFiles-only
+			// fallback (Store.CorpusStats -> ErrNotImplemented), which carries
+			// no FailureSummary, and gating on success alone would have
+			// reported that unknown as a confident zero (#939 review).
+			if failed := failedChunksForStats(retrievedStats.FailureSummary, retrievedStats.CorpusStatsAvailable); failed != nil {
 				idx["failed_chunks"] = failed
 			}
 			return idx
