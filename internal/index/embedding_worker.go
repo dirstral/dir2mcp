@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1204,10 +1205,40 @@ func isTransientEmbedError(err error) bool {
 			return true
 		}
 	}
-	// Rate-limit responses are retryable after backoff. store.IsTransientError
-	// (below) classifies rate limits under their own category, not transient_net,
-	// so keep this check explicit here.
-	if strings.Contains(strings.ToLower(err.Error()), "rate limit") {
+	// THE PROVIDER ALREADY DECIDED THIS. ProviderError carries a structured
+	// Retryable verdict and the status it came from, and every adapter sets it
+	// from the HTTP status: 401/403 false, 429 true, 5xx true, any other 4xx
+	// false. Reading that verdict is not a heuristic, so it runs before every
+	// string test below.
+	//
+	// #932: the worker used to decide this by searching the flattened message
+	// for "rate limit", and Gemini's quota response is
+	// `GEMINI_RATE_LIMIT: {"error":{"code":429,...,"message":"You exceeded your
+	// current quota..."}}`. The code spells it with an UNDERSCORE and the
+	// message reverses "quota exceeded", so the keyword matched nothing, a
+	// corpus-wide 429 was called PERMANENT, and the poison-chunk bisector
+	// (#399) — designed for the rare bad input — walked 406 healthy chunks into
+	// embedding_status=error one halving at a time. Those chunks then vanish
+	// from BOTH retrieval paths with no query-time error, and they stay dead
+	// across a provider switch until a manual reindex. A rate limit is the one
+	// failure guaranteed to hit every chunk in the run, because it is a
+	// property of the account rather than of the chunk, so it is the worst
+	// possible input for a bisector and must never reach it.
+	//
+	// StatusCode is checked besides Retryable so a 429 still routes correctly
+	// if some adapter forgets the flag; a false verdict here costs one retry
+	// cycle, while a false PERMANENT costs the corpus.
+	var provErr *model.ProviderError
+	if errors.As(err, &provErr) && provErr != nil &&
+		(provErr.Retryable || provErr.StatusCode == http.StatusTooManyRequests) {
+		return true
+	}
+	// Fallback for providers that return a plain error: a rate limit or an
+	// exhausted quota is retryable after backoff. Deferring to the shared
+	// classifier keeps this decision and the rate_limit label one fact
+	// (store.IsRateLimitError), instead of a private keyword that drifts from
+	// the table the diagnostics use — which is exactly how #932 happened.
+	if store.IsRateLimitError(err) {
 		return true
 	}
 	// Defer to the shared store classification so the worker's retry gate and
