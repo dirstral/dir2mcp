@@ -58,6 +58,17 @@ def build_parser() -> argparse.ArgumentParser:
                             "(more recall, less precision; needs --scorebug)")
         c.add_argument("--jersey", action="store_true", help="enable jersey-number OCR")
         c.add_argument("--faces", type=Path, help="roster image bank dir; enables face recognition")
+        c.add_argument("--caption", action="store_true",
+                       help="enable scene captioning with the #923 claim gate "
+                            "(Qwen3-VL via the `caption` extra; needs a GPU)")
+        c.add_argument("--caption-model", default=None, metavar="HF_ID",
+                       help="vision-language model id (default: the one the 0.99 gate "
+                            "was calibrated on; changing it invalidates the threshold)")
+        c.add_argument("--caption-device", default="cuda:0", metavar="DEV",
+                       help="torch device for captioning (default cuda:0; cpu only for tests)")
+        c.add_argument("--caption-fps", type=float, default=None, metavar="F",
+                       help="frame rate for captioning (default: --fps); captions cost "
+                            "~10x a face embedding, so a lower rate is the cost lever")
         c.add_argument("--news", action="store_true",
                        help="enable news overlay text (headline banner + ticker); needs no roster")
         c.add_argument("--news-min-chars", type=int, metavar="N",
@@ -112,10 +123,43 @@ def _needs_roster(args) -> bool:
     return bool(args.scorebug or args.jersey or args.faces or args.games)
 
 
+def _caption_backend(args):
+    """Load the captioner and prober when --caption is set, or (None, None).
+
+    Loading happens once, at startup, where the operator can see a failure.
+    An unavailable backend (extra not installed, no CUDA device for the torch
+    wheel) is reported and the server comes up WITHOUT captioning, the same
+    degrade-with-reason contract every other heavy recognizer follows: a
+    systemd-managed serve must not crash-loop because one optional recognizer
+    cannot load, but it must also never pretend the capability is there.
+    """
+    if not getattr(args, "caption", False):
+        return None, None
+    from .recognizers.base import RecognizerUnavailable
+    from .recognizers import qwen_vl
+
+    kwargs = {"device": args.caption_device}
+    if args.caption_model:
+        kwargs["model_name"] = args.caption_model
+    try:
+        return qwen_vl.load_backend(**kwargs)
+    except RecognizerUnavailable as exc:
+        print(f"warning: --caption requested but unavailable, serving without it: {exc}",
+              file=sys.stderr)
+        return None, None
+
+
 def _pipeline(args, roster: Roster, games) -> Pipeline:
+    caption_fn, probe_fn = _caption_backend(args)
     return Pipeline(
         roster=roster,
         games=games,
+        caption_fn=caption_fn,
+        probe_fn=probe_fn,
+        # `is not None`, not truthiness: an explicit --caption-fps 0 must reach
+        # the recognizer, which rejects it with a reason, rather than be read
+        # as "unset" and silently sample at --fps.
+        caption_fps=(args.caption_fps if getattr(args, "caption_fps", None) is not None else args.fps),
         scorebug=args.scorebug,
         scorebug_pitch_counts=args.scorebug_pitch_counts,
         jersey=args.jersey,

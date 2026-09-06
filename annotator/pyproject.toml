@@ -19,7 +19,11 @@ jersey = ["ultralytics>=8.2", "pytesseract>=0.3", "Pillow>=10"]
 # Scene captioning (#860). torch is far heavier than insightface, so this extra
 # is deliberately NOT part of `all`: pulling it in CI would add gigabytes for a
 # recognizer whose absence already degrades through RecognizerUnavailable.
-caption = ["torch>=2.4", "transformers>=4.51", "accelerate>=1.0", "Pillow>=10"]
+# transformers >= 4.57: the first release whose Auto* classes know model_type
+# qwen3_vl (huggingface/transformers#40795). Below it AutoConfig raises a bare
+# ValueError for the calibrated model; qwen_vl.MIN_TRANSFORMERS is the runtime
+# half of the same floor, for a venv assembled without this extra.
+caption = ["torch>=2.4", "transformers>=4.57", "accelerate>=1.0", "Pillow>=10"]
 # Test runner + the schema-agreement contract test's validator. The tested
 # code is stdlib-only; the runner and jsonschema are external test tooling.
 test = ["pytest>=8", "jsonschema>=4"]
