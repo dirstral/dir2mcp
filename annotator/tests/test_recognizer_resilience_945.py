@@ -20,7 +20,7 @@ from dirstral_annotator import pipeline as pipeline_mod
 from dirstral_annotator.model import Cue
 from dirstral_annotator.recognizers import caption as caption_mod
 from dirstral_annotator.recognizers import news as news_mod
-from dirstral_annotator.recognizers.base import RecognizerUnavailable
+from dirstral_annotator.recognizers.base import SCRUBBED_ERROR_MAX_CHARS, RecognizerUnavailable, scrub_error
 from dirstral_annotator.recognizers.caption import SceneCaptionRecognizer
 from dirstral_annotator.roster import Roster
 from dirstral_annotator.serve import serve
@@ -111,9 +111,9 @@ def test_one_recognizer_raising_does_not_discard_the_others(monkeypatch, tmp_pat
         cues = pipe.cues_for(tmp_path / "game.mp4")
     assert [c.source for c in cues] == ["news"], "the healthy recognizer's cues must survive"
     assert pipe.skipped == ["caption: RuntimeError: late explosion after four hours"]
-    # The traceback is in the LOG, not in the request.
+    # The traceback frames are in the LOG, not in the request.
     assert "recognizer caption failed" in caplog.text
-    assert "Traceback" in caplog.text
+    assert "test_recognizer_resilience_945.py" in caplog.text
 
 
 def test_unavailability_still_skips_without_a_traceback(monkeypatch, tmp_path, caplog):
@@ -129,7 +129,7 @@ def test_unavailability_still_skips_without_a_traceback(monkeypatch, tmp_path, c
     with caplog.at_level(logging.ERROR):
         pipe.cues_for(tmp_path / "game.mp4")
     assert pipe.skipped == ["no vision backend"]
-    assert "Traceback" not in caplog.text, "expected unavailability is not an error"
+    assert "failed on" not in caplog.text, "expected unavailability is not an error"
 
 
 # --- layer 3: serve logs what dir2mcp deliberately will not echo ---------------
@@ -169,8 +169,13 @@ def test_a_502_is_logged_with_its_traceback(tmp_path, caplog):
             status, body = _post(f"http://127.0.0.1:{server.server_address[1]}", media)
     finally:
         server.shutdown()
-    assert status == 502 and "fuse blew up" in body["error"]
-    assert "recognize game.mp4 failed" in caplog.text and "Traceback" in caplog.text
+    # The body is a stable public code with NO exception text (CWE-209); the
+    # reason lives in this process's log, frames intact.
+    assert status == 502
+    assert body == {"error": "recognition failed", "code": "RECOGNITION_FAILED"}
+    assert "recognize game.mp4 failed" in caplog.text
+    assert "RuntimeError: fuse blew up" in caplog.text
+    assert "test_recognizer_resilience_945.py" in caplog.text, "frames must survive scrubbing"
 
 
 def test_a_degraded_200_logs_the_skip_reasons(tmp_path, caplog):
@@ -188,3 +193,79 @@ def test_a_degraded_200_logs_the_skip_reasons(tmp_path, caplog):
         server.shutdown()
     assert status == 200 and body["annotations"] == []
     assert "2 recognizer(s) skipped" in caplog.text and "caption: RuntimeError: boom" in caplog.text
+
+
+# --- CWE-209: what an upstream exception may carry must not reach a log, a
+# skip reason or a response body (review finding on #946) ------------------
+
+SENTINEL_KEY = "api_key=SENTINEL_SECRET_ABC123XYZ"
+SENTINEL_BEARER = "Authorization: Bearer sk-SENTINELTOKEN-9f8e7d6c5b4a"
+LEAKY = RuntimeError(
+    f"POST https://vlm.example/v1/caption?{SENTINEL_KEY} -> 401; {SENTINEL_BEARER}; "
+    "body: \x00\x01binary\x02fragment"
+)
+
+
+def test_scrub_error_redacts_credentials_urls_and_binary_but_keeps_the_type():
+    out = scrub_error(LEAKY)
+    assert out.startswith("RuntimeError: ")
+    for secret in ("SENTINEL_SECRET_ABC123XYZ", "sk-SENTINELTOKEN"):
+        assert secret not in out
+    assert "api_key=<redacted>" in out
+    assert "Authorization=<redacted>" in out
+    assert "https://vlm.example/v1/caption?<redacted>" in out, "host kept, query dropped"
+    # The two shapes the first draft missed: a bare scheme word, and a short
+    # prefixed key under the opaque-token length floor.
+    assert "sk-" not in scrub_error(RuntimeError("Bearer sk-abc12345defgh"))
+    assert scrub_error(RuntimeError("key sk-abcdefgh1234")) == "RuntimeError: key <redacted>"
+    assert "\x00" not in out and "\x01" not in out
+    long = RuntimeError("x" * 5000)
+    assert len(scrub_error(long)) <= len("RuntimeError: ") + SCRUBBED_ERROR_MAX_CHARS
+
+
+def test_a_secret_in_a_batch_failure_never_reaches_the_log(frames, caplog):
+    calls = {"n": 0}
+
+    def captioner(paths):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise LEAKY
+        return [(f"Scene {p.name}", 0.9) for p in paths]
+
+    with caplog.at_level(logging.WARNING):
+        SceneCaptionRecognizer(captioner=captioner, fps=1.0, batch_size=3).recognize(MEDIA)
+    assert "SENTINEL" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_a_secret_in_a_recognizer_fault_never_reaches_skip_reasons_or_log(monkeypatch, tmp_path, caplog):
+    class Boom:
+        def __init__(self, **kw):
+            pass
+
+        def recognize(self, media):
+            raise LEAKY
+
+    monkeypatch.setattr(caption_mod, "SceneCaptionRecognizer", Boom)
+    pipe = pipeline_mod.Pipeline(roster=Roster([]), games={}, caption_fn=lambda paths: [])
+    with caplog.at_level(logging.ERROR):
+        pipe.cues_for(tmp_path / "game.mp4")
+    assert "SENTINEL" not in " ".join(pipe.skipped)
+    assert "SENTINEL" not in caplog.text
+    assert pipe.skipped and pipe.skipped[0].startswith("caption: RuntimeError:")
+
+
+def test_a_secret_in_a_pipeline_fault_never_reaches_the_502_body_or_log(tmp_path, caplog):
+    media = tmp_path / "game.mp4"
+    media.write_bytes(b"x")
+    server = serve(_Stub(raise_exc=LEAKY), host="127.0.0.1", port=0)
+    import threading
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with caplog.at_level(logging.ERROR):
+            status, body = _post(f"http://127.0.0.1:{server.server_address[1]}", media)
+    finally:
+        server.shutdown()
+    assert status == 502
+    assert "SENTINEL" not in json.dumps(body) and "SENTINEL" not in caplog.text
+    assert body["code"] == "RECOGNITION_FAILED"

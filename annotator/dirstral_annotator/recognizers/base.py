@@ -19,6 +19,65 @@ import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+
+#: Bytes kept of a scrubbed error message. Same order of magnitude as dir2mcp's
+#: store.SanitizeReason cap: enough for a diagnostic, too little for a payload.
+SCRUBBED_ERROR_MAX_CHARS = 512
+
+# What an upstream exception message can carry that a log line must not: a
+# credential named in a URL or header ("api_key=...", "Authorization: Bearer
+# ..."), a URL query string, or a long opaque token. The captioner and prober
+# are injected callables and may be HTTP clients whose exceptions interpolate
+# the failing request (#945 review, CWE-209), so the message is scrubbed
+# BEFORE it reaches a skip reason, a log line or a response body.
+_CREDENTIAL_KV = re.compile(
+    # key, separator, then the WHOLE value including an auth-scheme word:
+    # "Authorization: Bearer sk-..." must lose the token, not just "Bearer".
+    # (The first draft consumed one \S+ and redacted the scheme word alone; a
+    # sentinel test caught the token surviving.)
+    r"(?i)\b(api[_-]?key|access[_-]?key|secret|token|password|passwd|authorization)"
+    r"\s*[=:]\s*(?:(?:bearer|basic|token)\s+)?\S+"
+)
+# A bare scheme + credential with no key name in front ("Bearer eyJ...").
+_BARE_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+\S+")
+_URL_QUERY = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
+# Well-known secret prefixes are redacted at ANY length: real keys are often
+# shorter than the opaque-token floor below ("sk-" keys can be 20-30 chars).
+_PREFIXED_KEY = re.compile(r"\b(?:sk|pk|rk|tk|hf|ghp|gho|ghs|glpat|xox[abp]|AKIA)[-_][A-Za-z0-9_\-]{8,}")
+_LONG_OPAQUE_TOKEN = re.compile(r"\b[A-Za-z0-9_\-]{32,}\b")
+
+
+def scrub_error(exc: BaseException) -> str:
+    """One safe line naming the exception type and a scrubbed message.
+
+    Mirrors dir2mcp's store.SanitizeReason (printable characters only,
+    whitespace collapsed, length capped) and adds credential redaction, because
+    the annotator's backends are injected callables that may be HTTP clients.
+    The TYPE is always kept verbatim: it is the part of an exception that is
+    diagnostic and never sensitive.
+    """
+    msg = str(exc)
+    msg = _CREDENTIAL_KV.sub(lambda m: m.group(1) + "=<redacted>", msg)
+    msg = _BARE_BEARER.sub(lambda m: m.group(1) + " <redacted>", msg)
+    msg = _URL_QUERY.sub(lambda m: m.group(1) + "?<redacted>", msg)
+    msg = _PREFIXED_KEY.sub("<redacted>", msg)
+    msg = _LONG_OPAQUE_TOKEN.sub("<redacted>", msg)
+    msg = "".join(ch if ch.isprintable() else " " for ch in msg)
+    msg = " ".join(msg.split())
+    if len(msg) > SCRUBBED_ERROR_MAX_CHARS:
+        msg = msg[: SCRUBBED_ERROR_MAX_CHARS - 1] + "\u2026"
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
+
+def scrubbed_traceback(exc: BaseException) -> str:
+    """The traceback's FRAMES (file, line, function: diagnostic, never
+    sensitive) followed by the scrubbed exception line instead of the raw one,
+    so a log keeps what an operator needs to find the fault and drops what an
+    upstream client may have interpolated into the message."""
+    import traceback
+
+    frames = "".join(traceback.format_tb(exc.__traceback__)) if exc.__traceback__ else ""
+    return frames + scrub_error(exc)
 from pathlib import Path
 from typing import Protocol
 

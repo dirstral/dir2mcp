@@ -33,7 +33,7 @@ from pathlib import Path
 from .eval import align, ground_truth
 from .fusion import fuse
 from .model import Annotation, Cue
-from .recognizers.base import Recognizer, RecognizerUnavailable
+from .recognizers.base import Recognizer, RecognizerUnavailable, scrub_error, scrubbed_traceback
 from .roster import Roster
 
 log = logging.getLogger(__name__)
@@ -296,8 +296,11 @@ class Pipeline:
                 # traceback goes to the log -- the response must not carry it,
                 # since it can name local paths -- and the request degrades
                 # with a reason, exactly like an unavailability skip.
-                log.exception("recognizer %s failed on %s", name, media_path.name)
-                skipped.append(f"{name}: {type(exc).__name__}: {exc}")
+                # Frames kept, message scrubbed: an injected backend's exception
+                # can interpolate a request URL or header (CWE-209).
+                log.error("recognizer %s failed on %s\n%s", name, media_path.name,
+                          scrubbed_traceback(exc))
+                skipped.append(f"{name}: {scrub_error(exc)}")
 
         if self.scorebug:
             from .recognizers.scorebug import ScorebugRecognizer

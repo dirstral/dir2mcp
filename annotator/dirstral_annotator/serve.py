@@ -20,6 +20,7 @@ from pathlib import Path
 from .emit import build_response
 from .model import Document
 from .pipeline import Pipeline
+from .recognizers.base import scrubbed_traceback
 
 log = logging.getLogger(__name__)
 
@@ -56,12 +57,14 @@ def make_handler(pipeline: Pipeline):
             try:
                 annotations = pipeline.annotations_for(media)
             except Exception as exc:  # surface as 502, never a hung request
-                # ...and LOG it. The 502 body carries the message, but the
-                # caller (dir2mcp) deliberately does not echo backend bodies
-                # because they can name local paths, so without this line the
-                # reason for a failed run existed nowhere (#945).
-                log.exception("recognize %s failed", media.name)
-                self._reply(502, {"error": f"recognition failed: {exc}"})
+                # The body carries a STABLE code and no exception text: the
+                # message can interpolate a request URL, a header or a local
+                # path (CWE-209), and the caller (dir2mcp) deliberately does
+                # not echo backend bodies anyway. The reason lives in this
+                # process's journal, frames intact and message scrubbed, so a
+                # failed run is diagnosable here and leaks nothing there (#945).
+                log.error("recognize %s failed\n%s", media.name, scrubbed_traceback(exc))
+                self._reply(502, {"error": "recognition failed", "code": "RECOGNITION_FAILED"})
                 return
             skipped = pipeline.skipped
             if skipped:

@@ -58,7 +58,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ..model import Cue
-from .base import RecognizerUnavailable, collapse_text_sightings, iter_frames
+from .base import RecognizerUnavailable, collapse_text_sightings, iter_frames, scrub_error
 
 log = logging.getLogger(__name__)
 
@@ -364,8 +364,8 @@ class SceneCaptionRecognizer:
                 failed_batches += 1
                 last_error = exc
                 log.warning(
-                    "caption batch %d (%d frames from t=%.1fs) failed and was skipped: %s: %s",
-                    n_batches, len(batch), batch[0][0], type(exc).__name__, exc,
+                    "caption batch %d (%d frames from t=%.1fs) failed and was skipped: %s",
+                    n_batches, len(batch), batch[0][0], scrub_error(exc),
                 )
                 continue
             if len(results) != len(batch):
@@ -388,7 +388,7 @@ class SceneCaptionRecognizer:
         if n_batches and failed_batches == n_batches:
             raise RecognizerUnavailable(
                 f"caption backend failed on all {n_batches} batches; last error: "
-                f"{type(last_error).__name__}: {last_error}"
+                f"{scrub_error(last_error)}"
             )
         if failed_batches:
             log.warning(
