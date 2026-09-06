@@ -131,6 +131,35 @@ def yes_probability(
     return yes / (yes + no)
 
 
+#: Oldest transformers release whose Auto* classes know model_type "qwen3_vl".
+#: Below it AutoConfig raises a bare ValueError before any weight is read, which
+#: is not RecognizerUnavailable and would escape the CLI's degrade path. The
+#: `caption` extra in pyproject.toml carries the same floor; this check is the
+#: runtime half, for a venv that was assembled without the extra.
+MIN_TRANSFORMERS = (4, 57, 0)
+
+
+def transformers_version() -> tuple[int, ...]:
+    """The installed transformers version as a comparable tuple (mockable)."""
+    import transformers  # type: ignore
+
+    parts = []
+    for piece in str(transformers.__version__).split(".")[:3]:
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _require_transformers(installed: tuple[int, ...]) -> None:
+    if installed < MIN_TRANSFORMERS:
+        want = ".".join(str(n) for n in MIN_TRANSFORMERS)
+        have = ".".join(str(n) for n in installed)
+        raise RecognizerUnavailable(
+            f"scene captioning needs transformers >= {want} for model type "
+            f"qwen3_vl (installed {have}); pip install 'dirstral-annotator[caption]'"
+        )
+
+
 def load_backend(
     model_name: str = DEFAULT_MODEL,
     device: str = "cuda:0",
@@ -164,12 +193,25 @@ def load_backend(
             "CUDA version (or pass --caption-device cpu for a small test run)"
         )
 
+    _require_transformers(transformers_version())
+
     log = logging.getLogger(__name__)
     log.info("loading %s on %s (max_pixels=%d)", model_name, device, max_pixels)
-    processor = AutoProcessor.from_pretrained(model_name, max_pixels=max_pixels)
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_name, dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa",
-    )
+    try:
+        processor = AutoProcessor.from_pretrained(model_name, max_pixels=max_pixels)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_name, dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa",
+        )
+    except Exception as exc:  # noqa: BLE001 - the whole point is to map ANY load failure
+        # An unrecognised model type (ValueError from AutoConfig), missing or
+        # partial weights (OSError), a config/key mismatch (KeyError) -- none of
+        # these are RecognizerUnavailable on their own, and the serve CLI only
+        # degrades on that type. Left unmapped, `serve --caption` would crash at
+        # startup instead of coming up without captioning and saying why.
+        raise RecognizerUnavailable(
+            f"scene captioning could not load {model_name} on {device}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     model.eval()
     tokenizer = processor.tokenizer
 

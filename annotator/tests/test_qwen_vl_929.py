@@ -188,3 +188,74 @@ def test_a_new_prober_rebuilds_the_recognizer_rather_than_reusing_an_ungated_one
     pipe.probe_fn = prober
     pipe.cues_for(media)
     assert builds == [None, prober]
+
+
+# --- review round 1 on #944 ------------------------------------------------
+
+def test_explicit_zero_caption_fps_is_not_read_as_unset(monkeypatch, tmp_path):
+    # --caption-fps 0 is invalid, and the recognizer rejects it with a reason.
+    # Reading 0 as "unset" would instead sample captions at --fps, silently
+    # replacing an operator's explicit (wrong) value with a different one.
+    monkeypatch.setattr(qwen_vl, "load_backend", lambda **kw: (lambda p: [], lambda p, q: []))
+    roster = tmp_path / "roster.json"
+    roster.write_text("[]")
+    args = cli.build_parser().parse_args([
+        "serve", "--roster", str(roster), "--caption", "--caption-fps", "0", "--fps", "1",
+    ])
+    pipe = cli._pipeline(args, Roster([]), {})
+    assert pipe.caption_fps == 0.0
+
+
+def test_too_old_transformers_is_unavailability_naming_the_floor():
+    with pytest.raises(RecognizerUnavailable) as exc:
+        qwen_vl._require_transformers((4, 51, 0))
+    msg = str(exc.value)
+    assert "qwen3_vl" in msg and "4.51.0" in msg
+    assert ".".join(str(n) for n in qwen_vl.MIN_TRANSFORMERS) in msg
+    # At the floor and above: fine.
+    qwen_vl._require_transformers(qwen_vl.MIN_TRANSFORMERS)
+    qwen_vl._require_transformers((5, 16, 1))
+
+
+def test_any_model_load_failure_degrades_instead_of_crashing(monkeypatch):
+    # AutoConfig raises a bare ValueError for an unknown model type; weights
+    # missing raise OSError. Neither is RecognizerUnavailable, and the serve
+    # CLI only degrades on that type, so `serve --caption` would have crashed.
+    class BadAuto:
+        @staticmethod
+        def from_pretrained(*a, **k):
+            raise ValueError("The checkpoint you are trying to load has model type `qwen3_vl` "
+                             "but Transformers does not recognize this architecture")
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: True), bfloat16=object(),
+        no_grad=lambda: (lambda f: f))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=object()))
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(
+        AutoModelForImageTextToText=BadAuto, AutoProcessor=BadAuto, __version__="5.16.1"))
+    with pytest.raises(RecognizerUnavailable) as exc:
+        qwen_vl.load_backend(device="cuda:0")
+    assert "could not load" in str(exc.value) and "ValueError" in str(exc.value)
+
+
+def test_load_backend_checks_the_floor_before_touching_the_model(monkeypatch):
+    # Through load_backend, not the helper: the point is that an old
+    # transformers is refused BEFORE AutoConfig gets to raise its own bare
+    # ValueError, so the operator reads a version floor, not a stack trace.
+    class MustNotBeCalled:
+        @staticmethod
+        def from_pretrained(*a, **k):
+            raise AssertionError("model load attempted on a too-old transformers")
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: True), bfloat16=object(),
+        no_grad=lambda: (lambda f: f))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=object()))
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(
+        AutoModelForImageTextToText=MustNotBeCalled, AutoProcessor=MustNotBeCalled,
+        __version__="4.51.3"))
+    with pytest.raises(RecognizerUnavailable) as exc:
+        qwen_vl.load_backend(device="cuda:0")
+    assert "transformers >= 4.57.0" in str(exc.value) and "4.51.3" in str(exc.value)

@@ -156,7 +156,10 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         games=games,
         caption_fn=caption_fn,
         probe_fn=probe_fn,
-        caption_fps=(args.caption_fps if getattr(args, "caption_fps", None) else args.fps),
+        # `is not None`, not truthiness: an explicit --caption-fps 0 must reach
+        # the recognizer, which rejects it with a reason, rather than be read
+        # as "unset" and silently sample at --fps.
+        caption_fps=(args.caption_fps if getattr(args, "caption_fps", None) is not None else args.fps),
         scorebug=args.scorebug,
         scorebug_pitch_counts=args.scorebug_pitch_counts,
         jersey=args.jersey,
