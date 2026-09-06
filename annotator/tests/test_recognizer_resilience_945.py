@@ -211,7 +211,10 @@ def test_scrub_error_redacts_credentials_urls_and_binary_but_keeps_the_type():
     assert out.startswith("RuntimeError: ")
     for secret in ("SENTINEL_SECRET_ABC123XYZ", "sk-SENTINELTOKEN"):
         assert secret not in out
-    assert "api_key=<redacted>" in out
+    # The api_key pair sat INSIDE the URL query, and the query scrub swallows
+    # the whole query (more redaction, not less), so it is asserted on a bare
+    # message where it is the only thing to redact.
+    assert scrub_error(RuntimeError("api_key=SENTINELX123 rejected")) == "RuntimeError: api_key=<redacted> rejected"
     assert "Authorization=<redacted>" in out
     assert "https://vlm.example/v1/caption?<redacted>" in out, "host kept, query dropped"
     # The two shapes the first draft missed: a bare scheme word, and a short
