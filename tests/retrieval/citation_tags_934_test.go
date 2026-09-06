@@ -129,7 +129,9 @@ func TestAsk934_LinesSpanKeepsItsForm(t *testing.T) {
 	if _, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1}); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if !strings.Contains(gen.prompts[0], "<<<BEGIN UNTRUSTED DOCUMENT [game.mp4@L12-48]") {
+	// ":L12-L48" is the SPEC 9.3 line form (#942); the old "@L12-48" reused the
+	// time separator and this assertion used to pin it.
+	if !strings.Contains(gen.prompts[0], "<<<BEGIN UNTRUSTED DOCUMENT [game.mp4:L12-L48]") {
 		t.Fatalf("lines-span header lacks its span form:\n%s", gen.prompts[0])
 	}
 }
