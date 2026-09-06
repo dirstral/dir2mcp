@@ -183,6 +183,12 @@ class Pipeline:
     #: it at the moments a feed says are notable; None captions every sampled
     #: frame, which is the feed-free floor.
     caption_fn: object | None = None
+    #: The #923 claim gate's backend (a ProbeFn). Optional and independent of
+    #: caption_fn at the type level, but in practice both come from one loaded
+    #: model (qwen_vl.load_backend). None leaves the claim events ungated,
+    #: which is the pre-#923 behaviour and measured 0.35 precision on the
+    #: reaction claim; the recognizer's docstring says so.
+    probe_fn: object | None = None
     caption_fps: float = 1.0
     caption_windows: tuple[tuple[float, float], ...] | None = None
     #: Tier B (#860): a low rate across the WHOLE file, alongside the aimed
@@ -315,13 +321,17 @@ class Pipeline:
                 # The captioner itself joins the key: a different backend (or a
                 # different prompt behind it) must rebuild rather than silently
                 # reuse a recognizer built for the previous one.
-                (self.caption_fn, self.caption_fps, self.caption_windows,
-                 self.caption_floor_fps),
+                # probe_fn joins the key too: a recognizer built ungated must
+                # not be reused once a prober is supplied, or the gate would
+                # silently stay off for the lifetime of the server.
+                (self.caption_fn, self.probe_fn, self.caption_fps,
+                 self.caption_windows, self.caption_floor_fps),
                 lambda: SceneCaptionRecognizer(
                     captioner=self.caption_fn,
                     fps=self.caption_fps,
                     windows=self.caption_windows,
                     floor_fps=self.caption_floor_fps,
+                    prober=self.probe_fn,
                 ),
             )
         if self.news:
