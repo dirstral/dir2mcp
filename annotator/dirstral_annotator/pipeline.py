@@ -24,6 +24,7 @@ a memo on the binding it came from. See `GameConfig.events` (#844).
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ from .fusion import fuse
 from .model import Annotation, Cue
 from .recognizers.base import Recognizer, RecognizerUnavailable
 from .roster import Roster
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -285,6 +288,16 @@ class Pipeline:
                 # reported per request and the instance is not written off: the
                 # engine can be installed under a long lived server.
                 skipped.append(str(exc))
+            except Exception as exc:  # noqa: BLE001 - one recognizer must not sink the request
+                # Any other fault in ONE recognizer must not discard the cues
+                # the others already produced: on the pilot a late exception in
+                # the newest recognizer threw away four hours of scorebug and
+                # face output and surfaced as an opaque 502 (#945). The
+                # traceback goes to the log -- the response must not carry it,
+                # since it can name local paths -- and the request degrades
+                # with a reason, exactly like an unavailability skip.
+                log.exception("recognizer %s failed on %s", name, media_path.name)
+                skipped.append(f"{name}: {type(exc).__name__}: {exc}")
 
         if self.scorebug:
             from .recognizers.scorebug import ScorebugRecognizer
