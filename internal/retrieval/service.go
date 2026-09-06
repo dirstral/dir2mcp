@@ -4726,7 +4726,7 @@ func ensureAnswerAttributions(answer string, citations []model.Citation) string 
 
 // FormatCitation renders a human-readable citation string for a span (SPEC §9.3).
 // The base forms are path-only ([rel_path]), page ([rel_path#p=N]), line range
-// ([rel_path@L12-48]), and time ([rel_path@t=02:13-02:41]). On a diarized
+// ([rel_path:L12-L48]), and time ([rel_path@t=02:13-02:41]). On a diarized
 // transcript a time span MAY append the speaker — preferring the human-readable
 // label, falling back to the stable id — as " › Speaker" (§8.6.8), e.g.
 // [interview.mp4@t=02:13-02:41 › S2]. The base form is used unchanged when no
@@ -4746,8 +4746,15 @@ func FormatCitation(relPath string, span model.Span) string {
 			suffix = fmt.Sprintf("#p=%d", span.Page)
 		}
 	case "lines":
+		// ":L<start>-L<end>", not "@L<start>-<end>": SPEC 9.3 gives each span
+		// kind its own separator (#p= pages, @t= time, :L lines), and reusing
+		// the time separator for lines made the two forms differ by one
+		// character after the "@". Since #934 these tags are model-visible in
+		// every block header, so the model was learning the wrong form (#942).
+		// citationTagPath has always stripped both spellings, so answers that
+		// cite the old form keep resolving.
 		if span.StartLine > 0 && span.EndLine >= span.StartLine {
-			suffix = fmt.Sprintf("@L%d-%d", span.StartLine, span.EndLine)
+			suffix = fmt.Sprintf(":L%d-L%d", span.StartLine, span.EndLine)
 		}
 	case "time":
 		suffix = "@t=" + formatCitationTime(span.StartMS) + "-" + formatCitationTime(span.EndMS)
