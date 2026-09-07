@@ -72,7 +72,11 @@ func routingDecisions(cfg config.Config) []routingRow {
 		providerRow(cfg, "Embed", provider.CapEmbed),
 		providerRow(cfg, "Chat", provider.CapChat),
 	}
-	rows = append(rows, extractorRow(cfg))
+	primary := ingest.DescribeDocumentExtractor(cfg)
+	rows = append(rows, extractorRowFor(primary))
+	if row, ok := pandocRow(cfg, primary); ok {
+		rows = append(rows, row)
+	}
 	return rows
 }
 
@@ -92,16 +96,41 @@ func providerRow(cfg config.Config, label string, cap provider.Capability) routi
 	return routingRow{Capability: label, Provider: prof.Name}
 }
 
-// extractorRow renders the document-extractor decision. It uses
-// ingest.DescribeDocumentExtractor so the banner reflects the same
-// selection the runtime will perform. The Source ("auto", "fallback",
-// etc.) is folded into the reason since the reason text already
-// conveys whichever distinction matters.
-func extractorRow(cfg config.Config) routingRow {
-	d := ingest.DescribeDocumentExtractor(cfg)
+// extractorRowFor renders the document-extractor decision. routingDecisions
+// resolves it once via ingest.DescribeDocumentExtractor, so the banner reflects
+// the same selection the runtime will perform and the OCR row and the pandoc row
+// share one resolution instead of probing twice. The Source ("auto", "fallback",
+// etc.) is folded into the reason since the reason text already conveys
+// whichever distinction matters.
+func extractorRowFor(d ingest.ExtractorDecision) routingRow {
 	name := d.Name
 	if name == "" {
 		name = "disabled"
 	}
 	return routingRow{Capability: "OCR", Provider: name, Reason: d.Reason}
+}
+
+// pandocRow renders the capability-activated pandoc engine (T2, #393) as its own
+// banner row under `ingest.extractor: auto`, where it is a SECONDARY engine the
+// OCR row cannot express: with docling or Mistral OCR as the primary, a missing
+// pandoc is precisely what leaves .docx/.odt/.rtf/.epub uncovered, and SPEC §7.7
+// requires an eligible-but-unavailable engine to be listed with its reason
+// (#395). No row when pandoc is already the primary (the OCR row names it) or
+// when the policy makes it ineligible (a docling/mistral pin, or off).
+func pandocRow(cfg config.Config, primary ingest.ExtractorDecision) (routingRow, bool) {
+	if primary.Name == "pandoc" {
+		return routingRow{}, false
+	}
+	d := ingest.DescribePandocEngine(cfg)
+	if d.Source == "ineligible" {
+		return routingRow{}, false
+	}
+	if d.Name == "" {
+		return routingRow{
+			Capability: "Pandoc",
+			Provider:   "unavailable",
+			Reason:     d.Reason + "; T2 engine for .docx/.odt/.rtf/.epub",
+		}, true
+	}
+	return routingRow{Capability: "Pandoc", Provider: d.Name, Reason: "secondary engine; " + d.Reason}, true
 }

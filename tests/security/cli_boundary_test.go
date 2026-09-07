@@ -195,6 +195,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 		"retry_embeddings.go":                    {},
 		"retry_embeddings_internal_test.go":      {},
 		"rerank_selection_test.go":               {},
+		"extraction_coverage.go":                 {},
 		"routing_decision.go":                    {},
 		"server_doctor.go":                       {},
 		"server_doctor_coverage_test.go":         {},

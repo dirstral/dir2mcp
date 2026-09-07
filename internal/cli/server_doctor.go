@@ -252,14 +252,14 @@ func extractionCoverageCheck(ctx context.Context, a *App, cfg config.Config) doc
 		}
 	}
 
-	// (A/A') Extractable documents exist: report either a hard dead-end (no
-	// extractor at all) or partial coverage (an active extractor that cannot read
-	// some present formats). Factored out to keep this function's branching under
-	// the complexity budget.
-	if extractable > 0 {
-		if check, reported := extractionAvailabilityCheck(ctx, sqliteStore, cfg, name, extractable); reported {
-			return check
-		}
+	// (A/A') Report either a hard dead-end (index-eligible extractable documents
+	// exist but no extractor at all) or partial coverage (an active extractor that
+	// cannot read some present formats). The coverage half runs even when no
+	// status="ok" extractable row exists, because the uncovered documents are by
+	// construction NOT status="ok" (§7.7, spec 0.60.1). Factored out to keep this
+	// function's branching under the complexity budget.
+	if check, reported := extractionAvailabilityCheck(ctx, sqliteStore, cfg, name, extractable); reported {
+		return check
 	}
 
 	// (B) Chunks were created but none are embedded: extraction succeeded yet
@@ -277,50 +277,56 @@ func extractionCoverageCheck(ctx context.Context, a *App, cfg config.Config) doc
 		"%d extractable doc(s); %d/%d chunks embedded", extractable, stats.EmbeddedOK, stats.ChunksTotal)}
 }
 
-// extractionAvailabilityCheck reports the extractor-coverage verdict for a
-// corpus that has extractable documents. It returns (check, true) when it has a
-// verdict to surface — either:
+// extractionAvailabilityCheck reports the extractor-coverage verdict. It returns
+// (check, true) when it has a verdict to surface — either:
 //
-//	(A)  no extractor is available at all → a hard configuration dead-end (error); or
-//	(A') an extractor is active but cannot read some formats present in the corpus
-//	     → those documents are skipped with a non-fatal unsupported-format
-//	     diagnostic (#394), so partial coverage is a warning that NAMES the exact
-//	     uncovered extensions (within §7.7's "surface the reason" mandate) so the
-//	     remedy is actionable — "install docling / add a provider for .odt, .tiff"
-//	     (#395) — instead of an opaque failure count.
+//	(A)  index-eligible (status="ok") extractable documents exist but no extractor
+//	     is available at all → a hard configuration dead-end (error); or
+//	(A') an extractor is active but cannot read some formats present in the durable
+//	     record → those documents are recorded as skipped (lenient) or error
+//	     (strict), never as indexed (§7.4.B.2), so partial coverage is a warning
+//	     that NAMES the exact uncovered extensions (within §7.7's "surface the
+//	     reason" mandate) so the remedy is actionable — "install docling / add a
+//	     provider for .odt, .tiff" (#395) — instead of an opaque failure count.
 //
-// It returns (_, false) when every extractable format is covered, letting the
-// caller fall through to the embedding checks.
-func extractionAvailabilityCheck(ctx context.Context, sqliteStore *store.SQLiteStore, cfg config.Config, name string, extractable int64) (doctorCheck, bool) {
+// (A') counts extractable documents of EVERY status via the shared
+// computeExtractionCoverage verdict (the same one the `up` banner prints). It
+// used to count status="ok" rows only, which went blind the moment #584 recorded
+// the gap honestly as status="skipped": measured on main, a store holding an .odt
+// durably skipped and a .tiff errored produced "ok (1 extractable doc(s); 0/0
+// chunks embedded)" and named neither format.
+//
+// It returns (_, false) when nothing needs surfacing, letting the caller fall
+// through to the embedding checks.
+func extractionAvailabilityCheck(ctx context.Context, sqliteStore *store.SQLiteStore, cfg config.Config, name string, okExtractable int64) (doctorCheck, bool) {
 	decision := ingest.DescribeDocumentExtractorContext(ctx, cfg)
-	if decision.Name == "" {
+	if decision.Name == "" && okExtractable > 0 {
 		detail := fmt.Sprintf(
 			"%d document(s) need extraction (pdf/image/document) but no extractor is available: %s. "+
 				"They produce no searchable text. Enable an extractor (set ingest.extractor to auto/docling/mistral, "+
 				"not off), then make one available (install docling or set MISTRAL_API_KEY), and run `dir2mcp reindex`.",
-			extractable, decision.Reason)
+			okExtractable, decision.Reason)
 		return doctorCheck{Name: name, Status: doctorStatusError, Detail: detail}, true
 	}
-	extCounts, err := sqliteStore.ExtractableExtensionCounts(ctx, "ok")
+	// The coverage half runs even with NO primary engine: on a lean install whose
+	// only extractable documents are already durably skipped, nothing is
+	// status="ok", so (A) above does not fire, yet the corpus still holds formats
+	// nothing reads. The verdict then lists every present extractable format.
+	cov, err := computeExtractionCoverage(ctx, sqliteStore, cfg, decision)
 	if err != nil {
 		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}, true
 	}
-	structured := extractorIsStructured(decision.Name)
-	// pandoc (T2, #393) can be a second active engine under `auto`, covering the
-	// born-digital formats docling cannot read (.odt/.rtf/.epub) and — when it is
-	// the primary — the OOXML/markup formats it reads. Fold its availability into
-	// the engine-aware coverage verdict so the doctor names exactly what indexing
-	// will skip.
-	pandocActive := ingest.PandocActive(cfg)
-	uncovered, docs := uncoveredExtractableExtensions(extCounts, cfg.IngestExtractor, structured, decision.Name == "mistral-ocr", pandocActive)
-	if len(uncovered) == 0 {
+	if len(cov.Uncovered) == 0 {
 		return doctorCheck{}, false
+	}
+	engine := cov.Engine
+	if engine == "" {
+		engine = "none"
 	}
 	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
 		"%d document(s) in %d format(s) are uncovered by the active extractor (%s): %s. "+
-			"They produce no searchable text (skipped with an unsupported-format error). %s",
-		docs, len(uncovered), decision.Name, strings.Join(uncovered, ", "),
-		uncoveredExtractionRemedy(uncovered, structured, pandocActive))}, true
+			"They produce no searchable text (recorded as skipped or error, never as indexed). %s",
+		cov.Docs, len(cov.Uncovered), engine, strings.Join(cov.Uncovered, ", "), cov.Remedy)}, true
 }
 
 // extractorIsStructured maps a resolved extractor name (ExtractorDecision.Name)

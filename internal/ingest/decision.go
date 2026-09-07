@@ -189,3 +189,55 @@ func mistralOCRAvailable(cfg config.Config) bool {
 	_, err := cfg.Providers().ResolveExplicit(provider.CapOCR, ocrProviderName(cfg), true)
 	return err == nil
 }
+
+// DescribePandocEngine describes the capability-activated pandoc engine (T2,
+// #393) for the SPEC §7.7 startup engine list, which covers every engine the
+// `ingest.extractor` policy makes eligible and lists an eligible-but-unavailable
+// engine with its reason. DescribeDocumentExtractor reports only the PRIMARY of
+// the cascade, so under `auto` with docling or Mistral OCR active a missing pandoc
+// was invisible at startup even though its absence is exactly what leaves
+// .odt/.rtf/.epub uncovered (#395).
+//
+//   - `auto`: pandoc is an additive secondary engine. Name="pandoc"/Source="auto"
+//     when a functional pandoc resolves; Source="disabled" with the reason when
+//     it does not (mirrors the docling reasons: not on PATH, or present but
+//     failing its functional check).
+//   - `pandoc` (pin): identical to the primary decision (pandoc IS the primary).
+//   - any other pin, or `off`: Source="ineligible"; the policy never activates
+//     pandoc, so there is nothing to report as unavailable.
+//
+// Like DescribeDocumentExtractor it never embeds the resolved command or path in
+// Reason (no user-supplied value flows into the banner or the support bundle),
+// and the functional probe is memoized per binary, so calling it alongside the
+// primary decision costs no second subprocess.
+func DescribePandocEngine(cfg config.Config) ExtractorDecision {
+	return describePandocEngine(context.Background(), cfg)
+}
+
+// DescribePandocEngineContext is DescribePandocEngine with a caller-provided
+// context threaded into the functional-check probe.
+func DescribePandocEngineContext(ctx context.Context, cfg config.Config) ExtractorDecision {
+	return describePandocEngine(ctx, cfg)
+}
+
+func describePandocEngine(ctx context.Context, cfg config.Config) ExtractorDecision {
+	policy := strings.ToLower(strings.TrimSpace(cfg.IngestExtractor))
+	if policy == "" {
+		policy = "auto"
+	}
+	switch policy {
+	case "pandoc":
+		return describeExplicitPandoc(ctx, cfg)
+	case "auto":
+		bin, source, ok := resolvePandocBinary(cfg)
+		if !ok {
+			return ExtractorDecision{Source: "disabled", Reason: "pandoc not found on PATH"}
+		}
+		if err := pandocFunctionalCheck(ctx, bin); err != nil {
+			return ExtractorDecision{Source: "disabled", Reason: "pandoc present but failed its functional check"}
+		}
+		return ExtractorDecision{Name: "pandoc", Source: "auto", Reason: pandocResolvedReason(source)}
+	default:
+		return ExtractorDecision{Source: "ineligible", Reason: "not eligible under ingest.extractor=" + policy}
+	}
+}

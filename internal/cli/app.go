@@ -2448,7 +2448,7 @@ func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 // printHumanConnection prints the styled "ready for connections" banner to
 // stdout, summarizing the mode, MCP endpoint URL, auth source, required
 // headers, and client registration hint.
-func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool) {
+func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool, coverage extractionCoverage) {
 	s := a.sty(false)
 	writeln(a.stdout)
 	writef(a.stdout, "  %s %s\n", s.banner(), s.dim(buildinfo.Display()))
@@ -2492,6 +2492,7 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	writeln(a.stdout)
 
 	printRoutingSection(a.stdout, s, routingDecisions(cfg))
+	printCoverageSection(a.stdout, s, coverage)
 	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, auth.mode != "none")
 	writeln(a.stdout, s.separator(44))
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
