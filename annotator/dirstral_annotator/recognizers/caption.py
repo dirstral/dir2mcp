@@ -318,12 +318,22 @@ class SceneCaptionRecognizer:
         outvote the one that carries the event.
         """
         question = CLAIM_PROBES[event]
-        scores = self.prober(frames, question)
-        if len(scores) != len(frames):
-            raise RecognizerUnavailable(
-                f"probe backend returned {len(scores)} scores for "
-                f"{len(frames)} frames; the contract is one P(yes) per frame"
-            )
+        # Probe in slices of batch_size, never the whole run at once. A run is
+        # every frame whose caption collapsed into one passage, and a long
+        # celebration at 0.5 fps is dozens of frames; one forward pass over all
+        # of them is what ran the pilot's L4 out of memory (#947: a 3.38 GiB
+        # spike with 1.9 GiB free). batch_size is the knob that already bounds
+        # the captioner's peak memory, and the probe path must respect it too.
+        scores: list[float] = []
+        for i in range(0, len(frames), self.batch_size):
+            part = frames[i:i + self.batch_size]
+            got = self.prober(part, question)
+            if len(got) != len(part):
+                raise RecognizerUnavailable(
+                    f"probe backend returned {len(got)} scores for "
+                    f"{len(part)} frames; the contract is one P(yes) per frame"
+                )
+            scores.extend(got)
         for score in scores:
             # A backend that answers inf, NaN or 1.7 is not answering the
             # question asked. Trusting it would clear any threshold and publish
