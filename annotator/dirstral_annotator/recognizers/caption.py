@@ -51,13 +51,16 @@ the cost of leaving it off is the 0.35 precision measured above.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ..model import Cue
-from .base import RecognizerUnavailable, collapse_text_sightings, iter_frames
+from .base import RecognizerUnavailable, collapse_text_sightings, iter_frames, scrub_error
+
+log = logging.getLogger(__name__)
 
 #: A batch of frame images in, one (text, confidence) pair per frame out. The
 #: batch shape is the interface because #860 measured batching as the lever
@@ -342,9 +345,29 @@ class SceneCaptionRecognizer:
         # Timestamp -> frame, so a collapsed run can be re-probed on the exact
         # frames it came from rather than on a re-extraction.
         frame_at: dict[float, Path] = {}
+        n_batches = failed_batches = 0
+        last_error: BaseException | None = None
         for i in range(0, len(frames), self.batch_size):
             batch = frames[i:i + self.batch_size]
-            results = self.captioner([path for _, path in batch])
+            n_batches += 1
+            try:
+                results = self.captioner([path for _, path in batch])
+            except RecognizerUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the whole point is ANY fault
+                # A backend fault on ONE batch (a CUDA error, a decode error on
+                # one frame, a transient in a remote captioner) used to abort
+                # the run and discard every caption before it; on the pilot
+                # that was four GPU-hours (#945). Skip the batch, keep going,
+                # and say so. A backend that fails EVERY batch is dead, and that
+                # is unavailability (below), never a silent zero captions.
+                failed_batches += 1
+                last_error = exc
+                log.warning(
+                    "caption batch %d (%d frames from t=%.1fs) failed and was skipped: %s",
+                    n_batches, len(batch), batch[0][0], scrub_error(exc),
+                )
+                continue
             if len(results) != len(batch):
                 raise RecognizerUnavailable(
                     "caption backend returned "
@@ -361,6 +384,17 @@ class SceneCaptionRecognizer:
                 # comparison, and measurably did (0.500 -> 0.706), making the
                 # module's own words the reason two different shots merged.
                 sightings.append((t, text, float(confidence)))
+
+        if n_batches and failed_batches == n_batches:
+            raise RecognizerUnavailable(
+                f"caption backend failed on all {n_batches} batches; last error: "
+                f"{scrub_error(last_error)}"
+            )
+        if failed_batches:
+            log.warning(
+                "caption: %d of %d batches failed and were skipped; the run is missing "
+                "those frames", failed_batches, n_batches,
+            )
 
         # Collapse by TEXT, not by identity: a caption names nobody the roster
         # owns, so there is no entity to group on.

@@ -13,12 +13,16 @@ See `pipeline._Shared`.
 from __future__ import annotations
 
 import json
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .emit import build_response
 from .model import Document
 from .pipeline import Pipeline
+from .recognizers.base import scrubbed_traceback
+
+log = logging.getLogger(__name__)
 
 MAX_REQUEST_BYTES = 1 << 20
 
@@ -53,8 +57,22 @@ def make_handler(pipeline: Pipeline):
             try:
                 annotations = pipeline.annotations_for(media)
             except Exception as exc:  # surface as 502, never a hung request
-                self._reply(502, {"error": f"recognition failed: {exc}"})
+                # The body carries a STABLE code and no exception text: the
+                # message can interpolate a request URL, a header or a local
+                # path (CWE-209), and the caller (dir2mcp) deliberately does
+                # not echo backend bodies anyway. The reason lives in this
+                # process's journal, frames intact and message scrubbed, so a
+                # failed run is diagnosable here and leaks nothing there (#945).
+                log.error("recognize %s failed\n%s", media.name, scrubbed_traceback(exc))
+                self._reply(502, {"error": "recognition failed", "code": "RECOGNITION_FAILED"})
                 return
+            skipped = pipeline.skipped
+            if skipped:
+                # A degraded request is a 200 with fewer cues. That is the right
+                # wire contract (the schema is closed and the caller cannot act
+                # on it), but it must not be a silent one on this side.
+                log.warning("recognize %s: %d recognizer(s) skipped: %s",
+                            media.name, len(skipped), "; ".join(skipped))
             doc = Document(media=media.name, annotations=annotations)
             self._reply(200, build_response(doc, pipeline.roster))
 
