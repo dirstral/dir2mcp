@@ -40,6 +40,9 @@ _CREDENTIAL_KV = re.compile(
 )
 # A bare scheme + credential with no key name in front ("Bearer eyJ...").
 _BARE_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+\S+")
+# URL userinfo ("https://user:password@host/..."): the password sits before
+# the host, so the query scrub below never sees it (#946 review, CWE-532).
+_URL_USERINFO = re.compile(r"(https?://)[^/\s@]+@")
 _URL_QUERY = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
 # Well-known secret prefixes are redacted at ANY length: real keys are often
 # shorter than the opaque-token floor below ("sk-" keys can be 20-30 chars).
@@ -59,6 +62,7 @@ def scrub_error(exc: BaseException) -> str:
     msg = str(exc)
     msg = _CREDENTIAL_KV.sub(lambda m: m.group(1) + "=<redacted>", msg)
     msg = _BARE_BEARER.sub(lambda m: m.group(1) + " <redacted>", msg)
+    msg = _URL_USERINFO.sub(lambda m: m.group(1) + "<redacted>@", msg)
     msg = _URL_QUERY.sub(lambda m: m.group(1) + "?<redacted>", msg)
     msg = _PREFIXED_KEY.sub("<redacted>", msg)
     msg = _LONG_OPAQUE_TOKEN.sub("<redacted>", msg)

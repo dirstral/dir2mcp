@@ -222,6 +222,18 @@ def test_scrub_error_redacts_credentials_urls_and_binary_but_keeps_the_type():
     assert "sk-" not in scrub_error(RuntimeError("Bearer sk-abc12345defgh"))
     assert scrub_error(RuntimeError("key sk-abcdefgh1234")) == "RuntimeError: key <redacted>"
     assert "\x00" not in out and "\x01" not in out
+    # Userinfo credentials sit BEFORE the host, where the query scrub cannot
+    # reach them (second-round finding, CWE-532): the password goes, the host
+    # and path stay so the log still says which endpoint failed.
+    userinfo = RuntimeError("GET https://svc:SENTINEL_PW_77@vlm.example/v1/caption?k=SENTINEL_Q -> 407")
+    got = scrub_error(userinfo)
+    assert "SENTINEL_PW_77" not in got and "svc:" not in got
+    assert "SENTINEL_Q" not in got
+    assert got == "RuntimeError: GET https://<redacted>@vlm.example/v1/caption?<redacted> -> 407"
+    # A URL without userinfo is untouched by the userinfo scrub: the "@" in a
+    # path or query segment must not be mistaken for a credential boundary.
+    plain = scrub_error(RuntimeError("GET https://vlm.example/v1/users/@me -> 404"))
+    assert plain == "RuntimeError: GET https://vlm.example/v1/users/@me -> 404"
     long = RuntimeError("x" * 5000)
     assert len(scrub_error(long)) <= len("RuntimeError: ") + SCRUBBED_ERROR_MAX_CHARS
 
