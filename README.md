@@ -596,6 +596,39 @@ To pin one answer language for all requests, write your own `rag.system_prompt`.
 replaces the shipped grounding rule, answer-language rule and `[rel_path]` citation rule,
 so keep in your text the ones you still want.
 
+#### Reference a shipped rule, do not copy it
+
+Keep a shipped rule by REFERENCE. Write `${rag.answer_language_rule}` or
+`${rag.citation_rule}` in your `rag.system_prompt`, and the server replaces each one with
+the rule this version ships.
+
+A copy goes stale, and it goes stale in silence. The server matches both rules exactly:
+the trailing answer-language reminder is appended only when the prompt in force states the
+answer-language rule, and a client parses the bracketed tag the citation rule asks for. A
+release that rewords a rule therefore disarms every prompt that reproduced the previous
+wording. Config load still passes, the daemon still starts, answers still come back, and
+only the quality changes. A reference cannot go stale, because it names the rule instead
+of restating it.
+
+The reference is resolved when the prompt is loaded, never when it is saved. Your config
+file keeps the token, so the next release reaches you without an edit. A misspelled name
+inside the `${rag.*}` namespace is a config error at startup. Any other `${...}` text is
+prompt text and is left alone.
+
+A prompt that still holds part of a shipped rule, from a copy made before this, is
+reported at load:
+
+```
+warning: rag.system_prompt reproduces PART of the shipped rag.answer_language_rule but not
+all of it. That is a copy taken from an older release: ...
+```
+
+The report changes nothing on its own. Replace the copied sentences with the reference to
+clear it.
+
+The setup wizard's `legal` and `code` profiles write these references, so a config the
+wizard generates tracks the server too.
+
 #### The untrusted-data guard is not replaceable
 
 `rag.system_prompt` supplies domain rules only. The server appends the untrusted-data

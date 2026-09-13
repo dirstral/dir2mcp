@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/promptrules"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/setupwizard"
 )
@@ -102,9 +103,13 @@ func TestAsk957_GuardStaysLastAfterTheCitationRuleIsRestored(t *testing.T) {
 // The wizard presets are now COMPOSED from the shipped rules instead of holding
 // a copy (#957). This is the test that a future clause cannot drift them apart
 // again, which is what happened to the copies this change removed.
+//
+// A preset states each rule as a `${rag.*}` reference (#965), so the prompt is
+// resolved here exactly as the server resolves it. The composition moved from
+// the preset text to the reference; the property under test did not move.
 func TestAsk957_WizardPresetsCarryTheShippedRulesVerbatim(t *testing.T) {
 	for _, p := range []setupwizard.Profile{setupwizard.ProfileLegal, setupwizard.ProfileCode} {
-		prompt := profilePrompt885(t, p)
+		prompt := promptrules.Expand(profilePrompt885(t, p))
 		if !strings.Contains(prompt, strings.TrimSpace(retrieval.AnswerLanguageRule())) {
 			t.Errorf("%s preset lost the shipped answer-language rule:\n%s", p, prompt)
 		}

@@ -4979,6 +4979,7 @@ func (c *Config) Validate() error {
 		c.validateLateChunking,
 		c.validateTEITransport,
 		c.validateMCPPath,
+		c.validateRAGSystemPrompt,
 	} {
 		if err := validate(); err != nil {
 			return err

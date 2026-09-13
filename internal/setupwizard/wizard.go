@@ -16,7 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dirstral/dir2mcp/internal/config"
-	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/promptrules"
 )
 
 // dir2mcp brand palette (matches internal/cli/style.go): orange #F2911A is the
@@ -128,15 +128,19 @@ const (
 // in one language while the asker works in another. An operator who wants a
 // fixed answer language still gets it by editing rag.system_prompt, and the
 // reminder stands down with it, exactly as #892 pinned.
-// The two shared sentences are taken FROM the retrieval package rather than
-// copied here (issue #957). The previous version of this file pasted both, with
-// a comment promising they could not drift; adding one clause to the shipped
-// answer-language rule drifted them immediately, and the preset lost the #892
-// reminder without a single test outside retrieval noticing.
+// The two shared sentences are REFERENCED, not copied (issues #957, #965). An
+// older version of this file pasted both, with a comment promising they could
+// not drift; adding one clause to the shipped answer-language rule drifted them
+// immediately, and the preset lost the #892 reminder without a single test
+// outside retrieval noticing. Composing the preset from the rule constants
+// fixed the presets in the binary, but a preset is WRITTEN into the operator's
+// rag.system_prompt, so the copy simply moved into their file and would go
+// stale there at the next rewording. A `${rag.*}` reference survives that: the
+// config keeps the reference, and the server expands it per run.
 var legalSystemPrompt = `You answer questions strictly from the provided legal documents: statutes,
 amendment acts, regulations, and codes of practice. Cite the specific act,
 section, and page for every statement.
-` + retrieval.CitationRule() + retrieval.AnswerLanguageRule() +
+` + promptrules.CitationRuleToken + "\n" + promptrules.AnswerLanguageRuleToken + "\n" +
 	`When provisions conflict, prefer the
 most recent and say which one applies. If the documents do not cover the
 question, say so plainly. Do not give legal advice or speculate beyond the
@@ -144,7 +148,7 @@ cited text.`
 
 var codeSystemPrompt = `You answer questions strictly from the provided source code and project
 documentation. Cite file paths and line ranges, and quote the relevant code.
-` + retrieval.CitationRule() + retrieval.AnswerLanguageRule() +
+` + promptrules.CitationRuleToken + "\n" + promptrules.AnswerLanguageRuleToken + "\n" +
 	`If the indexed code does not cover the question, say so plainly rather than
 guessing.`
 
