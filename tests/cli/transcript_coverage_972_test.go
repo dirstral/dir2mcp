@@ -358,3 +358,24 @@ func TestStartupTranscriptCoverage_IsSilentWhereNoBannerPrints(t *testing.T) {
 		t.Errorf("unexpected warning: %q", stderr.String())
 	}
 }
+
+func TestDoctorTranscriptCoverage_ASubSecondShortfallIsNotRenderedAsNothing(t *testing.T) {
+	// "0s never heard" reads as nothing missing, which is the silence §7.7
+	// forbids. Windows are minutes long, so this is the rounding edge rather
+	// than a common case, and that is exactly why it must not round to zero.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/nearly.mp4",
+		metaJSON: coverageMeta(t, "whisper", "large-v3", 2, 1, 40*minute-400, 40*minute)})
+	_ = st.Close()
+
+	check, ok := doctorCheckNamed(t, dir, "transcript_coverage")
+	if !ok {
+		t.Fatalf("doctor has no transcript_coverage check")
+	}
+	if strings.Contains(check.Detail, "0s never heard") {
+		t.Errorf("a real shortfall is reported as nothing: %q", check.Detail)
+	}
+	if !strings.Contains(check.Detail, "<1s never heard") {
+		t.Errorf("detail does not name the sub-second shortfall: %q", check.Detail)
+	}
+}

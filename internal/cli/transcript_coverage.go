@@ -109,6 +109,14 @@ func humanDuration(ms int64) string {
 		ms = 0
 	}
 	seconds := ms / 1000
+	if ms > 0 && seconds == 0 {
+		// A shortfall under a second is still a shortfall, and "0s never heard"
+		// is the exact silence this report exists to remove: it reads as nothing
+		// missing. Windows are minutes long, so this is the rounding edge rather
+		// than a case an operator meets often, which is why it has to be right
+		// rather than argued about.
+		return "<1s"
+	}
 	switch {
 	case seconds >= 3600:
 		return fmt.Sprintf("%dh %dm", seconds/3600, (seconds%3600)/60)
