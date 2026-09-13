@@ -66,12 +66,79 @@ func (s *SQLiteStore) PartialTranscriptCoverage(ctx context.Context) (model.Tran
 	return partialTranscriptCoverage(ctx, db)
 }
 
+// PartialTranscriptPaths returns the rel_paths of the documents whose live
+// transcript records incomplete coverage, sorted, for the re-decode action the
+// §7.7 remediation names (#974).
+//
+// It walks the same rows as PartialTranscriptCoverage through the same
+// predicate, so the corpus the report COUNTS and the corpus the action REPAIRS
+// cannot drift apart. A report that names 12 transcripts and an action that
+// repairs 9 of them would be a worse failure than the silence both exist to
+// remove.
+func (s *SQLiteStore) PartialTranscriptPaths(ctx context.Context) ([]string, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	var paths []string
+	if err := walkPartialTranscripts(ctx, db, func(relPath string, _ *model.TranscriptCoverage) {
+		paths = append(paths, relPath)
+	}); err != nil {
+		return nil, err
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.TranscriptCoverageSummary, error) {
+	var out model.TranscriptCoverageSummary
+	seen := map[string]bool{}
+	err := walkPartialTranscripts(ctx, db, func(_ string, cov *model.TranscriptCoverage) {
+		out.Transcripts++
+		if id := cov.Identity; id != "" && !seen[id] {
+			seen[id] = true
+			out.Providers = append(out.Providers, id)
+		}
+		if cov.DurationMS <= 0 {
+			// The duration probe failed (§8.6.13). Counted as a file, excluded
+			// from the length, and reported: an unknown length summed as zero
+			// would report a shortfall of nothing, which is the silence the
+			// report exists to remove.
+			out.UnknownDuration++
+			return
+		}
+		out.DecodedMS += int64(cov.DecodedMS)
+		out.DurationMS += int64(cov.DurationMS)
+	})
+	if err != nil {
+		return model.TranscriptCoverageSummary{}, err
+	}
+	sort.Strings(out.Providers)
+	return out, nil
+}
+
+// walkPartialTranscripts calls visit once per LIVE transcript representation
+// whose §8.6.13 coverage record does not state completeness. It is the single
+// definition of "partial" that both the report and the re-decode action read.
+//
+// A transcript retired by a partial-transcript refusal is tombstoned with
+// `deleted = 1` and its chunks are gone, so it is not walked: reporting a
+// shortfall for audio that is no longer indexed at all is the `skip_reasons`
+// aggregate's job, not this one.
+//
+// Rows are decoded in Go rather than with json_extract so completeness is
+// decided by model.TranscriptCoverage.Complete, the one definition ingest writes
+// with. A meta_json that does not parse, or that carries no `coverage`, is
+// skipped: §5.2 absence is "no assertion", and a single-request decode records
+// nothing precisely so that absence cannot be read as either complete or partial.
+func walkPartialTranscripts(ctx context.Context, db *sql.DB, visit func(relPath string, cov *model.TranscriptCoverage)) error {
 	// The `%coverage%` predicate is a cheap pre-filter, not the decision: it
 	// keeps the scan off every single-request transcript in a large corpus, and
 	// Complete below decides. A false positive costs one JSON decode.
 	rows, err := db.QueryContext(ctx, `
-		SELECT r.meta_json
+		SELECT d.rel_path, r.meta_json
 		FROM representations r
 		JOIN documents d ON d.doc_id = r.doc_id
 		WHERE r.deleted = 0 AND d.deleted = 0
@@ -80,16 +147,14 @@ func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.Transcrip
 		       OR r.rep_type LIKE 'transcript-%')
 		  AND r.meta_json LIKE '%coverage%'`)
 	if err != nil {
-		return model.TranscriptCoverageSummary{}, err
+		return err
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out model.TranscriptCoverageSummary
-	seen := map[string]bool{}
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return model.TranscriptCoverageSummary{}, err
+		var relPath, raw string
+		if err := rows.Scan(&relPath, &raw); err != nil {
+			return err
 		}
 		var meta transcriptCoverageMeta
 		if err := json.Unmarshal([]byte(raw), &meta); err != nil {
@@ -101,27 +166,10 @@ func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.Transcrip
 		if cov == nil || cov.WindowsAttempted <= 0 || cov.Complete() {
 			continue
 		}
-		out.Transcripts++
-		if id := transcriptIdentity(meta); id != "" && !seen[id] {
-			seen[id] = true
-			out.Providers = append(out.Providers, id)
-		}
-		if cov.DurationMS <= 0 {
-			// The duration probe failed (§8.6.13). Counted as a file, excluded
-			// from the length, and reported: an unknown length summed as zero
-			// would report a shortfall of nothing, which is the silence the
-			// report exists to remove.
-			out.UnknownDuration++
-			continue
-		}
-		out.DecodedMS += int64(cov.DecodedMS)
-		out.DurationMS += int64(cov.DurationMS)
+		cov.Identity = transcriptIdentity(meta)
+		visit(relPath, cov)
 	}
-	if err := rows.Err(); err != nil {
-		return model.TranscriptCoverageSummary{}, err
-	}
-	sort.Strings(out.Providers)
-	return out, nil
+	return rows.Err()
 }
 
 // transcriptIdentity renders the recorded derivation identity for the report,

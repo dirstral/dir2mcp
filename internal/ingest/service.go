@@ -75,6 +75,21 @@ type Service struct {
 	recognizeBackendPID int
 	recognizeHealthWait time.Duration
 
+	// redecodeTranscripts is the set of rel_paths whose cached transcript must be
+	// IGNORED on read, so a run actually calls the STT provider again (#974).
+	//
+	// It exists because a repair is otherwise unreachable. transcriptCacheKey is
+	// the media bytes folded with the STT derivation identity (SPEC §8.6.7), and
+	// §8.6.13 requires a cache hit to restore the recorded coverage with the
+	// text. An operator who fixes a down endpoint changes neither key component,
+	// so an ordinary reindex returns the same partial transcript and never
+	// reaches the provider. The entry is still WRITTEN afterwards, replacing the
+	// stale one, so a repair costs exactly one decode and not a permanently
+	// uncached document.
+	//
+	// Nil means "trust the cache", which is every ordinary run.
+	redecodeTranscripts map[string]bool
+
 	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
 	// active extraction engine supports (ingest.on_unsupported): "lenient"
 	// (default) skips with a warning and surfaces the gap in the honest coverage
@@ -6640,11 +6655,16 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
-	if cached, err := os.ReadFile(cachePath); err == nil {
-		// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
-		// text. A cache hit that dropped it would re-index the same PARTIAL
-		// transcript as a complete one on the next run, which is the whole defect.
-		return string(cached), readCachedWords(wordsPath), readCachedCoverage(coveragePath), nil
+	// #974: an operator asked for this document to be decoded again, so the cache
+	// is not consulted. The entry is rewritten below, so this costs one decode
+	// rather than leaving the document uncached forever.
+	if !s.redecodeTranscripts[doc.RelPath] {
+		if cached, err := os.ReadFile(cachePath); err == nil {
+			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
+			// text. A cache hit that dropped it would re-index the same PARTIAL
+			// transcript as a complete one on the next run, which is the whole defect.
+			return string(cached), readCachedWords(wordsPath), readCachedCoverage(coveragePath), nil
+		}
 	}
 
 	transcript, words, coverage, err := s.transcribe(ctx, doc, content)
@@ -7036,4 +7056,28 @@ func (s *Service) flattenJSONForIndexing(v interface{}) string {
 		return string(raw)
 	}
 	return out
+}
+
+// RedecodeTranscripts marks rel_paths whose cached transcript must be ignored on
+// read, so the next run decodes them again (#974).
+//
+// Scoped on purpose. Clearing the whole transcript cache would re-decode a
+// corpus that is mostly fine, which on an archive is hours of GPU time and a
+// provider bill to repair a handful of recordings. The caller passes exactly the
+// documents the §7.7 report named.
+//
+// A nil or empty set restores ordinary cache behaviour, so this cannot leave a
+// Service permanently bypassing its cache.
+func (s *Service) RedecodeTranscripts(relPaths []string) {
+	if len(relPaths) == 0 {
+		s.redecodeTranscripts = nil
+		return
+	}
+	set := make(map[string]bool, len(relPaths))
+	for _, p := range relPaths {
+		if p = strings.TrimSpace(p); p != "" {
+			set[p] = true
+		}
+	}
+	s.redecodeTranscripts = set
 }
