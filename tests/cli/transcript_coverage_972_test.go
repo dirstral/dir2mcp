@@ -77,8 +77,11 @@ func plainMeta(t *testing.T) string {
 }
 
 type seedRep struct {
-	relPath  string
-	status   string
+	relPath string
+	status  string
+	// repType defaults to "transcript". §8.6.12 gives an additional audio track
+	// its own "transcript@t<N>".
+	repType  string
 	metaJSON string
 	// deleted tombstones the REPRESENTATION, as a partial-transcript refusal does.
 	deleted bool
@@ -104,9 +107,13 @@ func seedTranscripts(t *testing.T, dir string, reps ...seedRep) *store.SQLiteSto
 		if err != nil {
 			t.Fatalf("read back %s: %v", r.relPath, err)
 		}
+		repType := r.repType
+		if repType == "" {
+			repType = "transcript"
+		}
 		rep := model.Representation{
 			DocID:    stored.DocID,
-			RepType:  "transcript",
+			RepType:  repType,
 			RepHash:  fmt.Sprintf("hash-%d", i),
 			MetaJSON: r.metaJSON,
 			Deleted:  r.deleted,
@@ -377,5 +384,59 @@ func TestDoctorTranscriptCoverage_ASubSecondShortfallIsNotRenderedAsNothing(t *t
 	}
 	if !strings.Contains(check.Detail, "<1s never heard") {
 		t.Errorf("detail does not name the sub-second shortfall: %q", check.Detail)
+	}
+}
+
+func TestPartialTranscriptCoverage_SeesEveryAudioTrack(t *testing.T) {
+	// §8.6.12 gives an additional audio track its own `transcript@t<N>` rep_type,
+	// and each track is a separate decode with its own coverage. A predicate
+	// matching only the bare `transcript` would call a multi-track recording
+	// fully covered while every track past the first was missing most of its
+	// speech, which on a multilingual archive is the common shape: the original
+	// on track 0 and the interpreted feed on track 1.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/dual.mp4", repType: "transcript",
+			metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)},
+		seedRep{relPath: "rfe/dual.mp4", repType: "transcript@t1",
+			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
+	)
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if got.Transcripts != 1 {
+		t.Fatalf("transcripts = %d, want 1: track 1 is partial and must be seen", got.Transcripts)
+	}
+	if got.MissingMS() != rfeDurationMS-rfeDecodedMS {
+		t.Errorf("missing = %d, want %d", got.MissingMS(), rfeDurationMS-rfeDecodedMS)
+	}
+}
+
+func TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall(t *testing.T) {
+	// A translation derives from the source transcript's TEXT and records no
+	// coverage of its own (§8.6.2). Counting it would report the same missing
+	// audio twice for one recording.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/ru.mp4", repType: "transcript",
+			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
+		seedRep{relPath: "rfe/ru.mp4", repType: "transcript-en",
+			metaJSON: `{"provider":"whisper","model":"large-v3","source_language":"ru",` +
+				`"translate_provider":"openai","translate_model":"gpt-4o","language":"en"}`},
+	)
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if got.Transcripts != 1 {
+		t.Errorf("transcripts = %d, want 1: the translation carries no coverage of its own", got.Transcripts)
+	}
+	if got.DurationMS != rfeDurationMS {
+		t.Errorf("duration = %d, want %d (counted once)", got.DurationMS, rfeDurationMS)
 	}
 }

@@ -42,6 +42,15 @@ type transcriptCoverageMeta struct {
 // counting it would report a shortfall for audio that is no longer indexed at
 // all; that case is already the `skip_reasons` aggregate's.
 //
+// The whole transcript rep_type FAMILY is walked, not the bare `transcript`.
+// §8.6.12 gives an additional audio track its own `transcript@t<N>` rep_type
+// (UNIQUE(doc_id, rep_type) makes that the only way to hold more than one), and
+// each track is a separate decode with its own coverage. A predicate matching
+// only `transcript` would report a multi-track recording as fully covered while
+// every track past the first was missing most of its speech. Translations
+// (`transcript-<lang>`) and sidecars are matched too and fall out on their own,
+// because neither is a windowed decode and neither records a `coverage` object.
+//
 // Rows are decoded in Go rather than with json_extract so that completeness is
 // decided by model.TranscriptCoverage.Complete, the one definition ingest writes
 // with. A meta_json that does not parse, or that carries no `coverage`, is not
@@ -66,7 +75,9 @@ func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.Transcrip
 		FROM representations r
 		JOIN documents d ON d.doc_id = r.doc_id
 		WHERE r.deleted = 0 AND d.deleted = 0
-		  AND r.rep_type = 'transcript'
+		  AND (r.rep_type = 'transcript'
+		       OR r.rep_type LIKE 'transcript@%'
+		       OR r.rep_type LIKE 'transcript-%')
 		  AND r.meta_json LIKE '%coverage%'`)
 	if err != nil {
 		return model.TranscriptCoverageSummary{}, err
