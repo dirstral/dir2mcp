@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import math
 import shutil
 import re
 import subprocess
@@ -571,6 +572,7 @@ def collapse_text_sightings(
     similarity: float = TEXT_RUN_SIMILARITY,
     min_tokens: int = MIN_MATCH_TOKENS,
     cue_gap: float | None = None,
+    max_span: float | None = None,
 ) -> list[Cue]:
     """Collapse per-frame (t, text, confidence) reads into per-passage cues.
 
@@ -628,7 +630,51 @@ def collapse_text_sightings(
     not an entity; note that `fusion.fuse` merges overlapping same-event cues
     that share no entity, so a consumer emitting these needs either distinct
     events or a fusion rule of its own.
+
+    `max_span` bounds how long ONE cue may run, and defaults to no bound
+    because for the overlay case there is nothing to bound: a banner that sits
+    on screen unchanged for twenty minutes IS one sighting, and cutting it into
+    pieces would invent transitions the screen never made. It exists for the
+    caller whose reads are not an overlay. A scene caption describes what the
+    camera sees, and footage that LOOKS alike for three hours is not one
+    moment; it is three hours of separate events a captioner happens to
+    describe in the same words. Measured on the Apollo 11 moonwalk (dir2mcp
+    #970): 2,190 captioned frames collapsed to 7 cues and one of them covered
+    181 minutes, so the first step on the Moon, the flag and the President's
+    call all cited the same three hours. A read that would push the open run
+    past the ceiling starts a new run instead, anchored on itself, so each
+    piece carries the longest text ITS own frames produced rather than
+    repeating one text across every piece. The ceiling counts the emitted cue,
+    trailing extension included, so `max_span` is the longest cue that can come
+    back and not a number the caller has to adjust for the gap.
     """
+    trailing = frame_gap if cue_gap is None else cue_gap
+    if trailing < 0:
+        # A cue may not end before its last observation: with one sighting a
+        # negative extension puts end_s before start_s, which Cue refuses, and
+        # with several it silently claims a span the overlay had already left.
+        raise ValueError(f"cue_gap must not be negative: {trailing}")
+    if max_span is not None and not math.isfinite(max_span):
+        # NaN fails every comparison, so the join test below is false for EVERY
+        # read and each one opens its own run: the collapse degenerates to one
+        # cue per frame, silently, which is the opposite of what a ceiling was
+        # asked for (measured: 20 reads of one passage came back as 20 cues).
+        # Infinity is a second spelling of unbounded, and None is the one this
+        # contract has. Both are refused so that neither can be reached by
+        # accident through a float() of operator input.
+        raise ValueError(
+            f"max_span must be a finite number of seconds, or None for no "
+            f"ceiling: {max_span}"
+        )
+    if max_span is not None and max_span < trailing:
+        # Every cue spans at least `trailing`, so a ceiling below it could not
+        # be honoured by any cue this returns, not even a single-read one. Say
+        # so here rather than emit cues that all breach the stated ceiling.
+        raise ValueError(
+            f"max_span {max_span} is below the {trailing} a single read already "
+            "spans; no cue could honour it"
+        )
+
     runs: list[_TextRun] = []
     for t, text, conf in sorted(sightings):
         tokens = tuple(word.casefold() for word in text_tokens(text))
@@ -638,6 +684,8 @@ def collapse_text_sightings(
         open_run = runs[-1] if runs else None
         if (open_run is not None
                 and t - open_run.last_s <= frame_gap + RUN_GAP_S
+                and (max_span is None
+                     or t + trailing - open_run.start_s <= max_span)
                 and _same_passage(open_run.anchor, tokens, similarity, min_tokens)):
             open_run.last_s = t
             open_run.confidence = max(open_run.confidence, conf)
@@ -647,12 +695,6 @@ def collapse_text_sightings(
             runs.append(_TextRun(start_s=t, last_s=t, confidence=conf,
                                  anchor=tokens, best_text=stripped))
 
-    trailing = frame_gap if cue_gap is None else cue_gap
-    if trailing < 0:
-        # A cue may not end before its last observation: with one sighting a
-        # negative extension puts end_s before start_s, which Cue refuses, and
-        # with several it silently claims a span the overlay had already left.
-        raise ValueError(f"cue_gap must not be negative: {trailing}")
     cues = [
         Cue(
             source=source,

@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="marker prepended to each caption cue so a reader can tell "
                             "an auto description from a recorded fact (default names a "
                             "game feed); pass an empty string for no marker")
+        c.add_argument("--caption-max-span", type=float, default=None, metavar="SEC",
+                       help="longest span one caption cue may cover (default 120s). "
+                            "Uniform footage describes alike for hours, and without a "
+                            "ceiling a whole recording collapses into one cue that "
+                            "cites everything; pass 0 for no ceiling")
         c.add_argument("--news", action="store_true",
                        help="enable news overlay text (headline banner + ticker); needs no roster")
         c.add_argument("--news-min-chars", type=int, metavar="N",
@@ -175,6 +180,10 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         # not an absent flag.
         caption_prefix=(args.caption_prefix
                         if getattr(args, "caption_prefix", None) is not None else None),
+        # `is not None` a third time, and here it carries the OFF switch:
+        # --caption-max-span 0 asks for no ceiling and must not read as unset.
+        caption_max_span=(args.caption_max_span
+                          if getattr(args, "caption_max_span", None) is not None else None),
         scorebug=args.scorebug,
         scorebug_pitch_counts=args.scorebug_pitch_counts,
         jersey=args.jersey,

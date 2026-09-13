@@ -203,6 +203,11 @@ class Pipeline:
     #: cutaway sits in dead time between plays. Inert when caption_windows is
     #: None, because then every sampled frame is captioned already.
     caption_floor_fps: float | None = None
+    #: Longest span one caption cue may cover, in seconds. None keeps the
+    #: recognizer's own ceiling; see recognizers/caption.CAPTION_MAX_SPAN_S for
+    #: why there is one and what removing it costs (#970). A sentinel of 0 from
+    #: the CLI means "no ceiling" and reaches the recognizer as None.
+    caption_max_span: float | None = None
     fps: float = 0.5
     min_confidence: float = 0.0
 
@@ -346,9 +351,12 @@ class Pipeline:
                 # caption_prefix joins the key for the same reason probe_fn
                 # does: a recognizer built with one marker must not be reused
                 # once another is configured.
+                # caption_max_span joins it for the same reason again: a
+                # recognizer built with one ceiling must not keep emitting
+                # three-hour cues after another is configured.
                 (self.caption_fn, self.probe_fn, self.caption_fps,
                  self.caption_windows, self.caption_floor_fps,
-                 self.caption_prefix),
+                 self.caption_prefix, self.caption_max_span),
                 lambda: SceneCaptionRecognizer(
                     captioner=self.caption_fn,
                     fps=self.caption_fps,
@@ -357,6 +365,8 @@ class Pipeline:
                     prober=self.probe_fn,
                     **({} if self.caption_prefix is None
                        else {"prefix": self.caption_prefix}),
+                    **({} if self.caption_max_span is None
+                       else {"max_span": self.caption_max_span or None}),
                 ),
             )
         if self.news:

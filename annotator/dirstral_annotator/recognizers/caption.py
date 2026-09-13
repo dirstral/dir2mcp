@@ -51,6 +51,7 @@ the cost of leaving it off is the 0.35 precision measured above.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import math
 import re
@@ -173,6 +174,31 @@ CAPTION_PREFIX = "Scene (auto description, not the game feed): "
 #: too high a value splits one shot into several cues.
 CAPTION_RUN_SIMILARITY = 0.75
 
+#: Longest span one caption cue may cover, in seconds. None means no ceiling.
+#:
+#: Similarity alone does not bound a caption run, and #970 measured what that
+#: costs. On the Apollo 11 moonwalk (3h02m, one fixed camera, monochrome) 2,190
+#: captioned frames collapsed to 7 cues, one of which covered 181 minutes: the
+#: first step, the flag and the President's call all cite the same three hours.
+#: A run ends when the TEXT turns over, and on uniform footage the text never
+#: does, because the captioner keeps describing the same grain in the same
+#: words. For an overlay that is right (see base.collapse_text_sightings); for a
+#: scene it is not, because footage that looks alike is not one moment.
+#:
+#: 120 s, and the reasoning is what the number rests on rather than a labelled
+#: set. A cue is a seek target: its worth is that it puts a reader AT the
+#: moment, and a citation that names two minutes is still a citation a reader
+#: can watch, where one that names three hours is a search. It only ever fires
+#: where the text has not turned over for two minutes, which is the failure it
+#: exists to bound, so it cannot split a shot that the captioner described as
+#: changing. On the Apollo run it leaves all six short cues untouched (they run
+#: 5 s to 40 s) and bounds the recording to at most ~91 cues instead of 7.
+#:
+#: PROVISIONAL, on the same terms as CAPTION_RUN_SIMILARITY above: #860's
+#: labelled set should confirm or replace it. Pass None (or `--caption-max-span
+#: 0`) for the unbounded behaviour that shipped before.
+CAPTION_MAX_SPAN_S = 120.0
+
 #: Ordered classifier rules: the FIRST match wins, so the order is the
 #: precedence. Celebration outranks crowd because a dugout celebration with
 #: fans behind it is the celebration the user asked for; graphic and replay
@@ -213,6 +239,55 @@ def classify_scene(caption: str) -> str:
     return SCENE_OTHER
 
 
+def _report_collapse(
+    cues: list[Cue], times: list[float], max_span: float | None,
+) -> None:
+    """Log how much footage each caption cue speaks for (#970, suggestion 3).
+
+    A cue built from 1,800 frames and a cue built from 3 look the same in the
+    output: one line of prose and a time range. The difference is whether the
+    operator has a moment or a recording, and on Apollo it was the difference
+    between 7 cues and a usable index. Reading it off the spans by eye is what
+    #970 had to do to find the bug, so the run says it.
+
+    Counted by bisecting the sorted sighting times rather than by threading a
+    count out of the collapser: the count is for the log, and it must not become
+    a cue field. Cue.attributes is the SPEC section 9.10 filter namespace, and a
+    per-cue frame count there would offer "collapsed 1,800 frames" beside real
+    scopes in a client's filter list.
+    """
+    if not cues:
+        return
+    # Partition on the cue STARTS, not on [start_s, end_s]. A cue ends one
+    # frame gap past its last read, so with the ceiling in play two cues abut
+    # and a frame at the seam counts for both: every cue would over-report by
+    # one. Each read belongs to exactly one run, and the last cue that starts
+    # at or before it is that run.
+    starts = [cue.start_s for cue in cues]
+    frames = [0] * len(cues)
+    for t in times:
+        i = bisect.bisect_right(starts, t) - 1
+        if i >= 0:  # a read the collapser dropped, before any cue opened
+            frames[i] += 1
+    widest = max(range(len(cues)), key=lambda i: cues[i].end_s - cues[i].start_s)
+    log.info(
+        "caption: %d frames collapsed to %d cues; the widest covers %.0fs from "
+        "%d frames", len(times), len(cues),
+        cues[widest].end_s - cues[widest].start_s, frames[widest],
+    )
+    if max_span is None:
+        return
+    # Floating spans, so compare with a millisecond of slack rather than ==.
+    cut = sum(1 for cue in cues if cue.end_s - cue.start_s >= max_span - 1e-3)
+    if cut:
+        log.warning(
+            "caption: %d of %d cues reached the %.0fs ceiling; the captions did "
+            "not change for that long, so these spans are a cut rather than a "
+            "shot. Uniform footage reads this way; --caption-max-span sets the "
+            "ceiling and 0 removes it.", cut, len(cues), max_span,
+        )
+
+
 class SceneCaptionRecognizer:
     """Describe sampled frames and emit one cue per described passage.
 
@@ -242,6 +317,7 @@ class SceneCaptionRecognizer:
         prober: ProbeFn | None = None,
         claim_threshold: float = CLAIM_THRESHOLD,
         prefix: str = CAPTION_PREFIX,
+        max_span: float | None = CAPTION_MAX_SPAN_S,
     ):
         if captioner is None:
             raise RecognizerUnavailable(
@@ -292,6 +368,18 @@ class SceneCaptionRecognizer:
         # caller has no windows either (then every frame is already captioned).
         self.floor_fps = floor_fps
         self.similarity = similarity
+        # Zero or negative is not "no ceiling", it is a ceiling no cue can meet,
+        # and collapse_text_sightings would refuse it deep inside a run that has
+        # already cost GPU hours. None is how the caller asks for no ceiling.
+        if max_span is not None and (
+                isinstance(max_span, bool)
+                or not isinstance(max_span, (int, float))
+                or not math.isfinite(max_span) or max_span <= 0):
+            raise RecognizerUnavailable(
+                "caption max_span must be a positive number of seconds, or None "
+                f"for no ceiling, got {max_span!r}"
+            )
+        self.max_span = None if max_span is None else float(max_span)
 
     def _in_window(self, t: float) -> bool:
         if self.windows is None:
@@ -434,6 +522,7 @@ class SceneCaptionRecognizer:
             event=SCENE_OTHER,
             frame_gap=1.0 / self.fps,
             similarity=self.similarity,
+            max_span=self.max_span,
         ):
             # The event is classified from the surviving text, so a collapsed
             # run is labelled by the passage it kept rather than by whichever
@@ -447,10 +536,17 @@ class SceneCaptionRecognizer:
             # scene_other rather than dropped, because the passage still
             # describes a real moment and the timestamp is still worth keeping.
             if self.prober is not None and event in CLAIM_PROBES:
+                # Half-open at the end. A cue runs one frame gap past its
+                # last read, so an inclusive end also collects the FIRST frame
+                # of the next cue, and this gate publishes a claim when ANY
+                # frame in the run supports it: a neighbour's frame could carry
+                # a claim on footage this cue never showed. Two cues abut
+                # whenever a run was cut at the max_span ceiling, so that seam
+                # is now the ordinary case rather than a rare one.
                 run = [
                     frame_at[t]
                     for t, _, _ in sightings
-                    if cue.start_s <= t <= cue.end_s and t in frame_at
+                    if cue.start_s <= t < cue.end_s and t in frame_at
                 ]
                 if run and not self._claim_holds(event, run):
                     event = SCENE_OTHER
@@ -472,4 +568,5 @@ class SceneCaptionRecognizer:
                     text=self._prefix + cue.text,
                 )
             )
+        _report_collapse(cues, sorted(t for t, _, _ in sightings), self.max_span)
         return cues
