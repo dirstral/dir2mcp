@@ -74,6 +74,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		egressCheck(cfg),
 		extractorCheck(cfg),
 		extractionCoverageCheck(ctx, a, cfg),
+		transcriptCoverageCheck(ctx, a, cfg),
 		indexingFailureCheck(ctx, a, cfg),
 		daemonLivenessCheck(cfg),
 		stuckPendingCheck(ctx, a, cfg),
@@ -201,6 +202,48 @@ func extractorCheck(cfg config.Config) doctorCheck {
 		status = doctorStatusWarn
 	}
 	return doctorCheck{Name: "extractor", Status: status, Detail: detail}
+}
+
+// transcriptCoverageCheck is the SPEECH half of the §7.7 honest-coverage report
+// (#972): how much of the corpus was never HEARD.
+//
+// It is a separate check rather than a branch of extractionCoverageCheck because
+// it answers a different question with a different remediation, and folding it in
+// would make one check's status the max of two unrelated verdicts.
+//
+// It reports the clean corpus POSITIVELY, which the banner does not. §7.7
+// requires that, and doctor is the right surface for it: an omitted line and a
+// clean corpus read identically, and doctor is the surface an operator ASKS,
+// where a banner is one they pass on every start.
+func transcriptCoverageCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
+	const name = "transcript_coverage"
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no index yet"}
+		}
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("stat %s: %v", metaPath, err)}
+	}
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	sqliteStore, ok := st.(*store.SQLiteStore)
+	if !ok {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: "store is not SQLite-backed; coverage aggregation unavailable"}
+	}
+	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("initialize store: %v", err)}
+	}
+	cov, err := computeTranscriptCoverage(ctx, sqliteStore, cfg)
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
+	}
+	if !cov.Partial() {
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: cov.Summary()}
+	}
+	// A warning, not an error. The partial transcripts ARE indexed and their text
+	// is genuinely useful; `media.stt.on_partial_transcript: warn` indexes them
+	// deliberately. What is wrong is that the shortfall was silent.
+	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: cov.Summary() + ". " + cov.Remedy}
 }
 
 // extractionCoverageCheck surfaces the two silent failures behind a corpus

@@ -274,7 +274,10 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// §7.7 startup coverage: what the durable record already knows is uncovered.
 	// Read before the ingest worker starts so the banner reflects the store as it
 	// stood at start (the scan may be re-recording those rows concurrently).
-	coverage := a.startupExtractionCoverage(runCtx, st, cfg, opts, logSink)
+	coverage := startupCoverage{
+		Extraction: a.startupExtractionCoverage(runCtx, st, cfg, opts, logSink),
+		Transcript: a.startupTranscriptCoverage(runCtx, st, cfg, opts, logSink),
+	}
 	stdinQuitCh := a.installInteractionForUp(cancel, cfg, connection, auth, opts, nonInteractiveMode, coverage)
 
 	ingestErrCh := make(chan error, 1)
@@ -1838,7 +1841,7 @@ func (a *App) bindServerListener(cfg config.Config, jsonOutput bool) (net.Listen
 
 // printHumanConnectionIfVerbose prints the human-readable connection block
 // when neither --json nor --quiet is active.
-func (a *App) printHumanConnectionIfVerbose(cfg config.Config, connection connectionPayload, auth authMaterial, opts upOptions, coverage extractionCoverage) {
+func (a *App) printHumanConnectionIfVerbose(cfg config.Config, connection connectionPayload, auth authMaterial, opts upOptions, coverage startupCoverage) {
 	if !opts.jsonOutput && !opts.quiet {
 		a.printHumanConnection(cfg, connection, auth, opts.readOnly, coverage)
 	}
@@ -2192,7 +2195,7 @@ func (a *App) installInteractionForUp(
 	auth authMaterial,
 	opts upOptions,
 	nonInteractiveMode bool,
-	coverage extractionCoverage,
+	coverage startupCoverage,
 ) <-chan struct{} {
 	if a.isDaemonChild() {
 		installDaemonChildSignalHandler(cancel)
