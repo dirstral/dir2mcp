@@ -82,8 +82,18 @@ func (s *SQLiteStore) PartialTranscriptPaths(ctx context.Context) ([]string, err
 	}
 	defer s.ReleaseDB()
 
+	// One document can hold SEVERAL partial transcripts: §8.6.12 gives every
+	// additional audio track its own `transcript@t<N>`. The report counts those
+	// separately, because each is its own decode with its own missing audio, but
+	// the repair is per DOCUMENT, and a run that announced "re-decoding 4
+	// recordings" for two files would misreport what it is about to do.
 	var paths []string
+	seen := map[string]bool{}
 	if err := walkPartialTranscripts(ctx, db, func(relPath string, _ *model.TranscriptCoverage) {
+		if seen[relPath] {
+			return
+		}
+		seen[relPath] = true
 		paths = append(paths, relPath)
 	}); err != nil {
 		return nil, err

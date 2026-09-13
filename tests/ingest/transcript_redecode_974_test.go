@@ -190,3 +190,12 @@ func readCachedTranscript(t *testing.T, stateDir string) string {
 	t.Fatalf("no cached transcript under %s", cacheDir)
 	return ""
 }
+
+// There is deliberately NO test here for a rel_path with surrounding
+// whitespace. The corpus resolver trims both ends before it touches the
+// filesystem (`resolve "trailing.mp3 "` lstats `trailing.mp3`), so a document
+// whose rel_path differs from its trimmed form cannot be read, ingested or
+// stored, and the case is unreachable. RedecodeTranscripts nevertheless stores
+// what it is given verbatim: the set mirrors paths that came OUT of the store,
+// and normalizing a key you did not produce is a coupling to someone else's
+// rules rather than a safeguard.

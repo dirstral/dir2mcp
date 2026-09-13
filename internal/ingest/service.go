@@ -7073,9 +7073,15 @@ func (s *Service) RedecodeTranscripts(relPaths []string) {
 		s.redecodeTranscripts = nil
 		return
 	}
+	// Stored VERBATIM. These paths come OUT of the store and are matched against
+	// doc.RelPath byte for byte, so normalizing them here would be applying this
+	// function's rules to someone else's key. (Surrounding whitespace is not the
+	// live case: the corpus resolver trims both ends before touching the
+	// filesystem, so such a document cannot be ingested in the first place.) An
+	// empty path is dropped because it can match no document.
 	set := make(map[string]bool, len(relPaths))
 	for _, p := range relPaths {
-		if p = strings.TrimSpace(p); p != "" {
+		if p != "" {
 			set[p] = true
 		}
 	}

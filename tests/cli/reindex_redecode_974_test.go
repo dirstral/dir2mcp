@@ -100,3 +100,24 @@ func runReindexIn(t *testing.T, dir string, extra ...string) string {
 	})
 	return stderr.String()
 }
+
+func TestReindexRedecode_CountsRecordingsNotTranscripts(t *testing.T) {
+	// §8.6.12 gives every additional audio track its own transcript, so one
+	// recording can hold several partial transcripts. The report counts those
+	// separately, because each is its own decode with its own missing audio, but
+	// the repair is per DOCUMENT: announcing "2 recordings" for one file would
+	// misreport what the run is about to do.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/dual.mp4", repType: "transcript",
+			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)},
+		seedRep{relPath: "rfe/dual.mp4", repType: "transcript@t1",
+			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 2, 20*minute, 73*minute)},
+	)
+	_ = st.Close()
+
+	stderr := runReindexIn(t, dir, "--redecode-partial-transcripts")
+	if !strings.Contains(stderr, "re-decoding 1 recording(s)") {
+		t.Errorf("two tracks of one recording must count as one recording: %q", stderr)
+	}
+}
