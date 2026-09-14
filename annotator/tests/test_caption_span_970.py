@@ -162,7 +162,10 @@ SHOTS = (
     "a view of Earth as a bright crescent above the horizon",
     "a television monitor showing wavy interference bands",
     "two figures set up a reflector experiment on flat ground",
-    "a black screen with no picture at all",
+    # NOT a black/blank frame: #953 drops a caption that describes nothing
+    # citable, and this fixture is about the ceiling not splitting DISTINCT
+    # shots. A frame with no content is not a shot.
+    "a rover wheel leaves a track in the powdery regolith",
 )
 
 

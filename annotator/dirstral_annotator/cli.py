@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "Uniform footage describes alike for hours, and without a "
                             "ceiling a whole recording collapses into one cue that "
                             "cites everything; pass 0 for no ceiling")
+        c.add_argument("--caption-keep-uninformative", action="store_true",
+                       help="keep scene cues whose caption describes nothing citable "
+                            "(a black, blank or unreadable frame); they are dropped by "
+                            "default because they are indexed on their text and compete "
+                            "with real moments in retrieval")
         c.add_argument("--news", action="store_true",
                        help="enable news overlay text (headline banner + ticker); needs no roster")
         c.add_argument("--news-min-chars", type=int, metavar="N",
@@ -184,6 +189,9 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         # --caption-max-span 0 asks for no ceiling and must not read as unset.
         caption_max_span=(args.caption_max_span
                           if getattr(args, "caption_max_span", None) is not None else None),
+        # The flag is the OPT-OUT, so only its presence says anything: absent
+        # leaves the recognizer's default rather than asserting True.
+        caption_drop_uninformative=(False if getattr(args, "caption_keep_uninformative", False) else None),
         scorebug=args.scorebug,
         scorebug_pitch_counts=args.scorebug_pitch_counts,
         jersey=args.jersey,
