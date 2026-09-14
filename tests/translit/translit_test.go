@@ -210,3 +210,50 @@ func TestIsEnglishTarget(t *testing.T) {
 		}
 	}
 }
+
+// A surname continued by an apostrophe or a hyphen is one token, and it is
+// refused rather than pinned (CodeRabbit finding on #985).
+//
+// properNounRE stopped at the joiner, so "сказал Лук'яненко" pinned "Лук -> Luk"
+// and "Римский-Корсаков" split into "Римский -> Rimsky" AND "Корсаков ->
+// Korsakov". The prompt says "use exactly these spellings", so a fragment did
+// not merely fail to help -- it pushed the model to corrupt a complete surname.
+// Ukrainian and Belarusian apostrophe names are routine in an RFE archive.
+func TestHints_AJoinerNameIsNeverPinnedAsAFragment(t *testing.T) {
+	for _, s := range []string{
+		"сказал Лук'яненко вчера", // straight apostrophe
+		"сказал Лук’яненко вчера", // curly apostrophe
+		"сказал Дем'янюк вчера",
+		"сказал Римский-Корсаков вчера",
+		"сказал Петров-Водкин вчера",
+	} {
+		got := translit.Hints(s)
+		if len(got) != 0 {
+			t.Errorf("Hints(%q) = %v, want none: a joiner name is refused, not fragmented", s, got)
+		}
+	}
+}
+
+func TestHints_AJoinerNameDoesNotHideAPlainOneBesideIt(t *testing.T) {
+	// The refusal is per token. The plain surname in the same line is still pinned.
+	got := translit.Hints("сказали Лук'яненко и Петров вчера")
+	if len(got) != 1 || got[0] != "Петров -> Petrov" {
+		t.Errorf("Hints = %v, want only [Петров -> Petrov]", got)
+	}
+}
+
+func TestHints_ATokenTailAfterAJoinerIsNotAName(t *testing.T) {
+	// Go's regexp has no lookbehind, so the boundary is enforced in code: a
+	// capitalised run that begins right after a letter or a joiner is the tail
+	// of a token whose head did not qualify, never a name in its own right.
+	for _, s := range []string{
+		"сказал де-Голль вчера", // lowercase-led compound: the head fails the capital rule
+		"сказал о'Брайен вчера", // lowercase head before the apostrophe
+	} {
+		for _, h := range translit.Hints(s) {
+			if strings.HasPrefix(h, "Голль ") || strings.HasPrefix(h, "Брайен ") {
+				t.Errorf("Hints(%q) pinned a token tail: %v", s, h)
+			}
+		}
+	}
+}

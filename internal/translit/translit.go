@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Proper nouns are the weak point of LLM translation: the model REGENERATES a name
@@ -206,7 +207,12 @@ var genitiveTrigger = regexp.MustCompile(`(?i)(^|\s)(имени|им\.)\s*$`)
 // lowercase class must cover every alphabet in the corpus: omitting the Kazakh/Kyrgyz
 // letters made the match stop at the first one, pinning a TRUNCATED name
 // ("Айдарқұла" -> "Айдар").
-var properNounRE = regexp.MustCompile(`[А-ЯЁЄІЇҐӘҒҚҢӨҰҮҺ][а-яёєіїґәғқңөұүһ]{2,}`)
+var properNounRE = regexp.MustCompile(`[А-ЯЁЄІЇҐӘҒҚҢӨҰҮҺ][а-яёєіїґәғқңөұүһ]{2,}(?:['’][а-яёєіїґәғқңөұүһ]+|-[А-ЯЁЄІЇҐӘҒҚҢӨҰҮҺа-яёєіїґәғқңөұүһ][а-яёєіїґәғқңөұүһ]+)*`)
+
+// nameJoiners are the characters that continue a single surname across a boundary
+// the plain letter class would stop at: the Ukrainian/Belarusian apostrophe in both
+// its straight and curly forms, and the hyphen of a compound surname.
+const nameJoiners = "'’-"
 
 // sentenceEnders are the characters after which a capital signals sentence case rather
 // than a name. Dash-led dialogue is routine in subtitles ("— Привет, Иван"), and
@@ -238,6 +244,30 @@ func Hints(text string) []string {
 			}
 			last := []rune(before)[len([]rune(before))-1]
 			if strings.ContainsRune(sentenceEnders, last) {
+				continue
+			}
+		}
+		// A name that a joiner continues -- Лук'яненко, Дем'янюк, Римский-Корсаков --
+		// is matched as ONE token now, so it can no longer pin a fragment ("Лук ->
+		// Luk") or split into two hints ("Римский -> Rimsky", "Корсаков -> Korsakov").
+		// Both put a wrong spelling into a prompt that says "use exactly these".
+		//
+		// It is then REFUSED rather than pinned, for the same reason an ambiguous
+		// -ова is: a correct rendering of a compound needs per-part rules that do
+		// not exist yet (Transliterate gives "Rimskiy-korsakov": the second half
+		// is lowercased and the adjectival -sky rule only fires at word end), and
+		// no hint leaves the model its own rendering where a wrong hint overrides
+		// it. Splitting on the joiner and transliterating each part is the
+		// follow-up once those rules exist.
+		if strings.ContainsAny(word, nameJoiners) {
+			continue
+		}
+		// A match that starts right after a letter or a joiner is the tail of a
+		// token whose head failed the capital rule (or a lowercase-led compound).
+		// Go's regexp has no lookbehind, so the boundary is enforced here.
+		if loc[0] > 0 {
+			prev, _ := utf8.DecodeLastRuneInString(text[:loc[0]])
+			if unicode.IsLetter(prev) || strings.ContainsRune(nameJoiners, prev) {
 				continue
 			}
 		}
