@@ -17,7 +17,7 @@ import (
 // re-calling the chat provider (SPEC §8.6.2 caching parity with the transcript
 // cache). The cache is keyed by source content, not target text, because the
 // same source media always yields the same translation for a given target.
-func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, sourceText, targetLang string) (string, error) {
+func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, sourceText, sourceLang, targetLang string) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "translate")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("create translate cache dir: %w", err)
@@ -40,7 +40,7 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 		return string(cached), nil
 	}
 
-	translated, err := s.translateTranscriptText(ctx, sourceText, targetLang)
+	translated, err := s.translateTranscriptText(ctx, sourceText, sourceLang, targetLang)
 	if err != nil {
 		return "", err
 	}
@@ -59,7 +59,7 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 // same time spans for the translated transcript as for the source. Lines are
 // translated segment-by-segment via the chat Generator; a line with no timestamp
 // marker is translated as-is (its leading-marker, if any, is empty).
-func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targetLang string) (string, error) {
+func (s *Service) translateTranscriptText(ctx context.Context, sourceText, sourceLang, targetLang string) (string, error) {
 	lines := strings.Split(sourceText, "\n")
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -68,7 +68,7 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 			continue
 		}
 		marker, body := splitTimestampMarker(line)
-		translatedBody, err := s.translateLine(ctx, body, targetLang)
+		translatedBody, err := s.translateLine(ctx, body, sourceLang, targetLang)
 		if err != nil {
 			return "", err
 		}
@@ -94,16 +94,20 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 // the chat Generator. Empty/whitespace input short-circuits to empty so the chat
 // provider is never called for a marker-only line. The prompt asks for the
 // translation only (no preamble), which the trim downstream normalizes.
-func (s *Service) translateLine(ctx context.Context, text, targetLang string) (string, error) {
+// sourceLang is the transcript's resolved source language ("" when unknown); it
+// gates the name hints, which only exist for a Russian source.
+func (s *Service) translateLine(ctx context.Context, text, sourceLang, targetLang string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", nil
 	}
-	// English-only: the hints are BGN/PCGN transliterations, so pinning them for
-	// another target language would override that language's own convention for the
-	// same name (fr "Chtcherbak", de "Schtscherbak").
+	// Russian source, English target only. The tables are the Russian BGN/PCGN
+	// set, so a Ukrainian source would get Volodimir for Volodymyr pinned as "use
+	// exactly this", and another target language would lose its own convention
+	// for the same name (fr "Chtcherbak", de "Schtscherbak"). An unknown source
+	// ("" from auto-detect) is not assumed to be Russian.
 	var hints []string
-	if s.translateNameHints && translit.IsEnglishTarget(targetLang) && translit.HasCyrillic(text) {
+	if s.translateNameHints && translit.IsRussianSource(sourceLang) && translit.IsEnglishTarget(targetLang) && translit.HasCyrillic(text) {
 		hints = translit.Hints(text)
 	}
 	prompt := buildTranslatePrompt(text, targetLang, hints)

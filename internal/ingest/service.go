@@ -3129,7 +3129,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	if s.translateEngine == "whisper" {
 		translated, translatedWords, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
 	} else {
-		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
+		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, sourceLang, targetLang)
 	}
 	if err != nil {
 		return fmt.Errorf("translate transcript for %s into %q: %w", doc.RelPath, targetLang, err)

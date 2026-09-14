@@ -375,12 +375,20 @@ func TestTranscriptTranslation_NameHintsInPrompt(t *testing.T) {
 	const line = "[00:00] Студентам университета имени Сеченова об этом объявили"
 
 	for _, tc := range []struct {
-		name     string
-		enabled  bool
-		wantHint bool
+		name       string
+		enabled    bool
+		sourceLang string
+		wantHint   bool
 	}{
-		{"hints on", true, true},
-		{"hints off", false, false},
+		{"hints on, Russian source", true, "ru", true},
+		{"hints on, regional Russian tag", true, "ru-RU", true},
+		{"hints off", false, "ru", false},
+		// The tables are Russian BGN/PCGN. A Ukrainian source would get
+		// Volodimir pinned where the Ukrainian rules give Volodymyr, so a
+		// non-Russian source gets no hints (CodeRabbit finding on #985).
+		{"hints on, Ukrainian source", true, "uk", false},
+		// Auto-detect leaves the source language empty. Unknown is not Russian.
+		{"hints on, unknown source", true, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := &fakeIngestStore{}
@@ -391,6 +399,7 @@ func TestTranscriptTranslation_NameHintsInPrompt(t *testing.T) {
 				MediaTranslateTargetLangs: []string{"en"},
 			}, st)
 			svc.SetTranscriber(&fakeTranscriber{text: line})
+			svc.SetTranscriptLanguage(tc.sourceLang)
 			tr := &promptCapturingTranslator{}
 			svc.SetTranslator(tr, "mistral", "m", []string{"en"})
 

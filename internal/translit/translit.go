@@ -21,6 +21,21 @@ import (
 // The reverse (guessing which English capital is a mangled name) is not, because
 // English capitalises ordinary words mid-sentence constantly.
 
+// IsRussianSource reports whether a source-language tag names Russian ("ru",
+// "rus", "ru-RU"). Hints are gated on it because cyrTranslit is the Russian
+// BGN/PCGN table: applied to a Ukrainian name it yields Володимир -> Volodimir
+// and Гриценко -> Gritsenko, where the Ukrainian rules give Volodymyr and
+// Hrytsenko (И -> Y, Г -> H). A pinned wrong spelling is worse than no hint, so
+// a source that is not known to be Russian gets none. An empty tag is unknown,
+// not Russian (SPEC §8.8: unknown is first class), and is refused too.
+func IsRussianSource(lang string) bool {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if i := strings.IndexAny(lang, "-_"); i >= 0 {
+		lang = lang[:i]
+	}
+	return lang == "ru" || lang == "rus"
+}
+
 // cyrTranslit is BGN/PCGN-style, matching how Russian names are conventionally
 // rendered in English-language copy (Сеченов->Sechenov, Щербак->Shcherbak).
 // Order matters: multi-rune outputs are applied before single-letter ones.
@@ -255,6 +270,30 @@ func notAWholePlainName(text string, loc []int, word string) bool {
 	return unicode.IsLetter(prev) || strings.ContainsRune(nameJoiners, prev)
 }
 
+// genitiveStem restores the nominative of a masculine surname that "имени" has
+// put in the genitive: имени Сеченова -> Сеченов. It only does so when the
+// stripped stem ends in a suffix nominativeSuffixes recognises as a surname,
+// which is what proves the trailing а was an inflection at all.
+//
+// Without that proof the strip corrupts indeclinable names: Дюма is French and
+// does not inflect, so "имени Дюма" is still Дюма, and stripping gave "Дюма ->
+// Dyum" -- pinned into a prompt that says "use exactly this". An unproven stem
+// falls through to nominalize, which refuses a vowel-final form as ambiguous,
+// so no hint is emitted and the model keeps its own rendering.
+func genitiveStem(word string, genitive bool) (string, bool) {
+	if !genitive || !strings.HasSuffix(word, "а") {
+		return "", false
+	}
+	stem := strings.TrimSuffix(word, "а")
+	lw := strings.ToLower(stem)
+	for _, suf := range nominativeSuffixes {
+		if strings.HasSuffix(lw, suf) {
+			return stem, true
+		}
+	}
+	return "", false
+}
+
 func Hints(text string) []string {
 	var hints []string
 	seen := make(map[string]bool)
@@ -283,8 +322,8 @@ func Hints(text string) []string {
 		}
 
 		var nom string
-		if genitive && strings.HasSuffix(word, "а") {
-			nom = strings.TrimSuffix(word, "а")
+		if stem, ok := genitiveStem(word, genitive); ok {
+			nom = stem
 		} else {
 			var ok bool
 			if nom, ok = nominalize(word); !ok {

@@ -257,3 +257,35 @@ func TestHints_ATokenTailAfterAJoinerIsNotAName(t *testing.T) {
 		}
 	}
 }
+
+// An indeclinable surname after "имени" keeps its ending (CodeRabbit finding on
+// #985). Дюма is French and does not inflect, so "имени Дюма" is still Дюма; the
+// genitive strip turned it into "Дюма -> Dyum" and pinned that. The strip now
+// requires the stem to end in a recognised surname suffix, which is the proof
+// that the а was an inflection; Сеченова -> Сеченов still passes that test.
+func TestHints_AnIndeclinableNameAfterImeniIsNotTruncated(t *testing.T) {
+	for _, s := range []string{"в театре имени Дюма сегодня", "премия имени Гарсиа вручена"} {
+		if got := translit.Hints(s); len(got) != 0 {
+			t.Errorf("Hints(%q) = %v, want none: an unproven stem is refused, not truncated", s, got)
+		}
+	}
+	got := translit.Hints("в клинике имени Сеченова сегодня")
+	if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
+		t.Errorf("a proven inflection must still be restored: %v", got)
+	}
+}
+
+// IsRussianSource gates the hints on a Russian source. The tables are Russian
+// BGN/PCGN, so a Ukrainian name would be pinned wrong (Володимир -> Volodimir,
+// Гриценко -> Gritsenko instead of Volodymyr, Hrytsenko). An empty tag means
+// auto-detect found nothing; unknown is refused, not assumed Russian.
+func TestIsRussianSource(t *testing.T) {
+	for lang, want := range map[string]bool{
+		"ru": true, "RU": true, "rus": true, "ru-RU": true, "ru_RU": true, " ru ": true,
+		"uk": false, "uk-UA": false, "be": false, "kk": false, "en": false, "": false, "russian": false,
+	} {
+		if got := translit.IsRussianSource(lang); got != want {
+			t.Errorf("IsRussianSource(%q) = %v, want %v", lang, got, want)
+		}
+	}
+}

@@ -469,8 +469,11 @@ type Config struct {
 	// prompt (config `media.translate.name_hints`). The translation model tends to
 	// REGENERATE a name instead of transliterating it, which is the dominant
 	// named-entity error; this supplies the expected spelling up front. Only applies
-	// to the chat engine and to sources whose script marks proper nouns reliably
-	// (Cyrillic), so it is OFF by default.
+	// to the chat engine, to an English target, and to a source language resolved
+	// as Russian (pin it with `media.language` / per-provider `stt_language`): the
+	// spellings follow the Russian BGN/PCGN table, and an unknown or non-Russian
+	// Cyrillic source (Ukrainian, Kazakh) gets no hints rather than wrong ones. OFF
+	// by default.
 	MediaTranslateNameHints bool
 	// MediaFilterWords is an optional, general-purpose list of boilerplate /
 	// credits / watermark phrases stripped from transcript and subtitle text
