@@ -36,7 +36,7 @@ import (
 //  5. Atomically write the pid file, print a short ready summary to
 //     the user's terminal, and return exitSuccess. The child keeps
 //     running.
-func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
+func (a *App) runUpAsDaemonParent(ctx context.Context, opts upOptions) int {
 	cfg, err := loadConfigForDaemonParent(opts.globalOptions)
 	if err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, fmt.Sprintf("load config: %v", err))
@@ -152,15 +152,22 @@ func (a *App) runUpAsDaemonParent(_ context.Context, opts upOptions) int {
 		return exitGeneric
 	}
 
-	a.printDaemonReady(cfg, logPath, registeredPid, connection, opts)
+	a.printDaemonReady(ctx, cfg, logPath, registeredPid, connection, opts)
 	return exitSuccess
 }
 
 // printDaemonReady renders the short connection summary the user sees
-// when `dir2mcp up` returns control. The full ornate banner that the
-// in-process body would have produced lives in the server log; this is
-// the just-enough info to keep working from the shell.
-func (a *App) printDaemonReady(cfg config.Config, logPath string, pid int, connection connectionPayload, opts upOptions) {
+// when `dir2mcp up` returns control. Most of the ornate banner the in-process
+// body would have produced lives in the server log; this is the just-enough
+// info to keep working from the shell.
+//
+// The §7.7 coverage sections are the exception, and they are printed HERE rather
+// than left to the log. SPEC §7.7 makes them startup diagnostics ("Startup
+// diagnostics and `dir2mcp doctor` MUST report..."), and `up` daemonizes by
+// default on a terminal, so before this they rendered nowhere on the path almost
+// every operator takes: the child skips the banner entirely and never computes
+// them, so they were not in the log either (#981).
+func (a *App) printDaemonReady(ctx context.Context, cfg config.Config, logPath string, pid int, connection connectionPayload, opts upOptions) {
 	if opts.quiet {
 		return
 	}
@@ -178,6 +185,7 @@ func (a *App) printDaemonReady(cfg config.Config, logPath string, pid int, conne
 	}
 	writeln(a.stdout, s.kv("Logs", logPath))
 	writeln(a.stdout)
+	a.printDaemonCoverage(ctx, s, cfg, opts)
 	_, requiresAuth := connection.Headers["Authorization"]
 	printRegistrationHint(a.stdout, s, cfg.ServerName, connection.URL, cfg.ProtocolVersion, requiresAuth)
 	writef(a.stdout, "  %s\n", s.Success.Render("Ready for connections"))
@@ -295,4 +303,47 @@ func generateDaemonNonce() (string, error) {
 		return "", fmt.Errorf("read CSPRNG: %w", err)
 	}
 	return hex.EncodeToString(buf[:]), nil
+}
+
+// printDaemonCoverage computes and prints the §7.7 coverage verdicts for the
+// daemon parent, in the same order and with the same renderers the foreground
+// banner uses, so the two paths cannot say different things about one corpus.
+//
+// The PARENT does this and the child still does not. Exactly one process should
+// spend the query, and the parent is the one holding a terminal: the child's
+// output goes to server.log, where a coverage warning reads as a server fault
+// rather than as the diagnostic it is (#949).
+//
+// It runs after readiness, so the child has created and migrated the store. The
+// read is concurrent with a running daemon, which is what `doctor` already does
+// against a live server; both are readers, and the store is WAL.
+//
+// A failure is reported on stderr and swallowed otherwise. `up` has already
+// succeeded by this point, and a corpus whose coverage could not be read is not
+// a reason to fail a daemon that is serving — but it is a reason to say so,
+// because a coverage report that fails quietly is the silence §7.7 forbids.
+func (a *App) printDaemonCoverage(ctx context.Context, s styles, cfg config.Config, opts upOptions) {
+	if opts.quiet || opts.jsonOutput {
+		return
+	}
+	st := a.storeForConfig(cfg)
+	if st == nil {
+		return
+	}
+	defer func() { _ = st.Close() }()
+
+	printCoverageSection(a.stdout, s, a.startupExtractionCoverage(ctx, st, cfg, opts, a.stderr))
+	printTranscriptCoverageSection(a.stdout, s, a.startupTranscriptCoverage(ctx, st, cfg, opts, a.stderr))
+}
+
+// RenderDaemonReadyForTest renders the daemon PARENT's ready banner for cfg to
+// the app's stdout, for the external tests package.
+//
+// It drives printDaemonReady end to end rather than printDaemonCoverage alone,
+// because the defect in #981 was not that the sections rendered wrongly: it was
+// that nothing on the daemon path ever asked for them. A test over the renderer
+// in isolation would keep passing with the call deleted again.
+func (a *App) RenderDaemonReadyForTest(ctx context.Context, cfg config.Config) {
+	a.printDaemonReady(ctx, cfg, cfg.StateDir+"/server.log", 4242,
+		connectionPayload{URL: "http://127.0.0.1:8765/mcp"}, upOptions{})
 }
