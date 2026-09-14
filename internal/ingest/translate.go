@@ -97,8 +97,11 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 	if text == "" {
 		return "", nil
 	}
+	// English-only: the hints are BGN/PCGN transliterations, so pinning them for
+	// another target language would override that language's own convention for the
+	// same name (fr "Chtcherbak", de "Schtscherbak").
 	var hints []string
-	if s.translateNameHints && hasCyrillic(text) {
+	if s.translateNameHints && isEnglishTarget(targetLang) && hasCyrillic(text) {
 		hints = nameHints(text)
 	}
 	prompt := buildTranslatePrompt(text, targetLang, hints)

@@ -181,3 +181,108 @@ func TestNameHintsSkipsCapitalisedCommonNouns(t *testing.T) {
 		}
 	}
 }
+
+// --- regression tests for review findings on PR #985 ---
+
+// TestNominalizeAdjectivalRestoresEnding pins that an oblique adjectival surname is
+// RESTORED to its nominative, not truncated. Dropping "-ского" outright yielded
+// "Зеленск" -> "Zelensk", and since the prompt says "use exactly these spellings" the
+// model was then pushed to write it.
+func TestNominalizeAdjectivalRestoresEnding(t *testing.T) {
+	for in, want := range map[string]string{
+		"Зеленского":   "Zelensky",
+		"Достоевского": "Dostoevsky",
+		"Маяковским":   "Mayakovsky",
+		"Троцкому":     "Trotsky",
+	} {
+		nom, ok := nominalize(in)
+		if !ok {
+			t.Errorf("nominalize(%q) refused", in)
+			continue
+		}
+		if got := translitCyrillic(nom); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestNameHintsSkipsNonPeriodSentenceStarts pins that a capital after a dash, quote,
+// colon or ellipsis is treated as sentence case. Dash-led dialogue is routine in
+// subtitles, and without this an ordinary word is pinned as a name.
+func TestNameHintsSkipsNonPeriodSentenceStarts(t *testing.T) {
+	for _, s := range []string{
+		"— Привет, как дела?",
+		"«Привет», сказал он",
+		"Он ушёл… Потом вернулся",
+		"Вопрос: Почему так вышло",
+	} {
+		for _, h := range nameHints(s) {
+			if strings.HasPrefix(h, "Привет") || strings.HasPrefix(h, "Потом") || strings.HasPrefix(h, "Почему") {
+				t.Errorf("nameHints(%q) pinned an ordinary sentence-initial word: %v", s, h)
+			}
+		}
+	}
+	// a genuine name later in the same dash-led line is still pinned
+	got := nameHints("— Привет, Иванов, как дела?")
+	if len(got) != 1 || !strings.HasPrefix(got[0], "Иванов") {
+		t.Errorf("expected only the surname to be hinted, got %v", got)
+	}
+}
+
+// TestNameHintsAbbreviatedImeni pins that "им. X" works as well as "имени X". The
+// abbreviated form ends in '.', so testing the sentence boundary first made it
+// unreachable -- and it is the commoner form in broadcast copy.
+func TestNameHintsAbbreviatedImeni(t *testing.T) {
+	for _, s := range []string{"в клинике им. Сеченова сегодня", "в клинике имени Сеченова сегодня"} {
+		got := nameHints(s)
+		if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
+			t.Errorf("nameHints(%q) = %v, want [Сеченова -> Sechenov]", s, got)
+		}
+	}
+}
+
+// TestNameHintsExtendedCyrillic pins that Kazakh/Kyrgyz letters are part of a word.
+// Omitting them from the lowercase class made the match stop at the first one and pin
+// a TRUNCATED name.
+func TestNameHintsExtendedCyrillic(t *testing.T) {
+	got := nameHints("встретил Айдарқұла вчера")
+	for _, h := range got {
+		if strings.HasPrefix(h, "Айдар ->") {
+			t.Errorf("pinned a truncated name: %v", got)
+		}
+	}
+	if s := translitCyrillic("Өмүрбек"); !strings.HasPrefix(s, "O") || strings.ContainsAny(s, "өүқғңәұһ") {
+		t.Errorf("translitCyrillic(Өмүрбек) = %q, want fully transliterated", s)
+	}
+}
+
+// TestHasExonymRequiresCaseEndingOnly pins that the exonym list matches a whole word
+// plus an inflection, not any word sharing a prefix -- "вен" was eating Венедиктов,
+// "литв" Литвиненко, "бог" Богданов, silently removing the feature for real names.
+func TestHasExonymRequiresCaseEndingOnly(t *testing.T) {
+	for _, w := range []string{"Венедиктов", "Литвиненко", "Богданов", "Казанцев", "Германом"} {
+		if hasExonym(w) {
+			t.Errorf("hasExonym(%q) = true, want false (real surname)", w)
+		}
+	}
+	for _, w := range []string{"России", "Москве", "Крыма", "Бог", "Украиной"} {
+		if !hasExonym(w) {
+			t.Errorf("hasExonym(%q) = false, want true (exonym)", w)
+		}
+	}
+}
+
+// TestIsEnglishTarget pins that hints apply only to an English target; the
+// transliterations are BGN/PCGN and would override another language's convention.
+func TestIsEnglishTarget(t *testing.T) {
+	for _, l := range []string{"en", "EN", "eng", "English", "en-GB", "en_US"} {
+		if !isEnglishTarget(l) {
+			t.Errorf("isEnglishTarget(%q) = false", l)
+		}
+	}
+	for _, l := range []string{"de", "fr", "ru", "es", ""} {
+		if isEnglishTarget(l) {
+			t.Errorf("isEnglishTarget(%q) = true", l)
+		}
+	}
+}
