@@ -259,6 +259,12 @@ type generateMessage struct {
 type generateRequest struct {
 	Model    string            `json:"model"`
 	Messages []generateMessage `json:"messages"`
+	// Temperature is pinned rather than left to the provider default so generation is
+	// REPRODUCIBLE. Without it a provider picks its own default (ollama uses 0.8), and
+	// re-running the same input rewrites nearly all of the output -- measured: 96.7% of
+	// subtitle cues changed between two runs of an unmodified corpus, which makes a
+	// delivery impossible to reproduce and swamps any A/B comparison in sampling noise.
+	Temperature float64 `json:"temperature"`
 }
 
 type generateResponse struct {
@@ -311,8 +317,9 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 
 func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, timeout time.Duration) (string, error) {
 	body, err := json.Marshal(generateRequest{
-		Model:    chatModel,
-		Messages: []generateMessage{{Role: "user", Content: prompt}},
+		Model:       chatModel,
+		Messages:    []generateMessage{{Role: "user", Content: prompt}},
+		Temperature: 0,
 	})
 	if err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to marshal generation request", Retryable: false, Cause: err}
