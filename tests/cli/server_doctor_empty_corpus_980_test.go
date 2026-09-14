@@ -33,8 +33,8 @@ func TestDoctor_AnEmptyRecordOverANonEmptyCorpusIsAWarning(t *testing.T) {
 	if check.Status != "warn" {
 		t.Errorf("status = %q, want warn: nothing was indexed from a non-empty directory", check.Status)
 	}
-	if !strings.Contains(check.Detail, "no documents") {
-		t.Errorf("the detail does not state the record is empty: %q", check.Detail)
+	if !strings.Contains(check.Detail, "0 document(s) and 0 chunk(s)") {
+		t.Errorf("the detail does not state the counts: %q", check.Detail)
 	}
 	if !strings.Contains(check.Detail, "source.path") {
 		t.Errorf("the detail names no remedy: %q", check.Detail)
@@ -53,6 +53,9 @@ func TestDoctor_AnEmptyRecordOverAnEmptyCorpusIsNotAWarning(t *testing.T) {
 	}
 	if !strings.Contains(check.Detail, "empty too") {
 		t.Errorf("the detail does not explain why this is fine: %q", check.Detail)
+	}
+	if !strings.Contains(check.Detail, "0 document(s) and 0 chunk(s)") {
+		t.Errorf("the detail does not state the counts: %q", check.Detail)
 	}
 }
 
@@ -184,5 +187,51 @@ func TestDoctor_AnUnreadableCorpusRootIsReportedNotAssumedEmpty(t *testing.T) {
 	}
 	if strings.Contains(check.Detail, "empty too") {
 		t.Errorf("an unreadable root was asserted to be empty: %q", check.Detail)
+	}
+}
+
+func TestDoctor_TheCountsAreStatedOnEveryPath(t *testing.T) {
+	// The check exists so that "nothing indexed" can never look like "everything
+	// fine" through a line that is simply absent. A branch that describes the
+	// situation without the numbers reintroduces that gap, so every path states
+	// them — including the ones where the answer is zero.
+	//
+	// It also makes one inconsistency visible that nothing else names: zero
+	// documents with a non-zero chunk count is a store whose chunks outlived
+	// their documents, which "the record holds no documents" alone would
+	// describe as merely empty.
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{"empty record, non-empty corpus", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("x"), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			seedEmptyStore(t, dir)
+		}},
+		{"empty record, empty corpus", func(t *testing.T, dir string) {
+			seedEmptyStore(t, dir)
+		}},
+		{"empty record, uninspectable source", func(t *testing.T, dir string) {
+			seedEmptyStore(t, dir)
+			if err := os.WriteFile(filepath.Join(dir, ".dir2mcp.yaml"),
+				[]byte("source:\n  kind: nfs\n"), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir)
+			check, ok := doctorCheckNamed(t, dir, "corpus_record")
+			if !ok {
+				t.Fatalf("doctor has no corpus_record check")
+			}
+			if !strings.Contains(check.Detail, "document(s)") || !strings.Contains(check.Detail, "chunk(s)") {
+				t.Errorf("the counts are missing on this path: %q", check.Detail)
+			}
+		})
 	}
 }

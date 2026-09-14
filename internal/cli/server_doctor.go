@@ -286,12 +286,21 @@ func corpusRecordCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
 	}
 	if stats.TotalDocs > 0 {
-		// Stated on every run, healthy or not, so that "nothing indexed" can
-		// never look like "everything fine" through a missing line.
 		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
 			"%d document(s) in the record; %d chunk(s), %d embedded",
 			stats.TotalDocs, stats.ChunksTotal, stats.EmbeddedOK)}
 	}
+	// The counts lead on EVERY path, including the empty ones. That is the whole
+	// point of the check: "nothing indexed" must never look like "everything
+	// fine" through a line that is simply absent, and a branch that describes the
+	// situation without stating the numbers reintroduces exactly that gap.
+	//
+	// It also makes one inconsistency visible that no other check names: zero
+	// documents with a non-zero chunk count is a store whose chunks outlived
+	// their documents, and "the record holds no documents" alone would describe
+	// it as merely empty.
+	counts := fmt.Sprintf("%d document(s) and %d chunk(s) in the record",
+		stats.TotalDocs, stats.ChunksTotal)
 	probe := probeRoot(cfg)
 	switch {
 	case !probe.probed:
@@ -300,16 +309,16 @@ func corpusRecordCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 		// directory is empty too" here would assert a fact it never established,
 		// which is the bug class this check exists to remove.
 		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
-			"the record holds no documents, and the corpus source could not be inspected (%s), "+
+			"%s, and the corpus source could not be inspected (%s), "+
 				"so this check cannot tell whether anything should have been indexed. "+
-				"`dir2mcp status` reports what the last run saw.", probe.reason)}
+				"`dir2mcp status` reports what the last run saw.", counts, probe.reason)}
 	case probe.hasEntries:
 		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
-			"the record holds no documents, but %s is not empty. Nothing is searchable. "+
+			"%s, but %s is not empty. Nothing is searchable. "+
 				"Check that source.path points at the corpus you meant, then run `dir2mcp reindex`.",
-			cfg.RootDir)}
+			counts, cfg.RootDir)}
 	default:
-		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "the record holds no documents (the corpus directory is empty too)"}
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: counts + " (the corpus directory is empty too)"}
 	}
 }
 
