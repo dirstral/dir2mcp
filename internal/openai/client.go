@@ -317,7 +317,13 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 		// it IS supported.
 		if !omitTemperature && isUnsupportedTemperature(err) {
 			omitTemperature = true
-			if text, err2 := c.generateOnce(ctx, chatModel, prompt, timeout, true); err2 == nil {
+			// Assign to err rather than a shadowed variable: if the retry fails for an
+			// unrelated reason (rate limit, 5xx) that error must flow into the normal
+			// retryability check below. Discarding it left the original non-retryable
+			// temperature error in place, which returned immediately and bypassed
+			// MaxRetries while reporting the wrong cause.
+			text, err = c.generateOnce(ctx, chatModel, prompt, timeout, true)
+			if err == nil {
 				return text, nil
 			}
 		}

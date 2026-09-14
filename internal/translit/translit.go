@@ -1,4 +1,4 @@
-package ingest
+package translit
 
 import (
 	"regexp"
@@ -60,8 +60,8 @@ func capitalise(s string) string {
 	return string(r)
 }
 
-// translitCyrillic renders one Cyrillic word in Latin script, capitalised.
-func translitCyrillic(word string) string {
+// Transliterate renders one Cyrillic word in Latin script, capitalised.
+func Transliterate(word string) string {
 	w := strings.ToLower(word)
 	for _, ae := range adjectivalEndings {
 		if strings.HasSuffix(w, ae.from) {
@@ -218,10 +218,10 @@ const sentenceEnders = ".!?…:;—–«»\"'()"
 // realistic worst case (a list of officials) without crowding out the text itself.
 const maxNameHints = 6
 
-// nameHints returns "<source> -> <english>" spelling hints for the proper nouns in a
+// Hints returns "<source> -> <english>" spelling hints for the proper nouns in a
 // line of Cyrillic text, in first-appearance order. Returns nil when there is nothing
 // to pin, so the prompt is unchanged for the vast majority of lines.
-func nameHints(text string) []string {
+func Hints(text string) []string {
 	var hints []string
 	seen := make(map[string]bool)
 	for _, loc := range properNounRE.FindAllStringIndex(text, -1) {
@@ -241,10 +241,6 @@ func nameHints(text string) []string {
 				continue
 			}
 		}
-		if seen[word] {
-			continue
-		}
-		seen[word] = true
 		if hasExonym(word) {
 			continue
 		}
@@ -258,10 +254,18 @@ func nameHints(text string) []string {
 				continue
 			}
 		}
-		english := translitCyrillic(nom)
+		english := Transliterate(nom)
 		if english == "" {
 			continue
 		}
+		// Keyed on the NORMALISED name, and only once normalisation has succeeded: an
+		// ambiguous occurrence that gets rejected must not block a later valid one, and
+		// two inflections of the same name should not consume two hint slots.
+		key := strings.ToLower(nom)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		hints = append(hints, word+" -> "+english)
 		if len(hints) == maxNameHints {
 			break
@@ -270,9 +274,9 @@ func nameHints(text string) []string {
 	return hints
 }
 
-// hasCyrillic reports whether text contains any Cyrillic letter, so the hint pass is
+// HasCyrillic reports whether text contains any Cyrillic letter, so the hint pass is
 // skipped entirely for source languages it does not apply to.
-func hasCyrillic(text string) bool {
+func HasCyrillic(text string) bool {
 	for _, r := range text {
 		if unicode.Is(unicode.Cyrillic, r) {
 			return true
@@ -281,10 +285,10 @@ func hasCyrillic(text string) bool {
 	return false
 }
 
-// isEnglishTarget reports whether the translation target is English. The hints are
+// IsEnglishTarget reports whether the translation target is English. The hints are
 // English transliterations (BGN/PCGN), so pinning them for a French or German target
 // would override that language's own convention for the same name.
-func isEnglishTarget(lang string) bool {
+func IsEnglishTarget(lang string) bool {
 	l := strings.ToLower(strings.TrimSpace(lang))
 	return l == "en" || l == "eng" || l == "english" || strings.HasPrefix(l, "en-") || strings.HasPrefix(l, "en_")
 }

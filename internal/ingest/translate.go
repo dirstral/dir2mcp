@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/translit"
 )
 
 // readOrComputeTranslation returns the source transcript translated into
@@ -101,8 +103,8 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 	// another target language would override that language's own convention for the
 	// same name (fr "Chtcherbak", de "Schtscherbak").
 	var hints []string
-	if s.translateNameHints && isEnglishTarget(targetLang) && hasCyrillic(text) {
-		hints = nameHints(text)
+	if s.translateNameHints && translit.IsEnglishTarget(targetLang) && translit.HasCyrillic(text) {
+		hints = translit.Hints(text)
 	}
 	prompt := buildTranslatePrompt(text, targetLang, hints)
 	translated, err := s.translator.Generate(ctx, prompt)
