@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/secrets"
 )
 
 // The `egress` doctor check makes an ABSOLUTE claim: "no third-party egress".
@@ -32,6 +34,27 @@ func egressDetail(t *testing.T, cfgBody string) (string, string) {
 		t.Fatalf("doctor produced no egress check")
 	}
 	return status, detail
+}
+
+// isolateFromAmbientCredentials clears every built-in provider credential for
+// the duration of the test.
+//
+// Without it these tests read the developer's shell. The TTS test below proves
+// the mechanism: ELEVENLABS_API_KEY alone activates public TTS egress over
+// localStack, so anyone with that key exported — or COHERE_API_KEY, or any
+// other — would see the clean-verdict assertions fail for reasons that have
+// nothing to do with the change under test. Capability-driven activation is the
+// product's design, which makes ambient credentials a real hazard for any test
+// asserting a LOCAL-only verdict.
+//
+// The list comes from secrets.ManagedEnvVars rather than a literal here, so a
+// provider added later is isolated automatically instead of silently
+// reintroducing the flake.
+func isolateFromAmbientCredentials(t *testing.T) {
+	t.Helper()
+	for _, key := range secrets.ManagedEnvVars() {
+		t.Setenv(key, "")
+	}
 }
 
 // localStack is embed + chat + stt all pointed at loopback: the shape a
@@ -63,6 +86,7 @@ func TestEgress_APurelyLocalStackIsReportedCleanAndNamesWhatItChecked(t *testing
 	// A claim is only as good as its scope, so the clean verdict states the
 	// scope. Without that, a later capability can be added to the product and
 	// silently left out of the claim, which is exactly how #979 happened.
+	isolateFromAmbientCredentials(t)
 	status, detail := egressDetail(t, localStack)
 	if status != "ok" {
 		t.Fatalf("status = %q, want ok: every provider is loopback. detail=%q", status, detail)
@@ -88,6 +112,7 @@ func TestEgress_ARerankerSendsChunkTextsAndMustBeNamed(t *testing.T) {
 	// another project with nothing in the config naming it. A hardcoded
 	// `api_key` would exercise a different activation route than the one this
 	// check exists to catch.
+	isolateFromAmbientCredentials(t)
 	t.Setenv("COHERE_API_KEY", "test-key")
 
 	cfg := localStack + `rerank:
@@ -112,6 +137,7 @@ func TestEgress_AnUnreadableEndpointIsNotCountedAsLocal(t *testing.T) {
 	// base_url and for a base_url this check could not parse. Folding the second
 	// into the clean verdict is a guess, and the guess runs in the reassuring
 	// direction: the operator NAMED a destination and we failed to read it.
+	isolateFromAmbientCredentials(t)
 	cfg := `root_dir: .
 state_dir: .dir2mcp
 providers:
@@ -146,6 +172,7 @@ func TestEgress_AMistypedPublicEndpointIsNotTurnedIntoALanHost(t *testing.T) {
 	// into evidence of locality and folded into the clean verdict.
 	// A SINGLE slash is enough to lose the host: url.Parse("https:/x") succeeds
 	// with scheme "https" and an empty host, so a "://" test misses it.
+	isolateFromAmbientCredentials(t)
 	for _, bad := range []string{"http://[::1", "https://exa mple.com", "https:/api.example.com", "http:/[::1"} {
 		cfg := `root_dir: .
 state_dir: .dir2mcp
@@ -171,6 +198,7 @@ func TestEgress_TheDocumentedSchemelessHostPortStillResolves(t *testing.T) {
 	// scheme "gpu-vps" with an empty host, so rejecting every scheme-bearing
 	// value would break exactly the case the reparse exists for, and a LAN
 	// endpoint would start reporting as unreadable.
+	isolateFromAmbientCredentials(t)
 	cfg := `root_dir: .
 state_dir: .dir2mcp
 providers:
@@ -192,6 +220,7 @@ func TestEgress_AnUnreadableEndpointDoesNotHideAKnownPublicOne(t *testing.T) {
 	// Uncertainty must not outrank a CONFIRMED destination. Returning only the
 	// warning would trade a known fact for a caveat: the operator would lose
 	// sight of the host we positively know receives corpus content.
+	isolateFromAmbientCredentials(t)
 	t.Setenv("OPENAI_API_KEY", "test-key")
 
 	cfg := `root_dir: .
@@ -231,6 +260,7 @@ func TestEgress_ACredentialAloneEnablesTTSEgressAndMustBeNamed(t *testing.T) {
 	// content leaving the machine.
 	//
 	// STT stays pinned to loopback whisper, so the host below is named for tts.
+	isolateFromAmbientCredentials(t)
 	t.Setenv("ELEVENLABS_API_KEY", "test-key")
 
 	_, detail := egressDetail(t, localStack)
