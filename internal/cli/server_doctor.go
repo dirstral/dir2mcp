@@ -292,23 +292,48 @@ func corpusRecordCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 			"%d document(s) in the record; %d chunk(s), %d embedded",
 			stats.TotalDocs, stats.ChunksTotal, stats.EmbeddedOK)}
 	}
-	if rootHasEntries(cfg) {
+	probe := probeRoot(cfg)
+	switch {
+	case !probe.probed:
+		// The record is empty and this check could not look at the source, so it
+		// does not know whether anything SHOULD have been indexed. Saying "the
+		// directory is empty too" here would assert a fact it never established,
+		// which is the bug class this check exists to remove.
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"the record holds no documents, and the corpus source could not be inspected (%s), "+
+				"so this check cannot tell whether anything should have been indexed. "+
+				"`dir2mcp status` reports what the last run saw.", probe.reason)}
+	case probe.hasEntries:
 		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
 			"the record holds no documents, but %s is not empty. Nothing is searchable. "+
 				"Check that source.path points at the corpus you meant, then run `dir2mcp reindex`.",
 			cfg.RootDir)}
+	default:
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "the record holds no documents (the corpus directory is empty too)"}
 	}
-	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "the record holds no documents (the corpus directory is empty too)"}
 }
 
-// rootHasEntries reports whether the configured root holds at least one entry
-// that is not dir2mcp's own state directory.
+// rootProbe is what probeRoot could establish about the corpus source. The
+// three states are kept apart on purpose: "empty", "not empty" and "I could not
+// look" are different answers, and collapsing the third into the first is what
+// lets an empty record over an unreachable mount read as a clean bill.
+type rootProbe struct {
+	hasEntries bool
+	probed     bool
+	// reason explains why the source could not be inspected. Set only when
+	// probed is false.
+	reason string
+}
+
+// probeRoot reports whether the configured root holds at least one entry that is
+// not dir2mcp's own state directory.
 //
-// The state directory is the whole reason this is not a one-line check: it lives
-// INSIDE the root by default, so the root is never empty once `up` has run, and
-// a naive probe would report "you indexed nothing from a non-empty directory"
-// for every genuinely empty corpus. That is a false alarm on a first run, which
-// is exactly when an operator is least able to tell a real warning from noise.
+// The state directory is why this is not a one-line check: it lives INSIDE the
+// root by default, so the root is never empty once `up` has run, and a naive
+// probe would warn on every genuinely empty corpus. That is a false alarm on a
+// first run, which is exactly when an operator is least able to tell a real
+// warning from noise. It is skipped only when it really sits in the root, so a
+// state dir configured elsewhere cannot mask a same-named corpus entry.
 //
 // It reads entries in small batches rather than walking, because this runs in a
 // health check over corpora that can be millions of files, and one qualifying
@@ -316,25 +341,25 @@ func corpusRecordCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 // something", not "how much is there". The cap bounds the pathological case of a
 // directory holding only state-dir-named entries.
 //
-// It answers false for a non-local source. A remote root (nfs/s3) cannot be
-// probed cheaply, and guessing would put an invented fact into a report whose
-// value is that it states only what it knows.
-func rootHasEntries(cfg config.Config) bool {
+// A remote source (nfs/s3) is NOT probed: it cannot be inspected cheaply, and a
+// guess would put an invented fact into a report whose value is that it states
+// only what it knows. An unreadable root is not probed either, for the same
+// reason. Both come back with probed=false and a reason the caller reports.
+func probeRoot(cfg config.Config) rootProbe {
 	if kind := strings.ToLower(strings.TrimSpace(cfg.Source.Kind)); kind != "" && kind != "local" {
-		return false
+		return rootProbe{reason: fmt.Sprintf("source.kind is %q, which this check does not read", kind)}
 	}
 	root := strings.TrimSpace(cfg.RootDir)
 	if root == "" {
-		return false
+		return rootProbe{reason: "no corpus path is configured"}
 	}
 	f, err := os.Open(root)
 	if err != nil {
-		return false
+		return rootProbe{reason: fmt.Sprintf("%s: %v", root, err)}
 	}
 	defer func() { _ = f.Close() }()
 
-	// Only skip the state dir when it actually sits inside the root; a state dir
-	// configured elsewhere must not mask a same-named corpus entry.
+	// Only skip the state dir when it actually sits inside the root.
 	skip := ""
 	if state := strings.TrimSpace(cfg.StateDir); state != "" {
 		if abs, absErr := filepath.Abs(state); absErr == nil {
@@ -346,17 +371,27 @@ func rootHasEntries(cfg config.Config) bool {
 
 	for read := 0; read < rootProbeMaxEntries; {
 		names, readErr := f.Readdirnames(rootProbeBatch)
-		if len(names) == 0 || readErr != nil {
-			return false
-		}
-		read += len(names)
 		for _, name := range names {
 			if name != skip {
-				return true
+				return rootProbe{hasEntries: true, probed: true}
 			}
 		}
+		read += len(names)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				// The whole directory was read and held nothing but the state
+				// dir: a genuine empty, established rather than assumed.
+				return rootProbe{probed: true}
+			}
+			return rootProbe{reason: fmt.Sprintf("read %s: %v", root, readErr)}
+		}
+		if len(names) == 0 {
+			return rootProbe{probed: true}
+		}
 	}
-	return false
+	// The cap was hit without finding a non-state entry. Not established either
+	// way, so it is not claimed either way.
+	return rootProbe{reason: fmt.Sprintf("%s holds more than %d entries named like the state directory", root, rootProbeMaxEntries)}
 }
 
 // rootProbeBatch and rootProbeMaxEntries bound the corpus-presence probe. The

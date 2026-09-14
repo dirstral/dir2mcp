@@ -136,3 +136,53 @@ func seedEmptyStore(t *testing.T, dir string) {
 		t.Logf("close: %v", err)
 	}
 }
+
+func TestDoctor_AnEmptyRecordOverAnUninspectableSourceIsNotCalledEmpty(t *testing.T) {
+	// "empty", "not empty" and "I could not look" are three different answers.
+	// Collapsing the third into the first is what lets an empty record over an
+	// unreachable mount read as a clean bill — the exact bug class this check
+	// exists to remove, committed by the check itself.
+	dir := t.TempDir()
+	seedEmptyStore(t, dir)
+	// A remote source: the probe cannot read it cheaply and must not guess.
+	// nfs rather than s3 because s3 additionally demands AWS credentials, which
+	// would fail config validation before this check ever runs.
+	cfgPath := filepath.Join(dir, ".dir2mcp.yaml")
+	if err := os.WriteFile(cfgPath, []byte("source:\n  kind: nfs\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	check, ok := doctorCheckNamed(t, dir, "corpus_record")
+	if !ok {
+		t.Fatalf("doctor has no corpus_record check")
+	}
+	if strings.Contains(check.Detail, "empty too") {
+		t.Fatalf("an uninspected source was asserted to be empty: %q", check.Detail)
+	}
+	if check.Status != "warn" {
+		t.Errorf("status = %q, want warn: the record is empty and the source was never read", check.Status)
+	}
+	if !strings.Contains(check.Detail, "could not be inspected") {
+		t.Errorf("the detail does not admit what it could not do: %q", check.Detail)
+	}
+}
+
+func TestDoctor_AnUnreadableCorpusRootIsReportedNotAssumedEmpty(t *testing.T) {
+	// Same rule for a local root that cannot be opened: a missing or unreadable
+	// corpus path is a fact about the probe, not a fact about the corpus.
+	dir := t.TempDir()
+	seedEmptyStore(t, dir)
+	cfgPath := filepath.Join(dir, ".dir2mcp.yaml")
+	missing := filepath.Join(dir, "not-here")
+	if err := os.WriteFile(cfgPath, []byte("root_dir: \""+missing+"\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	check, ok := doctorCheckNamed(t, dir, "corpus_record")
+	if !ok {
+		t.Fatalf("doctor has no corpus_record check")
+	}
+	if strings.Contains(check.Detail, "empty too") {
+		t.Errorf("an unreadable root was asserted to be empty: %q", check.Detail)
+	}
+}
