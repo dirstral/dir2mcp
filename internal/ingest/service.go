@@ -5849,7 +5849,7 @@ func (s *Service) warnPartialTranscript(doc model.Document, tc trackContext, cov
 // each track caches independently.
 func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if tc.audioIndex <= 0 {
-		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
+		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "", doc.RelPath)
 	}
 	audio, err := s.extractTrackAudio(ctx, doc, content, tc.audioIndex)
 	if err != nil {
@@ -5869,7 +5869,9 @@ func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, c
 	trackDoc := doc
 	trackDoc.DocType = "audio"
 	trackDoc.RelPath = trackAudioRelPath(doc.RelPath, tc.audioIndex)
-	return s.readOrComputeTranscriptWithWords(ctx, trackDoc, audio, "")
+	// The ORIGINAL document's path, not trackDoc's synthetic one: see the mark
+	// lookup in readOrComputeTranscriptWithWords.
+	return s.readOrComputeTranscriptWithWords(ctx, trackDoc, audio, "", doc.RelPath)
 }
 
 // extractTrackAudio demuxes a specific audio-relative track to a compact STT-ready
@@ -6624,7 +6626,7 @@ func TranscriptLangSuffix(language string) string {
 }
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
-	text, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language)
+	text, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
 	return text, err
 }
 
@@ -6634,7 +6636,10 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // best-effort sidecar (.words.json) carried only when the transcriber implements
 // model.StructuredTranscriber. A missing or unreadable sidecar yields nil words
 // — behaviour identical to a provider without word timing.
-func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string) (string, []model.TimedWord, *TranscriptCoverage, error) {
+// originRelPath is the rel_path of the DOCUMENT this transcript belongs to,
+// which is doc.RelPath for an ordinary decode and the real document's path for a
+// per-track decode whose doc is synthetic. Only the #974 redecode mark reads it.
+func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if s.transcriber == nil {
 		return "", nil, nil, errors.New("transcriber not configured")
 	}
@@ -6658,7 +6663,14 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	// #974: an operator asked for this document to be decoded again, so the cache
 	// is not consulted. The entry is rewritten below, so this costs one decode
 	// rather than leaving the document uncached forever.
-	if !s.redecodeTranscripts[doc.RelPath] {
+	//
+	// The mark is keyed on the DOCUMENT's rel_path, which is why originRelPath is
+	// threaded in rather than read off doc. A per-track decode (§8.6.12) builds a
+	// synthetic `<path>#t<N>.<ext>` document so each track caches independently,
+	// and matching on that would miss every additional track: exactly the
+	// transcripts the report surfaces on a multilingual archive, where the
+	// original is track 0 and the interpreted feed is track 1.
+	if !s.redecodeTranscripts[originRelPath] {
 		if cached, err := os.ReadFile(cachePath); err == nil {
 			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
 			// text. A cache hit that dropped it would re-index the same PARTIAL

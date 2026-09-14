@@ -76,7 +76,7 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitConfigInvalid
 	}
 
-	if code := a.armTranscriptRedecode(ctx, global, opts, st, ing); code != exitSuccess {
+	if code := a.armTranscriptRedecode(ctx, global, opts, cfg, st, ing); code != exitSuccess {
 		staging.restoreContentHashes(ctx, a.stderr)
 		a.closeStoreWithLog(st)
 		staging.rollback(a.stderr)
@@ -147,7 +147,7 @@ type partialTranscriptLister interface {
 // silently reindexing with the cache intact would print a successful rebuild
 // that repaired nothing, which is the shape of failure this whole area exists to
 // remove.
-func (a *App) armTranscriptRedecode(ctx context.Context, global globalOptions, opts reindexOptions, st model.Store, ing any) int {
+func (a *App) armTranscriptRedecode(ctx context.Context, global globalOptions, opts reindexOptions, cfg config.Config, st model.Store, ing any) int {
 	if !opts.redecodePartial {
 		return exitSuccess
 	}
@@ -161,6 +161,26 @@ func (a *App) armTranscriptRedecode(ctx context.Context, global globalOptions, o
 	if !ok {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
 			"--redecode-partial-transcripts is not supported by this ingestor")
+		return exitConfigInvalid
+	}
+	// Refuse before the rebuild starts. With no transcriber resolved
+	// (`stt.provider: off`, or auto with no eligible provider) transcription is
+	// skipped entirely, so the armed paths are never decoded and never written
+	// back: Reindex would return success, the cache would still hold the partial
+	// text, and the operator would read a green run as a repair. That is the
+	// exact failure this flag exists to remove, so it is a configuration error.
+	// nil AND err are both "no transcriber": TranscriberFromConfig returns
+	// (nil, nil) for `stt.provider: off`, which is the case an operator is most
+	// likely to hit, so checking only the error would let exactly that one
+	// through.
+	if transcriber, err := ingest.TranscriberFromConfig(cfg); err != nil || transcriber == nil {
+		detail := "stt.provider is off, so no recording would be decoded"
+		if err != nil {
+			detail = err.Error()
+		}
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			fmt.Sprintf("--redecode-partial-transcripts needs a working speech-to-text provider, "+
+				"and none resolved: %s. Configure stt.provider and run it again.", detail))
 		return exitConfigInvalid
 	}
 	paths, err := lister.PartialTranscriptPaths(ctx)

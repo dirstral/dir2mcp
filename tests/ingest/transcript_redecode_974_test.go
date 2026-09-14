@@ -199,3 +199,49 @@ func readCachedTranscript(t *testing.T, stateDir string) string {
 // what it is given verbatim: the set mirrors paths that came OUT of the store,
 // and normalizing a key you did not produce is a coupling to someone else's
 // rules rather than a safeguard.
+
+func TestRedecode_ReachesAnAdditionalAudioTrack(t *testing.T) {
+	// §8.6.12 transcribes track N >= 1 as a SYNTHETIC document whose rel_path is
+	// `<path>#t<N>.<ext>`, so each track caches independently. The mark is keyed
+	// on the real document's rel_path, which is what the report names, so the
+	// lookup has to use the ORIGINAL path and not the synthetic one. Matching on
+	// the synthetic path would miss every additional track, and on a multilingual
+	// archive that is the original on track 0 and the interpreted feed on track 1.
+	root, stateDir := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(root, "dual.m4a"), "fake-audio-bytes")
+	tr := &countingTranscriber{}
+
+	build := func() *ingest.Service {
+		svc := mustNewIngestService(t, config.Config{
+			RootDir: root, StateDir: stateDir, STTProvider: "off",
+			MediaSTTTracks: []string{"all"},
+		}, newRealStore(t))
+		svc.SetTranscriber(tr)
+		svc.SetSTTIdentity("whisper", "whisper-large-v3")
+		svc.ProbeMediaInfoFunc = threeTrackProbe()
+		svc.ExtractAudioTrackIndexFunc = func(_ context.Context, _ string, audioIndex int) ([]byte, error) {
+			// Distinct bytes per track, so the two land on different cache keys.
+			return []byte(trackAudioBytes(audioIndex)), nil
+		}
+		return svc
+	}
+
+	processMedia(t, build(), "dual.m4a")
+	first := tr.count()
+	if first < 3 {
+		t.Fatalf("first run: calls = %d, want one per audio track", first)
+	}
+
+	// Unmarked: everything comes from the cache.
+	processMedia(t, build(), "dual.m4a")
+	if tr.count() != first {
+		t.Fatalf("an unmarked run re-decoded: calls = %d, want %d", tr.count(), first)
+	}
+
+	svc := build()
+	svc.RedecodeTranscripts([]string{"dual.m4a"})
+	processMedia(t, svc, "dual.m4a")
+	if tr.count() != first*2 {
+		t.Errorf("calls = %d, want %d: marking the document must reach every track", tr.count(), first*2)
+	}
+}

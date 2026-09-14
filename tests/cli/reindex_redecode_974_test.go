@@ -90,7 +90,12 @@ func TestReindexRedecode_APlainReindexAnnouncesNothing(t *testing.T) {
 func runReindexIn(t *testing.T, dir string, extra ...string) string {
 	t.Helper()
 	cfgPath := filepath.Join(dir, ".dir2mcp.yaml")
-	if err := os.WriteFile(cfgPath, []byte("stt:\n  provider: \"off\"\n"), 0o644); err != nil {
+	// A whisper endpoint that is never called: the arming step runs BEFORE the
+	// rebuild and only needs a transcriber to RESOLVE. `off` is not usable here,
+	// because the flag now refuses it (a run with no transcriber decodes nothing
+	// and would report a repair it cannot perform).
+	cfgBody := "stt:\n  provider: \"whisper\"\nproviders:\n  whisper:\n    kind: whisper\n    base_url: \"http://127.0.0.1:9/v1\"\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	var stdout, stderr strings.Builder
@@ -119,5 +124,40 @@ func TestReindexRedecode_CountsRecordingsNotTranscripts(t *testing.T) {
 	stderr := runReindexIn(t, dir, "--redecode-partial-transcripts")
 	if !strings.Contains(stderr, "re-decoding 1 recording(s)") {
 		t.Errorf("two tracks of one recording must count as one recording: %q", stderr)
+	}
+}
+
+func TestReindexRedecode_RefusesWhenNoTranscriberResolves(t *testing.T) {
+	// With stt.provider off, transcription is skipped entirely: the armed paths
+	// are never decoded and never written back, Reindex returns success, and the
+	// cache still holds the partial text. The operator would read a green run as
+	// a repair, which is the exact failure this flag exists to remove.
+	//
+	// TranscriberFromConfig returns (nil, nil) for `off`, not an error, so the
+	// nil is the case that has to be caught.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/one.mp4",
+		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)})
+	_ = st.Close()
+
+	cfgPath := filepath.Join(dir, ".dir2mcp.yaml")
+	if err := os.WriteFile(cfgPath, []byte("stt:\n  provider: \"off\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout, stderr strings.Builder
+	var code int
+	testutil.WithWorkingDir(t, dir, func() {
+		app := cli.NewAppWithIO(&stdout, &stderr)
+		code = app.Run([]string{"--non-interactive", "reindex", "--redecode-partial-transcripts"})
+	})
+	if code == 0 {
+		t.Errorf("exit = 0, want a configuration error: a run that decodes nothing must not look like a repair")
+	}
+	if !strings.Contains(stderr.String(), "needs a working speech-to-text provider") {
+		t.Errorf("the refusal does not say what is missing: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "re-decoding") {
+		t.Errorf("the run announced a repair it cannot perform: %q", stderr.String())
 	}
 }
