@@ -227,6 +227,34 @@ const maxNameHints = 6
 // Hints returns "<source> -> <english>" spelling hints for the proper nouns in a
 // line of Cyrillic text, in first-appearance order. Returns nil when there is nothing
 // to pin, so the prompt is unchanged for the vast majority of lines.
+// notAWholePlainName reports whether the match at loc must be refused: it is a
+// name a joiner continues, or it is the tail of a longer token.
+//
+// A name that a joiner continues -- Лук'яненко, Дем'янюк, Римский-Корсаков -- is
+// matched as ONE token by properNounRE, so it can no longer pin a fragment ("Лук
+// -> Luk") or split into two hints ("Римский -> Rimsky", "Корсаков -> Korsakov").
+// Both put a wrong spelling into a prompt that says "use exactly these". It is
+// then REFUSED rather than pinned, for the same reason an ambiguous -ова is: a
+// correct rendering of a compound needs per-part rules that do not exist yet
+// (Transliterate gives "Rimskiy-korsakov": the second half is lowercased and the
+// adjectival -sky rule only fires at word end), and no hint leaves the model its
+// own rendering where a wrong hint overrides it. Splitting on the joiner and
+// transliterating each part is the follow-up once those rules exist.
+//
+// A match that starts right after a letter or a joiner is the tail of a token
+// whose head failed the capital rule (or a lowercase-led compound such as
+// де-Голль). Go's regexp has no lookbehind, so that boundary is enforced here.
+func notAWholePlainName(text string, loc []int, word string) bool {
+	if strings.ContainsAny(word, nameJoiners) {
+		return true
+	}
+	if loc[0] == 0 {
+		return false
+	}
+	prev, _ := utf8.DecodeLastRuneInString(text[:loc[0]])
+	return unicode.IsLetter(prev) || strings.ContainsRune(nameJoiners, prev)
+}
+
 func Hints(text string) []string {
 	var hints []string
 	seen := make(map[string]bool)
@@ -247,29 +275,8 @@ func Hints(text string) []string {
 				continue
 			}
 		}
-		// A name that a joiner continues -- Лук'яненко, Дем'янюк, Римский-Корсаков --
-		// is matched as ONE token now, so it can no longer pin a fragment ("Лук ->
-		// Luk") or split into two hints ("Римский -> Rimsky", "Корсаков -> Korsakov").
-		// Both put a wrong spelling into a prompt that says "use exactly these".
-		//
-		// It is then REFUSED rather than pinned, for the same reason an ambiguous
-		// -ова is: a correct rendering of a compound needs per-part rules that do
-		// not exist yet (Transliterate gives "Rimskiy-korsakov": the second half
-		// is lowercased and the adjectival -sky rule only fires at word end), and
-		// no hint leaves the model its own rendering where a wrong hint overrides
-		// it. Splitting on the joiner and transliterating each part is the
-		// follow-up once those rules exist.
-		if strings.ContainsAny(word, nameJoiners) {
+		if notAWholePlainName(text, loc, word) {
 			continue
-		}
-		// A match that starts right after a letter or a joiner is the tail of a
-		// token whose head failed the capital rule (or a lowercase-led compound).
-		// Go's regexp has no lookbehind, so the boundary is enforced here.
-		if loc[0] > 0 {
-			prev, _ := utf8.DecodeLastRuneInString(text[:loc[0]])
-			if unicode.IsLetter(prev) || strings.ContainsRune(nameJoiners, prev) {
-				continue
-			}
 		}
 		if hasExonym(word) {
 			continue
