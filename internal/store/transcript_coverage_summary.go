@@ -125,8 +125,50 @@ func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.Transcrip
 	if err != nil {
 		return model.TranscriptCoverageSummary{}, err
 	}
+	noAssertion, err := countTranscriptsWithoutCoverage(ctx, db)
+	if err != nil {
+		return model.TranscriptCoverageSummary{}, err
+	}
+	out.NoAssertion = noAssertion
 	sort.Strings(out.Providers)
 	return out, nil
+}
+
+// countTranscriptsWithoutCoverage counts the live DECODED transcripts that carry
+// no §8.6.13 coverage record at all (#977).
+//
+// §5.2 says an absent field is "no assertion", and the report has to say so
+// rather than fold it into the clean count. A corpus indexed before the record
+// existed has zero coverage objects, so a check that only counts INCOMPLETE
+// coverage reports "no transcript records an incomplete decode" — the same
+// sentence a genuinely clean corpus gets. Measured on the RFE validation
+// corpus: 34 transcripts, 0 coverage records, and 19 of the 50 recordings large
+// enough that a decode today would be windowed.
+//
+// Counted in SQL rather than by decoding every transcript's meta_json, because
+// this runs on the `up` banner and an archive holds a transcript per recording.
+// The patterns are the JSON keys as encoded, quotes included: an unquoted
+// `%coverage%` would also match the word in some other field's text and drop a
+// row that genuinely asserts nothing.
+//
+// Two populations are excluded because neither is a windowed decode and neither
+// could ever carry coverage: a SIDECAR transcript is authored rather than
+// decoded, and a TRANSLATION derives from another transcript's text. Counting
+// them would inflate the number with rows whose silence means nothing.
+func countTranscriptsWithoutCoverage(ctx context.Context, db *sql.DB) (int64, error) {
+	var n int64
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM representations r
+		JOIN documents d ON d.doc_id = r.doc_id
+		WHERE r.deleted = 0 AND d.deleted = 0
+		  AND (r.rep_type = 'transcript'
+		       OR r.rep_type LIKE 'transcript@%'
+		       OR r.rep_type LIKE 'transcript-%')
+		  AND r.meta_json NOT LIKE '%"coverage"%'
+		  AND r.meta_json NOT LIKE '%"source":"sidecar"%'
+		  AND r.meta_json NOT LIKE '%"translate_provider"%'`).Scan(&n)
+	return n, err
 }
 
 // walkPartialTranscripts calls visit once per LIVE transcript representation

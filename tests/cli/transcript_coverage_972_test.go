@@ -440,3 +440,98 @@ func TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall(t *testing.
 		t.Errorf("duration = %d, want %d (counted once)", got.DurationMS, rfeDurationMS)
 	}
 }
+
+// #977. A corpus that asserts nothing read exactly like a clean one: both got
+// "no transcript records an incomplete decode". Every corpus indexed before
+// §8.6.13 existed is in that state, and §5.2 makes an absent field "no
+// assertion", never a positive value.
+
+func TestTranscriptCoverage_ACorpusThatAssertsNothingSaysSo(t *testing.T) {
+	// The real RFE shape: decoded transcripts, not one coverage record between
+	// them, because they were indexed before the record existed.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/a.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+		seedRep{relPath: "rfe/b.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+	)
+	_ = st.Close()
+
+	check, ok := doctorCheckNamed(t, dir, "transcript_coverage")
+	if !ok {
+		t.Fatalf("doctor has no transcript_coverage check")
+	}
+	// Still ok: an unknown is not a known defect, and a corpus of short
+	// single-request decodes is genuinely fine.
+	if check.Status != "ok" {
+		t.Errorf("status = %q, want ok: a no-assertion count is not a defect", check.Status)
+	}
+	if !strings.Contains(check.Detail, "2 transcript(s) assert nothing about coverage") {
+		t.Errorf("the silent population is not named: %q", check.Detail)
+	}
+}
+
+func TestTranscriptCoverage_ACleanCorpusStillReadsClean(t *testing.T) {
+	// The clause must not appear when every transcript asserts, or it becomes
+	// the noise it was added to remove.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/complete.mp4",
+		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
+	_ = st.Close()
+
+	check, _ := doctorCheckNamed(t, dir, "transcript_coverage")
+	if strings.Contains(check.Detail, "assert nothing") {
+		t.Errorf("a fully asserting corpus got the clause: %q", check.Detail)
+	}
+	if check.Detail != "no transcript records an incomplete decode" {
+		t.Errorf("detail = %q, want the bare clean verdict", check.Detail)
+	}
+}
+
+func TestTranscriptCoverage_TheClauseRidesAlongsideAKnownShortfall(t *testing.T) {
+	// The two populations are independent: a corpus can hold a known partial
+	// AND transcripts that say nothing, and the report must not drop either.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/partial.mp4",
+			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
+		seedRep{relPath: "rfe/silent.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+	)
+	_ = st.Close()
+
+	check, _ := doctorCheckNamed(t, dir, "transcript_coverage")
+	if check.Status != "warn" {
+		t.Errorf("status = %q, want warn: there is a known shortfall", check.Status)
+	}
+	if !strings.Contains(check.Detail, "1 transcript(s) record an incomplete decode") {
+		t.Errorf("the known shortfall is missing: %q", check.Detail)
+	}
+	if !strings.Contains(check.Detail, "1 transcript(s) assert nothing") {
+		t.Errorf("the silent one is missing: %q", check.Detail)
+	}
+}
+
+func TestPartialTranscriptCoverage_SilenceThatMeansNothingIsNotCounted(t *testing.T) {
+	// A sidecar is AUTHORED, not decoded, and a translation derives from another
+	// transcript's text. Neither could ever carry coverage, so counting their
+	// silence would inflate the number with rows whose absence says nothing
+	// about any decode.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/decoded.mp4",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+		seedRep{relPath: "rfe/authored.mp4", repType: "transcript",
+			metaJSON: `{"source":"sidecar","language":"ru"}`},
+		seedRep{relPath: "rfe/decoded.mp4", repType: "transcript-en",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
+				`"translate_provider":"openai","translate_model":"gpt-4o"}`},
+	)
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if got.NoAssertion != 1 {
+		t.Errorf("no-assertion = %d, want 1 (only the decoded one)", got.NoAssertion)
+	}
+}

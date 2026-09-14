@@ -119,6 +119,13 @@ type TranscriptCoverageSummary struct {
 	// ENDPOINT that served a window is not recorded, and one provider may be
 	// routed to several, so a report that named one would be guessing.
 	Providers []string `json:"providers,omitempty"`
+	// NoAssertion is how many live DECODED transcripts carry no coverage record
+	// at all: a single-request decode records none (§8.6.13), and neither does
+	// any transcript indexed before the record existed. §5.2 makes that "no
+	// assertion", so it is reported as its own number rather than folded into
+	// the clean count, where it would be indistinguishable from a corpus that
+	// really is whole (#977).
+	NoAssertion int64 `json:"no_assertion,omitempty"`
 }
 
 // Partial reports whether anything was found. A summary with no partial
