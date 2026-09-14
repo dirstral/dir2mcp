@@ -976,28 +976,45 @@ func egressCheck(cfg config.Config) doctorCheck {
 	if !resolvedAny {
 		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no content providers resolved"}
 	}
-	// An unreadable endpoint outranks the clean verdict: the whole value of this
-	// check is that "no third-party egress" is a statement and not a hope.
+	// An unreadable endpoint outranks the CLEAN verdict: the whole value of this
+	// check is that "no third-party egress" is a statement and not a hope. It
+	// must not outrank a CONFIRMED one, though. Returning only the uncertainty
+	// would hide a destination we positively know about behind one we do not,
+	// which trades a known fact for a caveat.
 	if len(unreadable) > 0 {
 		sort.Strings(unreadable)
-		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+		detail := fmt.Sprintf(
 			"cannot say where content goes: %s has a base_url this check could not parse. "+
-				"Fix or remove it; until then no egress verdict covers %s.",
-			strings.Join(unreadable, ", "), strings.Join(unreadable, ", "))}
+				"Fix or remove it; until then no egress verdict covers it.",
+			strings.Join(unreadable, ", "))
+		if known := thirdPartyDestinations(hostOrder, byHost); known != "" {
+			detail = "corpus content egresses to third-party host(s): " + known + ". " + detail
+		}
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: detail}
 	}
 	if len(hostOrder) == 0 {
 		return doctorCheck{Name: name, Status: doctorStatusOK,
 			Detail: "no third-party egress: all resolved providers target local/loopback or private/LAN endpoints " +
 				"(checked embed, chat, ocr, stt, rerank, tts)"}
 	}
+	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
+		"corpus content egresses to third-party host(s): %s. For an on-prem/no-egress setup, see the README 'Fully local / no-egress' recipe.",
+		thirdPartyDestinations(hostOrder, byHost))}
+}
+
+// thirdPartyDestinations renders "host (cap, cap); host (cap)" for the public
+// destinations found, sorted. Shared so the uncertainty verdict reports the same
+// confirmed destinations the clean-path verdict would have.
+func thirdPartyDestinations(hostOrder []string, byHost map[string][]string) string {
+	if len(hostOrder) == 0 {
+		return ""
+	}
 	sort.Strings(hostOrder)
 	parts := make([]string, 0, len(hostOrder))
 	for _, h := range hostOrder {
 		parts = append(parts, fmt.Sprintf("%s (%s)", h, strings.Join(byHost[h], ", ")))
 	}
-	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
-		"corpus content egresses to third-party host(s): %s. For an on-prem/no-egress setup, see the README 'Fully local / no-egress' recipe.",
-		strings.Join(parts, "; "))}
+	return strings.Join(parts, "; ")
 }
 
 // kindDefaultHost maps a provider kind to the cloud host its client contacts
@@ -1038,13 +1055,25 @@ func hostFromBaseURL(raw string) string {
 	if err == nil && u.Host != "" {
 		return strings.ToLower(u.Hostname())
 	}
-	// The reparse is ONLY for a value that names no scheme. Applied to one that
-	// does, it manufactures a host out of a typo: "http://[::1" becomes
+	// The reparse is ONLY for a value that names no TRANSPORT scheme. Applied to
+	// one that does, it manufactures a host out of a typo: "http://[::1" becomes
 	// "http://http://[::1", whose host parses as "http" — a bare single-label
 	// name, which hostIsLocal treats as LAN. A mistyped PUBLIC endpoint would
 	// then be certified as no-egress, which is the one answer this check must
-	// never give by accident (#979). Measured: "http://[::1" and
-	// "http://exa mple.com" both yielded "http" before this guard.
+	// never give by accident (#979).
+	//
+	// The test is the scheme and NOT the "://" substring, because a single slash
+	// is enough to lose the host: url.Parse("https:/api.example.com") succeeds
+	// with scheme "https" and an EMPTY host, and the reparse then yields "https".
+	//
+	// It is also not "any scheme". url.Parse reads the documented scheme-less
+	// form "gpu-vps:9001" as scheme "gpu-vps" with an empty host, so rejecting
+	// every scheme-bearing value would break exactly the case the reparse exists
+	// for. Only a value naming a scheme this client actually speaks is malformed
+	// when it carries no host.
+	if err == nil && isTransportScheme(u.Scheme) {
+		return ""
+	}
 	if strings.Contains(raw, "://") {
 		return ""
 	}
@@ -1053,6 +1082,16 @@ func hostFromBaseURL(raw string) string {
 		return strings.ToLower(u2.Hostname())
 	}
 	return ""
+}
+
+// isTransportScheme reports whether s names a scheme a provider client speaks.
+// A value carrying one of these but no host is malformed, not a host:port.
+func isTransportScheme(s string) bool {
+	switch strings.ToLower(s) {
+	case "http", "https":
+		return true
+	}
+	return false
 }
 
 // hostIsLocal reports whether host denotes a loopback, private/LAN, or

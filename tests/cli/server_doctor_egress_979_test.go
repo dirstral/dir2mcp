@@ -137,7 +137,9 @@ func TestEgress_AMistypedPublicEndpointIsNotTurnedIntoALanHost(t *testing.T) {
 	// bare single-label name, which hostIsLocal treats as LAN. So a typo in a
 	// PUBLIC endpoint did not merely go unexamined: it was actively converted
 	// into evidence of locality and folded into the clean verdict.
-	for _, bad := range []string{"http://[::1", "https://exa mple.com"} {
+	// A SINGLE slash is enough to lose the host: url.Parse("https:/x") succeeds
+	// with scheme "https" and an empty host, so a "://" test misses it.
+	for _, bad := range []string{"http://[::1", "https://exa mple.com", "https:/api.example.com", "http:/[::1"} {
 		cfg := `root_dir: .
 state_dir: .dir2mcp
 providers:
@@ -153,5 +155,58 @@ model:
 		if strings.Contains(detail, "no third-party egress") {
 			t.Errorf("%q was certified as no egress: %q", bad, detail)
 		}
+	}
+}
+
+func TestEgress_TheDocumentedSchemelessHostPortStillResolves(t *testing.T) {
+	// The guard on the reparse has to key on a TRANSPORT scheme, not on any
+	// scheme. url.Parse reads the documented scheme-less form "gpu-vps:9001" as
+	// scheme "gpu-vps" with an empty host, so rejecting every scheme-bearing
+	// value would break exactly the case the reparse exists for, and a LAN
+	// endpoint would start reporting as unreadable.
+	cfg := `root_dir: .
+state_dir: .dir2mcp
+providers:
+  lan-embed:
+    kind: openai
+    base_url: "gpu-vps:9001"
+    embed_text_model: m
+model:
+  embed:
+    provider: lan-embed
+`
+	status, detail := egressDetail(t, cfg)
+	if status != "ok" || !strings.Contains(detail, "no third-party egress") {
+		t.Errorf("a scheme-less LAN host:port no longer resolves: status=%q detail=%q", status, detail)
+	}
+}
+
+func TestEgress_AnUnreadableEndpointDoesNotHideAKnownPublicOne(t *testing.T) {
+	// Uncertainty must not outrank a CONFIRMED destination. Returning only the
+	// warning would trade a known fact for a caveat: the operator would lose
+	// sight of the host we positively know receives corpus content.
+	cfg := `root_dir: .
+state_dir: .dir2mcp
+providers:
+  public-embed:
+    kind: openai
+    api_key: "k"
+    embed_text_model: m
+  broken-chat:
+    kind: openai
+    base_url: "https:/api.example.com"
+    chat_model: c
+model:
+  embed:
+    provider: public-embed
+  chat:
+    provider: broken-chat
+`
+	_, detail := egressDetail(t, cfg)
+	if !strings.Contains(detail, "api.openai.com") {
+		t.Errorf("the confirmed public destination was hidden by the uncertainty: %q", detail)
+	}
+	if !strings.Contains(detail, "cannot say where content goes") {
+		t.Errorf("the uncertainty is not reported: %q", detail)
 	}
 }
