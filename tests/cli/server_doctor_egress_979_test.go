@@ -210,3 +210,29 @@ model:
 		t.Errorf("the uncertainty is not reported: %q", detail)
 	}
 }
+
+func TestEgress_ACredentialAloneEnablesTTSEgressAndMustBeNamed(t *testing.T) {
+	// The clean-path test only proves the word "tts" appears in a string
+	// literal. It would keep passing if the TTS capability scan were removed,
+	// which is no coverage at all for the thing #979 was about.
+	//
+	// This drives the resolver, and through the path that actually bites: TTS
+	// has no explicit binding, so the built-in elevenlabs profile activates on
+	// CREDENTIAL PRESENCE alone. That is the same shape as the rerank case — a
+	// key exported for another project, nothing in the config naming it, and
+	// content leaving the machine.
+	//
+	// STT stays pinned to loopback whisper, so the host below is named for tts.
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+
+	_, detail := egressDetail(t, localStack)
+	if strings.Contains(detail, "no third-party egress") {
+		t.Fatalf("a credential-activated cloud TTS provider was certified as no egress: %q", detail)
+	}
+	if !strings.Contains(detail, "api.elevenlabs.io") {
+		t.Errorf("the TTS destination is not named: %q", detail)
+	}
+	if !strings.Contains(detail, "tts") {
+		t.Errorf("the tts capability is not named against the host: %q", detail)
+	}
+}
