@@ -906,8 +906,21 @@ func stuckPendingCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 func egressCheck(cfg config.Config) doctorCheck {
 	const name = "egress"
 	res := cfg.Providers()
-	// Ordered so the detail reads embed, chat, ocr, stt regardless of map
-	// iteration; each pair is a corpus-content-carrying capability.
+	// Ordered so the detail reads the same regardless of map iteration; each pair
+	// is a corpus-content-carrying capability.
+	//
+	// rerank and tts are here because they carry content outward exactly as the
+	// others do, and leaving them out made this check's positive verdict false
+	// (#979). A reranker is sent the candidate CHUNK TEXTS: cohere's client POSTs
+	// {query, documents} to api.cohere.com. Rerank is also activated by
+	// credential presence alone, so a stale COHERE_API_KEY from another project
+	// turns it on without anything in the config naming it, which is precisely
+	// the case an operator needs this check to catch. tts is sent the text it is
+	// asked to speak.
+	//
+	// A capability MUST NOT be omitted from this list quietly: the check makes an
+	// absolute claim ("no third-party egress"), and an unexamined path folded
+	// into that claim is worse than no check.
 	caps := []struct {
 		label string
 		cap   provider.Capability
@@ -916,6 +929,8 @@ func egressCheck(cfg config.Config) doctorCheck {
 		{"chat", provider.CapChat},
 		{"ocr", provider.CapOCR},
 		{"stt", provider.CapSTT},
+		{"rerank", provider.CapRerank},
+		{"tts", provider.CapTTS},
 	}
 
 	// Group public destinations by host so the same provider serving several
@@ -923,6 +938,9 @@ func egressCheck(cfg config.Config) doctorCheck {
 	byHost := map[string][]string{}
 	hostOrder := []string{}
 	resolvedAny := false
+	// Capabilities whose configured base_url could not be parsed, so this check
+	// cannot say where their content goes.
+	var unreadable []string
 	for _, c := range caps {
 		prof, err := res.Resolve(c.cap)
 		if err != nil {
@@ -930,8 +948,24 @@ func egressCheck(cfg config.Config) doctorCheck {
 		}
 		resolvedAny = true
 		host := effectiveProviderHost(prof)
-		if host == "" || hostIsLocal(host) {
-			continue // loopback / LAN / self-hosted, or no known endpoint
+		if host == "" {
+			// Two different states share this value, and only one of them is
+			// safe to fold into a no-egress verdict.
+			//
+			// A self-hosted kind with no base_url has no known endpoint: it
+			// contacts nothing until configured, and other checks surface that.
+			//
+			// A base_url that is SET but unparseable is the operator naming a
+			// destination this check then failed to read. Counting that as local
+			// is a guess, and the guess is in the direction that produces a
+			// reassuring answer. It is reported instead.
+			if strings.TrimSpace(prof.BaseURL) != "" {
+				unreadable = append(unreadable, c.label)
+			}
+			continue
+		}
+		if hostIsLocal(host) {
+			continue // loopback / LAN / self-hosted
 		}
 		if _, seen := byHost[host]; !seen {
 			hostOrder = append(hostOrder, host)
@@ -942,9 +976,19 @@ func egressCheck(cfg config.Config) doctorCheck {
 	if !resolvedAny {
 		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no content providers resolved"}
 	}
+	// An unreadable endpoint outranks the clean verdict: the whole value of this
+	// check is that "no third-party egress" is a statement and not a hope.
+	if len(unreadable) > 0 {
+		sort.Strings(unreadable)
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"cannot say where content goes: %s has a base_url this check could not parse. "+
+				"Fix or remove it; until then no egress verdict covers %s.",
+			strings.Join(unreadable, ", "), strings.Join(unreadable, ", "))}
+	}
 	if len(hostOrder) == 0 {
 		return doctorCheck{Name: name, Status: doctorStatusOK,
-			Detail: "no third-party egress: all resolved providers target local/loopback or private/LAN endpoints"}
+			Detail: "no third-party egress: all resolved providers target local/loopback or private/LAN endpoints " +
+				"(checked embed, chat, ocr, stt, rerank, tts)"}
 	}
 	sort.Strings(hostOrder)
 	parts := make([]string, 0, len(hostOrder))
@@ -993,6 +1037,16 @@ func hostFromBaseURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err == nil && u.Host != "" {
 		return strings.ToLower(u.Hostname())
+	}
+	// The reparse is ONLY for a value that names no scheme. Applied to one that
+	// does, it manufactures a host out of a typo: "http://[::1" becomes
+	// "http://http://[::1", whose host parses as "http" — a bare single-label
+	// name, which hostIsLocal treats as LAN. A mistyped PUBLIC endpoint would
+	// then be certified as no-egress, which is the one answer this check must
+	// never give by accident (#979). Measured: "http://[::1" and
+	// "http://exa mple.com" both yielded "http" before this guard.
+	if strings.Contains(raw, "://") {
+		return ""
 	}
 	// Scheme-less: reparse with a scheme so host/port split correctly.
 	if u2, err2 := url.Parse("http://" + raw); err2 == nil && u2.Host != "" {
