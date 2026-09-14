@@ -464,6 +464,14 @@ type Config struct {
 	// English-only target_langs (Whisper's only translation target). Only
 	// consulted when MediaTranslateEnabled is true.
 	MediaTranslateEngine string
+
+	// MediaTranslateNameHints pins proper-noun spellings in the chat-translation
+	// prompt (config `media.translate.name_hints`). The translation model tends to
+	// REGENERATE a name instead of transliterating it, which is the dominant
+	// named-entity error; this supplies the expected spelling up front. Only applies
+	// to the chat engine and to sources whose script marks proper nouns reliably
+	// (Cyrillic), so it is OFF by default.
+	MediaTranslateNameHints bool
 	// MediaFilterWords is an optional, general-purpose list of boilerplate /
 	// credits / watermark phrases stripped from transcript and subtitle text
 	// (config `media.filter_words`). Matching is case-insensitive substring
@@ -768,6 +776,7 @@ type fileConfig struct {
 	MediaTranslateEnabled              *bool
 	MediaTranslateTargetLangs          []string
 	MediaTranslateEngine               *string
+	MediaTranslateNameHints            *bool
 	MediaFilterWords                   []string
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
@@ -907,6 +916,7 @@ type persistedConfig struct {
 	MediaTranslateEnabled              bool          `yaml:"media_translate_enabled"`
 	MediaTranslateTargetLangs          []string      `yaml:"media_translate_target_langs"`
 	MediaTranslateEngine               string        `yaml:"media_translate_engine"`
+	MediaTranslateNameHints            bool          `yaml:"media_translate_name_hints"`
 	MediaFilterWords                   []string      `yaml:"media_filter_words"`
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
@@ -1132,6 +1142,7 @@ func Default() Config {
 		MediaTranslateEnabled:     false,
 		MediaTranslateTargetLangs: nil,
 		MediaTranslateEngine:      "chat",
+		MediaTranslateNameHints:   false,
 		// Bilingual subtitle export (SPEC §8.6.10) is OFF by default; the align
 		// tolerance carries its spec default so an enabled-but-unspecified config
 		// behaves predictably.
@@ -1268,6 +1279,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaTranslateEnabled:              cfg.MediaTranslateEnabled,
 		MediaTranslateTargetLangs:          append([]string(nil), cfg.MediaTranslateTargetLangs...),
 		MediaTranslateEngine:               cfg.MediaTranslateEngine,
+		MediaTranslateNameHints:            cfg.MediaTranslateNameHints,
 		MediaFilterWords:                   append([]string(nil), cfg.MediaFilterWords...),
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
@@ -2017,6 +2029,9 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaTranslateEngine != nil {
 		cfg.MediaTranslateEngine = *fc.MediaTranslateEngine
 	}
+	if fc.MediaTranslateNameHints != nil {
+		cfg.MediaTranslateNameHints = *fc.MediaTranslateNameHints
+	}
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
@@ -2415,6 +2430,7 @@ var configKeyAliases = map[string]string{
 	"media_translate_enabled":                 "media.translate.enabled",
 	"media_translate_target_langs":            "media.translate.target_langs",
 	"media_translate_engine":                  "media.translate.engine",
+	"media_translate_name_hints":              "media.translate.name_hints",
 	"media_filter_words":                      "media.filter_words",
 	"filter_words":                            "media.filter_words",
 	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
@@ -2556,6 +2572,7 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	"media_sidecars_disabled":    func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
 	"media.variants.group":       func(c *fileConfig) **bool { return &c.MediaVariantsGroup },
 	"media.translate.enabled":    func(c *fileConfig) **bool { return &c.MediaTranslateEnabled },
+	"media.translate.name_hints": func(c *fileConfig) **bool { return &c.MediaTranslateNameHints },
 	"media.subtitles.ttml.enabled": func(c *fileConfig) **bool {
 		return &c.MediaSubtitlesTTMLEnabled
 	},
@@ -3063,6 +3080,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_translate_enabled", cfg.MediaTranslateEnabled)
 	writeList("media_translate_target_langs", cfg.MediaTranslateTargetLangs)
 	writeScalar("media_translate_engine", cfg.MediaTranslateEngine)
+	writeBool("media_translate_name_hints", cfg.MediaTranslateNameHints)
 	writeList("media_filter_words", cfg.MediaFilterWords)
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)

@@ -97,7 +97,11 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 	if text == "" {
 		return "", nil
 	}
-	prompt := buildTranslatePrompt(text, targetLang)
+	var hints []string
+	if s.translateNameHints && hasCyrillic(text) {
+		hints = nameHints(text)
+	}
+	prompt := buildTranslatePrompt(text, targetLang, hints)
 	translated, err := s.translator.Generate(ctx, prompt)
 	if err != nil {
 		return "", err
@@ -109,12 +113,23 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 // prompt. It pins the TARGET language only (the source language is auto-detected
 // by the model, matching SPEC §8.6.2's auto-detection default) and instructs the
 // model to return the translation alone so the output needs no post-parsing.
-func buildTranslatePrompt(text, targetLang string) string {
+func buildTranslatePrompt(text, targetLang string, nameHints []string) string {
 	var b strings.Builder
 	b.WriteString("Translate the following text into ")
 	b.WriteString(targetLang)
 	b.WriteString(". Preserve meaning faithfully. Return only the translated text, ")
-	b.WriteString("with no preamble, quotes, or explanation.\n\n")
+	b.WriteString("with no preamble, quotes, or explanation.\n")
+	// Pin proper-noun spellings BEFORE the model sees the text. Left to itself the
+	// model regenerates a name rather than transliterating it, which is the dominant
+	// named-entity error; naming the expected spelling up front prevents it instead of
+	// trying to detect and repair it afterwards. Omitted entirely when there are no
+	// hints, so the prompt is byte-identical to before for non-Cyrillic sources.
+	if len(nameHints) > 0 {
+		b.WriteString("Use exactly these spellings for the names that appear: ")
+		b.WriteString(strings.Join(nameHints, "; "))
+		b.WriteString(".\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(text)
 	return b.String()
 }

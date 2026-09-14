@@ -131,6 +131,11 @@ type Service struct {
 	// media.translate.engine): "chat" (default, line-by-line via s.translator) or
 	// "whisper" (native audio->English translate task via s.translateSTT).
 	translateEngine string
+
+	// translateNameHints pins proper-noun spellings in the chat-translation prompt
+	// (config media.translate.name_hints). Off by default: it only helps sources whose
+	// script marks proper nouns reliably, and it changes prompts, so it is opt-in.
+	translateNameHints bool
 	// translateSTT runs Whisper's translate task; set only when
 	// translateEngine == "whisper", nil for the chat engine.
 	translateSTT model.Transcriber
@@ -393,6 +398,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	// generator; when off (default), or no chat provider resolves, the field
 	// stays nil and the translate step self-skips so behaviour is unchanged.
 	svc.translateTargetLangs = append([]string(nil), cfg.MediaTranslateTargetLangs...)
+	svc.translateNameHints = cfg.MediaTranslateNameHints
 	svc.translateEngine = strings.ToLower(strings.TrimSpace(cfg.MediaTranslateEngine))
 	if svc.translateEngine == "" {
 		svc.translateEngine = "chat"
