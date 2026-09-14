@@ -37,6 +37,11 @@ type TranscriptCoverage struct {
 	// non-overlapping and ascending (§8.6.13), so a consumer reads the gaps
 	// directly instead of reconstructing them from window arithmetic.
 	Ranges []CoverageRange `json:"ranges,omitempty"`
+	// Identity is the §8.6.7 "provider/model" that produced this transcript. It
+	// is NOT part of the persisted coverage object; a reader fills it from the
+	// sibling fields of the same meta_json so a §7.7 report can name what
+	// decoded the recording without carrying the whole meta around.
+	Identity string `json:"-"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds

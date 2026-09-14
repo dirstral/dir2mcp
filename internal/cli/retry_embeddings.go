@@ -22,6 +22,10 @@ type reindexOptions struct {
 	// errorCategories narrows the retry to specific store.ErrorCategory values.
 	// Empty selects the default retryable set (store.RequeueableErrorCategories).
 	errorCategories []string
+	// redecodePartial makes the rebuild IGNORE the cached transcript of every
+	// document the §7.7 report named as partially decoded, so those recordings
+	// reach the STT provider again (#974).
+	redecodePartial bool
 }
 
 // parseReindexOptions parses the reindex flag set. Positional arguments are
@@ -34,6 +38,10 @@ func parseReindexOptions(args []string) (reindexOptions, []string, error) {
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.embeddingsOnly, "embeddings-only", false,
 		"retry chunks that failed to embed (reset them to pending) without re-running extraction")
+	fs.BoolVar(&opts.redecodePartial, "redecode-partial-transcripts", false,
+		"re-decode the recordings whose transcript covers only part of the audio "+
+			"(the transcript_coverage report names them); ignores their cached transcript, "+
+			"which an ordinary reindex would restore unchanged")
 	fs.StringVar(&categories, "error-category", "",
 		"comma-separated error categories to retry (default: "+strings.Join(store.RequeueableErrorCategories(), ",")+")")
 	if err := fs.Parse(args); err != nil {
@@ -50,6 +58,14 @@ func parseReindexOptions(args []string) (reindexOptions, []string, error) {
 		// operator believe they had scoped a run that in fact reprocesses the
 		// whole corpus.
 		return reindexOptions{}, nil, errors.New("--error-category is only valid with --embeddings-only")
+	}
+	if opts.redecodePartial && opts.embeddingsOnly {
+		// --embeddings-only re-queues chunks a provider rejected and runs no
+		// extraction at all, so it would never reach a transcript. Accepting the
+		// pair would let an operator believe they had repaired their partial
+		// transcripts by running something that cannot.
+		return reindexOptions{}, nil, errors.New("--redecode-partial-transcripts cannot be combined with --embeddings-only: " +
+			"the embeddings-only retry runs no transcription")
 	}
 	opts.errorCategories = parsed
 	return opts, fs.Args(), nil

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -56,26 +55,25 @@ func computeTranscriptCoverage(ctx context.Context, counter partialTranscriptCou
 
 // transcriptCoverageRemedy names an action that actually re-decodes.
 //
-// "Run a reindex" is NOT one, and saying so is the point. §8.6.13 keys the
-// transcript cache on the media bytes folded with the STT derivation identity,
-// and requires a cache hit to restore the recorded coverage along with the text.
-// An operator who repairs a down endpoint changes neither key component, so an
-// ordinary re-index returns the same partial transcript, reports the same
-// shortfall, and never calls the provider. §7.7 requires a remediation to name
-// an action that works, and requires an implementation that has none to say so
-// rather than name a re-index that will not repair anything. dir2mcp has none
-// yet (#974), so this names the cache directory whose entries have to go.
-func transcriptCoverageRemedy(cfg config.Config, summary model.TranscriptCoverageSummary) string {
+// "Run a reindex" is NOT one, and §7.7 requires the difference to be stated.
+// §8.6.13 keys the transcript cache on the media bytes folded with the STT
+// derivation identity, and requires a cache hit to restore the recorded coverage
+// along with the text. An operator who repairs a down endpoint changes neither
+// key component, so an ordinary reindex returns the same partial transcript,
+// reports the same shortfall, and never calls the provider.
+//
+// `--redecode-partial-transcripts` is the action that does work (#974): it
+// ignores the cached transcript of exactly the recordings named here.
+func transcriptCoverageRemedy(_ config.Config, summary model.TranscriptCoverageSummary) string {
 	var b strings.Builder
 	if len(summary.Providers) > 0 {
+		// Named, not guessed: the record holds provider and model, never the
+		// endpoint that served a given window.
 		fmt.Fprintf(&b, "Decoded by %s. ", strings.Join(summary.Providers, ", "))
 	}
-	// Named, not guessed: the record holds provider and model, never the
-	// endpoint that served a given window.
-	b.WriteString("Check that provider's endpoint, then delete the affected entries under ")
-	b.WriteString(filepath.Join(cfg.StateDir, "cache", "transcribe"))
-	b.WriteString(" and reindex. A reindex ALONE re-decodes nothing: the cache is keyed on the media bytes ")
-	b.WriteString("and the provider/model, and a repaired endpoint changes neither, so the same partial transcript comes back (#974).")
+	b.WriteString("Check that provider's endpoint, then run `dir2mcp reindex --redecode-partial-transcripts`. ")
+	b.WriteString("A plain reindex re-decodes nothing here: the transcript cache is keyed on the media bytes ")
+	b.WriteString("and the provider/model, and a repaired endpoint changes neither, so the same partial transcript comes back.")
 	return b.String()
 }
 

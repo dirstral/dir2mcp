@@ -75,6 +75,21 @@ type Service struct {
 	recognizeBackendPID int
 	recognizeHealthWait time.Duration
 
+	// redecodeTranscripts is the set of rel_paths whose cached transcript must be
+	// IGNORED on read, so a run actually calls the STT provider again (#974).
+	//
+	// It exists because a repair is otherwise unreachable. transcriptCacheKey is
+	// the media bytes folded with the STT derivation identity (SPEC §8.6.7), and
+	// §8.6.13 requires a cache hit to restore the recorded coverage with the
+	// text. An operator who fixes a down endpoint changes neither key component,
+	// so an ordinary reindex returns the same partial transcript and never
+	// reaches the provider. The entry is still WRITTEN afterwards, replacing the
+	// stale one, so a repair costs exactly one decode and not a permanently
+	// uncached document.
+	//
+	// Nil means "trust the cache", which is every ordinary run.
+	redecodeTranscripts map[string]bool
+
 	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
 	// active extraction engine supports (ingest.on_unsupported): "lenient"
 	// (default) skips with a warning and surfaces the gap in the honest coverage
@@ -5834,7 +5849,7 @@ func (s *Service) warnPartialTranscript(doc model.Document, tc trackContext, cov
 // each track caches independently.
 func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if tc.audioIndex <= 0 {
-		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
+		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "", doc.RelPath)
 	}
 	audio, err := s.extractTrackAudio(ctx, doc, content, tc.audioIndex)
 	if err != nil {
@@ -5854,7 +5869,9 @@ func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, c
 	trackDoc := doc
 	trackDoc.DocType = "audio"
 	trackDoc.RelPath = trackAudioRelPath(doc.RelPath, tc.audioIndex)
-	return s.readOrComputeTranscriptWithWords(ctx, trackDoc, audio, "")
+	// The ORIGINAL document's path, not trackDoc's synthetic one: see the mark
+	// lookup in readOrComputeTranscriptWithWords.
+	return s.readOrComputeTranscriptWithWords(ctx, trackDoc, audio, "", doc.RelPath)
 }
 
 // extractTrackAudio demuxes a specific audio-relative track to a compact STT-ready
@@ -6609,7 +6626,7 @@ func TranscriptLangSuffix(language string) string {
 }
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
-	text, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language)
+	text, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
 	return text, err
 }
 
@@ -6619,7 +6636,10 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // best-effort sidecar (.words.json) carried only when the transcriber implements
 // model.StructuredTranscriber. A missing or unreadable sidecar yields nil words
 // — behaviour identical to a provider without word timing.
-func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string) (string, []model.TimedWord, *TranscriptCoverage, error) {
+// originRelPath is the rel_path of the DOCUMENT this transcript belongs to,
+// which is doc.RelPath for an ordinary decode and the real document's path for a
+// per-track decode whose doc is synthetic. Only the #974 redecode mark reads it.
+func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if s.transcriber == nil {
 		return "", nil, nil, errors.New("transcriber not configured")
 	}
@@ -6640,11 +6660,23 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
-	if cached, err := os.ReadFile(cachePath); err == nil {
-		// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
-		// text. A cache hit that dropped it would re-index the same PARTIAL
-		// transcript as a complete one on the next run, which is the whole defect.
-		return string(cached), readCachedWords(wordsPath), readCachedCoverage(coveragePath), nil
+	// #974: an operator asked for this document to be decoded again, so the cache
+	// is not consulted. The entry is rewritten below, so this costs one decode
+	// rather than leaving the document uncached forever.
+	//
+	// The mark is keyed on the DOCUMENT's rel_path, which is why originRelPath is
+	// threaded in rather than read off doc. A per-track decode (§8.6.12) builds a
+	// synthetic `<path>#t<N>.<ext>` document so each track caches independently,
+	// and matching on that would miss every additional track: exactly the
+	// transcripts the report surfaces on a multilingual archive, where the
+	// original is track 0 and the interpreted feed is track 1.
+	if !s.redecodeTranscripts[originRelPath] {
+		if cached, err := os.ReadFile(cachePath); err == nil {
+			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
+			// text. A cache hit that dropped it would re-index the same PARTIAL
+			// transcript as a complete one on the next run, which is the whole defect.
+			return string(cached), readCachedWords(wordsPath), readCachedCoverage(coveragePath), nil
+		}
 	}
 
 	transcript, words, coverage, err := s.transcribe(ctx, doc, content)
@@ -7036,4 +7068,34 @@ func (s *Service) flattenJSONForIndexing(v interface{}) string {
 		return string(raw)
 	}
 	return out
+}
+
+// RedecodeTranscripts marks rel_paths whose cached transcript must be ignored on
+// read, so the next run decodes them again (#974).
+//
+// Scoped on purpose. Clearing the whole transcript cache would re-decode a
+// corpus that is mostly fine, which on an archive is hours of GPU time and a
+// provider bill to repair a handful of recordings. The caller passes exactly the
+// documents the §7.7 report named.
+//
+// A nil or empty set restores ordinary cache behaviour, so this cannot leave a
+// Service permanently bypassing its cache.
+func (s *Service) RedecodeTranscripts(relPaths []string) {
+	if len(relPaths) == 0 {
+		s.redecodeTranscripts = nil
+		return
+	}
+	// Stored VERBATIM. These paths come OUT of the store and are matched against
+	// doc.RelPath byte for byte, so normalizing them here would be applying this
+	// function's rules to someone else's key. (Surrounding whitespace is not the
+	// live case: the corpus resolver trims both ends before touching the
+	// filesystem, so such a document cannot be ingested in the first place.) An
+	// empty path is dropped because it can match no document.
+	set := make(map[string]bool, len(relPaths))
+	for _, p := range relPaths {
+		if p != "" {
+			set[p] = true
+		}
+	}
+	s.redecodeTranscripts = set
 }

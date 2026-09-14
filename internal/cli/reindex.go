@@ -76,6 +76,13 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitConfigInvalid
 	}
 
+	if code := a.armTranscriptRedecode(ctx, global, opts, cfg, st, ing); code != exitSuccess {
+		staging.restoreContentHashes(ctx, a.stderr)
+		a.closeStoreWithLog(st)
+		staging.rollback(a.stderr)
+		return code
+	}
+
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	defer stopProgress()
 	progressDone := startReindexProgress(progressCtx, a.stderr, st, global, reindexProgressInterval)
@@ -110,6 +117,90 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		a.rollbackReindex(ctx, cfg, st, staging)
 	}
 	return a.finishReindex(global, reindexErr)
+}
+
+// transcriptRedecoder is the ingestor capability --redecode-partial-transcripts
+// drives: the set of rel_paths whose cached transcript must be ignored on read.
+type transcriptRedecoder interface {
+	RedecodeTranscripts(relPaths []string)
+}
+
+// partialTranscriptLister is the store capability that names them. It is the
+// SAME query the transcript_coverage report counts through, so the corpus the
+// report names and the corpus this repairs cannot drift apart.
+type partialTranscriptLister interface {
+	PartialTranscriptPaths(ctx context.Context) ([]string, error)
+}
+
+// armTranscriptRedecode points the ingestor at the partial transcripts before
+// the rebuild starts (#974).
+//
+// Why a flag and not the default. A reindex with the cache honoured is the
+// cheap, ordinary operation, and on an archive re-decoding everything is hours
+// of GPU time and a provider bill. But an operator who has just repaired an STT
+// endpoint has no other way to reach those recordings: transcriptCacheKey is the
+// media bytes folded with the provider/model, and repairing an endpoint changes
+// neither, so the cache answers with the same partial text and the provider is
+// never called.
+//
+// It fails the run rather than degrading. The operator asked for specific work;
+// silently reindexing with the cache intact would print a successful rebuild
+// that repaired nothing, which is the shape of failure this whole area exists to
+// remove.
+func (a *App) armTranscriptRedecode(ctx context.Context, global globalOptions, opts reindexOptions, cfg config.Config, st model.Store, ing any) int {
+	if !opts.redecodePartial {
+		return exitSuccess
+	}
+	lister, ok := st.(partialTranscriptLister)
+	if !ok {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			"--redecode-partial-transcripts needs the SQLite metadata store; this corpus does not have one")
+		return exitConfigInvalid
+	}
+	redecoder, ok := ing.(transcriptRedecoder)
+	if !ok {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			"--redecode-partial-transcripts is not supported by this ingestor")
+		return exitConfigInvalid
+	}
+	// Refuse before the rebuild starts. With no transcriber resolved
+	// (`stt.provider: off`, or auto with no eligible provider) transcription is
+	// skipped entirely, so the armed paths are never decoded and never written
+	// back: Reindex would return success, the cache would still hold the partial
+	// text, and the operator would read a green run as a repair. That is the
+	// exact failure this flag exists to remove, so it is a configuration error.
+	// nil AND err are both "no transcriber": TranscriberFromConfig returns
+	// (nil, nil) for `stt.provider: off`, which is the case an operator is most
+	// likely to hit, so checking only the error would let exactly that one
+	// through.
+	if transcriber, err := ingest.TranscriberFromConfig(cfg); err != nil || transcriber == nil {
+		detail := "stt.provider is off, so no recording would be decoded"
+		if err != nil {
+			detail = err.Error()
+		}
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			fmt.Sprintf("--redecode-partial-transcripts needs a working speech-to-text provider, "+
+				"and none resolved: %s. Configure stt.provider and run it again.", detail))
+		return exitConfigInvalid
+	}
+	paths, err := lister.PartialTranscriptPaths(ctx)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			fmt.Sprintf("read partial transcripts: %v", err))
+		return exitConfigInvalid
+	}
+	redecoder.RedecodeTranscripts(paths)
+	if !global.quiet && !global.jsonOutput {
+		if len(paths) == 0 {
+			// Said positively, for the same reason the doctor check states a
+			// clean corpus: silence here reads as "it worked" when the truth is
+			// "there was nothing to do".
+			writeln(a.stderr, "no transcript records an incomplete decode; nothing to re-decode")
+		} else {
+			writef(a.stderr, "re-decoding %d recording(s) whose transcript covers only part of the audio\n", len(paths))
+		}
+	}
+	return exitSuccess
 }
 
 // commitReindex keeps the rebuild: it discards both undo records and closes the
