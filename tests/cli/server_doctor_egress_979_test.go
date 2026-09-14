@@ -81,11 +81,18 @@ func TestEgress_ARerankerSendsChunkTextsAndMustBeNamed(t *testing.T) {
 	// The #979 case. Everything local EXCEPT a cohere reranker, which is sent
 	// the candidate chunk texts. Before the fix this reported "no third-party
 	// egress" while every query shipped corpus content to api.cohere.com.
+	//
+	// The credential comes from the ENVIRONMENT, not a literal in the config,
+	// and that is the scenario rather than a style preference: rerank activates
+	// on credential presence, so the case that bites is a key exported for
+	// another project with nothing in the config naming it. A hardcoded
+	// `api_key` would exercise a different activation route than the one this
+	// check exists to catch.
+	t.Setenv("COHERE_API_KEY", "test-key")
+
 	cfg := localStack + `rerank:
   enabled: true
   provider: cohere
-  cohere:
-    api_key: "test-key"
 `
 	status, detail := egressDetail(t, cfg)
 	if strings.Contains(detail, "no third-party egress") {
@@ -185,12 +192,13 @@ func TestEgress_AnUnreadableEndpointDoesNotHideAKnownPublicOne(t *testing.T) {
 	// Uncertainty must not outrank a CONFIRMED destination. Returning only the
 	// warning would trade a known fact for a caveat: the operator would lose
 	// sight of the host we positively know receives corpus content.
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
 	cfg := `root_dir: .
 state_dir: .dir2mcp
 providers:
   public-embed:
     kind: openai
-    api_key: "k"
     embed_text_model: m
   broken-chat:
     kind: openai
