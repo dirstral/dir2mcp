@@ -610,9 +610,9 @@ func TestPartialTranscriptCoverage_AnUnreadableMetaIsCountedAsAssertingNothing(t
 }
 
 func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T) {
-	// Pins what the README now states. The banner is keyed on Partial, so a
-	// corpus whose transcripts merely assert nothing produces no section, and
-	// only `doctor` names that population.
+	// Pins what the README states, on the banner's ACTUAL output rather than on
+	// the probe's count: a corpus whose transcripts merely assert nothing
+	// produces no Speech coverage section, and only `doctor` names them.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/silent.mp4",
 		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`})
@@ -620,15 +620,33 @@ func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T)
 
 	cfg := config.Config{StateDir: filepath.Join(dir, ".dir2mcp")}
 	app := cli.NewAppWithIO(io.Discard, io.Discard)
-	var stderr strings.Builder
-	// The probe finds no PARTIAL transcript, which is what the banner renders on.
-	if got := app.StartupTranscriptCoverageForTest(context.Background(), st, cfg, false, false, &stderr); got != 0 {
-		t.Errorf("banner probe = %d, want 0 partial transcripts", got)
+	if got := app.RenderTranscriptCoverageSectionForTest(context.Background(), st, cfg); got != "" {
+		t.Errorf("the banner rendered a section for a no-assertion-only corpus:\n%s", got)
 	}
-	// doctor still names them.
+
+	// doctor still names them, which is the half the README points at.
 	_ = st.Close()
 	check, _ := doctorCheckNamed(t, dir, "transcript_coverage")
 	if !strings.Contains(check.Detail, "assert nothing about coverage") {
 		t.Errorf("doctor must still name them: %q", check.Detail)
+	}
+}
+
+func TestStartupBanner_AKnownShortfallDoesRenderTheSection(t *testing.T) {
+	// The other side of the same claim: without this, a section that never
+	// rendered at all would satisfy the test above.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/partial.mp4",
+		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
+	defer func() { _ = st.Close() }()
+
+	cfg := config.Config{StateDir: filepath.Join(dir, ".dir2mcp")}
+	app := cli.NewAppWithIO(io.Discard, io.Discard)
+	got := app.RenderTranscriptCoverageSectionForTest(context.Background(), st, cfg)
+	if !strings.Contains(got, "Speech coverage") {
+		t.Errorf("a known shortfall rendered no section:\n%s", got)
+	}
+	if !strings.Contains(got, "incomplete decode") {
+		t.Errorf("the section does not state the shortfall:\n%s", got)
 	}
 }

@@ -192,6 +192,21 @@ func printTranscriptCoverageSection(out io.Writer, s styles, cov transcriptCover
 	writeln(out)
 }
 
+// RenderTranscriptCoverageSectionForTest runs the banner's ACTUAL path for the
+// corpus behind st — compute the verdict, then render the section — and returns
+// exactly what the banner would have written.
+//
+// It exists because asserting the probe's count is not the same claim as
+// asserting what the banner prints, and the README documents the latter. A test
+// over the count alone would keep passing if the section started rendering for a
+// verdict that is not partial.
+func (a *App) RenderTranscriptCoverageSectionForTest(ctx context.Context, st interface{}, cfg config.Config) string {
+	cov := a.startupTranscriptCoverage(ctx, st, cfg, upOptions{}, io.Discard)
+	var out strings.Builder
+	printTranscriptCoverageSection(&out, a.sty(false), cov)
+	return out.String()
+}
+
 // StartupTranscriptCoverageForTest exposes the banner's probe to the external
 // `tests/cli` package, which cannot call an unexported method. It returns how
 // many partial transcripts the verdict found; 0 means the probe was skipped or
