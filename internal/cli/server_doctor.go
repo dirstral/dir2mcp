@@ -73,7 +73,9 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		providerCheck(ctx, cfg, "chat", provider.CapChat, false, false),
 		egressCheck(cfg),
 		extractorCheck(cfg),
+		corpusRecordCheck(ctx, a, cfg),
 		extractionCoverageCheck(ctx, a, cfg),
+		skippedDocumentsCheck(ctx, a, cfg),
 		transcriptCoverageCheck(ctx, a, cfg),
 		indexingFailureCheck(ctx, a, cfg),
 		daemonLivenessCheck(cfg),
@@ -244,6 +246,230 @@ func transcriptCoverageCheck(ctx context.Context, a *App, cfg config.Config) doc
 	// is genuinely useful; `media.stt.on_partial_transcript: warn` indexes them
 	// deliberately. What is wrong is that the shortfall was silent.
 	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: cov.Summary() + ". " + cov.Remedy}
+}
+
+// corpusRecordCheck reports how much the durable record actually holds (#980).
+//
+// Every other check reads counts and reports ok when they are zero, so a corpus
+// that indexed NOTHING produced the same all-green report as one that indexed
+// everything: `indexing_failures ok 0 failures`, `pending_backlog ok 0 chunks
+// pending`, and no line anywhere stating how many documents exist. That state is
+// reachable by a plain typo — `source.path` pointing at the wrong directory, a
+// symlink, a volume not yet mounted — or by a first scan that died after `up`
+// created meta.sqlite. Every search then returns nothing while the health report
+// says the install is perfect.
+//
+// The ENOENT branches elsewhere already say "no index yet" correctly, but they
+// only fire when meta.sqlite is MISSING. An existing-but-empty database fell
+// straight through to the green path, and that is the case a failed first scan
+// leaves behind.
+func corpusRecordCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
+	const name = "corpus_record"
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no index yet"}
+		}
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("stat %s: %v", metaPath, err)}
+	}
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	sqliteStore, ok := st.(*store.SQLiteStore)
+	if !ok {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: "store is not SQLite-backed; corpus size unavailable"}
+	}
+	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("initialize store: %v", err)}
+	}
+	stats, err := sqliteStore.CorpusStats(ctx)
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
+	}
+	if stats.TotalDocs > 0 {
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
+			"%d document(s) in the record; %d chunk(s), %d embedded",
+			stats.TotalDocs, stats.ChunksTotal, stats.EmbeddedOK)}
+	}
+	// The counts lead on EVERY path, including the empty ones. That is the whole
+	// point of the check: "nothing indexed" must never look like "everything
+	// fine" through a line that is simply absent, and a branch that describes the
+	// situation without stating the numbers reintroduces exactly that gap.
+	//
+	// It also makes one inconsistency visible that no other check names: zero
+	// documents with a non-zero chunk count is a store whose chunks outlived
+	// their documents, and "the record holds no documents" alone would describe
+	// it as merely empty.
+	counts := fmt.Sprintf("%d document(s) and %d chunk(s) in the record",
+		stats.TotalDocs, stats.ChunksTotal)
+	probe := probeRoot(cfg)
+	switch {
+	case !probe.probed:
+		// The record is empty and this check could not look at the source, so it
+		// does not know whether anything SHOULD have been indexed. Saying "the
+		// directory is empty too" here would assert a fact it never established,
+		// which is the bug class this check exists to remove.
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"%s, and the corpus source could not be inspected (%s), "+
+				"so this check cannot tell whether anything should have been indexed. "+
+				"`dir2mcp status` reports what the last run saw.", counts, probe.reason)}
+	case probe.hasEntries:
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"%s, but %s is not empty. Nothing is searchable. "+
+				"Check that source.path points at the corpus you meant, then run `dir2mcp reindex`.",
+			counts, cfg.RootDir)}
+	default:
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: counts + " (the corpus directory is empty too)"}
+	}
+}
+
+// rootProbe is what probeRoot could establish about the corpus source. The
+// three states are kept apart on purpose: "empty", "not empty" and "I could not
+// look" are different answers, and collapsing the third into the first is what
+// lets an empty record over an unreachable mount read as a clean bill.
+type rootProbe struct {
+	hasEntries bool
+	probed     bool
+	// reason explains why the source could not be inspected. Set only when
+	// probed is false.
+	reason string
+}
+
+// probeRoot reports whether the configured root holds at least one entry that is
+// not dir2mcp's own state directory.
+//
+// The state directory is why this is not a one-line check: it lives INSIDE the
+// root by default, so the root is never empty once `up` has run, and a naive
+// probe would warn on every genuinely empty corpus. That is a false alarm on a
+// first run, which is exactly when an operator is least able to tell a real
+// warning from noise. It is skipped only when it really sits in the root, so a
+// state dir configured elsewhere cannot mask a same-named corpus entry.
+//
+// It reads entries in small batches rather than walking, because this runs in a
+// health check over corpora that can be millions of files, and one qualifying
+// entry is all the verdict needs: the question is "did we index nothing from
+// something", not "how much is there". The cap bounds the pathological case of a
+// directory holding only state-dir-named entries.
+//
+// A remote source (nfs/s3) is NOT probed: it cannot be inspected cheaply, and a
+// guess would put an invented fact into a report whose value is that it states
+// only what it knows. An unreadable root is not probed either, for the same
+// reason. Both come back with probed=false and a reason the caller reports.
+func probeRoot(cfg config.Config) rootProbe {
+	if kind := strings.ToLower(strings.TrimSpace(cfg.Source.Kind)); kind != "" && kind != "local" {
+		return rootProbe{reason: fmt.Sprintf("source.kind is %q, which this check does not read", kind)}
+	}
+	root := strings.TrimSpace(cfg.RootDir)
+	if root == "" {
+		return rootProbe{reason: "no corpus path is configured"}
+	}
+	f, err := os.Open(root)
+	if err != nil {
+		return rootProbe{reason: fmt.Sprintf("%s: %v", root, err)}
+	}
+	defer func() { _ = f.Close() }()
+
+	// Only skip the state dir when it actually sits inside the root.
+	skip := ""
+	if state := strings.TrimSpace(cfg.StateDir); state != "" {
+		if abs, absErr := filepath.Abs(state); absErr == nil {
+			if rootAbs, rootErr := filepath.Abs(root); rootErr == nil && filepath.Dir(abs) == rootAbs {
+				skip = filepath.Base(abs)
+			}
+		}
+	}
+
+	for read := 0; read < rootProbeMaxEntries; {
+		names, readErr := f.Readdirnames(rootProbeBatch)
+		for _, name := range names {
+			if name != skip {
+				return rootProbe{hasEntries: true, probed: true}
+			}
+		}
+		read += len(names)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				// The whole directory was read and held nothing but the state
+				// dir: a genuine empty, established rather than assumed.
+				return rootProbe{probed: true}
+			}
+			return rootProbe{reason: fmt.Sprintf("read %s: %v", root, readErr)}
+		}
+		if len(names) == 0 {
+			return rootProbe{probed: true}
+		}
+	}
+	// The cap was hit without finding a non-state entry. Not established either
+	// way, so it is not claimed either way.
+	return rootProbe{reason: fmt.Sprintf("%s holds more than %d entries named like the state directory", root, rootProbeMaxEntries)}
+}
+
+// rootProbeBatch and rootProbeMaxEntries bound the corpus-presence probe. The
+// cap only matters when every entry read so far is the state directory, which
+// takes one batch in practice.
+const (
+	rootProbeBatch      = 32
+	rootProbeMaxEntries = 256
+)
+
+// skippedDocumentsCheck surfaces the durable skips (#980).
+//
+// SkipSummary is read by `status` and `reindex` and by no doctor check, so a
+// corpus with 1,200 files over ingest.max_file_mb and 30 recordings refused for
+// a partial transcript reported an all-green doctor. extraction_coverage catches
+// only the format-class gap, and on a multilingual archive `language_uncovered`
+// is the same silence §7.7 spent three PRs removing for transcripts, reached by
+// a different route.
+func skippedDocumentsCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
+	const name = "skipped_documents"
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no index yet"}
+		}
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("stat %s: %v", metaPath, err)}
+	}
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	sqliteStore, ok := st.(*store.SQLiteStore)
+	if !ok {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: "store is not SQLite-backed; skip aggregation unavailable"}
+	}
+	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: fmt.Sprintf("initialize store: %v", err)}
+	}
+	stats, err := sqliteStore.CorpusStats(ctx)
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusError, Detail: err.Error()}
+	}
+	if stats.SkipSummary == nil || len(stats.SkipSummary.Categories) == 0 {
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no document was recorded as skipped"}
+	}
+	// A warning, not an error: a skip is a decision the daemon already made and
+	// recorded honestly. What was wrong is that doctor never mentioned it.
+	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+		"%d document(s) are recorded as skipped and are NOT searchable: %s. "+
+			"`dir2mcp status` lists examples; the reason names the setting that skipped them.",
+		stats.Skipped, skipReasonBreakdown(stats.SkipSummary.Categories))}
+}
+
+// skipReasonBreakdown renders "reason (n), reason (n)" ordered by count then
+// name, so the dominant reason leads and the line is stable between runs.
+func skipReasonBreakdown(categories map[string]int64) string {
+	reasons := make([]string, 0, len(categories))
+	for reason := range categories {
+		reasons = append(reasons, reason)
+	}
+	sort.Slice(reasons, func(i, j int) bool {
+		if categories[reasons[i]] != categories[reasons[j]] {
+			return categories[reasons[i]] > categories[reasons[j]]
+		}
+		return reasons[i] < reasons[j]
+	})
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		parts = append(parts, fmt.Sprintf("%s (%d)", reason, categories[reason]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // extractionCoverageCheck surfaces the two silent failures behind a corpus
