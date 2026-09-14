@@ -3,8 +3,14 @@ name: Go
 on:
   push:
     branches: [ "main" ]
+  # PRs into a long-lived integration or release branch run the same suite as
+  # PRs into main. Without this, a PR targeting integration/* got exactly one
+  # status check (CodeRabbit, and only since #986) and the whole Go suite was
+  # skipped -- silently, since a PR with one green check looks normal. That is
+  # how integration/rfe-batch came to fail vet, gocyclo and fmt-check at once
+  # with nothing reporting it. The patterns mirror .coderabbit.yaml.
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "integration/**", "release/**" ]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
