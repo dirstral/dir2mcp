@@ -147,9 +147,14 @@ func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.Transcrip
 //
 // Counted in SQL rather than by decoding every transcript's meta_json, because
 // this runs on the `up` banner and an archive holds a transcript per recording.
-// The patterns are the JSON keys as encoded, quotes included: an unquoted
-// `%coverage%` would also match the word in some other field's text and drop a
-// row that genuinely asserts nothing.
+//
+// The patterns match the JSON KEY, colon included, not just the quoted word.
+// `%"coverage"%` would also match the word as a VALUE, and that is reachable
+// rather than theoretical: `track_label` carries the container's track title
+// (§8.6.12) and "coverage" is an ordinary broadcast word, so a track titled
+// "Live coverage" would silently drop its transcript from this count. The meta
+// is produced by encoding/json, which emits `"coverage":` with no space before
+// the colon, so the key form is exact here.
 //
 // Two populations are excluded because neither is a windowed decode and neither
 // could ever carry coverage: a SIDECAR transcript is authored rather than
@@ -165,9 +170,9 @@ func countTranscriptsWithoutCoverage(ctx context.Context, db *sql.DB) (int64, er
 		  AND (r.rep_type = 'transcript'
 		       OR r.rep_type LIKE 'transcript@%'
 		       OR r.rep_type LIKE 'transcript-%')
-		  AND r.meta_json NOT LIKE '%"coverage"%'
+		  AND r.meta_json NOT LIKE '%"coverage":%'
 		  AND r.meta_json NOT LIKE '%"source":"sidecar"%'
-		  AND r.meta_json NOT LIKE '%"translate_provider"%'`).Scan(&n)
+		  AND r.meta_json NOT LIKE '%"translate_provider":%'`).Scan(&n)
 	return n, err
 }
 

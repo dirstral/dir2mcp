@@ -535,3 +535,30 @@ func TestPartialTranscriptCoverage_SilenceThatMeansNothingIsNotCounted(t *testin
 		t.Errorf("no-assertion = %d, want 1 (only the decoded one)", got.NoAssertion)
 	}
 }
+
+func TestPartialTranscriptCoverage_TheWordCoverageInSomeOtherFieldIsNotACoverageRecord(t *testing.T) {
+	// `track_label` carries the container's track title (§8.6.12), and
+	// "coverage" is an ordinary broadcast word. Matching the quoted word rather
+	// than the KEY would read such a transcript as carrying a coverage record
+	// and drop it from the no-assertion count — under-reporting the silent
+	// population, which is the one thing this count exists to get right.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/live.mp4",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
+				`"track_label":"Live coverage","language":"ru"}`},
+		// Same trap on the other two exclusions.
+		seedRep{relPath: "rfe/note.mp4",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
+				`"track_label":"translate_provider"}`},
+	)
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if got.NoAssertion != 2 {
+		t.Errorf("no-assertion = %d, want 2: neither transcript carries a coverage record", got.NoAssertion)
+	}
+}
