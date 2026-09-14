@@ -208,6 +208,10 @@ class Pipeline:
     #: why there is one and what removing it costs (#970). A sentinel of 0 from
     #: the CLI means "no ceiling" and reaches the recognizer as None.
     caption_max_span: float | None = None
+    #: #953. False keeps the cues whose caption describes nothing citable (a
+    #: black, blank or unreadable frame). None keeps the recognizer's default,
+    #: which drops them; see recognizers/caption.UNINFORMATIVE_PHRASES.
+    caption_drop_uninformative: bool | None = None
     fps: float = 0.5
     min_confidence: float = 0.0
 
@@ -356,7 +360,8 @@ class Pipeline:
                 # three-hour cues after another is configured.
                 (self.caption_fn, self.probe_fn, self.caption_fps,
                  self.caption_windows, self.caption_floor_fps,
-                 self.caption_prefix, self.caption_max_span),
+                 self.caption_prefix, self.caption_max_span,
+                 self.caption_drop_uninformative),
                 lambda: SceneCaptionRecognizer(
                     captioner=self.caption_fn,
                     fps=self.caption_fps,
@@ -367,6 +372,8 @@ class Pipeline:
                        else {"prefix": self.caption_prefix}),
                     **({} if self.caption_max_span is None
                        else {"max_span": self.caption_max_span or None}),
+                    **({} if self.caption_drop_uninformative is None
+                       else {"drop_uninformative": self.caption_drop_uninformative}),
                 ),
             )
         if self.news:

@@ -217,6 +217,49 @@ _SCENE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+#: Phrases that mark a caption as describing NOTHING an editor would search for
+#: (#953): a black or blank frame, a picture too degraded to read, a colour-bar
+#: or test card. Measured on the pilot corpus: the caption-gate deploy added
+#: 1,373 scene cues and a share of them were "a completely black screen with no
+#: visible content" or "a heavily pixelated and distorted view". Those are
+#: indexed on their text, so they compete with real moments in retrieval.
+#:
+#: The phrases are DELIBERATELY long. A bare "black" would drop the Apollo 11
+#: corpus whole: every caption of that footage opens "a grainy black-and-white
+#: image shows ..." (#970). Each needle here names a frame with no content,
+#: not a frame that happens to contain a colour word.
+UNINFORMATIVE_PHRASES: tuple[str, ...] = (
+    "black screen",
+    "completely black",
+    "entirely black",
+    "blank screen",
+    "blank frame",
+    "no visible content",
+    "nothing is visible",
+    "no discernible content",
+    "heavily pixelated",
+    "too distorted to",
+    "too blurry to",
+    "unreadable",
+    "colour bars",
+    "color bars",
+    "test pattern",
+    "test card",
+)
+
+
+def scene_is_uninformative(caption: str) -> bool:
+    """True when the caption says the frame shows nothing worth citing (#953).
+
+    Pure and deterministic, like classify_scene, so a fixture pins it without a
+    model. It is only ever CONSULTED for a caption that classify_scene already
+    mapped to scene_other; see SceneCaptionRecognizer for why that ordering is
+    the whole safety argument.
+    """
+    text = " " + re.sub(r"\s+", " ", caption).strip().lower() + " "
+    return any(phrase in text for phrase in UNINFORMATIVE_PHRASES)
+
+
 def _is_probability(value: object) -> bool:
     """True when `value` is a real number in [0, 1].
 
@@ -318,6 +361,7 @@ class SceneCaptionRecognizer:
         claim_threshold: float = CLAIM_THRESHOLD,
         prefix: str = CAPTION_PREFIX,
         max_span: float | None = CAPTION_MAX_SPAN_S,
+        drop_uninformative: bool = True,
     ):
         if captioner is None:
             raise RecognizerUnavailable(
@@ -380,6 +424,16 @@ class SceneCaptionRecognizer:
                 f"for no ceiling, got {max_span!r}"
             )
         self.max_span = None if max_span is None else float(max_span)
+        # #953. A caption that describes nothing produces no cue.
+        #
+        # ON by default, and the safety argument is structural rather than
+        # measured: the rule is consulted ONLY for a caption that classify_scene
+        # already mapped to scene_other, so a caption naming a celebration, a
+        # crowd, the dugout, a replay, a graphic or the field can never be
+        # dropped whatever its wording. That is the issue's acceptance
+        # criterion ("no labelled positive is dropped") satisfied by
+        # construction instead of by a labelled set that does not exist yet.
+        self.drop_uninformative = bool(drop_uninformative)
 
     def _in_window(self, t: float) -> bool:
         if self.windows is None:
@@ -516,6 +570,7 @@ class SceneCaptionRecognizer:
         # anchors each run on its FIRST read, which bounds the run, and it is
         # the same mechanism base.py already documents for ticker text.
         cues: list[Cue] = []
+        dropped = 0
         for cue in collapse_text_sightings(
             sightings,
             source=self.name,
@@ -528,6 +583,19 @@ class SceneCaptionRecognizer:
             # run is labelled by the passage it kept rather than by whichever
             # frame happened to be first.
             event = classify_scene(cue.text)
+            # #953. A caption that describes nothing produces no cue at all.
+            #
+            # The order is the safety argument and must not be inverted: the
+            # drop is gated on the classification ALREADY being scene_other, so
+            # a caption naming a celebration, a crowd, the dugout, a replay, a
+            # graphic or the field survives whatever phrases it also contains.
+            # Checking the phrases first would let "the crowd is barely visible
+            # on a heavily pixelated frame" be discarded, which is exactly the
+            # labelled positive the issue forbids dropping.
+            if (self.drop_uninformative and event == SCENE_OTHER
+                    and scene_is_uninformative(cue.text)):
+                dropped += 1
+                continue
             # #923. An event that ASSERTS something about the people in frame
             # is checked against the frames before it is published. The caption
             # keeps its prose either way: what the gate withdraws is the
@@ -567,6 +635,15 @@ class SceneCaptionRecognizer:
                     # captions, so the marker cannot influence grouping.
                     text=self._prefix + cue.text,
                 )
+            )
+        if dropped:
+            # Said out loud for the same reason the collapse report is (#970):
+            # a rule that silently removes cues is one an operator cannot audit,
+            # and the count is the only way to notice it removing too much.
+            log.info(
+                "caption: %d cue(s) described nothing citable and were dropped "
+                "(black, blank or unreadable frames); --caption-keep-uninformative keeps them",
+                dropped,
             )
         _report_collapse(cues, sorted(t for t, _, _ in sightings), self.max_span)
         return cues
