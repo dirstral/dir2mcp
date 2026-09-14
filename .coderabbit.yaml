@@ -1,0 +1,15 @@
+# CodeRabbit configuration.
+#
+# By default CodeRabbit only auto-reviews pull requests whose BASE is the repository's
+# default branch. Work that stacks on a long-lived integration branch therefore merges
+# with no automated review at all, silently — the PR looks normal, no review appears,
+# and nothing reports that one was skipped.
+#
+# base_branches opts those targets in. Entries are regular expressions matched against
+# the base branch name; `main` stays covered by the default behaviour.
+reviews:
+  auto_review:
+    enabled: true
+    base_branches:
+      - "integration/.*"
+      - "release/.*"
