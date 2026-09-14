@@ -83,7 +83,7 @@ func transcriptCoverageRemedy(_ config.Config, summary model.TranscriptCoverageS
 // identically to the operator deciding whether to trust a search result.
 func (c transcriptCoverage) Summary() string {
 	if !c.Partial() {
-		return "no transcript records an incomplete decode"
+		return "no transcript records an incomplete decode" + c.noAssertionClause()
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d transcript(s) record an incomplete decode", c.Transcripts)
@@ -96,7 +96,32 @@ func (c transcriptCoverage) Summary() string {
 		// shortfall is the silence §7.7 forbids.
 		fmt.Fprintf(&b, "; %d of them have no known duration and are not in that total", c.UnknownDuration)
 	}
+	b.WriteString(c.noAssertionClause())
 	return b.String()
+}
+
+// noAssertionClause names the transcripts that say NOTHING about their coverage,
+// and is empty when there are none (#977).
+//
+// Without it, a corpus holding no coverage records at all gets the same sentence
+// as a corpus that is genuinely whole: "no transcript records an incomplete
+// decode". Every corpus indexed before §8.6.13 existed is in that state, and on
+// the RFE validation corpus it meant a clean-looking verdict over 34 transcripts
+// of which 19 recordings were large enough to be windowed today.
+//
+// It does not say how many of those sit on media that WOULD be windowed now.
+// That number is derivable from `documents.size_bytes` and it is the actionable
+// half, but it is a guess about the CURRENT config inside a report whose whole
+// value is that it states only what the record holds. The operator who wants
+// certainty has `--redecode-partial-transcripts`.
+func (c transcriptCoverage) noAssertionClause() string {
+	if c.NoAssertion <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"; %d transcript(s) assert nothing about coverage (a single-request decode "+
+			"records none, and neither does one indexed before the record existed)",
+		c.NoAssertion)
 }
 
 // humanDuration renders milliseconds as "1h 3m", "3m 20s" or "12s". Whole units
@@ -154,6 +179,10 @@ func (a *App) startupTranscriptCoverage(ctx context.Context, st interface{}, cfg
 // an operator to skip the section. `doctor` is the surface that is ASKED the
 // question, so that is where §7.7's positive statement belongs.
 func printTranscriptCoverageSection(out io.Writer, s styles, cov transcriptCoverage) {
+	// Deliberately keyed on Partial, not on the summary being non-empty: the
+	// #977 no-assertion count is not a defect, and a section that appeared on
+	// every start of every pre-§8.6.13 corpus would be noise an operator learns
+	// to skip. doctor is the surface that is ASKED, and it carries the clause.
 	if !cov.Partial() {
 		return
 	}
@@ -161,6 +190,21 @@ func printTranscriptCoverageSection(out io.Writer, s styles, cov transcriptCover
 	writeln(out, s.kv("Partial", cov.Summary()))
 	writeln(out, s.kv("Fix", cov.Remedy))
 	writeln(out)
+}
+
+// RenderTranscriptCoverageSectionForTest runs the banner's ACTUAL path for the
+// corpus behind st — compute the verdict, then render the section — and returns
+// exactly what the banner would have written.
+//
+// It exists because asserting the probe's count is not the same claim as
+// asserting what the banner prints, and the README documents the latter. A test
+// over the count alone would keep passing if the section started rendering for a
+// verdict that is not partial.
+func (a *App) RenderTranscriptCoverageSectionForTest(ctx context.Context, st interface{}, cfg config.Config) string {
+	cov := a.startupTranscriptCoverage(ctx, st, cfg, upOptions{}, io.Discard)
+	var out strings.Builder
+	printTranscriptCoverageSection(&out, a.sty(false), cov)
+	return out.String()
 }
 
 // StartupTranscriptCoverageForTest exposes the banner's probe to the external

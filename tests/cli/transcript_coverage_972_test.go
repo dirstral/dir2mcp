@@ -440,3 +440,213 @@ func TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall(t *testing.
 		t.Errorf("duration = %d, want %d (counted once)", got.DurationMS, rfeDurationMS)
 	}
 }
+
+// #977. A corpus that asserts nothing read exactly like a clean one: both got
+// "no transcript records an incomplete decode". Every corpus indexed before
+// §8.6.13 existed is in that state, and §5.2 makes an absent field "no
+// assertion", never a positive value.
+
+func TestTranscriptCoverage_ACorpusThatAssertsNothingSaysSo(t *testing.T) {
+	// The real RFE shape: decoded transcripts, not one coverage record between
+	// them, because they were indexed before the record existed.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/a.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+		seedRep{relPath: "rfe/b.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+	)
+	_ = st.Close()
+
+	check, ok := doctorCheckNamed(t, dir, "transcript_coverage")
+	if !ok {
+		t.Fatalf("doctor has no transcript_coverage check")
+	}
+	// Still ok: an unknown is not a known defect, and a corpus of short
+	// single-request decodes is genuinely fine.
+	if check.Status != "ok" {
+		t.Errorf("status = %q, want ok: a no-assertion count is not a defect", check.Status)
+	}
+	if !strings.Contains(check.Detail, "2 transcript(s) assert nothing about coverage") {
+		t.Errorf("the silent population is not named: %q", check.Detail)
+	}
+}
+
+func TestTranscriptCoverage_ACleanCorpusStillReadsClean(t *testing.T) {
+	// The clause must not appear when every transcript asserts, or it becomes
+	// the noise it was added to remove.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/complete.mp4",
+		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
+	_ = st.Close()
+
+	check, _ := doctorCheckNamed(t, dir, "transcript_coverage")
+	if strings.Contains(check.Detail, "assert nothing") {
+		t.Errorf("a fully asserting corpus got the clause: %q", check.Detail)
+	}
+	if check.Detail != "no transcript records an incomplete decode" {
+		t.Errorf("detail = %q, want the bare clean verdict", check.Detail)
+	}
+}
+
+func TestTranscriptCoverage_TheClauseRidesAlongsideAKnownShortfall(t *testing.T) {
+	// The two populations are independent: a corpus can hold a known partial
+	// AND transcripts that say nothing, and the report must not drop either.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/partial.mp4",
+			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
+		seedRep{relPath: "rfe/silent.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+	)
+	_ = st.Close()
+
+	check, _ := doctorCheckNamed(t, dir, "transcript_coverage")
+	if check.Status != "warn" {
+		t.Errorf("status = %q, want warn: there is a known shortfall", check.Status)
+	}
+	if !strings.Contains(check.Detail, "1 transcript(s) record an incomplete decode") {
+		t.Errorf("the known shortfall is missing: %q", check.Detail)
+	}
+	if !strings.Contains(check.Detail, "1 transcript(s) assert nothing") {
+		t.Errorf("the silent one is missing: %q", check.Detail)
+	}
+}
+
+func TestPartialTranscriptCoverage_SilenceThatMeansNothingIsNotCounted(t *testing.T) {
+	// A sidecar is AUTHORED, not decoded, and a translation derives from another
+	// transcript's text. Neither could ever carry coverage, so counting their
+	// silence would inflate the number with rows whose absence says nothing
+	// about any decode.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/decoded.mp4",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+		seedRep{relPath: "rfe/authored.mp4", repType: "transcript",
+			metaJSON: `{"source":"sidecar","language":"ru"}`},
+		seedRep{relPath: "rfe/decoded.mp4", repType: "transcript-en",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
+				`"translate_provider":"openai","translate_model":"gpt-4o"}`},
+	)
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if got.NoAssertion != 1 {
+		t.Errorf("no-assertion = %d, want 1 (only the decoded one)", got.NoAssertion)
+	}
+}
+
+func TestPartialTranscriptCoverage_TheWordCoverageInSomeOtherFieldIsNotACoverageRecord(t *testing.T) {
+	// `track_label` carries the container's track title (§8.6.12), and
+	// "coverage" is an ordinary broadcast word. Matching the quoted word rather
+	// than the KEY would read such a transcript as carrying a coverage record
+	// and drop it from the no-assertion count — under-reporting the silent
+	// population, which is the one thing this count exists to get right.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/live.mp4",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
+				`"track_label":"Live coverage","language":"ru"}`},
+		// Same trap on the other two exclusions.
+		seedRep{relPath: "rfe/note.mp4",
+			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
+				`"track_label":"translate_provider"}`},
+	)
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if got.NoAssertion != 2 {
+		t.Errorf("no-assertion = %d, want 2: neither transcript carries a coverage record", got.NoAssertion)
+	}
+}
+
+func TestPartialTranscriptCoverage_WhitespaceAroundTheKeyIsStillACoverageRecord(t *testing.T) {
+	// A LIKE on `"coverage":` encodes an assumption about the writer's
+	// formatting. JSON permits a space before the colon, and a document written
+	// that way asserts coverage exactly as much as one written without it.
+	// Reading it as "no record" would under-report the very number this count
+	// exists to make honest.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/spaced.mp4",
+		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
+			`"coverage" : {"windows_attempted":4,"windows_decoded":4,` +
+			`"decoded_ms":2400000,"duration_ms":2400000}}`})
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if got.NoAssertion != 0 {
+		t.Errorf("no-assertion = %d, want 0: the record is there, just spaced", got.NoAssertion)
+	}
+	if got.Transcripts != 0 {
+		t.Errorf("transcripts = %d, want 0: it states completeness", got.Transcripts)
+	}
+}
+
+func TestPartialTranscriptCoverage_AnUnreadableMetaIsCountedAsAssertingNothing(t *testing.T) {
+	// json_extract raises on a document it cannot parse, so each test is guarded
+	// by json_valid. A row that fails the guard is counted: it certainly carries
+	// no coverage record, and it cannot be shown to be a sidecar or translation
+	// either, so dropping it would be the same silence this count removes.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir,
+		seedRep{relPath: "rfe/broken.mp4", metaJSON: `{"coverage": not json`},
+		seedRep{relPath: "rfe/empty.mp4", metaJSON: ``},
+	)
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PartialTranscriptCoverage(context.Background())
+	if err != nil {
+		t.Fatalf("one unreadable row must not fail the report: %v", err)
+	}
+	if got.NoAssertion != 2 {
+		t.Errorf("no-assertion = %d, want 2", got.NoAssertion)
+	}
+}
+
+func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T) {
+	// Pins what the README states, on the banner's ACTUAL output rather than on
+	// the probe's count: a corpus whose transcripts merely assert nothing
+	// produces no Speech coverage section, and only `doctor` names them.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/silent.mp4",
+		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`})
+	defer func() { _ = st.Close() }()
+
+	cfg := config.Config{StateDir: filepath.Join(dir, ".dir2mcp")}
+	app := cli.NewAppWithIO(io.Discard, io.Discard)
+	if got := app.RenderTranscriptCoverageSectionForTest(context.Background(), st, cfg); got != "" {
+		t.Errorf("the banner rendered a section for a no-assertion-only corpus:\n%s", got)
+	}
+
+	// doctor still names them, which is the half the README points at.
+	_ = st.Close()
+	check, _ := doctorCheckNamed(t, dir, "transcript_coverage")
+	if !strings.Contains(check.Detail, "assert nothing about coverage") {
+		t.Errorf("doctor must still name them: %q", check.Detail)
+	}
+}
+
+func TestStartupBanner_AKnownShortfallDoesRenderTheSection(t *testing.T) {
+	// The other side of the same claim: without this, a section that never
+	// rendered at all would satisfy the test above.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/partial.mp4",
+		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
+	defer func() { _ = st.Close() }()
+
+	cfg := config.Config{StateDir: filepath.Join(dir, ".dir2mcp")}
+	app := cli.NewAppWithIO(io.Discard, io.Discard)
+	got := app.RenderTranscriptCoverageSectionForTest(context.Background(), st, cfg)
+	if !strings.Contains(got, "Speech coverage") {
+		t.Errorf("a known shortfall rendered no section:\n%s", got)
+	}
+	if !strings.Contains(got, "incomplete decode") {
+		t.Errorf("the section does not state the shortfall:\n%s", got)
+	}
+}
