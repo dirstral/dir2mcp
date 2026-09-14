@@ -126,6 +126,13 @@ func (a *App) runUpAsDaemonParent(ctx context.Context, opts upOptions) int {
 		// and will bind shortly, so report it as a friendly success instead
 		// of the scary bind-failure path.
 		if IsDaemonStillStarting(err) {
+			// Deliberately no §7.7 coverage here, and the README says so. This
+			// path returns while the child is still building the store, so any
+			// verdict would describe a corpus that does not exist yet — and
+			// "no uncovered formats" read off a half-built record is the kind
+			// of false clean bill §7.7 exists to prevent. The operator is
+			// pointed at the log, and the next `up` or `doctor` reports for
+			// real.
 			a.reportDaemonStillStarting(childPid, logPath, opts)
 			return exitSuccess
 		}
@@ -346,4 +353,11 @@ func (a *App) printDaemonCoverage(ctx context.Context, s styles, cfg config.Conf
 func (a *App) RenderDaemonReadyForTest(ctx context.Context, cfg config.Config) {
 	a.printDaemonReady(ctx, cfg, cfg.StateDir+"/server.log", 4242,
 		connectionPayload{URL: "http://127.0.0.1:8765/mcp"}, upOptions{})
+}
+
+// ReportDaemonStillStartingForTest exposes the still-starting notice to the
+// external tests package, so the §7.7 pairing can assert that this path emits
+// no coverage rather than leaving that to a comment.
+func (a *App) ReportDaemonStillStartingForTest(pid int, logPath string) {
+	a.reportDaemonStillStarting(pid, logPath, upOptions{})
 }

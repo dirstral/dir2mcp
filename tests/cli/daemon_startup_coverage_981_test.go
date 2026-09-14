@@ -62,3 +62,29 @@ func TestDaemonReady_ACleanCorpusKeepsTheBannerShort(t *testing.T) {
 		t.Errorf("the banner is missing its ready line:\n%s", got)
 	}
 }
+
+func TestDaemonReady_TheStillStartingPathReportsNoCoverage(t *testing.T) {
+	// A run that returns while the daemon is still starting prints no coverage,
+	// and the README says so. Any verdict there would describe a corpus the
+	// child has not finished building, and "no uncovered formats" read off a
+	// half-built record is the false clean bill §7.7 exists to prevent.
+	//
+	// Asserted through the banner renderer that path does NOT reach: if the
+	// coverage ever moved above the readiness wait, printDaemonReady would no
+	// longer be the only place it renders and this pairing would need revisiting.
+	dir := t.TempDir()
+	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/interview.mp4",
+		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
+	_ = st.Close()
+
+	var stdout, stderr strings.Builder
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	cfg := config.Config{StateDir: filepath.Join(dir, ".dir2mcp")}
+
+	// The still-starting path prints its own notice and returns; nothing it
+	// writes carries a coverage section.
+	app.ReportDaemonStillStartingForTest(4242, filepath.Join(cfg.StateDir, "server.log"))
+	if got := stdout.String() + stderr.String(); strings.Contains(got, "Speech coverage") {
+		t.Errorf("the still-starting notice carried a coverage section:\n%s", got)
+	}
+}
