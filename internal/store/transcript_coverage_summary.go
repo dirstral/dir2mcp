@@ -148,13 +148,19 @@ func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.Transcrip
 // Counted in SQL rather than by decoding every transcript's meta_json, because
 // this runs on the `up` banner and an archive holds a transcript per recording.
 //
-// The patterns match the JSON KEY, colon included, not just the quoted word.
-// `%"coverage"%` would also match the word as a VALUE, and that is reachable
-// rather than theoretical: `track_label` carries the container's track title
-// (§8.6.12) and "coverage" is an ordinary broadcast word, so a track titled
-// "Live coverage" would silently drop its transcript from this count. The meta
-// is produced by encoding/json, which emits `"coverage":` with no space before
-// the colon, so the key form is exact here.
+// The membership tests are SQLite JSON1 functions, not LIKE patterns. A LIKE has
+// to encode an assumption about how the writer formatted the document, and both
+// spellings of that assumption are wrong in a way that UNDER-reports:
+// `%"coverage"%` also matches the word as a VALUE (`track_label` carries the
+// container's track title per §8.6.12, and "coverage" is an ordinary broadcast
+// word), while `%"coverage":%` misses a document that puts a space before the
+// colon. json_extract asks the question that is actually meant.
+//
+// Each test is guarded by json_valid, because json_extract raises on a document
+// it cannot parse and one unreadable row must not fail a startup banner. A row
+// whose meta cannot be read is COUNTED here: it certainly carries no coverage
+// record, and it cannot be shown to be a sidecar or a translation either, so
+// excluding it would be the same silence this count exists to remove.
 //
 // Two populations are excluded because neither is a windowed decode and neither
 // could ever carry coverage: a SIDECAR transcript is authored rather than
@@ -170,9 +176,9 @@ func countTranscriptsWithoutCoverage(ctx context.Context, db *sql.DB) (int64, er
 		  AND (r.rep_type = 'transcript'
 		       OR r.rep_type LIKE 'transcript@%'
 		       OR r.rep_type LIKE 'transcript-%')
-		  AND r.meta_json NOT LIKE '%"coverage":%'
-		  AND r.meta_json NOT LIKE '%"source":"sidecar"%'
-		  AND r.meta_json NOT LIKE '%"translate_provider":%'`).Scan(&n)
+		  AND NOT (json_valid(r.meta_json) AND json_extract(r.meta_json, '$.coverage') IS NOT NULL)
+		  AND NOT (json_valid(r.meta_json) AND json_extract(r.meta_json, '$.source') = 'sidecar')
+		  AND NOT (json_valid(r.meta_json) AND json_extract(r.meta_json, '$.translate_provider') IS NOT NULL)`).Scan(&n)
 	return n, err
 }
 
