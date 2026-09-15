@@ -146,7 +146,7 @@ func TestGenerate_OtherBadRequestDoesNotRetry_958(t *testing.T) {
 		calls++
 		mu.Unlock()
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model."}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"Unsupported parameter: 'logprobs' is not supported with this model."}}`))
 	}))
 	t.Cleanup(srv.Close)
 	c := openai.NewClient(srv.URL+"/v1", "k")
@@ -154,7 +154,7 @@ func TestGenerate_OtherBadRequestDoesNotRetry_958(t *testing.T) {
 	if err == nil {
 		t.Fatal("a 400 naming another parameter must surface")
 	}
-	if !strings.Contains(err.Error(), "temperature") {
+	if !strings.Contains(err.Error(), "logprobs") {
 		t.Fatalf("error must name the real cause, got %v", err)
 	}
 	// The request count is the assertion that matters: retrying an unrelated 400
@@ -229,13 +229,13 @@ func TestGenerate_UnrelatedRejectionNamingTheCapDoesNotFlip_959(t *testing.T) {
 		{
 			// The real shape, with the structured param OpenAI sends.
 			name: "structured param names another parameter",
-			body: `{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"temperature","code":"unsupported_parameter"}}`,
+			body: `{"error":{"message":"Unsupported parameter: 'logprobs' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"logprobs","code":"unsupported_parameter"}}`,
 		},
 		{
 			// Same sentence from a server that sends no param at all, so only
 			// the phrase binding can save it.
 			name: "no structured param, cap named only as the remedy",
-			body: `{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model. Use 'max_completion_tokens' instead."}}`,
+			body: `{"error":{"message":"Unsupported parameter: 'logprobs' is not supported with this model. Use 'max_completion_tokens' instead."}}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
