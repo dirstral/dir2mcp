@@ -142,9 +142,16 @@ func TestHintsSkipsExonymsAndCommonNouns(t *testing.T) {
 	}
 	// a real surname that merely starts like an exonym is still hinted: matching on a
 	// bare prefix silently ate Венедиктов ("вен"), Литвиненко ("литв"), Богданов ("бог")
-	for _, s := range []string{"сказал Венедиктов вчера", "сказал Литвиненко вчера", "сказал Богданов вчера"} {
-		if got := translit.Hints(s); len(got) != 1 {
-			t.Errorf("Hints(%q) = %v, want the surname hinted", s, got)
+	for _, tc := range []struct{ input, word string }{
+		{"сказал Венедиктов вчера", "Венедиктов"},
+		{"сказал Литвиненко вчера", "Литвиненко"},
+		{"сказал Богданов вчера", "Богданов"},
+	} {
+		got := translit.Hints(tc.input)
+		// The complete word, not a count: a prefix regression would still
+		// yield exactly one hint, a truncated one ("Вен -> Ven").
+		if len(got) != 1 || !strings.HasPrefix(got[0], tc.word+" -> ") {
+			t.Errorf("Hints(%q) = %v, want the complete surname %q hinted", tc.input, got, tc.word)
 		}
 	}
 }
@@ -157,7 +164,7 @@ func TestHintsExtendedCyrillic(t *testing.T) {
 			t.Errorf("pinned a truncated name: %v", h)
 		}
 	}
-	if s := translit.Transliterate("Өмүрбек"); strings.ContainsAny(s, "өүқғңәұһ") {
+	if s := translit.Transliterate("Өмүрбек"); translit.HasCyrillic(s) {
 		t.Errorf("Transliterate(Өмүрбек) = %q, want fully transliterated", s)
 	}
 }
