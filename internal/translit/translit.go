@@ -232,8 +232,11 @@ const nameJoiners = "'’-"
 // sentenceEnders are the characters after which a capital signals sentence case rather
 // than a name. Dash-led dialogue is routine in subtitles ("— Привет, Иван"), and
 // quotation marks, colons and ellipses open sentences too; without them an ordinary
-// word gets pinned as a name.
-const sentenceEnders = ".!?…:;—–«»\"'()"
+// word gets pinned as a name. The closing bracket ends a "[00:00]" timestamp
+// marker, after which the line starts. A digit (a bare "00:00" marker, a list
+// number) ends a sentence the same way and is checked alongside this set. The
+// comma is deliberately absent: "Привет, Иван" continues the sentence.
+const sentenceEnders = ".!?…:;—–«»\"'()]"
 
 // maxNameHints bounds the prompt growth on a name-dense line. Six covers the
 // realistic worst case (a list of officials) without crowding out the text itself.
@@ -310,7 +313,7 @@ func Hints(text string) []string {
 				continue
 			}
 			last := []rune(before)[len([]rune(before))-1]
-			if strings.ContainsRune(sentenceEnders, last) {
+			if strings.ContainsRune(sentenceEnders, last) || unicode.IsDigit(last) {
 				continue
 			}
 		}

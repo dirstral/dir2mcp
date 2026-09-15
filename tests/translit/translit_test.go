@@ -289,3 +289,23 @@ func TestIsRussianSource(t *testing.T) {
 		}
 	}
 }
+
+// A capital right after a timestamp marker opens the sentence (CodeRabbit
+// finding on #985): "[00:00] Студентам" emitted "Студентам -> Studentam". The
+// closing bracket and a trailing digit ("00:00 Студентам", "1. Студентам") are
+// sentence boundaries. A comma is not: "Привет, Иван" keeps its name.
+func TestHints_ACapitalAfterATimestampMarkerIsSentenceCase(t *testing.T) {
+	for _, s := range []string{
+		"[00:00] Студентам университета имени Сеченова об этом объявили",
+		"00:00 Студентам университета имени Сеченова об этом объявили",
+		"1. Студентам университета имени Сеченова об этом объявили",
+	} {
+		got := translit.Hints(s)
+		if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
+			t.Errorf("Hints(%q) = %v, want only the genitive surname", s, got)
+		}
+	}
+	if got := translit.Hints("Привет, Иван"); len(got) != 1 || got[0] != "Иван -> Ivan" {
+		t.Errorf("a comma must not hide a name: %v", got)
+	}
+}

@@ -416,6 +416,12 @@ func TestTranscriptTranslation_NameHintsInPrompt(t *testing.T) {
 			if hasHint != tc.wantHint {
 				t.Errorf("hint present = %v, want %v\nprompt:\n%s", hasHint, tc.wantHint, got)
 			}
+			// The first word of the line is sentence case, not a name, whatever
+			// precedes it (the [00:00] marker here). Pinning it would put
+			// "Studentam" into a prompt that says "use exactly these".
+			if strings.Contains(got, "Студентам ->") {
+				t.Errorf("the sentence-initial word was pinned as a name:\n%s", got)
+			}
 			if !tc.wantHint && strings.Contains(got, "spellings") {
 				t.Errorf("hints off should leave the prompt unchanged:\n%s", got)
 			}
