@@ -166,3 +166,56 @@ func srtToMS(hh, mm, ss, mmm string) int {
 	}
 	return ((atoi(hh)*60+atoi(mm))*60+atoi(ss))*1000 + atoi(mmm)
 }
+
+// TestExportBroadcastReflowsChunkWithoutWordTimings pins the third broadcast
+// path: a transcript with NO per-word timings. There is nothing to re-segment
+// from, so the stored chunk cues are reflowed into broadcast-legible cues using
+// the segment span, rather than emitted verbatim as one unreadable cue. This is
+// the path a line-by-line chat translation takes, where the translator returns
+// text with no word-level timing at all.
+func TestExportBroadcastReflowsChunkWithoutWordTimings(t *testing.T) {
+	const (
+		startMS = 1000
+		endMS   = 21000
+	)
+	text := strings.TrimSpace(strings.Repeat(
+		"we have submitted a formal request to the ministry and expect an answer ", 4))
+
+	tmp := t.TempDir()
+	seedTranscriptChunks(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3",
+		[]seedChunk{{text, startMS, endMS}})
+	cfgYAML := strings.Join([]string{
+		"media:",
+		"  subtitles:",
+		"    segmentation: broadcast",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(tmp, ".dir2mcp.yaml"), []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		if code := app.RunWithContext(context.Background(),
+			[]string{"export", "--format", "srt", "media/talk.mp3"}); code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+		}
+	})
+	out := stdout.String()
+
+	if cues := countSRTCues(t, out); cues < 4 {
+		t.Fatalf("a 20 s chunk with no word timings should reflow into several cues; got %d:\n%s",
+			cues, out)
+	}
+	assertBroadcastCaps(t, out)
+
+	// Reflow must stay inside the source segment: it redistributes the chunk's
+	// own span, it does not invent time outside it.
+	for _, m := range srtTimingRE.FindAllStringSubmatch(out, -1) {
+		start, end := srtToMS(m[1], m[2], m[3], m[4]), srtToMS(m[5], m[6], m[7], m[8])
+		if start < startMS || end > endMS {
+			t.Errorf("reflowed cue %d-%d ms falls outside the source span %d-%d ms",
+				start, end, startMS, endMS)
+		}
+	}
+}
