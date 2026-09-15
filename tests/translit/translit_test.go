@@ -355,3 +355,20 @@ func TestHintPairs_KeyIsTheNominative(t *testing.T) {
 		t.Errorf("Hints = %v, want the rendered pair", got)
 	}
 }
+
+// A capital that opens a new line is sentence case (CodeRabbit finding on the
+// main port): "текст\nПрезидент заявил" emitted "Президент -> Prezident". The
+// boundary check trims spaces and tabs only, so the newline is the last rune
+// before the word and must count as a sentence ender, in both line-break forms.
+func TestHints_ACapitalAfterALineBreakIsSentenceCase(t *testing.T) {
+	for _, s := range []string{"текст\nПрезидент заявил", "текст\r\nПрезидент заявил", "текст\n  Президент заявил"} {
+		if got := translit.Hints(s); len(got) != 0 {
+			t.Errorf("Hints(%q) = %v, want none: the word opens a line", s, got)
+		}
+	}
+	// The same word mid-line is still a candidate, so the fix is about the
+	// boundary, not the word.
+	if got := translit.Hints("сказал Иван\nи ушёл"); len(got) != 1 || got[0] != "Иван -> Ivan" {
+		t.Errorf("a name before the line break must keep its hint: %v", got)
+	}
+}
