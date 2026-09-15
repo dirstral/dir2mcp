@@ -2,6 +2,7 @@ package tests
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,7 +97,9 @@ func TestMediaSubtitlesSegmentation_NestedYAMLApplies(t *testing.T) {
 }
 
 // TestMediaSubtitles_RoundTrip pins SaveFile/LoadFile round-trip of the new
-// keys so the snapshot faithfully persists an enabled config.
+// keys so the snapshot faithfully persists an enabled config. One table row per
+// key: the row's value is set on the saved config and compared on the loaded
+// one, so adding a key is one line and a failure names the key that drifted.
 func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".dir2mcp.yaml")
@@ -122,32 +125,25 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	if !loaded.MediaSubtitlesTTMLEnabled || !loaded.MediaSubtitlesSMILEnabled {
-		t.Fatalf("enabled flags did not round-trip: %+v", loaded)
-	}
-	if loaded.MediaSubtitlesTTMLAlignToleranceMS != 1800 {
-		t.Fatalf("align tolerance = %d, want 1800", loaded.MediaSubtitlesTTMLAlignToleranceMS)
-	}
-	if loaded.MediaSubtitlesSegmentation != "broadcast" {
-		t.Fatalf("segmentation did not round-trip: %q", loaded.MediaSubtitlesSegmentation)
-	}
-	if len(loaded.MediaSubtitlesGlossary) != 1 || loaded.MediaSubtitlesGlossary[0] != "Aju?bei=>Adzhubei" {
-		t.Fatalf("glossary did not round-trip: %#v", loaded.MediaSubtitlesGlossary)
-	}
-	if len(loaded.MediaSubtitlesDropPhrases) != 1 || loaded.MediaSubtitlesDropPhrases[0] != "Донбасс|Крым|НАТО" {
-		t.Fatalf("drop_phrases did not round-trip: %#v", loaded.MediaSubtitlesDropPhrases)
-	}
-	if len(loaded.MediaSubtitlesScrubPhrases) != 1 || loaded.MediaSubtitlesScrubPhrases[0] != `Крым,?\s*НАТО` {
-		t.Fatalf("scrub_phrases did not round-trip: %#v", loaded.MediaSubtitlesScrubPhrases)
-	}
-	if loaded.MediaSubtitlesExpectScript != "cyrillic" {
-		t.Fatalf("expect_script did not round-trip: %q", loaded.MediaSubtitlesExpectScript)
-	}
-	if loaded.MediaSubtitlesCollapseRepeats != 3 {
-		t.Fatalf("collapse_repeats = %d, want 3", loaded.MediaSubtitlesCollapseRepeats)
-	}
-	if !loaded.MediaSubtitlesDropURLs {
-		t.Fatalf("drop_urls did not round-trip")
+	for _, tc := range []struct {
+		key  string
+		want any
+		got  any
+	}{
+		{"ttml.enabled", true, loaded.MediaSubtitlesTTMLEnabled},
+		{"smil.enabled", true, loaded.MediaSubtitlesSMILEnabled},
+		{"ttml.align_tolerance_ms", 1800, loaded.MediaSubtitlesTTMLAlignToleranceMS},
+		{"segmentation", "broadcast", loaded.MediaSubtitlesSegmentation},
+		{"glossary", []string{"Aju?bei=>Adzhubei"}, loaded.MediaSubtitlesGlossary},
+		{"drop_phrases", []string{"Донбасс|Крым|НАТО"}, loaded.MediaSubtitlesDropPhrases},
+		{"scrub_phrases", []string{`Крым,?\s*НАТО`}, loaded.MediaSubtitlesScrubPhrases},
+		{"expect_script", "cyrillic", loaded.MediaSubtitlesExpectScript},
+		{"collapse_repeats", 3, loaded.MediaSubtitlesCollapseRepeats},
+		{"drop_urls", true, loaded.MediaSubtitlesDropURLs},
+	} {
+		if !reflect.DeepEqual(tc.got, tc.want) {
+			t.Errorf("media.subtitles.%s did not round-trip: got %#v, want %#v", tc.key, tc.got, tc.want)
+		}
 	}
 }
 
