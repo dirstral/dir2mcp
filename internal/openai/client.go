@@ -101,6 +101,14 @@ type Client struct {
 	// current OpenAI parameter first and only falls back when a server refuses
 	// it by name. Atomic: one Client serves concurrent embed/generate workers.
 	capName atomic.Int32
+	// temperatureRefused remembers that this endpoint rejects the temperature
+	// parameter by name (some hosted reasoning models do). A fresh client sends
+	// temperature 0 on every generation; after one refusal it drops the field
+	// for the rest of the client's life, so determinism is kept wherever it IS
+	// supported and one probe is spent per client rather than one per request.
+	// Bound to the parameter the same way the cap fallback is (#959): a 400 that
+	// merely mentions the word does not flip it.
+	temperatureRefused atomic.Bool
 	// DefaultEmbedModel/DefaultChatModel/DefaultSTTModel/DefaultTTSModel/
 	// DefaultTTSVoice are used when the corresponding call is made with
 	// an empty value.
@@ -333,6 +341,15 @@ type generateRequest struct {
 	Messages            []generateMessage `json:"messages"`
 	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
 	MaxTokens           int               `json:"max_tokens,omitempty"`
+	// Temperature is pinned to 0 rather than left to the provider default so a
+	// derived representation is REPRODUCIBLE: the same transcript translated
+	// twice yields the same text. Left to the server, a local OpenAI-compatible
+	// endpoint samples at its own default (ollama: 0.8), and on the pilot corpus
+	// two runs of an unmodified archive disagreed on 96.7% of subtitle cues,
+	// which makes a delivery impossible to reproduce and swamps any A/B
+	// comparison in sampling noise. A pointer with omitempty because some hosted
+	// reasoning models refuse the parameter outright; see temperatureRefused.
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 type generateResponse struct {
@@ -396,13 +413,7 @@ func (c *Client) generate(ctx context.Context, prompt string, maxTokensOverride 
 			}
 		}
 		text, err := c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
-		if unsupportedCapParam(err, capModern) {
-			// An OpenAI-compatible server that predates the rename. Retry once
-			// under the legacy name and remember it for this client, so one
-			// probe is spent per client rather than one per request.
-			c.capName.Store(int32(capLegacy))
-			text, err = c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, capLegacy)
-		}
+		text, err = c.retryRefusedParams(ctx, chatModel, prompt, maxTokens, timeout, text, err)
 		if err == nil {
 			return text, nil
 		}
@@ -413,6 +424,27 @@ func (c *Client) generate(ctx context.Context, prompt string, maxTokensOverride 
 		}
 	}
 	return "", lastErr
+}
+
+// retryRefusedParams turns a 400 that refuses one of the client's own request
+// parameters BY NAME into one retry without it, remembering the refusal for
+// the client's life so each probe is spent once per client, not once per
+// request. Two parameters can be refused: the modern completion-cap spelling
+// (an OpenAI-compatible server that predates the rename, #958) and the pinned
+// temperature (some hosted reasoning models). Each is checked in turn, so an
+// endpoint that refuses both gets an answer after two probes. Any other
+// error, and the retry's own error, pass through unchanged into the caller's
+// retryability check.
+func (c *Client) retryRefusedParams(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration, text string, err error) (string, error) {
+	if unsupportedCapParam(err, capModern) {
+		c.capName.Store(int32(capLegacy))
+		text, err = c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, capLegacy)
+	}
+	if !c.temperatureRefused.Load() && unsupportedParam(err, "temperature") {
+		c.temperatureRefused.Store(true)
+		text, err = c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
+	}
+	return text, err
 }
 
 func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration) (string, error) {
@@ -435,11 +467,12 @@ const (
 	capLegacy                          // max_tokens
 )
 
-// capRejectionPhrase matches a rejection bound DIRECTLY to the parameter that
+// paramRejectionPhrase matches a rejection bound DIRECTLY to the parameter that
 // follows it, for servers that do not return a structured `param`. The name must
-// be the thing being refused, not merely a word in the sentence.
-var capRejectionPhrase = regexp.MustCompile(
-	`(?i)(?:unsupported|unrecognized|unknown|invalid|extra)[ _-]*(?:parameter|argument|field|input)?s?\s*[:\s]\s*['\"]?(max_completion_tokens|max_tokens)\b`)
+// be the thing being refused, not merely a word in the sentence; the caller
+// compares the captured name with the parameter it sent.
+var paramRejectionPhrase = regexp.MustCompile(
+	`(?i)(?:unsupported|unrecognized|unknown|invalid|extra)[ _-]*(?:parameter|argument|field|input)?s?\s*[:\s]\s*['\"]?([a-z_]+)\b`)
 
 // errorParam pulls `error.param` out of an OpenAI-shaped error body. httpError
 // puts the whole response body in Message, so the structured field is still
@@ -477,18 +510,26 @@ func errorParam(msg string) string {
 //  3. Otherwise no retry. A server whose wording matches neither simply gets no
 //     fallback, and the operator sees the real 400 instead of a silent reroute.
 func unsupportedCapParam(err error, sent completionCapName) bool {
-	var pErr *model.ProviderError
-	if !errors.As(err, &pErr) || pErr.StatusCode != http.StatusBadRequest {
-		return false
-	}
 	name := "max_completion_tokens"
 	if sent == capLegacy {
 		name = "max_tokens"
 	}
+	return unsupportedParam(err, name)
+}
+
+// unsupportedParam reports whether err is a 400 in which the provider refuses
+// the named request parameter ITSELF: `error.param` names it when the body is
+// structured, otherwise the rejection phrase must be followed by the name. Any
+// other error, and any 400 that merely mentions the word, is not a refusal.
+func unsupportedParam(err error, name string) bool {
+	var pErr *model.ProviderError
+	if !errors.As(err, &pErr) || pErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
 	if param := errorParam(pErr.Message); param != "" {
 		return strings.EqualFold(param, name)
 	}
-	m := capRejectionPhrase.FindStringSubmatch(pErr.Message)
+	m := paramRejectionPhrase.FindStringSubmatch(pErr.Message)
 	return len(m) == 2 && strings.EqualFold(m[1], name)
 }
 
@@ -501,6 +542,10 @@ func (c *Client) generateOnceWithCapName(ctx context.Context, chatModel, prompt 
 		req.MaxTokens = maxTokens
 	} else {
 		req.MaxCompletionTokens = maxTokens
+	}
+	if !c.temperatureRefused.Load() {
+		zero := 0.0
+		req.Temperature = &zero
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
