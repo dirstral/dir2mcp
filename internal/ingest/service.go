@@ -1407,8 +1407,8 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 }
 
 // captionCleanOptions builds the shared ingest-time cue cleaning from
-// media.subtitles.{drop_urls,drop_phrases,scrub_phrases,collapse_repeats}
-// (issues #545, #765). The same options clean STT transcript chunks, translated
+// media.subtitles.{drop_urls,expect_script,drop_phrases,scrub_phrases,collapse_repeats}
+// (issues #545, #765; SPEC §8.6.3). The same options clean STT transcript chunks, translated
 // transcript chunks and sidecar-cue chunks before embedding, and they are the
 // SAME subtitle.CleanOptions shape the export path builds (cli.newCuePipeline),
 // so a hallucinated URL, a wholly-spam chunk or a repetition run is neither
@@ -1432,8 +1432,13 @@ func (s *Service) captionCleanOptions() subtitle.CleanOptions {
 	if err != nil {
 		s.getLogger().Printf("media.subtitles.scrub_phrases invalid at ingest, ignoring: %v", err)
 	}
+	script, err := subtitle.NewScriptGuard(s.cfg.MediaSubtitlesExpectScript)
+	if err != nil {
+		s.getLogger().Printf("media.subtitles.expect_script invalid at ingest, ignoring: %v", err)
+	}
 	return subtitle.CleanOptions{
 		DropURLs:        s.cfg.MediaSubtitlesDropURLs,
+		Script:          script,
 		Drop:            drop,
 		Scrub:           scrub,
 		CollapseRepeats: s.cfg.MediaSubtitlesCollapseRepeats,

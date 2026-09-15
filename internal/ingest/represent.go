@@ -1324,6 +1324,9 @@ func applyWordFilterToSegments(segs []chunkSegment, filter *subtitle.WordFilter)
 //     after a scrub, an excision could remove the very token that identified the
 //     segment as a credit line, so the same segment would be dropped on export
 //     and kept in the index.
+//   - expect_script second, also on the ORIGINAL text: a scrub could remove the
+//     one expected-script word that made a mixed-script segment survive, so the
+//     verdict must be made before anything is excised, as export does.
 //   - drop_phrases before scrub_phrases: a wholly-spam segment must be dropped
 //     outright rather than scrubbed down to a punctuation husk that then reads
 //     as an empty-but-present cue.
@@ -1372,6 +1375,9 @@ func cleanSegment(seg chunkSegment, opts subtitle.CleanOptions) (chunkSegment, b
 		return seg, false
 	}
 	if opts.DropURLs && subtitle.IsURLCue(seg.Text) {
+		return seg, false
+	}
+	if opts.Script.IsForeign(seg.Text) {
 		return seg, false
 	}
 	if opts.Drop.IsSpam(seg.Text) {

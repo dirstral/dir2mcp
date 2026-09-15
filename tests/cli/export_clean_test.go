@@ -13,10 +13,16 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// seedCleanExportStore seeds a transcript exercising every cue-cleaning pass: a
-// name to be rewritten by the glossary, a long identical run to collapse, a URL
-// hallucination to drop, and ordinary speech that must survive.
-func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
+// seedChunk is one time-coded transcript chunk for seedTranscriptChunks.
+type seedChunk struct {
+	text  string
+	start int
+	end   int
+}
+
+// seedTranscriptChunks seeds a transcript document with the given time-coded
+// chunks, the minimal store state the export command needs.
+func seedTranscriptChunks(t *testing.T, stateDir, relPath string, chunks []seedChunk) {
 	t.Helper()
 	ctx := context.Background()
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -43,21 +49,6 @@ func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
 		if err != nil {
 			return err
 		}
-		chunks := []struct {
-			text  string
-			start int
-			end   int
-		}{
-			{"Letter signed by Ajubei", 0, 2000}, // glossary -> Adzhubei
-			{"No.", 2000, 3000},                  // run of 4 identical "No."
-			{"No.", 3000, 4000},
-			{"No.", 4000, 5000},                           // 3rd -> dropped (threshold 3)
-			{"No.", 5000, 6000},                           // 4th -> dropped
-			{"Subtitles by www.spam.com", 6000, 8000},     // URL -> dropped
-			{"Crimea, NATO.", 8000, 9000},                 // phrase-only -> dropped by drop_phrases
-			{"Crimea, NATO. Genuine words.", 9000, 10000}, // leaked phrase -> scrubbed, sentence kept
-			{"Real closing line", 10000, 11000},
-		}
 		for i, c := range chunks {
 			if _, err := tx.InsertChunkWithSpans(ctx,
 				model.Chunk{RepID: repID, Ordinal: i, Text: c.text, IndexKind: "text"},
@@ -70,6 +61,88 @@ func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
 	})
 	if err != nil {
 		t.Fatalf("seed transcript: %v", err)
+	}
+}
+
+// seedCleanExportStore seeds a transcript exercising every cue-cleaning pass: a
+// name to be rewritten by the glossary, a long identical run to collapse, a URL
+// hallucination to drop, and ordinary speech that must survive.
+func seedCleanExportStore(t *testing.T, stateDir, relPath string) {
+	t.Helper()
+	seedTranscriptChunks(t, stateDir, relPath, []seedChunk{
+		{"Letter signed by Ajubei", 0, 2000}, // glossary -> Adzhubei
+		{"No.", 2000, 3000},                  // run of 4 identical "No."
+		{"No.", 3000, 4000},
+		{"No.", 4000, 5000},                           // 3rd -> dropped (threshold 3)
+		{"No.", 5000, 6000},                           // 4th -> dropped
+		{"Subtitles by www.spam.com", 6000, 8000},     // URL -> dropped
+		{"Crimea, NATO.", 8000, 9000},                 // phrase-only -> dropped by drop_phrases
+		{"Crimea, NATO. Genuine words.", 9000, 10000}, // leaked phrase -> scrubbed, sentence kept
+		{"Real closing line", 10000, 11000},
+	})
+}
+
+// TestExportDropsForeignScriptCues pins the media.subtitles.expect_script path
+// end-to-end (SPEC §8.6.3): with a Cyrillic track configured, an all-Latin
+// gibberish cue is dropped while Cyrillic speech, a mixed-script cue and a
+// digit-bearing cue all survive; with no expect_script the gibberish cue is
+// exported unchanged; with an unknown script name the command fails as
+// CONFIG_INVALID instead of exporting with the filter silently off.
+func TestExportDropsForeignScriptCues(t *testing.T) {
+	seed := func(t *testing.T, tmp string) {
+		t.Helper()
+		seedTranscriptChunks(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", []seedChunk{
+			{"Elola alolo.", 0, 1000},            // wrong-script gibberish
+			{"Обычная речь.", 1000, 2000},        // expected script
+			{"Смотрите на YouTube.", 2000, 3000}, // mixed scripts survives
+			{"COVID-19.", 3000, 4000},            // digit guard survives
+		})
+	}
+	run := func(t *testing.T, cfgYAML string) (int, string, string) {
+		t.Helper()
+		tmp := t.TempDir()
+		seed(t, tmp)
+		if cfgYAML != "" {
+			if err := os.WriteFile(filepath.Join(tmp, ".dir2mcp.yaml"), []byte(cfgYAML), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+		}
+		var stdout, stderr bytes.Buffer
+		app := cli.NewAppWithIO(&stdout, &stderr)
+		var code int
+		withWorkingDir(t, tmp, func() {
+			code = app.RunWithContext(context.Background(), []string{"export", "--format", "srt", "media/talk.mp3"})
+		})
+		return code, stdout.String(), stderr.String()
+	}
+
+	code, out, stderr := run(t, "media:\n  subtitles:\n    expect_script: cyrillic\n")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr)
+	}
+	if strings.Contains(out, "Elola alolo.") {
+		t.Errorf("wrong-script cue not dropped:\n%s", out)
+	}
+	for _, want := range []string{"Обычная речь.", "Смотрите на YouTube.", "COVID-19."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("cue %q missing from export:\n%s", want, out)
+		}
+	}
+
+	code, out, stderr = run(t, "")
+	if code != 0 {
+		t.Fatalf("unconfigured exit = %d, stderr=%s", code, stderr)
+	}
+	if !strings.Contains(out, "Elola alolo.") {
+		t.Errorf("unconfigured export dropped the cue:\n%s", out)
+	}
+
+	code, out, stderr = run(t, "media:\n  subtitles:\n    expect_script: klingon\n")
+	if code == 0 {
+		t.Fatalf("an unknown script name must fail the command, got exit 0 with output:\n%s", out)
+	}
+	if !strings.Contains(stderr, "expect_script") || !strings.Contains(stderr, "klingon") {
+		t.Errorf("the error must name the key and the bad value: %s", stderr)
 	}
 }
 

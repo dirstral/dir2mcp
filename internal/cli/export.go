@@ -95,10 +95,10 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 // cuePipeline is the single cue-preparation pipeline every subtitle format
 // renders through: the media.filter_words word filter followed by the
 // media.subtitles.* editorial cleaning passes (glossary, drop_phrases,
-// scrub_phrases, collapse_repeats, drop_urls).
+// scrub_phrases, collapse_repeats, drop_urls, expect_script).
 //
-// Four of the five cleaning keys (drop_urls, drop_phrases, scrub_phrases,
-// collapse_repeats) are ALSO applied at ingest, before chunks are embedded
+// Five of the six cleaning keys (drop_urls, expect_script, drop_phrases,
+// scrub_phrases, collapse_repeats) are ALSO applied at ingest, before chunks are embedded
 // (issues #545, #765), from the same subtitle.CleanOptions shape this builds.
 // Re-running them here is deliberate rather than redundant: under broadcast
 // segmentation the cues are rebuilt finer than the stored chunks, and a corpus
@@ -138,10 +138,15 @@ func newCuePipeline(cfg config.Config) (cuePipeline, error) {
 	if err != nil {
 		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.scrub_phrases: %w", err)
 	}
+	script, err := subtitle.NewScriptGuard(cfg.MediaSubtitlesExpectScript)
+	if err != nil {
+		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.expect_script: %w", err)
+	}
 	return cuePipeline{
 		filter: subtitle.NewWordFilter(cfg.MediaFilterWords),
 		clean: subtitle.CleanOptions{
 			DropURLs:        cfg.MediaSubtitlesDropURLs,
+			Script:          script,
 			Drop:            drop,
 			Scrub:           scrub,
 			CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
