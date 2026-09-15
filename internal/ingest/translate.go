@@ -34,7 +34,7 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 	// identity change misses without reading another derivation's bytes. The
 	// TranscriptLangSuffix is retained on the filename so cache files stay
 	// human-identifiable by language.
-	base := s.translateCacheKey(content, sourceText, targetLang) + TranscriptLangSuffix(targetLang)
+	base := s.translateCacheKey(content, sourceText, sourceLang, targetLang) + TranscriptLangSuffix(targetLang)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
@@ -96,6 +96,20 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, sourc
 // translation only (no preamble), which the trim downstream normalizes.
 // sourceLang is the transcript's resolved source language ("" when unknown); it
 // gates the name hints, which only exist for a Russian source.
+// translateNameHintsActive reports whether the proper-noun spelling hints can
+// appear in the translation prompt for this source/target pair. It is the single
+// gate shared by prompt construction and the translation cache key, so a cached
+// translation can never have been produced under a different prompt shape.
+//
+// Whether any hint actually fires additionally depends on the line containing
+// Cyrillic, which is fully determined by the source transcript — already folded
+// into the cache key — so it is deliberately not part of this predicate.
+func (s *Service) translateNameHintsActive(sourceLang, targetLang string) bool {
+	return s.translateNameHints &&
+		translit.IsRussianSource(sourceLang) &&
+		translit.IsEnglishTarget(targetLang)
+}
+
 func (s *Service) translateLine(ctx context.Context, text, sourceLang, targetLang string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -107,7 +121,7 @@ func (s *Service) translateLine(ctx context.Context, text, sourceLang, targetLan
 	// for the same name (fr "Chtcherbak", de "Schtscherbak"). An unknown source
 	// ("" from auto-detect) is not assumed to be Russian.
 	var hints []string
-	if s.translateNameHints && translit.IsRussianSource(sourceLang) && translit.IsEnglishTarget(targetLang) && translit.HasCyrillic(text) {
+	if s.translateNameHintsActive(sourceLang, targetLang) && translit.HasCyrillic(text) {
 		hints = translit.Hints(text)
 	}
 	prompt := buildTranslatePrompt(text, targetLang, hints)
