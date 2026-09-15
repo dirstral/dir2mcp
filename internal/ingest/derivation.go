@@ -367,7 +367,7 @@ func (s *Service) activeTranslateIdentity(targetLang string) string {
 // transcript, the cached translation of the OLD text is stale and must miss. When
 // no translate provider/model is resolved the historical bytes+text-only key is
 // preserved.
-func (s *Service) translateCacheKey(content []byte, sourceText, targetLang string) string {
+func (s *Service) translateCacheKey(content []byte, sourceText, sourceLang, targetLang string) string {
 	parts := []string{
 		computeContentHash(content),
 		computeContentHash([]byte(sourceText)),
@@ -380,6 +380,15 @@ func (s *Service) translateCacheKey(content []byte, sourceText, targetLang strin
 		// targets never collide on the no-identity path.
 		parts = append(parts, strings.ToLower(strings.TrimSpace(targetLang)))
 	}
+	// The name-hint augmentation rewrites the prompt, so a key that ignored it
+	// would serve an un-hinted translation after the feature is switched on (and
+	// the reverse). It is folded as a single flag rather than as the raw source
+	// language because the source language reaches the prompt ONLY through this
+	// gate: relabelling a source that cannot take hints leaves the prompt
+	// byte-identical, and must keep hitting the existing cache entry.
+	if s.translateNameHintsActive(sourceLang, targetLang) {
+		parts = append(parts, "namehints")
+	}
 	combined := strings.Join(parts, "\x00")
 	return computeContentHash([]byte(combined))
 }
@@ -389,8 +398,8 @@ func (s *Service) translateCacheKey(content []byte, sourceText, targetLang strin
 // asserted directly — in particular that a provider, model, or target-language
 // change yields a distinct key (no cross-identity bleed) while the same identity
 // over the same source yields a stable key (cross-corpus reuse).
-func (s *Service) TranslateCacheKey(content []byte, sourceText, targetLang string) string {
-	return s.translateCacheKey(content, sourceText, targetLang)
+func (s *Service) TranslateCacheKey(content []byte, sourceText, sourceLang, targetLang string) string {
+	return s.translateCacheKey(content, sourceText, sourceLang, targetLang)
 }
 
 // derivationIdentity builds the canonical, order-stable derivation-identity

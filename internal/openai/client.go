@@ -259,6 +259,17 @@ type generateMessage struct {
 type generateRequest struct {
 	Model    string            `json:"model"`
 	Messages []generateMessage `json:"messages"`
+	// Temperature is pinned rather than left to the provider default so generation is
+	// REPRODUCIBLE. Without it a provider picks its own default (ollama uses 0.8), and
+	// re-running the same input rewrites nearly all of the output -- measured: 96.7% of
+	// subtitle cues changed between two runs of an unmodified corpus, which makes a
+	// delivery impossible to reproduce and swamps any A/B comparison in sampling noise.
+	//
+	// A POINTER with omitempty: some hosted reasoning models reject the parameter
+	// outright ("Unsupported value: 'temperature'"), and this client is shared by every
+	// Generate() caller, so an unconditional field would turn a working deployment into
+	// a hard failure. Sent by default, dropped and retried once if rejected.
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 type generateResponse struct {
@@ -290,15 +301,31 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	}
 
 	var lastErr error
+	omitTemperature := false
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if err := c.wait(ctx, c.backoffForAttempt(attempt-1)); err != nil {
 				return "", err
 			}
 		}
-		text, err := c.generateOnce(ctx, chatModel, prompt, timeout)
+		text, err := c.generateOnce(ctx, chatModel, prompt, timeout, omitTemperature)
 		if err == nil {
 			return text, nil
+		}
+		// A model that rejects the pinned temperature would otherwise fail every
+		// generation: drop the parameter and retry once, keeping determinism wherever
+		// it IS supported.
+		if !omitTemperature && isUnsupportedTemperature(err) {
+			omitTemperature = true
+			// Assign to err rather than a shadowed variable: if the retry fails for an
+			// unrelated reason (rate limit, 5xx) that error must flow into the normal
+			// retryability check below. Discarding it left the original non-retryable
+			// temperature error in place, which returned immediately and bypassed
+			// MaxRetries while reporting the wrong cause.
+			text, err = c.generateOnce(ctx, chatModel, prompt, timeout, true)
+			if err == nil {
+				return text, nil
+			}
 		}
 		lastErr = err
 		var pErr *model.ProviderError
@@ -309,11 +336,25 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	return "", lastErr
 }
 
-func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, timeout time.Duration) (string, error) {
-	body, err := json.Marshal(generateRequest{
+// isUnsupportedTemperature reports whether an error is the provider rejecting the
+// temperature parameter itself, as opposed to any other bad request.
+func isUnsupportedTemperature(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "temperature") &&
+		(strings.Contains(msg, "unsupported") || strings.Contains(msg, "not supported") ||
+			strings.Contains(msg, "unrecognized") || strings.Contains(msg, "does not support"))
+}
+
+func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, timeout time.Duration, omitTemperature bool) (string, error) {
+	req := generateRequest{
 		Model:    chatModel,
 		Messages: []generateMessage{{Role: "user", Content: prompt}},
-	})
+	}
+	if !omitTemperature {
+		zero := 0.0
+		req.Temperature = &zero
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to marshal generation request", Retryable: false, Cause: err}
 	}

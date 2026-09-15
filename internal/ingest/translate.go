@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/translit"
 )
 
 // readOrComputeTranslation returns the source transcript translated into
@@ -15,7 +17,7 @@ import (
 // re-calling the chat provider (SPEC §8.6.2 caching parity with the transcript
 // cache). The cache is keyed by source content, not target text, because the
 // same source media always yields the same translation for a given target.
-func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, sourceText, targetLang string) (string, error) {
+func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, sourceText, sourceLang, targetLang string) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "translate")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("create translate cache dir: %w", err)
@@ -32,13 +34,13 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 	// identity change misses without reading another derivation's bytes. The
 	// TranscriptLangSuffix is retained on the filename so cache files stay
 	// human-identifiable by language.
-	base := s.translateCacheKey(content, sourceText, targetLang) + TranscriptLangSuffix(targetLang)
+	base := s.translateCacheKey(content, sourceText, sourceLang, targetLang) + TranscriptLangSuffix(targetLang)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
 
-	translated, err := s.translateTranscriptText(ctx, sourceText, targetLang)
+	translated, err := s.translateTranscriptText(ctx, sourceText, sourceLang, targetLang)
 	if err != nil {
 		return "", err
 	}
@@ -57,7 +59,7 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 // same time spans for the translated transcript as for the source. Lines are
 // translated segment-by-segment via the chat Generator; a line with no timestamp
 // marker is translated as-is (its leading-marker, if any, is empty).
-func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targetLang string) (string, error) {
+func (s *Service) translateTranscriptText(ctx context.Context, sourceText, sourceLang, targetLang string) (string, error) {
 	lines := strings.Split(sourceText, "\n")
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -66,7 +68,7 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 			continue
 		}
 		marker, body := splitTimestampMarker(line)
-		translatedBody, err := s.translateLine(ctx, body, targetLang)
+		translatedBody, err := s.translateLine(ctx, body, sourceLang, targetLang)
 		if err != nil {
 			return "", err
 		}
@@ -92,12 +94,37 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 // the chat Generator. Empty/whitespace input short-circuits to empty so the chat
 // provider is never called for a marker-only line. The prompt asks for the
 // translation only (no preamble), which the trim downstream normalizes.
-func (s *Service) translateLine(ctx context.Context, text, targetLang string) (string, error) {
+// sourceLang is the transcript's resolved source language ("" when unknown); it
+// gates the name hints, which only exist for a Russian source.
+// translateNameHintsActive reports whether the proper-noun spelling hints can
+// appear in the translation prompt for this source/target pair. It is the single
+// gate shared by prompt construction and the translation cache key, so a cached
+// translation can never have been produced under a different prompt shape.
+//
+// Whether any hint actually fires additionally depends on the line containing
+// Cyrillic, which is fully determined by the source transcript — already folded
+// into the cache key — so it is deliberately not part of this predicate.
+func (s *Service) translateNameHintsActive(sourceLang, targetLang string) bool {
+	return s.translateNameHints &&
+		translit.IsRussianSource(sourceLang) &&
+		translit.IsEnglishTarget(targetLang)
+}
+
+func (s *Service) translateLine(ctx context.Context, text, sourceLang, targetLang string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", nil
 	}
-	prompt := buildTranslatePrompt(text, targetLang)
+	// Russian source, English target only. The tables are the Russian BGN/PCGN
+	// set, so a Ukrainian source would get Volodimir for Volodymyr pinned as "use
+	// exactly this", and another target language would lose its own convention
+	// for the same name (fr "Chtcherbak", de "Schtscherbak"). An unknown source
+	// ("" from auto-detect) is not assumed to be Russian.
+	var hints []string
+	if s.translateNameHintsActive(sourceLang, targetLang) && translit.HasCyrillic(text) {
+		hints = translit.Hints(text)
+	}
+	prompt := buildTranslatePrompt(text, targetLang, hints)
 	translated, err := s.translator.Generate(ctx, prompt)
 	if err != nil {
 		return "", err
@@ -109,12 +136,23 @@ func (s *Service) translateLine(ctx context.Context, text, targetLang string) (s
 // prompt. It pins the TARGET language only (the source language is auto-detected
 // by the model, matching SPEC §8.6.2's auto-detection default) and instructs the
 // model to return the translation alone so the output needs no post-parsing.
-func buildTranslatePrompt(text, targetLang string) string {
+func buildTranslatePrompt(text, targetLang string, nameHints []string) string {
 	var b strings.Builder
 	b.WriteString("Translate the following text into ")
 	b.WriteString(targetLang)
 	b.WriteString(". Preserve meaning faithfully. Return only the translated text, ")
-	b.WriteString("with no preamble, quotes, or explanation.\n\n")
+	b.WriteString("with no preamble, quotes, or explanation.\n")
+	// Pin proper-noun spellings BEFORE the model sees the text. Left to itself the
+	// model regenerates a name rather than transliterating it, which is the dominant
+	// named-entity error; naming the expected spelling up front prevents it instead of
+	// trying to detect and repair it afterwards. Omitted entirely when there are no
+	// hints, so the prompt is byte-identical to before for non-Cyrillic sources.
+	if len(nameHints) > 0 {
+		b.WriteString("Use exactly these spellings for the names that appear: ")
+		b.WriteString(strings.Join(nameHints, "; "))
+		b.WriteString(".\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(text)
 	return b.String()
 }

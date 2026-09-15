@@ -343,3 +343,88 @@ func TestTranscriptTranslation_ValidationRejectsEmptyTargets(t *testing.T) {
 		t.Fatalf("translation off must be valid, got %v", err)
 	}
 }
+
+// promptCapturingTranslator records every prompt it is asked to translate, so a test
+// can assert what the model was actually told.
+type promptCapturingTranslator struct {
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (p *promptCapturingTranslator) Generate(_ context.Context, prompt string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.prompts = append(p.prompts, prompt)
+	parts := strings.Split(prompt, "\n\n")
+	return "translated:" + parts[len(parts)-1], nil
+}
+
+func (p *promptCapturingTranslator) all() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return strings.Join(p.prompts, "\n---\n")
+}
+
+// TestTranscriptTranslation_NameHintsInPrompt pins the end-to-end effect of
+// media.translate.name_hints: with it ON the translation prompt carries the pinned
+// spelling for a proper noun, and with it OFF the prompt is unchanged. The model
+// otherwise REGENERATES names rather than transliterating them, which is the dominant
+// named-entity error.
+func TestTranscriptTranslation_NameHintsInPrompt(t *testing.T) {
+	t.Parallel()
+	const line = "[00:00] Студентам университета имени Сеченова об этом объявили"
+
+	for _, tc := range []struct {
+		name       string
+		enabled    bool
+		sourceLang string
+		wantHint   bool
+	}{
+		{"hints on, Russian source", true, "ru", true},
+		{"hints on, regional Russian tag", true, "ru-RU", true},
+		{"hints off", false, "ru", false},
+		// The tables are Russian BGN/PCGN. A Ukrainian source would get
+		// Volodimir pinned where the Ukrainian rules give Volodymyr, so a
+		// non-Russian source gets no hints (CodeRabbit finding on #985).
+		{"hints on, Ukrainian source", true, "uk", false},
+		// Auto-detect leaves the source language empty. Unknown is not Russian.
+		{"hints on, unknown source", true, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &fakeIngestStore{}
+			svc := mustNewIngestService(t, config.Config{
+				StateDir:                  t.TempDir(),
+				MediaTranslateNameHints:   tc.enabled,
+				MediaTranslateEnabled:     true,
+				MediaTranslateTargetLangs: []string{"en"},
+			}, st)
+			svc.SetTranscriber(&fakeTranscriber{text: line})
+			svc.SetTranscriptLanguage(tc.sourceLang)
+			tr := &promptCapturingTranslator{}
+			svc.SetTranslator(tr, "mistral", "m", []string{"en"})
+
+			doc := model.Document{DocID: 11, RelPath: "audio/ru.mp3", DocType: "audio"}
+			if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio")); err != nil {
+				t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+			}
+
+			got := tr.all()
+			if got == "" {
+				t.Fatal("translator was never called")
+			}
+			hasHint := strings.Contains(got, "Сеченова -> Sechenov")
+			if hasHint != tc.wantHint {
+				t.Errorf("hint present = %v, want %v\nprompt:\n%s", hasHint, tc.wantHint, got)
+			}
+			// The first word of the line is sentence case, not a name, whatever
+			// precedes it (the [00:00] marker here). Pinning it would put
+			// "Studentam" into a prompt that says "use exactly these".
+			if strings.Contains(got, "Студентам ->") {
+				t.Errorf("the sentence-initial word was pinned as a name:\n%s", got)
+			}
+			if !tc.wantHint && strings.Contains(got, "spellings") {
+				t.Errorf("hints off should leave the prompt unchanged:\n%s", got)
+			}
+		})
+	}
+}
