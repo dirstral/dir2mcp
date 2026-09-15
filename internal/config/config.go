@@ -2867,38 +2867,31 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 // setIngestStringFileScalar assigns ingest mode and STT string keys
 // onto the fileConfig.
 func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
-	switch key {
-	case "ingest.pdf.mode":
-		cfg.IngestPDFMode = strPtr(value)
-	case "ingest.images.mode":
-		cfg.IngestImagesMode = strPtr(value)
-	case "ingest.audio.mode":
-		cfg.IngestAudioMode = strPtr(value)
-	case "ingest.archives.mode":
-		cfg.IngestArchivesMode = strPtr(value)
-	case "ingest.extractor":
-		cfg.IngestExtractor = strPtr(value)
-	case "index.backend":
-		cfg.IndexBackend = strPtr(value)
-	case "stt.provider":
-		cfg.STTProvider = strPtr(value)
-	case "stt.mistral.model":
-		cfg.STTMistralModel = strPtr(value)
-	case "stt.elevenlabs.model":
-		cfg.STTElevenLabsModel = strPtr(value)
-	case "stt.elevenlabs.language_code":
-		cfg.STTElevenLabsLanguageCode = strPtr(value)
-	case "media.variants.select":
-		cfg.MediaVariantsSelect = strPtr(value)
-	case "media.translate.engine":
-		cfg.MediaTranslateEngine = strPtr(value)
-	case "media.subtitles.segmentation":
-		cfg.MediaSubtitlesSegmentation = strPtr(value)
-	case "media.subtitles.expect_script":
-		cfg.MediaSubtitlesExpectScript = strPtr(value)
-	case "media.batch.manifest":
-		cfg.MediaBatchManifest = strPtr(value)
+	if field, ok := ingestStringFileFields[key]; ok {
+		*field(cfg) = strPtr(value)
 	}
+}
+
+// ingestStringFileFields maps a dotted config key to the *string pointer field it
+// sets on fileConfig. A table rather than a switch, so adding a key is one line
+// and does not push the setter past the complexity limit; an unknown key is a
+// no-op exactly as the switch's missing default was.
+var ingestStringFileFields = map[string]func(*fileConfig) **string{
+	"ingest.pdf.mode":               func(c *fileConfig) **string { return &c.IngestPDFMode },
+	"ingest.images.mode":            func(c *fileConfig) **string { return &c.IngestImagesMode },
+	"ingest.audio.mode":             func(c *fileConfig) **string { return &c.IngestAudioMode },
+	"ingest.archives.mode":          func(c *fileConfig) **string { return &c.IngestArchivesMode },
+	"ingest.extractor":              func(c *fileConfig) **string { return &c.IngestExtractor },
+	"index.backend":                 func(c *fileConfig) **string { return &c.IndexBackend },
+	"stt.provider":                  func(c *fileConfig) **string { return &c.STTProvider },
+	"stt.mistral.model":             func(c *fileConfig) **string { return &c.STTMistralModel },
+	"stt.elevenlabs.model":          func(c *fileConfig) **string { return &c.STTElevenLabsModel },
+	"stt.elevenlabs.language_code":  func(c *fileConfig) **string { return &c.STTElevenLabsLanguageCode },
+	"media.variants.select":         func(c *fileConfig) **string { return &c.MediaVariantsSelect },
+	"media.translate.engine":        func(c *fileConfig) **string { return &c.MediaTranslateEngine },
+	"media.subtitles.segmentation":  func(c *fileConfig) **string { return &c.MediaSubtitlesSegmentation },
+	"media.subtitles.expect_script": func(c *fileConfig) **string { return &c.MediaSubtitlesExpectScript },
+	"media.batch.manifest":          func(c *fileConfig) **string { return &c.MediaBatchManifest },
 }
 
 // setX402StringFileScalar assigns x402 string keys onto the fileConfig;
@@ -3935,38 +3928,42 @@ func validateSQLIdentifier(field, ident string) error {
 // validateNumericBounds rejects negative session/health durations, RAG,
 // chunking, and ingest size values.
 func (c *Config) validateNumericBounds() error {
-	if c.SessionInactivityTimeout < 0 {
-		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
+	// Table-driven on purpose, and in the ORIGINAL order: when several fields
+	// are negative the first one listed is the one named in the error, and a
+	// test that pins that message must keep passing. The two tables carry the
+	// two verb formats the fields used (%v for a Duration, %d for an int); the
+	// "(0 = client default)" suffix is part of the message for the two fields
+	// that had it, not a table-wide convention.
+	durations := []struct {
+		name string
+		v    time.Duration
+	}{
+		{"session_inactivity_timeout", c.SessionInactivityTimeout},
+		{"session_max_lifetime", c.SessionMaxLifetime},
+		{"health_check_interval", c.HealthCheckInterval},
+		{"ingest.watch_debounce", c.IngestWatchDebounce},
 	}
-	if c.SessionMaxLifetime < 0 {
-		return fmt.Errorf("session_max_lifetime must be non-negative: %v", c.SessionMaxLifetime)
+	for _, d := range durations {
+		if d.v < 0 {
+			return fmt.Errorf("%s must be non-negative: %v", d.name, d.v)
+		}
 	}
-	if c.HealthCheckInterval < 0 {
-		return fmt.Errorf("health_check_interval must be non-negative: %v", c.HealthCheckInterval)
+	ints := []struct {
+		name string
+		v    int
+	}{
+		{"media.stt.max_payload_mb must be non-negative (0 = client default)", c.MediaSTTMaxPayloadMB},
+		{"media.stt.request_timeout_sec must be non-negative (0 = client default)", c.MediaSTTRequestTimeoutSec},
+		{"rag.max_context_chars must be non-negative", c.RAGMaxContextChars},
+		{"rag.k_default must be non-negative", c.RAGKDefault},
+		{"rag.oversample_factor must be non-negative", c.RAGOversampleFactor},
+		{"chunking.max_tokens must be non-negative", c.ChunkingMaxTokens},
+		{"chunking.overlap_tokens must be non-negative", c.ChunkingOverlapTokens},
 	}
-	if c.IngestWatchDebounce < 0 {
-		return fmt.Errorf("ingest.watch_debounce must be non-negative: %v", c.IngestWatchDebounce)
-	}
-	if c.MediaSTTMaxPayloadMB < 0 {
-		return fmt.Errorf("media.stt.max_payload_mb must be non-negative (0 = client default): %d", c.MediaSTTMaxPayloadMB)
-	}
-	if c.MediaSTTRequestTimeoutSec < 0 {
-		return fmt.Errorf("media.stt.request_timeout_sec must be non-negative (0 = client default): %d", c.MediaSTTRequestTimeoutSec)
-	}
-	if c.RAGMaxContextChars < 0 {
-		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
-	}
-	if c.RAGKDefault < 0 {
-		return fmt.Errorf("rag.k_default must be non-negative: %d", c.RAGKDefault)
-	}
-	if c.RAGOversampleFactor < 0 {
-		return fmt.Errorf("rag.oversample_factor must be non-negative: %d", c.RAGOversampleFactor)
-	}
-	if c.ChunkingMaxTokens < 0 {
-		return fmt.Errorf("chunking.max_tokens must be non-negative: %d", c.ChunkingMaxTokens)
-	}
-	if c.ChunkingOverlapTokens < 0 {
-		return fmt.Errorf("chunking.overlap_tokens must be non-negative: %d", c.ChunkingOverlapTokens)
+	for _, n := range ints {
+		if n.v < 0 {
+			return fmt.Errorf("%s: %d", n.name, n.v)
+		}
 	}
 	// Relational guard (#405): an overlap >= the window size produces chunks
 	// that never advance (or run backwards), so reject it. Only enforced when
@@ -3978,10 +3975,7 @@ func (c *Config) validateNumericBounds() error {
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
 	}
-	if err := c.validateRetrievalNumericBounds(); err != nil {
-		return err
-	}
-	return nil
+	return c.validateRetrievalNumericBounds()
 }
 
 // validateRetrievalNumericBounds validates the retrieval-tuning numeric knobs —

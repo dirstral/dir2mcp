@@ -2,6 +2,7 @@ package tests
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -122,32 +123,26 @@ func TestMediaSubtitles_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	if !loaded.MediaSubtitlesTTMLEnabled || !loaded.MediaSubtitlesSMILEnabled {
-		t.Fatalf("enabled flags did not round-trip: %+v", loaded)
-	}
-	if loaded.MediaSubtitlesTTMLAlignToleranceMS != 1800 {
-		t.Fatalf("align tolerance = %d, want 1800", loaded.MediaSubtitlesTTMLAlignToleranceMS)
-	}
-	if loaded.MediaSubtitlesSegmentation != "broadcast" {
-		t.Fatalf("segmentation did not round-trip: %q", loaded.MediaSubtitlesSegmentation)
-	}
-	if len(loaded.MediaSubtitlesGlossary) != 1 || loaded.MediaSubtitlesGlossary[0] != "Aju?bei=>Adzhubei" {
-		t.Fatalf("glossary did not round-trip: %#v", loaded.MediaSubtitlesGlossary)
-	}
-	if len(loaded.MediaSubtitlesDropPhrases) != 1 || loaded.MediaSubtitlesDropPhrases[0] != "Донбасс|Крым|НАТО" {
-		t.Fatalf("drop_phrases did not round-trip: %#v", loaded.MediaSubtitlesDropPhrases)
-	}
-	if len(loaded.MediaSubtitlesScrubPhrases) != 1 || loaded.MediaSubtitlesScrubPhrases[0] != `Крым,?\s*НАТО` {
-		t.Fatalf("scrub_phrases did not round-trip: %#v", loaded.MediaSubtitlesScrubPhrases)
-	}
-	if loaded.MediaSubtitlesExpectScript != "cyrillic" {
-		t.Fatalf("expect_script did not round-trip: %q", loaded.MediaSubtitlesExpectScript)
-	}
-	if loaded.MediaSubtitlesCollapseRepeats != 3 {
-		t.Fatalf("collapse_repeats = %d, want 3", loaded.MediaSubtitlesCollapseRepeats)
-	}
-	if !loaded.MediaSubtitlesDropURLs {
-		t.Fatalf("drop_urls did not round-trip")
+	// One table, compared with DeepEqual, so every field that must survive the
+	// round trip is a line here rather than its own if-block.
+	for _, f := range []struct {
+		name      string
+		got, want any
+	}{
+		{"ttml.enabled", loaded.MediaSubtitlesTTMLEnabled, true},
+		{"smil.enabled", loaded.MediaSubtitlesSMILEnabled, true},
+		{"ttml.align_tolerance_ms", loaded.MediaSubtitlesTTMLAlignToleranceMS, 1800},
+		{"segmentation", loaded.MediaSubtitlesSegmentation, "broadcast"},
+		{"glossary", loaded.MediaSubtitlesGlossary, []string{"Aju?bei=>Adzhubei"}},
+		{"drop_phrases", loaded.MediaSubtitlesDropPhrases, []string{"Донбасс|Крым|НАТО"}},
+		{"scrub_phrases", loaded.MediaSubtitlesScrubPhrases, []string{`Крым,?\s*НАТО`}},
+		{"expect_script", loaded.MediaSubtitlesExpectScript, "cyrillic"},
+		{"collapse_repeats", loaded.MediaSubtitlesCollapseRepeats, 3},
+		{"drop_urls", loaded.MediaSubtitlesDropURLs, true},
+	} {
+		if !reflect.DeepEqual(f.got, f.want) {
+			t.Fatalf("%s did not round-trip: got %#v, want %#v", f.name, f.got, f.want)
+		}
 	}
 }
 
