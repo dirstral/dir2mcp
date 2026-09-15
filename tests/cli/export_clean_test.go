@@ -142,10 +142,10 @@ func TestExportDropsForeignScriptCues(t *testing.T) {
 	seed := func(t *testing.T, tmp string) {
 		t.Helper()
 		seedTranscriptChunks(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", []seedChunk{
-			{"Elola alolo.", 0, 1000},           // wrong-script gibberish
-			{"Обычная речь.", 1000, 2000},       // expected script
+			{"Elola alolo.", 0, 1000},            // wrong-script gibberish
+			{"Обычная речь.", 1000, 2000},        // expected script
 			{"Смотрите на YouTube.", 2000, 3000}, // mixed scripts survives
-			{"COVID-19.", 3000, 4000},           // digit guard survives
+			{"COVID-19.", 3000, 4000},            // digit guard survives
 		})
 	}
 

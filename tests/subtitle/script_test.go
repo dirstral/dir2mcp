@@ -29,12 +29,12 @@ func TestScriptGuardForeignDetection(t *testing.T) {
 		}
 	}
 	keep := []string{
-		"Обычная речь.",         // expected script
-		"Смотрите на YouTube.",  // mixed scripts: one Cyrillic letter clears the cue
-		"COVID-19.",             // digit guard: never dropped
-		"127.0.0.1",             // digits only
-		"— …!?",                 // punctuation only: no letters, not foreign
-		"",                      // empty
+		"Обычная речь.",        // expected script
+		"Смотрите на YouTube.", // mixed scripts: one Cyrillic letter clears the cue
+		"COVID-19.",            // digit guard: never dropped
+		"127.0.0.1",            // digits only
+		"— …!?",                // punctuation only: no letters, not foreign
+		"",                     // empty
 	}
 	for _, s := range keep {
 		if g.IsForeign(s) {
