@@ -440,7 +440,13 @@ func (c *Client) retryRefusedParams(ctx context.Context, chatModel, prompt strin
 		c.capName.Store(int32(capLegacy))
 		text, err = c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, capLegacy)
 	}
-	if !c.temperatureRefused.Load() && unsupportedParam(err, "temperature") {
+	if unsupportedParam(err, "temperature") {
+		// Decided on THIS request's error, not on the flag: a concurrent worker
+		// can record the refusal between this request's send and this check, and
+		// a flag-guarded branch would then skip the retry and surface the
+		// rejection for a request that did carry the parameter. The retry reads
+		// the flag when it builds its body, so it goes out without temperature
+		// whoever stored the refusal first.
 		c.temperatureRefused.Store(true)
 		text, err = c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
 	}

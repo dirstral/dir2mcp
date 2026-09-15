@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/openai"
 )
@@ -263,5 +264,59 @@ func TestGenerate_TemperatureRefusalNamingTheCapDoesNotFlipTheCap(t *testing.T) 
 	}
 	if _, ok := bodies[1]["temperature"]; ok {
 		t.Fatalf("the retry must omit temperature: %v", bodies[1])
+	}
+}
+
+// Two workers share one client. Worker B's refusal is recorded while worker A's
+// request (which carried temperature) is still in flight. A's refusal must still
+// be retried without the parameter: the retry decision is made on A's own error,
+// not on a flag another worker set first. The server holds A until B has been
+// refused and has succeeded on its retry, so the ordering is fixed, not timed.
+func TestGenerate_ConcurrentRefusalStillRetriesTheInFlightRequest(t *testing.T) {
+	var mu sync.Mutex
+	withTemp := 0
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		_, has := body["temperature"]
+		if !has {
+			// A retry without temperature: succeed, and let the held request go.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"grounded answer"}}]}`))
+			releaseOnce.Do(func() { close(release) })
+			return
+		}
+		mu.Lock()
+		withTemp++
+		n := withTemp
+		mu.Unlock()
+		if n == 1 {
+			// Worker A: hold until worker B has completed its refusal and retry.
+			<-release
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","param":"temperature"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := openai.NewClient(srv.URL+"/v1", "k")
+	errs := make(chan error, 2)
+	go func() { _, err := c.Generate(context.Background(), "worker A"); errs <- err }()
+	// Give A a moment to send first so it is the held request; the server's
+	// ordering does not depend on this, only which worker plays which role.
+	time.Sleep(50 * time.Millisecond)
+	go func() { _, err := c.Generate(context.Background(), "worker B"); errs <- err }()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("a request that carried temperature and was refused must be retried without it, "+
+					"whoever recorded the refusal first: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out: a worker never completed")
+		}
 	}
 }
