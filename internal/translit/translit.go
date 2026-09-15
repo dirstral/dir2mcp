@@ -310,8 +310,34 @@ func genitiveStem(word string, genitive bool) (string, bool) {
 	return "", false
 }
 
+// Hint is one derived spelling: the Word exactly as it appears in the source,
+// the English rendering the prompt should pin for it, and Key -- the lower-cased
+// NOMINATIVE the rendering was derived from. Key is what identifies the name:
+// "Иванову" and "Иванов" share the key "иванов". Callers that reconcile hints
+// against another per-name table (the operator glossary) must match on Key, or an
+// oblique form in the text slips past a nominative entry in the table.
+type Hint struct {
+	Word    string
+	Key     string
+	English string
+}
+
+// Hints renders HintPairs as "<word> -> <english>" strings, the form the prompt
+// carries. See HintPairs for the derivation.
 func Hints(text string) []string {
-	var hints []string
+	pairs := HintPairs(text)
+	if len(pairs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(pairs))
+	for _, h := range pairs {
+		out = append(out, h.Word+" -> "+h.English)
+	}
+	return out
+}
+
+func HintPairs(text string) []Hint {
+	var hints []Hint
 	seen := make(map[string]bool)
 	for _, loc := range properNounRE.FindAllStringIndex(text, -1) {
 		word := text[loc[0]:loc[1]]
@@ -358,7 +384,7 @@ func Hints(text string) []string {
 			continue
 		}
 		seen[key] = true
-		hints = append(hints, word+" -> "+english)
+		hints = append(hints, Hint{Word: word, Key: key, English: english})
 		if len(hints) == maxNameHints {
 			break
 		}

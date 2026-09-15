@@ -155,3 +155,27 @@ func TestTranscriptTranslation_GlossaryWinsOverNameHint(t *testing.T) {
 		t.Errorf("a name the glossary does not cover keeps its hint:\n%s", got)
 	}
 }
+
+// TestTranscriptTranslation_GlossaryCoversObliqueForms pins that precedence is
+// decided on the NAME, not on the word as written. An operator writes the
+// glossary key once, in the nominative; the text carries whatever case the
+// sentence needs. "имени Сеченова" must count as covered by "сеченов", or the
+// prompt carries both the operator's spelling and a derived one for the same
+// person and leaves the model to choose.
+func TestTranscriptTranslation_GlossaryCoversObliqueForms(t *testing.T) {
+	t.Parallel()
+	got := runNameHintTranslation(t, config.Config{
+		MediaTranslateNameHints:   true,
+		MediaTranslateWindowLines: 1,
+		MediaTranslateGlossary:    map[string]map[string]string{"en": {"сеченов": "Setchenov"}},
+	}, "ru", "[00:00] Мы были в университете имени Сеченова, сказал Щербак")
+	if strings.Contains(got, "Сеченова -> Sechenov") {
+		t.Errorf("an oblique form of a glossary-covered name must not get a derived hint:\n%s", got)
+	}
+	if !strings.Contains(got, "сеченов => Setchenov") {
+		t.Errorf("the glossary guidance must still be present:\n%s", got)
+	}
+	if !strings.Contains(got, "Щербак -> Shcherbak") {
+		t.Errorf("an uncovered name keeps its hint:\n%s", got)
+	}
+}

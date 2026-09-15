@@ -336,3 +336,22 @@ func TestHints_AnOrdinaryNumberIsNotASentenceBoundary(t *testing.T) {
 		}
 	}
 }
+
+// TestHintPairs_KeyIsTheNominative pins the contract callers reconcile on: the
+// Key of a hint is the lower-cased nominative the spelling was derived from, not
+// the word as written, so two inflections of one name share a key and a table
+// keyed on the nominative (the operator glossary) matches either of them.
+func TestHintPairs_KeyIsTheNominative(t *testing.T) {
+	pairs := translit.HintPairs("Учился в университете имени Сеченова")
+	if len(pairs) != 1 {
+		t.Fatalf("HintPairs = %+v, want one hint", pairs)
+	}
+	h := pairs[0]
+	if h.Word != "Сеченова" || h.Key != "сеченов" || h.English != "Sechenov" {
+		t.Errorf("got %+v, want Word=Сеченова Key=сеченов English=Sechenov", h)
+	}
+	// Hints renders the same pairs; the two views must never disagree.
+	if got := translit.Hints("Учился в университете имени Сеченова"); len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
+		t.Errorf("Hints = %v, want the rendered pair", got)
+	}
+}

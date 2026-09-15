@@ -332,19 +332,28 @@ func (s *Service) nameHintsFor(text, sourceLang, targetLang string, glossary map
 	if !s.translateNameHintsActive(sourceLang, targetLang) || !translit.HasCyrillic(text) {
 		return nil
 	}
-	hints := translit.Hints(text)
-	if len(glossary) == 0 || len(hints) == 0 {
-		return hints
+	pairs := translit.HintPairs(text)
+	if len(pairs) == 0 {
+		return nil
 	}
-	kept := hints[:0]
-	for _, h := range hints {
-		name, _, _ := strings.Cut(h, " -> ")
-		if _, covered := glossary[strings.ToLower(strings.TrimSpace(name))]; covered {
+	hints := make([]string, 0, len(pairs))
+	for _, h := range pairs {
+		// Match the glossary on the NOMINATIVE key, not the word as written: an
+		// operator writes "иванов" once, and "Иванову" in the text must still
+		// count as covered. The written form is checked too, so an entry keyed on
+		// the exact inflection is honoured as well.
+		if _, covered := glossary[h.Key]; covered {
 			continue
 		}
-		kept = append(kept, h)
+		if _, covered := glossary[strings.ToLower(h.Word)]; covered {
+			continue
+		}
+		hints = append(hints, h.Word+" -> "+h.English)
 	}
-	return kept
+	if len(hints) == 0 {
+		return nil
+	}
+	return hints
 }
 
 // mergeNameHints appends the hints of one more cue to a window's list, keeping
