@@ -167,12 +167,17 @@ func TestCollapseRepeatsRunsAfterScrub(t *testing.T) {
 // completes: with the same options, the text the index keeps and the text the
 // exported sidecar keeps are the same, cue for cue.
 func TestCueCleaningIngestAndExportAgree(t *testing.T) {
-	const text = "[00:00] Real reporting here\n" +
+	const text = "[00:00] Реальный репортаж\n" +
 		"[00:02] www.example.com\n" +
 		"[00:04] Повтор\n" +
 		"[00:06] Повтор\n" +
-		"[00:08] Повтор"
-	opts := subtitle.CleanOptions{DropURLs: true, CollapseRepeats: 2}
+		"[00:08] Повтор\n" +
+		"[00:10] Elola alolo."
+	script, err := subtitle.NewScriptGuard("cyrillic")
+	if err != nil {
+		t.Fatalf("NewScriptGuard: %v", err)
+	}
+	opts := subtitle.CleanOptions{DropURLs: true, CollapseRepeats: 2, Script: script}
 
 	ingestSegs := ingest.ApplyCueCleaningToSegments(ingest.ChunkTranscriptByTime(text), opts)
 	exportCues := subtitle.CleanCues(subtitle.BuildCues(chunksFromSegments(ingest.ChunkTranscriptByTime(text))), opts)
@@ -189,7 +194,7 @@ func TestCueCleaningIngestAndExportAgree(t *testing.T) {
 		t.Fatalf("index and sidecar disagree:\n index  %q\n export %q", ingestTexts, exportTexts)
 	}
 	if len(ingestTexts) != 2 {
-		t.Fatalf("expected the URL chunk dropped and the repeat run collapsed to one, got %q", ingestTexts)
+		t.Fatalf("expected the URL and wrong-script chunks dropped and the repeat run collapsed to one, got %q", ingestTexts)
 	}
 }
 
@@ -245,6 +250,53 @@ func TestSidecarIngest_DropsHallucinatedURLCue(t *testing.T) {
 	}
 }
 
+// TestSidecarIngest_DropsWrongScriptCue drives the full sidecar ingest path with
+// media.subtitles.expect_script set and pins that a wrong-script gibberish cue
+// never reaches a stored chunk, while the real cues and a digit-bearing cue do
+// (SPEC §8.6.3: the index and the export apply the same rule).
+func TestSidecarIngest_DropsWrongScriptCue(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "media", "talk.mp3"), "fake-audio")
+	writeFile(t, filepath.Join(root, "media", "talk.vtt"),
+		"WEBVTT\n\n"+
+			"00:00:00.000 --> 00:00:20.000\n"+longCue("Реальный репортаж")+"\n\n"+
+			"00:00:20.000 --> 00:00:22.000\nElola alolo.\n\n"+
+			"00:00:22.000 --> 00:00:40.000\n"+longCue("Продолжение репортажа")+"\n\n"+
+			// A long cue on each side keeps the two short cues in separate
+			// chunks: two adjacent short cues merge into one chunk, and the
+			// digit in one would then protect the gibberish in the other.
+			"00:00:40.000 --> 00:00:42.000\nCOVID-19.\n\n"+
+			"00:00:42.000 --> 00:01:00.000\n"+longCue("Итоги репортажа")+"\n")
+
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{
+		RootDir:                    root,
+		StateDir:                   t.TempDir(),
+		MediaSubtitlesExpectScript: "cyrillic",
+	}, st)
+
+	doc := model.Document{DocID: 1, RelPath: "media/talk.mp3", DocType: "audio"}
+	if _, err := svc.IngestSidecarTranscripts(context.Background(), doc); err != nil {
+		t.Fatalf("IngestSidecarTranscripts: %v", err)
+	}
+	if len(st.chunks) != 4 {
+		t.Fatalf("expected 4 stored chunks (the wrong-script cue dropped, the digit cue kept), got %d", len(st.chunks))
+	}
+	kept := false
+	for _, c := range st.chunks {
+		if strings.Contains(c.Text, "Elola") {
+			t.Fatalf("wrong-script cue was embedded: %q", c.Text)
+		}
+		if strings.Contains(c.Text, "COVID-19") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("the digit-bearing cue must survive the script guard")
+	}
+}
+
 // TestSidecarIngest_CollapsesRepeatedCues drives the full sidecar ingest path
 // with media.subtitles.collapse_repeats enabled and pins that only the first
 // collapse_repeats-1 chunks of an identical run are stored.
@@ -273,5 +325,30 @@ func TestSidecarIngest_CollapsesRepeatedCues(t *testing.T) {
 	}
 	if len(st.chunks) != 2 {
 		t.Fatalf("expected the 4-cue run collapsed to 2 stored chunks, got %d", len(st.chunks))
+	}
+}
+
+// TestNewService_RefusesInvalidCueCleaning pins that a Service cannot be built
+// with a cleaning rule subtitle refuses (#994 review). The old shape logged the
+// bad rule and ran with that filter off, so a caller that skipped
+// config.Validate got an index with the gibberish it had configured away.
+func TestNewService_RefusesInvalidCueCleaning(t *testing.T) {
+	t.Parallel()
+	for name, cfg := range map[string]config.Config{
+		"unknown expect_script":    {StateDir: t.TempDir(), MediaSubtitlesExpectScript: "klingon"},
+		"bad drop_phrases regexp":  {StateDir: t.TempDir(), MediaSubtitlesDropPhrases: []string{"a(b"}},
+		"bad scrub_phrases regexp": {StateDir: t.TempDir(), MediaSubtitlesScrubPhrases: []string{"a(b"}},
+	} {
+		_, err := ingest.NewService(cfg, &fakeIngestStore{})
+		if err == nil {
+			t.Errorf("%s: NewService must fail instead of running with the filter off", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "media.subtitles.") {
+			t.Errorf("%s: the error must name the key: %v", name, err)
+		}
+	}
+	if _, err := ingest.NewService(config.Config{StateDir: t.TempDir(), MediaSubtitlesExpectScript: "cyrillic"}, &fakeIngestStore{}); err != nil {
+		t.Fatalf("a valid rule must still build: %v", err)
 	}
 }
