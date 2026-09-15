@@ -237,7 +237,10 @@ const nameJoiners = "'’-"
 // marker, after which the line starts. A list number ("1. Студентам") ends on its
 // own period and needs nothing extra here. The comma is deliberately absent:
 // "Привет, Иван" continues the sentence.
-const sentenceEnders = ".!?…:;—–«»\"'()]"
+// A line break ends a sentence too: the boundary check trims spaces and tabs
+// only, so the newline itself is the last rune before a word that opens the
+// next line.
+const sentenceEnders = ".!?…:;—–«»\"'()]\r\n"
 
 // bareTimestampMarker matches an UNBRACKETED "mm:ss" / "hh:mm:ss" / "mm:ss.mmm"
 // transcript marker that occupies the whole text before a candidate name, i.e.
