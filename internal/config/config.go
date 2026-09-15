@@ -1001,9 +1001,11 @@ type Config struct {
 	// written in (config `media.subtitles.expect_script`, e.g. "cyrillic"; SPEC
 	// §8.6.3). A cue that contains letters but not ONE letter of that script is
 	// wrong-script STT gibberish over non-speech and is dropped
-	// (subtitle.ScriptGuard); a cue with any digit or a mixed script always
-	// survives. Applied at export in every format AND at ingest before chunks are
-	// embedded, from the same CleanOptions, so the index and the sidecar agree.
+	// (subtitle.ScriptGuard); a cue with any digit or any expected-script letter
+	// survives, so expected/foreign mixed-script text is kept while text that
+	// mixes two foreign scripts is still dropped. Applied at export in every
+	// format AND at ingest before chunks are embedded, from the same
+	// CleanOptions, so the index and the sidecar agree.
 	// Empty by default = off. An unknown name is CONFIG_INVALID, never a no-op.
 	MediaSubtitlesExpectScript string
 
