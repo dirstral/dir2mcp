@@ -227,6 +227,65 @@ func TestGenerate_CapAndTemperatureFallbacksCompose(t *testing.T) {
 	}
 }
 
+// The same two refusals in the OTHER order: temperature first, then the cap on
+// the retry. A server validates in whatever order it likes and reports one
+// refusal per response, so the fallbacks must compose either way round; a fixed
+// check order surfaced the second refusal instead of retrying it.
+func TestGenerate_TemperatureThenCapFallbacksCompose(t *testing.T) {
+	var mu sync.Mutex
+	var seen []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		mu.Lock()
+		seen = append(seen, body)
+		mu.Unlock()
+		if _, ok := body["temperature"]; ok {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","param":"temperature"}}`))
+			return
+		}
+		if _, ok := body["max_completion_tokens"]; ok {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Unsupported parameter: 'max_completion_tokens' is not supported. Use 'max_tokens' instead.","param":"max_completion_tokens"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"grounded answer"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := openai.NewClient(srv.URL+"/v1", "k")
+	got, err := c.Generate(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if got != "grounded answer" {
+		t.Fatalf("answer = %q", got)
+	}
+	mu.Lock()
+	n := len(seen)
+	last := seen[n-1]
+	mu.Unlock()
+	if n != 3 {
+		t.Fatalf("server calls = %d, want 3 (with temperature, modern cap without temperature, legacy cap without)", n)
+	}
+	if _, ok := last["temperature"]; ok {
+		t.Fatalf("the final request must omit temperature: %v", last)
+	}
+	if _, ok := last["max_tokens"]; !ok {
+		t.Fatalf("the final request must carry the legacy cap: %v", last)
+	}
+	if _, err := c.Generate(context.Background(), "q2"); err != nil {
+		t.Fatalf("second Generate: %v", err)
+	}
+	mu.Lock()
+	n2 := len(seen)
+	mu.Unlock()
+	if n2 != 4 {
+		t.Fatalf("both refusals must be remembered: server calls = %d, want 4", n2)
+	}
+}
+
 // OpenAI's own refusal of temperature names the cap as an unrelated remedy in
 // the same sentence. That must drop temperature and must NOT flip the cap
 // spelling (#959): the client stays on max_completion_tokens.
@@ -276,6 +335,7 @@ func TestGenerate_ConcurrentRefusalStillRetriesTheInFlightRequest(t *testing.T) 
 	var mu sync.Mutex
 	withTemp := 0
 	release := make(chan struct{})
+	held := make(chan struct{}) // closed once the server is holding worker A
 	var releaseOnce sync.Once
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var body map[string]any
@@ -293,7 +353,9 @@ func TestGenerate_ConcurrentRefusalStillRetriesTheInFlightRequest(t *testing.T) 
 		n := withTemp
 		mu.Unlock()
 		if n == 1 {
-			// Worker A: hold until worker B has completed its refusal and retry.
+			// Worker A: announce the hold, then wait until worker B has completed
+			// its refusal and retry.
+			close(held)
 			<-release
 		}
 		w.WriteHeader(http.StatusBadRequest)
@@ -304,9 +366,13 @@ func TestGenerate_ConcurrentRefusalStillRetriesTheInFlightRequest(t *testing.T) 
 	c := openai.NewClient(srv.URL+"/v1", "k")
 	errs := make(chan error, 2)
 	go func() { _, err := c.Generate(context.Background(), "worker A"); errs <- err }()
-	// Give A a moment to send first so it is the held request; the server's
-	// ordering does not depend on this, only which worker plays which role.
-	time.Sleep(50 * time.Millisecond)
+	// Start B only once the server is holding A, so A is the held request by
+	// construction rather than by timing.
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out: the server never received worker A's request")
+	}
 	go func() { _, err := c.Generate(context.Background(), "worker B"); errs <- err }()
 	for i := 0; i < 2; i++ {
 		select {

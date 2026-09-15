@@ -431,24 +431,34 @@ func (c *Client) generate(ctx context.Context, prompt string, maxTokensOverride 
 // the client's life so each probe is spent once per client, not once per
 // request. Two parameters can be refused: the modern completion-cap spelling
 // (an OpenAI-compatible server that predates the rename, #958) and the pinned
-// temperature (some hosted reasoning models). Each is checked in turn, so an
-// endpoint that refuses both gets an answer after two probes. Any other
-// error, and the retry's own error, pass through unchanged into the caller's
-// retryability check.
+// temperature (some hosted reasoning models). A server reports one refusal per
+// response, in whichever order it validates, so the loop keeps applying
+// fallbacks while the current error names a parameter whose fallback is still
+// untried; an endpoint that refuses both gets an answer after two probes
+// whichever it rejects first. Each fallback runs at most once per call, so the
+// loop always ends. Any other error, and the last retry's own error, pass
+// through unchanged into the caller's retryability check.
 func (c *Client) retryRefusedParams(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration, text string, err error) (string, error) {
-	if unsupportedCapParam(err, capModern) {
-		c.capName.Store(int32(capLegacy))
-		text, err = c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, capLegacy)
-	}
-	if unsupportedParam(err, "temperature") {
-		// Decided on THIS request's error, not on the flag: a concurrent worker
-		// can record the refusal between this request's send and this check, and
-		// a flag-guarded branch would then skip the retry and surface the
-		// rejection for a request that did carry the parameter. The retry reads
-		// the flag when it builds its body, so it goes out without temperature
-		// whoever stored the refusal first.
-		c.temperatureRefused.Store(true)
-		text, err = c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
+	triedCap, triedTemperature := false, false
+	for err != nil {
+		switch {
+		case !triedCap && unsupportedCapParam(err, capModern):
+			triedCap = true
+			c.capName.Store(int32(capLegacy))
+			text, err = c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, capLegacy)
+		case !triedTemperature && unsupportedParam(err, "temperature"):
+			// Decided on THIS request's error, not on the flag: a concurrent worker
+			// can record the refusal between this request's send and this check, and
+			// a flag-guarded branch would then skip the retry and surface the
+			// rejection for a request that did carry the parameter. The retry reads
+			// the flag when it builds its body, so it goes out without temperature
+			// whoever stored the refusal first.
+			triedTemperature = true
+			c.temperatureRefused.Store(true)
+			text, err = c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
+		default:
+			return text, err
+		}
 	}
 	return text, err
 }
