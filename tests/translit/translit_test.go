@@ -309,3 +309,30 @@ func TestHints_ACapitalAfterATimestampMarkerIsSentenceCase(t *testing.T) {
 		t.Errorf("a comma must not hide a name: %v", got)
 	}
 }
+
+// TestHints_AnOrdinaryNumberIsNotASentenceBoundary pins the limit of the marker
+// rule (CodeRabbit finding on #985). The boundary is the timestamp marker, not
+// the digit that happens to end it: a name following a plain number is still
+// mid-sentence and must be pinned, or every "В 2024 Иванов" loses its hint.
+func TestHints_AnOrdinaryNumberIsNotASentenceBoundary(t *testing.T) {
+	for _, s := range []string{
+		"В 2024 Иванов выступил",
+		"Было 15 Петров там",
+		"2024 Иванов выступил", // a leading year is not a marker either
+	} {
+		got := translit.Hints(s)
+		if len(got) != 1 {
+			t.Errorf("Hints(%q) = %v, want exactly the surname", s, got)
+		}
+	}
+	// The bare marker itself must still open the sentence.
+	for _, s := range []string{
+		"00:00 Студентам об этом объявили",
+		"1:02:33 Студентам об этом объявили",
+		"00:00.250 Студентам об этом объявили",
+	} {
+		if got := translit.Hints(s); len(got) != 0 {
+			t.Errorf("Hints(%q) = %v, want no hint after a bare marker", s, got)
+		}
+	}
+}

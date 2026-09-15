@@ -233,10 +233,22 @@ const nameJoiners = "'’-"
 // than a name. Dash-led dialogue is routine in subtitles ("— Привет, Иван"), and
 // quotation marks, colons and ellipses open sentences too; without them an ordinary
 // word gets pinned as a name. The closing bracket ends a "[00:00]" timestamp
-// marker, after which the line starts. A digit (a bare "00:00" marker, a list
-// number) ends a sentence the same way and is checked alongside this set. The
-// comma is deliberately absent: "Привет, Иван" continues the sentence.
+// marker, after which the line starts. A list number ("1. Студентам") ends on its
+// own period and needs nothing extra here. The comma is deliberately absent:
+// "Привет, Иван" continues the sentence.
 const sentenceEnders = ".!?…:;—–«»\"'()]"
+
+// bareTimestampMarker matches an UNBRACKETED "mm:ss" / "hh:mm:ss" / "mm:ss.mmm"
+// transcript marker that occupies the whole text before a candidate name, i.e.
+// the marker opens the line and the capital after it is sentence case.
+//
+// The bracketed form ends in ']' and is handled by sentenceEnders. This one ends
+// in a digit, and treating ANY trailing digit as a boundary was too broad: it hid
+// a genuine name after an ordinary number ("В 2024 Иванов" dropped Иванов).
+// Requiring the full marker shape keeps the boundary while leaving such names
+// pinnable. It mirrors the bare form of the ingest marker grammar
+// (transcriptTimestampBareRe), restated because ingest imports this package.
+var bareTimestampMarker = regexp.MustCompile(`(?:\A|\n)[ \t]*\d+:\d{2}(?::\d{2})?(?:\.\d{1,3})?\z`)
 
 // maxNameHints bounds the prompt growth on a name-dense line. Six covers the
 // realistic worst case (a list of officials) without crowding out the text itself.
@@ -313,7 +325,7 @@ func Hints(text string) []string {
 				continue
 			}
 			last := []rune(before)[len([]rune(before))-1]
-			if strings.ContainsRune(sentenceEnders, last) || unicode.IsDigit(last) {
+			if strings.ContainsRune(sentenceEnders, last) || bareTimestampMarker.MatchString(before) {
 				continue
 			}
 		}
