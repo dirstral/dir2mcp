@@ -327,3 +327,28 @@ func TestSidecarIngest_CollapsesRepeatedCues(t *testing.T) {
 		t.Fatalf("expected the 4-cue run collapsed to 2 stored chunks, got %d", len(st.chunks))
 	}
 }
+
+// TestNewService_RefusesInvalidCueCleaning pins that a Service cannot be built
+// with a cleaning rule subtitle refuses (#994 review). The old shape logged the
+// bad rule and ran with that filter off, so a caller that skipped
+// config.Validate got an index with the gibberish it had configured away.
+func TestNewService_RefusesInvalidCueCleaning(t *testing.T) {
+	t.Parallel()
+	for name, cfg := range map[string]config.Config{
+		"unknown expect_script":    {StateDir: t.TempDir(), MediaSubtitlesExpectScript: "klingon"},
+		"bad drop_phrases regexp":  {StateDir: t.TempDir(), MediaSubtitlesDropPhrases: []string{"a(b"}},
+		"bad scrub_phrases regexp": {StateDir: t.TempDir(), MediaSubtitlesScrubPhrases: []string{"a(b"}},
+	} {
+		_, err := ingest.NewService(cfg, &fakeIngestStore{})
+		if err == nil {
+			t.Errorf("%s: NewService must fail instead of running with the filter off", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "media.subtitles.") {
+			t.Errorf("%s: the error must name the key: %v", name, err)
+		}
+	}
+	if _, err := ingest.NewService(config.Config{StateDir: t.TempDir(), MediaSubtitlesExpectScript: "cyrillic"}, &fakeIngestStore{}); err != nil {
+		t.Fatalf("a valid rule must still build: %v", err)
+	}
+}

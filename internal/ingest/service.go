@@ -192,6 +192,9 @@ type Service struct {
 	// media.translate.engine): "chat" (default, line-by-line via s.translator) or
 	// "whisper" (native audio->English translate task via s.translateSTT).
 	translateEngine string
+	// captionClean is the ingest-time cue cleaning compiled once by NewService
+	// from media.subtitles.*; see captionCleanOptions.
+	captionClean subtitle.CleanOptions
 	// translateSTT runs Whisper's translate task; set only when
 	// translateEngine == "whisper", nil for the chat engine.
 	translateSTT model.Transcriber
@@ -973,6 +976,13 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		return nil, fmt.Errorf("configure transcriber: %w", err)
 	}
 	svc.transcriber = transcriber
+	// Compile the ingest-time cue cleaning once, and refuse an invalid rule
+	// here rather than at the first chunk: a caller that skipped config.Validate
+	// must not obtain a Service whose filter is silently off (#994 review).
+	svc.captionClean, err = buildCaptionCleanOptions(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("configure subtitle cleaning: %w", err)
+	}
 	if strings.EqualFold(strings.TrimSpace(cfg.RecognizeProvider), "serve") {
 		svc.recognizer = NewRecognizeServeClient(cfg.RecognizeServeURL)
 	}
@@ -1406,7 +1416,8 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 	return subtitle.NewWordFilter(s.cfg.MediaFilterWords)
 }
 
-// captionCleanOptions builds the shared ingest-time cue cleaning from
+// captionCleanOptions returns the shared ingest-time cue cleaning compiled by
+// NewService from
 // media.subtitles.{drop_urls,expect_script,drop_phrases,scrub_phrases,collapse_repeats}
 // (issues #545, #765; SPEC §8.6.3). The same options clean STT transcript chunks, translated
 // transcript chunks and sidecar-cue chunks before embedding, and they are the
@@ -1420,29 +1431,39 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 // indexed text with it needs a spec change first, not a code fix. With every key
 // unset the options are inactive and the cleaning is a byte-for-byte no-op.
 //
-// The patterns were already validated at config load (config.Validate →
-// subtitle.NewDropSet), so a compile error here is unexpected; it is logged and
-// treated as no cleaning (nil set) rather than failing ingestion.
+// The rules were validated at config load (config.Validate) and compiled again
+// by NewService, which refuses an invalid one, so by the time a chunk is cleaned
+// the options are known good. The old shape logged a bad rule and went on with
+// the filter off, which made "cleaning configured" and "cleaning active" two
+// different facts; a Service now either has the configured cleaning or does
+// not exist.
 func (s *Service) captionCleanOptions() subtitle.CleanOptions {
-	drop, err := subtitle.NewDropSet(s.cfg.MediaSubtitlesDropPhrases)
+	return s.captionClean
+}
+
+// buildCaptionCleanOptions compiles the media.subtitles.* cleaning rules for
+// ingest. Any rule subtitle refuses (a bad regexp, an unknown script name) is
+// returned as an error naming the key, the same error config.Validate raises.
+func buildCaptionCleanOptions(cfg config.Config) (subtitle.CleanOptions, error) {
+	drop, err := subtitle.NewDropSet(cfg.MediaSubtitlesDropPhrases)
 	if err != nil {
-		s.getLogger().Printf("media.subtitles.drop_phrases invalid at ingest, ignoring: %v", err)
+		return subtitle.CleanOptions{}, fmt.Errorf("media.subtitles.drop_phrases: %w", err)
 	}
-	scrub, err := subtitle.NewDropSet(s.cfg.MediaSubtitlesScrubPhrases)
+	scrub, err := subtitle.NewDropSet(cfg.MediaSubtitlesScrubPhrases)
 	if err != nil {
-		s.getLogger().Printf("media.subtitles.scrub_phrases invalid at ingest, ignoring: %v", err)
+		return subtitle.CleanOptions{}, fmt.Errorf("media.subtitles.scrub_phrases: %w", err)
 	}
-	script, err := subtitle.NewScriptGuard(s.cfg.MediaSubtitlesExpectScript)
+	script, err := subtitle.NewScriptGuard(cfg.MediaSubtitlesExpectScript)
 	if err != nil {
-		s.getLogger().Printf("media.subtitles.expect_script invalid at ingest, ignoring: %v", err)
+		return subtitle.CleanOptions{}, fmt.Errorf("media.subtitles.expect_script: %w", err)
 	}
 	return subtitle.CleanOptions{
-		DropURLs:        s.cfg.MediaSubtitlesDropURLs,
+		DropURLs:        cfg.MediaSubtitlesDropURLs,
 		Script:          script,
 		Drop:            drop,
 		Scrub:           scrub,
-		CollapseRepeats: s.cfg.MediaSubtitlesCollapseRepeats,
-	}
+		CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
+	}, nil
 }
 
 func sttExpectedLanguage(cfg config.Config) string {
