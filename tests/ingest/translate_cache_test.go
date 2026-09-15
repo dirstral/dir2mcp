@@ -37,8 +37,8 @@ func TestTranslateCacheKey_SameIdentityStable(t *testing.T) {
 	corpusA := newSvc()
 	corpusB := newSvc()
 
-	keyA := corpusA.TranslateCacheKey(content, sourceText, "en")
-	keyB := corpusB.TranslateCacheKey(content, sourceText, "en")
+	keyA := corpusA.TranslateCacheKey(content, sourceText, "ru", "en")
+	keyB := corpusB.TranslateCacheKey(content, sourceText, "ru", "en")
 
 	if keyA != keyB {
 		t.Fatalf("same source+identity must yield a stable cache key across corpora: %q != %q", keyA, keyB)
@@ -61,28 +61,28 @@ func TestTranslateCacheKey_IdentityChangeMisses(t *testing.T) {
 	}
 
 	base := newSvc("mistral", "m1")
-	baseKey := base.TranslateCacheKey(content, sourceText, "en")
+	baseKey := base.TranslateCacheKey(content, sourceText, "ru", "en")
 
 	// Same provider/model/target as base -> same key (sanity for the diffs below).
-	if again := newSvc("mistral", "m1").TranslateCacheKey(content, sourceText, "en"); again != baseKey {
+	if again := newSvc("mistral", "m1").TranslateCacheKey(content, sourceText, "ru", "en"); again != baseKey {
 		t.Fatalf("identical identity must be stable: %q != %q", again, baseKey)
 	}
 
 	// Provider change must miss.
-	if k := newSvc("openai", "m1").TranslateCacheKey(content, sourceText, "en"); k == baseKey {
+	if k := newSvc("openai", "m1").TranslateCacheKey(content, sourceText, "ru", "en"); k == baseKey {
 		t.Fatalf("provider change must yield a distinct cache key (got %q for both)", k)
 	}
 	// Model change must miss.
-	if k := newSvc("mistral", "m2").TranslateCacheKey(content, sourceText, "en"); k == baseKey {
+	if k := newSvc("mistral", "m2").TranslateCacheKey(content, sourceText, "ru", "en"); k == baseKey {
 		t.Fatalf("model change must yield a distinct cache key (got %q for both)", k)
 	}
 	// Target-language change must miss.
-	if k := base.TranslateCacheKey(content, sourceText, "fr"); k == baseKey {
+	if k := base.TranslateCacheKey(content, sourceText, "ru", "fr"); k == baseKey {
 		t.Fatalf("target-language change must yield a distinct cache key (got %q for both)", k)
 	}
 	// Source-transcript-text change must miss (translation is of that text; an
 	// upstream STT swap changing the source text must not reuse the old body).
-	if k := base.TranslateCacheKey(content, "[00:00] DIFFERENT text", "en"); k == baseKey {
+	if k := base.TranslateCacheKey(content, "[00:00] DIFFERENT text", "ru", "en"); k == baseKey {
 		t.Fatalf("source-text change must yield a distinct cache key (got %q for both)", k)
 	}
 }
@@ -99,8 +99,8 @@ func TestTranslateCacheKey_NoIdentityPathSeparatesTargets(t *testing.T) {
 	// No SetTranslator -> empty translate identity -> bytes+text(+target) key.
 	none := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, &fakeIngestStore{})
 
-	kEn := none.TranslateCacheKey(content, sourceText, "en")
-	kFr := none.TranslateCacheKey(content, sourceText, "fr")
+	kEn := none.TranslateCacheKey(content, sourceText, "ru", "en")
+	kFr := none.TranslateCacheKey(content, sourceText, "ru", "fr")
 	if kEn == kFr {
 		t.Fatalf("no-identity path must still separate distinct targets (got %q for both)", kEn)
 	}
@@ -109,7 +109,7 @@ func TestTranslateCacheKey_NoIdentityPathSeparatesTargets(t *testing.T) {
 	// no-identity key (the identity is folded in).
 	with := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, &fakeIngestStore{})
 	with.SetTranslator(&fakeTranslator{}, "mistral", "m1", []string{"en"})
-	if k := with.TranslateCacheKey(content, sourceText, "en"); k == kEn {
+	if k := with.TranslateCacheKey(content, sourceText, "ru", "en"); k == kEn {
 		t.Fatalf("identity-folded key must differ from no-identity key (got %q for both)", k)
 	}
 }
@@ -152,8 +152,46 @@ func TestTranslation_CrossCorpusReuse(t *testing.T) {
 	probe := mustNewIngestService(t, config.Config{StateDir: stateDir}, &fakeIngestStore{})
 	probe.SetTranslator(&fakeTranslator{}, "mistral", "m1", []string{"en"})
 	cachePath := filepath.Join(stateDir, "cache", "translate",
-		probe.TranslateCacheKey(content, "[00:00] one line", "en")+ingest.TranscriptLangSuffix("en")+".txt")
+		probe.TranslateCacheKey(content, "[00:00] one line", "ru", "en")+ingest.TranscriptLangSuffix("en")+".txt")
 	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("expected translation cache file at %s: %v", cachePath, err)
+	}
+}
+
+// TestTranslateCacheKey_NameHintModeMisses locks the prompt-shape guarantee
+// (SPEC §8.6.7): the name-hint augmentation rewrites the translation prompt, so
+// switching it on must MISS the cache rather than return the un-hinted
+// translation produced before. It also locks the converse, which is why the key
+// folds the hint GATE and not the raw source language: hints only reach the
+// prompt for a Russian source and an English target, so with hints enabled but
+// a source that cannot take them the prompt is byte-identical to the un-hinted
+// one and the existing cache entry must still hit.
+func TestTranslateCacheKey_NameHintModeMisses(t *testing.T) {
+	t.Parallel()
+	content := []byte("audio-bytes")
+	sourceText := "[00:00] одна строка"
+
+	newSvc := func(nameHints bool) *ingest.Service {
+		s := mustNewIngestService(t, config.Config{
+			StateDir:                t.TempDir(),
+			MediaTranslateNameHints: nameHints,
+		}, &fakeIngestStore{})
+		s.SetTranslator(&fakeTranslator{}, "mistral", "m1", []string{"en", "fr"})
+		return s
+	}
+	off, on := newSvc(false), newSvc(true)
+
+	offKey := off.TranslateCacheKey(content, sourceText, "ru", "en")
+	if onKey := on.TranslateCacheKey(content, sourceText, "ru", "en"); onKey == offKey {
+		t.Fatalf("enabling name hints changes the prompt, so it must miss the cache (both %q)", onKey)
+	}
+	if k := on.TranslateCacheKey(content, sourceText, "uk", "en"); k != off.TranslateCacheKey(content, sourceText, "uk", "en") {
+		t.Errorf("a non-Russian source cannot take hints; key must not change: %q", k)
+	}
+	if k := on.TranslateCacheKey(content, sourceText, "", "en"); k != off.TranslateCacheKey(content, sourceText, "", "en") {
+		t.Errorf("an unknown source cannot take hints; key must not change: %q", k)
+	}
+	if k := on.TranslateCacheKey(content, sourceText, "ru", "fr"); k != off.TranslateCacheKey(content, sourceText, "ru", "fr") {
+		t.Errorf("a non-English target cannot take hints; key must not change: %q", k)
 	}
 }

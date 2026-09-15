@@ -17,7 +17,7 @@ const glossaryGuidanceMarker = "Prefer these renderings for the terms below"
 // carries the source text (SPEC §8.6.2, issue #574).
 func TestBuildTranslatePrompt_GlossaryInjectedDeterministic(t *testing.T) {
 	glossary := map[string]string{"Zephyr": "Zefiro", "Aegis": "Egida", "Mistral": "Mistral"}
-	got := buildTranslatePrompt("The Aegis holds.", "es", glossary)
+	got := buildTranslatePrompt("The Aegis holds.", "es", glossary, nil)
 
 	if !strings.Contains(got, glossaryGuidanceMarker) {
 		t.Fatalf("glossary guidance missing:\n%s", got)
@@ -61,7 +61,7 @@ func TestBuildTranslatePrompt_NoGlossaryUnchanged(t *testing.T) {
 		promptfence.Wrap("", "hello") +
 		"\nReturn only the translated text."
 	for _, g := range []map[string]string{nil, {}} {
-		got := buildTranslatePrompt("hello", "es", g)
+		got := buildTranslatePrompt("hello", "es", g, nil)
 		if got != want {
 			t.Errorf("prompt diverged byte-for-byte:\n got=%q\nwant=%q", got, want)
 		}
@@ -75,7 +75,7 @@ func TestBuildWindowTranslatePrompt_Glossary(t *testing.T) {
 	cells := []translateCell{{body: "one", translatable: true}, {body: "two", translatable: true}}
 	targets := []int{0, 1}
 
-	withG := buildWindowTranslatePrompt(cells, nil, targets, nil, "de", map[string]string{"beta": "B", "alpha": "A"})
+	withG := buildWindowTranslatePrompt(cells, nil, targets, nil, "de", map[string]string{"beta": "B", "alpha": "A"}, nil)
 	if !strings.Contains(withG, glossaryGuidanceMarker) {
 		t.Fatalf("glossary guidance missing from windowed prompt:\n%s", withG)
 	}
@@ -83,7 +83,7 @@ func TestBuildWindowTranslatePrompt_Glossary(t *testing.T) {
 		t.Errorf("windowed glossary entries not in sorted order: %d,%d\n%s", ai, bi, withG)
 	}
 
-	withoutG := buildWindowTranslatePrompt(cells, nil, targets, nil, "de", nil)
+	withoutG := buildWindowTranslatePrompt(cells, nil, targets, nil, "de", nil, nil)
 	if strings.Contains(withoutG, glossaryGuidanceMarker) {
 		t.Errorf("guidance injected for nil glossary in windowed prompt:\n%s", withoutG)
 	}
@@ -109,7 +109,7 @@ func TestTranslateGlossaryFor_CurrentTargetOnly(t *testing.T) {
 	}
 
 	// The es prompt must show only the es rendering, never the fr one.
-	prompt := buildTranslatePrompt("The Sun", "es", svc.translateGlossaryFor("es"))
+	prompt := buildTranslatePrompt("The Sun", "es", svc.translateGlossaryFor("es"), nil)
 	if !strings.Contains(prompt, "Sun => Sol") {
 		t.Errorf("es rendering missing:\n%s", prompt)
 	}

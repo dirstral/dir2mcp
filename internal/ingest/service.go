@@ -192,6 +192,11 @@ type Service struct {
 	// media.translate.engine): "chat" (default, line-by-line via s.translator) or
 	// "whisper" (native audio->English translate task via s.translateSTT).
 	translateEngine string
+	// translateNameHints pins proper-noun spellings in the chat translate prompts
+	// (config media.translate.name_hints, SPEC §8.6.2). Off by default: it only
+	// exists for a (source, target) pair translit carries a convention for, and it
+	// changes the prompt, so it is opt-in and folded into the translate cache key.
+	translateNameHints bool
 	// captionClean is the ingest-time cue cleaning compiled once by NewService
 	// from media.subtitles.*; see captionCleanOptions.
 	captionClean subtitle.CleanOptions
@@ -1022,6 +1027,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	// generator; when off (default), or no chat provider resolves, the field
 	// stays nil and the translate step self-skips so behaviour is unchanged.
 	svc.translateTargetLangs = append([]string(nil), cfg.MediaTranslateTargetLangs...)
+	svc.translateNameHints = cfg.MediaTranslateNameHints
 	svc.translateEngine = strings.ToLower(strings.TrimSpace(cfg.MediaTranslateEngine))
 	if svc.translateEngine == "" {
 		svc.translateEngine = "chat"
@@ -6149,7 +6155,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	if s.translateEngine == "whisper" {
 		translated, translatedWords, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
 	} else {
-		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, targetLang)
+		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, sourceLang, targetLang)
 	}
 	if err != nil {
 		// §14.4: a translation provider/transport failure (chat OR whisper engine)

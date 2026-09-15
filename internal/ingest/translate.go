@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/statefs"
+	"github.com/dirstral/dir2mcp/internal/translit"
 )
 
 // readOrComputeTranslation returns the source transcript translated into
@@ -23,7 +24,7 @@ import (
 // re-calling the chat provider (SPEC §8.6.2 caching parity with the transcript
 // cache). The cache is keyed by source content, not target text, because the
 // same source media always yields the same translation for a given target.
-func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, sourceText, targetLang string) (string, error) {
+func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, sourceText, sourceLang, targetLang string) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "translate")
 	if err := statefs.MkdirAll(cacheDir); err != nil {
 		return "", fmt.Errorf("create translate cache dir: %w", err)
@@ -40,13 +41,13 @@ func (s *Service) readOrComputeTranslation(ctx context.Context, content []byte, 
 	// identity change misses without reading another derivation's bytes. The
 	// TranscriptLangSuffix is retained on the filename so cache files stay
 	// human-identifiable by language.
-	base := s.translateCacheKey(content, sourceText, targetLang) + TranscriptLangSuffix(targetLang)
+	base := s.translateCacheKey(content, sourceText, sourceLang, targetLang) + TranscriptLangSuffix(targetLang)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
 
-	translated, err := s.translateTranscriptText(ctx, sourceText, targetLang)
+	translated, err := s.translateTranscriptText(ctx, sourceText, sourceLang, targetLang)
 	if err != nil {
 		return "", err
 	}
@@ -88,7 +89,7 @@ type translateCell struct {
 // timing. The historical per-line path is used directly when the effective window
 // is <=1 with no margin (an explicit opt-out that also keeps pre-windowing
 // translate caches valid — see translateWindowShape).
-func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targetLang string) (string, error) {
+func (s *Service) translateTranscriptText(ctx context.Context, sourceText, sourceLang, targetLang string) (string, error) {
 	lines := strings.Split(sourceText, "\n")
 	cells := make([]translateCell, len(lines))
 	var order []int // indices into cells that carry translatable text, in order
@@ -108,13 +109,13 @@ func (s *Service) translateTranscriptText(ctx context.Context, sourceText, targe
 	marginM := s.translateContextLines()
 	if windowN <= 1 && marginM == 0 {
 		// Explicit opt-out: translate each cue in isolation (historical behaviour).
-		if err := s.translateCellsPerLine(ctx, cells, order, targetLang); err != nil {
+		if err := s.translateCellsPerLine(ctx, cells, order, sourceLang, targetLang); err != nil {
 			return "", err
 		}
 	} else {
 		for start := 0; start < len(order); start += windowN {
 			end := min(start+windowN, len(order))
-			if err := s.translateWindow(ctx, cells, order, start, end, marginM, targetLang); err != nil {
+			if err := s.translateWindow(ctx, cells, order, start, end, marginM, sourceLang, targetLang); err != nil {
 				return "", err
 			}
 		}
@@ -193,12 +194,20 @@ func (s *Service) translateWindowShape() string {
 // the model up to marginM read-only context cues on each side. It verifies the
 // model returned exactly one line per target in order; on any mismatch it falls
 // back to per-line translation for this window so timing can never desync.
-func (s *Service) translateWindow(ctx context.Context, cells []translateCell, order []int, start, end, marginM int, targetLang string) error {
+func (s *Service) translateWindow(ctx context.Context, cells []translateCell, order []int, start, end, marginM int, sourceLang, targetLang string) error {
 	targets := order[start:end]
 	before := order[max(0, start-marginM):start]
 	after := order[end:min(len(order), end+marginM)]
 
-	prompt := buildWindowTranslatePrompt(cells, before, targets, after, targetLang, s.translateGlossaryFor(targetLang))
+	glossary := s.translateGlossaryFor(targetLang)
+	// Hints for the target cues only: the context cues are not translated, so a
+	// spelling pinned for them would be an instruction about text the model must
+	// not return.
+	var hints []string
+	for _, idx := range targets {
+		hints = mergeNameHints(hints, s.nameHintsFor(cells[idx].body, sourceLang, targetLang, glossary))
+	}
+	prompt := buildWindowTranslatePrompt(cells, before, targets, after, targetLang, glossary, hints)
 	raw, err := s.generateBounded(ctx, prompt, translateLineMaxTokens*len(targets))
 	if err != nil {
 		// A provider/transport failure is NOT a format mismatch: the provider is
@@ -210,7 +219,7 @@ func (s *Service) translateWindow(ctx context.Context, cells []translateCell, or
 	if !ok {
 		s.getLogger().Printf("transcript translation: windowed batch response did not return %d numbered lines 1:1; "+
 			"falling back to per-line translation for this window (subtitle timing preserved)", len(targets))
-		return s.translateCellsPerLine(ctx, cells, targets, targetLang)
+		return s.translateCellsPerLine(ctx, cells, targets, sourceLang, targetLang)
 	}
 	for i, idx := range targets {
 		cells[idx].translated = collapseTranslatedLine(parsed[i])
@@ -222,9 +231,9 @@ func (s *Service) translateWindow(ctx context.Context, cells []translateCell, or
 // historical isolated path). It is also the safe-degrade fallback for a window
 // whose batch response was malformed. collapseTranslatedLine keeps one source cue
 // exactly one output line.
-func (s *Service) translateCellsPerLine(ctx context.Context, cells []translateCell, idxs []int, targetLang string) error {
+func (s *Service) translateCellsPerLine(ctx context.Context, cells []translateCell, idxs []int, sourceLang, targetLang string) error {
 	for _, idx := range idxs {
-		translatedBody, err := s.translateLine(ctx, cells[idx].body, targetLang)
+		translatedBody, err := s.translateLine(ctx, cells[idx].body, sourceLang, targetLang)
 		if err != nil {
 			return err
 		}
@@ -283,12 +292,92 @@ func (s *Service) generateBounded(ctx context.Context, prompt string, maxTokens 
 // the chat Generator. Empty/whitespace input short-circuits to empty so the chat
 // provider is never called for a marker-only line. The prompt asks for the
 // translation only (no preamble), which the trim downstream normalizes.
-func (s *Service) translateLine(ctx context.Context, text, targetLang string) (string, error) {
+// sourceLang is the transcript's resolved source language ("" when unknown); it
+// gates the proper-noun spelling hints.
+func (s *Service) translateLine(ctx context.Context, text, sourceLang, targetLang string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", nil
 	}
-	return s.generateBounded(ctx, buildTranslatePrompt(text, targetLang, s.translateGlossaryFor(targetLang)), translateLineMaxTokens)
+	glossary := s.translateGlossaryFor(targetLang)
+	hints := s.nameHintsFor(text, sourceLang, targetLang, glossary)
+	return s.generateBounded(ctx, buildTranslatePrompt(text, targetLang, glossary, hints), translateLineMaxTokens)
+}
+
+// translateNameHintsActive reports whether proper-noun spelling hints can appear
+// in the translate prompt for this source/target pair (SPEC §8.6.2). It is the
+// single gate shared by prompt construction and the translate cache key, so a
+// cached translation can never have been produced under a different prompt
+// shape. The tables are the Russian BGN/PCGN set, so a Ukrainian source would
+// get "Volodimir" for Volodymyr pinned as "use exactly this", and another
+// target language would lose its own convention for the same name (fr
+// "Chtcherbak", de "Schtscherbak"). An unknown source ("" from auto-detect) is
+// not assumed to be Russian.
+//
+// Whether any hint actually fires also depends on the line containing a
+// Cyrillic proper noun, which the source transcript fully determines and the
+// cache key already folds, so it is deliberately not part of this predicate.
+func (s *Service) translateNameHintsActive(sourceLang, targetLang string) bool {
+	return s.translateNameHints &&
+		translit.IsRussianSource(sourceLang) &&
+		translit.IsEnglishTarget(targetLang)
+}
+
+// nameHintsFor returns the "<source> -> <spelling>" hints for one line, or nil
+// when the gate is closed, the line carries no Cyrillic, or every candidate was
+// refused. A name the operator's glossary already covers is dropped: the
+// glossary is the operator's explicit choice and wins over a derived spelling
+// (SPEC §8.6.2), and two instructions for one name would leave the model to pick.
+func (s *Service) nameHintsFor(text, sourceLang, targetLang string, glossary map[string]string) []string {
+	if !s.translateNameHintsActive(sourceLang, targetLang) || !translit.HasCyrillic(text) {
+		return nil
+	}
+	hints := translit.Hints(text)
+	if len(glossary) == 0 || len(hints) == 0 {
+		return hints
+	}
+	kept := hints[:0]
+	for _, h := range hints {
+		name, _, _ := strings.Cut(h, " -> ")
+		if _, covered := glossary[strings.ToLower(strings.TrimSpace(name))]; covered {
+			continue
+		}
+		kept = append(kept, h)
+	}
+	return kept
+}
+
+// mergeNameHints appends the hints of one more cue to a window's list, keeping
+// first-appearance order and dropping exact repeats, so a name that recurs
+// across the window is pinned once.
+func mergeNameHints(acc, more []string) []string {
+	for _, h := range more {
+		dup := false
+		for _, have := range acc {
+			if have == h {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			acc = append(acc, h)
+		}
+	}
+	return acc
+}
+
+// writeNameHintGuidance appends the proper-noun spelling line (SPEC §8.6.2).
+// Unlike the glossary line it is an exact instruction: the point is to stop the
+// model regenerating a name, so "prefer" would leave the door open. No-op when
+// there are no hints, so the prompt is byte-identical to before for a source
+// that takes none.
+func writeNameHintGuidance(b *strings.Builder, hints []string) {
+	if len(hints) == 0 {
+		return
+	}
+	b.WriteString("Use exactly these spellings for the names that appear: ")
+	b.WriteString(strings.Join(hints, "; "))
+	b.WriteString(".\n")
 }
 
 // translateGlossaryFor returns the terminology-guidance entries (source term →
@@ -336,13 +425,14 @@ func writeGlossaryGuidance(b *strings.Builder, glossary map[string]string) {
 // model to return the translation alone so the output needs no post-parsing. When
 // a non-empty glossary is supplied it injects per-target terminology guidance
 // (§8.6.2); an empty glossary reproduces the historical prompt verbatim.
-func buildTranslatePrompt(text, targetLang string, glossary map[string]string) string {
+func buildTranslatePrompt(text, targetLang string, glossary map[string]string, nameHints []string) string {
 	var b strings.Builder
 	b.WriteString("Translate the following text into ")
 	b.WriteString(targetLang)
 	b.WriteString(". Preserve meaning faithfully. Return only the translated text, ")
 	b.WriteString("with no preamble, quotes, or explanation.\n")
 	writeGlossaryGuidance(&b, glossary)
+	writeNameHintGuidance(&b, nameHints)
 	// The cue is untrusted DATA (#888): a subtitle line saying "ignore the
 	// above" is text an attacker may have written, and the translation is
 	// stored and indexed.
@@ -365,7 +455,7 @@ func buildTranslatePrompt(text, targetLang string, glossary map[string]string) s
 // target language is pinned; the source is auto-detected). A non-empty glossary
 // injects the same per-target terminology guidance as the per-line prompt
 // (§8.6.2, issue #574); an empty glossary reproduces the historical prompt.
-func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []int, targetLang string, glossary map[string]string) string {
+func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []int, targetLang string, glossary map[string]string, nameHints []string) string {
 	var b strings.Builder
 	b.WriteString("Translate each NUMBERED line below into ")
 	b.WriteString(targetLang)
@@ -378,6 +468,7 @@ func buildWindowTranslatePrompt(cells []translateCell, before, targets, after []
 	b.WriteString("merge, renumber, or reorder lines, and never output the context lines. ")
 	b.WriteString("No preamble, quotes, or explanation.\n")
 	writeGlossaryGuidance(&b, glossary)
+	writeNameHintGuidance(&b, nameHints)
 	b.WriteString("\n")
 	b.WriteString(promptfence.Guard("translate"))
 	b.WriteString("\n")
@@ -548,7 +639,7 @@ func formatTimestampMarker(ms int) string {
 
 // BuildTranslatePromptForTest exposes the per-line prompt.
 func BuildTranslatePromptForTest(text, targetLang string, glossary map[string]string) string {
-	return buildTranslatePrompt(text, targetLang, glossary)
+	return buildTranslatePrompt(text, targetLang, glossary, nil)
 }
 
 // BuildWindowTranslatePromptForTest exposes the windowed prompt, taking cue
@@ -564,7 +655,7 @@ func BuildWindowTranslatePromptForTest(before, targets, after []string, targetLa
 		return out
 	}
 	beforeIdx, targetIdx, afterIdx := idx(before), idx(targets), idx(after)
-	return buildWindowTranslatePrompt(cells, beforeIdx, targetIdx, afterIdx, targetLang, nil)
+	return buildWindowTranslatePrompt(cells, beforeIdx, targetIdx, afterIdx, targetLang, nil, nil)
 }
 
 // ParseNumberedTranslationsForTest exposes the 1:1 batch parser, including its
