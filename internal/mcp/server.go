@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -608,26 +607,29 @@ func (s *Server) enforceProtocolVersion(w http.ResponseWriter, r *http.Request, 
 // asserted one version, so the server cannot know which it meant. The joined
 // text is returned for the error message so the operator sees what arrived.
 func soleProtocolVersion(values []string) (string, bool) {
-	seen := make([]string, 0, len(values))
+	first := ""
 	for _, value := range values {
 		for _, part := range strings.Split(value, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
 			}
-			if !slices.Contains(seen, part) {
-				seen = append(seen, part)
+			if first == "" {
+				first = part
+				continue
+			}
+			if part != first {
+				// A second distinct version settles the question, so scanning
+				// stops here. Collecting every member first would do work
+				// proportional to a field an attacker controls, for an answer
+				// that cannot change: the client has named more than one
+				// version. The raw field goes into the refusal so the operator
+				// sees exactly what arrived.
+				return strings.TrimSpace(strings.Join(values, ", ")), false
 			}
 		}
 	}
-	switch len(seen) {
-	case 0:
-		return "", true
-	case 1:
-		return seen[0], true
-	default:
-		return strings.Join(seen, ", "), false
-	}
+	return first, true
 }
 
 // gatePostInitialize applies every gate a post-initialize message must pass,

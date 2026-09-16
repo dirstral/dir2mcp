@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -45,9 +46,13 @@ func TestPostInitialize_ProtocolVersionHeaderIsAFieldList(t *testing.T) {
 			t.Fatalf("do: %v", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
-		buf := make([]byte, 2048)
-		n, _ := resp.Body.Read(buf)
-		return resp.StatusCode, string(buf[:n])
+		// io.ReadAll, not one Read: a single Read can return part of the JSON,
+		// and the assertion would then miss the refusal code intermittently.
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return resp.StatusCode, string(body)
 	}
 
 	rejected := func(status int, body string) bool {
@@ -141,9 +146,11 @@ func TestSDKTransport_JoinedProtocolVersionReachesTheSDK(t *testing.T) {
 			t.Fatalf("do: %v", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
-		buf := make([]byte, 8192)
-		n, _ := resp.Body.Read(buf)
-		return resp, string(buf[:n])
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return resp, string(raw)
 	}
 
 	initResp, initBody := post(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"bridge","version":"1"}}}`, "")
