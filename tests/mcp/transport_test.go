@@ -52,7 +52,7 @@ func TestNewTransport_IsSDK(t *testing.T) {
 		done <- tr.Serve(ctx, http.NotFoundHandler())
 	}()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 
 	notFoundResp, err := client.Post("http://"+ln.Addr().String()+"/not-mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
 	if err != nil {
@@ -145,7 +145,7 @@ func TestSDKTransport_Serve(t *testing.T) {
 		done <- tr.Serve(ctx, srv.Handler())
 	}()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	url := "http://" + ln.Addr().String() + "/mcp"
 	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	resp, err := client.Post(url, "application/json", body)
@@ -235,7 +235,7 @@ func TestSDKTransport_X402MissingPaymentSignature(t *testing.T) {
 		done <- tr.Serve(ctx, http.NotFoundHandler())
 	}()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	url := "http://" + ln.Addr().String() + "/mcp"
 	initBody := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	initResp, err := client.Post(url, "application/json", initBody)
@@ -309,7 +309,7 @@ func TestSDKTransport_RejectsOversizedBody(t *testing.T) {
 		done <- tr.Serve(ctx, srv.Handler())
 	}()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	url := "http://" + ln.Addr().String() + "/mcp"
 	oversized := strings.Repeat("x", (1<<20)+8)
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(oversized))

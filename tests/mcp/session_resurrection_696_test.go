@@ -387,7 +387,7 @@ func doRPC(url, sessionID, body string) (int, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set(protocol.MCPSessionHeader, sessionID)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (testClient(30 * time.Second)).Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -401,7 +401,7 @@ func doDelete(url, sessionID string) error {
 		return err
 	}
 	req.Header.Set(protocol.MCPSessionHeader, sessionID)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (testClient(30 * time.Second)).Do(req)
 	if err != nil {
 		return err
 	}

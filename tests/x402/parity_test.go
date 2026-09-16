@@ -136,7 +136,7 @@ func paritySendRPC(t *testing.T, mcpURL, sessionID, body string, extraHeaders ma
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(5 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)

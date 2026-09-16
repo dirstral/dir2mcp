@@ -58,7 +58,7 @@ func TestSDKTransport_InitializePinsProtocolVersion(t *testing.T) {
 	url, stop := startConformanceServer(t)
 	defer stop()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
@@ -95,7 +95,7 @@ func TestSDKTransport_PartialAcceptNegotiated(t *testing.T) {
 	url, stop := startConformanceServer(t)
 	defer stop()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
 	if err != nil {
@@ -123,7 +123,7 @@ func TestSDKTransport_DeleteTerminatesSession(t *testing.T) {
 	url, stop := startConformanceServer(t)
 	defer stop()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	sessionID := initializeSession(t, url)
 
 	delReq, err := http.NewRequest(http.MethodDelete, url, nil)
@@ -163,7 +163,7 @@ func TestSDKTransport_DeleteUnknownSession(t *testing.T) {
 	url, stop := startConformanceServer(t)
 	defer stop()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 
 	// No session header at all.
 	req, err := http.NewRequest(http.MethodDelete, url, nil)
@@ -190,7 +190,7 @@ func TestSDKTransport_GetUnsupported(t *testing.T) {
 	url, stop := startConformanceServer(t)
 	defer stop()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	resp, err := client.Get(url)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
@@ -211,7 +211,7 @@ func TestSDKTransport_CancelledNotificationForwarded(t *testing.T) {
 	url, stop := startConformanceServer(t)
 	defer stop()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	sessionID := initializeSession(t, url)
 
 	cancelReq, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"42","reason":"user aborted"}}`))
@@ -237,7 +237,7 @@ func TestSDKTransport_CancelledWithIDRejected(t *testing.T) {
 	url, stop := startConformanceServer(t)
 	defer stop()
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := testClient(3 * time.Second)
 	sessionID := initializeSession(t, url)
 
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":9,"method":"notifications/cancelled","params":{"requestId":"42"}}`))
