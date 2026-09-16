@@ -162,10 +162,16 @@ func TestTranslation_CrossCorpusReuse(t *testing.T) {
 // (SPEC §8.6.7): the name-hint augmentation rewrites the translation prompt, so
 // switching it on must MISS the cache rather than return the un-hinted
 // translation produced before. It also locks the converse, which is why the key
-// folds the hint GATE and not the raw source language: hints only reach the
-// prompt for a Russian source and an English target, so with hints enabled but
-// a source that cannot take them the prompt is byte-identical to the un-hinted
-// one and the existing cache entry must still hit.
+// folds the hint GATE and not the raw source language: hints reach the prompt
+// only for a source translit carries a convention for and an English target, so
+// with hints enabled but a source that cannot take them the prompt is
+// byte-identical to the un-hinted one and the existing cache entry must still
+// hit.
+//
+// The gate folds the CONVENTION, not a bare flag: Russian and Ukrainian both
+// take hints and spell the same text differently (Гриценко is Gritsenko under
+// one table and Hrytsenko under the other), so a translation cached under one
+// must not be served after the source language changes to the other.
 func TestTranslateCacheKey_NameHintModeMisses(t *testing.T) {
 	t.Parallel()
 	content := []byte("audio-bytes")
@@ -185,8 +191,15 @@ func TestTranslateCacheKey_NameHintModeMisses(t *testing.T) {
 	if onKey := on.TranslateCacheKey(content, sourceText, "ru", "en"); onKey == offKey {
 		t.Fatalf("enabling name hints changes the prompt, so it must miss the cache (both %q)", onKey)
 	}
-	if k := on.TranslateCacheKey(content, sourceText, "uk", "en"); k != off.TranslateCacheKey(content, sourceText, "uk", "en") {
-		t.Errorf("a non-Russian source cannot take hints; key must not change: %q", k)
+	if k := on.TranslateCacheKey(content, sourceText, "be", "en"); k != off.TranslateCacheKey(content, sourceText, "be", "en") {
+		t.Errorf("a source with no convention cannot take hints; key must not change: %q", k)
+	}
+	ukKey := on.TranslateCacheKey(content, sourceText, "uk", "en")
+	if ukKey == offKey {
+		t.Errorf("a Ukrainian source takes hints too, so it must miss the un-hinted entry: %q", ukKey)
+	}
+	if ukKey == on.TranslateCacheKey(content, sourceText, "ru", "en") {
+		t.Errorf("the two conventions spell the same text differently; they must not share a cache entry: %q", ukKey)
 	}
 	if k := on.TranslateCacheKey(content, sourceText, "", "en"); k != off.TranslateCacheKey(content, sourceText, "", "en") {
 		t.Errorf("an unknown source cannot take hints; key must not change: %q", k)

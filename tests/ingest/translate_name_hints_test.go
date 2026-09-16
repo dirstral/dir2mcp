@@ -179,3 +179,41 @@ func TestTranscriptTranslation_GlossaryCoversObliqueForms(t *testing.T) {
 		t.Errorf("an uncovered name keeps its hint:\n%s", got)
 	}
 }
+
+// TestTranscriptTranslation_UkrainianSourceUsesTheUkrainianTable pins the
+// end-to-end effect of the second convention (SPEC §8.6.2): a Ukrainian source
+// now carries hints, and they are the national-system spellings, not the Russian
+// table's. Before the Ukrainian table existed this source was refused outright,
+// because the Russian table would have pinned "Volodimir" for Volodymyr.
+func TestTranscriptTranslation_UkrainianSourceUsesTheUkrainianTable(t *testing.T) {
+	t.Parallel()
+	const line = "[00:00] вчора сказав Володимир Гриценко про це"
+	for _, tc := range []struct {
+		name       string
+		sourceLang string
+		want       []string
+		absent     []string
+	}{
+		{"Ukrainian", "uk", []string{"Володимир -> Volodymyr", "Гриценко -> Hrytsenko"}, []string{"Volodimir", "Gritsenko"}},
+		{"regional Ukrainian tag", "uk-UA", []string{"Володимир -> Volodymyr"}, []string{"Volodimir"}},
+		{"Russian", "ru", []string{"Володимир -> Volodimir", "Гриценко -> Gritsenko"}, []string{"Volodymyr", "Hrytsenko"}},
+		{"no convention", "be", nil, []string{"Volodymyr", "Volodimir", "spellings"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runNameHintTranslation(t, config.Config{
+				MediaTranslateNameHints:   true,
+				MediaTranslateWindowLines: 1,
+			}, tc.sourceLang, line)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("prompt is missing %q:\n%s", want, got)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(got, absent) {
+					t.Errorf("prompt must not carry %q:\n%s", absent, got)
+				}
+			}
+		})
+	}
+}

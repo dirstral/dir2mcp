@@ -16,53 +16,91 @@ import (
 // English word was supposed to be which source name -- ambiguous, and a wrong swap is
 // worse than a visible error. Instead we hand the model the spellings up front.
 //
-// This is safe in the Cyrillic->English direction specifically: Russian capitalises
-// mid-sentence words almost exclusively for proper nouns, so detection is reliable.
-// The reverse (guessing which English capital is a mangled name) is not, because
-// English capitalises ordinary words mid-sentence constantly.
+// This is safe in the Cyrillic->English direction specifically: the source languages
+// here capitalise mid-sentence words almost exclusively for proper nouns, so detection
+// is reliable. The reverse (guessing which English capital is a mangled name) is not,
+// because English capitalises ordinary words mid-sentence constantly.
+//
+// Everything that differs BETWEEN source languages lives in a convention
+// (russian.go, ukrainian.go); this file holds what they share. A language with no
+// convention gets no hints at all: applying one language's table to another gives
+// a confidently wrong spelling, and the prompt says "use exactly these".
 
-// IsRussianSource reports whether a source-language tag names Russian ("ru",
-// "rus", "ru-RU"). Hints are gated on it because cyrTranslit is the Russian
-// BGN/PCGN table: applied to a Ukrainian name it yields Володимир -> Volodimir
-// and Гриценко -> Gritsenko, where the Ukrainian rules give Volodymyr and
-// Hrytsenko (И -> Y, Г -> H). A pinned wrong spelling is worse than no hint, so
-// a source that is not known to be Russian gets none. An empty tag is unknown,
-// not Russian (SPEC §8.8: unknown is first class), and is refused too.
-func IsRussianSource(lang string) bool {
-	lang = strings.ToLower(strings.TrimSpace(lang))
-	if i := strings.IndexAny(lang, "-_"); i >= 0 {
-		lang = lang[:i]
+// replacement is one ordered source-ending/rendering pair.
+type replacement struct{ from, to string }
+
+// convention is one source language's transliteration system and name grammar.
+// Every field is language-specific on purpose: a shared default would be one
+// language's rule silently applied to another, which is the bug this type exists
+// to prevent.
+type convention struct {
+	// name is the short tag recorded in the translate derivation identity, so a
+	// cached translation produced under one convention cannot be served after
+	// the source language changes to another.
+	name string
+	// transliterate renders one LOWER-CASED word; the caller capitalises.
+	transliterate func(word string) string
+	// obliqueForms map an unambiguous oblique ending to its nominative.
+	obliqueForms []replacement
+	// nominativeSuffixes mark a form that already needs no adjustment, and prove
+	// that a stripped genitive -а was an inflection.
+	nominativeSuffixes []string
+	// triggerForms restore a genitive that only the genitiveTrigger construction
+	// makes unambiguous. Checked after the strip; see genitiveStem.
+	triggerForms []replacement
+	// exonymStems are source words with an established English form.
+	exonymStems []string
+	// vowelRunes decide whether a word is consonant-final, hence nominative.
+	vowelRunes string
+	// caseEndingRunes are the letters a case ending is built from.
+	caseEndingRunes string
+	// apostropheIsInternal is true where an apostrophe is a phonetic separator
+	// inside one word rather than a compound boundary.
+	apostropheIsInternal bool
+	// genitiveTrigger matches the construction that forces the next word into
+	// the genitive.
+	genitiveTrigger *regexp.Regexp
+}
+
+// conventionFor resolves a BCP-47 source-language tag to its convention. The
+// region subtag is dropped ("ru-RU" is Russian), and an unknown or empty tag
+// resolves to nothing: unknown is first class (SPEC §8.8) and is never assumed
+// to be a language we have a table for.
+func conventionFor(lang string) (*convention, bool) {
+	l := strings.ToLower(strings.TrimSpace(lang))
+	if i := strings.IndexAny(l, "-_"); i >= 0 {
+		l = l[:i]
 	}
-	return lang == "ru" || lang == "rus"
+	switch l {
+	case "ru", "rus":
+		return russian, true
+	case "uk", "ukr":
+		return ukrainian, true
+	}
+	return nil, false
 }
 
-// cyrTranslit is BGN/PCGN-style, matching how Russian names are conventionally
-// rendered in English-language copy (Сеченов->Sechenov, Щербак->Shcherbak).
-// Order matters: multi-rune outputs are applied before single-letter ones.
-// Includes the Kazakh/Kyrgyz/Ukrainian letters this corpus also carries, so a name in
-// those alphabets transliterates rather than surviving as raw Cyrillic.
-var cyrTranslit = []struct{ from, to string }{
-	{"щ", "shch"}, {"ш", "sh"}, {"ч", "ch"}, {"ж", "zh"}, {"ц", "ts"},
-	{"ю", "yu"}, {"я", "ya"}, {"х", "kh"}, {"ё", "e"}, {"э", "e"},
-	{"ъ", ""}, {"ь", ""},
-	{"а", "a"}, {"б", "b"}, {"в", "v"}, {"г", "g"}, {"д", "d"}, {"е", "e"},
-	{"з", "z"}, {"и", "i"}, {"й", "y"}, {"к", "k"}, {"л", "l"}, {"м", "m"},
-	{"н", "n"}, {"о", "o"}, {"п", "p"}, {"р", "r"}, {"с", "s"}, {"т", "t"},
-	{"у", "u"}, {"ф", "f"}, {"ы", "y"},
-	// Ukrainian
-	{"і", "i"}, {"ї", "yi"}, {"є", "ye"}, {"ґ", "g"},
-	// Kazakh / Kyrgyz
-	{"ә", "a"}, {"ғ", "g"}, {"қ", "k"}, {"ң", "ng"}, {"ө", "o"},
-	{"ұ", "u"}, {"ү", "u"}, {"һ", "h"},
+// SupportsSource reports whether name hints exist for a source language. Hints
+// are gated on it because a table is specific to the language it was written
+// for: the Russian table applied to a Ukrainian name yields Володимир ->
+// Volodimir and Гриценко -> Gritsenko, where the Ukrainian rules give Volodymyr
+// and Hrytsenko. A pinned wrong spelling is worse than no hint.
+func SupportsSource(lang string) bool {
+	_, ok := conventionFor(lang)
+	return ok
 }
 
-// adjectivalEndings render the Russian adjectival name endings the way English-language
-// copy conventionally does: Достоевский is "Dostoevsky", not "Dostoevskiy". Applied
-// before the letter-by-letter table, which would otherwise produce the -iy form and
-// fight editorial style.
-var adjectivalEndings = []struct{ from, to string }{
-	{"цкий", "tsky"}, {"ский", "sky"}, {"цкая", "tskaya"}, {"ская", "skaya"},
-	{"ый", "y"}, {"ий", "y"},
+// SourceConvention returns the short name of the convention a source language
+// resolves to, or "" when there is none. It is folded into the translate
+// derivation identity: two languages that BOTH have hints produce different
+// spellings for the same text, so a cached translation must not be served across
+// them.
+func SourceConvention(lang string) string {
+	conv, ok := conventionFor(lang)
+	if !ok {
+		return ""
+	}
+	return conv.name
 }
 
 // capitalise upper-cases the first RUNE. Byte-slicing would corrupt any name whose
@@ -76,59 +114,22 @@ func capitalise(s string) string {
 	return string(r)
 }
 
-// Transliterate renders one Cyrillic word in Latin script, capitalised.
-func Transliterate(word string) string {
-	w := strings.ToLower(word)
-	for _, ae := range adjectivalEndings {
-		if strings.HasSuffix(w, ae.from) {
-			base := strings.TrimSuffix(w, ae.from)
-			for _, r := range cyrTranslit {
-				base = strings.ReplaceAll(base, r.from, r.to)
-			}
-			return capitalise(base + ae.to)
-		}
+// Transliterate renders one Cyrillic word in Latin script, capitalised, under the
+// convention of sourceLang. A language with no convention returns "".
+func Transliterate(word, sourceLang string) string {
+	conv, ok := conventionFor(sourceLang)
+	if !ok {
+		return ""
 	}
-	for _, r := range cyrTranslit {
-		w = strings.ReplaceAll(w, r.from, r.to)
-	}
-	return capitalise(w)
+	return capitalise(conv.transliterate(strings.ToLower(word)))
 }
 
-// obliqueForms maps an UNAMBIGUOUS oblique (non-nominative) ending on a Russian
-// personal name to the nominative ending. English does not inflect, so a hint must
-// carry the nominative or the case ending leaks into the translation: "Тикебаеву"
-// became "Tikebaevu", "Арнабаевича" became "Arnabaevicha".
-//
-// Adjectival surnames are RESTORED rather than truncated -- dropping "-ского" outright
-// yields "Зеленск", and because the prompt says "use exactly these spellings" the model
-// is then pushed to write "Zelensk". Longest suffixes first, since HasSuffix is checked
-// in order.
-//
-// Deliberately EXCLUDES -ова/-ева/-ина: genitive for a man's surname but NOMINATIVE for
-// a woman's, and guessing wrong renames the person. Such forms are left unhinted,
-// except after "имени", where the construction guarantees the genitive.
-var obliqueForms = []struct{ from, to string }{
-	{"овичем", "ович"}, {"евичем", "евич"},
-	{"овича", "ович"}, {"евича", "евич"}, {"овичу", "ович"}, {"евичу", "евич"},
-	{"овной", "овна"}, {"евной", "евна"}, {"овне", "овна"}, {"евне", "евна"},
-	{"ского", "ский"}, {"скому", "ский"}, {"ским", "ский"}, {"ском", "ский"},
-	{"цкого", "цкий"}, {"цкому", "цкий"}, {"цким", "цкий"}, {"цком", "цкий"},
-	{"овым", "ов"}, {"евым", "ев"}, {"иным", "ин"}, {"ыным", "ын"},
-	{"ову", "ов"}, {"еву", "ев"}, {"ину", "ин"}, {"ыну", "ын"},
-	{"ове", "ов"}, {"еве", "ев"}, {"ине", "ин"}, {"ыне", "ын"},
-}
-
-// nominativeSuffixes mark a form that already needs no adjustment.
-var nominativeSuffixes = []string{
-	"ов", "ев", "ин", "ын", "ий", "ый", "ич", "ко", "ук", "юк", "ян", "дзе", "швили",
-}
-
-// nominalize returns the nominative form of a Russian personal name plus whether the
+// nominalize returns the nominative form of a personal name plus whether the
 // conversion is trustworthy. Anything ambiguous reports false so no hint is emitted --
 // a wrong pin is worse than no pin, since the model may well have had it right.
-func nominalize(word string) (string, bool) {
+func nominalize(word string, conv *convention) (string, bool) {
 	lw := strings.ToLower(word)
-	for _, of := range obliqueForms {
+	for _, of := range conv.obliqueForms {
 		if strings.HasSuffix(lw, of.from) {
 			stem := []rune(word)[:len([]rune(word))-len([]rune(of.from))]
 			if len(stem) < 3 {
@@ -137,56 +138,30 @@ func nominalize(word string) (string, bool) {
 			return string(stem) + of.to, true
 		}
 	}
-	for _, nom := range nominativeSuffixes {
+	for _, nom := range conv.nominativeSuffixes {
 		if strings.HasSuffix(lw, nom) {
 			return word, true
 		}
 	}
 	r := []rune(lw)
-	if !strings.ContainsRune("аеёиоуыэюяәөүұ", r[len(r)-1]) {
+	if !strings.ContainsRune(conv.vowelRunes, r[len(r)-1]) {
 		return word, true // consonant-final: already nominative
 	}
 	return "", false
 }
 
-// exonymStems lists source words that already have an established English form the
-// model knows (countries, major cities, well-known bodies, and capitalised common
-// nouns). Pinning a literal transliteration for these makes the translation WORSE --
-// measured: "России" pinned to "Rossii" turned "in Russia" into "in Rossii", and "Бог"
-// pinned to "Bog" turned "May God grant" into "May Bog indeed enable".
-var exonymStems = []string{
-	// countries / regions
-	"росси", "украин", "беларус", "белорус", "казахстан", "киргиз", "кыргыз",
-	"грузи", "армени", "азербайджан", "узбекистан", "таджикистан", "туркмен",
-	"молдов", "литв", "латви", "эстони", "польш", "германи", "франци", "англи",
-	"британи", "америк", "европ", "китай", "япони", "турци", "израил", "иран",
-	"ирак", "сири", "инди", "афганистан", "чечн", "сибир", "кавказ", "урал",
-	"крым", "донбас", "прибалтик",
-	// cities
-	"москв", "киев", "харьков", "одесс", "львов", "петербург", "минск", "бишкек",
-	"астан", "алмат", "тбилиси", "ереван", "баку", "ташкент", "душанбе", "вильнюс",
-	"риг", "таллин", "варшав", "берлин", "париж", "лондон", "вашингтон", "брюссел",
-	"праг", "вен", "рим", "стамбул", "сочи", "казан", "екатеринбург", "новосибирск",
-	// bodies / institutions with standard English names
-	"нато", "оон", "евросоюз", "кремл", "госдум", "думе", "юнеско", "интерпол",
-	// capitalised COMMON nouns
-	"бог", "господ", "земл", "интернет", "родин", "отечеств",
-}
-
-// caseEndingRunes are the letters a Russian case ending is built from. Used to decide
-// whether the text after an exonym stem is an inflection of that word or the rest of a
-// different, longer word.
-const caseEndingRunes = "аеёиоуыэюяьйм"
-
 // hasExonym reports whether word already has a conventional English rendering.
+// Pinning a literal transliteration for these makes the translation WORSE --
+// measured: "России" pinned to "Rossii" turned "in Russia" into "in Rossii", and
+// "Бог" pinned to "Bog" turned "May God grant" into "May Bog indeed enable".
 //
 // The stem must be followed only by a plausible case ending. A bare prefix test
 // swallows real surnames that merely start the same way -- "вен" ate Венедиктов,
 // "литв" ate Литвиненко, "бог" ate Богданов -- silently removing the feature for names
 // it exists to fix.
-func hasExonym(word string) bool {
+func hasExonym(word string, conv *convention) bool {
 	lw := strings.ToLower(word)
-	for _, stem := range exonymStems {
+	for _, stem := range conv.exonymStems {
 		if !strings.HasPrefix(lw, stem) {
 			continue
 		}
@@ -196,7 +171,7 @@ func hasExonym(word string) bool {
 		}
 		ok := true
 		for _, r := range rest {
-			if !strings.ContainsRune(caseEndingRunes, r) {
+			if !strings.ContainsRune(conv.caseEndingRunes, r) {
 				ok = false
 				break
 			}
@@ -207,16 +182,6 @@ func hasExonym(word string) bool {
 	}
 	return false
 }
-
-// genitiveTrigger matches the "имени X" / "им. X" construction, which forces X into
-// the genitive. The English form is then the nominative: "имени Сеченова" is
-// "Sechenov", not "Sechenova" -- the single most visible case, since it names
-// institutions.
-//
-// Deliberately NOT anchored with \b: Go's RE2 defines word boundaries over ASCII word
-// characters only, so \b never matches against a Cyrillic letter and the pattern would
-// silently never fire.
-var genitiveTrigger = regexp.MustCompile(`(?i)(^|\s)(имени|им\.)\s*$`)
 
 // properNounRE matches a capitalised Cyrillic word of three or more letters. The
 // lowercase class must cover every alphabet in the corpus: omitting the Kazakh/Kyrgyz
@@ -258,28 +223,32 @@ var bareTimestampMarker = regexp.MustCompile(`(?:\A|\n)[ \t]*\d+:\d{2}(?::\d{2})
 // realistic worst case (a list of officials) without crowding out the text itself.
 const maxNameHints = 6
 
-// Hints returns "<source> -> <english>" spelling hints for the proper nouns in a
-// line of Cyrillic text, in first-appearance order. Returns nil when there is nothing
-// to pin, so the prompt is unchanged for the vast majority of lines.
 // notAWholePlainName reports whether the match at loc must be refused: it is a
-// name a joiner continues, or it is the tail of a longer token.
+// name a joiner continues that this convention cannot render, or it is the tail
+// of a longer token.
 //
-// A name that a joiner continues -- Лук'яненко, Дем'янюк, Римский-Корсаков -- is
-// matched as ONE token by properNounRE, so it can no longer pin a fragment ("Лук
-// -> Luk") or split into two hints ("Римский -> Rimsky", "Корсаков -> Korsakov").
-// Both put a wrong spelling into a prompt that says "use exactly these". It is
+// A HYPHENATED name -- Римский-Корсаков -- is matched as ONE token by
+// properNounRE, so it can no longer pin a fragment or split into two hints. It is
 // then REFUSED rather than pinned, for the same reason an ambiguous -ова is: a
 // correct rendering of a compound needs per-part rules that do not exist yet
-// (Transliterate gives "Rimskiy-korsakov": the second half is lowercased and the
-// adjectival -sky rule only fires at word end), and no hint leaves the model its
-// own rendering where a wrong hint overrides it. Splitting on the joiner and
-// transliterating each part is the follow-up once those rules exist.
+// (the Russian transliterator gives "Rimskiy-korsakov": the second half is
+// lowercased and the adjectival -sky rule only fires at word end), and no hint
+// leaves the model its own rendering where a wrong hint overrides it.
+//
+// An APOSTROPHE is refused only where the convention treats it as a boundary. In
+// Ukrainian it is a phonetic separator inside one word and the national system
+// simply drops it, so Лук'яненко renders "Lukianenko" as one name; refusing it
+// there would drop a whole class of Ukrainian surnames.
 //
 // A match that starts right after a letter or a joiner is the tail of a token
 // whose head failed the capital rule (or a lowercase-led compound such as
 // де-Голль). Go's regexp has no lookbehind, so that boundary is enforced here.
-func notAWholePlainName(text string, loc []int, word string) bool {
-	if strings.ContainsAny(word, nameJoiners) {
+func notAWholePlainName(text string, loc []int, word string, conv *convention) bool {
+	refused := nameJoiners
+	if conv.apostropheIsInternal {
+		refused = "-"
+	}
+	if strings.ContainsAny(word, refused) {
 		return true
 	}
 	if loc[0] == 0 {
@@ -289,28 +258,59 @@ func notAWholePlainName(text string, loc []int, word string) bool {
 	return unicode.IsLetter(prev) || strings.ContainsRune(nameJoiners, prev)
 }
 
-// genitiveStem restores the nominative of a masculine surname that "имени" has
-// put in the genitive: имени Сеченова -> Сеченов. It only does so when the
-// stripped stem ends in a suffix nominativeSuffixes recognises as a surname,
-// which is what proves the trailing а was an inflection at all.
+// genitiveStem restores the nominative of a surname that the genitive trigger has
+// put in the genitive: имени Сеченова -> Сеченов, імені Шевченка -> Шевченко.
 //
-// Without that proof the strip corrupts indeclinable names: Дюма is French and
-// does not inflect, so "имени Дюма" is still Дюма, and stripping gave "Дюма ->
-// Dyum" -- pinned into a prompt that says "use exactly this". An unproven stem
-// falls through to nominalize, which refuses a vowel-final form as ambiguous,
-// so no hint is emitted and the model keeps its own rendering.
-func genitiveStem(word string, genitive bool) (string, bool) {
-	if !genitive || !strings.HasSuffix(word, "а") {
+// The trailing -а is stripped only when the stripped stem ends in a suffix
+// nominativeSuffixes recognises, which is what proves the -а was an inflection at
+// all. Without that proof the strip corrupts indeclinable names: Дюма is French
+// and does not inflect, so "имени Дюма" is still Дюма, and stripping gave "Дюма
+// -> Dyum" -- pinned into a prompt that says "use exactly this".
+//
+// A convention's triggerForms are checked AFTER the strip, for a genitive whose
+// nominative is a different ending rather than a shorter one. They are safe only
+// under the trigger, which guarantees the case: Ukrainian -ка restores to -ко
+// (Франка -> Франко) because no feminine nominative in -ка has a genitive in -ка,
+// but outside the construction the same ending is ordinary.
+//
+// An unproven stem falls through to nominalize, which refuses a vowel-final form
+// as ambiguous, so no hint is emitted and the model keeps its own rendering.
+func genitiveStem(word string, genitive bool, conv *convention) (string, bool) {
+	if !genitive {
 		return "", false
 	}
-	stem := strings.TrimSuffix(word, "а")
-	lw := strings.ToLower(stem)
-	for _, suf := range nominativeSuffixes {
-		if strings.HasSuffix(lw, suf) {
-			return stem, true
+	if strings.HasSuffix(word, "а") {
+		stem := strings.TrimSuffix(word, "а")
+		lw := strings.ToLower(stem)
+		for _, suf := range conv.nominativeSuffixes {
+			if strings.HasSuffix(lw, suf) {
+				return stem, true
+			}
 		}
 	}
+	lw := strings.ToLower(word)
+	for _, tf := range conv.triggerForms {
+		if !strings.HasSuffix(lw, tf.from) {
+			continue
+		}
+		stem := []rune(word)[:len([]rune(word))-len([]rune(tf.from))]
+		if len(stem) < 3 {
+			return "", false
+		}
+		return string(stem) + tf.to, true
+	}
 	return "", false
+}
+
+// opensASentence reports whether a capital placed right after before is sentence
+// case rather than a name: nothing precedes it, the text ends in a sentence
+// ender, or the text is only a bare transcript timestamp marker.
+func opensASentence(before string) bool {
+	if before == "" {
+		return true
+	}
+	last := []rune(before)[len([]rune(before))-1]
+	return strings.ContainsRune(sentenceEnders, last) || bareTimestampMarker.MatchString(before)
 }
 
 // Hint is one derived spelling: the Word exactly as it appears in the source,
@@ -327,8 +327,8 @@ type Hint struct {
 
 // Hints renders HintPairs as "<word> -> <english>" strings, the form the prompt
 // carries. See HintPairs for the derivation.
-func Hints(text string) []string {
-	pairs := HintPairs(text)
+func Hints(text, sourceLang string) []string {
+	pairs := HintPairs(text, sourceLang)
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -339,43 +339,45 @@ func Hints(text string) []string {
 	return out
 }
 
-func HintPairs(text string) []Hint {
+// HintPairs returns spelling hints for the proper nouns in a line of Cyrillic
+// text, in first-appearance order, under the convention of sourceLang. It returns
+// nil when there is nothing to pin or the language has no convention, so the
+// prompt is unchanged for the vast majority of lines.
+func HintPairs(text, sourceLang string) []Hint {
+	conv, ok := conventionFor(sourceLang)
+	if !ok {
+		return nil
+	}
 	var hints []Hint
 	seen := make(map[string]bool)
 	for _, loc := range properNounRE.FindAllStringIndex(text, -1) {
 		word := text[loc[0]:loc[1]]
 		before := strings.TrimRight(text[:loc[0]], " \t")
-		genitive := genitiveTrigger.MatchString(before)
+		genitive := conv.genitiveTrigger.MatchString(before)
 
 		// A capital opening a sentence is sentence case, not a name. Checked AFTER the
 		// genitive trigger: "им. Сеченова" ends in '.', so testing the boundary first
 		// made the abbreviated form unreachable -- and it is the commoner one in copy.
-		if !genitive {
-			if before == "" {
-				continue
-			}
-			last := []rune(before)[len([]rune(before))-1]
-			if strings.ContainsRune(sentenceEnders, last) || bareTimestampMarker.MatchString(before) {
-				continue
-			}
-		}
-		if notAWholePlainName(text, loc, word) {
+		if !genitive && opensASentence(before) {
 			continue
 		}
-		if hasExonym(word) {
+		if notAWholePlainName(text, loc, word, conv) {
+			continue
+		}
+		if hasExonym(word, conv) {
 			continue
 		}
 
 		var nom string
-		if stem, ok := genitiveStem(word, genitive); ok {
+		if stem, ok := genitiveStem(word, genitive, conv); ok {
 			nom = stem
 		} else {
 			var ok bool
-			if nom, ok = nominalize(word); !ok {
+			if nom, ok = nominalize(word, conv); !ok {
 				continue
 			}
 		}
-		english := Transliterate(nom)
+		english := capitalise(conv.transliterate(strings.ToLower(nom)))
 		if english == "" {
 			continue
 		}
@@ -407,8 +409,8 @@ func HasCyrillic(text string) bool {
 }
 
 // IsEnglishTarget reports whether the translation target is English. The hints are
-// English transliterations (BGN/PCGN), so pinning them for a French or German target
-// would override that language's own convention for the same name.
+// English transliterations, so pinning them for a French or German target would
+// override that language's own convention for the same name.
 func IsEnglishTarget(lang string) bool {
 	l := strings.ToLower(strings.TrimSpace(lang))
 	return l == "en" || l == "eng" || l == "english" || strings.HasPrefix(l, "en-") || strings.HasPrefix(l, "en_")

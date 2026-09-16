@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/dirstral/dir2mcp/internal/translit"
 	"path/filepath"
 	"strings"
 
@@ -514,7 +515,12 @@ func (s *Service) translateCacheKey(content []byte, sourceText, sourceLang, targ
 	// gate: relabelling a source that cannot take hints leaves the prompt
 	// byte-identical, and must keep hitting the existing cache entry.
 	if s.translateNameHintsActive(sourceLang, targetLang) {
-		parts = append(parts, "namehints")
+		// The CONVENTION, not a bare flag: two source languages that both have
+		// hints spell the same text differently (Гриценко is Gritsenko under the
+		// Russian table and Hrytsenko under the Ukrainian one), so a translation
+		// cached under one must not be served after the source language changes
+		// to the other.
+		parts = append(parts, "namehints:"+translit.SourceConvention(sourceLang))
 	}
 	combined := strings.Join(parts, "\x00")
 	return computeContentHash([]byte(combined))
