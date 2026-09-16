@@ -194,8 +194,11 @@ func TestTranslateCacheKey_NameHintModeMisses(t *testing.T) {
 	if k := on.TranslateCacheKey(content, sourceText, "be", "en"); k != off.TranslateCacheKey(content, sourceText, "be", "en") {
 		t.Errorf("a source with no convention cannot take hints; key must not change: %q", k)
 	}
+	// Against the UKRAINIAN un-hinted key, not the Russian one: comparing across
+	// languages would also pass if the key folded the raw source language and
+	// the hints contributed nothing, which is the opposite of what this asserts.
 	ukKey := on.TranslateCacheKey(content, sourceText, "uk", "en")
-	if ukKey == offKey {
+	if ukKey == off.TranslateCacheKey(content, sourceText, "uk", "en") {
 		t.Errorf("a Ukrainian source takes hints too, so it must miss the un-hinted entry: %q", ukKey)
 	}
 	if ukKey == on.TranslateCacheKey(content, sourceText, "ru", "en") {
