@@ -255,11 +255,12 @@ func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Requ
 	if !t.applyOriginGuard(w, req) {
 		return false
 	}
-	// Both header repairs run last, after every gate of this server has read the
+	// The header repairs run last, after every gate of this server has read the
 	// request as the client sent it. They exist only to satisfy the SDK handler
 	// this request is about to reach.
 	canonicalizeContentType(req)
 	negotiateAccept(req)
+	canonicalizeProtocolVersion(req)
 	return true
 }
 
@@ -297,6 +298,32 @@ func (t *SDKTransport) applyOriginGuard(w http.ResponseWriter, req *http.Request
 // same request for the same handler.
 func canonicalizeContentType(req *http.Request) {
 	req.Header.Set("Content-Type", jsonMediaType)
+}
+
+// canonicalizeProtocolVersion collapses a repeated MCP-Protocol-Version field
+// to the single version the client asserted.
+//
+// MCP-Protocol-Version is an ordinary HTTP field, and RFC 9110 §5.3 makes
+// repeated field lines and one comma-joined list equivalent, with any hop free
+// to combine them. A client that sends the header while a bridge adds its own
+// therefore produces "2025-11-25, 2025-11-25": one version, stated twice. The
+// SDK compares the field for exact equality against its supported list, the
+// same way it compares Content-Type above, so it answers that joined value with
+// "Unsupported protocol version" and every post-initialize call fails.
+//
+// This is the configuration dir2mcp itself writes: `install claude` registers
+// the mcp-remote bridge with an explicit --header MCP-Protocol-Version, and
+// current mcp-remote sends its own too (issue #1003).
+//
+// A field naming two DIFFERENT versions is left exactly as it arrived: that is
+// a real disagreement, and gatePostInitialize refuses it with the text the
+// client sent. This repairs only the unambiguous case, and it runs after this
+// server's own gates have read the request.
+func canonicalizeProtocolVersion(req *http.Request) {
+	got, sole := soleProtocolVersion(req.Header.Values(protocol.MCPProtocolVersionHeader))
+	if sole && got != "" {
+		req.Header.Set(protocol.MCPProtocolVersionHeader, got)
+	}
 }
 
 // negotiateAccept guarantees the POST Accept header advertises BOTH

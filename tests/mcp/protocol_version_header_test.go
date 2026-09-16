@@ -1,10 +1,13 @@
 package tests
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
@@ -83,5 +86,81 @@ func TestPostInitialize_ProtocolVersionHeaderIsAFieldList(t *testing.T) {
 				t.Errorf("rejected=%v want=%v (status=%d body=%s)", got, tc.wantReject, status, strings.TrimSpace(body)[:min(len(strings.TrimSpace(body)), 300)])
 			}
 		})
+	}
+}
+
+// The SDK transport is the path the daemon serves, and the SDK compares
+// MCP-Protocol-Version for exact equality against its supported list, exactly as
+// it compares Content-Type. A joined field reached it as one unknown string, so
+// every call AFTER the handshake failed with "Unsupported protocol version",
+// which is what the pre-release smoke gate hit over the mcp-remote bridge.
+//
+// The handshake has to be real: this server's own session gate refuses an
+// unknown session before the SDK is reached, so a bare call would pass whether
+// or not the field was repaired and would prove nothing.
+func TestSDKTransport_JoinedProtocolVersionReachesTheSDK(t *testing.T) {
+	srv := mcp.NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	tr := mcp.NewSDKTransport(srv, ln, "", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = tr.Serve(ctx, http.NotFoundHandler()) }()
+
+	url := "http://" + ln.Addr().String() + "/mcp"
+	client := testClient(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := net.DialTimeout("tcp", ln.Addr().String(), 200*time.Millisecond); err == nil {
+			_ = c.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	const joined = "2025-11-25, 2025-11-25"
+	post := func(t *testing.T, body, session string) (*http.Response, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		// The field as a bridge leaves it: one supported version, stated twice.
+		req.Header.Set("MCP-Protocol-Version", joined)
+		if session != "" {
+			req.Header.Set("MCP-Session-Id", session)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		buf := make([]byte, 8192)
+		n, _ := resp.Body.Read(buf)
+		return resp, string(buf[:n])
+	}
+
+	initResp, initBody := post(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"bridge","version":"1"}}}`, "")
+	session := initResp.Header.Get("Mcp-Session-Id")
+	if session == "" {
+		t.Fatalf("no session from initialize (status=%d): %s", initResp.StatusCode, strings.TrimSpace(initBody))
+	}
+	post(t, `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, session)
+
+	_, body := post(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`, session)
+	if strings.Contains(strings.ToLower(body), "unsupported protocol version") {
+		t.Errorf("the SDK refused a field that names one supported version twice: %s", strings.TrimSpace(body))
+	}
+	if strings.Contains(body, "UNSUPPORTED_PROTOCOL_VERSION") {
+		t.Errorf("this server refused a field that names one supported version twice: %s", strings.TrimSpace(body))
+	}
+	if !strings.Contains(body, `"tools"`) {
+		t.Errorf("tools/list did not answer with a tool list: %s", strings.TrimSpace(body))
 	}
 }
