@@ -33,7 +33,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -446,7 +445,7 @@ func (c *Client) retryRefusedParams(ctx context.Context, chatModel, prompt strin
 			triedCap = true
 			c.capName.Store(int32(capLegacy))
 			text, err = c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, capLegacy)
-		case !triedTemperature && unsupportedParam(err, "temperature"):
+		case !triedTemperature && providerhttp.RefusesParam(err, "temperature"):
 			// Decided on THIS request's error, not on the flag: a concurrent worker
 			// can record the refusal between this request's send and this check, and
 			// a flag-guarded branch would then skip the retry and surface the
@@ -483,70 +482,16 @@ const (
 	capLegacy                          // max_tokens
 )
 
-// paramRejectionPhrase matches a rejection bound DIRECTLY to the parameter that
-// follows it, for servers that do not return a structured `param`. The name must
-// be the thing being refused, not merely a word in the sentence; the caller
-// compares the captured name with the parameter it sent.
-var paramRejectionPhrase = regexp.MustCompile(
-	`(?i)(?:unsupported|unrecognized|unknown|invalid|extra)[ _-]*(?:parameter|argument|field|input)?s?\s*[:\s]\s*['\"]?([a-z_]+)\b`)
-
-// errorParam pulls `error.param` out of an OpenAI-shaped error body. httpError
-// puts the whole response body in Message, so the structured field is still
-// there. Returns "" when the body is not JSON or carries no param.
-func errorParam(msg string) string {
-	var body struct {
-		Error struct {
-			Param string `json:"param"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(msg), &body); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(body.Error.Param)
-}
-
 // unsupportedCapParam reports whether err is the provider refusing the cap
 // parameter ITSELF, which is the one error worth retrying under the other
-// spelling. Everything else must surface unchanged.
-//
-// The refusal has to be bound to the parameter, not merely co-located with its
-// name (#959 review). OpenAI's own message for a rejected parameter NAMES the
-// other spelling as the remedy:
-//
-//	Unsupported parameter: 'temperature' is not supported with this model.
-//	Use 'max_completion_tokens' instead.
-//
-// A plain substring test sees "unsupported" and "max_completion_tokens" in that
-// sentence and flips the client to the legacy name for the rest of its life,
-// over an error that had nothing to do with the cap. So:
-//
-//  1. `error.param` decides when the body carries it. OpenAI and most
-//     compatible servers set it, and it names exactly one parameter.
-//  2. Otherwise the rejection phrase must be immediately followed by the name.
-//  3. Otherwise no retry. A server whose wording matches neither simply gets no
-//     fallback, and the operator sees the real 400 instead of a silent reroute.
+// spelling (#958, #959). The binding rule lives in providerhttp.RefusesParam and
+// is shared with the temperature fallback and the other chat adapters.
 func unsupportedCapParam(err error, sent completionCapName) bool {
 	name := "max_completion_tokens"
 	if sent == capLegacy {
 		name = "max_tokens"
 	}
-	return unsupportedParam(err, name)
-}
-
-// unsupportedParam reports whether err is a 400 in which the provider refuses
-// the named request parameter ITSELF: `error.param` names it when the body is
-// structured, otherwise the rejection phrase must be followed by the name. Any
-// other error, and any 400 that merely mentions the word, is not a refusal.
-func unsupportedParam(err error, name string) bool {
-	var pErr *model.ProviderError
-	if !errors.As(err, &pErr) || pErr.StatusCode != http.StatusBadRequest {
-		return false
-	}
-	if param := errorParam(pErr.Message); param != "" {
-		return strings.EqualFold(param, name)
-	}
-	m := paramRejectionPhrase.FindStringSubmatch(pErr.Message)
-	return len(m) == 2 && strings.EqualFold(m[1], name)
+	return providerhttp.RefusesParam(err, name)
 }
 
 func (c *Client) generateOnceWithCapName(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration, cap completionCapName) (string, error) {

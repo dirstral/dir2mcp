@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -84,6 +85,13 @@ type Client struct {
 	// applications may override this to experiment with alternative models
 	// or aliases (e.g. "mistral-small-latest").
 	DefaultChatModel string
+	// temperatureRefused remembers that this endpoint rejects the temperature
+	// parameter by name. A fresh client sends temperature 0 on every generation;
+	// after one refusal (providerhttp.RefusesParam) it drops the field for the
+	// rest of the client's life, so determinism is kept wherever it is supported
+	// and one probe is spent per client. Atomic: one Client serves concurrent
+	// workers.
+	temperatureRefused atomic.Bool
 	// DefaultTranscribeModel controls the model string sent with audio
 	// transcription requests.  Callers may override it on the client instance.
 	DefaultTranscribeModel string
@@ -220,6 +228,12 @@ type transcribeResponse struct {
 type generateRequest struct {
 	Model    string            `json:"model"`
 	Messages []generateMessage `json:"messages"`
+	// Temperature is pinned to 0 so a derived representation is REPRODUCIBLE:
+	// the same transcript translated twice yields the same text (dir2mcp #996
+	// for the OpenAI adapter; this adapter follows it). A pointer with omitempty:
+	// an endpoint that refuses the parameter by name gets one retry without it,
+	// remembered for the client's life (temperatureRefused).
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 type generateMessage struct {
@@ -870,6 +884,14 @@ func (c *Client) generateWithRetry(ctx context.Context, prompt string) (string, 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		out, err := c.generateOnce(ctx, prompt)
+		if providerhttp.RefusesParam(err, "temperature") {
+			// Decided on THIS request's error, not on the flag: a concurrent
+			// worker may have recorded the refusal while this request was in
+			// flight, and this request still carried the parameter. The retry
+			// reads the flag when it builds its body.
+			c.temperatureRefused.Store(true)
+			out, err = c.generateOnce(ctx, prompt)
+		}
 		if err == nil {
 			return out, nil
 		}
@@ -916,6 +938,10 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 		Messages: []generateMessage{
 			{Role: "user", Content: prompt},
 		},
+	}
+	if !c.temperatureRefused.Load() {
+		zero := 0.0
+		reqPayload.Temperature = &zero
 	}
 	body, err := json.Marshal(reqPayload)
 	if err != nil {
