@@ -38,3 +38,41 @@ func TestRefusesParam(t *testing.T) {
 		}
 	}
 }
+
+// The phrase rule must read the decoded message: inside the raw JSON a quoted
+// name is `\"temperature\"`, and the backslash sits between the optional quote
+// and the name, so a regular expression over the raw body never reaches it.
+func TestRefusesParam_DecodesTheMessageBeforeThePhraseRule(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"OpenAI-shaped, name in escaped quotes", `{"error":{"message":"Unsupported parameter: \"temperature\" is not supported with this model."}}`},
+		{"top-level message, name in escaped quotes", `{"message":"Invalid parameter \"temperature\" for this model","type":"invalid_request_error"}`},
+	} {
+		err := &model.ProviderError{Code: "X", Message: tc.body, StatusCode: http.StatusBadRequest}
+		if !providerhttp.RefusesParam(err, "temperature") {
+			t.Errorf("%s: RefusesParam = false, want true", tc.name)
+		}
+	}
+	// A body that is not JSON is matched as plain text, as before.
+	plain := &model.ProviderError{Code: "X", Message: `Unsupported parameter: 'temperature'`, StatusCode: http.StatusBadRequest}
+	if !providerhttp.RefusesParam(plain, "temperature") {
+		t.Errorf("a plain-text body must still match")
+	}
+}
+
+// A refusal is a property of the model, not of the endpoint.
+func TestRefusedParams_IsScopedToTheModel(t *testing.T) {
+	var r providerhttp.RefusedParams
+	if r.Refused("a") {
+		t.Fatal("nothing recorded yet")
+	}
+	r.Record("a")
+	if !r.Refused("a") {
+		t.Fatal("recorded model must read as refused")
+	}
+	if r.Refused("b") {
+		t.Fatal("another model must not inherit the refusal")
+	}
+}

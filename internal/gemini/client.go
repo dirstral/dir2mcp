@@ -36,7 +36,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -103,13 +102,14 @@ type Client struct {
 	EmbedTextDim     int
 	EmbedCodeDim     int
 	DefaultChatModel string
-	// temperatureRefused remembers that this endpoint rejects the temperature
-	// parameter by name. A fresh client sends temperature 0 on every generation;
-	// after one refusal (providerhttp.RefusesParam) it drops the field for the
-	// rest of the client's life, so determinism is kept wherever it is supported
-	// and one probe is spent per client. Atomic: one Client serves concurrent
-	// workers.
-	temperatureRefused atomic.Bool
+	// temperatureRefused remembers, per model, that the endpoint rejects the
+	// temperature parameter by name. A fresh client sends temperature 0 on every
+	// generation; after one refusal (providerhttp.RefusesParam) it drops the
+	// field for that model for the rest of the client's life, so determinism is
+	// kept wherever it is supported and one probe is spent per model. Keyed by
+	// model, not client-wide: a later DefaultChatModel that accepts the
+	// parameter is pinned again. Safe for concurrent workers.
+	temperatureRefused providerhttp.RefusedParams
 	DefaultSTTModel    string
 	// DefaultSTTLanguage is an optional language hint included in the
 	// transcription prompt (SPEC 8.2 stt_language); empty omits it.
@@ -473,7 +473,7 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 			// worker may have recorded the refusal while this request was in
 			// flight, and this request still carried the parameter. The retry
 			// reads the flag when it builds its body.
-			c.temperatureRefused.Store(true)
+			c.temperatureRefused.Record(chatModel)
 			text, err = c.generateOnce(ctx, chatModel, prompt, timeout)
 		}
 		if err == nil {
@@ -493,7 +493,7 @@ func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, tim
 		Model:    chatModel,
 		Messages: []generateMessage{{Role: "user", Content: prompt}},
 	}
-	if !c.temperatureRefused.Load() {
+	if !c.temperatureRefused.Refused(chatModel) {
 		zero := 0.0
 		req.Temperature = &zero
 	}

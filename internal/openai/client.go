@@ -100,14 +100,14 @@ type Client struct {
 	// current OpenAI parameter first and only falls back when a server refuses
 	// it by name. Atomic: one Client serves concurrent embed/generate workers.
 	capName atomic.Int32
-	// temperatureRefused remembers that this endpoint rejects the temperature
-	// parameter by name (some hosted reasoning models do). A fresh client sends
-	// temperature 0 on every generation; after one refusal it drops the field
-	// for the rest of the client's life, so determinism is kept wherever it IS
-	// supported and one probe is spent per client rather than one per request.
-	// Bound to the parameter the same way the cap fallback is (#959): a 400 that
-	// merely mentions the word does not flip it.
-	temperatureRefused atomic.Bool
+	// temperatureRefused remembers, per model, that the endpoint rejects the
+	// temperature parameter by name. A fresh client sends temperature 0 on every
+	// generation; after one refusal (providerhttp.RefusesParam) it drops the
+	// field for that model for the rest of the client's life, so determinism is
+	// kept wherever it is supported and one probe is spent per model. Keyed by
+	// model, not client-wide: a later DefaultChatModel that accepts the
+	// parameter is pinned again. Safe for concurrent workers.
+	temperatureRefused providerhttp.RefusedParams
 	// DefaultEmbedModel/DefaultChatModel/DefaultSTTModel/DefaultTTSModel/
 	// DefaultTTSVoice are used when the corresponding call is made with
 	// an empty value.
@@ -453,7 +453,7 @@ func (c *Client) retryRefusedParams(ctx context.Context, chatModel, prompt strin
 			// the flag when it builds its body, so it goes out without temperature
 			// whoever stored the refusal first.
 			triedTemperature = true
-			c.temperatureRefused.Store(true)
+			c.temperatureRefused.Record(chatModel)
 			text, err = c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
 		default:
 			return text, err
@@ -504,7 +504,7 @@ func (c *Client) generateOnceWithCapName(ctx context.Context, chatModel, prompt 
 	} else {
 		req.MaxCompletionTokens = maxTokens
 	}
-	if !c.temperatureRefused.Load() {
+	if !c.temperatureRefused.Refused(chatModel) {
 		zero := 0.0
 		req.Temperature = &zero
 	}

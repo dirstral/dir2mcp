@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 )
@@ -39,6 +40,49 @@ func errorParam(msg string) string {
 	return strings.TrimSpace(body.Param)
 }
 
+// errorMessage pulls the human-readable message out of an error body:
+// `error.message` for OpenAI-shaped bodies, top-level `message` for Mistral
+// and Cohere. The phrase rule must run on the DECODED text: inside the raw JSON
+// a quoted name is `\"temperature\"`, and the backslash sits between the
+// optional quote and the name, so the regular expression never reaches it.
+// Returns "" when the body is not JSON or carries no message.
+func errorMessage(msg string) string {
+	var body struct {
+		Message string `json:"message"`
+		Error   struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(msg), &body); err != nil {
+		return ""
+	}
+	if m := strings.TrimSpace(body.Error.Message); m != "" {
+		return m
+	}
+	return strings.TrimSpace(body.Message)
+}
+
+// RefusedParams remembers, per model, that an endpoint refused a request
+// parameter by name, so a client spends one probe per model rather than one
+// per request. It is keyed by model because a refusal is a property of the
+// model, not of the endpoint: a client whose DefaultChatModel later changes to
+// a model that accepts the parameter must pin it again. The zero value is
+// ready to use and safe for concurrent workers.
+type RefusedParams struct {
+	m sync.Map // model -> struct{}
+}
+
+// Refused reports whether a refusal was recorded for model.
+func (r *RefusedParams) Refused(model string) bool {
+	_, ok := r.m.Load(strings.TrimSpace(model))
+	return ok
+}
+
+// Record remembers that model refused the parameter.
+func (r *RefusedParams) Record(model string) {
+	r.m.Store(strings.TrimSpace(model), struct{}{})
+}
+
 // RefusesParam reports whether err is a 400 in which the provider refuses the
 // named request parameter ITSELF: the structured `param` names it when the body
 // carries one, otherwise the rejection phrase must be followed by the name. Any
@@ -59,6 +103,10 @@ func RefusesParam(err error, name string) bool {
 	if param := errorParam(pErr.Message); param != "" {
 		return strings.EqualFold(param, name)
 	}
-	m := paramRejectionPhrase.FindStringSubmatch(pErr.Message)
+	text := errorMessage(pErr.Message)
+	if text == "" {
+		text = pErr.Message
+	}
+	m := paramRejectionPhrase.FindStringSubmatch(text)
 	return len(m) == 2 && strings.EqualFold(m[1], name)
 }

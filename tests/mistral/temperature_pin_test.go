@@ -139,3 +139,42 @@ func TestGenerate_UnrelatedBadRequestKeepsThePin(t *testing.T) {
 		t.Fatalf("an unrelated 400 must not drop the pin for later requests, got %v", carried)
 	}
 }
+
+// A refusal is remembered for the model that refused, not for the client: after
+// model model-a refuses, a client switched to model model-b pins temperature again.
+func TestGenerate_RefusalIsScopedToTheModel(t *testing.T) {
+	var mu sync.Mutex
+	var seen []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		mu.Lock()
+		seen = append(seen, body)
+		mu.Unlock()
+		if _, has := body["temperature"]; has && body["model"] == "model-a" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"object":"error","message":"Input should be less than or equal to 1.5","type":"invalid_request_error","param":"temperature","code":"1000"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"grounded answer"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := mistral.NewClient(srv.URL, "test-key")
+	c.DefaultChatModel = "model-a"
+	if _, err := c.Generate(context.Background(), "q"); err != nil {
+		t.Fatalf("Generate on the refusing model: %v", err)
+	}
+	c.DefaultChatModel = "model-b"
+	if _, err := c.Generate(context.Background(), "q"); err != nil {
+		t.Fatalf("Generate on the accepting model: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 3 {
+		t.Fatalf("requests = %d, want 3 (refused, retried without, then the new model pinned)", len(seen))
+	}
+	if _, has := seen[2]["temperature"]; !has || seen[2]["model"] != "model-b" {
+		t.Fatalf("the new model must carry temperature again: %v", seen[2])
+	}
+}
