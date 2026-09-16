@@ -333,6 +333,12 @@ type chatMessage struct {
 type chatRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
+	// Temperature is pinned to 0 so a derived representation is REPRODUCIBLE
+	// (dir2mcp #996 for the OpenAI adapter; this adapter follows it). Cohere's
+	// v2/chat accepts the parameter on every chat model, and cohereHTTPError
+	// discards the response body, so there is no refusal to detect and no
+	// fallback: a 400 surfaces as it always did.
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 type chatResponse struct {
@@ -386,9 +392,11 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 }
 
 func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, timeout time.Duration) (string, error) {
+	zero := 0.0
 	body, err := json.Marshal(chatRequest{
-		Model:    chatModel,
-		Messages: []chatMessage{{Role: "user", Content: prompt}},
+		Model:       chatModel,
+		Messages:    []chatMessage{{Role: "user", Content: prompt}},
+		Temperature: &zero,
 	})
 	if err != nil {
 		return "", &model.ProviderError{Code: "COHERE_FAILED", Message: "failed to marshal generation request", Retryable: false, Cause: err}

@@ -61,6 +61,14 @@ type Client struct {
 	// DefaultChatModel is used when Generate is called and no model has
 	// been configured on the client.
 	DefaultChatModel string
+	// temperatureRefused remembers, per model, that the endpoint rejects the
+	// temperature parameter by name. A fresh client sends temperature 0 on every
+	// generation; after one refusal (providerhttp.RefusesParam) it drops the
+	// field for that model for the rest of the client's life, so determinism is
+	// kept wherever it is supported and one probe is spent per model. Keyed by
+	// model, not client-wide: a later DefaultChatModel that accepts the
+	// parameter is pinned again. Safe for concurrent workers.
+	temperatureRefused providerhttp.RefusedParams
 }
 
 // compile-time assertion that *Client implements model.Generator.
@@ -95,6 +103,12 @@ type generateRequest struct {
 	Model     string            `json:"model"`
 	MaxTokens int               `json:"max_tokens"`
 	Messages  []generateMessage `json:"messages"`
+	// Temperature is pinned to 0 so a derived representation is REPRODUCIBLE:
+	// the same transcript translated twice yields the same text (dir2mcp #996
+	// for the OpenAI adapter; this adapter follows it). A pointer with omitempty:
+	// an endpoint that refuses the parameter by name gets one retry without it,
+	// remembered for the client's life (temperatureRefused).
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 type generateResponse struct {
@@ -155,6 +169,14 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 			}
 		}
 		text, err := c.generateOnce(ctx, chatModel, prompt, timeout)
+		if providerhttp.RefusesParam(err, "temperature") {
+			// Decided on THIS request's error, not on the flag: a concurrent
+			// worker may have recorded the refusal while this request was in
+			// flight, and this request still carried the parameter. The retry
+			// reads the flag when it builds its body.
+			c.temperatureRefused.Record(chatModel)
+			text, err = c.generateOnce(ctx, chatModel, prompt, timeout)
+		}
 		if err == nil {
 			return text, nil
 		}
@@ -168,11 +190,16 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 }
 
 func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, timeout time.Duration) (string, error) {
-	body, err := json.Marshal(generateRequest{
+	req := generateRequest{
 		Model:     chatModel,
 		MaxTokens: defaultMaxTokens,
 		Messages:  []generateMessage{{Role: "user", Content: prompt}},
-	})
+	}
+	if !c.temperatureRefused.Refused(chatModel) {
+		zero := 0.0
+		req.Temperature = &zero
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return "", &model.ProviderError{Code: "ANTHROPIC_FAILED", Message: "failed to marshal generation request", Retryable: false, Cause: err}
 	}
