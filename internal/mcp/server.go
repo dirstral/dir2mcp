@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -567,21 +568,66 @@ func handshakeExemptMethod(method string) bool {
 // transport and the direct handler chain call this helper so the two cannot
 // drift.
 func (s *Server) enforceProtocolVersion(w http.ResponseWriter, r *http.Request, id interface{}) bool {
-	got := strings.TrimSpace(r.Header.Get(protocol.MCPProtocolVersionHeader))
-	if got == "" {
+	values := r.Header.Values(protocol.MCPProtocolVersionHeader)
+	if len(values) == 0 {
 		return true
 	}
 	pinned := strings.TrimSpace(s.cfg.ProtocolVersion)
 	if pinned == "" {
 		pinned = protocol.ProtocolDefaultVersion
 	}
-	if got == pinned {
+	got, sole := soleProtocolVersion(values)
+	// An empty field is the same as an absent one: bs-004 puts the MUST on the
+	// client and the session already fixed the version at initialize.
+	if got == "" || (sole && got == pinned) {
 		return true
 	}
 	writeError(w, http.StatusBadRequest, id, -32600,
 		fmt.Sprintf("unsupported MCP-Protocol-Version %q (this server supports %q)", got, pinned),
 		protocol.ErrorCodeUnsupportedProtocolVersion, false)
 	return false
+}
+
+// soleProtocolVersion reduces the MCP-Protocol-Version field to the single
+// version the client asserted, and reports whether it asserted exactly one.
+//
+// The header can arrive as repeated field lines or as ONE comma-joined list,
+// and RFC 9110 §5.3 makes those two forms equivalent: a recipient may combine
+// repeated lines into a list, and any hop may have already done so. A client
+// that sends the header while a proxy or bridge adds its own therefore produces
+// "2025-11-25, 2025-11-25" -- one value, stated twice, unambiguous.
+//
+// Comparing the raw field to the pinned version rejected exactly that, and it
+// is the configuration dir2mcp itself writes: `install claude` registers the
+// mcp-remote bridge with an explicit --header MCP-Protocol-Version, and current
+// mcp-remote sends its own too. Every post-initialize call then failed with
+// UNSUPPORTED_PROTOCOL_VERSION, which surfaces in a client as "Failed to call
+// tool".
+//
+// A list naming two DIFFERENT versions stays a refusal: the client has not
+// asserted one version, so the server cannot know which it meant. The joined
+// text is returned for the error message so the operator sees what arrived.
+func soleProtocolVersion(values []string) (string, bool) {
+	seen := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if !slices.Contains(seen, part) {
+				seen = append(seen, part)
+			}
+		}
+	}
+	switch len(seen) {
+	case 0:
+		return "", true
+	case 1:
+		return seen[0], true
+	default:
+		return strings.Join(seen, ", "), false
+	}
 }
 
 // gatePostInitialize applies every gate a post-initialize message must pass,
