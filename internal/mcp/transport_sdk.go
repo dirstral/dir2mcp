@@ -260,7 +260,7 @@ func (t *SDKTransport) checkPostPreRequest(w http.ResponseWriter, req *http.Requ
 	// this request is about to reach.
 	canonicalizeContentType(req)
 	negotiateAccept(req)
-	canonicalizeProtocolVersion(req)
+	canonicalizeProtocolVersion(req, t.server.pinnedProtocolVersion())
 	return true
 }
 
@@ -315,13 +315,15 @@ func canonicalizeContentType(req *http.Request) {
 // the mcp-remote bridge with an explicit --header MCP-Protocol-Version, and
 // current mcp-remote sends its own too (issue #1003).
 //
-// A field naming two DIFFERENT versions is left exactly as it arrived: that is
-// a real disagreement, and gatePostInitialize refuses it with the text the
-// client sent. This repairs only the unambiguous case, and it runs after this
-// server's own gates have read the request.
-func canonicalizeProtocolVersion(req *http.Request) {
+// Only a field that names the pinned version is rewritten, because only that
+// one is about to be accepted. A field naming a version this server does not
+// speak is left exactly as it arrived, even when it names it twice, so the
+// refusal gatePostInitialize writes quotes what the client actually sent rather
+// than a value this repair invented. The same goes for a field naming two
+// DIFFERENT versions: that is a real disagreement, not a duplicate.
+func canonicalizeProtocolVersion(req *http.Request, pinned string) {
 	got, sole := soleProtocolVersion(req.Header.Values(protocol.MCPProtocolVersionHeader))
-	if sole && got != "" {
+	if sole && got != "" && got == pinned {
 		req.Header.Set(protocol.MCPProtocolVersionHeader, got)
 	}
 }

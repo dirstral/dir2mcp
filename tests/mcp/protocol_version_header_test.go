@@ -171,3 +171,57 @@ func TestSDKTransport_JoinedProtocolVersionReachesTheSDK(t *testing.T) {
 		t.Errorf("tools/list did not answer with a tool list: %s", strings.TrimSpace(body))
 	}
 }
+
+// A refusal must quote what the CLIENT sent. The transport repairs a repeated
+// field only when it names the version this server speaks, because only that
+// one is about to be accepted; repairing a field the gate is about to refuse
+// would make the error report a value this server invented rather than the one
+// that arrived.
+func TestSDKTransport_RefusalQuotesTheFieldTheClientSent(t *testing.T) {
+	srv := mcp.NewServer(config.Config{MCPPath: "/mcp", AuthMode: "none"}, nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	tr := mcp.NewSDKTransport(srv, ln, "", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = tr.Serve(ctx, http.NotFoundHandler()) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := net.DialTimeout("tcp", ln.Addr().String(), 200*time.Millisecond); err == nil {
+			_ = c.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	for _, sent := range []string{"2024-11-05, 2024-11-05", "2024-11-05"} {
+		req, err := http.NewRequest(http.MethodPost, "http://"+ln.Addr().String()+"/mcp",
+			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", sent)
+		resp, err := testClient(10 * time.Second).Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		body := string(raw)
+		if !strings.Contains(body, "UNSUPPORTED_PROTOCOL_VERSION") {
+			t.Fatalf("a version this server does not speak must be refused; got %s", strings.TrimSpace(body))
+		}
+		if !strings.Contains(body, sent) {
+			t.Errorf("refusal must quote the field the client sent (%q): %s", sent, strings.TrimSpace(body))
+		}
+	}
+}

@@ -571,20 +571,33 @@ func (s *Server) enforceProtocolVersion(w http.ResponseWriter, r *http.Request, 
 	if len(values) == 0 {
 		return true
 	}
-	pinned := strings.TrimSpace(s.cfg.ProtocolVersion)
-	if pinned == "" {
-		pinned = protocol.ProtocolDefaultVersion
-	}
+	pinned := s.pinnedProtocolVersion()
 	got, sole := soleProtocolVersion(values)
-	// An empty field is the same as an absent one: bs-004 puts the MUST on the
-	// client and the session already fixed the version at initialize.
-	if got == "" || (sole && got == pinned) {
+	// sole must hold in BOTH accepting cases: without it an empty got would
+	// also swallow "the client named several different versions", which is a
+	// refusal. An empty field with sole set is the same as an absent one:
+	// bs-004 puts the MUST on the client and the session already fixed the
+	// version at initialize.
+	if sole && (got == "" || got == pinned) {
 		return true
 	}
+	// The refusal quotes the field as it ARRIVED, not the reduced value: an
+	// operator reading the log has to recognise what the client sent.
 	writeError(w, http.StatusBadRequest, id, -32600,
-		fmt.Sprintf("unsupported MCP-Protocol-Version %q (this server supports %q)", got, pinned),
+		fmt.Sprintf("unsupported MCP-Protocol-Version %q (this server supports %q)",
+			strings.TrimSpace(strings.Join(values, ", ")), pinned),
 		protocol.ErrorCodeUnsupportedProtocolVersion, false)
 	return false
+}
+
+// pinnedProtocolVersion is the one version this server speaks. Both the gate
+// that refuses a mismatch and the transport repair that rewrites an accepted
+// field read it here, so the two cannot drift.
+func (s *Server) pinnedProtocolVersion() string {
+	if v := strings.TrimSpace(s.cfg.ProtocolVersion); v != "" {
+		return v
+	}
+	return protocol.ProtocolDefaultVersion
 }
 
 // soleProtocolVersion reduces the MCP-Protocol-Version field to the single
@@ -623,9 +636,9 @@ func soleProtocolVersion(values []string) (string, bool) {
 				// stops here. Collecting every member first would do work
 				// proportional to a field an attacker controls, for an answer
 				// that cannot change: the client has named more than one
-				// version. The raw field goes into the refusal so the operator
-				// sees exactly what arrived.
-				return strings.TrimSpace(strings.Join(values, ", ")), false
+				// version. The caller reports the raw field, so nothing is lost
+				// by returning early.
+				return "", false
 			}
 		}
 	}
