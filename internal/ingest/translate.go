@@ -308,18 +308,18 @@ func (s *Service) translateLine(ctx context.Context, text, sourceLang, targetLan
 // in the translate prompt for this source/target pair (SPEC §8.6.2). It is the
 // single gate shared by prompt construction and the translate cache key, so a
 // cached translation can never have been produced under a different prompt
-// shape. The tables are the Russian BGN/PCGN set, so a Ukrainian source would
-// get "Volodimir" for Volodymyr pinned as "use exactly this", and another
-// target language would lose its own convention for the same name (fr
-// "Chtcherbak", de "Schtscherbak"). An unknown source ("" from auto-detect) is
-// not assumed to be Russian.
+// shape. A source language is allowed only when translit carries a convention
+// for it, because one language's table applied to another gives a confidently
+// wrong spelling; another TARGET language would lose its own convention for the
+// same name (fr "Chtcherbak", de "Schtscherbak"). An unknown source ("" from
+// auto-detect) has no convention and gets no hints.
 //
 // Whether any hint actually fires also depends on the line containing a
 // Cyrillic proper noun, which the source transcript fully determines and the
 // cache key already folds, so it is deliberately not part of this predicate.
 func (s *Service) translateNameHintsActive(sourceLang, targetLang string) bool {
 	return s.translateNameHints &&
-		translit.IsRussianSource(sourceLang) &&
+		translit.SupportsSource(sourceLang) &&
 		translit.IsEnglishTarget(targetLang)
 }
 
@@ -332,7 +332,7 @@ func (s *Service) nameHintsFor(text, sourceLang, targetLang string, glossary map
 	if !s.translateNameHintsActive(sourceLang, targetLang) || !translit.HasCyrillic(text) {
 		return nil
 	}
-	pairs := translit.HintPairs(text)
+	pairs := translit.HintPairs(text, sourceLang)
 	if len(pairs) == 0 {
 		return nil
 	}

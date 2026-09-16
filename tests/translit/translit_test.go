@@ -19,7 +19,7 @@ func TestTransliterate(t *testing.T) {
 		"Жуков":    "Zhukov",
 		"Цветаева": "Tsvetaeva",
 	} {
-		if got := translit.Transliterate(in); got != want {
+		if got := translit.Transliterate(in, "ru"); got != want {
 			t.Errorf("Transliterate(%q) = %q, want %q", in, got, want)
 		}
 	}
@@ -36,7 +36,7 @@ func TestTransliterateAdjectivalEndings(t *testing.T) {
 		"Маяковский":  "Mayakovsky",
 		"Грозный":     "Grozny",
 	} {
-		if got := translit.Transliterate(in); got != want {
+		if got := translit.Transliterate(in, "ru"); got != want {
 			t.Errorf("Transliterate(%q) = %q, want %q", in, got, want)
 		}
 	}
@@ -45,7 +45,7 @@ func TestTransliterateAdjectivalEndings(t *testing.T) {
 // TestHintsSkipsSentenceInitial pins that a capital opening a sentence is treated as
 // sentence case, not a name -- otherwise every sentence's first word would be pinned.
 func TestHintsSkipsSentenceInitial(t *testing.T) {
-	got := translit.Hints("Студентам университета имени Сеченова об этом объявили.")
+	got := translit.Hints("Студентам университета имени Сеченова об этом объявили.", "ru")
 	if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
 		t.Fatalf("Hints = %v, want [Сеченова -> Sechenov]", got)
 	}
@@ -61,7 +61,7 @@ func TestHintsSkipsNonPeriodSentenceStarts(t *testing.T) {
 		"Он ушёл… Потом вернулся",
 		"Вопрос: Почему так вышло",
 	} {
-		for _, h := range translit.Hints(s) {
+		for _, h := range translit.Hints(s, "ru") {
 			for _, bad := range []string{"Привет", "Потом", "Почему"} {
 				if strings.HasPrefix(h, bad) {
 					t.Errorf("Hints(%q) pinned ordinary sentence-initial word: %v", s, h)
@@ -69,7 +69,7 @@ func TestHintsSkipsNonPeriodSentenceStarts(t *testing.T) {
 			}
 		}
 	}
-	got := translit.Hints("— Привет, Иванов, как дела?")
+	got := translit.Hints("— Привет, Иванов, как дела?", "ru")
 	if len(got) != 1 || !strings.HasPrefix(got[0], "Иванов") {
 		t.Errorf("expected only the surname hinted, got %v", got)
 	}
@@ -84,14 +84,14 @@ func TestHintsGenitiveAfterImeni(t *testing.T) {
 		"в клинике имени Сеченова сегодня",
 		"в клинике им. Сеченова сегодня",
 	} {
-		got := translit.Hints(s)
+		got := translit.Hints(s, "ru")
 		if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
 			t.Errorf("Hints(%q) = %v, want [Сеченова -> Sechenov]", s, got)
 		}
 	}
 	// Without the trigger a bare -ова is ambiguous: genitive of a man's surname or
 	// nominative of a woman's. Guessing renames the person, so no hint is emitted.
-	if got := translit.Hints("в клинике Сеченова сегодня"); len(got) != 0 {
+	if got := translit.Hints("в клинике Сеченова сегодня", "ru"); len(got) != 0 {
 		t.Errorf("ambiguous -ова should yield no hint, got %v", got)
 	}
 }
@@ -100,7 +100,7 @@ func TestHintsGenitiveAfterImeni(t *testing.T) {
 // not suppress a later valid one: de-duplication keys on the normalised name and only
 // applies once normalisation has succeeded.
 func TestHintsAmbiguousThenValidOccurrence(t *testing.T) {
-	got := translit.Hints("в клинике Сеченова, затем в университете имени Сеченова")
+	got := translit.Hints("в клинике Сеченова, затем в университете имени Сеченова", "ru")
 	if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
 		t.Errorf("Hints = %v, want the later valid occurrence to be hinted", got)
 	}
@@ -116,7 +116,7 @@ func TestHintsAdjectivalObliqueRestored(t *testing.T) {
 		"читал Достоевского всю ночь": "Dostoevsky",
 		"говорил с Маяковским тогда":  "Mayakovsky",
 	} {
-		got := translit.Hints(src)
+		got := translit.Hints(src, "ru")
 		if len(got) != 1 || !strings.HasSuffix(got[0], "-> "+want) {
 			t.Errorf("Hints(%q) = %v, want a hint ending %q", src, got, want)
 		}
@@ -136,7 +136,7 @@ func TestHintsSkipsExonymsAndCommonNouns(t *testing.T) {
 		"дай Бог здоровья всем",
 		"нашёл в Интернете вчера",
 	} {
-		if got := translit.Hints(s); len(got) != 0 {
+		if got := translit.Hints(s, "ru"); len(got) != 0 {
 			t.Errorf("Hints(%q) = %v, want none", s, got)
 		}
 	}
@@ -147,7 +147,7 @@ func TestHintsSkipsExonymsAndCommonNouns(t *testing.T) {
 		{"сказал Литвиненко вчера", "Литвиненко"},
 		{"сказал Богданов вчера", "Богданов"},
 	} {
-		got := translit.Hints(tc.input)
+		got := translit.Hints(tc.input, "ru")
 		// The complete word, not a count: a prefix regression would still
 		// yield exactly one hint, a truncated one ("Вен -> Ven").
 		if len(got) != 1 || !strings.HasPrefix(got[0], tc.word+" -> ") {
@@ -159,12 +159,12 @@ func TestHintsSkipsExonymsAndCommonNouns(t *testing.T) {
 // TestHintsExtendedCyrillic pins that Kazakh/Kyrgyz letters count as part of a word.
 // Omitting them made the match stop at the first one and pin a TRUNCATED name.
 func TestHintsExtendedCyrillic(t *testing.T) {
-	for _, h := range translit.Hints("встретил Айдарқұла вчера") {
+	for _, h := range translit.Hints("встретил Айдарқұла вчера", "ru") {
 		if strings.HasPrefix(h, "Айдар ->") {
 			t.Errorf("pinned a truncated name: %v", h)
 		}
 	}
-	if s := translit.Transliterate("Өмүрбек"); translit.HasCyrillic(s) {
+	if s := translit.Transliterate("Өмүрбек", "ru"); translit.HasCyrillic(s) {
 		t.Errorf("Transliterate(Өмүрбек) = %q, want fully transliterated", s)
 	}
 }
@@ -178,7 +178,7 @@ func TestHintsEmptyForOrdinaryText(t *testing.T) {
 		"",
 		"The meeting is over.",
 	} {
-		if got := translit.Hints(s); len(got) != 0 {
+		if got := translit.Hints(s, "ru"); len(got) != 0 {
 			t.Errorf("Hints(%q) = %v, want none", s, got)
 		}
 	}
@@ -187,11 +187,11 @@ func TestHintsEmptyForOrdinaryText(t *testing.T) {
 // TestHintsDedupesAndCaps pins de-duplication and the per-line cap, so a name-dense
 // line cannot crowd the text out of the prompt.
 func TestHintsDedupesAndCaps(t *testing.T) {
-	if got := translit.Hints("сказал Иванов, а потом Иванов снова сказал"); len(got) != 1 {
+	if got := translit.Hints("сказал Иванов, а потом Иванов снова сказал", "ru"); len(got) != 1 {
 		t.Errorf("repeated name should yield one hint, got %v", got)
 	}
 	many := "перечислим: Иванов, Петров, Сидоров, Кузнецов, Смирнов, Попов, Волков, Лебедев"
-	if got := translit.Hints(many); len(got) > 6 {
+	if got := translit.Hints(many, "ru"); len(got) > 6 {
 		t.Errorf("hints = %d, want capped at 6", len(got))
 	}
 }
@@ -234,7 +234,7 @@ func TestHints_AJoinerNameIsNeverPinnedAsAFragment(t *testing.T) {
 		"сказал Римский-Корсаков вчера",
 		"сказал Петров-Водкин вчера",
 	} {
-		got := translit.Hints(s)
+		got := translit.Hints(s, "ru")
 		if len(got) != 0 {
 			t.Errorf("Hints(%q) = %v, want none: a joiner name is refused, not fragmented", s, got)
 		}
@@ -243,7 +243,7 @@ func TestHints_AJoinerNameIsNeverPinnedAsAFragment(t *testing.T) {
 
 func TestHints_AJoinerNameDoesNotHideAPlainOneBesideIt(t *testing.T) {
 	// The refusal is per token. The plain surname in the same line is still pinned.
-	got := translit.Hints("сказали Лук'яненко и Петров вчера")
+	got := translit.Hints("сказали Лук\u02bcяненко и Петров вчера", "ru")
 	if len(got) != 1 || got[0] != "Петров -> Petrov" {
 		t.Errorf("Hints = %v, want only [Петров -> Petrov]", got)
 	}
@@ -257,7 +257,7 @@ func TestHints_ATokenTailAfterAJoinerIsNotAName(t *testing.T) {
 		"сказал де-Голль вчера", // lowercase-led compound: the head fails the capital rule
 		"сказал о'Брайен вчера", // lowercase head before the apostrophe
 	} {
-		for _, h := range translit.Hints(s) {
+		for _, h := range translit.Hints(s, "ru") {
 			if strings.HasPrefix(h, "Голль ") || strings.HasPrefix(h, "Брайен ") {
 				t.Errorf("Hints(%q) pinned a token tail: %v", s, h)
 			}
@@ -272,11 +272,11 @@ func TestHints_ATokenTailAfterAJoinerIsNotAName(t *testing.T) {
 // that the а was an inflection; Сеченова -> Сеченов still passes that test.
 func TestHints_AnIndeclinableNameAfterImeniIsNotTruncated(t *testing.T) {
 	for _, s := range []string{"в театре имени Дюма сегодня", "премия имени Гарсиа вручена"} {
-		if got := translit.Hints(s); len(got) != 0 {
+		if got := translit.Hints(s, "ru"); len(got) != 0 {
 			t.Errorf("Hints(%q) = %v, want none: an unproven stem is refused, not truncated", s, got)
 		}
 	}
-	got := translit.Hints("в клинике имени Сеченова сегодня")
+	got := translit.Hints("в клинике имени Сеченова сегодня", "ru")
 	if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
 		t.Errorf("a proven inflection must still be restored: %v", got)
 	}
@@ -285,14 +285,35 @@ func TestHints_AnIndeclinableNameAfterImeniIsNotTruncated(t *testing.T) {
 // IsRussianSource gates the hints on a Russian source. The tables are Russian
 // BGN/PCGN, so a Ukrainian name would be pinned wrong (Володимир -> Volodimir,
 // Гриценко -> Gritsenko instead of Volodymyr, Hrytsenko). An empty tag means
-// auto-detect found nothing; unknown is refused, not assumed Russian.
-func TestIsRussianSource(t *testing.T) {
+// SupportsSource gates the hints on a source language translit carries a
+// convention for. Russian and Ukrainian have one; every other tag, and the empty
+// tag that auto-detect leaves behind, does not. A language without a convention
+// must be refused rather than fall back to another language's table: the Russian
+// table renders Володимир "Volodimir" where the Ukrainian rules give "Volodymyr".
+func TestSupportsSource(t *testing.T) {
 	for lang, want := range map[string]bool{
 		"ru": true, "RU": true, "rus": true, "ru-RU": true, "ru_RU": true, " ru ": true,
-		"uk": false, "uk-UA": false, "be": false, "kk": false, "en": false, "": false, "russian": false,
+		"uk": true, "UK": true, "ukr": true, "uk-UA": true, "uk_UA": true,
+		"be": false, "kk": false, "bg": false, "sr": false, "en": false,
+		"": false, "russian": false, "ukrainian": false, "ua": false,
 	} {
-		if got := translit.IsRussianSource(lang); got != want {
-			t.Errorf("IsRussianSource(%q) = %v, want %v", lang, got, want)
+		if got := translit.SupportsSource(lang); got != want {
+			t.Errorf("SupportsSource(%q) = %v, want %v", lang, got, want)
+		}
+	}
+}
+
+// SourceConvention names the table a language resolves to. It joins the translate
+// derivation identity, so two languages that both have hints cannot share a cache
+// entry for the same text.
+func TestSourceConvention(t *testing.T) {
+	for lang, want := range map[string]string{
+		"ru": "ru", "ru-RU": "ru", "rus": "ru",
+		"uk": "uk", "uk-UA": "uk", "ukr": "uk",
+		"en": "", "": "", "be": "",
+	} {
+		if got := translit.SourceConvention(lang); got != want {
+			t.Errorf("SourceConvention(%q) = %q, want %q", lang, got, want)
 		}
 	}
 }
@@ -307,12 +328,12 @@ func TestHints_ACapitalAfterATimestampMarkerIsSentenceCase(t *testing.T) {
 		"00:00 Студентам университета имени Сеченова об этом объявили",
 		"1. Студентам университета имени Сеченова об этом объявили",
 	} {
-		got := translit.Hints(s)
+		got := translit.Hints(s, "ru")
 		if len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
 			t.Errorf("Hints(%q) = %v, want only the genitive surname", s, got)
 		}
 	}
-	if got := translit.Hints("Привет, Иван"); len(got) != 1 || got[0] != "Иван -> Ivan" {
+	if got := translit.Hints("Привет, Иван", "ru"); len(got) != 1 || got[0] != "Иван -> Ivan" {
 		t.Errorf("a comma must not hide a name: %v", got)
 	}
 }
@@ -327,7 +348,7 @@ func TestHints_AnOrdinaryNumberIsNotASentenceBoundary(t *testing.T) {
 		"Было 15 Петров там",
 		"2024 Иванов выступил", // a leading year is not a marker either
 	} {
-		got := translit.Hints(s)
+		got := translit.Hints(s, "ru")
 		if len(got) != 1 {
 			t.Errorf("Hints(%q) = %v, want exactly the surname", s, got)
 		}
@@ -338,7 +359,7 @@ func TestHints_AnOrdinaryNumberIsNotASentenceBoundary(t *testing.T) {
 		"1:02:33 Студентам об этом объявили",
 		"00:00.250 Студентам об этом объявили",
 	} {
-		if got := translit.Hints(s); len(got) != 0 {
+		if got := translit.Hints(s, "ru"); len(got) != 0 {
 			t.Errorf("Hints(%q) = %v, want no hint after a bare marker", s, got)
 		}
 	}
@@ -349,7 +370,7 @@ func TestHints_AnOrdinaryNumberIsNotASentenceBoundary(t *testing.T) {
 // the word as written, so two inflections of one name share a key and a table
 // keyed on the nominative (the operator glossary) matches either of them.
 func TestHintPairs_KeyIsTheNominative(t *testing.T) {
-	pairs := translit.HintPairs("Учился в университете имени Сеченова")
+	pairs := translit.HintPairs("Учился в университете имени Сеченова", "ru")
 	if len(pairs) != 1 {
 		t.Fatalf("HintPairs = %+v, want one hint", pairs)
 	}
@@ -358,7 +379,7 @@ func TestHintPairs_KeyIsTheNominative(t *testing.T) {
 		t.Errorf("got %+v, want Word=Сеченова Key=сеченов English=Sechenov", h)
 	}
 	// Hints renders the same pairs; the two views must never disagree.
-	if got := translit.Hints("Учился в университете имени Сеченова"); len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
+	if got := translit.Hints("Учился в университете имени Сеченова", "ru"); len(got) != 1 || got[0] != "Сеченова -> Sechenov" {
 		t.Errorf("Hints = %v, want the rendered pair", got)
 	}
 }
@@ -369,13 +390,13 @@ func TestHintPairs_KeyIsTheNominative(t *testing.T) {
 // before the word and must count as a sentence ender, in both line-break forms.
 func TestHints_ACapitalAfterALineBreakIsSentenceCase(t *testing.T) {
 	for _, s := range []string{"текст\nПрезидент заявил", "текст\r\nПрезидент заявил", "текст\n  Президент заявил"} {
-		if got := translit.Hints(s); len(got) != 0 {
+		if got := translit.Hints(s, "ru"); len(got) != 0 {
 			t.Errorf("Hints(%q) = %v, want none: the word opens a line", s, got)
 		}
 	}
 	// The same word mid-line is still a candidate, so the fix is about the
 	// boundary, not the word.
-	if got := translit.Hints("сказал Иван\nи ушёл"); len(got) != 1 || got[0] != "Иван -> Ivan" {
+	if got := translit.Hints("сказал Иван\nи ушёл", "ru"); len(got) != 1 || got[0] != "Иван -> Ivan" {
 		t.Errorf("a name before the line break must keep its hint: %v", got)
 	}
 }
