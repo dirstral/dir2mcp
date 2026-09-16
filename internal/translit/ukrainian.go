@@ -3,9 +3,11 @@ package translit
 import "regexp"
 
 // The Ukrainian convention is the national system: Cabinet of Ministers
-// resolution 55 of 2010-01-27, adopted by UNGEGN in 2012 and by BGN/PCGN in
-// 2020. It is what Ukrainian passports, road signs and official English-language
-// copy use, so it is the spelling an English reader meets elsewhere.
+// resolution 55 of 2010-01-27, recommended for international use by resolution
+// X/9 of the Tenth United Nations Conference on the Standardization of
+// Geographical Names in 2012, and adopted by BGN/PCGN in its 2019 Agreement. It
+// is what Ukrainian passports, road signs and official English-language copy
+// use, so it is the spelling an English reader meets elsewhere.
 //
 // It is NOT the Russian table with Ukrainian letters added, which is why a
 // Ukrainian source was refused until this convention existed: the Russian table
