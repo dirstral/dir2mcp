@@ -99,7 +99,7 @@ func postInitializeWithHost(t *testing.T, addr, host string) (int, string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Host = host
 
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	resp, err := (testClient(5 * time.Second)).Do(req)
 	if err != nil {
 		t.Fatalf("POST /mcp with Host %q: %v", host, err)
 	}

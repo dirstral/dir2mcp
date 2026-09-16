@@ -26,7 +26,7 @@ func postToolsListWithSession(serverURL, mcpPath, sessionID string) (*http.Respo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("MCP-Session-Id", sessionID)
-	return http.DefaultClient.Do(req)
+	return testClient(5 * time.Second).Do(req)
 }
 
 func waitForSessionExpiry(t *testing.T, serverURL, mcpPath, sessionID, expectedReason string) *http.Response {
@@ -73,7 +73,7 @@ func TestMCPInitialize_AllowsOriginWithPortWhenAllowlistOmitsPort(t *testing.T) 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "http://localhost:5173")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSessionExpiration_InactivityHeader(t *testing.T) {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do initialize: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestSessionExpiration_MaxLifetimeHeader(t *testing.T) {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do initialize: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestMCPInitialize_RejectsMissingJSONRPCVersion(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestMCPInitialize_UsesBuildInfoVersion(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -330,7 +330,7 @@ func initializeServerInfoName(t *testing.T, cfg config.Config) string {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}

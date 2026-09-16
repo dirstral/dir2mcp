@@ -489,7 +489,7 @@ func postRPCWithHeaders(t *testing.T, url, sessionID, body string, headers map[s
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(5 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)

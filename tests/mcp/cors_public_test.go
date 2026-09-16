@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -31,7 +32,7 @@ func TestCORS_PreflightReturns204(t *testing.T) {
 	req.Header.Set("Access-Control-Request-Method", "POST")
 	req.Header.Set("Access-Control-Request-Headers", strings.Join([]string{"Content-Type", "Authorization", protocol.MCPProtocolVersionHeader}, ", "))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestCORS_OptionsWithoutPreflightHeadersFallsThrough(t *testing.T) {
 	// Intentionally omit Access-Control-Request-* headers so this is not
 	// treated as a CORS preflight request.
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestCORS_PreflightDisallowedOriginNoCORSHeaders(t *testing.T) {
 	req.Header.Set("Access-Control-Request-Method", "POST")
 	req.Header.Set("Access-Control-Request-Headers", strings.Join([]string{"Content-Type", "Authorization", protocol.MCPProtocolVersionHeader}, ", "))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestCORS_DisallowedOriginNoHeaders(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://evil.example.com")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestCORS_AllowedOriginSetsHeaders(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://elevenlabs.io")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}

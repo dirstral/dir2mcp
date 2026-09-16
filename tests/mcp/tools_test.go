@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
@@ -2320,7 +2321,7 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
