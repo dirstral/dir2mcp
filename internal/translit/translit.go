@@ -187,12 +187,20 @@ func hasExonym(word string, conv *convention) bool {
 // lowercase class must cover every alphabet in the corpus: omitting the Kazakh/Kyrgyz
 // letters made the match stop at the first one, pinning a TRUNCATED name
 // ("Айдарқұла" -> "Айдар").
-var properNounRE = regexp.MustCompile(`[А-ЯЁЄІЇҐӘҒҚҢӨҰҮҺ][а-яёєіїґәғқңөұүһ]{2,}(?:['’][а-яёєіїґәғқңөұүһ]+|-[А-ЯЁЄІЇҐӘҒҚҢӨҰҮҺа-яёєіїґәғқңөұүһ][а-яёєіїґәғқңөұүһ]+)*`)
+var properNounRE = regexp.MustCompile(`[А-ЯЁЄІЇҐӘҒҚҢӨҰҮҺ][а-яёєіїґәғқңөұүһ]{2,}(?:['’ʼ][а-яёєіїґәғқңөұүһ]+|-[А-ЯЁЄІЇҐӘҒҚҢӨҰҮҺа-яёєіїґәғқңөұүһ][а-яёєіїґәғқңөұүһ]+)*`)
 
 // nameJoiners are the characters that continue a single surname across a boundary
-// the plain letter class would stop at: the Ukrainian/Belarusian apostrophe in both
-// its straight and curly forms, and the hyphen of a compound surname.
-const nameJoiners = "'’-"
+// the plain letter class would stop at: the Ukrainian/Belarusian apostrophe and
+// the hyphen of a compound surname.
+//
+// All THREE apostrophe forms are listed, and properNounRE lists the same three.
+// Ukrainian orthography writes the apostrophe as U+2019 or U+02BC and keyboards
+// produce U+0027; the published transliteration table itself uses U+02BC. A form
+// the pattern does not know stops the match at it, and the fragment left behind
+// is a plausible name on its own: Лукʼяненко matched only "Лук", which ends in a
+// recognised surname suffix and was pinned as "Luk". That is the truncation the
+// joiner rule exists to prevent, in a codepoint it could not see.
+const nameJoiners = "'’ʼ-"
 
 // sentenceEnders are the characters after which a capital signals sentence case rather
 // than a name. Dash-led dialogue is routine in subtitles (a cue that opens with a

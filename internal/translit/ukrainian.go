@@ -39,7 +39,8 @@ var ukLetters = map[rune]string{
 	'к': "k", 'л': "l", 'м': "m", 'н': "n", 'о': "o", 'п': "p", 'р': "r",
 	'с': "s", 'т': "t", 'у': "u", 'ф': "f", 'х': "kh", 'ц': "ts", 'ч': "ch",
 	'ш': "sh", 'щ': "shch", 'ю': "iu", 'я': "ia",
-	'ь': "", '\'': "", '’': "",
+	// Every apostrophe form Ukrainian text uses; see nameJoiners.
+	'ь': "", '\'': "", '’': "", 'ʼ': "",
 	// Not Ukrainian letters; see the type comment.
 	'ы': "y", 'э': "e", 'ё': "e", 'ъ': "",
 }

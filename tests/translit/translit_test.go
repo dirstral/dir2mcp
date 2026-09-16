@@ -243,7 +243,7 @@ func TestHints_AJoinerNameIsNeverPinnedAsAFragment(t *testing.T) {
 
 func TestHints_AJoinerNameDoesNotHideAPlainOneBesideIt(t *testing.T) {
 	// The refusal is per token. The plain surname in the same line is still pinned.
-	got := translit.Hints("сказали Лук'яненко и Петров вчера", "ru")
+	got := translit.Hints("сказали Лук\u02bcяненко и Петров вчера", "ru")
 	if len(got) != 1 || got[0] != "Петров -> Petrov" {
 		t.Errorf("Hints = %v, want only [Петров -> Petrov]", got)
 	}

@@ -7,10 +7,13 @@ import (
 	"github.com/dirstral/dir2mcp/internal/translit"
 )
 
-// The Ukrainian convention is the national system (Cabinet of Ministers
-// resolution 55 of 2010, UNGEGN 2012, BGN/PCGN 2020). Every expectation below
-// that carries a "(official)" note is an example from the published table, so a
-// change to the table is measured against the source, not against itself.
+// The Ukrainian convention is the national system: Cabinet of Ministers
+// resolution 55 of 2010, recommended for international use by resolution X/9 of
+// the Tenth United Nations Conference on the Standardization of Geographical
+// Names in 2012, and adopted by BGN/PCGN in its 2019 Agreement. Every
+// expectation below that carries a "(official)" note is an example from the
+// published table, so a change to the table is measured against the source, not
+// against itself.
 
 func TestTransliterateUkrainian_OfficialExamples(t *testing.T) {
 	for in, want := range map[string]string{
@@ -43,9 +46,12 @@ func TestTransliterateUkrainian_OfficialExamples(t *testing.T) {
 		"Зеленський":  "Zelenskyi",
 		"Коцюбинська": "Kotsiubynska",
 		// The soft sign and the apostrophe render as nothing.
-		"Лук'яненко": "Lukianenko",
-		"Дем'янюк":   "Demianiuk",
-		"В'ячеслав":  "Viacheslav",
+		"Лук'яненко":      "Lukianenko",
+		"Дем'янюк":        "Demianiuk",
+		"В'ячеслав":       "Viacheslav",
+		"Лук\u2019яненко": "Lukianenko",
+		"Лук\u02bcяненко": "Lukianenko",
+		"В\u02bcячеслав":  "Viacheslav",
 		// The names the Russian table got wrong, which is why this convention exists.
 		"Володимир": "Volodymyr",
 		"Гриценко":  "Hrytsenko",
@@ -160,9 +166,17 @@ func TestHintsUkrainian_AdjectivalObliqueRestored(t *testing.T) {
 // national system drops it. The name is pinned whole; under Russian, where an
 // apostrophe is a compound boundary or a quote artifact, it stays refused.
 func TestHintsUkrainian_ApostropheNamesArePinnedWhole(t *testing.T) {
+	// All three apostrophe forms Ukrainian text uses: U+0027 from a keyboard,
+	// U+2019 from a typographic editor, and U+02BC, which the published
+	// transliteration table itself uses. A form the pattern does not know stops
+	// the match at it and leaves a fragment that is a plausible name on its own:
+	// Лукʼяненко matched only "Лук" and was pinned "Luk".
 	for _, tc := range []struct{ line, want string }{
 		{"сказали Лук'яненко та інші", "Лук'яненко -> Lukianenko"},
+		{"сказали Лук\u2019яненко та інші", "Лук\u2019яненко -> Lukianenko"},
+		{"сказали Лук\u02bcяненко та інші", "Лук\u02bcяненко -> Lukianenko"},
 		{"виступив Дем'янюк вчора", "Дем'янюк -> Demianiuk"},
+		{"виступив Дем\u02bcянюк вчора", "Дем\u02bcянюк -> Demianiuk"},
 	} {
 		got := translit.Hints(tc.line, "uk")
 		if len(got) != 1 || got[0] != tc.want {
