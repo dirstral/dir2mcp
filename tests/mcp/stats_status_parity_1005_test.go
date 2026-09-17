@@ -216,3 +216,43 @@ func TestStatusPendingIsMeasuredWithEmbeddedOK1005(t *testing.T) {
 		t.Errorf("chunks_total=%v, want 8 (3 embedded + 5 pending)", got)
 	}
 }
+
+// fallbackCountersRetriever models the ListFiles-only path inside
+// retrieval.Service: Stats SUCCEEDS, the document counters are real, and the
+// chunk counters are structurally absent (left at zero, with
+// CorpusStatsAvailable false to say so).
+type fallbackCountersRetriever struct {
+	model.Retriever
+}
+
+func (r *fallbackCountersRetriever) Stats(context.Context) (model.Stats, error) {
+	return model.Stats{
+		CorpusStatsAvailable: false,
+		CorpusStats: model.CorpusStats{
+			DocCounts: map[string]int64{"md": 4},
+			TotalDocs: 4,
+			Scanned:   4,
+			Indexed:   4,
+		},
+	}, nil
+}
+
+// TestStatsIgnoresFallbackChunkZeros1005 pins the provenance gate. A successful
+// Stats call is not proof that anyone counted the chunks: the ListFiles-only
+// fallback answers successfully and cannot see them. Publishing its zeros would
+// report "nothing is embedded" over a corpus that is, which is #1005 again in
+// another costume, so the live run counters answer on that path instead.
+func TestStatsIgnoresFallbackChunkZeros1005(t *testing.T) {
+	indexing := statsIndexingWith(t, &fallbackCountersRetriever{})
+
+	for _, field := range []string{"chunks_total", "embedded_ok", "representations"} {
+		if _, present := indexing[field]; !present {
+			t.Fatalf("%s missing: the fallback is a degraded mode, not an error: %#v", field, indexing)
+		}
+	}
+	// The stub's own doc counters must not reach the wire either: with no
+	// provenance behind them, the whole block comes from one clock or none.
+	if got := indexing["scanned"]; got != float64(0) {
+		t.Errorf("scanned=%v, want 0 (the live run's count, not the unprovenanced 4)", got)
+	}
+}

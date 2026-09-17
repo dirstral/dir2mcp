@@ -393,7 +393,14 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	// One resolver, two surfaces: `dir2mcp status` builds its counter block
 	// from this same call, so the CLI and this tool cannot report different
 	// numbers for one state dir (#1005).
-	counters := model.ResolveIndexingCounters(retrievedStats.CorpusStats, statsFromRetriever, &model.IndexingCounters{
+	//
+	// The gate is CorpusStatsAvailable, NOT "the retriever answered", for the
+	// same reason failed_chunks uses it below: the ListFiles-only fallback
+	// returns success too, and it cannot see chunks at all. Gating on success
+	// would publish its structural blind spot as chunks_total=0 embedded_ok=0
+	// over a corpus full of chunks, which is the #1005 misreport in another
+	// costume. The live run counted what it did, so it answers there instead.
+	counters := model.ResolveIndexingCounters(retrievedStats.CorpusStats, retrievedStats.CorpusStatsAvailable, &model.IndexingCounters{
 		Scanned:         snapshot.Scanned,
 		Indexed:         snapshot.Indexed,
 		Skipped:         snapshot.Skipped,

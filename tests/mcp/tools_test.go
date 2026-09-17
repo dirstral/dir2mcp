@@ -949,6 +949,11 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 			Root:            "/repo",
 			StateDir:        "/repo/.dir2mcp",
 			ProtocolVersion: cfg.ProtocolVersion,
+			// Provenance, as the real retriever reports it: these counters came
+			// from the store's own aggregate. Without the flag the stub claims
+			// corpus-wide numbers it never says it counted, and the tool prefers
+			// the live run counters over that (#1005).
+			CorpusStatsAvailable: true,
 			CorpusStats: model.CorpusStats{
 				DocCounts:       map[string]int64{"code": 2, "md": 1},
 				TotalDocs:       3,
