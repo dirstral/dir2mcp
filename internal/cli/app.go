@@ -2112,7 +2112,7 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	if err != nil {
 		return err
 	}
-	emitProgressEvents(emitter, snapshot.Indexing)
+	emitProgressEvents(emitter, runProgressCounters(indexingState, snapshot.Indexing))
 
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -2128,6 +2128,35 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 		return fmt.Errorf("write corpus snapshot: %w", err)
 	}
 	return nil
+}
+
+// runProgressCounters returns the block the scan_progress/embed_progress events
+// carry. Those events answer "how far has THIS RUN got", which is a different
+// question from the one corpus.json answers ("what does the corpus hold"), so
+// they take the live run counters even when the store can state the corpus
+// (#1005 review). With the corpus-wide totals an incremental pass over an
+// already-indexed corpus would emit its finished numbers on the first tick, and
+// a client rendering progress from them would show the run complete before it
+// had scanned a file. That is #414 again in the opposite direction: there the
+// events were hardcoded zeros and never advanced.
+//
+// Without a live run there is no progress to report, so the snapshot stands,
+// including its -1 "not derivable" sentinels.
+func runProgressCounters(indexingState *appstate.IndexingState, snapshot corpusIndexing) corpusIndexing {
+	if indexingState == nil {
+		return snapshot
+	}
+	idx := indexingState.Snapshot()
+	return corpusIndexing{
+		Scanned:         idx.Scanned,
+		Indexed:         idx.Indexed,
+		Skipped:         idx.Skipped,
+		Deleted:         idx.Deleted,
+		Representations: idx.Representations,
+		ChunksTotal:     idx.ChunksTotal,
+		EmbeddedOK:      idx.EmbeddedOK,
+		Errors:          idx.Errors,
+	}
 }
 
 // emitProgressEvents emits the spec-required `scan_progress` and

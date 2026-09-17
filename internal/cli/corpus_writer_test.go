@@ -464,3 +464,72 @@ func TestWriteConnectionFile_ConcurrentReadNeverPartial(t *testing.T) {
 
 	wg.Wait()
 }
+
+// aggregateCorpusStore answers CorpusStats with fixed corpus-wide totals, which
+// is what a sqlite state dir does. mutableCorpusStore deliberately does not, so
+// only this one exercises the aggregate path.
+type aggregateCorpusStore struct {
+	mutableCorpusStore
+	stats model.CorpusStats
+}
+
+func (a *aggregateCorpusStore) CorpusStats(context.Context) (model.CorpusStats, error) {
+	return a.stats, nil
+}
+
+// TestWriteCorpusSnapshot_ProgressEventsStayPerRun_1005 pins the split the
+// #1005 review asked for: corpus.json states the CORPUS, while scan_progress
+// and embed_progress report THIS RUN. Feeding the corpus totals into the events
+// would make an incremental pass over an indexed corpus announce its finished
+// numbers on the first tick, so a client's progress display reads as complete
+// before the run has scanned a file.
+func TestWriteCorpusSnapshot_ProgressEventsStayPerRun_1005(t *testing.T) {
+	stateDir := t.TempDir()
+	store := &aggregateCorpusStore{stats: model.CorpusStats{
+		DocCounts:       map[string]int64{"md": 400},
+		TotalDocs:       400,
+		Scanned:         400,
+		Indexed:         400,
+		Representations: 400,
+		ChunksTotal:     487,
+		EmbeddedOK:      487,
+	}}
+
+	// The run has just started: two files scanned, nothing embedded yet.
+	idxState := appstate.NewIndexingState(appstate.ModeIncremental)
+	idxState.SetRunning(true)
+	idxState.AddScanned(2)
+	idxState.AddIndexed(1)
+
+	var buf bytes.Buffer
+	emitter := newNDJSONEmitter(&buf, true)
+	if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, io.Discard, emitter); err != nil {
+		t.Fatalf("writeCorpusSnapshot: %v", err)
+	}
+
+	events := decodeNDJSON(t, buf.String())
+	scan, ok := events["scan_progress"]
+	if !ok {
+		t.Fatalf("no scan_progress event: %q", buf.String())
+	}
+	if got, _ := scan["scanned"].(float64); got != 2 {
+		t.Errorf("scan_progress[scanned] = %v, want 2 (this run), not the corpus total", scan["scanned"])
+	}
+	embed, ok := events["embed_progress"]
+	if !ok {
+		t.Fatalf("no embed_progress event: %q", buf.String())
+	}
+	if got, _ := embed["embedded"].(float64); got != 0 {
+		t.Errorf("embed_progress[embedded] = %v, want 0 (this run has embedded nothing)", embed["embedded"])
+	}
+
+	// The snapshot on disk is the other half of the split: it states the corpus,
+	// which is what `status` and dir2mcp_stats report.
+	snap := readCorpusFile(t, filepath.Join(stateDir, "corpus.json"))
+	if snap.Indexing.EmbeddedOK != 487 {
+		t.Errorf("corpus.json embedded_ok = %d, want 487 (the corpus, not the run)", snap.Indexing.EmbeddedOK)
+	}
+	if snap.Indexing.ChunksTotal != 487 {
+		t.Errorf("corpus.json chunks_total = %d, want 487", snap.Indexing.ChunksTotal)
+	}
+}

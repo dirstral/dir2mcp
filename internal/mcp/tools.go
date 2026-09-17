@@ -476,12 +476,16 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	// contract, and the canonical stats.json closes the output object, so
 	// emitting it made a canonically-validating client reject every response.
 
+	// The same resolved counters the structured block carries. A client that
+	// reads the text and a client that reads structuredContent must not be told
+	// two different things by one response, which is #1005 inside a single
+	// payload.
 	text := fmt.Sprintf(
 		"indexing running=%t scanned=%d indexed=%d errors=%d",
 		snapshot.Running,
-		retrievedStats.Scanned,
-		retrievedStats.Indexed,
-		retrievedStats.Errors,
+		counters.Scanned,
+		counters.Indexed,
+		counters.Errors,
 	)
 
 	return toolCallResult{

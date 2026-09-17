@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
@@ -254,5 +259,53 @@ func TestStatsIgnoresFallbackChunkZeros1005(t *testing.T) {
 	// provenance behind them, the whole block comes from one clock or none.
 	if got := indexing["scanned"]; got != float64(0) {
 		t.Errorf("scanned=%v, want 0 (the live run's count, not the unprovenanced 4)", got)
+	}
+}
+
+// TestStatsTextAndStructuredAgree1005 closes the last drift inside one payload.
+// The tool answers twice: a text line for a human and structuredContent for a
+// client. On the no-aggregate path the structured block reports the live run
+// while the text line used to report the store's reconstruction, so one
+// response stated two different corpora.
+func TestStatsTextAndStructuredAgree1005(t *testing.T) {
+	cfg := config.Default()
+	cfg.StateDir = t.TempDir()
+	cfg.MCPPath = protocol.DefaultMCPPath
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, &fallbackCountersRetriever{}).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dir2mcp_stats","arguments":{}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	var envelope struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode stats response: %v", err)
+	}
+	if len(envelope.Result.Content) == 0 {
+		t.Fatal("stats returned no text content")
+	}
+	indexing, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("no indexing object: %#v", envelope.Result.StructuredContent)
+	}
+
+	text := envelope.Result.Content[0].Text
+	for _, field := range []string{"scanned", "indexed", "errors"} {
+		value, _ := indexing[field].(float64)
+		want := fmt.Sprintf("%s=%d", field, int64(value))
+		if !strings.Contains(text, want) {
+			t.Errorf("text %q does not carry %q from structuredContent (one response, two answers)", text, want)
+		}
 	}
 }
