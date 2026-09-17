@@ -58,6 +58,25 @@ VERSION_LINE_RE = re.compile(r'^(\s*version\s+)"(?P<version>[^"]+)"\s*$')
 REVISION_LINE_RE = re.compile(r"^\s*revision\s+\d+\s*$")
 
 
+def _version_from_urls(formula_text: str) -> str | None:
+    """Return the version the release-tarball URLs already encode, if any.
+
+    This is the version brew itself scans when the formula declares none.
+    Only ``url`` lines are scanned. A tarball name that appears in a comment
+    or inside the hand-written install logic must not stand in for the
+    release URLs; if it did, a formula whose comment already named the new
+    version would read as "no bump" and keep a stale ``revision``.
+    """
+    for line in formula_text.splitlines():
+        url_match = URL_LINE_RE.match(line)
+        if url_match is None:
+            continue
+        match = TARBALL_RE.search(url_match.group("url"))
+        if match:
+            return match.group("version")
+    return None
+
+
 def _find_declared_version(formula_text: str) -> str | None:
     """Return the formula's current top-level ``version`` string, if any."""
     for line in formula_text.splitlines():
@@ -110,7 +129,12 @@ def bump_formula(formula_text: str, new_version: str, checksums: dict[str, str])
     # A "real version bump" is when the formula's declared version differs from
     # the target. On such a bump we drop any stale `revision N` line (see the
     # module docstring); on an idempotent same-version re-run we leave it alone.
-    old_version = _find_declared_version(formula_text)
+    # The declared line is optional: `brew audit` rejects a `version` field
+    # whose value it can scan out of the release-tarball URLs, so the formula
+    # carries no such line and the URLs are the only statement of the version.
+    # Fall back to reading it from the first release URL, or a bump would look
+    # like an idempotent re-run and keep a stale `revision`.
+    old_version = _find_declared_version(formula_text) or _version_from_urls(formula_text)
     is_version_bump = old_version is not None and old_version != new_version
 
     for line in formula_text.splitlines(keepends=False):
@@ -178,15 +202,15 @@ def bump_formula(formula_text: str, new_version: str, checksums: dict[str, str])
     if not seen_keys:
         raise SystemExit("no dir2mcp release-tarball URLs found in formula; nothing to bump")
 
-    if not version_line_seen:
-        # If the formula ever loses the top-level version field, just
-        # bumping URLs/SHA256s would produce an inconsistent file (the
-        # declared version would lag the artefacts). Fail rather than
-        # silently ship a mismatch.
-        raise SystemExit(
-            'no top-level version "..." line found in formula; refusing to '
-            "rewrite URLs/SHA256s without also bumping the declared version"
-        )
+    # A formula with no top-level version line is CORRECT, not broken: brew
+    # scans the version from the release-tarball URLs, and `brew audit` refuses
+    # a declaration it can derive ("`version X` is redundant with version
+    # scanned from URL"). The old guard here failed in that case, to stop a
+    # declared version lagging the artefacts. With no declaration there is
+    # nothing to lag, and the URLs above have just been rewritten, so the file
+    # is consistent. version_line_seen is still tracked because a formula that
+    # DOES declare one must have it rewritten, which the loop above does.
+    _ = version_line_seen
 
     # Trailing newline preservation.
     suffix = "\n" if formula_text.endswith("\n") else ""

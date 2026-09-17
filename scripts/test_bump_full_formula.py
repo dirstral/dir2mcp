@@ -131,22 +131,49 @@ class BumpFormulaTests(unittest.TestCase):
             bump_formula(formula, "0.5.0", _NEW_CHECKSUMS)
         self.assertIn("no dir2mcp release-tarball URLs", str(cm.exception))
 
-    def test_missing_version_line_is_fatal(self) -> None:
-        # The patcher must not silently rewrite URLs/SHA256s while leaving
-        # the declared version stale; that would ship a mismatched formula.
+    def test_no_version_line_is_supported(self) -> None:
+        # A formula with no top-level version line is CORRECT: brew scans the
+        # version from the release-tarball URLs, and `brew audit` refuses a
+        # declaration it can derive. The patcher must rewrite the URLs and
+        # SHA256s and leave the file without a declaration, rather than fail.
         formula = textwrap.dedent(
             """\
             class Dir2mcpFull < Formula
               homepage "https://github.com/dirstral/dir2mcp"
-              # version line removed on purpose
+              revision 2
               url "https://github.com/dirstral/dir2mcp/releases/download/v0.4.4/dir2mcp_0.4.4_darwin_arm64.tar.gz"
               sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             end
             """
         )
-        with self.assertRaises(SystemExit) as cm:
-            bump_formula(formula, "0.5.0", _NEW_CHECKSUMS)
-        self.assertIn("no top-level version", str(cm.exception))
+        out = bump_formula(formula, "0.5.0", _NEW_CHECKSUMS)
+        self.assertIn("/v0.5.0/dir2mcp_0.5.0_darwin_arm64.tar.gz", out)
+        self.assertNotIn("0.4.4", out)
+        self.assertNotIn("version \"", out)
+        # The version moved, so a rebuild counter scoped to the old one is
+        # stale. Without a declared line the bump is detected from the URLs.
+        self.assertNotIn("revision 2", out)
+
+    def test_version_in_a_comment_does_not_mask_a_bump(self) -> None:
+        # The URL scan is the fallback when no version line is declared. It
+        # must read the release URLs only. Here a comment already names the
+        # NEW tarball while the release URL is still on the old version: a
+        # whole-file scan would report "no bump" and strand `revision 3`
+        # against a version the formula no longer ships.
+        formula = textwrap.dedent(
+            """\
+            class Dir2mcpFull < Formula
+              homepage "https://github.com/dirstral/dir2mcp"
+              revision 3
+              # Pinned for parity with dir2mcp_0.5.0_darwin_arm64.tar.gz.
+              url "https://github.com/dirstral/dir2mcp/releases/download/v0.4.4/dir2mcp_0.4.4_darwin_arm64.tar.gz"
+              sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            end
+            """
+        )
+        out = bump_formula(formula, "0.5.0", _NEW_CHECKSUMS)
+        self.assertIn("/v0.5.0/dir2mcp_0.5.0_darwin_arm64.tar.gz", out)
+        self.assertNotIn("revision 3", out)
 
     def test_url_without_expected_segment_is_fatal(self) -> None:
         # Tarball name matches our regex but the URL path doesn't contain
