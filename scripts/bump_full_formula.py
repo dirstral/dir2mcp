@@ -62,9 +62,19 @@ def _version_from_urls(formula_text: str) -> str | None:
     """Return the version the release-tarball URLs already encode, if any.
 
     This is the version brew itself scans when the formula declares none.
+    Only ``url`` lines are scanned. A tarball name that appears in a comment
+    or inside the hand-written install logic must not stand in for the
+    release URLs; if it did, a formula whose comment already named the new
+    version would read as "no bump" and keep a stale ``revision``.
     """
-    match = TARBALL_RE.search(formula_text)
-    return match.group("version") if match else None
+    for line in formula_text.splitlines():
+        url_match = URL_LINE_RE.match(line)
+        if url_match is None:
+            continue
+        match = TARBALL_RE.search(url_match.group("url"))
+        if match:
+            return match.group("version")
+    return None
 
 
 def _find_declared_version(formula_text: str) -> str | None:
