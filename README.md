@@ -342,7 +342,7 @@ dir2mcp up --listen 0.0.0.0:8087
 |---|---|
 | `up` | Start the MCP server and begin indexing (daemonizes by default) |
 | `down` | Stop the dir2mcp server running in this directory |
-| `status` | Show corpus and indexing state |
+| `status` | Show corpus and indexing state. The counters (`reps`, `chunks`, `embedded`, `pending`, `errors`) are read from the metadata store on every call, so they are corpus-wide and match what the `dir2mcp_stats` MCP tool reports for the same state dir |
 | `ask "<question>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `search "<query>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |

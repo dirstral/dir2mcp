@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,35 +30,42 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		cfg.StateDir = filepath.Join(".", ".dir2mcp")
 	}
 
-	snapshotPath := filepath.Join(cfg.StateDir, "corpus.json")
-	snapshot, err := readCorpusSnapshot(snapshotPath)
-	source := "corpus_json"
-	if err != nil {
-		metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
-		if _, statErr := os.Stat(metaPath); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("no state found in %s; run: dir2mcp up", cfg.StateDir))
-				return exitGeneric
-			}
-			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("read state: %v", statErr))
+	cached, cacheErr := readCorpusSnapshot(filepath.Join(cfg.StateDir, "corpus.json"))
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	_, metaErr := os.Stat(metaPath)
+	if cacheErr != nil && metaErr != nil {
+		if errors.Is(metaErr, os.ErrNotExist) {
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("no state found in %s; run: dir2mcp up", cfg.StateDir))
 			return exitGeneric
 		}
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("read state: %v", metaErr))
+		return exitGeneric
+	}
 
-		st := a.storeForConfig(cfg)
-		defer func() { _ = st.Close() }()
-		if initErr := st.Init(ctx); initErr != nil && !errors.Is(initErr, model.ErrNotImplemented) {
-			writeStoreInitError(a.stderr, global.jsonOutput, exitIndexLoadFailure, initErr, fmt.Sprintf("initialize metadata store: %v", initErr))
-			return exitIndexLoadFailure
+	snapshot := cached
+	source := "corpus_json"
+	if metaErr == nil {
+		// Read the store whenever it is there, even with a readable corpus.json
+		// in hand. corpus.json is a cache the daemon stops refreshing the moment
+		// indexing reports stopped, while the embed worker keeps draining the
+		// queue for minutes afterwards; the MCP dir2mcp_stats tool queries the
+		// store on every call. Trusting the file is exactly how #1005 happened:
+		// `status` printed "embedded=0 pending=487" over a corpus the store,
+		// the stats tool and `ask` all agreed was fully embedded.
+		computed, code, ok := a.computeStatusSnapshot(ctx, global, cfg, cacheErr == nil)
+		if ok {
+			if cacheErr == nil {
+				carryRunLiveness(&computed, cached)
+			}
+			snapshot = computed
+			source = "computed"
+		} else if cacheErr != nil {
+			// Nothing cached to fall back on, so the store failure is fatal.
+			// computeStatusSnapshot already reported why.
+			return code
 		}
-		// status --json must emit a single JSON object, not an NDJSON stream.
-		// Keep the emitter disabled so computed-snapshot warnings go to stderr.
-		emitter := newNDJSONEmitter(a.stdout, false)
-		snapshot, err = buildCorpusSnapshot(ctx, st, nil, a.stderr, emitter)
-		if err != nil {
-			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("build status snapshot: %v", err))
-			return exitGeneric
-		}
-		source = "computed"
+		// Otherwise the cached snapshot stands, and the downgrade is already on
+		// stderr, so the operator knows the counters may have moved on.
 	}
 
 	// Reconcile a daemon-written "running" snapshot against process liveness.
@@ -77,6 +85,69 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 	recentFailures := a.loadRecentFailuresForStatus(ctx, cfg, statusRecentFailuresLimit)
 
 	return a.renderStatusOutput(global, cfg.StateDir, snapshot, source, staleRunning, recentFailures)
+}
+
+// computeStatusSnapshot builds a corpus snapshot straight from the metadata
+// store, which is the source of truth the dir2mcp_stats MCP tool reads too
+// (both assemble their counter block with model.ResolveIndexingCounters, so the
+// two surfaces cannot drift: #1005).
+//
+// haveCached says whether the caller holds a usable corpus.json. Without one a
+// failure here is fatal, so the reason is written to the caller's error surface
+// and the returned exit code is the one to exit with. With one the failure only
+// costs freshness, so it is noted on stderr and the caller keeps the cache.
+func (a *App) computeStatusSnapshot(ctx context.Context, global globalOptions, cfg config.Config, haveCached bool) (corpusSnapshot, int, bool) {
+	snapshot, storeInitFailed, err := a.storeStatusSnapshot(ctx, cfg, a.stderr)
+	if err == nil {
+		return snapshot, exitSuccess, true
+	}
+	if haveCached {
+		// Say it out loud. A silent downgrade hands the operator counters that
+		// look current and are not, which is the #1005 failure in miniature.
+		writef(a.stderr, "status: reporting cached counters; %v\n", err)
+		return corpusSnapshot{}, exitSuccess, false
+	}
+	if storeInitFailed {
+		writeStoreInitError(a.stderr, global.jsonOutput, exitIndexLoadFailure, err, err.Error())
+		return corpusSnapshot{}, exitIndexLoadFailure, false
+	}
+	writeCLIError(a.stderr, global.jsonOutput, exitGeneric, err.Error())
+	return corpusSnapshot{}, exitGeneric, false
+}
+
+// carryRunLiveness copies the run-liveness fields from the daemon's corpus.json
+// cache onto a store-derived snapshot. mode, running and watch_overflows
+// describe the daemon's CURRENT run, and no store query can answer them, so a
+// refreshed snapshot that dropped them would report a live indexing run as
+// stopped: #418 in reverse. The counters are NOT copied, which is the whole
+// point of refreshing them (#1005).
+func carryRunLiveness(refreshed *corpusSnapshot, cached corpusSnapshot) {
+	refreshed.Indexing.Mode = cached.Indexing.Mode
+	refreshed.Indexing.Running = cached.Indexing.Running
+	refreshed.Indexing.WatchOverflows = cached.Indexing.WatchOverflows
+}
+
+// storeStatusSnapshot builds a corpus snapshot from the metadata store. The
+// bool reports whether the failure was the store handshake itself, which
+// carries its own operator hint (writeStoreInitError).
+//
+// warn takes the snapshot builder's advisory output (unexpected document
+// statuses). `status` sends it to stderr; the support bundle discards it,
+// because a bundle must not print to the operator's terminal.
+func (a *App) storeStatusSnapshot(ctx context.Context, cfg config.Config, warn io.Writer) (corpusSnapshot, bool, error) {
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return corpusSnapshot{}, true, fmt.Errorf("initialize metadata store: %w", err)
+	}
+	// status --json must emit a single JSON object, not an NDJSON stream.
+	// Keep the emitter disabled so computed-snapshot warnings go to warn.
+	emitter := newNDJSONEmitter(a.stdout, false)
+	snapshot, err := buildCorpusSnapshot(ctx, st, nil, warn, emitter)
+	if err != nil {
+		return corpusSnapshot{}, false, fmt.Errorf("build status snapshot: %w", err)
+	}
+	return snapshot, false, nil
 }
 
 // statusRecentFailuresLimit bounds how many recent failures `status` renders —

@@ -226,35 +226,44 @@ func readLogTail(path string, maxBytes int64) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// marshalStatusJSON computes the same payload `dir2mcp status --json`
-// would emit. Falls back to a placeholder when no state is present so
+// marshalStatusJSON computes the same payload `dir2mcp status --json` would
+// emit, through the same two helpers (storeStatusSnapshot + carryRunLiveness),
+// so a bundle and the live command cannot report different corpora (#1005).
+// Falls back to a placeholder when no state is present so
 // the bundle still records "we tried and found nothing". The snapshot's
 // FailureSummary.Samples carry raw {rel_path, message} pairs that can echo
 // corpus content, so they are redacted the same way list-files.json is
 // unless the operator opts in with --include-content.
 func marshalStatusJSON(ctx context.Context, a *App, cfg config.Config, includeContent bool) ([]byte, error) {
-	snapshotPath := filepath.Join(cfg.StateDir, "corpus.json")
-	snapshot, err := readCorpusSnapshot(snapshotPath)
+	cached, cacheErr := readCorpusSnapshot(filepath.Join(cfg.StateDir, "corpus.json"))
+	_, metaErr := os.Stat(filepath.Join(cfg.StateDir, "meta.sqlite"))
+	if cacheErr != nil && metaErr != nil {
+		return json.MarshalIndent(map[string]interface{}{
+			"available": false,
+			"reason":    "no state found",
+		}, "", "  ")
+	}
+
+	snapshot := cached
 	source := "corpus_json"
-	if err != nil {
-		metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
-		if _, statErr := os.Stat(metaPath); statErr != nil {
-			return json.MarshalIndent(map[string]interface{}{
-				"available": false,
-				"reason":    "no state found",
-			}, "", "  ")
+	if metaErr == nil {
+		// Same rule as `status` itself, through the same two helpers: the
+		// bundle must not ship the daemon's frozen cache as the corpus state.
+		// A maintainer reading status.json for a stuck-embedding report would
+		// otherwise see the very numbers that made #1005 look like a stall.
+		computed, _, err := a.storeStatusSnapshot(ctx, cfg, io.Discard)
+		if err == nil {
+			if cacheErr == nil {
+				carryRunLiveness(&computed, cached)
+			}
+			snapshot = computed
+			source = "computed"
+		} else if cacheErr != nil {
+			// No cache to degrade to, so the bundle cannot report status.
+			return nil, err
 		}
-		st := a.storeForConfig(cfg)
-		defer func() { _ = st.Close() }()
-		if initErr := st.Init(ctx); initErr != nil && !errors.Is(initErr, model.ErrNotImplemented) {
-			return nil, fmt.Errorf("initialize store: %w", initErr)
-		}
-		emitter := newNDJSONEmitter(io.Discard, false)
-		snapshot, err = buildCorpusSnapshot(ctx, st, nil, io.Discard, emitter)
-		if err != nil {
-			return nil, fmt.Errorf("build snapshot: %w", err)
-		}
-		source = "computed"
+		// Otherwise the cached snapshot stands, labelled source=corpus_json so
+		// the reader can see the bundle could not refresh it.
 	}
 	snapshot.Indexing.FailureSummary = redactFailureSamples(snapshot.Indexing.FailureSummary, includeContent)
 	return json.MarshalIndent(map[string]interface{}{
