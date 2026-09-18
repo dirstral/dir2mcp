@@ -74,9 +74,14 @@ def roster_digest(roster) -> str:
     truth through `mlbam_id`, which the roster also owns. Every field that can
     move an id or a name is therefore in the digest.
 
-    The OCR read log needs no equivalent. It records text, the reader has no
-    roster, and interpretation re-runs on replay: a changed roster is exactly
-    the kind of change a read log is FOR.
+    The OCR read log needs no equivalent, though not as cleanly. It records
+    text and re-runs interpretation on replay, so a changed roster reaches the
+    cues. What it cannot re-run is the band search: `ScorebugRecognizer`
+    counts a roster match as a hit, and the hit count is what steers
+    `_RegionSearch` and `_AdaptiveFallback`. A replay therefore reads the
+    bands the RECORDED roster settled on. That is close enough to be useful
+    and not the same as a fresh pass, which is why this digest guards the cue
+    file and `OverlayReader._replay` states the limit rather than hiding it.
     """
     rows = sorted(
         [p.id, p.name, p.number or "", *sorted(p.aliases)] for p in roster.players
@@ -268,7 +273,15 @@ def run_pipeline(
     """
     fingerprint = cascade_fingerprint(pipeline, media_path)
     if cues_in is not None:
-        cached, cues = cues_from_json(cues_in.read_text(encoding="utf-8"))
+        # The read itself, not just the parse: a path that is missing, is a
+        # directory, or cannot be opened is the same kind of problem as a
+        # malformed one, and the CLI turns exactly one exception type into a
+        # message rather than a traceback.
+        try:
+            raw = cues_in.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise CueCacheMismatch(f"cannot read {cues_in}: {exc}") from exc
+        cached, cues = cues_from_json(raw)
         diffs = cache_differences(cached, fingerprint)
         if diffs:
             raise CueCacheMismatch(

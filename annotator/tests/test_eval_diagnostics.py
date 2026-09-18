@@ -538,3 +538,13 @@ def test_a_malformed_cue_file_is_refused(tmp_path, payload):
     path.write_text(payload)
     with pytest.raises(diagnose_mod.CueCacheMismatch):
         diagnose_mod.cues_from_json(path.read_text())
+
+
+def test_an_unreadable_cue_file_is_refused(tmp_path, roster):
+    """A missing or unopenable path is the same problem as a malformed one."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    missing = tmp_path / "nowhere" / "cues.json"
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(Pipeline(roster=roster), media, cues_in=missing)
+    assert "cannot read" in str(excinfo.value)

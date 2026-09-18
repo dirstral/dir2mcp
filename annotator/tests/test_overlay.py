@@ -764,6 +764,16 @@ def _refuse_frames(*a, **k):
     raise AssertionError("the video was read during a replay")
 
 
+def _reader(cache, **kw):
+    return OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache, **kw)
+
+
+def _log(cache, media):
+    """Where the reader keeps its log. Computed, not spelled out: the name
+    carries a digest so two files sharing a basename get two logs."""
+    return _reader(cache)._cache_path(media)
+
+
 def test_a_recorded_run_replays_without_reading_the_video(bands, tmp_path, monkeypatch):
     bands({BADGE: "GAME 1"}, frames=6)
     cache = tmp_path / "logs"
@@ -815,7 +825,7 @@ def test_an_abandoned_pass_records_nothing(bands, tmp_path):
                           read_cache=cache).read_text(MEDIA)
     assert next(reads).texts == ("GAME 1",)
     reads.close()
-    assert not (cache / f"overlay-{MEDIA}.jsonl").exists()
+    assert not _log(cache, MEDIA).exists()
     # ... and no half-written temporary is left where a later run could find it.
     assert [p.name for p in cache.iterdir() if p.is_file()] == []
 
@@ -836,12 +846,11 @@ def test_a_log_recorded_by_a_different_reader_is_refused(bands, tmp_path):
 def test_a_log_from_a_future_schema_is_refused(bands, tmp_path):
     cache = tmp_path / "logs"
     cache.mkdir()
-    (cache / f"overlay-{MEDIA}.jsonl").write_text(
+    _log(cache, MEDIA).write_text(
         json.dumps({"schema": overlay.READ_CACHE_SCHEMA + 1, "reader": {}}) + "\n"
     )
-    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
     with pytest.raises(overlay.ReadCacheMismatch):
-        list(reader.read_text(MEDIA))
+        list(_reader(cache).read_text(MEDIA))
 
 
 def test_workers_do_not_invalidate_a_log(bands, tmp_path, monkeypatch):
@@ -855,23 +864,65 @@ def test_workers_do_not_invalidate_a_log(bands, tmp_path, monkeypatch):
                                   read_cache=cache).read_text(MEDIA))) == 3
 
 
-def test_two_videos_sharing_a_basename_do_not_share_a_log(bands, tmp_path, monkeypatch):
-    """A cache keyed by basename alone would replay one game as another."""
+def test_two_videos_sharing_a_basename_get_two_logs(bands, tmp_path, monkeypatch):
+    """`proxy.mp4` in two corpus directories is the ordinary case.
+
+    One log per basename would refuse the second video, and alternating
+    between the two corpora would thrash a single log forever. Both are
+    cached instead, and each replays its own reads.
+    """
     cache = tmp_path / "logs"
     first = tmp_path / "a" / MEDIA
     first.parent.mkdir()
     first.write_bytes(b"one")
     bands({BADGE: "GAME 1"}, frames=3)
-    assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
-                              read_cache=cache).read_text(first))
+    assert len(list(_reader(cache).read_text(first))) == 3
 
     second = tmp_path / "b" / MEDIA
     second.parent.mkdir()
     second.write_bytes(b"a different game entirely")
-    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    bands({BADGE: "GAME 2"}, frames=3)
+    assert len(list(_reader(cache).read_text(second))) == 3
+
+    assert _log(cache, first) != _log(cache, second)
+    assert len(sorted(cache.glob("*.jsonl"))) == 2
+
+    monkeypatch.setattr(overlay, "iter_frames", _refuse_frames)
+    assert [r.texts for r in _reader(cache).read_text(first)] == [("GAME 1",)] * 3
+    assert [r.texts for r in _reader(cache).read_text(second)] == [("GAME 2",)] * 3
+
+
+def test_a_log_that_names_other_media_is_refused(bands, tmp_path):
+    """The filename keys on name and size; the header carries the mtime too.
+
+    So a log moved or renamed onto another file's path is still caught, which
+    is what keeps the shorter filename key safe.
+    """
+    cache = tmp_path / "logs"
+    first = tmp_path / "a" / MEDIA
+    first.parent.mkdir()
+    first.write_bytes(b"one")
+    bands({BADGE: "GAME 1"}, frames=3)
+    assert list(_reader(cache).read_text(first))
+
+    second = tmp_path / "b" / MEDIA
+    second.parent.mkdir()
+    second.write_bytes(b"two")  # same size, so the same filename key
+    assert _log(cache, first).name == _log(cache, second).name
+    _log(cache, second).write_bytes(_log(cache, first).read_bytes())
+
     with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
-        list(reader.read_text(second))
+        list(_reader(cache).read_text(second))
     assert "media" in str(excinfo.value)
+
+
+def test_an_unreadable_log_is_refused(bands, tmp_path):
+    cache = tmp_path / "logs"
+    cache.mkdir()
+    _log(cache, MEDIA).mkdir()  # a directory where the log belongs
+    with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
+        list(_reader(cache).read_text(MEDIA))
+    assert "cannot read" in str(excinfo.value)
 
 
 def test_a_truncated_log_is_refused(bands, tmp_path):
@@ -883,7 +934,7 @@ def test_a_truncated_log_is_refused(bands, tmp_path):
     assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
                               read_cache=cache).read_text(media))
 
-    log = cache / f"overlay-{MEDIA}.jsonl"
+    log = _log(cache, media)
     log.write_text(log.read_text()[:-12])  # cut the last record mid-line
     reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
     with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
@@ -900,10 +951,9 @@ def test_a_truncated_log_is_refused(bands, tmp_path):
 def test_a_malformed_log_header_is_refused(tmp_path, header):
     cache = tmp_path / "logs"
     cache.mkdir()
-    (cache / f"overlay-{MEDIA}.jsonl").write_text(header)
-    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    _log(cache, MEDIA).write_text(header)
     with pytest.raises(overlay.ReadCacheMismatch):
-        list(reader.read_text(MEDIA))
+        list(_reader(cache).read_text(MEDIA))
 
 
 def test_a_stale_log_stops_the_cascade_instead_of_degrading_it(tmp_path, monkeypatch):
@@ -942,7 +992,7 @@ def test_a_boolean_schema_does_not_read_as_schema_one(bands, tmp_path):
     assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
                               read_cache=cache).read_text(media))
 
-    log = cache / f"overlay-{MEDIA}.jsonl"
+    log = _log(cache, media)
     lines = log.read_text().splitlines()
     header = json.loads(lines[0])
     header["schema"] = True

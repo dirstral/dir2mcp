@@ -399,7 +399,8 @@ What each one answers:
 
 Neither replays a change to OCR itself, to the band search, or to what an
 interpreter counts as a hit: those steer which pixels get read, and a
-recording is a log of what one run already read.
+recording is a log of what one run already read. A change of that kind needs
+a fresh pass, and neither flag will tell you so.
 
 Both refuse a file recorded under different settings rather than report a
 scorecard for a configuration that never ran. Delete the file (or drop the
@@ -407,7 +408,11 @@ flag) to record again. What each one checks:
 
 * a read log checks the reader: the media (name, size and mtime, not a
   content digest), the band, the frame rate, the OCR language and page mode.
-  It carries no roster, because interpretation re-runs on a replay.
+  It carries no roster, because interpretation re-runs on a replay. One
+  qualifier: the scorebug counts a roster match as a hit, and the hit count
+  steers the band search and the adaptive fallback, so a replay reads the
+  bands the RECORDED roster settled on rather than the ones a fresh pass
+  would. Useful, and not the same thing.
 * a cue file checks the whole cascade: the media, a digest of the roster,
   every recognizer flag, and what the caption backend was built from. Cues
   are already resolved to entities and display names, so a changed roster

@@ -51,6 +51,7 @@ for callers with nothing better to offer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -435,9 +436,26 @@ class OverlayReader:
         }
 
     def _cache_path(self, media_path: Path) -> Path | None:
+        """Where this reader's log for this media lives.
+
+        The name carries a digest so two different files that share a basename
+        get two logs and both stay cached. Without it they share one path, the
+        second run is refused, and alternating between the two corpora thrashes
+        one log forever.
+
+        The digest deliberately covers name and size only, not the mtime the
+        header also records. A file re-copied in place keeps its path, so the
+        header check refuses it and the operator re-records; putting the mtime
+        here instead would silently orphan the old log and grow the directory
+        a file at a time.
+        """
         if self.read_cache is None:
             return None
-        return self.read_cache / f"{self.name}-{Path(media_path).name}.jsonl"
+        ident = media_identity(media_path)
+        key = hashlib.sha256(
+            json.dumps([ident["name"], ident["size"]], sort_keys=True).encode("utf-8")
+        ).hexdigest()[:10]
+        return self.read_cache / f"{self.name}-{Path(media_path).name}.{key}.jsonl"
 
     def _replay(
         self, cache: Path, media_path: Path, interpret: Interpreter[_T],
@@ -451,7 +469,11 @@ class OverlayReader:
         measurement of a changed interpreter: that one steers the search, and
         the search is exactly what a replay skips.
         """
-        with cache.open(encoding="utf-8") as fh:
+        try:
+            fh = cache.open(encoding="utf-8")
+        except OSError as exc:
+            raise ReadCacheMismatch(f"cannot read {cache}: {exc}") from exc
+        with fh:
             header = fh.readline()
             if not header.strip():
                 raise ReadCacheMismatch(f"{cache} is empty; delete it to record again")
