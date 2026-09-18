@@ -29,11 +29,12 @@ type perTrackTranscriber struct {
 
 func (p *perTrackTranscriber) Transcribe(_ context.Context, _ string, data []byte) (string, error) {
 	p.calls++
-	key := string(data)
-	if err := p.failFor[key]; err != nil {
+	// Converted at each lookup, not bound to a variable: the compiler elides
+	// the allocation for a map index and staticcheck SA6001 asks for it.
+	if err := p.failFor[string(data)]; err != nil {
 		return "", err
 	}
-	return p.byInput[key], nil
+	return p.byInput[string(data)], nil
 }
 
 // trackAudioBytes is the deterministic per-track audio the stubbed extractor emits
