@@ -40,27 +40,28 @@ func canonicalSkipReasons(t *testing.T) map[string]bool {
 		t.Logf("canonical stats.json unavailable (%v); using the model skip-reason constants", err)
 		return fallback
 	}
+	// `output` is top level, not under `definitions`. spec 0.69.0 migrated
+	// stats.json to the input/output wrapper that spec/tools/schemas.md always
+	// documented (dirstral-spec#75), and the legacy path is gone.
 	var doc struct {
-		Definitions struct {
-			Output struct {
-				Properties struct {
-					SkipReasons struct {
-						Items struct {
-							Properties struct {
-								Reason struct {
-									Enum []string `json:"enum"`
-								} `json:"reason"`
-							} `json:"properties"`
-						} `json:"items"`
-					} `json:"skip_reasons"`
-				} `json:"properties"`
-			} `json:"output"`
-		} `json:"definitions"`
+		Output struct {
+			Properties struct {
+				SkipReasons struct {
+					Items struct {
+						Properties struct {
+							Reason struct {
+								Enum []string `json:"enum"`
+							} `json:"reason"`
+						} `json:"properties"`
+					} `json:"items"`
+				} `json:"skip_reasons"`
+			} `json:"properties"`
+		} `json:"output"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("decode canonical stats.json: %v", err)
 	}
-	enum := doc.Definitions.Output.Properties.SkipReasons.Items.Properties.Reason.Enum
+	enum := doc.Output.Properties.SkipReasons.Items.Properties.Reason.Enum
 	if len(enum) == 0 {
 		t.Fatal("canonical stats.json declares no skip_reasons reason enum")
 	}

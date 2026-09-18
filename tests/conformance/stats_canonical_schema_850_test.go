@@ -38,9 +38,14 @@ import (
 // spec-side change reaches this test through the submodule pin.
 var canonicalStatsSchemaPath = filepath.Join("..", "..", "dirstral-spec", "spec", "tools", "schemas", "stats.json")
 
-// canonicalStatsOutputRaw returns the raw `definitions.output` subschema of the
+// canonicalStatsOutputRaw returns the raw top-level `output` subschema of the
 // canonical stats.json. That subschema, not the file's root, is the contract for
 // a dir2mcp_stats structuredContent payload.
+//
+// It reads `.output`, not `definitions.output`. spec 0.69.0 migrated
+// stats.json, annotate.json and list_files.json to the `input`/`output` wrapper
+// that spec/tools/schemas.md always documented (dirstral-spec#75); the legacy
+// path is gone, and this test read it.
 func canonicalStatsOutputRaw(t *testing.T) json.RawMessage {
 	t.Helper()
 	raw, err := os.ReadFile(canonicalStatsSchemaPath)
@@ -48,16 +53,15 @@ func canonicalStatsOutputRaw(t *testing.T) json.RawMessage {
 		t.Fatalf("read canonical stats.json (run: git submodule update --init): %v", err)
 	}
 	var doc struct {
-		Definitions map[string]json.RawMessage `json:"definitions"`
+		Output json.RawMessage `json:"output"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("decode canonical stats.json: %v", err)
 	}
-	output, ok := doc.Definitions["output"]
-	if !ok {
-		t.Fatal("canonical stats.json declares no definitions.output")
+	if len(doc.Output) == 0 {
+		t.Fatal("canonical stats.json declares no top-level output subschema")
 	}
-	return output
+	return doc.Output
 }
 
 // canonicalStatsValidator compiles the canonical output subschema into a
