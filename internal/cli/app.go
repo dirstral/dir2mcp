@@ -2112,7 +2112,7 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	if err != nil {
 		return err
 	}
-	emitProgressEvents(emitter, snapshot.Indexing)
+	emitProgressEvents(emitter, runProgressCounters(indexingState, snapshot.Indexing))
 
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -2128,6 +2128,35 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 		return fmt.Errorf("write corpus snapshot: %w", err)
 	}
 	return nil
+}
+
+// runProgressCounters returns the block the scan_progress/embed_progress events
+// carry. Those events answer "how far has THIS RUN got", which is a different
+// question from the one corpus.json answers ("what does the corpus hold"), so
+// they take the live run counters even when the store can state the corpus
+// (#1005 review). With the corpus-wide totals an incremental pass over an
+// already-indexed corpus would emit its finished numbers on the first tick, and
+// a client rendering progress from them would show the run complete before it
+// had scanned a file. That is #414 again in the opposite direction: there the
+// events were hardcoded zeros and never advanced.
+//
+// Without a live run there is no progress to report, so the snapshot stands,
+// including its -1 "not derivable" sentinels.
+func runProgressCounters(indexingState *appstate.IndexingState, snapshot corpusIndexing) corpusIndexing {
+	if indexingState == nil {
+		return snapshot
+	}
+	idx := indexingState.Snapshot()
+	return corpusIndexing{
+		Scanned:         idx.Scanned,
+		Indexed:         idx.Indexed,
+		Skipped:         idx.Skipped,
+		Deleted:         idx.Deleted,
+		Representations: idx.Representations,
+		ChunksTotal:     idx.ChunksTotal,
+		EmbeddedOK:      idx.EmbeddedOK,
+		Errors:          idx.Errors,
+	}
 }
 
 // emitProgressEvents emits the spec-required `scan_progress` and
@@ -2169,10 +2198,12 @@ func watchOverflowsField(idx appstate.IndexingSnapshot) *int64 {
 }
 
 // buildCorpusSnapshot collects corpus stats and assembles a corpusSnapshot,
-// preferring live indexing-state counters when available and otherwise
-// deriving them from the store, including the code/total doc ratio.
+// including the code/total doc ratio. The counter block comes from
+// model.ResolveIndexingCounters, the single resolver the dir2mcp_stats MCP tool
+// also calls, so corpus.json and the MCP surface cannot report different
+// numbers for the same state dir (#1005).
 func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) (corpusSnapshot, error) {
-	corpusStats, err := collectCorpusStats(ctx, st, stderr, emitter)
+	corpusStats, aggregateRan, err := collectCorpusStats(ctx, st, stderr, emitter)
 	if err != nil {
 		return corpusSnapshot{}, err
 	}
@@ -2186,25 +2217,10 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 	}
 
 	idx := appstate.IndexingSnapshot{Mode: appstate.ModeIncremental}
+	var live *model.IndexingCounters
 	if indexingState != nil {
 		idx = indexingState.Snapshot()
-	} else {
-		idx.Scanned = corpusStats.Scanned
-		idx.Indexed = corpusStats.Indexed
-		idx.Skipped = corpusStats.Skipped
-		idx.Deleted = corpusStats.Deleted
-		idx.Representations = corpusStats.Representations
-		idx.ChunksTotal = corpusStats.ChunksTotal
-		idx.EmbeddedOK = corpusStats.EmbeddedOK
-		idx.Errors = corpusStats.Errors
-		idx.Unknown = corpusStats.Unknown
-	}
-
-	return corpusSnapshot{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Indexing: corpusIndexing{
-			Mode:            idx.Mode,
-			Running:         idx.Running,
+		live = &model.IndexingCounters{
 			Scanned:         idx.Scanned,
 			Indexed:         idx.Indexed,
 			Skipped:         idx.Skipped,
@@ -2212,13 +2228,32 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			Representations: idx.Representations,
 			ChunksTotal:     idx.ChunksTotal,
 			EmbeddedOK:      idx.EmbeddedOK,
-			// embedded_pending is always a store-derived count (no live
-			// appstate counter tracks it), so source it straight from
-			// corpusStats rather than idx — correct in both the live-snapshot
-			// and computed-fallback branches above (#364).
-			EmbeddedPending: corpusStats.EmbeddedPending,
 			Errors:          idx.Errors,
 			Unknown:         idx.Unknown,
+			// EmbeddedPending stays 0 here on purpose: no live counter tracks
+			// the queue depth, and only the store can answer it (#364).
+		}
+	}
+	// Mode, Running and WatchActive stay with the live state: they describe
+	// THIS process, and no store query can answer them. Only the counters go
+	// through the resolver.
+	counters := model.ResolveIndexingCounters(corpusStats, aggregateRan, live)
+
+	return corpusSnapshot{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Indexing: corpusIndexing{
+			Mode:            idx.Mode,
+			Running:         idx.Running,
+			Scanned:         counters.Scanned,
+			Indexed:         counters.Indexed,
+			Skipped:         counters.Skipped,
+			Deleted:         counters.Deleted,
+			Representations: counters.Representations,
+			ChunksTotal:     counters.ChunksTotal,
+			EmbeddedOK:      counters.EmbeddedOK,
+			EmbeddedPending: counters.EmbeddedPending,
+			Errors:          counters.Errors,
+			Unknown:         counters.Unknown,
 			// FailureSummary travels straight through from the
 			// aggregate CorpusStats so `status --json` consumers see
 			// the same grouping the doctor renders. Omitted from JSON
@@ -2243,9 +2278,14 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 // collectCorpusStats returns corpus statistics, preferring the store's
 // aggregate CorpusStats and otherwise falling back to a ListFiles scan
 // (which leaves representation/chunk/embed counters at the -1 sentinel).
-func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (model.CorpusStats, error) {
+//
+// The bool reports whether the aggregate itself ran. Callers need that to tell
+// a real corpus-wide count from the fallback's reconstruction, which cannot see
+// chunks at all; without it a caller would read the fallback's structural blind
+// spot as a confident zero (#1005).
+func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (model.CorpusStats, bool, error) {
 	if st == nil {
-		return model.CorpusStats{DocCounts: map[string]int64{}}, nil
+		return model.CorpusStats{DocCounts: map[string]int64{}}, false, nil
 	}
 
 	if agg, ok := st.(corpusStatsStore); ok {
@@ -2254,21 +2294,21 @@ func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, e
 			if stats.DocCounts == nil {
 				stats.DocCounts = map[string]int64{}
 			}
-			return stats, nil
+			return stats, true, nil
 		}
 		if !errors.Is(err, model.ErrNotImplemented) {
-			return model.CorpusStats{}, fmt.Errorf("corpus stats: %w", err)
+			return model.CorpusStats{}, false, fmt.Errorf("corpus stats: %w", err)
 		}
 	}
 
 	docCounts, totalDocs, err := collectActiveDocCounts(ctx, st)
 	if err != nil {
-		return model.CorpusStats{}, err
+		return model.CorpusStats{}, false, err
 	}
 
 	statusCounts, err := collectDocumentStatusCounts(ctx, st, stderr, emitter)
 	if err != nil {
-		return model.CorpusStats{}, err
+		return model.CorpusStats{}, false, err
 	}
 
 	return model.CorpusStats{
@@ -2284,7 +2324,7 @@ func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, e
 		EmbeddedOK:      -1,
 		Errors:          statusCounts.Errors,
 		Unknown:         statusCounts.Unknown,
-	}, nil
+	}, false, nil
 }
 
 // collectActiveDocCounts returns per-doc-type and total counts of non-deleted

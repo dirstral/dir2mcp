@@ -390,16 +390,26 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	}
 
 	snapshot := s.indexing.Snapshot()
-	if !statsFromRetriever {
-		retrievedStats.Scanned = snapshot.Scanned
-		retrievedStats.Indexed = snapshot.Indexed
-		retrievedStats.Skipped = snapshot.Skipped
-		retrievedStats.Deleted = snapshot.Deleted
-		retrievedStats.Representations = snapshot.Representations
-		retrievedStats.ChunksTotal = snapshot.ChunksTotal
-		retrievedStats.EmbeddedOK = snapshot.EmbeddedOK
-		retrievedStats.Errors = snapshot.Errors
-	}
+	// One resolver, two surfaces: `dir2mcp status` builds its counter block
+	// from this same call, so the CLI and this tool cannot report different
+	// numbers for one state dir (#1005).
+	//
+	// The gate is CorpusStatsAvailable, NOT "the retriever answered", for the
+	// same reason failed_chunks uses it below: the ListFiles-only fallback
+	// returns success too, and it cannot see chunks at all. Gating on success
+	// would publish its structural blind spot as chunks_total=0 embedded_ok=0
+	// over a corpus full of chunks, which is the #1005 misreport in another
+	// costume. The live run counted what it did, so it answers there instead.
+	counters := model.ResolveIndexingCounters(retrievedStats.CorpusStats, retrievedStats.CorpusStatsAvailable, &model.IndexingCounters{
+		Scanned:         snapshot.Scanned,
+		Indexed:         snapshot.Indexed,
+		Skipped:         snapshot.Skipped,
+		Deleted:         snapshot.Deleted,
+		Representations: snapshot.Representations,
+		ChunksTotal:     snapshot.ChunksTotal,
+		EmbeddedOK:      snapshot.EmbeddedOK,
+		Errors:          snapshot.Errors,
+	})
 	structured := map[string]interface{}{
 		"root":             retrievedStats.Root,
 		"state_dir":        retrievedStats.StateDir,
@@ -420,14 +430,14 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 				"job_id":          snapshot.JobID,
 				"running":         snapshot.Running,
 				"mode":            snapshot.Mode,
-				"scanned":         retrievedStats.Scanned,
-				"indexed":         retrievedStats.Indexed,
-				"skipped":         retrievedStats.Skipped,
-				"deleted":         retrievedStats.Deleted,
-				"representations": retrievedStats.Representations,
-				"chunks_total":    retrievedStats.ChunksTotal,
-				"embedded_ok":     retrievedStats.EmbeddedOK,
-				"errors":          retrievedStats.Errors,
+				"scanned":         counters.Scanned,
+				"indexed":         counters.Indexed,
+				"skipped":         counters.Skipped,
+				"deleted":         counters.Deleted,
+				"representations": counters.Representations,
+				"chunks_total":    counters.ChunksTotal,
+				"embedded_ok":     counters.EmbeddedOK,
+				"errors":          counters.Errors,
 			}
 			// Optional additive field (#591): only surface watch_overflows when a
 			// watcher is actually running, so absence reads as "not applicable"
@@ -466,12 +476,16 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	// contract, and the canonical stats.json closes the output object, so
 	// emitting it made a canonically-validating client reject every response.
 
+	// The same resolved counters the structured block carries. A client that
+	// reads the text and a client that reads structuredContent must not be told
+	// two different things by one response, which is #1005 inside a single
+	// payload.
 	text := fmt.Sprintf(
 		"indexing running=%t scanned=%d indexed=%d errors=%d",
 		snapshot.Running,
-		retrievedStats.Scanned,
-		retrievedStats.Indexed,
-		retrievedStats.Errors,
+		counters.Scanned,
+		counters.Indexed,
+		counters.Errors,
 	)
 
 	return toolCallResult{
