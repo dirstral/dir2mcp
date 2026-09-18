@@ -51,6 +51,7 @@ for callers with nothing better to offer.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -286,6 +287,83 @@ def any_text(read: OverlayRead) -> tuple[tuple[str, ...], int]:
     return kept, 1 if kept else 0
 
 
+#: Bumped when a recorded read log stops being readable by this code.
+READ_CACHE_SCHEMA = 1
+
+
+class ReadCacheMismatch(Exception):
+    """A recorded read log does not describe the run that asked to replay it.
+
+    Deliberately not a `RecognizerUnavailable`: that one means "this backend is
+    missing, carry on without it", and the cascade degrades quietly around it.
+    A stale cache is the opposite case. Carrying on would score a configuration
+    that never ran, so this one is meant to stop the run.
+    """
+
+
+class _recording:
+    """Append every yielded read to a log, and publish it only when told.
+
+    Inert when `path` is None, so the recording branch costs the uncached run
+    one method call per read and no conditional in the loop.
+
+    The log lands on a temporary file in the destination directory and is
+    moved into place by `complete`. Nothing else produces the final path, so a
+    run that dies part way leaves no log rather than a short one. That matters
+    more than it sounds: a truncated log replays as a complete pass over the
+    file, and the run that reads it reports a scorecard for footage it never
+    saw.
+    """
+
+    def __init__(self, path: Path | None, meta: dict):
+        self.path = path
+        self.meta = meta
+        self._tmp: Path | None = None
+        self._fh = None
+        self._complete = False
+
+    def __enter__(self) -> "_recording":
+        if self.path is None:
+            return self
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".part",
+        )
+        self._tmp = Path(tmp)
+        self._fh = os.fdopen(fd, "w", encoding="utf-8")
+        self._write({"schema": READ_CACHE_SCHEMA, "reader": self.meta})
+        return self
+
+    def __call__(self, read: OverlayRead) -> None:
+        if self._fh is None:
+            return
+        self._write({
+            "index": read.index,
+            "timestamp_s": read.timestamp_s,
+            "region": list(read.region),
+            "texts": list(read.texts),
+        })
+
+    def _write(self, payload: dict) -> None:
+        assert self._fh is not None
+        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def complete(self) -> None:
+        """Mark the pass finished. Only then does the log become readable."""
+        self._complete = True
+
+    def __exit__(self, *exc_info) -> None:
+        if self._fh is None:
+            return
+        self._fh.close()
+        self._fh = None
+        assert self._tmp is not None and self.path is not None
+        if self._complete:
+            os.replace(self._tmp, self.path)
+        else:
+            self._tmp.unlink(missing_ok=True)
+
+
 class OverlayReader:
     """Sample a media file and OCR its overlay band, frame by frame.
 
@@ -305,6 +383,7 @@ class OverlayReader:
         lang: str | None = None,  # None: LANG_ENV, else the engine's default
         psm: int | None = OCR_PSM,
         name: str = "overlay",  # scratch dir and worker thread prefix
+        read_cache: Path | None = None,  # dir to record/replay OCR in; see `read`
     ):
         self.ocr = ocr if ocr is not None else default_ocr(psm=psm, lang=lang)
         # The language the default adapter was built with, resolved through
@@ -320,6 +399,91 @@ class OverlayReader:
             self.regions = tuple(regions) if regions is not None else CANDIDATE_REGIONS
         self.workers = default_workers() if workers is None else max(1, int(workers))
         self.name = name
+        self.read_cache = Path(read_cache) if read_cache is not None else None
+
+    # --- recorded reads -------------------------------------------------
+    #
+    # OCR dominates the run: this module's own header puts a three hour
+    # broadcast at nearly two hours of reading. Everything above it (roster
+    # matching, the pitch-count rule, fusion, scoring) takes seconds. Without
+    # a recording, testing one change to a rule above OCR costs another pass
+    # over the video, which is why the scorebug pitch-count trade (#741) sat
+    # unexamined.
+
+    def _fingerprint(self, media_path: Path) -> dict:
+        """The reader settings that decide what a run reads.
+
+        `workers` is absent: it changes how fast the reads arrive, never what
+        they say. `ocr` cannot be fingerprinted at all, because it is an
+        injected callable. `lang` and `psm` record what the DEFAULT adapter
+        was built with and say nothing about a supplied one, so a caller that
+        injects its own engine and then swaps it can still replay a log the
+        old engine wrote. That is the one hole in the check.
+        """
+        return {
+            # `name`, not the path: a log stays valid when the corpus moves,
+            # and callers already pass a bare file name in places.
+            "media": Path(media_path).name,
+            "name": self.name,
+            "fps": self.fps,
+            "crop": list(self.crop) if self.crop is not None else None,
+            "regions": [list(r) for r in self.regions],
+            "lang": self.lang,
+            "psm": self.psm,
+        }
+
+    def _cache_path(self, media_path: Path) -> Path | None:
+        if self.read_cache is None:
+            return None
+        return self.read_cache / f"{self.name}-{Path(media_path).name}.jsonl"
+
+    def _replay(
+        self, cache: Path, media_path: Path, interpret: Interpreter[_T],
+    ) -> Iterator[tuple[OverlayRead, _T]]:
+        """Re-yield a recorded run's reads, re-running `interpret` on each.
+
+        The band search and the adaptive fallback do NOT re-run: what is on
+        disk is the sequence of bands the recorded run settled on, and both of
+        those decisions were made from the recorded run's hit counts. So a
+        replay is faithful for any change ABOVE the interpreter, and is not a
+        measurement of a changed interpreter: that one steers the search, and
+        the search is exactly what a replay skips.
+        """
+        with cache.open(encoding="utf-8") as fh:
+            header = fh.readline()
+            if not header.strip():
+                raise ReadCacheMismatch(f"{cache} is empty; delete it to record again")
+            meta = json.loads(header)
+            if meta.get("schema") != READ_CACHE_SCHEMA:
+                raise ReadCacheMismatch(
+                    f"{cache} has schema {meta.get('schema')!r}, this build reads "
+                    f"{READ_CACHE_SCHEMA}; delete it to record again"
+                )
+            current = self._fingerprint(media_path)
+            recorded = meta.get("reader", {})
+            diffs = [
+                f"{k}: recorded={recorded.get(k)!r}, this run={current.get(k)!r}"
+                for k in sorted(set(recorded) | set(current))
+                if recorded.get(k) != current.get(k)
+            ]
+            if diffs:
+                raise ReadCacheMismatch(
+                    f"{cache} was recorded by a different reader:\n  "
+                    + "\n  ".join(diffs)
+                    + "\ndelete it to record again"
+                )
+            for line in fh:
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                read = OverlayRead(
+                    index=int(d["index"]),
+                    timestamp_s=float(d["timestamp_s"]),
+                    region=tuple(d["region"]),  # type: ignore[arg-type]
+                    texts=tuple(d.get("texts") or ()),
+                )
+                value, _hits = interpret(read)
+                yield read, value
 
     def read(
         self,
@@ -327,6 +491,13 @@ class OverlayReader:
         interpret: Interpreter[_T] = any_text,  # type: ignore[assignment]
     ) -> Iterator[tuple[OverlayRead, _T]]:
         """Yield (read, interpretation) for every band the search wanted.
+
+        With `read_cache` set, a recorded log for this media is replayed
+        instead of the video being read again, and a run that finds no log
+        records one. See `_replay` for what a replay does and does not answer,
+        and note that a log records what ONE interpreter's hit counts steered
+        the search to: a reader shared between two interpreters must not share
+        a log, which is why the file is keyed by `name`.
 
         One frame can yield several bands while the search is still sweeping,
         and none at all on a strided frame. A band that produced hits on the
@@ -345,11 +516,32 @@ class OverlayReader:
         accumulate state. The pool sits upstream of it and cannot reorder
         anything: see `_with_lookahead`.
         """
+        cache = self._cache_path(media_path)
+        if cache is not None and cache.exists():
+            yield from self._replay(cache, media_path, interpret)
+            return
+        yield from self._read_media(media_path, interpret, cache)
+
+    def _read_media(
+        self,
+        media_path: Path,
+        interpret: Interpreter[_T],
+        cache: Path | None,
+    ) -> Iterator[tuple[OverlayRead, _T]]:
+        """Read the video, optionally recording every yielded read.
+
+        The log is written to a temporary file and moved into place only after
+        the last frame. A consumer that abandons this generator part way (an
+        error above it, an interrupt, a `closing` block unwinding) therefore
+        leaves no log at all, rather than a short one that a later run would
+        replay as a complete pass over the file.
+        """
         search = _RegionSearch(self.regions)
         fallback = _AdaptiveFallback()
         with (
             tempfile.TemporaryDirectory(prefix=f"dirstral-{self.name}-") as tmp,
             _reader(self.ocr, Path(tmp), self.workers, self.name) as pool,
+            _recording(cache, self._fingerprint(media_path)) as record,
         ):
             frames = iter_frames(media_path, fps=self.fps)
             for i, timestamp, frame in _with_lookahead(frames, search, pool):
@@ -374,6 +566,7 @@ class OverlayReader:
                         if retry_hits:
                             read, value, hits = retry, retry_value, retry_hits
                             recovered = True
+                    record(read)
                     yield read, value
                     search.record(region, hits, fallback=recovered)
                     if hits and not recovered:
@@ -383,6 +576,7 @@ class OverlayReader:
                         # the remaining bands keep their chance to answer, and
                         # a clean read among them still wins the frame.
                         break
+            record.complete()
 
     def read_text(self, media_path: Path) -> Iterator[OverlayRead]:
         """Every band's text, and nothing else. The no-interpretation path."""

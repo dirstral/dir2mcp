@@ -25,6 +25,8 @@ this scorer" stop looking identical.
 
 from __future__ import annotations
 
+import json
+
 import statistics
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -46,14 +48,183 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
 DEBUG_SAMPLE = 10
 
 
-def run_pipeline(pipeline: "Pipeline", media_path: Path) -> tuple[list[Cue], list[Annotation]]:
+#: Bumped when the on-disk cue cache stops being readable by this code.
+CUE_CACHE_SCHEMA = 1
+
+#: The one source a `--vision-only` run subtracts. See `cache_differences`.
+PLAYBYPLAY_SOURCE = "playbyplay"
+
+
+class CueCacheMismatch(Exception):
+    """A cached cascade does not describe the run that asked to replay it."""
+
+
+def cascade_fingerprint(pipeline: "Pipeline", media_path: Path) -> dict:
+    """The settings that decide WHICH cues the cascade produces.
+
+    `min_confidence` is deliberately absent. It is a fusion-time floor, not a
+    cascade input, so a cached run is free to sweep it. Every field below does
+    change the cues, so replaying a cache under a different value would report
+    a number for a configuration that never ran.
+    """
+    return {
+        "media": media_path.name,
+        "playbyplay": [
+            {
+                "media": name,
+                "game_pk": game.game_pk,
+                "feed": game.feed,
+                # Anchors map wall clock onto this video, so they move every
+                # play-by-play cue: a re-anchored run is a different cue set.
+                "anchors": [[a.epoch_s, a.video_s] for a in game.anchors],
+            }
+            for name, game in sorted(pipeline.games.items())
+        ],
+        "scorebug": pipeline.scorebug,
+        "scorebug_pitch_counts": pipeline.scorebug_pitch_counts,
+        "jersey": pipeline.jersey,
+        "news": pipeline.news,
+        "news_min_chars": pipeline.news_min_chars,
+        "news_min_agreement": pipeline.news_min_agreement,
+        "ocr_lang": pipeline.ocr_lang,
+        "faces_bank": str(pipeline.faces_bank) if pipeline.faces_bank else None,
+        # The backends are callables, so only their presence is recordable.
+        # A cache cannot tell that the model behind one was swapped.
+        "caption": pipeline.caption_fn is not None,
+        "caption_probe": pipeline.probe_fn is not None,
+        "caption_fps": pipeline.caption_fps,
+        "caption_prefix": pipeline.caption_prefix,
+        "caption_windows": (
+            [list(w) for w in pipeline.caption_windows]
+            if pipeline.caption_windows is not None else None
+        ),
+        "caption_floor_fps": pipeline.caption_floor_fps,
+        "caption_max_span": pipeline.caption_max_span,
+        "caption_drop_uninformative": pipeline.caption_drop_uninformative,
+        "fps": pipeline.fps,
+    }
+
+
+def cache_differences(cached: dict, current: dict) -> list[str]:
+    """Report the fields that make `cached` unusable for a `current` run.
+
+    Empty means the cache may be replayed. The point of the check is that a
+    silent replay under changed settings produces a scorecard for a
+    configuration that never ran, which is worse than the hours the cache
+    saves.
+
+    `playbyplay` is exempt in exactly one direction. A cache recorded WITH a
+    feed binding can serve a `--vision-only` run, because vision-only is that
+    same cue set minus the play-by-play source, and the caller subtracts it.
+    The reverse cannot be served: those cues are not in the file.
+    """
+    diffs = []
+    for key in sorted(set(cached) | set(current)):
+        if key == "playbyplay":
+            continue
+        if cached.get(key) != current.get(key):
+            diffs.append(f"{key}: cached={cached.get(key)!r}, this run={current.get(key)!r}")
+    if current.get("playbyplay") and cached.get("playbyplay") != current.get("playbyplay"):
+        diffs.append(
+            f"playbyplay: cached={cached.get('playbyplay')!r}, "
+            f"this run={current.get('playbyplay')!r}"
+        )
+    return diffs
+
+
+def cues_to_json(cues: "list[Cue]", meta: dict) -> str:
+    """Serialise pre-fusion cues so a later run can skip the cascade.
+
+    The cascade is the only expensive stage: OCR and face embedding over a
+    3h24m proxy take hours, while fusion, scoring and diagnostics take
+    seconds. Without a cache, testing one fusion or scoring change costs a
+    full re-read of the video, which is why the pitch-count trade (#741) sat
+    unexamined between two report files.
+    """
+    payload = {
+        "schema": CUE_CACHE_SCHEMA,
+        "cascade": meta,
+        "cues": [
+            {
+                "source": c.source,
+                "start_s": c.start_s,
+                "end_s": c.end_s,
+                "event": c.event,
+                "entity_ids": list(c.entity_ids),
+                "confidence": c.confidence,
+                "text": c.text,
+                "attributes": dict(c.attributes),
+            }
+            for c in cues
+        ],
+    }
+    return json.dumps(payload, indent=1, sort_keys=True)
+
+
+def cues_from_json(raw: str) -> tuple[dict, list[Cue]]:
+    """Rebuild the cascade settings and cues written by `cues_to_json`.
+
+    `entity_ids` is restored as a tuple because `Cue` is frozen and compares
+    by value; a list would make a round-tripped cue unequal to the one the
+    cascade produced.
+    """
+    payload = json.loads(raw)
+    schema = payload.get("schema")
+    if schema != CUE_CACHE_SCHEMA:
+        raise CueCacheMismatch(
+            f"cue cache schema {schema!r}, this build reads {CUE_CACHE_SCHEMA}; "
+            "re-run the cascade to rewrite it"
+        )
+    cues = [
+        Cue(
+            source=d["source"],
+            start_s=float(d["start_s"]),
+            end_s=float(d["end_s"]),
+            event=d["event"],
+            entity_ids=tuple(d.get("entity_ids") or ()),
+            confidence=float(d["confidence"]),
+            text=d.get("text", ""),
+            attributes=dict(d.get("attributes") or {}),
+        )
+        for d in payload.get("cues", [])
+    ]
+    return payload.get("cascade", {}), cues
+
+
+def run_pipeline(
+    pipeline: "Pipeline",
+    media_path: Path,
+    *,
+    cues_in: "Path | None" = None,
+    cues_out: "Path | None" = None,
+) -> tuple[list[Cue], list[Annotation]]:
     """Run the cascade keeping the pre-fusion cues.
 
     `Pipeline.annotations_for` throws the cues away, and the cues are what
     make a zero row explainable (how many a source emitted before fusion and
     before the confidence floor).
+
+    `cues_in` replays a recorded cascade instead of running it, and refuses a
+    cache whose settings differ (`cache_differences`). Fusion, the confidence
+    floor and scoring still run, so a replay answers questions about those.
+    It says nothing about a change to a recognizer: that needs the cascade.
     """
-    cues = pipeline.cues_for(media_path)
+    fingerprint = cascade_fingerprint(pipeline, media_path)
+    if cues_in is not None:
+        cached, cues = cues_from_json(cues_in.read_text(encoding="utf-8"))
+        diffs = cache_differences(cached, fingerprint)
+        if diffs:
+            raise CueCacheMismatch(
+                f"{cues_in} was recorded for a different cascade:\n  "
+                + "\n  ".join(diffs)
+                + "\nre-run without --cues to rebuild it"
+            )
+        if not fingerprint["playbyplay"] and cached.get("playbyplay"):
+            cues = [c for c in cues if c.source != PLAYBYPLAY_SOURCE]
+    else:
+        cues = pipeline.cues_for(media_path)
+    if cues_out is not None:
+        cues_out.write_text(cues_to_json(cues, fingerprint), encoding="utf-8")
     return cues, fuse(cues, min_confidence=pipeline.min_confidence)
 
 

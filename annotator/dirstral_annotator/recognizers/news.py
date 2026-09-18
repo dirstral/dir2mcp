@@ -311,6 +311,9 @@ class NewsOverlayRecognizer:
         ocr: OcrFn | None = None,
         similarity: float | None = None,
         frame_gap: float | None = None,
+        # See `OverlayReader.read`. Each role gets its own log, because each
+        # role is its own reader with its own band search.
+        read_cache: Path | None = None,
     ) -> None:
         roles = tuple(roles)
         if not roles:
@@ -357,6 +360,7 @@ class NewsOverlayRecognizer:
                     regions=role.regions,
                     workers=workers,
                     name=f"{self.name}-{role.event}",
+                    read_cache=read_cache,
                     **psm_kwargs,
                 ),
                 agreement=agreement,

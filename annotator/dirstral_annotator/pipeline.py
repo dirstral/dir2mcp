@@ -213,6 +213,13 @@ class Pipeline:
     #: which drops them; see recognizers/caption.UNINFORMATIVE_PHRASES.
     caption_drop_uninformative: bool | None = None
     fps: float = 0.5
+    #: Directory the OCR recognizers record their reads in, and replay from on
+    #: a later run. None keeps every run reading the video. OCR is the cascade's
+    #: dominant cost, so this is what makes a change to a rule ABOVE it (name
+    #: matching, the scorebug pitch-count rule, fusion, scoring) measurable in
+    #: seconds rather than hours. See `OverlayReader.read` for what a replay
+    #: does and does not answer.
+    read_cache: Path | None = None
     min_confidence: float = 0.0
 
     def __post_init__(self) -> None:
@@ -319,10 +326,11 @@ class Pipeline:
 
             try_recognizer(
                 "scorebug",
-                (self.roster, self.fps, self.scorebug_pitch_counts),
+                (self.roster, self.fps, self.scorebug_pitch_counts, self.read_cache),
                 lambda: ScorebugRecognizer(
                     self.roster, fps=self.fps,
                     count_pitch_cues=self.scorebug_pitch_counts,
+                    read_cache=self.read_cache,
                 ),
             )
         if self.jersey:
@@ -391,9 +399,10 @@ class Pipeline:
             try_recognizer(
                 "news",
                 (self.ocr_lang, self.fps, self.news_min_chars,
-                 self.news_min_agreement),
+                 self.news_min_agreement, self.read_cache),
                 lambda: NewsOverlayRecognizer(
-                    lang=self.ocr_lang, fps=self.fps, **gate
+                    lang=self.ocr_lang, fps=self.fps,
+                    read_cache=self.read_cache, **gate
                 ),
             )
         return cues

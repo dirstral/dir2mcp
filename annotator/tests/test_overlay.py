@@ -18,6 +18,7 @@ and skip where either is missing.
 from __future__ import annotations
 
 import ast
+import json
 import sys
 import threading
 from concurrent.futures import Future
@@ -750,3 +751,105 @@ def test_the_same_frame_is_unread_with_the_fallback_switched_off(
     reader = OverlayReader(ocr=engine, crop=PANEL, workers=1)
     (read,) = list(reader.read_text(MEDIA))
     assert not _read_it(read.best()), read.texts
+
+
+# --- recorded reads --------------------------------------------------------
+#
+# OCR is the run. Everything above it is seconds. A recording is what makes a
+# change to a rule above OCR measurable without another pass over the video,
+# and these pin the two things that makes it safe to trust: a replay is the
+# recorded pass exactly, and a pass that did not finish leaves nothing behind.
+
+def _refuse_frames(*a, **k):
+    raise AssertionError("the video was read during a replay")
+
+
+def test_a_recorded_run_replays_without_reading_the_video(bands, tmp_path, monkeypatch):
+    bands({BADGE: "GAME 1"}, frames=6)
+    cache = tmp_path / "logs"
+    recorded = list(
+        OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+        .read_text(MEDIA)
+    )
+    assert len(recorded) == 6
+
+    # Neither frame extraction nor OCR may happen again. Asserting on the cues
+    # alone would pass for a reader that quietly re-read the file.
+    monkeypatch.setattr(overlay, "iter_frames", _refuse_frames)
+    monkeypatch.setattr(overlay, "read_band", _refuse_frames)
+    monkeypatch.setattr(overlay, "read_band_adaptive", _refuse_frames)
+    replayed = list(
+        OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+        .read_text(MEDIA)
+    )
+    assert [(r.index, r.timestamp_s, r.region, r.texts) for r in replayed] == \
+           [(r.index, r.timestamp_s, r.region, r.texts) for r in recorded]
+
+
+def test_a_replay_re_runs_the_interpreter(bands, tmp_path, monkeypatch):
+    """The point of a recording: the rules above OCR are free to change."""
+    bands({BADGE: "GAME 1"}, frames=3)
+    cache = tmp_path / "logs"
+    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    assert len(list(reader.read_text(MEDIA))) == 3
+
+    monkeypatch.setattr(overlay, "iter_frames", _refuse_frames)
+    monkeypatch.setattr(overlay, "read_band", _refuse_frames)
+
+    def shouty(read):
+        return tuple(t.lower() for t in read.texts), 1
+
+    values = [
+        value for _read, value in
+        OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
+                      read_cache=cache).read(MEDIA, shouty)
+    ]
+    assert values == [("game 1",)] * 3
+
+
+def test_an_abandoned_pass_records_nothing(bands, tmp_path):
+    """A short log would replay as a complete pass over footage never seen."""
+    bands({BADGE: "GAME 1"}, frames=6)
+    cache = tmp_path / "logs"
+    reads = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
+                          read_cache=cache).read_text(MEDIA)
+    assert next(reads).texts == ("GAME 1",)
+    reads.close()
+    assert not (cache / f"overlay-{MEDIA}.jsonl").exists()
+    # ... and no half-written temporary is left where a later run could find it.
+    assert [p.name for p in cache.iterdir() if p.is_file()] == []
+
+
+def test_a_log_recorded_by_a_different_reader_is_refused(bands, tmp_path):
+    bands({BADGE: "GAME 1"}, frames=3, fps=0.5)
+    cache = tmp_path / "logs"
+    assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, fps=0.5,
+                              read_cache=cache).read_text(MEDIA))
+
+    changed = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, fps=2.0,
+                            read_cache=cache)
+    with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
+        list(changed.read_text(MEDIA))
+    assert "fps" in str(excinfo.value)
+
+
+def test_a_log_from_a_future_schema_is_refused(bands, tmp_path):
+    cache = tmp_path / "logs"
+    cache.mkdir()
+    (cache / f"overlay-{MEDIA}.jsonl").write_text(
+        json.dumps({"schema": overlay.READ_CACHE_SCHEMA + 1, "reader": {}}) + "\n"
+    )
+    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    with pytest.raises(overlay.ReadCacheMismatch):
+        list(reader.read_text(MEDIA))
+
+
+def test_workers_do_not_invalidate_a_log(bands, tmp_path, monkeypatch):
+    """Worker count changes how fast reads arrive, never what they say."""
+    bands({BADGE: "GAME 1"}, frames=3)
+    cache = tmp_path / "logs"
+    assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
+                              read_cache=cache).read_text(MEDIA))
+    monkeypatch.setattr(overlay, "iter_frames", _refuse_frames)
+    assert len(list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=4,
+                                  read_cache=cache).read_text(MEDIA))) == 3

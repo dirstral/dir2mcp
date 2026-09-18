@@ -317,6 +317,10 @@ class ScorebugRecognizer:
         count_pitch_cues: bool = False,
         workers: int | None = None,  # None: default_workers(); 1: serial
         lang: str | None = None,  # OCR language; None: the reader's default
+        # Directory the reader records its OCR in, and replays from on a later
+        # run. The rules above OCR (name matching, `_count_pitch_cues`) are
+        # then measurable in seconds instead of hours. See `OverlayReader.read`.
+        read_cache: Path | None = None,
     ):
         self.roster = roster
         self.pitch_cues = pitch_cues
@@ -330,6 +334,7 @@ class ScorebugRecognizer:
             lang=lang,
             psm=OCR_PSM,
             name=self.name,
+            read_cache=read_cache,
         )
         # Mirrored so the recognizer still answers for its own configuration.
         # The reader owns them; these are reads of what it settled on.

@@ -364,7 +364,44 @@ dirstral-annotate eval game7.mp4 --roster roster.json \
 ```
 
 Ground truth comes free from MLB statsapi (per-pitch identities +
-timestamps, ~2017 onward) — no manual annotation.
+timestamps, ~2017 onward) - no manual annotation.
+
+### Measure a change without reading the video again
+
+OCR is the run: this module's reader puts a three hour broadcast at nearly two
+hours of reading, and everything above it (name matching, the scorebug
+pitch-count rule, fusion, the confidence floor, scoring) takes seconds. Two
+flags record the expensive stages so a later run replays them.
+
+```bash
+# First pass: read the video once, and record both stages.
+dirstral-annotate eval game7.mp4 --roster roster.json --scorebug \
+  --game-pk 745123 --anchor "1789265400.0=60.0" \
+  --ocr-cache .eval-cache --dump-cues cues.json --report base.md
+
+# Change a rule above OCR, then replay the reads: seconds, not hours.
+dirstral-annotate eval game7.mp4 --roster roster.json --scorebug \
+  --scorebug-pitch-counts --game-pk 745123 --anchor "1789265400.0=60.0" \
+  --ocr-cache .eval-cache --report counts.md
+
+# Change nothing below fusion, and skip the cascade as well.
+dirstral-annotate eval game7.mp4 --roster roster.json \
+  --game-pk 745123 --anchor "1789265400.0=60.0" \
+  --cues cues.json --min-confidence 0.7 --report floor.md
+```
+
+What each one answers:
+
+| flag | replays | still runs | answers a change in |
+| --- | --- | --- | --- |
+| `--ocr-cache DIR` | the OCR reads | interpretation, the recognizer rules, fusion, scoring | anything above OCR |
+| `--cues PATH` | the whole cascade | fusion, `--min-confidence`, scoring | fusion and scoring only |
+
+Neither replays a change to OCR itself, to the band search, or to what an
+interpreter counts as a hit: those steer which pixels get read, and a
+recording is a log of what one run already read. Both refuse a file recorded
+under different settings rather than report a scorecard for a configuration
+that never ran. Delete the file (or drop the flag) to record again.
 
 ## Tests
 

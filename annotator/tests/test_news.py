@@ -466,8 +466,10 @@ def test_the_pipeline_runs_the_news_recognizer_when_asked(monkeypatch, tmp_path)
         roster=Roster([]), news=True, ocr_lang="rus", fps=0.25
     ).cues_for(media)
     # No gate arguments: the measured defaults live in the recognizer, and the
-    # pipeline forwards only what an operator actually set.
-    assert built == {"lang": "rus", "fps": 0.25}
+    # pipeline forwards only what an operator actually set. `read_cache` is
+    # forwarded either way, exactly like `lang`: an unset one is a value the
+    # pipeline owns (no cache), not a default it leaves to the recognizer.
+    assert built == {"lang": "rus", "fps": 0.25, "read_cache": None}
 
 
 def test_the_gate_floors_reach_the_recognizer_from_argv(monkeypatch, tmp_path):

@@ -15,6 +15,7 @@ import pytest
 
 from dirstral_annotator.eval import ground_truth
 from dirstral_annotator.eval.align import Anchor, estimate
+from dirstral_annotator.eval import diagnose as diagnose_mod
 from dirstral_annotator.eval.diagnose import diagnose, run_pipeline, scored_windows
 from dirstral_annotator.eval.report import render
 from dirstral_annotator.eval.score import score
@@ -277,3 +278,182 @@ def test_eval_cli_emits_diagnostics(tmp_path, events):
     text = report.read_text()
     assert "## Source diagnostics" in text
     assert "playbyplay" in text
+
+
+# --- recorded cues ---------------------------------------------------------
+#
+# The layer above the recorded OCR reads (see test_overlay.py): a cue file
+# skips the cascade entirely, so fusion, the confidence floor and scoring are
+# all answerable in seconds. It cannot answer a change INSIDE a recognizer,
+# and the settings check is what stops it from pretending otherwise.
+
+def _game(events):
+    return GameConfig.parse({
+        "feed": str(FIXTURE), "anchors": [f"{events[0].epoch_s}=60.0"],
+    })
+
+
+def test_a_cue_survives_the_round_trip(roster):
+    cue = Cue(source="scorebug", start_s=1.5, end_s=4.25, event="at_bat",
+              entity_ids=(BATTER, PITCHER), confidence=0.61,
+              text="Freddie Freeman at bat", attributes={"count": "1-2"})
+    _meta, back = diagnose_mod.cues_from_json(diagnose_mod.cues_to_json([cue], {}))
+    # Equality, not field-by-field: `Cue` is frozen and compares by value, so
+    # a list where a tuple belongs would read back as a different cue.
+    assert back == [cue]
+
+
+def test_replayed_cues_score_the_same(tmp_path, roster, events):
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)})
+    cache = tmp_path / "cues.json"
+    cues, annotations = run_pipeline(pipeline, media, cues_out=cache)
+    assert cues and annotations
+
+    replayed, replayed_annotations = run_pipeline(pipeline, media, cues_in=cache)
+    assert replayed == cues
+    assert replayed_annotations == annotations
+
+
+def test_a_cue_file_from_another_configuration_is_refused(tmp_path, roster, events):
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster, games={media.name: _game(events)}),
+                 media, cues_out=cache)
+
+    # Same cues, different cascade: the pitch-count rule runs inside the
+    # recognizer, so replaying under it would report a number for a
+    # configuration that never ran.
+    counting = Pipeline(roster=roster, games={media.name: _game(events)},
+                        scorebug=True, scorebug_pitch_counts=True)
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(counting, media, cues_in=cache)
+    assert "scorebug" in str(excinfo.value)
+
+
+def test_min_confidence_may_change_under_a_replay(tmp_path, roster, events):
+    """It is a fusion floor, not a cascade input, so a replay can sweep it."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)})
+    cues, _ = run_pipeline(pipeline, media, cues_out=cache)
+
+    floored = Pipeline(roster=roster, games={media.name: _game(events)},
+                       min_confidence=0.99)
+    replayed, annotations = run_pipeline(floored, media, cues_in=cache)
+    assert replayed == cues
+    assert len(annotations) < len(cues)
+
+
+def test_a_vision_only_run_replays_a_recorded_feed_run(tmp_path, roster, events):
+    """One expensive pass, both numbers: vision-only is the same cues minus one
+    source, so the caller subtracts it rather than reading the video again."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    with_feed, _ = run_pipeline(
+        Pipeline(roster=roster, games={media.name: _game(events)}),
+        media, cues_out=cache,
+    )
+    assert any(c.source == "playbyplay" for c in with_feed)
+
+    vision_only, _ = run_pipeline(Pipeline(roster=roster), media, cues_in=cache)
+    assert not any(c.source == "playbyplay" for c in vision_only)
+    assert vision_only == [c for c in with_feed if c.source != "playbyplay"]
+
+
+def test_a_vision_only_cue_file_cannot_serve_a_feed_run(tmp_path, roster, events):
+    """The other direction: those cues are simply not in the file."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster), media, cues_out=cache)
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(Pipeline(roster=roster, games={media.name: _game(events)}),
+                     media, cues_in=cache)
+    assert "playbyplay" in str(excinfo.value)
+
+
+def test_a_cue_file_for_another_video_is_refused(tmp_path, roster, events):
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    other = tmp_path / "game8.mp4"
+    other.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster), media, cues_out=cache)
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(Pipeline(roster=roster), other, cues_in=cache)
+    assert "media" in str(excinfo.value)
+
+
+def test_eval_cli_dumps_and_replays_cues(tmp_path, events):
+    from dirstral_annotator.cli import main
+
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    roster_path = tmp_path / "cli-roster.json"
+    roster_path.write_text(json.dumps([
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+    ]))
+    cues = tmp_path / "cues.json"
+    base = ["eval", str(media), "--roster", str(roster_path), "--feed", str(FIXTURE),
+            "--anchor", f"{events[0].epoch_s}=60.0"]
+
+    dumped = tmp_path / "dumped.md"
+    assert main([*base, "--report", str(dumped), "--dump-cues", str(cues)]) == 0
+    assert json.loads(cues.read_text())["cues"]
+
+    replayed = tmp_path / "replayed.md"
+    assert main([*base, "--report", str(replayed), "--cues", str(cues)]) == 0
+    assert replayed.read_text() == dumped.read_text()
+
+
+def test_eval_cli_reports_a_stale_cue_file_without_a_traceback(tmp_path, events):
+    """A stale cache must read as a configuration error, not a crash."""
+    from dirstral_annotator.cli import main
+
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    roster_path = tmp_path / "cli-roster.json"
+    roster_path.write_text(json.dumps([
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+    ]))
+    cues = tmp_path / "cues.json"
+    base = ["eval", str(media), "--roster", str(roster_path), "--feed", str(FIXTURE),
+            "--anchor", f"{events[0].epoch_s}=60.0"]
+    assert main([*base, "--report", str(tmp_path / "r.md"), "--dump-cues", str(cues)]) == 0
+
+    payload = json.loads(cues.read_text())
+    payload["cascade"]["fps"] = 99.0
+    cues.write_text(json.dumps(payload))
+
+    with pytest.raises(SystemExit) as excinfo:
+        main([*base, "--report", str(tmp_path / "r2.md"), "--cues", str(cues)])
+    assert "fps" in str(excinfo.value)
+    assert "re-run without --cues" in str(excinfo.value)
+
+
+def test_a_vision_only_run_replays_a_cue_file_recorded_with_the_feed(tmp_path, events):
+    """The allowed direction, end to end: one pass answers both questions."""
+    from dirstral_annotator.cli import main
+
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    roster_path = tmp_path / "cli-roster.json"
+    roster_path.write_text(json.dumps([
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+    ]))
+    cues = tmp_path / "cues.json"
+    base = ["eval", str(media), "--roster", str(roster_path), "--feed", str(FIXTURE),
+            "--anchor", f"{events[0].epoch_s}=60.0"]
+    assert main([*base, "--report", str(tmp_path / "r.md"), "--dump-cues", str(cues)]) == 0
+
+    report = tmp_path / "vision-only.md"
+    # Non-zero: with the feed subtracted this fixture pipeline recognizes
+    # nothing, which is the gate failing, not the replay.
+    assert main([*base, "--report", str(report), "--cues", str(cues),
+                 "--vision-only"]) == 1
+    assert "mostly a measurement of wall-clock alignment" in report.read_text()

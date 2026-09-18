@@ -43,6 +43,9 @@ from .eval import diagnose as diagnose_mod
 from .eval import report as report_mod
 from .eval import score as score_mod
 from .pipeline import GameConfig, Pipeline, load_games
+# Stdlib-only and measured at 58 ms: unlike the recognizers `Pipeline`
+# defers, this module pulls in no model runtime.
+from .recognizers.overlay import ReadCacheMismatch
 from .roster import Roster
 from .serve import serve
 
@@ -126,6 +129,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add per-source sample cues to the report's diagnostics",
     )
+    e.add_argument(
+        "--ocr-cache",
+        type=Path,
+        metavar="DIR",
+        help="record the scorebug and news OCR here, and replay it on a later "
+             "run instead of reading the video again. OCR dominates the pass, "
+             "so this makes a change to a rule above it (name matching, the "
+             "pitch-count rule, fusion, scoring) measurable in seconds. A log "
+             "recorded by a different reader is refused; delete it to re-record",
+    )
+    e.add_argument(
+        "--dump-cues",
+        type=Path,
+        metavar="PATH",
+        help="write the pre-fusion cues here, so a later run can replay them "
+             "with --cues instead of re-reading the video",
+    )
+    e.add_argument(
+        "--cues",
+        type=Path,
+        metavar="PATH",
+        help="replay cues recorded by --dump-cues instead of running the "
+             "cascade. Fusion, --min-confidence and scoring still run; a "
+             "change to a recognizer does NOT, so it needs a fresh pass. "
+             "A cache recorded under different cascade settings is refused",
+    )
     vision_flags(e)
     return p
 
@@ -201,6 +230,7 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         ocr_lang=args.ocr_lang,
         faces_bank=args.faces,
         fps=args.fps,
+        read_cache=getattr(args, "ocr_cache", None),
         min_confidence=args.min_confidence,
     )
 
@@ -265,7 +295,24 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
     # Keep the pre-fusion cues: they are what makes an empty source row
     # explainable (ineligible / floored / weak) instead of just empty.
-    cues, annotations = diagnose_mod.run_pipeline(pipeline, args.media)
+    #
+    # `--cues` replays a recorded cascade. The expensive pass then runs once
+    # and every later question about fusion, the confidence floor or scoring
+    # is answered in seconds (#741).
+    try:
+        cues, annotations = diagnose_mod.run_pipeline(
+            pipeline, args.media, cues_in=args.cues, cues_out=args.dump_cues,
+        )
+    except (diagnose_mod.CueCacheMismatch, ReadCacheMismatch) as exc:
+        # A stale cache is a configuration error, not a crash, and it must be
+        # loud: replaying one silently would report a scorecard for a
+        # configuration that never ran.
+        raise SystemExit(str(exc)) from exc
+    if args.cues:
+        print(f"replayed {len(cues)} cue(s) from {args.cues}: the cascade did not run",
+              file=sys.stderr)
+    if args.dump_cues:
+        print(f"wrote {len(cues)} cue(s) to {args.dump_cues}", file=sys.stderr)
     for msg in pipeline.skipped:
         print(f"skipped: {msg}", file=sys.stderr)
 
