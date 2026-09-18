@@ -2072,8 +2072,26 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	// Emit an initial snapshot immediately, then refresh while indexing runs.
-	logSnapshotErr(stderr, writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter))
+	// Emit an initial snapshot immediately, then refresh while work is in
+	// flight.
+	//
+	// "In flight" is deliberately not "Running". Running goes false when
+	// scanning stops, and the embed worker keeps draining the queue for
+	// minutes afterwards, changing embedded_ok and embedded_pending with every
+	// completion. Refreshing only while Running froze this file on the numbers
+	// of a run that had embedded nothing, which is how `status` came to report
+	// "embedded=0 pending=487" over a fully embedded corpus (#1005). #1007
+	// stopped the three first-party readers depending on the file; this stops
+	// the file itself from lying to anything that reads it raw (#1008).
+	//
+	// So keep writing while a run is active OR the last snapshot still showed
+	// work queued, and stop once neither holds. An idle daemon must not
+	// rewrite an unchanged file every five seconds.
+	pending, err := writeCorpusSnapshotPending(ctx, stateDir, st, indexingState, stderr, emitter)
+	logSnapshotErr(stderr, err)
+	// A failed write teaches nothing about the queue, so assume work remains
+	// and try again. Reporting a stale file as settled is the worse error.
+	draining := err != nil || pending > 0
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -2082,10 +2100,15 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if indexingState != nil && !indexingState.Snapshot().Running {
+			running := indexingState == nil || indexingState.Snapshot().Running
+			if !running && !draining {
 				continue
 			}
-			logSnapshotErr(stderr, writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter))
+			pending, err := writeCorpusSnapshotPending(ctx, stateDir, st, indexingState, stderr, emitter)
+			logSnapshotErr(stderr, err)
+			// -1 means the store could not aggregate, so the depth is
+			// unknown; do not spin on it.
+			draining = err != nil || pending > 0
 		}
 	}
 }
@@ -2108,15 +2131,24 @@ func logSnapshotErr(stderr io.Writer, err error) {
 // corpus.json in stateDir via a per-write temp file and rename (with a
 // Windows remove-and-retry fallback).
 func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) error {
+	_, err := writeCorpusSnapshotPending(ctx, stateDir, st, indexingState, stderr, emitter)
+	return err
+}
+
+// writeCorpusSnapshotPending writes the snapshot and reports the queue depth it
+// recorded, so the writer loop can tell whether work is still in flight. It
+// returns the EmbeddedPending the snapshot carries, which is -1 when the store
+// could not aggregate and the depth is therefore unknown.
+func writeCorpusSnapshotPending(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) (int64, error) {
 	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState, stderr, emitter)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	emitProgressEvents(emitter, runProgressCounters(indexingState, snapshot.Indexing))
 
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal corpus snapshot: %w", err)
+		return 0, fmt.Errorf("marshal corpus snapshot: %w", err)
 	}
 
 	// Owner-only: this lives under the state directory and carries the corpus
@@ -2125,9 +2157,9 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	// temp file before the rename, so the mode is never briefly wider.
 	path := filepath.Join(stateDir, "corpus.json")
 	if err := atomicWriteFile(path, raw, statefs.FileMode); err != nil {
-		return fmt.Errorf("write corpus snapshot: %w", err)
+		return 0, fmt.Errorf("write corpus snapshot: %w", err)
 	}
-	return nil
+	return snapshot.Indexing.EmbeddedPending, nil
 }
 
 // runProgressCounters returns the block the scan_progress/embed_progress events

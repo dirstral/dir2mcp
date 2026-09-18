@@ -533,3 +533,111 @@ func TestWriteCorpusSnapshot_ProgressEventsStayPerRun_1005(t *testing.T) {
 		t.Errorf("corpus.json chunks_total = %d, want 487", snap.Indexing.ChunksTotal)
 	}
 }
+
+// drainingCorpusStore reports aggregate stats that a test can change while the
+// writer goroutine is reading them.
+type drainingCorpusStore struct {
+	mutableCorpusStore
+	mu    sync.Mutex
+	stats model.CorpusStats
+}
+
+func (d *drainingCorpusStore) CorpusStats(context.Context) (model.CorpusStats, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.stats, nil
+}
+
+func (d *drainingCorpusStore) setStats(s model.CorpusStats) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.stats = s
+}
+
+func readEmbeddedOK(t *testing.T, path string) int64 {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return -1
+	}
+	var snap struct {
+		Indexing struct {
+			EmbeddedOK      int64 `json:"embedded_ok"`
+			EmbeddedPending int64 `json:"embedded_pending"`
+		} `json:"indexing"`
+	}
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return -1
+	}
+	return snap.Indexing.EmbeddedOK
+}
+
+// TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008 pins
+// the rule that "still working" is not the same as "still scanning".
+//
+// Running goes false when the scan stops, but the embed worker keeps draining
+// for minutes and every completion changes embedded_ok/embedded_pending. The
+// writer used to skip its tick on !Running, so corpus.json froze on the numbers
+// of a run that had embedded nothing: the "embedded=0 pending=487" report in
+// #1005. #1007 stopped status, the bundle and the MCP tool from trusting the
+// file; this stops the file from lying to anything that reads it raw (#1008).
+func TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008(t *testing.T) {
+	stateDir := t.TempDir()
+	store := &drainingCorpusStore{}
+	store.setDocs([]model.Document{{RelPath: "a.md", DocType: "md"}})
+	// Scanning has finished and 5 chunks are still queued.
+	store.setStats(model.CorpusStats{
+		DocCounts: map[string]int64{"md": 1}, TotalDocs: 1,
+		ChunksTotal: 5, EmbeddedOK: 0, EmbeddedPending: 5,
+	})
+
+	// The decisive part of the setup: the run is NOT running.
+	idxState := appstate.NewIndexingState(appstate.ModeIncremental)
+	idxState.SetRunning(false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCorpusWriterWithInterval(ctx, stateDir, store, idxState, io.Discard, nil, 10*time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("corpus writer goroutine did not exit after cancel")
+		}
+	}()
+
+	corpusPath := filepath.Join(stateDir, "corpus.json")
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := os.Stat(corpusPath)
+		return err == nil
+	})
+	if got := readEmbeddedOK(t, corpusPath); got != 0 {
+		t.Fatalf("initial embedded_ok = %d, want 0", got)
+	}
+
+	// The embed worker drains the queue while nothing is scanning.
+	store.setStats(model.CorpusStats{
+		DocCounts: map[string]int64{"md": 1}, TotalDocs: 1,
+		ChunksTotal: 5, EmbeddedOK: 5, EmbeddedPending: 0,
+	})
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return readEmbeddedOK(t, corpusPath) == 5
+	})
+
+	// And once the queue is empty with no run active, it must stop rewriting:
+	// an idle daemon should not churn an unchanged file forever.
+	store.setStats(model.CorpusStats{
+		DocCounts: map[string]int64{"md": 1}, TotalDocs: 1,
+		ChunksTotal: 5, EmbeddedOK: 99, EmbeddedPending: 0,
+	})
+	time.Sleep(150 * time.Millisecond) // many ticks at a 10ms interval
+	if got := readEmbeddedOK(t, corpusPath); got != 5 {
+		t.Fatalf("embedded_ok = %d after the queue drained; the writer kept "+
+			"rewriting an idle corpus, want it parked at 5", got)
+	}
+}
