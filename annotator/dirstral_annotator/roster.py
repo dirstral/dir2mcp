@@ -70,6 +70,16 @@ class Roster:
     def get(self, player_id: str) -> Player | None:
         return self._by_id.get(player_id)
 
+    @property
+    def mlbam_ids(self) -> dict[int, str]:
+        """The statsapi id -> entity id map, as a copy.
+
+        The scorer resolves ground truth through it, so a cache that
+        fingerprints the roster has to see it. A copy, because a caller that
+        mutated the live map would silently re-attribute every scored pitch.
+        """
+        return dict(self._mlbam)
+
     def by_mlbam(self, mlbam_id: int) -> Player | None:
         pid = self._mlbam.get(mlbam_id)
         return self._by_id.get(pid) if pid else None

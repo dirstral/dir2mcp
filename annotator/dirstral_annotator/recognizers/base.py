@@ -25,6 +25,32 @@ from dataclasses import dataclass
 #: store.SanitizeReason cap: enough for a diagnostic, too little for a payload.
 SCRUBBED_ERROR_MAX_CHARS = 512
 
+
+def media_identity(media_path) -> dict:
+    """What a cache records to know it is looking at the same video.
+
+    Name, size and modification time, NOT a content digest. Hashing a three
+    hour proxy costs minutes, which is the very cost a cache exists to avoid,
+    and this triple already separates the cases that matter: two different
+    files sharing a basename, and one file replaced in place.
+
+    It is not proof. A file edited without changing its size or its mtime
+    reads as the same media. What it rules out is the accident; a caller that
+    needs proof has to hash.
+
+    A path that does not exist records `None` for both stat fields rather than
+    failing. A caller may legitimately name a file it never opens (an injected
+    backend, a test), and refusing to fingerprint that is worse than recording
+    what is knowable.
+    """
+    path = Path(media_path)
+    try:
+        st = path.stat()
+        size, mtime_ns = st.st_size, st.st_mtime_ns
+    except OSError:
+        size, mtime_ns = None, None
+    return {"name": path.name, "size": size, "mtime_ns": mtime_ns}
+
 # What an upstream exception message can carry that a log line must not: a
 # credential named in a URL or header ("api_key=...", "Authorization: Bearer
 # ..."), a URL query string, or a long opaque token. The captioner and prober

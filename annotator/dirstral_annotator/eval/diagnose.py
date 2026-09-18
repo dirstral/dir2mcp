@@ -25,6 +25,7 @@ this scorer" stop looking identical.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import statistics
@@ -37,6 +38,7 @@ from typing import TYPE_CHECKING
 from ..fusion import fuse
 from ..model import Annotation, Cue
 from ..roster import Roster
+from ..recognizers.base import media_identity
 from .align import Alignment
 from .ground_truth import PitchEvent
 from .score import SCORED_EVENT, TOLERANCE_S, Scorecard
@@ -59,6 +61,31 @@ class CueCacheMismatch(Exception):
     """A cached cascade does not describe the run that asked to replay it."""
 
 
+class IncompleteCascade(Exception):
+    """A run asked to record cues after part of the cascade did not run."""
+
+
+def roster_digest(roster) -> str:
+    """A stable digest of the entity vocabulary a run resolved against.
+
+    Cues are ALREADY resolved: they carry entity ids and text built from a
+    player's display name. So a cue file recorded against one roster replayed
+    against another names the wrong people, and the scorer resolves ground
+    truth through `mlbam_id`, which the roster also owns. Every field that can
+    move an id or a name is therefore in the digest.
+
+    The OCR read log needs no equivalent. It records text, the reader has no
+    roster, and interpretation re-runs on replay: a changed roster is exactly
+    the kind of change a read log is FOR.
+    """
+    rows = sorted(
+        [p.id, p.name, p.number or "", *sorted(p.aliases)] for p in roster.players
+    )
+    mlbam = sorted((str(k), v) for k, v in roster.mlbam_ids.items())
+    payload = json.dumps([rows, mlbam], sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
 def cascade_fingerprint(pipeline: "Pipeline", media_path: Path) -> dict:
     """The settings that decide WHICH cues the cascade produces.
 
@@ -68,7 +95,8 @@ def cascade_fingerprint(pipeline: "Pipeline", media_path: Path) -> dict:
     a number for a configuration that never ran.
     """
     return {
-        "media": media_path.name,
+        "media": media_identity(media_path),
+        "roster": roster_digest(pipeline.roster),
         "playbyplay": [
             {
                 "media": name,
@@ -88,10 +116,15 @@ def cascade_fingerprint(pipeline: "Pipeline", media_path: Path) -> dict:
         "news_min_agreement": pipeline.news_min_agreement,
         "ocr_lang": pipeline.ocr_lang,
         "faces_bank": str(pipeline.faces_bank) if pipeline.faces_bank else None,
-        # The backends are callables, so only their presence is recordable.
-        # A cache cannot tell that the model behind one was swapped.
+        # A loaded backend is a callable and cannot be fingerprinted, so its
+        # presence is recorded here and what it was BUILT from is recorded by
+        # the builder (`Pipeline.caption_config`). That covers the settings an
+        # operator changes, `--caption-model` and `--caption-prompt` among
+        # them. It does not cover a model whose weights changed under a
+        # stable id; nothing short of hashing them would.
         "caption": pipeline.caption_fn is not None,
         "caption_probe": pipeline.probe_fn is not None,
+        "caption_config": dict(sorted(pipeline.caption_config.items())),
         "caption_fps": pipeline.caption_fps,
         "caption_prefix": pipeline.caption_prefix,
         "caption_windows": (
@@ -168,27 +201,51 @@ def cues_from_json(raw: str) -> tuple[dict, list[Cue]]:
     by value; a list would make a round-tripped cue unequal to the one the
     cascade produced.
     """
-    payload = json.loads(raw)
+    # A hand-edited, truncated or foreign file is a stale cache, not a crash.
+    # Every shape error below becomes the same exception, because the CLI
+    # turns exactly one type into a readable message and a `KeyError` from
+    # here would surface as a traceback instead.
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise CueCacheMismatch(f"cue cache is not readable JSON ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise CueCacheMismatch(
+            f"cue cache holds a {type(payload).__name__} where an object belongs"
+        )
     schema = payload.get("schema")
-    if schema != CUE_CACHE_SCHEMA:
+    # `type(...) is not int` as well as the comparison: `True == 1` in Python,
+    # so a JSON `true` would otherwise read as schema 1.
+    if type(schema) is not int or schema != CUE_CACHE_SCHEMA:
         raise CueCacheMismatch(
             f"cue cache schema {schema!r}, this build reads {CUE_CACHE_SCHEMA}; "
             "re-run the cascade to rewrite it"
         )
-    cues = [
-        Cue(
-            source=d["source"],
-            start_s=float(d["start_s"]),
-            end_s=float(d["end_s"]),
-            event=d["event"],
-            entity_ids=tuple(d.get("entity_ids") or ()),
-            confidence=float(d["confidence"]),
-            text=d.get("text", ""),
-            attributes=dict(d.get("attributes") or {}),
-        )
-        for d in payload.get("cues", [])
-    ]
-    return payload.get("cascade", {}), cues
+    cascade = payload.get("cascade")
+    if not isinstance(cascade, dict):
+        raise CueCacheMismatch("cue cache records no cascade settings")
+    records = payload.get("cues")
+    if not isinstance(records, list):
+        raise CueCacheMismatch("cue cache holds no cue list")
+    cues = []
+    for i, d in enumerate(records):
+        try:
+            cues.append(Cue(
+                source=str(d["source"]),
+                start_s=float(d["start_s"]),
+                end_s=float(d["end_s"]),
+                event=str(d["event"]),
+                entity_ids=tuple(str(e) for e in (d.get("entity_ids") or ())),
+                confidence=float(d["confidence"]),
+                text=str(d.get("text", "")),
+                attributes={str(k): str(v) for k, v in (d.get("attributes") or {}).items()},
+            ))
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise CueCacheMismatch(
+                f"cue cache record {i} is not a readable cue "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+    return cascade, cues
 
 
 def run_pipeline(
@@ -224,6 +281,16 @@ def run_pipeline(
     else:
         cues = pipeline.cues_for(media_path)
     if cues_out is not None:
+        # Same rule as the read log one layer down: publish a complete pass or
+        # nothing. A recognizer that was skipped (no engine installed, a
+        # backend that failed) leaves its cues out, and a file recorded then
+        # replays as the full cascade. The caller reports `pipeline.skipped`
+        # either way, so the reason is never lost.
+        if pipeline.skipped:
+            raise IncompleteCascade(
+                f"{len(pipeline.skipped)} recognizer(s) were skipped, so this run is "
+                "not a cascade worth recording:\n  " + "\n  ".join(pipeline.skipped)
+            )
         cues_out.write_text(cues_to_json(cues, fingerprint), encoding="utf-8")
     return cues, fuse(cues, min_confidence=pipeline.min_confidence)
 

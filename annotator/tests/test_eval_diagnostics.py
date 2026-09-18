@@ -457,3 +457,84 @@ def test_a_vision_only_run_replays_a_cue_file_recorded_with_the_feed(tmp_path, e
     assert main([*base, "--report", str(report), "--cues", str(cues),
                  "--vision-only"]) == 1
     assert "mostly a measurement of wall-clock alignment" in report.read_text()
+
+
+def test_a_cue_file_recorded_against_another_roster_is_refused(tmp_path, roster, events):
+    """Cues are already resolved, so a changed roster names the wrong people."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster, games={media.name: _game(events)}),
+                 media, cues_out=cache)
+
+    renamed = tmp_path / "renamed.json"
+    renamed.write_text(json.dumps([
+        {"id": PITCHER, "name": "Someone Else", "number": "62", "mlbam_id": 657277},
+        {"id": BATTER, "name": "Freddie Freeman", "number": "5", "mlbam_id": 518692},
+    ]))
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(
+            Pipeline(roster=Roster.load(renamed), games={media.name: _game(events)}),
+            media, cues_in=cache,
+        )
+    assert "roster" in str(excinfo.value)
+
+
+def test_the_caption_backend_settings_are_fingerprinted(tmp_path, roster):
+    """A loaded callable cannot be fingerprinted; what it was built from can.
+
+    Asserted on the fingerprint rather than through a run, because a pipeline
+    with a live `caption_fn` would try to read the stub video.
+    """
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    a = Pipeline(roster=roster, caption_config={"model_name": "qwen-a",
+                                                "caption_prompt": "describe"})
+    b = Pipeline(roster=roster, caption_config={"model_name": "qwen-b",
+                                                "caption_prompt": "describe"})
+    c = Pipeline(roster=roster, caption_config={"model_name": "qwen-a",
+                                                "caption_prompt": "who is on screen"})
+    fa = diagnose_mod.cascade_fingerprint(a, media)
+    assert diagnose_mod.cache_differences(fa, fa) == []
+    for other in (b, c):
+        diffs = diagnose_mod.cache_differences(
+            fa, diagnose_mod.cascade_fingerprint(other, media))
+        assert any("caption_config" in d for d in diffs), diffs
+
+
+def test_no_cue_file_is_written_for_an_incomplete_cascade(tmp_path, roster, events, monkeypatch):
+    """A skipped recognizer leaves its cues out, and the file would replay as
+    the full cascade."""
+    from dirstral_annotator.recognizers import scorebug as scorebug_mod
+    from dirstral_annotator.recognizers.base import RecognizerUnavailable
+
+    def unavailable(*a, **k):
+        raise RecognizerUnavailable("tesseract is not installed")
+
+    monkeypatch.setattr(scorebug_mod, "ScorebugRecognizer", unavailable)
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)}, scorebug=True)
+    with pytest.raises(diagnose_mod.IncompleteCascade) as excinfo:
+        run_pipeline(pipeline, media, cues_out=cache)
+    assert "tesseract" in str(excinfo.value)
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("payload", [
+    "not json at all",
+    '["a list where an object belongs"]',
+    '{"schema": true, "cascade": {}, "cues": []}',   # true == 1 in Python
+    '{"schema": 1, "cues": []}',                     # no cascade settings
+    '{"schema": 1, "cascade": {}}',                  # no cue list
+    '{"schema": 1, "cascade": {}, "cues": [{"source": "s"}]}',
+    '{"schema": 1, "cascade": {}, "cues": [{"source":"s","start_s":"x","end_s":1,'
+    '"event":"pitch","confidence":0.5}]}',
+])
+def test_a_malformed_cue_file_is_refused(tmp_path, payload):
+    """Every shape error is the one exception the CLI turns into a message."""
+    path = tmp_path / "cues.json"
+    path.write_text(payload)
+    with pytest.raises(diagnose_mod.CueCacheMismatch):
+        diagnose_mod.cues_from_json(path.read_text())

@@ -34,6 +34,7 @@ from .eval import align, ground_truth
 from .fusion import fuse
 from .model import Annotation, Cue
 from .recognizers.base import Recognizer, RecognizerUnavailable, scrub_error, scrubbed_traceback
+from .recognizers.overlay import ReadCacheMismatch
 from .roster import Roster
 
 log = logging.getLogger(__name__)
@@ -192,6 +193,11 @@ class Pipeline:
     #: which is the pre-#923 behaviour and measured 0.35 precision on the
     #: reaction claim; the recognizer's docstring says so.
     probe_fn: object | None = None
+    #: What `caption_fn` was built from (model id, prompt, device). The
+    #: pipeline never reads it: a loaded callable cannot be fingerprinted, and
+    #: the eval cue cache has to know that `--caption-model` changed. The
+    #: builder records it; see `cli._caption_backend`.
+    caption_config: dict = field(default_factory=dict)
     caption_fps: float = 1.0
     #: Marker prepended to each caption cue. None keeps the recognizer's own
     #: default, which names a game feed; see recognizers/caption.CAPTION_PREFIX.
@@ -307,6 +313,13 @@ class Pipeline:
                 # reported per request and the instance is not written off: the
                 # engine can be installed under a long lived server.
                 skipped.append(str(exc))
+            except ReadCacheMismatch:
+                # The one fault that must NOT degrade. Every other failure here
+                # costs the run one recognizer and says so; a stale read log
+                # would instead produce a scorecard that silently omits this
+                # recognizer's cues, which is the failure the cache exists to
+                # prevent. Let it reach the CLI, which prints it and stops.
+                raise
             except Exception as exc:  # noqa: BLE001 - one recognizer must not sink the request
                 # Any other fault in ONE recognizer must not discard the cues
                 # the others already produced: on the pilot a late exception in

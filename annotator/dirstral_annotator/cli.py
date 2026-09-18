@@ -172,7 +172,10 @@ def _needs_roster(args) -> bool:
 
 
 def _caption_backend(args):
-    """Load the captioner and prober when --caption is set, or (None, None).
+    """Load the captioner, the prober and the settings they were built from.
+
+    Returns `(None, None, {})` when --caption is not set or the backend is
+    unavailable.
 
     Loading happens once, at startup, where the operator can see a failure.
     An unavailable backend (extra not installed, no CUDA device for the torch
@@ -182,7 +185,7 @@ def _caption_backend(args):
     cannot load, but it must also never pretend the capability is there.
     """
     if not getattr(args, "caption", False):
-        return None, None
+        return None, None, {}
     from .recognizers.base import RecognizerUnavailable
     from .recognizers import qwen_vl
 
@@ -192,20 +195,25 @@ def _caption_backend(args):
     if getattr(args, "caption_prompt", None):
         kwargs["caption_prompt"] = args.caption_prompt
     try:
-        return qwen_vl.load_backend(**kwargs)
+        caption_fn, probe_fn = qwen_vl.load_backend(**kwargs)
     except RecognizerUnavailable as exc:
         print(f"warning: --caption requested but unavailable, serving without it: {exc}",
               file=sys.stderr)
-        return None, None
+        return None, None, {}
+    # Returned alongside the backends, not derived later: a loaded callable
+    # cannot be fingerprinted, and the eval cue cache has to notice that
+    # --caption-model or --caption-prompt changed. Only the builder knows.
+    return caption_fn, probe_fn, dict(kwargs)
 
 
 def _pipeline(args, roster: Roster, games) -> Pipeline:
-    caption_fn, probe_fn = _caption_backend(args)
+    caption_fn, probe_fn, caption_config = _caption_backend(args)
     return Pipeline(
         roster=roster,
         games=games,
         caption_fn=caption_fn,
         probe_fn=probe_fn,
+        caption_config=caption_config,
         # `is not None`, not truthiness: an explicit --caption-fps 0 must reach
         # the recognizer, which rejects it with a reason, rather than be read
         # as "unset" and silently sample at --fps.
@@ -303,10 +311,12 @@ def main(argv: list[str] | None = None) -> int:
         cues, annotations = diagnose_mod.run_pipeline(
             pipeline, args.media, cues_in=args.cues, cues_out=args.dump_cues,
         )
-    except (diagnose_mod.CueCacheMismatch, ReadCacheMismatch) as exc:
+    except (diagnose_mod.CueCacheMismatch, diagnose_mod.IncompleteCascade,
+            ReadCacheMismatch) as exc:
         # A stale cache is a configuration error, not a crash, and it must be
         # loud: replaying one silently would report a scorecard for a
-        # configuration that never ran.
+        # configuration that never ran. Same for recording one from a cascade
+        # that did not fully run.
         raise SystemExit(str(exc)) from exc
     if args.cues:
         print(f"replayed {len(cues)} cue(s) from {args.cues}: the cascade did not run",

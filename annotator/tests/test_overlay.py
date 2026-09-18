@@ -853,3 +853,102 @@ def test_workers_do_not_invalidate_a_log(bands, tmp_path, monkeypatch):
     monkeypatch.setattr(overlay, "iter_frames", _refuse_frames)
     assert len(list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=4,
                                   read_cache=cache).read_text(MEDIA))) == 3
+
+
+def test_two_videos_sharing_a_basename_do_not_share_a_log(bands, tmp_path, monkeypatch):
+    """A cache keyed by basename alone would replay one game as another."""
+    cache = tmp_path / "logs"
+    first = tmp_path / "a" / MEDIA
+    first.parent.mkdir()
+    first.write_bytes(b"one")
+    bands({BADGE: "GAME 1"}, frames=3)
+    assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
+                              read_cache=cache).read_text(first))
+
+    second = tmp_path / "b" / MEDIA
+    second.parent.mkdir()
+    second.write_bytes(b"a different game entirely")
+    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
+        list(reader.read_text(second))
+    assert "media" in str(excinfo.value)
+
+
+def test_a_truncated_log_is_refused(bands, tmp_path):
+    """A half-written line must not read as a shorter pass over the video."""
+    bands({BADGE: "GAME 1"}, frames=4)
+    cache = tmp_path / "logs"
+    media = tmp_path / MEDIA
+    media.write_bytes(b"one")
+    assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
+                              read_cache=cache).read_text(media))
+
+    log = cache / f"overlay-{MEDIA}.jsonl"
+    log.write_text(log.read_text()[:-12])  # cut the last record mid-line
+    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
+        list(reader.read_text(media))
+    assert "not a readable record" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("header", [
+    "not json at all\n",
+    '["a list where an object belongs"]\n',
+    '{"schema": true, "reader": {}}\n',       # true == 1 in Python
+    '{"schema": 1}\n',                        # no reader settings
+])
+def test_a_malformed_log_header_is_refused(tmp_path, header):
+    cache = tmp_path / "logs"
+    cache.mkdir()
+    (cache / f"overlay-{MEDIA}.jsonl").write_text(header)
+    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    with pytest.raises(overlay.ReadCacheMismatch):
+        list(reader.read_text(MEDIA))
+
+
+def test_a_stale_log_stops_the_cascade_instead_of_degrading_it(tmp_path, monkeypatch):
+    """The whole point of the check: a pipeline that caught this and carried on
+    would report a scorecard silently missing the scorebug's cues."""
+    from dirstral_annotator.pipeline import Pipeline
+    from dirstral_annotator.recognizers import scorebug as scorebug_mod
+    from dirstral_annotator.roster import Roster
+
+    class Stale:
+        name = "scorebug"
+
+        def recognize(self, media_path):
+            raise overlay.ReadCacheMismatch("stale log")
+
+    monkeypatch.setattr(scorebug_mod, "ScorebugRecognizer", lambda *a, **k: Stale())
+    media = tmp_path / "broadcast.mp4"
+    media.write_bytes(b"")
+    pipeline = Pipeline(roster=Roster([]), scorebug=True)
+    with pytest.raises(overlay.ReadCacheMismatch):
+        pipeline.cues_for(media)
+    assert pipeline.skipped == []
+
+
+def test_a_boolean_schema_does_not_read_as_schema_one(bands, tmp_path):
+    """`True == 1` in Python, so the check is on the type as well as the value.
+
+    The log is otherwise valid, which is the point: with a mismatched reader
+    block the fingerprint check would reject it anyway and this guard would
+    never be the thing that fired.
+    """
+    bands({BADGE: "GAME 1"}, frames=3)
+    cache = tmp_path / "logs"
+    media = tmp_path / MEDIA
+    media.write_bytes(b"one")
+    assert list(OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1,
+                              read_cache=cache).read_text(media))
+
+    log = cache / f"overlay-{MEDIA}.jsonl"
+    lines = log.read_text().splitlines()
+    header = json.loads(lines[0])
+    header["schema"] = True
+    log.write_text("\n".join([json.dumps(header), *lines[1:]]) + "\n")
+
+    reader = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1, read_cache=cache)
+    with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
+        list(reader.read_text(media))
+    assert "schema" in str(excinfo.value)

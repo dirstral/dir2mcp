@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, TypeVar
 
-from .base import RecognizerUnavailable, iter_frames
+from .base import RecognizerUnavailable, iter_frames, media_identity
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; Pillow ships in the extra
     from PIL import Image
@@ -421,9 +421,11 @@ class OverlayReader:
         old engine wrote. That is the one hole in the check.
         """
         return {
-            # `name`, not the path: a log stays valid when the corpus moves,
-            # and callers already pass a bare file name in places.
-            "media": Path(media_path).name,
+            # Name, size and mtime, not the path: a log stays valid when the
+            # corpus moves, and two different files that share a basename do
+            # not share a log. See `media_identity` for what that does not
+            # prove.
+            "media": media_identity(media_path),
             "name": self.name,
             "fps": self.fps,
             "crop": list(self.crop) if self.crop is not None else None,
@@ -453,14 +455,34 @@ class OverlayReader:
             header = fh.readline()
             if not header.strip():
                 raise ReadCacheMismatch(f"{cache} is empty; delete it to record again")
-            meta = json.loads(header)
-            if meta.get("schema") != READ_CACHE_SCHEMA:
+            # A hand-edited, truncated or half-written log is a stale cache,
+            # not a crash. Every shape error below is converted for the same
+            # reason: the caller acts on one exception type, and a recognizer
+            # that saw a `KeyError` instead would degrade around it.
+            try:
+                meta = json.loads(header)
+            except ValueError as exc:
+                raise ReadCacheMismatch(
+                    f"{cache} has an unreadable header ({exc}); delete it to record again"
+                ) from exc
+            if not isinstance(meta, dict):
+                raise ReadCacheMismatch(
+                    f"{cache} has a {type(meta).__name__} header where an object belongs; "
+                    "delete it to record again"
+                )
+            # `is not int` and not `!=`: `True == 1` in Python, and a JSON
+            # `true` must not read as schema 1.
+            if type(meta.get("schema")) is not int or meta.get("schema") != READ_CACHE_SCHEMA:
                 raise ReadCacheMismatch(
                     f"{cache} has schema {meta.get('schema')!r}, this build reads "
                     f"{READ_CACHE_SCHEMA}; delete it to record again"
                 )
             current = self._fingerprint(media_path)
-            recorded = meta.get("reader", {})
+            recorded = meta.get("reader")
+            if not isinstance(recorded, dict):
+                raise ReadCacheMismatch(
+                    f"{cache} records no reader settings; delete it to record again"
+                )
             diffs = [
                 f"{k}: recorded={recorded.get(k)!r}, this run={current.get(k)!r}"
                 for k in sorted(set(recorded) | set(current))
@@ -472,16 +494,22 @@ class OverlayReader:
                     + "\n  ".join(diffs)
                     + "\ndelete it to record again"
                 )
-            for line in fh:
+            for n, line in enumerate(fh, start=2):  # line 1 is the header
                 if not line.strip():
                     continue
-                d = json.loads(line)
-                read = OverlayRead(
-                    index=int(d["index"]),
-                    timestamp_s=float(d["timestamp_s"]),
-                    region=tuple(d["region"]),  # type: ignore[arg-type]
-                    texts=tuple(d.get("texts") or ()),
-                )
+                try:
+                    d = json.loads(line)
+                    read = OverlayRead(
+                        index=int(d["index"]),
+                        timestamp_s=float(d["timestamp_s"]),
+                        region=tuple(float(v) for v in d["region"]),  # type: ignore[arg-type]
+                        texts=tuple(str(t) for t in (d.get("texts") or ())),
+                    )
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise ReadCacheMismatch(
+                        f"{cache} line {n} is not a readable record "
+                        f"({type(exc).__name__}: {exc}); delete it to record again"
+                    ) from exc
                 value, _hits = interpret(read)
                 yield read, value
 
