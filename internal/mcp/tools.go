@@ -4547,7 +4547,33 @@ func askOutputSchema() map[string]interface{} {
 			"answer_source":        map[string]interface{}{"type": "string", "enum": []string{"generated", "retrieval_only"}, "description": "Optional (SPEC 9.4.5): whether answer holds a generated answer or retrieved material published in place of one. Absent means generated. Absent in search_only, where no answer is produced, and generated for an answer withheld under 9.4.4."},
 			"answer_source_reason": map[string]interface{}{"type": "string", "enum": []string{"generator_not_configured", "generator_unavailable", "generator_error"}, "description": "Optional (SPEC 9.4.5): why the answer is retrieval_only. Present when answer_source is retrieval_only and absent otherwise. generator_not_configured: none is configured (expected operation, not a fault). generator_unavailable: one is configured and could not be used (unreachable, or refused for authentication, quota, rate limit or exhausted credit). generator_error: one replied, but the reply could not be used as an answer."},
 		},
-		"required":    []string{"question", "answer", "citations", "hits", "indexing_complete"},
+		"required": []string{"question", "answer", "citations", "hits", "indexing_complete"},
+		// SPEC 9.4.5 pairs the two provenance fields, and the pairing is a rule
+		// a client can only enforce if the SERVED schema states it: the
+		// canonical contract carrying it is no help to a caller validating
+		// against what the server advertised. retrieval_only requires a reason,
+		// a reason requires retrieval_only, and retrieval_only admits no
+		// faithfulness other than "unchecked", because nothing was generated to
+		// verify. Absent stays legal throughout, since all three are optional.
+		"allOf": []interface{}{
+			map[string]interface{}{
+				"if": map[string]interface{}{
+					"properties": map[string]interface{}{"answer_source": map[string]interface{}{"const": "retrieval_only"}},
+					"required":   []string{"answer_source"},
+				},
+				"then": map[string]interface{}{
+					"required":   []string{"answer_source_reason"},
+					"properties": map[string]interface{}{"faithfulness": map[string]interface{}{"const": "unchecked"}},
+				},
+			},
+			map[string]interface{}{
+				"if": map[string]interface{}{"required": []string{"answer_source_reason"}},
+				"then": map[string]interface{}{
+					"properties": map[string]interface{}{"answer_source": map[string]interface{}{"const": "retrieval_only"}},
+					"required":   []string{"answer_source"},
+				},
+			},
+		},
 		"definitions": sharedDefinitions(),
 	}
 }
