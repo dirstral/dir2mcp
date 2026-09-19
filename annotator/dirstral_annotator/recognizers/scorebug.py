@@ -640,6 +640,20 @@ def _upper(text: str) -> str:
 #: treated as the same pitch. The metric's own tolerance, because two cues that
 #: both fall within tolerance of one ground-truth pitch are two claims about one
 #: event, and the second can only ever be a false positive.
+#: Widest interval a count cue may span, in seconds. The bug goes off screen
+#: after a pitch (replay, reaction, ad) and a cue spans from the last sighting
+#: of the old count to the first of the new one, so an absence this long puts
+#: the pitch somewhere in a window too wide to cite.
+#:
+#: A wide cue also COSTS recall rather than buying it, which is the part that
+#: is easy to get backwards: the scorer gives each annotation to at most one
+#: event, so one cue spanning several pitches is consumed by the earliest and
+#: every later pitch inside it goes unmatched. So the value is a floor as much
+#: as a ceiling: recall is flat across 6-11s on the pilot corpus and falls at
+#: 12s, and precision steps up at 10s. 10 sits on the best row with a second
+#: of margin from the cliff. Swept on the pilot (#741); the PR has the table.
+COUNT_PITCH_MAX_SPAN_S = 10.0
+
 COUNT_PITCH_DEDUPE_S = 5.0
 
 
@@ -667,6 +681,23 @@ def _count_pitch_cues(
     never showed. A decrease is a new pitcher or OCR noise and resets the
     tracking for that pitcher, never emits.
 
+    **A +1 step does not carry a timestamp either, and this used to pretend it
+    did.** The pitch happened somewhere between the last frame that showed the
+    old count and the first that showed the new one. Those are usually not
+    adjacent: a broadcast cuts to a replay or a dugout reaction after a pitch,
+    and the bug is off screen until play resumes. A cue placed at the moment of
+    NOTICING therefore lands after the pitch, by however long the bug was away,
+    and the scorer's tolerance is not that wide. The false positive it produces
+    is not an invented pitch: it is a real one the cue arrived too late to
+    claim, and the pitch stays uncredited as well, so one mistimed cue costs
+    both precision and recall (#741).
+
+    So a cue spans the interval the pitch is known to lie in, from the last
+    sighting of the old count to the first sighting of the new one. It is the
+    same reasoning the multi-pitch jump already got, applied to the case it was
+    not applied to. `COUNT_PITCH_MAX_SPAN_S` caps how long an interval may get
+    before it stops being a citation anyone can use.
+
     Cues that land on a pitch a graphic already reported are dropped rather than
     added. The scorecard matches at most one annotation per ground-truth pitch
     and counts the rest as false positives, so a duplicate cannot raise recall
@@ -675,10 +706,15 @@ def _count_pitch_cues(
     cues: list[Cue] = []
     committed: dict[str, int] = {}
     pending: dict[str, tuple[int, float, int]] = {}  # pid -> (count, first_t, seen)
+    #: Last time the committed count was seen still standing. The pitch that
+    #: raised it happened after this, which is the only lower bound the bug
+    #: gives.
+    last_seen: dict[str, float] = {}
     for t, pid, count in sorted(counted):
         current = committed.get(pid)
         if current is not None and count == current:
             pending.pop(pid, None)  # the count simply has not moved
+            last_seen[pid] = t
             continue
         candidate, first_t, seen = pending.get(pid, (count, t, 0))
         if candidate != count:
@@ -689,13 +725,26 @@ def _count_pitch_cues(
             continue
         pending.pop(pid, None)
         previous = current
+        seen_at = last_seen.get(pid)
         committed[pid] = candidate
+        last_seen[pid] = t
         if previous is None or candidate != previous + 1:
             continue
+        # The interval the pitch is known to lie in. `seen_at` is absent only
+        # when the old count was committed and never seen standing again, which
+        # leaves no lower bound: the cue keeps the old fixed width rather than
+        # reaching back to a time nothing was read at.
+        start = first_t - PITCH_CUE_PAD_S if seen_at is None else seen_at
+        if first_t - start > COUNT_PITCH_MAX_SPAN_S:
+            # Past this the bug was away too long to place the pitch at all,
+            # and a cue that wide is not a citation anyone can act on. Trimmed
+            # to the recent end, which is where the pitch is likelier to be:
+            # play resumes, the bug returns, and the count is already up.
+            start = first_t - COUNT_PITCH_MAX_SPAN_S
         cues.append(
             Cue(
                 source=source,
-                start_s=max(0.0, first_t - PITCH_CUE_PAD_S),
+                start_s=max(0.0, start),
                 end_s=first_t + PITCH_CUE_PAD_S,
                 event="pitch",
                 entity_ids=(pid,),
