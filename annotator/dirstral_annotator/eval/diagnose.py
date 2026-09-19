@@ -226,24 +226,66 @@ def cues_from_json(raw: str) -> tuple[dict, list[Cue]]:
     if not isinstance(records, list):
         raise CueCacheMismatch("cue cache holds no cue list")
     cues = []
-    for i, d in enumerate(records):
+    for i, record in enumerate(records):
         try:
-            cues.append(Cue(
-                source=str(d["source"]),
-                start_s=float(d["start_s"]),
-                end_s=float(d["end_s"]),
-                event=str(d["event"]),
-                entity_ids=tuple(str(e) for e in (d.get("entity_ids") or ())),
-                confidence=float(d["confidence"]),
-                text=str(d.get("text", "")),
-                attributes={str(k): str(v) for k, v in (d.get("attributes") or {}).items()},
-            ))
-        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            cues.append(_cue_from(record))
+        except (ValueError, TypeError, KeyError) as exc:
             raise CueCacheMismatch(
                 f"cue cache record {i} is not a readable cue "
                 f"({type(exc).__name__}: {exc})"
             ) from exc
     return cascade, cues
+
+
+def _cue_from(d: object) -> Cue:
+    """One cue, with its declared types REQUIRED rather than coerced.
+
+    Coercion looks harmless and is not. `str()` over a JSON string gives the
+    characters, so `"entity_ids": "player:webb-logan"` became a 17-element
+    tuple of single letters, every one of them a plausible-looking entity id
+    that matches no roster row. That cue then fuses and scores, and the run
+    reports a wrong scorecard instead of refusing to read the file.
+    """
+    if not isinstance(d, dict):
+        raise TypeError(f"expected an object, got {type(d).__name__}")
+
+    def text_field(key: str, default: object = ...) -> str:
+        value = d[key] if default is ... else d.get(key, default)
+        if not isinstance(value, str):
+            raise TypeError(f"{key} is {type(value).__name__}, expected a string")
+        return value
+
+    def number(key: str) -> float:
+        value = d[key]
+        # `bool` is an `int` in Python, and a JSON `true` is not a timestamp.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{key} is {type(value).__name__}, expected a number")
+        return float(value)
+
+    ids = d.get("entity_ids") or []
+    if not isinstance(ids, list):
+        raise TypeError(f"entity_ids is {type(ids).__name__}, expected a list")
+    for e in ids:
+        if not isinstance(e, str):
+            raise TypeError(f"entity_ids holds a {type(e).__name__}, expected strings")
+
+    attributes = d.get("attributes") or {}
+    if not isinstance(attributes, dict):
+        raise TypeError(f"attributes is {type(attributes).__name__}, expected an object")
+    for k, v in attributes.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise TypeError("attributes must map strings to strings")
+
+    return Cue(
+        source=text_field("source"),
+        start_s=number("start_s"),
+        end_s=number("end_s"),
+        event=text_field("event"),
+        entity_ids=tuple(ids),
+        confidence=number("confidence"),
+        text=text_field("text", ""),
+        attributes=dict(attributes),
+    )
 
 
 def run_pipeline(

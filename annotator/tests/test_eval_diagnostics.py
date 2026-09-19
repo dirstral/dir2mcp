@@ -548,3 +548,66 @@ def test_an_unreadable_cue_file_is_refused(tmp_path, roster):
     with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
         run_pipeline(Pipeline(roster=roster), media, cues_in=missing)
     assert "cannot read" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("field,value,why", [
+    ("entity_ids", "player:webb-logan", "a bare string iterates into characters"),
+    ("entity_ids", [1, 2], "ids are strings"),
+    ("source", 7, "a number is not a source"),
+    ("event", None, "None is not an event"),
+    ("text", 3.5, "a number is not text"),
+    ("start_s", "12.0", "a string is not a timestamp"),
+    ("confidence", True, "bool is an int in Python; true is not a confidence"),
+    ("attributes", [["a", "b"]], "attributes are an object"),
+    ("attributes", {"count": 3}, "attribute values are strings"),
+])
+def test_a_cue_field_of_the_wrong_type_is_refused(field, value, why):
+    """Coercion looks harmless and is not.
+
+    `str()` over a JSON string yields its characters, so a stray
+    `"entity_ids": "player:webb-logan"` became a 17-element tuple of single
+    letters. Every one of those is a plausible-looking id that matches no
+    roster row, the cue fuses and scores, and the run reports a wrong
+    scorecard instead of refusing to read the file.
+    """
+    record = {"source": "scorebug", "start_s": 1.0, "end_s": 2.0,
+              "event": "pitch", "confidence": 0.5}
+    record[field] = value
+    payload = json.dumps({"schema": diagnose_mod.CUE_CACHE_SCHEMA,
+                          "cascade": {}, "cues": [record]})
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        diagnose_mod.cues_from_json(payload)
+    assert field in str(excinfo.value), why
+
+
+def test_a_reordered_roster_changes_the_digest(tmp_path):
+    """`scorebug._name_index` is built in roster order and `match_name` keeps
+    the FIRST fuzzy candidate on a tie, so the same players in a different
+    order can resolve an OCR name to a different one of them."""
+    rows = [
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+        {"id": BATTER, "name": "Freddie Freeman", "number": "5", "mlbam_id": 518692},
+    ]
+    a = tmp_path / "a.json"
+    a.write_text(json.dumps(rows))
+    b = tmp_path / "b.json"
+    b.write_text(json.dumps(list(reversed(rows))))
+    assert Roster.load(a).digest() != Roster.load(b).digest()
+
+
+def test_a_caption_backend_that_failed_to_load_blocks_a_cue_file(tmp_path, roster, events):
+    """The same degradation one layer up.
+
+    A backend loaded once at startup fails there, so the pipeline never sees
+    that recognizer: nothing is registered, nothing is skipped, and the
+    incomplete-cascade check passes on a cue file missing the caption cues.
+    """
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)},
+                        startup_skips=("caption: no CUDA device",))
+    with pytest.raises(diagnose_mod.IncompleteCascade) as excinfo:
+        run_pipeline(pipeline, media, cues_out=cache)
+    assert "no CUDA device" in str(excinfo.value)
+    assert not cache.exists()

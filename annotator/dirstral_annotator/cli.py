@@ -172,10 +172,12 @@ def _needs_roster(args) -> bool:
 
 
 def _caption_backend(args):
-    """Load the captioner, the prober and the settings they were built from.
+    """Load the captioner, the prober, the settings they were built from, and
+    any skip notes the load produced.
 
-    Returns `(None, None, {})` when --caption is not set or the backend is
-    unavailable.
+    Returns empty values when --caption is not set. An unavailable backend
+    returns the same, plus a skip note: the caller must be able to tell "no
+    captioning was asked for" from "captioning was asked for and is missing".
 
     Loading happens once, at startup, where the operator can see a failure.
     An unavailable backend (extra not installed, no CUDA device for the torch
@@ -185,7 +187,7 @@ def _caption_backend(args):
     cannot load, but it must also never pretend the capability is there.
     """
     if not getattr(args, "caption", False):
-        return None, None, {}
+        return None, None, {}, ()
     from .recognizers.base import RecognizerUnavailable
     from .recognizers import qwen_vl
 
@@ -199,16 +201,21 @@ def _caption_backend(args):
     except RecognizerUnavailable as exc:
         print(f"warning: --caption requested but unavailable, serving without it: {exc}",
               file=sys.stderr)
-        return None, None, {}
+        # Returned, not just printed. A caption backend that fails HERE leaves
+        # the pipeline with no caption recognizer to register and therefore no
+        # skip to report, so an eval run would record a cue file as a complete
+        # cascade with the requested caption cues missing from it.
+        return None, None, {}, (f"caption: {exc}",)
     # Returned alongside the backends, not derived later: a loaded callable
     # cannot be fingerprinted, and the eval cue cache has to notice that
     # --caption-model or --caption-prompt changed. Only the builder knows.
-    return caption_fn, probe_fn, dict(kwargs)
+    return caption_fn, probe_fn, dict(kwargs), ()
 
 
 def _pipeline(args, roster: Roster, games) -> Pipeline:
-    caption_fn, probe_fn, caption_config = _caption_backend(args)
+    caption_fn, probe_fn, caption_config, startup_skips = _caption_backend(args)
     return Pipeline(
+        startup_skips=startup_skips,
         roster=roster,
         games=games,
         caption_fn=caption_fn,

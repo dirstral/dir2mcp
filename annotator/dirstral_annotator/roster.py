@@ -80,13 +80,22 @@ class Roster:
         against a different roster; see `eval.diagnose.cascade_fingerprint`
         and `recognizers.overlay.OverlayReader`.
 
+        ORDER is part of it, and not as a convenience. `scorebug._name_index`
+        builds its index in roster order, and `match_name` keeps the FIRST
+        fuzzy candidate when two score equally, so reordering the same players
+        can resolve an OCR name to a different one of them. A digest that
+        sorted the rows would call those two rosters identical and let a cache
+        accept results the current roster would not have produced.
+
         Truncated to 16 hex characters. This is a change detector, not a
         security boundary: nobody is constructing a roster to collide with
         another one, and a short digest keeps a cache header readable.
         """
-        rows = sorted(
+        # Aliases ARE sorted: they go into a dict keyed by name form, so their
+        # order among themselves reaches no decision.
+        rows = [
             [p.id, p.name, p.number or "", *sorted(p.aliases)] for p in self.players
-        )
+        ]
         mlbam = sorted((str(k), v) for k, v in self._mlbam.items())
         payload = json.dumps([rows, mlbam], sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()[:16]

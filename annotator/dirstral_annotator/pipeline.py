@@ -198,6 +198,12 @@ class Pipeline:
     #: the eval cue cache has to know that `--caption-model` changed. The
     #: builder records it; see `cli._caption_backend`.
     caption_config: dict = field(default_factory=dict)
+    #: Degradations that happened BEFORE the pipeline existed, so they reach
+    #: `skipped` like any other. A backend loaded once at startup (captioning)
+    #: fails there, and the pipeline then simply never sees that recognizer:
+    #: nothing is registered, nothing is skipped, and every downstream check
+    #: for an incomplete cascade passes. The builder reports it here instead.
+    startup_skips: tuple[str, ...] = ()
     caption_fps: float = 1.0
     #: Marker prepended to each caption cue. None keeps the recognizer's own
     #: default, which names a game feed; see recognizers/caption.CAPTION_PREFIX.
@@ -288,7 +294,7 @@ class Pipeline:
         # Appended to through the local name and published to this thread only,
         # so two concurrent requests neither interleave into one list nor
         # overwrite each other's answer. See the `skipped` property.
-        skipped: list[str] = []
+        skipped: list[str] = list(self.startup_skips)
         self._notes.skipped = skipped
 
         game = self.games.get(media_path.name)
