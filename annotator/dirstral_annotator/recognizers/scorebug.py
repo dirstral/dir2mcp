@@ -565,6 +565,19 @@ def match_name(index: dict[str, set[str]], token: str) -> tuple[str, float] | No
     means something, and a surname two players share resolves to neither: the
     overlay gives no way to tell them apart, so a guess would be wrong half the
     time.
+
+    The fuzzy path applies that rule to ITSELF. Two players whose forms score
+    identically are the same ambiguity, and the previous code kept whichever
+    the index reached first. The index is built in roster order, so the answer
+    came from the order of a JSON file rather than from anything on screen, and
+    re-sorting the roster silently re-attributed sightings (#1015). The order
+    dependence is not academic: `_interpret` counts a match as a HIT, and the
+    hit count steers the band search, so it decides which pixels get OCR'd for
+    the rest of the file.
+
+    Equality is compared exactly. The concern is two forms producing the
+    identical ratio, not two that are merely close; a tolerance would refuse
+    resolutions that are genuinely ordered.
     """
     key = _upper(token)
     if len(key.replace(" ", "")) < 3:
@@ -575,13 +588,21 @@ def match_name(index: dict[str, set[str]], token: str) -> tuple[str, float] | No
     if len(key) < FUZZY_MIN_LEN:
         return None
     best: tuple[str, float] | None = None
+    tied = False
     for form, form_ids in index.items():
         if len(form_ids) != 1:
             continue
+        pid = next(iter(form_ids))
         ratio = difflib.SequenceMatcher(None, key, form).ratio()
-        if ratio >= FUZZY_THRESHOLD and (best is None or ratio > best[1]):
-            best = (next(iter(form_ids)), ratio)
-    if best is None:
+        if ratio < FUZZY_THRESHOLD:
+            continue
+        if best is None or ratio > best[1]:
+            best, tied = (pid, ratio), False
+        elif ratio == best[1] and pid != best[0]:
+            # Two different PLAYERS, equally close. Two forms of the same
+            # player tying is not ambiguity and must not refuse.
+            tied = True
+    if best is None or tied:
         return None
     return best[0], round(best[1] * FUZZY_CEILING, 4)
 

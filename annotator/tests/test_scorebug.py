@@ -168,6 +168,76 @@ def test_a_shared_surname_resolves_to_nobody(index):
     assert match_name(index, "SMITH") is None
 
 
+def _tie_roster(tmp_path, name, rows):
+    path = tmp_path / name
+    path.write_text(json.dumps(rows))
+    return _name_index(Roster.load(path))
+
+
+#: Two nine-letter surnames one substitution from the OCR token, so both score
+#: 0.8889: equal, and above FUZZY_THRESHOLD. The margin matters. A pair that
+#: ties BELOW the threshold refuses for the ordinary reason and would let this
+#: test pass without exercising the tie at all.
+TIE_ROWS = [
+    {"id": "player:a-hernandes", "name": "Ana Hernandes",
+     "aliases": ["Hernandes"], "mlbam_id": 1},
+    {"id": "player:b-hernandez", "name": "Bo Hernandez",
+     "aliases": ["Hernandez"], "mlbam_id": 2},
+]
+
+
+def test_the_tie_fixture_really_ties_above_the_threshold(tmp_path):
+    """Guards the test below from passing for the wrong reason.
+
+    `match_name` returning None proves nothing on its own: a token that
+    matches nobody returns None too. Each name must resolve ALONE, so that
+    None from the pair can only be the tie.
+    """
+    for i, row in enumerate(TIE_ROWS):
+        index = _tie_roster(tmp_path, f"one{i}.json", [row])
+        hit = match_name(index, "HERNANDEX")
+        assert hit is not None and hit[0] == row["id"], row["name"]
+
+
+def test_a_fuzzy_tie_between_two_players_resolves_to_nobody(tmp_path):
+    """The same ambiguity the exact path already refuses (#1015).
+
+    Two players equally close to one OCR token is no more separable than two
+    who share a surname. The old code kept whichever the index reached first,
+    and the index is built in ROSTER order, so the answer came from the order
+    of a JSON file rather than from anything on screen.
+    """
+    assert match_name(_tie_roster(tmp_path, "both.json", TIE_ROWS), "HERNANDEX") is None
+
+
+def test_reordering_the_roster_cannot_change_a_resolution(tmp_path):
+    """The property the refusal buys, stated directly.
+
+    `_interpret` counts a match as a HIT and the hit count steers the band
+    search, so an order-dependent resolution decides which pixels get read for
+    the rest of the file.
+    """
+    a = match_name(_tie_roster(tmp_path, "fwd.json", TIE_ROWS), "HERNANDEX")
+    b = match_name(_tie_roster(tmp_path, "rev.json", list(reversed(TIE_ROWS))), "HERNANDEX")
+    assert a == b
+
+
+def test_two_forms_of_ONE_player_tying_still_resolves(tmp_path):
+    """A tie is only ambiguity when the candidates are different PEOPLE.
+
+    `_name_index` holds several forms per player, so equal scores against two
+    spellings of one player are ordinary. Refusing those would lose a
+    resolution nobody is ambiguous about, and the same fixture as the real tie
+    is used so the only difference is how many players the forms belong to.
+    """
+    index = _tie_roster(tmp_path, "one-player.json", [{
+        "id": "player:solo", "name": "Ana Hernandes",
+        "aliases": ["Hernandes", "Hernandez"], "mlbam_id": 1,
+    }])
+    hit = match_name(index, "HERNANDEX")
+    assert hit is not None and hit[0] == "player:solo"
+
+
 # --- the evidence handed back to the band search ---------------------------
 
 def _hits(roster, text):
