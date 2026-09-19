@@ -90,6 +90,13 @@ class Roster:
         Truncated to 16 hex characters. This is a change detector, not a
         security boundary: nobody is constructing a roster to collide with
         another one, and a short digest keeps a cache header readable.
+
+        Changing THIS FUNCTION also changes every digest, so an existing
+        recording reads as made against a different roster even when it was
+        not. That is survivable precisely because the read log warns and does
+        not refuse: an operator is told, and the log stays usable. A cue file
+        does refuse, and rightly, since it is cheap to rebuild once the
+        cascade has been recorded.
         """
         # Aliases ARE sorted: they go into a dict keyed by name form, so their
         # order among themselves reaches no decision.
