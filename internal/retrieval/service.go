@@ -2058,6 +2058,23 @@ func (s *Service) abstainOnWeakEvidence(ctx context.Context, question string, hi
 	}, true
 }
 
+// Answer-provenance values (SPEC §9.4.5, spec 0.70.0). A generated answer
+// carries none of these: absence means generated, so a client that ignores the
+// field is unaffected.
+const (
+	answerSourceRetrievalOnly = "retrieval_only"
+
+	// No generator is configured. Expected operation, not a fault.
+	reasonGeneratorNotConfigured = "generator_not_configured"
+	// One is configured and could not be used: unreachable, or it refused
+	// service (authentication, quota, rate limit, exhausted credit). This is
+	// the one the three-day outage would have reported.
+	reasonGeneratorUnavailable = "generator_unavailable"
+	// One was reached and replied, but the reply could not be used as an
+	// answer.
+	reasonGeneratorError = "generator_error"
+)
+
 func (s *Service) Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
@@ -2123,15 +2140,26 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	// every path that does not verify, which §9.4.4 defines as "no judgement"
 	// rather than as a weak pass.
 	faithfulness := faithfulnessUnchecked
+	// §9.4.5. `answer` currently holds retrieved material, so the default is
+	// the honest one and a path that generates has to clear it. A default of
+	// "generated" would make every new branch that forgets to set this claim
+	// an answer it did not produce, which is the failure mode being fixed.
+	sourceReason := ""
+	if s.gen == nil && len(hits) > 0 {
+		sourceReason = reasonGeneratorNotConfigured
+	}
 	switch {
 	case skipRetrieval:
 		// The adaptive gate found no information need, so no lookup ran and the
 		// zero-hit fallback would misreport a corpus result the server never
 		// obtained (#685). Answer without retrieval and keep citations empty.
 		answer = s.answerWithoutRetrieval(ctx, question)
+		// Generated, and from no retrieved material at all, so there is
+		// nothing this could be "retrieval only" about.
+		sourceReason = ""
 	case s.gen != nil && len(hits) > 0:
 		var shown string
-		answer, citations, shown = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
+		answer, citations, shown, sourceReason = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
 		// Grounding check (#336): read the answer back against the exact
 		// context the model was shown. An unsupported answer is withheld
 		// rather than published, because the absolute evidence threshold
@@ -2158,6 +2186,10 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 				// and take the refusal for an answer; this is what tells the two
 				// apart without parsing prose.
 				Faithfulness: faithfulness.wireName(),
+				// §9.4.5 is explicit that a WITHHELD answer is `generated`:
+				// generation ran, and the two fields above already describe
+				// this outcome in full. Marking it retrieval_only would claim
+				// the refusal text came from the corpus.
 			}, nil
 		}
 	}
@@ -2188,7 +2220,21 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		// "unchecked", which §9.4.4 defines as carrying no judgement rather
 		// than as a weak pass.
 		Faithfulness: faithfulness.wireName(),
+		// §9.4.5 (spec 0.70.0). Both empty on the ordinary path, which means
+		// generated and omits both wire fields.
+		AnswerSource:       answerSourceFor(sourceReason),
+		AnswerSourceReason: sourceReason,
 	}, nil
+}
+
+// answerSourceFor names the provenance that a reason implies. Kept as one
+// function so the pairing §9.4.5 requires (a reason iff retrieval_only) cannot
+// drift between the call sites.
+func answerSourceFor(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return answerSourceRetrievalOnly
 }
 
 // generateGroundedAnswer runs RAG generation and returns the answer and the
@@ -2201,8 +2247,11 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 // was placed.
 func (s *Service) generateGroundedAnswer(
 	ctx context.Context, question, fallback string, hits []model.SearchHit, citations []model.Citation,
-) (string, []model.Citation, string) {
+) (string, []model.Citation, string, string) {
 	answer := fallback
+	// Empty until something goes wrong: the answer is generated unless this
+	// says otherwise (SPEC §9.4.5).
+	sourceReason := ""
 	s.metaMu.RLock()
 	systemPrompt := s.ragSystemPrompt
 	maxContextChars := s.ragMaxContextChars
@@ -2241,6 +2290,10 @@ func (s *Service) generateGroundedAnswer(
 		// entire question in logs since it may contain sensitive data.
 		safeQuestion := truncateQuestion(question)
 		s.logf("generator error for question %q: %v", safeQuestion, genErr)
+		// The published answer is now the retrieved material. Recording that
+		// is the whole point of §9.4.5: the log line above reaches whoever
+		// reads the server log, and reached nobody for three days.
+		sourceReason = reasonGeneratorUnavailable
 	} else {
 		// len(usedIdx) == 0 means the budget could not hold even one complete
 		// fenced block, so the prompt's Context section was empty. Adopting
@@ -2261,6 +2314,9 @@ func (s *Service) generateGroundedAnswer(
 			// overstated grounding the F1 narrowing exists to prevent.
 			s.logf("rag: context budget %d chars fits no document (%d hits); discarding the ungrounded reply", maxContextChars, len(hits))
 			citations = nil
+			// Reached and replied, and the reply could not be used as an
+			// answer: it would have been grounded in nothing.
+			sourceReason = reasonGeneratorError
 		} else if trimmed := strings.TrimSpace(generated); trimmed != "" {
 			answer = trimmed
 			// Faithfulness (issue #403): the answer came from the model, so
@@ -2270,10 +2326,14 @@ func (s *Service) generateGroundedAnswer(
 			// in that set (F3).
 			citations = citationsForIndices(hits, usedIdx)
 			answer = stripHallucinatedCitations(answer, citations)
+		} else {
+			// An empty or whitespace-only reply. The call succeeded and
+			// produced nothing usable, so the fallback stands and says so.
+			sourceReason = reasonGeneratorError
 		}
 	}
 
-	return answer, citations, contextSection
+	return answer, citations, contextSection, sourceReason
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {

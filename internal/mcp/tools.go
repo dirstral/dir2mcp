@@ -4137,6 +4137,17 @@ func buildAskStructuredContent(result model.AskResult) map[string]interface{} {
 	if verdict := strings.TrimSpace(result.Faithfulness); verdict != "" {
 		structured["faithfulness"] = verdict
 	}
+	// SPEC 9.4.5 (spec 0.70.0). Emitted together or not at all: the schema
+	// states the pairing as a conditional, so half of it would fail
+	// validation, and a reason without a source says nothing a client can act
+	// on. Absent means generated, which is why the ordinary path emits
+	// neither.
+	source := strings.TrimSpace(result.AnswerSource)
+	reason := strings.TrimSpace(result.AnswerSourceReason)
+	if source != "" && reason != "" {
+		structured["answer_source"] = source
+		structured["answer_source_reason"] = reason
+	}
 	return structured
 }
 
@@ -4528,6 +4539,13 @@ func askOutputSchema() map[string]interface{} {
 			"indexing_complete": map[string]interface{}{"type": "boolean"},
 			"evidence":          map[string]interface{}{"type": "string", "enum": []string{"strong", "sufficient", "insufficient", "unknown"}, "description": "Optional absolute verdict of the eligible set behind the answer, aggregated as the strongest eligible hit's verdict (SPEC 9.4.3); insufficient is the structured form of abstention."},
 			"faithfulness":      map[string]interface{}{"type": "string", "enum": []string{"verified", "unsupported", "unchecked"}, "description": "Optional verdict on the ANSWER rather than the retrieval (SPEC 9.4.4): unsupported means the answer was withheld, so answer carries a refusal and citations is empty; unchecked means verification produced no verdict (not configured, or attempted and unable to complete), which is the default and is NOT a quality signal. Orthogonal to evidence."},
+			// SPEC 9.4.5 (spec 0.70.0). Absent means generated, so a client
+			// that ignores these is unaffected. They exist because nothing
+			// else in the payload can say it: citations, hits, evidence and
+			// indexing_complete are all populated and all correct when
+			// generation fails, since retrieval genuinely succeeded.
+			"answer_source":        map[string]interface{}{"type": "string", "enum": []string{"generated", "retrieval_only"}, "description": "Optional (SPEC 9.4.5): whether answer holds a generated answer or retrieved material published in place of one. Absent means generated. Absent in search_only, where no answer is produced, and generated for an answer withheld under 9.4.4."},
+			"answer_source_reason": map[string]interface{}{"type": "string", "enum": []string{"generator_not_configured", "generator_unavailable", "generator_error"}, "description": "Optional (SPEC 9.4.5): why the answer is retrieval_only. Present when answer_source is retrieval_only and absent otherwise. generator_not_configured: none is configured (expected operation, not a fault). generator_unavailable: one is configured and could not be used (unreachable, or refused for authentication, quota, rate limit or exhausted credit). generator_error: one replied, but the reply could not be used as an answer."},
 		},
 		"required":    []string{"question", "answer", "citations", "hits", "indexing_complete"},
 		"definitions": sharedDefinitions(),
