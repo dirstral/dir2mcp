@@ -94,12 +94,12 @@ func TestAnswerSurfaces_TheConditionalsBindTheRightRelationships_117(t *testing.
 			riders := decodeRiders(t, servedOutputSchema(t, tool)["allOf"], tool)
 
 			// retrieval_only implies a reason, and implies faithfulness unchecked.
-			forward := riderWhoseIfConstrains(riders, "answer_source", "retrieval_only")
+			forward := riderWhoseIfConstrains(t, riders, "answer_source", "retrieval_only", tool)
 			if forward == nil {
 				t.Fatalf("served %s (%s) states no rider conditioned on "+
 					"answer_source=retrieval_only", tool, file)
 			}
-			if !riderThenRequires(forward, "answer_source_reason") {
+			if !riderThenRequires(t, forward, "answer_source_reason", tool) {
 				t.Errorf("served %s: retrieval_only does not require answer_source_reason: %#v",
 					tool, forward)
 			}
@@ -109,7 +109,7 @@ func TestAnswerSurfaces_TheConditionalsBindTheRightRelationships_117(t *testing.
 			}
 
 			// A reason implies retrieval_only.
-			reverse := riderWhoseIfRequires(riders, "answer_source_reason")
+			reverse := riderWhoseIfRequires(t, riders, "answer_source_reason", tool)
 			if reverse == nil {
 				t.Fatalf("served %s (%s) states no rider conditioned on the presence "+
 					"of answer_source_reason", tool, file)
@@ -155,33 +155,74 @@ func subObject(node map[string]interface{}, path ...string) map[string]interface
 	return current
 }
 
-func stringList(node map[string]interface{}, key string) []string {
-	listed, ok := node[key].([]interface{})
+// stringList reads a JSON Schema string array, reporting anything malformed.
+//
+// Dropping a non-string entry silently would let `required: ["x", 42]` read as
+// `["x"]`, so a schema that is not valid JSON Schema satisfies the assertions
+// built on it.
+func stringList(t *testing.T, node map[string]interface{}, key, label string) []string {
+	t.Helper()
+	raw, present := node[key]
+	if !present {
+		return nil
+	}
+	listed, ok := raw.([]interface{})
 	if !ok {
+		t.Errorf("%s: `%s` is %T, not an array", label, key, raw)
 		return nil
 	}
 	out := make([]string, 0, len(listed))
-	for _, entry := range listed {
-		if value, ok := entry.(string); ok {
-			out = append(out, value)
+	for i, entry := range listed {
+		value, ok := entry.(string)
+		if !ok {
+			t.Errorf("%s: `%s`[%d] is %T, not a string: %v", label, key, i, entry, entry)
+			continue
 		}
+		out = append(out, value)
 	}
 	return out
 }
 
-// riderWhoseIfConstrains finds the rider whose `if` pins field to value.
-func riderWhoseIfConstrains(riders []map[string]interface{}, field, value string) map[string]interface{} {
+// riderWhoseIfConstrains finds the rider whose `if` pins field to value AND
+// requires it to be present.
+//
+// `properties` constrains a key only when it is there, so an `if` of just
+// `{"properties": {"answer_source": {"const": "retrieval_only"}}}` also
+// matches a document carrying NO answer_source. That rider would force
+// answer_source_reason onto every ordinary generated answer, which is the
+// opposite of what 9.4.5 says. The `required` is what makes the condition
+// mean "answer_source = retrieval_only" rather than "absent or
+// retrieval_only".
+func riderWhoseIfConstrains(t *testing.T, riders []map[string]interface{}, field, value, label string) map[string]interface{} {
+	t.Helper()
 	for _, rider := range riders {
 		prop := subObject(rider, "if", "properties", field)
-		if prop != nil && prop["const"] == value {
-			return rider
+		if prop == nil || prop["const"] != value {
+			continue
 		}
+		cond := subObject(rider, "if")
+		if !containsString(stringList(t, cond, "required", label+" if"), field) {
+			t.Errorf("%s: the rider pinning %s=%q does not require %s to be present, so it "+
+				"also applies when %s is absent", label, field, value, field, field)
+			continue
+		}
+		return rider
 	}
 	return nil
 }
 
+func containsString(haystack []string, needle string) bool {
+	for _, entry := range haystack {
+		if entry == needle {
+			return true
+		}
+	}
+	return false
+}
+
 // riderWhoseIfRequires finds the rider conditioned on a field's PRESENCE.
-func riderWhoseIfRequires(riders []map[string]interface{}, field string) map[string]interface{} {
+func riderWhoseIfRequires(t *testing.T, riders []map[string]interface{}, field, label string) map[string]interface{} {
+	t.Helper()
 	for _, rider := range riders {
 		cond := subObject(rider, "if")
 		if cond == nil {
@@ -191,7 +232,7 @@ func riderWhoseIfRequires(riders []map[string]interface{}, field string) map[str
 		if subObject(cond, "properties", field) != nil {
 			continue
 		}
-		for _, required := range stringList(cond, "required") {
+		for _, required := range stringList(t, cond, "required", label+" if") {
 			if required == field {
 				return rider
 			}
@@ -200,12 +241,13 @@ func riderWhoseIfRequires(riders []map[string]interface{}, field string) map[str
 	return nil
 }
 
-func riderThenRequires(rider map[string]interface{}, field string) bool {
+func riderThenRequires(t *testing.T, rider map[string]interface{}, field, label string) bool {
+	t.Helper()
 	then := subObject(rider, "then")
 	if then == nil {
 		return false
 	}
-	for _, required := range stringList(then, "required") {
+	for _, required := range stringList(t, then, "required", label+" then") {
 		if required == field {
 			return true
 		}
