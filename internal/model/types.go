@@ -1224,6 +1224,26 @@ type AskResult struct {
 	// not distinguished because both say the identical thing: no answer-level
 	// judgement is available.
 	Faithfulness string
+	// AnswerSource says whether Answer holds a GENERATED answer or retrieved
+	// material published in place of one (SPEC §9.4.5, spec 0.70.0): ""
+	// (generated) or "retrieval_only".
+	//
+	// Nothing else in the payload can express it. Citations, Hits,
+	// EvidenceVerdict and IndexingComplete are all populated and all correct
+	// when generation fails, because retrieval genuinely succeeded, so the
+	// only remaining signal was the shape of the prose. Two public
+	// deployments served context dumps for three days behind exactly that gap
+	// (dirstral-spec#117).
+	//
+	// Empty means generated, so a client that ignores the field is unaffected.
+	AnswerSource string
+	// AnswerSourceReason says WHY, in the §9.4.5 vocabulary:
+	// "generator_not_configured", "generator_unavailable" or
+	// "generator_error". Set only when AnswerSource is "retrieval_only".
+	//
+	// The three carve at the line an operator acts on: change the
+	// configuration, fix the provider, or investigate the model.
+	AnswerSourceReason string
 }
 
 type CorpusStats struct {
