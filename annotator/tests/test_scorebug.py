@@ -460,3 +460,12 @@ def test_the_flag_is_inert_without_pitch_cues(roster, fake_frames):
         roster, ocr=ocr, crop=WHOLE, pitch_cues=False, count_pitch_cues=True
     ).recognize(MEDIA)
     assert [c for c in cues if c.event == "pitch"] == []
+
+
+def test_the_reader_records_which_roster_steered_it(roster, fake_frames, tmp_path):
+    """`_interpret` counts a roster match as a hit, and the hit count steers
+    the band search, so the roster is part of what produced a recording even
+    though `OverlayReader` never sees one."""
+    rec = ScorebugRecognizer(roster, ocr=fake_frames(["RAY P: 87"]), crop=WHOLE,
+                             read_cache=tmp_path / "logs")
+    assert rec.reader.interpreter_id == roster.digest()

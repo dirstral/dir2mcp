@@ -43,6 +43,9 @@ from .eval import diagnose as diagnose_mod
 from .eval import report as report_mod
 from .eval import score as score_mod
 from .pipeline import GameConfig, Pipeline, load_games
+# Stdlib-only and measured at 58 ms: unlike the recognizers `Pipeline`
+# defers, this module pulls in no model runtime.
+from .recognizers.overlay import ReadCacheMismatch
 from .roster import Roster
 from .serve import serve
 
@@ -126,6 +129,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add per-source sample cues to the report's diagnostics",
     )
+    e.add_argument(
+        "--ocr-cache",
+        type=Path,
+        metavar="DIR",
+        help="record the scorebug and news OCR here, and replay it on a later "
+             "run instead of reading the video again. OCR dominates the pass, "
+             "so this makes a change to a rule above it (name matching, the "
+             "pitch-count rule, fusion, scoring) measurable in seconds. A log "
+             "recorded by a different reader is refused; delete it to re-record",
+    )
+    e.add_argument(
+        "--dump-cues",
+        type=Path,
+        metavar="PATH",
+        help="write the pre-fusion cues here, so a later run can replay them "
+             "with --cues instead of re-reading the video",
+    )
+    e.add_argument(
+        "--cues",
+        type=Path,
+        metavar="PATH",
+        help="replay cues recorded by --dump-cues instead of running the "
+             "cascade. Fusion, --min-confidence and scoring still run; a "
+             "change to a recognizer does NOT, so it needs a fresh pass. "
+             "A cache recorded under different cascade settings is refused",
+    )
     vision_flags(e)
     return p
 
@@ -143,7 +172,12 @@ def _needs_roster(args) -> bool:
 
 
 def _caption_backend(args):
-    """Load the captioner and prober when --caption is set, or (None, None).
+    """Load the captioner, the prober, the settings they were built from, and
+    any skip notes the load produced.
+
+    Returns empty values when --caption is not set. An unavailable backend
+    returns the same, plus a skip note: the caller must be able to tell "no
+    captioning was asked for" from "captioning was asked for and is missing".
 
     Loading happens once, at startup, where the operator can see a failure.
     An unavailable backend (extra not installed, no CUDA device for the torch
@@ -153,7 +187,7 @@ def _caption_backend(args):
     cannot load, but it must also never pretend the capability is there.
     """
     if not getattr(args, "caption", False):
-        return None, None
+        return None, None, {}, ()
     from .recognizers.base import RecognizerUnavailable
     from .recognizers import qwen_vl
 
@@ -163,20 +197,30 @@ def _caption_backend(args):
     if getattr(args, "caption_prompt", None):
         kwargs["caption_prompt"] = args.caption_prompt
     try:
-        return qwen_vl.load_backend(**kwargs)
+        caption_fn, probe_fn = qwen_vl.load_backend(**kwargs)
     except RecognizerUnavailable as exc:
         print(f"warning: --caption requested but unavailable, serving without it: {exc}",
               file=sys.stderr)
-        return None, None
+        # Returned, not just printed. A caption backend that fails HERE leaves
+        # the pipeline with no caption recognizer to register and therefore no
+        # skip to report, so an eval run would record a cue file as a complete
+        # cascade with the requested caption cues missing from it.
+        return None, None, {}, (f"caption: {exc}",)
+    # Returned alongside the backends, not derived later: a loaded callable
+    # cannot be fingerprinted, and the eval cue cache has to notice that
+    # --caption-model or --caption-prompt changed. Only the builder knows.
+    return caption_fn, probe_fn, dict(kwargs), ()
 
 
 def _pipeline(args, roster: Roster, games) -> Pipeline:
-    caption_fn, probe_fn = _caption_backend(args)
+    caption_fn, probe_fn, caption_config, startup_skips = _caption_backend(args)
     return Pipeline(
+        startup_skips=startup_skips,
         roster=roster,
         games=games,
         caption_fn=caption_fn,
         probe_fn=probe_fn,
+        caption_config=caption_config,
         # `is not None`, not truthiness: an explicit --caption-fps 0 must reach
         # the recognizer, which rejects it with a reason, rather than be read
         # as "unset" and silently sample at --fps.
@@ -201,6 +245,7 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         ocr_lang=args.ocr_lang,
         faces_bank=args.faces,
         fps=args.fps,
+        read_cache=getattr(args, "ocr_cache", None),
         min_confidence=args.min_confidence,
     )
 
@@ -265,7 +310,26 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
     # Keep the pre-fusion cues: they are what makes an empty source row
     # explainable (ineligible / floored / weak) instead of just empty.
-    cues, annotations = diagnose_mod.run_pipeline(pipeline, args.media)
+    #
+    # `--cues` replays a recorded cascade. The expensive pass then runs once
+    # and every later question about fusion, the confidence floor or scoring
+    # is answered in seconds (#741).
+    try:
+        cues, annotations = diagnose_mod.run_pipeline(
+            pipeline, args.media, cues_in=args.cues, cues_out=args.dump_cues,
+        )
+    except (diagnose_mod.CueCacheMismatch, diagnose_mod.IncompleteCascade,
+            ReadCacheMismatch) as exc:
+        # A stale cache is a configuration error, not a crash, and it must be
+        # loud: replaying one silently would report a scorecard for a
+        # configuration that never ran. Same for recording one from a cascade
+        # that did not fully run.
+        raise SystemExit(str(exc)) from exc
+    if args.cues:
+        print(f"replayed {len(cues)} cue(s) from {args.cues}: the cascade did not run",
+              file=sys.stderr)
+    if args.dump_cues:
+        print(f"wrote {len(cues)} cue(s) to {args.dump_cues}", file=sys.stderr)
     for msg in pipeline.skipped:
         print(f"skipped: {msg}", file=sys.stderr)
 

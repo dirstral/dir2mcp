@@ -15,6 +15,7 @@ import pytest
 
 from dirstral_annotator.eval import ground_truth
 from dirstral_annotator.eval.align import Anchor, estimate
+from dirstral_annotator.eval import diagnose as diagnose_mod
 from dirstral_annotator.eval.diagnose import diagnose, run_pipeline, scored_windows
 from dirstral_annotator.eval.report import render
 from dirstral_annotator.eval.score import score
@@ -277,3 +278,336 @@ def test_eval_cli_emits_diagnostics(tmp_path, events):
     text = report.read_text()
     assert "## Source diagnostics" in text
     assert "playbyplay" in text
+
+
+# --- recorded cues ---------------------------------------------------------
+#
+# The layer above the recorded OCR reads (see test_overlay.py): a cue file
+# skips the cascade entirely, so fusion, the confidence floor and scoring are
+# all answerable in seconds. It cannot answer a change INSIDE a recognizer,
+# and the settings check is what stops it from pretending otherwise.
+
+def _game(events):
+    return GameConfig.parse({
+        "feed": str(FIXTURE), "anchors": [f"{events[0].epoch_s}=60.0"],
+    })
+
+
+def test_a_cue_survives_the_round_trip(roster):
+    cue = Cue(source="scorebug", start_s=1.5, end_s=4.25, event="at_bat",
+              entity_ids=(BATTER, PITCHER), confidence=0.61,
+              text="Freddie Freeman at bat", attributes={"count": "1-2"})
+    _meta, back = diagnose_mod.cues_from_json(diagnose_mod.cues_to_json([cue], {}))
+    # Equality, not field-by-field: `Cue` is frozen and compares by value, so
+    # a list where a tuple belongs would read back as a different cue.
+    assert back == [cue]
+
+
+def test_replayed_cues_score_the_same(tmp_path, roster, events):
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)})
+    cache = tmp_path / "cues.json"
+    cues, annotations = run_pipeline(pipeline, media, cues_out=cache)
+    assert cues and annotations
+
+    replayed, replayed_annotations = run_pipeline(pipeline, media, cues_in=cache)
+    assert replayed == cues
+    assert replayed_annotations == annotations
+
+
+def test_a_cue_file_from_another_configuration_is_refused(tmp_path, roster, events):
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster, games={media.name: _game(events)}),
+                 media, cues_out=cache)
+
+    # Same cues, different cascade: the pitch-count rule runs inside the
+    # recognizer, so replaying under it would report a number for a
+    # configuration that never ran.
+    counting = Pipeline(roster=roster, games={media.name: _game(events)},
+                        scorebug=True, scorebug_pitch_counts=True)
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(counting, media, cues_in=cache)
+    assert "scorebug" in str(excinfo.value)
+
+
+def test_min_confidence_may_change_under_a_replay(tmp_path, roster, events):
+    """It is a fusion floor, not a cascade input, so a replay can sweep it."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)})
+    cues, _ = run_pipeline(pipeline, media, cues_out=cache)
+
+    floored = Pipeline(roster=roster, games={media.name: _game(events)},
+                       min_confidence=0.99)
+    replayed, annotations = run_pipeline(floored, media, cues_in=cache)
+    assert replayed == cues
+    assert len(annotations) < len(cues)
+
+
+def test_a_vision_only_run_replays_a_recorded_feed_run(tmp_path, roster, events):
+    """One expensive pass, both numbers: vision-only is the same cues minus one
+    source, so the caller subtracts it rather than reading the video again."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    with_feed, _ = run_pipeline(
+        Pipeline(roster=roster, games={media.name: _game(events)}),
+        media, cues_out=cache,
+    )
+    assert any(c.source == "playbyplay" for c in with_feed)
+
+    vision_only, _ = run_pipeline(Pipeline(roster=roster), media, cues_in=cache)
+    assert not any(c.source == "playbyplay" for c in vision_only)
+    assert vision_only == [c for c in with_feed if c.source != "playbyplay"]
+
+
+def test_a_vision_only_cue_file_cannot_serve_a_feed_run(tmp_path, roster, events):
+    """The other direction: those cues are simply not in the file."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster), media, cues_out=cache)
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(Pipeline(roster=roster, games={media.name: _game(events)}),
+                     media, cues_in=cache)
+    assert "playbyplay" in str(excinfo.value)
+
+
+def test_a_cue_file_for_another_video_is_refused(tmp_path, roster, events):
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    other = tmp_path / "game8.mp4"
+    other.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster), media, cues_out=cache)
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(Pipeline(roster=roster), other, cues_in=cache)
+    assert "media" in str(excinfo.value)
+
+
+def test_eval_cli_dumps_and_replays_cues(tmp_path, events):
+    from dirstral_annotator.cli import main
+
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    roster_path = tmp_path / "cli-roster.json"
+    roster_path.write_text(json.dumps([
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+    ]))
+    cues = tmp_path / "cues.json"
+    base = ["eval", str(media), "--roster", str(roster_path), "--feed", str(FIXTURE),
+            "--anchor", f"{events[0].epoch_s}=60.0"]
+
+    dumped = tmp_path / "dumped.md"
+    assert main([*base, "--report", str(dumped), "--dump-cues", str(cues)]) == 0
+    assert json.loads(cues.read_text())["cues"]
+
+    replayed = tmp_path / "replayed.md"
+    assert main([*base, "--report", str(replayed), "--cues", str(cues)]) == 0
+    assert replayed.read_text() == dumped.read_text()
+
+
+def test_eval_cli_reports_a_stale_cue_file_without_a_traceback(tmp_path, events):
+    """A stale cache must read as a configuration error, not a crash."""
+    from dirstral_annotator.cli import main
+
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    roster_path = tmp_path / "cli-roster.json"
+    roster_path.write_text(json.dumps([
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+    ]))
+    cues = tmp_path / "cues.json"
+    base = ["eval", str(media), "--roster", str(roster_path), "--feed", str(FIXTURE),
+            "--anchor", f"{events[0].epoch_s}=60.0"]
+    assert main([*base, "--report", str(tmp_path / "r.md"), "--dump-cues", str(cues)]) == 0
+
+    payload = json.loads(cues.read_text())
+    payload["cascade"]["fps"] = 99.0
+    cues.write_text(json.dumps(payload))
+
+    with pytest.raises(SystemExit) as excinfo:
+        main([*base, "--report", str(tmp_path / "r2.md"), "--cues", str(cues)])
+    assert "fps" in str(excinfo.value)
+    assert "re-run without --cues" in str(excinfo.value)
+
+
+def test_a_vision_only_run_replays_a_cue_file_recorded_with_the_feed(tmp_path, events):
+    """The allowed direction, end to end: one pass answers both questions."""
+    from dirstral_annotator.cli import main
+
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    roster_path = tmp_path / "cli-roster.json"
+    roster_path.write_text(json.dumps([
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+    ]))
+    cues = tmp_path / "cues.json"
+    base = ["eval", str(media), "--roster", str(roster_path), "--feed", str(FIXTURE),
+            "--anchor", f"{events[0].epoch_s}=60.0"]
+    assert main([*base, "--report", str(tmp_path / "r.md"), "--dump-cues", str(cues)]) == 0
+
+    report = tmp_path / "vision-only.md"
+    # Non-zero: with the feed subtracted this fixture pipeline recognizes
+    # nothing, which is the gate failing, not the replay.
+    assert main([*base, "--report", str(report), "--cues", str(cues),
+                 "--vision-only"]) == 1
+    assert "mostly a measurement of wall-clock alignment" in report.read_text()
+
+
+def test_a_cue_file_recorded_against_another_roster_is_refused(tmp_path, roster, events):
+    """Cues are already resolved, so a changed roster names the wrong people."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    run_pipeline(Pipeline(roster=roster, games={media.name: _game(events)}),
+                 media, cues_out=cache)
+
+    renamed = tmp_path / "renamed.json"
+    renamed.write_text(json.dumps([
+        {"id": PITCHER, "name": "Someone Else", "number": "62", "mlbam_id": 657277},
+        {"id": BATTER, "name": "Freddie Freeman", "number": "5", "mlbam_id": 518692},
+    ]))
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(
+            Pipeline(roster=Roster.load(renamed), games={media.name: _game(events)}),
+            media, cues_in=cache,
+        )
+    assert "roster" in str(excinfo.value)
+
+
+def test_the_caption_backend_settings_are_fingerprinted(tmp_path, roster):
+    """A loaded callable cannot be fingerprinted; what it was built from can.
+
+    Asserted on the fingerprint rather than through a run, because a pipeline
+    with a live `caption_fn` would try to read the stub video.
+    """
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    a = Pipeline(roster=roster, caption_config={"model_name": "qwen-a",
+                                                "caption_prompt": "describe"})
+    b = Pipeline(roster=roster, caption_config={"model_name": "qwen-b",
+                                                "caption_prompt": "describe"})
+    c = Pipeline(roster=roster, caption_config={"model_name": "qwen-a",
+                                                "caption_prompt": "who is on screen"})
+    fa = diagnose_mod.cascade_fingerprint(a, media)
+    assert diagnose_mod.cache_differences(fa, fa) == []
+    for other in (b, c):
+        diffs = diagnose_mod.cache_differences(
+            fa, diagnose_mod.cascade_fingerprint(other, media))
+        assert any("caption_config" in d for d in diffs), diffs
+
+
+def test_no_cue_file_is_written_for_an_incomplete_cascade(tmp_path, roster, events, monkeypatch):
+    """A skipped recognizer leaves its cues out, and the file would replay as
+    the full cascade."""
+    from dirstral_annotator.recognizers import scorebug as scorebug_mod
+    from dirstral_annotator.recognizers.base import RecognizerUnavailable
+
+    def unavailable(*a, **k):
+        raise RecognizerUnavailable("tesseract is not installed")
+
+    monkeypatch.setattr(scorebug_mod, "ScorebugRecognizer", unavailable)
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)}, scorebug=True)
+    with pytest.raises(diagnose_mod.IncompleteCascade) as excinfo:
+        run_pipeline(pipeline, media, cues_out=cache)
+    assert "tesseract" in str(excinfo.value)
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("payload", [
+    "not json at all",
+    '["a list where an object belongs"]',
+    '{"schema": true, "cascade": {}, "cues": []}',   # true == 1 in Python
+    '{"schema": 1, "cues": []}',                     # no cascade settings
+    '{"schema": 1, "cascade": {}}',                  # no cue list
+    '{"schema": 1, "cascade": {}, "cues": [{"source": "s"}]}',
+    '{"schema": 1, "cascade": {}, "cues": [{"source":"s","start_s":"x","end_s":1,'
+    '"event":"pitch","confidence":0.5}]}',
+])
+def test_a_malformed_cue_file_is_refused(tmp_path, payload):
+    """Every shape error is the one exception the CLI turns into a message."""
+    path = tmp_path / "cues.json"
+    path.write_text(payload)
+    with pytest.raises(diagnose_mod.CueCacheMismatch):
+        diagnose_mod.cues_from_json(path.read_text())
+
+
+def test_an_unreadable_cue_file_is_refused(tmp_path, roster):
+    """A missing or unopenable path is the same problem as a malformed one."""
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    missing = tmp_path / "nowhere" / "cues.json"
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        run_pipeline(Pipeline(roster=roster), media, cues_in=missing)
+    assert "cannot read" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("field,value,why", [
+    ("entity_ids", "player:webb-logan", "a bare string iterates into characters"),
+    ("entity_ids", [1, 2], "ids are strings"),
+    ("source", 7, "a number is not a source"),
+    ("event", None, "None is not an event"),
+    ("text", 3.5, "a number is not text"),
+    ("start_s", "12.0", "a string is not a timestamp"),
+    ("confidence", True, "bool is an int in Python; true is not a confidence"),
+    ("attributes", [["a", "b"]], "attributes are an object"),
+    ("attributes", {"count": 3}, "attribute values are strings"),
+])
+def test_a_cue_field_of_the_wrong_type_is_refused(field, value, why):
+    """Coercion looks harmless and is not.
+
+    `str()` over a JSON string yields its characters, so a stray
+    `"entity_ids": "player:webb-logan"` became a 17-element tuple of single
+    letters. Every one of those is a plausible-looking id that matches no
+    roster row, the cue fuses and scores, and the run reports a wrong
+    scorecard instead of refusing to read the file.
+    """
+    record = {"source": "scorebug", "start_s": 1.0, "end_s": 2.0,
+              "event": "pitch", "confidence": 0.5}
+    record[field] = value
+    payload = json.dumps({"schema": diagnose_mod.CUE_CACHE_SCHEMA,
+                          "cascade": {}, "cues": [record]})
+    with pytest.raises(diagnose_mod.CueCacheMismatch) as excinfo:
+        diagnose_mod.cues_from_json(payload)
+    assert field in str(excinfo.value), why
+
+
+def test_a_reordered_roster_changes_the_digest(tmp_path):
+    """`scorebug._name_index` is built in roster order and `match_name` keeps
+    the FIRST fuzzy candidate on a tie, so the same players in a different
+    order can resolve an OCR name to a different one of them."""
+    rows = [
+        {"id": PITCHER, "name": "Logan Webb", "number": "62", "mlbam_id": 657277},
+        {"id": BATTER, "name": "Freddie Freeman", "number": "5", "mlbam_id": 518692},
+    ]
+    a = tmp_path / "a.json"
+    a.write_text(json.dumps(rows))
+    b = tmp_path / "b.json"
+    b.write_text(json.dumps(list(reversed(rows))))
+    assert Roster.load(a).digest() != Roster.load(b).digest()
+
+
+def test_a_caption_backend_that_failed_to_load_blocks_a_cue_file(tmp_path, roster, events):
+    """The same degradation one layer up.
+
+    A backend loaded once at startup fails there, so the pipeline never sees
+    that recognizer: nothing is registered, nothing is skipped, and the
+    incomplete-cascade check passes on a cue file missing the caption cues.
+    """
+    media = tmp_path / "game7.mp4"
+    media.write_bytes(b"\x00")
+    cache = tmp_path / "cues.json"
+    pipeline = Pipeline(roster=roster, games={media.name: _game(events)},
+                        startup_skips=("caption: no CUDA device",))
+    with pytest.raises(diagnose_mod.IncompleteCascade) as excinfo:
+        run_pipeline(pipeline, media, cues_out=cache)
+    assert "no CUDA device" in str(excinfo.value)
+    assert not cache.exists()

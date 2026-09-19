@@ -16,6 +16,7 @@ Statcast identities so play-by-play ground truth maps onto roster ids.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 from pathlib import Path
 
@@ -69,6 +70,52 @@ class Roster:
 
     def get(self, player_id: str) -> Player | None:
         return self._by_id.get(player_id)
+
+    def digest(self) -> str:
+        """A stable digest of this entity vocabulary.
+
+        Every field that can move an entity id or a display name is in it, so
+        two rosters that would resolve any cue differently produce different
+        digests. Used by the eval caches to notice that a recording was made
+        against a different roster; see `eval.diagnose.cascade_fingerprint`
+        and `recognizers.overlay.OverlayReader`.
+
+        ORDER is part of it, and not as a convenience. `scorebug._name_index`
+        builds its index in roster order, and `match_name` keeps the FIRST
+        fuzzy candidate when two score equally, so reordering the same players
+        can resolve an OCR name to a different one of them. A digest that
+        sorted the rows would call those two rosters identical and let a cache
+        accept results the current roster would not have produced.
+
+        Truncated to 16 hex characters. This is a change detector, not a
+        security boundary: nobody is constructing a roster to collide with
+        another one, and a short digest keeps a cache header readable.
+
+        Changing THIS FUNCTION also changes every digest, so an existing
+        recording reads as made against a different roster even when it was
+        not. That is survivable precisely because the read log warns and does
+        not refuse: an operator is told, and the log stays usable. A cue file
+        does refuse, and rightly, since it is cheap to rebuild once the
+        cascade has been recorded.
+        """
+        # Aliases ARE sorted: they go into a dict keyed by name form, so their
+        # order among themselves reaches no decision.
+        rows = [
+            [p.id, p.name, p.number or "", *sorted(p.aliases)] for p in self.players
+        ]
+        mlbam = sorted((str(k), v) for k, v in self._mlbam.items())
+        payload = json.dumps([rows, mlbam], sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()[:16]
+
+    @property
+    def mlbam_ids(self) -> dict[int, str]:
+        """The statsapi id -> entity id map, as a copy.
+
+        The scorer resolves ground truth through it, so a cache that
+        fingerprints the roster has to see it. A copy, because a caller that
+        mutated the live map would silently re-attribute every scored pitch.
+        """
+        return dict(self._mlbam)
 
     def by_mlbam(self, mlbam_id: int) -> Player | None:
         pid = self._mlbam.get(mlbam_id)

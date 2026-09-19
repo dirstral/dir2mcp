@@ -630,11 +630,15 @@ def test_caption_prompt_reaches_the_backend_from_argv(monkeypatch):
 
     monkeypatch.setattr(
         "dirstral_annotator.recognizers.qwen_vl.load_backend", fake_load)
-    caption_fn, _ = cli._caption_backend(
+    caption_fn, _, config, skips = cli._caption_backend(
         _serve_args("--caption-prompt", "Describe the room."))
 
     assert caption_fn is not None
     assert seen["caption_prompt"] == "Describe the room."
+    # Returned as well as passed: the eval cue cache fingerprints what the
+    # backend was built from, because the loaded callable cannot be.
+    assert config["caption_prompt"] == "Describe the room."
+    assert skips == (), "a backend that loaded has nothing to report"
 
 
 def test_an_empty_caption_prefix_reaches_the_recognizer_from_argv():
