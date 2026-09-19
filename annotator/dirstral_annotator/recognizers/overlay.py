@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 from collections import deque
@@ -332,7 +333,7 @@ class _recording:
         )
         self._tmp = Path(tmp)
         self._fh = os.fdopen(fd, "w", encoding="utf-8")
-        self._write({"schema": READ_CACHE_SCHEMA, "reader": self.meta})
+        self._write(self.meta)
         return self
 
     def __call__(self, read: OverlayRead) -> None:
@@ -385,6 +386,10 @@ class OverlayReader:
         psm: int | None = OCR_PSM,
         name: str = "overlay",  # scratch dir and worker thread prefix
         read_cache: Path | None = None,  # dir to record/replay OCR in; see `read`
+        # Opaque token for whatever the caller's interpreter resolves against
+        # (a roster, a vocabulary). Recorded beside the reads and WARNED about
+        # on a mismatch; see `_replay` for why it warns and does not refuse.
+        interpreter_id: str | None = None,
     ):
         self.ocr = ocr if ocr is not None else default_ocr(psm=psm, lang=lang)
         # The language the default adapter was built with, resolved through
@@ -401,6 +406,7 @@ class OverlayReader:
         self.workers = default_workers() if workers is None else max(1, int(workers))
         self.name = name
         self.read_cache = Path(read_cache) if read_cache is not None else None
+        self.interpreter_id = interpreter_id
 
     # --- recorded reads -------------------------------------------------
     #
@@ -433,6 +439,15 @@ class OverlayReader:
             "regions": [list(r) for r in self.regions],
             "lang": self.lang,
             "psm": self.psm,
+        }
+
+    def _header(self, media_path: Path) -> dict:
+        """The whole first line of a log: what is checked, plus what is warned
+        about. They are separate keys because they carry different force."""
+        return {
+            "schema": READ_CACHE_SCHEMA,
+            "reader": self._fingerprint(media_path),
+            "interpreter": self.interpreter_id,
         }
 
     def _cache_path(self, media_path: Path) -> Path | None:
@@ -516,6 +531,25 @@ class OverlayReader:
                     + "\n  ".join(diffs)
                     + "\ndelete it to record again"
                 )
+            # A WARNING, not a refusal, and the asymmetry is the point. The
+            # reads themselves are text and interpretation re-runs, so most of
+            # a roster change reaches the cues correctly. What cannot re-run is
+            # the band search: a caller whose interpreter counts vocabulary
+            # matches as hits steered which bands were ever OCR'd, so a replay
+            # reads the bands the RECORDED vocabulary settled on. Refusing
+            # would throw away a usable log; saying nothing produced a wrong
+            # number that looked right (a 26-name roster replayed under a
+            # 52-name one, dir2mcp#741).
+            recorded_interp = meta.get("interpreter")
+            if recorded_interp != self.interpreter_id:
+                print(
+                    f"warning: {cache} was recorded against interpreter "
+                    f"{recorded_interp!r}, this run uses {self.interpreter_id!r}. "
+                    f"Interpretation re-runs, but the band search does not: these "
+                    f"are the bands the recorded one settled on. Re-record for a "
+                    f"clean measurement.",
+                    file=sys.stderr,
+                )
             for n, line in enumerate(fh, start=2):  # line 1 is the header
                 if not line.strip():
                     continue
@@ -591,7 +625,7 @@ class OverlayReader:
         with (
             tempfile.TemporaryDirectory(prefix=f"dirstral-{self.name}-") as tmp,
             _reader(self.ocr, Path(tmp), self.workers, self.name) as pool,
-            _recording(cache, self._fingerprint(media_path)) as record,
+            _recording(cache, self._header(media_path)) as record,
         ):
             frames = iter_frames(media_path, fps=self.fps)
             for i, timestamp, frame in _with_lookahead(frames, search, pool):

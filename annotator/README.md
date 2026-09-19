@@ -408,11 +408,12 @@ flag) to record again. What each one checks:
 
 * a read log checks the reader: the media (name, size and mtime, not a
   content digest), the band, the frame rate, the OCR language and page mode.
-  It carries no roster, because interpretation re-runs on a replay. One
-  qualifier: the scorebug counts a roster match as a hit, and the hit count
-  steers the band search and the adaptive fallback, so a replay reads the
-  bands the RECORDED roster settled on rather than the ones a fresh pass
-  would. Useful, and not the same thing.
+  It also RECORDS the roster, and warns rather than refusing when a replay
+  uses a different one. Interpretation re-runs, so most of a roster change
+  reaches the cues; the band search does not re-run, because the scorebug
+  counts a roster match as a hit and the hit count is what steers it. So a
+  replay reads the bands the RECORDED roster settled on. Useful, and not the
+  same thing as a fresh pass. Re-record before quoting a number.
 * a cue file checks the whole cascade: the media, a digest of the roster,
   every recognizer flag, and what the caption backend was built from. Cues
   are already resolved to entities and display names, so a changed roster

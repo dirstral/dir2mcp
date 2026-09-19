@@ -66,29 +66,22 @@ class IncompleteCascade(Exception):
 
 
 def roster_digest(roster) -> str:
-    """A stable digest of the entity vocabulary a run resolved against.
+    """The entity vocabulary a run resolved against, as one stable token.
 
     Cues are ALREADY resolved: they carry entity ids and text built from a
     player's display name. So a cue file recorded against one roster replayed
     against another names the wrong people, and the scorer resolves ground
-    truth through `mlbam_id`, which the roster also owns. Every field that can
-    move an id or a name is therefore in the digest.
+    truth through `mlbam_id`, which the roster also owns.
 
-    The OCR read log needs no equivalent, though not as cleanly. It records
-    text and re-runs interpretation on replay, so a changed roster reaches the
-    cues. What it cannot re-run is the band search: `ScorebugRecognizer`
-    counts a roster match as a hit, and the hit count is what steers
-    `_RegionSearch` and `_AdaptiveFallback`. A replay therefore reads the
-    bands the RECORDED roster settled on. That is close enough to be useful
-    and not the same as a fresh pass, which is why this digest guards the cue
-    file and `OverlayReader._replay` states the limit rather than hiding it.
+    The OCR read log carries the same token for a different purpose. It holds
+    text and re-runs interpretation on replay, so a changed roster mostly
+    reaches the cues correctly. What it cannot re-run is the band search:
+    `ScorebugRecognizer` counts a roster match as a hit, and the hit count is
+    what steers `_RegionSearch` and `_AdaptiveFallback`. A replay therefore
+    reads the bands the RECORDED roster settled on, so the log WARNS rather
+    than refusing. See `OverlayReader._replay`.
     """
-    rows = sorted(
-        [p.id, p.name, p.number or "", *sorted(p.aliases)] for p in roster.players
-    )
-    mlbam = sorted((str(k), v) for k, v in roster.mlbam_ids.items())
-    payload = json.dumps([rows, mlbam], sort_keys=True).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
+    return roster.digest()
 
 
 def cascade_fingerprint(pipeline: "Pipeline", media_path: Path) -> dict:

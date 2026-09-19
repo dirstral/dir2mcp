@@ -1002,3 +1002,39 @@ def test_a_boolean_schema_does_not_read_as_schema_one(bands, tmp_path):
     with pytest.raises(overlay.ReadCacheMismatch) as excinfo:
         list(reader.read_text(media))
     assert "schema" in str(excinfo.value)
+
+
+def test_a_replay_under_another_interpreter_warns(bands, tmp_path, monkeypatch, capsys):
+    """The failure that produced a wrong number that looked right.
+
+    A log recorded while one vocabulary steered the band search, replayed
+    while a different one is in force. Interpretation re-runs, so most of the
+    change reaches the cues; the bands do not, so the reads are the ones the
+    RECORDED vocabulary settled on. Refusing would throw away a usable log,
+    and saying nothing is what cost a measurement (dir2mcp#741).
+    """
+    cache = tmp_path / "logs"
+    media = tmp_path / MEDIA
+    media.write_bytes(b"one")
+    bands({BADGE: "GAME 1"}, frames=3)
+    assert list(_reader(cache, interpreter_id="roster-26").read_text(media))
+
+    monkeypatch.setattr(overlay, "iter_frames", _refuse_frames)
+    reads = list(_reader(cache, interpreter_id="roster-52").read_text(media))
+    assert len(reads) == 3, "a warning, not a refusal: the log is still usable"
+    err = capsys.readouterr().err
+    assert "roster-26" in err and "roster-52" in err
+    assert "band search" in err
+
+
+def test_a_replay_under_the_same_interpreter_is_quiet(bands, tmp_path, monkeypatch, capsys):
+    cache = tmp_path / "logs"
+    media = tmp_path / MEDIA
+    media.write_bytes(b"one")
+    bands({BADGE: "GAME 1"}, frames=3)
+    assert list(_reader(cache, interpreter_id="roster-52").read_text(media))
+
+    monkeypatch.setattr(overlay, "iter_frames", _refuse_frames)
+    capsys.readouterr()
+    assert len(list(_reader(cache, interpreter_id="roster-52").read_text(media))) == 3
+    assert "warning" not in capsys.readouterr().err

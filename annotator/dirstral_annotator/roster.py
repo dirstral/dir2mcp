@@ -16,6 +16,7 @@ Statcast identities so play-by-play ground truth maps onto roster ids.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 from pathlib import Path
 
@@ -69,6 +70,26 @@ class Roster:
 
     def get(self, player_id: str) -> Player | None:
         return self._by_id.get(player_id)
+
+    def digest(self) -> str:
+        """A stable digest of this entity vocabulary.
+
+        Every field that can move an entity id or a display name is in it, so
+        two rosters that would resolve any cue differently produce different
+        digests. Used by the eval caches to notice that a recording was made
+        against a different roster; see `eval.diagnose.cascade_fingerprint`
+        and `recognizers.overlay.OverlayReader`.
+
+        Truncated to 16 hex characters. This is a change detector, not a
+        security boundary: nobody is constructing a roster to collide with
+        another one, and a short digest keeps a cache header readable.
+        """
+        rows = sorted(
+            [p.id, p.name, p.number or "", *sorted(p.aliases)] for p in self.players
+        )
+        mlbam = sorted((str(k), v) for k, v in self._mlbam.items())
+        payload = json.dumps([rows, mlbam], sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()[:16]
 
     @property
     def mlbam_ids(self) -> dict[int, str]:

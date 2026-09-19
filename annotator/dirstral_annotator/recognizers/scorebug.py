@@ -335,6 +335,10 @@ class ScorebugRecognizer:
             psm=OCR_PSM,
             name=self.name,
             read_cache=read_cache,
+            # `_interpret` counts a roster match as a hit, and the hit count
+            # steers the band search, so the roster is part of what produced a
+            # recording even though the reader never sees it.
+            interpreter_id=roster.digest(),
         )
         # Mirrored so the recognizer still answers for its own configuration.
         # The reader owns them; these are reads of what it settled on.
