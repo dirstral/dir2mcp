@@ -462,6 +462,64 @@ def test_the_flag_is_inert_without_pitch_cues(roster, fake_frames):
     assert [c for c in cues if c.event == "pitch"] == []
 
 
+# --- a count step is an interval, not an instant -----------------------------
+
+def test_a_count_cue_spans_from_the_old_count_to_the_new(roster, fake_frames):
+    """The pitch happened between the last sighting of the old count and the
+    first of the new one, and the bug is off screen for most of that.
+
+    A cue placed at the moment of NOTICING lands after the pitch by however
+    long the broadcast spent on the replay. On the pilot that was 21 of 25
+    false positives (#741): a real pitch 8 to 15 seconds before a cue the
+    scorer could no longer match.
+    """
+    # At fps 0.5 a frame is 2s. The bug shows 87 through 4s, then goes away for
+    # three frames, and comes back at 10s already reading 88.
+    ocr = fake_frames(["RAY P: 87", "RAY P: 87", "RAY P: 87",
+                       "", "",
+                       "RAY P: 88", "RAY P: 88"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE,
+                              count_pitch_cues=True).recognize(MEDIA)
+    pitches = [c for c in cues if c.event == "pitch"]
+    assert len(pitches) == 1
+    cue = pitches[0]
+    # Last 87 at 4.0s, first 88 at 10.0s: the pitch is somewhere in between.
+    assert cue.start_s == pytest.approx(4.0)
+    assert cue.end_s == pytest.approx(10.0 + scorebug.PITCH_CUE_PAD_S)
+    assert cue.start_s <= 7.0 <= cue.end_s, "the true pitch time must be inside"
+
+
+def test_a_long_absence_is_trimmed_rather_than_spanned(roster, fake_frames):
+    """A cue wide enough to hold a whole half-inning is not a citation.
+
+    It also costs recall rather than buying it: the scorer gives each
+    annotation to at most one event, so one very wide cue is consumed by the
+    earliest pitch it covers and every later pitch inside it goes unmatched.
+    """
+    ocr = fake_frames(["RAY P: 87", "RAY P: 87"] + [""] * 40
+                      + ["RAY P: 88", "RAY P: 88"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE,
+                              count_pitch_cues=True).recognize(MEDIA)
+    cue = next(c for c in cues if c.event == "pitch")
+    span = cue.end_s - cue.start_s
+    assert span <= scorebug.COUNT_PITCH_MAX_SPAN_S + scorebug.PITCH_CUE_PAD_S
+    # Trimmed at the recent end: play resumes, the bug returns, the count is up.
+    # 2 readings + 40 blank frames, so the first 88 is frame 42, at 84.0s.
+    assert cue.end_s == pytest.approx(84.0 + scorebug.PITCH_CUE_PAD_S)
+    assert cue.start_s == pytest.approx(84.0 - scorebug.COUNT_PITCH_MAX_SPAN_S)
+
+
+def test_a_count_seen_every_frame_keeps_a_tight_cue(roster, fake_frames):
+    """The interval is the uncertainty, so no uncertainty means no widening."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 87", "RAY P: 88", "RAY P: 88"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE,
+                              count_pitch_cues=True).recognize(MEDIA)
+    cue = next(c for c in cues if c.event == "pitch")
+    # Last 87 at 2.0s, first 88 at 4.0s: one sampling interval apart.
+    assert cue.start_s == pytest.approx(2.0)
+    assert cue.end_s == pytest.approx(4.0 + scorebug.PITCH_CUE_PAD_S)
+
+
 def test_the_reader_records_which_roster_steered_it(roster, fake_frames, tmp_path):
     """`_interpret` counts a roster match as a hit, and the hit count steers
     the band search, so the roster is part of what produced a recording even
