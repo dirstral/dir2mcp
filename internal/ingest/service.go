@@ -159,6 +159,13 @@ type Service struct {
 	// identities (languageRouteIdentities), the form that joins the §8.6.7
 	// derivation identity and is recorded as language_routes.
 	languageRouteIDs map[string]string
+	// windowGate is the §8.6.6 gate run PER decode window under window scope
+	// (SPEC §8.2.2, #1030): repetition, gibberish and script mismatch against the
+	// window's resolved language. It deliberately omits the empty and density
+	// detectors: a silent window is "nothing said", not degenerate output, and a
+	// window is a fraction of the recording the density floor was tuned for. Nil
+	// when quality gates are off, in which case no window is refused for quality.
+	windowGate *quality.Gate
 
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
@@ -1040,6 +1047,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	// a follow-up); when off, the field stays nil and screening is skipped.
 	if cfg.QualityGatesEnabled {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
+		svc.windowGate = quality.New(windowGateConfig())
 	}
 	svc.resolveTranscriptIdentityFields()
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
@@ -1832,6 +1840,16 @@ func (s *Service) openScanCache() *scancache.SQLiteCache {
 // disables screening so generated transcript/OCR text is chunked and embedded
 // without quarantine. Mirrors SetTranscriber for tests.
 func (s *Service) SetQualityGate(gate *quality.Gate) {
+	// The per-window gate (§8.2.2) follows the document gate: nil turns both
+	// off, and any installed gate turns the default per-window detector set on
+	// (windowGateConfig), so a test that installs a gate sees it act at both
+	// granularities. The custom gate's own thresholds apply to the document
+	// only: the window set is a fixed subset tuned for a window's length.
+	if gate == nil {
+		s.windowGate = nil
+	} else {
+		s.windowGate = quality.New(windowGateConfig())
+	}
 	s.qualityGate = gate
 }
 
@@ -5760,32 +5778,44 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 // Recording that as ordinary silence would assert the recording had nothing to
 // say. An empty transcript cannot carry a secret, so the floor is the only
 // judgement left to make here.
-func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (string, error) {
+func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (skipReason string, gateRejected bool, err error) {
 	// §8.2.2 terminal status: no window produced text and at least one was
 	// refused. A language refusal is an operator decision that recurs on every
 	// run, so the item is a declared skip with that reason, and any earlier
-	// run's transcript is retired first exactly as the §8.6.13 floor does. A
-	// decode whose every refusal is quality_gate is left to the §8.6.6 path
-	// (TRANSCRIBE_FAILED) once per-window gating lands (#1030); this build never
-	// emits that reason.
-	if reason := allWindowsRefusedReason(coverage); reason == model.RefusedLanguageUncovered {
+	// run's transcript is retired first exactly as the §8.6.13 floor does. When
+	// every refusal is quality_gate the decoder produced only degenerate output:
+	// that is the §8.6.6 outcome, TRANSCRIBE_FAILED, recorded exactly as a
+	// failed document-level gate is (deferred under a multi-track selection).
+	switch allWindowsRefusedReason(coverage) {
+	case model.RefusedLanguageUncovered:
 		s.logTrackDropped(doc, tc, fmt.Sprintf(
 			"every decode window was refused: the resolved language is outside the routed model's declared coverage (media.stt.on_uncovered_language=skip, SPEC §8.2.2; %d of %d windows refused)",
 			coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted))
 		if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
-			return "", fmt.Errorf("uncovered-language refusal for %s: %w", doc.RelPath, err)
+			return "", false, fmt.Errorf("uncovered-language refusal for %s: %w", doc.RelPath, err)
 		}
-		return model.SkipReasonLanguageUncovered, nil
+		return model.SkipReasonLanguageUncovered, false, nil
+	case model.RefusedQualityGate:
+		reason := quality.Reason(coverage.RefusedQualityReason)
+		if reason == "" {
+			reason = quality.Reason(model.RefusedQualityGate)
+		}
+		s.logTrackDropped(doc, tc, fmt.Sprintf(
+			"every decode window was refused by the per-window quality gate (first reason %s; SPEC §8.2.2, §8.6.6)", reason))
+		if !s.deferGateDocError {
+			s.recordQualityGateDocError(ctx, doc, qualityKindTranscript, reason)
+		}
+		return "", true, nil
 	}
-	refused, err := s.refusePartialTranscript(ctx, doc, tc, coverage)
-	if err != nil {
-		return "", err
+	refused, perr := s.refusePartialTranscript(ctx, doc, tc, coverage)
+	if perr != nil {
+		return "", false, perr
 	}
 	if refused {
-		return model.SkipReasonTranscriptPartial, nil
+		return model.SkipReasonTranscriptPartial, false, nil
 	}
 	s.warnPartialTranscript(doc, tc, coverage)
-	return "", nil
+	return "", false, nil
 }
 
 // refusedTranscriptRep reports whether a stored representation is one the
@@ -5840,11 +5870,11 @@ func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, 
 // branch. A refusal whose retirement failed is an error, not a skip: see
 // refusePartialTranscript.
 func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, string, error) {
-	skipReason, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
+	skipReason, gateRejected, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
 	if err != nil {
 		return false, false, "", err
 	}
-	return false, false, skipReason, nil
+	return false, gateRejected, skipReason, nil
 }
 
 func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
