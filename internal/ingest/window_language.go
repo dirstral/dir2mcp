@@ -150,6 +150,12 @@ type windowLanguageState struct {
 	conf   *float64
 	pinned bool
 	route  routedSTT
+	// decodedEnd is how far the decoded pieces so far reach, and last the
+	// coverage.languages entry that describes the latest decoded stretch. A
+	// refused window starts its refused range where that reach ends (see
+	// refuse), so decoded and refused ranges never overlap in the record.
+	decodedEnd int
+	last       *model.CoverageLanguage
 }
 
 // newWindowLanguageState seeds the state with the item-level resolution of
@@ -212,7 +218,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if !covered && s.onUncoveredLanguage == onUncoveredLanguageSkip {
 		s.getLogger().Printf("windowed %s: refusing window [%d,%d]ms of %s: language %q is outside %s's declared coverage %v (media.stt.on_uncovered_language=skip, SPEC §8.2.2)",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
-		out.refused = []model.RefusedRange{{StartMS: core.StartMS, EndMS: core.EndMS, Reason: model.RefusedLanguageUncovered}}
+		out.refused, out.languages = st.refuse(core, model.RefusedLanguageUncovered)
 		st.advance(lang, source, conf, cur)
 		return out
 	}
@@ -221,8 +227,45 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
 	}
 	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, covered)
+	st.recordDecoded(out.covered, out.languages)
 	st.advance(lang, source, conf, cur)
 	return out
+}
+
+// refuse records one window as refused over its core, minus the stretch the
+// preceding decoded window's overlap tail already covers. The merge keeps that
+// tail when the window after it is missing (MergeTranscriptWindows extends a
+// window's core to the next SURVIVING window), so the text over it is in the
+// transcript: it is decoded, not refused, and it carries the entry of the window
+// that decoded it, extended over the tail. The refused range begins where the
+// decoded audio ends, so coverage.ranges and coverage.refused stay disjoint and
+// decoded_ms counts nothing that was refused.
+func (st *windowLanguageState) refuse(core CoverageRange, reason string) ([]model.RefusedRange, []model.CoverageLanguage) {
+	start := core.StartMS
+	var entries []model.CoverageLanguage
+	if st.decodedEnd > start && st.decodedEnd < core.EndMS {
+		if st.last != nil {
+			tail := *st.last
+			tail.StartMS, tail.EndMS = start, st.decodedEnd
+			entries = append(entries, tail)
+		}
+		start = st.decodedEnd
+	}
+	return []model.RefusedRange{{StartMS: start, EndMS: core.EndMS, Reason: reason}}, entries
+}
+
+// recordDecoded notes how far a decoded window's pieces reach and the entry that
+// describes its last piece, for refuse to extend over a retained overlap tail.
+func (st *windowLanguageState) recordDecoded(ranges []CoverageRange, entries []model.CoverageLanguage) {
+	for _, r := range ranges {
+		if r.EndMS > st.decodedEnd {
+			st.decodedEnd = r.EndMS
+		}
+	}
+	if len(entries) > 0 {
+		last := entries[len(entries)-1]
+		st.last = &last
+	}
 }
 
 // resolve identifies the window's language under the §8.2.2 resolution and
@@ -656,9 +699,11 @@ func allWindowsRefusedReason(coverage *TranscriptCoverage) string {
 
 // languageScopeIdentity renders the §8.2.2 component of the transcript
 // derivation identity (§8.6.7): empty under item scope, so every existing
-// corpus's identity is byte-stable, and "scope=window;routes=<lang>=<profile>,..."
-// with the routes sorted under window scope. Both the scope and the route table
-// change which model decodes which audio, and therefore the text.
+// corpus's identity is byte-stable, and
+// "scope=window;routes=<lang>=<profile>|<model>,..." with the routes sorted
+// under window scope. routes maps a language to its route identity as
+// languageRouteIdentities renders it. Both the scope and the route table change
+// which model decodes which audio, and therefore the text.
 func languageScopeIdentity(scope string, routes map[string]string) string {
 	if normalizeLanguageScope(scope) != languageScopeWindow {
 		return ""
@@ -678,7 +723,35 @@ func languageScopeIdentity(scope string, routes map[string]string) string {
 	return "scope=window;routes=" + strings.Join(parts, ",")
 }
 
-// renderLanguageRoutes is the canonical string form of media.stt.language_providers
+// languageRouteIdentities resolves media.stt.language_providers to the identity
+// of each route: the profile's name and the STT model it binds, joined as
+// "<profile>|<model>". Naming only the profile would let a profile keep its
+// name while its model changed and every transcript decoded through that route
+// pass the §8.6.7 stale check, because the base STT identity sees only the
+// profile the configured language selects. A route that does not resolve keeps
+// its configured name, so the component still changes when the table does. STT
+// profiles carry no model version today; when they do it joins here.
+func (s *Service) languageRouteIdentities() map[string]string {
+	if len(s.cfg.MediaSTTLanguageProviders) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(s.cfg.MediaSTTLanguageProviders))
+	for lang, name := range s.cfg.MediaSTTLanguageProviders {
+		id := strings.TrimSpace(name)
+		if prof, err := s.cfg.Providers().ResolveExplicit(provider.CapSTT, name, true); err == nil {
+			id = routeIdentity(prof)
+		}
+		out[lang] = id
+	}
+	return out
+}
+
+// routeIdentity is one route's contribution to the derivation identity.
+func routeIdentity(prof provider.Profile) string {
+	return strings.TrimSpace(prof.Name) + "|" + strings.TrimSpace(prof.STTModel)
+}
+
+// renderLanguageRoutes is the canonical string form of the resolved route table
 // recorded on a window-scoped transcript's meta_json (language_routes), so the
 // recorded identity can be rebuilt with languageScopeIdentity on the next run.
 func renderLanguageRoutes(routes map[string]string) string {
@@ -741,7 +814,7 @@ func (s *Service) applyWindowLanguageMeta(meta *transcriptMeta, coverage *Transc
 		return
 	}
 	meta.LanguageScope = languageScopeWindow
-	meta.LanguageRoutes = renderLanguageRoutes(s.cfg.MediaSTTLanguageProviders)
+	meta.LanguageRoutes = renderLanguageRoutes(s.languageRouteIDs)
 	lang, conf, ok := windowLanguageForMeta(coverage, s.transcriptLanguage)
 	if ok {
 		meta.Language = lang

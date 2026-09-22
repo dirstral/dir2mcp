@@ -563,22 +563,72 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 
 // identifiedLanguage normalizes the server's reported language to a lower-case
 // BCP-47 primary subtag (SPEC §8.2.2). Whisper servers report either an ISO
-// 639-1 code ("ru") or, on some builds, an English name ("russian"); only the
-// two-letter form is a tag, so a name is passed through lower-cased and the
-// caller's primary-subtag normalization leaves it as an opaque value that
-// matches no route. Empty when the server reported nothing.
+// 639-1 code ("ru": faster-whisper, whisper.cpp) or an English name ("russian":
+// the OpenAI API and builds that echo Whisper's language table). A name is
+// mapped through whisperLanguageCodes; a two- or three-letter code passes as
+// the tag it is. Anything else is reported as unknown (empty), so the caller
+// falls back to text detection instead of treating an opaque word as a language
+// that matches no route and is outside every declared coverage.
 func (r transcribeResponse) identifiedLanguage() string {
 	lang := strings.ToLower(strings.TrimSpace(r.Language))
 	if i := strings.IndexAny(lang, "-_"); i > 0 {
 		lang = lang[:i]
 	}
-	return lang
+	if lang == "" {
+		return ""
+	}
+	if code, ok := whisperLanguageCodes[lang]; ok {
+		return code
+	}
+	if isLanguageCode(lang) {
+		return lang
+	}
+	return ""
+}
+
+// isLanguageCode reports whether v has the shape of an ISO 639 code: two or
+// three ASCII letters.
+func isLanguageCode(v string) bool {
+	if len(v) < 2 || len(v) > 3 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 'a' || v[i] > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+// whisperLanguageCodes maps the English language names Whisper's own language
+// table uses (and the aliases it accepts) to their ISO 639-1 codes, the form a
+// server that reports names instead of codes returns.
+var whisperLanguageCodes = map[string]string{
+	"english": "en", "chinese": "zh", "mandarin": "zh", "german": "de", "spanish": "es", "castilian": "es",
+	"russian": "ru", "korean": "ko", "french": "fr", "japanese": "ja", "portuguese": "pt", "turkish": "tr",
+	"polish": "pl", "catalan": "ca", "valencian": "ca", "dutch": "nl", "flemish": "nl", "arabic": "ar",
+	"swedish": "sv", "italian": "it", "indonesian": "id", "hindi": "hi", "finnish": "fi", "vietnamese": "vi",
+	"hebrew": "he", "ukrainian": "uk", "greek": "el", "malay": "ms", "czech": "cs", "romanian": "ro",
+	"moldavian": "ro", "moldovan": "ro", "danish": "da", "hungarian": "hu", "tamil": "ta", "norwegian": "no",
+	"thai": "th", "urdu": "ur", "croatian": "hr", "bulgarian": "bg", "lithuanian": "lt", "latin": "la",
+	"maori": "mi", "malayalam": "ml", "welsh": "cy", "slovak": "sk", "telugu": "te", "persian": "fa",
+	"latvian": "lv", "bengali": "bn", "serbian": "sr", "azerbaijani": "az", "slovenian": "sl", "kannada": "kn",
+	"estonian": "et", "macedonian": "mk", "breton": "br", "basque": "eu", "icelandic": "is", "armenian": "hy",
+	"nepali": "ne", "mongolian": "mn", "bosnian": "bs", "kazakh": "kk", "albanian": "sq", "swahili": "sw",
+	"galician": "gl", "marathi": "mr", "punjabi": "pa", "panjabi": "pa", "sinhala": "si", "sinhalese": "si",
+	"khmer": "km", "shona": "sn", "yoruba": "yo", "somali": "so", "afrikaans": "af", "occitan": "oc",
+	"georgian": "ka", "belarusian": "be", "tajik": "tg", "sindhi": "sd", "gujarati": "gu", "amharic": "am",
+	"yiddish": "yi", "lao": "lo", "uzbek": "uz", "faroese": "fo", "haitian creole": "ht", "haitian": "ht",
+	"pashto": "ps", "pushto": "ps", "turkmen": "tk", "nynorsk": "nn", "maltese": "mt", "sanskrit": "sa",
+	"luxembourgish": "lb", "letzeburgesch": "lb", "myanmar": "my", "burmese": "my", "tibetan": "bo",
+	"tagalog": "tl", "malagasy": "mg", "assamese": "as", "tatar": "tt", "hawaiian": "haw", "lingala": "ln",
+	"hausa": "ha", "bashkir": "ba", "javanese": "jw", "sundanese": "su", "cantonese": "yue",
 }
 
 // languageConfidence clamps the reported language probability into [0,1]; a
 // server that reports none yields 0, which the caller reads as unknown.
 func (r transcribeResponse) languageConfidence() float64 {
-	if r.LanguageProbability <= 0 || r.Language == "" {
+	if r.LanguageProbability <= 0 || r.identifiedLanguage() == "" {
 		return 0
 	}
 	if r.LanguageProbability > 1 {

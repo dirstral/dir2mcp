@@ -606,9 +606,12 @@ type windowStats struct {
 // st is the §8.2.2 per-window language state, nil under item scope. With a
 // state, each window is decoded by decodeWindowScoped instead: identified,
 // routed, floor-checked and recorded. A window REFUSED there is neither decoded
-// nor failed: it is counted in attempted, listed in refused, and never turns the
-// "all windows failed" verdict below into an error, because a refusal is a
-// decision, not a fault.
+// nor failed: it is counted in attempted and listed in refused. When nothing
+// decoded and nothing failed, the refusals are the whole story and the caller
+// judges them (§8.2.2 terminal status) instead of retrying a decision. When a
+// refusal sits next to a real failure the failure wins, exactly as it does with
+// no refusals: it is the retryable one, and a language skip must never hide a
+// window the provider failed on.
 func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, plan windowSchedule, st *windowLanguageState) ([]TranscriptWindow, windowStats, error) {
 	var windows []TranscriptWindow
 	var firstDecodeErr, firstCutErr error
@@ -635,26 +638,36 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		stats.ranges = append(stats.ranges, wd.covered...)
 		windows = append(windows, wd.decoded...)
 	}
-	if stats.attempted > 0 && stats.decoded == 0 && len(stats.refused) > 0 {
-		// Every window was refused, or refused and failed in some mix. Nothing
-		// decoded, but the refusals are the caller's to judge (§8.2.2 terminal
-		// status), not a provider fault to retry: return the empty result with its
-		// record rather than an error.
-		return nil, stats, nil
-	}
-	if stats.attempted > 0 && stats.decoded == 0 {
-		// Prefer the provider's failure over a cut failure: it is the one whose
-		// retryable/terminal classification decides whether the document stays
-		// pending, and it must survive the aggregation rather than be flattened into
-		// an opaque string. With no decode failure recorded, nothing could be cut,
-		// and the windowExtractError tells the caller to send one request instead.
-		cause := firstDecodeErr
-		if cause == nil {
-			cause = firstCutErr
-		}
-		return nil, stats, fmt.Errorf("windowed %s %s: all %d windows failed: %w", plan.label, relPath, stats.attempted, cause)
+	if err := allWindowsFailed(relPath, plan, stats, firstDecodeErr, firstCutErr); err != nil {
+		return nil, stats, err
 	}
 	return windows, stats, nil
+}
+
+// allWindowsFailed is the verdict on a windowed decode that produced nothing:
+// nil when at least one window decoded, or when every window was refused (or
+// refused and silent) and none failed, because the refusals are the caller's to
+// judge (§8.2.2 terminal status) rather than a fault to retry. Otherwise the
+// systemic failure, with the provider's error preferred over a cut error: it is
+// the one whose retryable/terminal classification decides whether the document
+// stays pending, and it must survive the aggregation rather than be flattened
+// into an opaque string. With no decode failure recorded, nothing could be cut,
+// and the windowExtractError tells the caller to send one request instead.
+func allWindowsFailed(relPath string, plan windowSchedule, stats windowStats, firstDecodeErr, firstCutErr error) error {
+	if stats.attempted == 0 || stats.decoded > 0 {
+		return nil
+	}
+	if len(stats.refused) > 0 && firstDecodeErr == nil && firstCutErr == nil {
+		return nil
+	}
+	cause := firstDecodeErr
+	if cause == nil {
+		cause = firstCutErr
+	}
+	if n := len(stats.refused); n > 0 {
+		return fmt.Errorf("windowed %s %s: all %d windows failed or were refused (%d refused): %w", plan.label, relPath, stats.attempted, n, cause)
+	}
+	return fmt.Errorf("windowed %s %s: all %d windows failed: %w", plan.label, relPath, stats.attempted, cause)
 }
 
 // decodeScheduledWindow cuts and decodes the i-th scheduled window. A cut

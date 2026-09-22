@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -32,17 +33,20 @@ import (
 
 const (
 	scopeTotalMS = 30 * 60 * 1000
+	scopeWinMS   = 600_000
 	win2StartMS  = 590_000
 	win3StartMS  = 1_180_000
 	win4StartMS  = 1_770_000
 )
 
 // langReply is what the fake decoder answers for one call: the language it
-// reports, its confidence (0 = none reported), and an optional transcript.
+// reports, its confidence (0 = none reported), an optional transcript, or a
+// provider failure instead of any of them.
 type langReply struct {
 	lang string
 	conf float64
 	text string
+	err  error
 }
 
 // langWindowTranscriber is a fake STT provider that reports a scripted language
@@ -70,6 +74,9 @@ func (w *langWindowTranscriber) TranscribeStructured(context.Context, string, []
 	w.mu.Unlock()
 	if !ok {
 		r = w.def
+	}
+	if r.err != nil {
+		return model.TranscriptResult{}, r.err
 	}
 	text := r.text
 	if text == "" {
@@ -354,7 +361,9 @@ func TestWindowLanguage_RoutesPerWindowAndRedecodesOnlyMovedWindows(t *testing.T
 		1: {lang: "ru", conf: 0.9}, 2: {lang: "uk", conf: 0.9}, 3: {lang: "ru", conf: 0.9},
 	}}
 	ukRoute := &langWindowTranscriber{script: map[int]langReply{
-		1: {lang: "uk", conf: 0.95}, 2: {lang: "uk", conf: 0.95}, 3: {lang: "ru", conf: 0.9},
+		1: {lang: "uk", conf: 0.95, text: "[00:00] uk route decode 1 spoken at some length\n[00:30] uk route decode 1 closing line"},
+		2: {lang: "uk", conf: 0.95, text: "[00:00] uk route decode 2 spoken at some length\n[00:30] uk route decode 2 closing line"},
+		3: {lang: "ru", conf: 0.9, text: "[00:00] uk route decode 3 spoken at some length\n[00:30] uk route decode 3 closing line"},
 	}}
 	h, content := newScopedHarness(t, def, scopeTotalMS)
 	h.svc.SetRouteTranscriber("uk", ukRoute, "whisper-uk", []string{"uk"})
@@ -374,10 +383,15 @@ func TestWindowLanguage_RoutesPerWindowAndRedecodesOnlyMovedWindows(t *testing.T
 		{StartMS: win4StartMS, EndMS: scopeTotalMS, Language: "ru", LanguageSource: "detected", LanguageConfidence: f64(0.9), Route: "whisper", Covered: true},
 	})
 	// The merged transcript carries the ROUTED decode of the moved windows, not
-	// the default decoder's first attempt.
+	// the default decoder's first attempt: the uk route's own text for windows 2
+	// and 3, and none of the default decoder's discarded window-2 decode. Window
+	// 4 moved back, so the uk route's decode 3 is discarded in turn.
 	text := persistedText(h)
-	if !strings.Contains(text, "decode 1") || !strings.Contains(text, "decode 2") {
+	if !strings.Contains(text, "uk route decode 1") || !strings.Contains(text, "uk route decode 2") {
 		t.Errorf("routed windows must carry the uk route's text (its decodes 1 and 2), got:\n%s", text)
+	}
+	if strings.Contains(text, "opening line of decode 2") || strings.Contains(text, "uk route decode 3") {
+		t.Errorf("a discarded decode reached the transcript:\n%s", text)
 	}
 }
 
@@ -441,19 +455,24 @@ func TestWindowLanguage_FloorPerWindow_SkipRefusesOnlyThatWindow(t *testing.T) {
 	if cov.WindowsAttempted != 4 || cov.WindowsDecoded != 3 {
 		t.Errorf("coverage = %d/%d windows, want 3 decoded of 4 attempted", cov.WindowsDecoded, cov.WindowsAttempted)
 	}
-	if len(cov.Refused) != 1 || cov.Refused[0].Reason != "language_uncovered" || cov.Refused[0].StartMS != win3StartMS || cov.Refused[0].EndMS != win4StartMS {
-		t.Errorf("refused = %+v, want one language_uncovered range over the third window's core [%d,%d)", cov.Refused, win3StartMS, win4StartMS)
+	// The second window decoded through its full 600 s, ten seconds into the
+	// third window's core, and the merge keeps that tail because the third
+	// window is missing. So the refused range begins where the decoded audio
+	// ends, the decoded ranges and the refused range are disjoint, and the
+	// retained tail carries the second window's ru entry.
+	refusedStart := win2StartMS + scopeWinMS
+	if len(cov.Refused) != 1 || cov.Refused[0].Reason != "language_uncovered" || cov.Refused[0].StartMS != refusedStart || cov.Refused[0].EndMS != win4StartMS {
+		t.Errorf("refused = %+v, want one language_uncovered range [%d,%d)", cov.Refused, refusedStart, win4StartMS)
 	}
 	for _, r := range cov.Ranges {
-		if r.StartMS < win4StartMS && r.EndMS > win3StartMS+10_000 {
-			t.Errorf("decoded range %+v covers the refused window's core", r)
+		if r.StartMS < win4StartMS && r.EndMS > refusedStart {
+			t.Errorf("decoded range %+v overlaps the refused range [%d,%d)", r, refusedStart, win4StartMS)
 		}
 	}
-	for _, e := range cov.Languages {
-		if e.Language == "uk" {
-			t.Errorf("a refused window left a languages entry %+v", e)
-		}
-	}
+	assertLangs(t, cov.Languages, []covLang{
+		{StartMS: 0, EndMS: refusedStart, Language: "ru", LanguageSource: "detected", LanguageConfidence: f64(0.9), Route: "whisper", Covered: true},
+		{StartMS: win4StartMS, EndMS: scopeTotalMS, Language: "ru", LanguageSource: "detected", LanguageConfidence: f64(0.9), Route: "whisper", Covered: true},
+	})
 	text := persistedText(h)
 	if strings.Contains(text, "decode 3") {
 		t.Errorf("the refused window's text reached the transcript:\n%s", text)
@@ -542,6 +561,76 @@ func TestWindowLanguage_PinAppliesToEveryWindow(t *testing.T) {
 	}
 	if meta.Language != "ru" || meta.LanguageSource != "configured" || meta.LanguageConfidence != nil {
 		t.Errorf("representation language = %q/%q/%v, want ru/configured with no confidence", meta.Language, meta.LanguageSource, meta.LanguageConfidence)
+	}
+}
+
+// TestWindowLanguage_RefusedPlusFailedWindowsIsAFailure pins the other half of
+// the terminal-status rule: when no window decoded and one of them FAILED (a
+// provider error, not a refusal), the decode is a failure to retry, never a
+// language skip that would leave the failed window untried for good.
+//
+// Mutant killed: returning the refusal-only success whenever at least one
+// window was refused (one refused window plus one transport failure became a
+// durable skipped/language_uncovered).
+func TestWindowLanguage_RefusedPlusFailedWindowsIsAFailure(t *testing.T) {
+	t.Parallel()
+	tr := &langWindowTranscriber{
+		def:    langReply{lang: "uk", conf: 0.9},
+		script: map[int]langReply{4: {err: errors.New("whisper: 503 upstream")}},
+	}
+	h, content := newScopedHarness(t, tr, scopeTotalMS)
+	h.svc.SetSTTLanguages([]string{"ru"})
+	h.svc.SetOnUncoveredLanguage("skip")
+
+	err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/mixed.m4a"), content)
+	if err == nil {
+		t.Fatalf("three refused windows plus one failed window returned success; the failure must win\nlogs:\n%s", h.logs.String())
+	}
+	if !strings.Contains(err.Error(), "503 upstream") || !strings.Contains(err.Error(), "3 refused") {
+		t.Errorf("error = %v, want the provider failure with the refusal count", err)
+	}
+	if len(h.store.reps) != 0 {
+		t.Errorf("persisted %d representations on a failed decode, want none", len(h.store.reps))
+	}
+}
+
+// TestWindowLanguage_RouteIdentityNamesTheModel pins §8.6.7 for the route table:
+// the identity component names each route's profile AND the model it binds, so a
+// profile that keeps its name while its model changes re-derives the transcripts
+// decoded through it. Naming the profile alone would let the old cache pass.
+func TestWindowLanguage_RouteIdentityNamesTheModel(t *testing.T) {
+	t.Parallel()
+	identity := func(model string) string {
+		yaml := "" +
+			"providers:\n" +
+			"  whisper-uk:\n" +
+			"    kind: whisper\n" +
+			"    base_url: http://127.0.0.1:1\n" +
+			"    stt_model: " + model + "\n" +
+			"    stt_languages: [uk]\n" +
+			"media:\n" +
+			"  stt:\n" +
+			"    language_scope: window\n" +
+			"    language_providers:\n" +
+			"      uk: whisper-uk\n"
+		path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+		writeFile(t, path, yaml)
+		cfg, err := config.LoadFile(path)
+		if err != nil {
+			t.Fatalf("LoadFile: %v", err)
+		}
+		cfg.StateDir = t.TempDir()
+		svc := mustNewIngestService(t, cfg, &fakeIngestStore{})
+		svc.SetSTTIdentity("whisper", "large-v3")
+		return svc.ActiveTranscriptIdentity()
+	}
+	before := identity("large-v3-uk")
+	after := identity("large-v3-uk-2026")
+	if !strings.Contains(before, "uk=whisper-uk|large-v3-uk") {
+		t.Errorf("identity %q does not name the route's profile and model", before)
+	}
+	if before == after {
+		t.Errorf("changing the routed model left the identity unchanged: %q", before)
 	}
 }
 

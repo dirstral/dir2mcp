@@ -155,6 +155,10 @@ type Service struct {
 	languageScope string
 	routeMu       sync.Mutex
 	routes        map[string]routedSTT
+	// languageRouteIDs is media.stt.language_providers resolved to route
+	// identities (languageRouteIdentities), the form that joins the §8.6.7
+	// derivation identity and is recorded as language_routes.
+	languageRouteIDs map[string]string
 
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
@@ -1132,6 +1136,11 @@ func (svc *Service) resolveTranslateBinding(cfg config.Config) {
 // ingest folds into the transcript cache key it writes (SPEC §8.6.7).
 func (s *Service) resolveTranscriptIdentityFields() {
 	s.transcriptLanguage = sttExpectedLanguage(s.cfg)
+	// §8.2.2: the route table joins the identity under window scope, resolved
+	// to profile and model once here, before the STT-off return below, so a
+	// routed corpus records the same component whether or not the default
+	// profile is eligible.
+	s.languageRouteIDs = s.languageRouteIdentities()
 	// Resolve the STT derivation identity (SPEC §8.6.7) from the same profile the
 	// transcriber uses, so a recorded transcript identity can be compared against
 	// the active one to detect a model swap. Empty when STT is off.

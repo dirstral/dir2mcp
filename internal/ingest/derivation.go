@@ -173,7 +173,7 @@ func (s *Service) activeTranscriptIdentity() string {
 		// §8.2.2: the language scope and route table join the identity only
 		// under window scope; under item the component is empty and the identity
 		// of every existing corpus is byte-stable.
-		languageScopeIdentity(s.languageScope, s.cfg.MediaSTTLanguageProviders))
+		languageScopeIdentity(s.languageScope, s.languageRouteIDs))
 }
 
 // joinTranscriptIdentity appends a non-empty diarize identity to the STT
