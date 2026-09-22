@@ -30,9 +30,9 @@ import (
 // it asserts on.
 
 const (
-	sfgID       = "team:san-francisco-giants"
-	hrBatterID  = "player:heliot-ramos"
-	hrPitcherID = "player:logan-webb"
+	lexClubID   = "team:river-city-otters"
+	hrBatterID  = "player:sam-okafor"
+	hrPitcherID = "player:casey-nguyen"
 	homeRun     = "home_run"
 )
 
@@ -101,13 +101,13 @@ func hybridAnnotationService(t *testing.T) (*retrieval.Service, *lexicalHitStore
 
 	hits := make([]model.SearchHit, 0, 8)
 	for _, id := range homeRunIDs {
-		hits = append(hits, annotationHit(id, homeRun, []string{hrBatterID, sfgID}))
+		hits = append(hits, annotationHit(id, homeRun, []string{hrBatterID, lexClubID}))
 	}
 	// Two other events on the same corpus: a non-empty event filter must not
 	// admit them.
 	hits = append(hits,
-		annotationHit(6, "pitch", []string{hrPitcherID, sfgID}),
-		annotationHit(7, "at_bat", []string{hrBatterID, sfgID}),
+		annotationHit(6, "pitch", []string{hrPitcherID, lexClubID}),
+		annotationHit(7, "at_bat", []string{hrBatterID, lexClubID}),
 	)
 	// A plain text chunk: no attribution, so it never matches a non-empty filter.
 	hits = append(hits, model.SearchHit{
@@ -122,7 +122,7 @@ func hybridAnnotationService(t *testing.T) (*retrieval.Service, *lexicalHitStore
 
 	// The lexical retriever additionally returns a home run the vector index does
 	// not hold.
-	lexicalOnly := annotationHit(lexicalOnlyID, homeRun, []string{hrBatterID, sfgID})
+	lexicalOnly := annotationHit(lexicalOnlyID, homeRun, []string{hrBatterID, lexClubID})
 	st := &lexicalHitStore{hits: append(append([]model.SearchHit(nil), hits...), lexicalOnly)}
 
 	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
@@ -193,7 +193,7 @@ func TestAnImpossibleFilterValueReturnsZeroHits(t *testing.T) {
 	for _, q := range []model.SearchQuery{
 		{Events: []string{"no_such_event_xyz"}},
 		{Entities: []string{"player:nobody-at-all"}},
-		{Entities: []string{sfgID}, Events: []string{"no_such_event_xyz"}},
+		{Entities: []string{lexClubID}, Events: []string{"no_such_event_xyz"}},
 	} {
 		if got := hybridSearchIDs(t, svc, q); len(got) != 0 {
 			t.Fatalf("%+v returned %v; a value that matches nothing must return no hits", q, got)
@@ -263,7 +263,7 @@ func TestAnAbsentFilterStillFusesEveryLexicalCandidate(t *testing.T) {
 // has it, so a matching filter must still admit the candidate.
 func TestALexicalCandidateIsJudgedOnTheAttributionItCarries(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	attributed := annotationHit(1, homeRun, []string{hrBatterID, sfgID})
+	attributed := annotationHit(1, homeRun, []string{hrBatterID, lexClubID})
 
 	// The cached metadata for the same chunk holds the span bounds only.
 	stale := attributed
@@ -290,13 +290,13 @@ func TestALexicalCandidateIsJudgedOnTheAttributionItCarries(t *testing.T) {
 // still be judged on the event the live lexical read carries.
 func TestAPartlyAttributedCacheKeepsTheLexicalEvent(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	attributed := annotationHit(1, homeRun, []string{hrBatterID, sfgID})
+	attributed := annotationHit(1, homeRun, []string{hrBatterID, lexClubID})
 
 	// The cached span carries the ids and no event.
 	partial := attributed
 	partial.Span = model.Span{
 		Kind: "time", StartMS: attributed.Span.StartMS, EndMS: attributed.Span.EndMS,
-		Entities: []string{hrBatterID, sfgID},
+		Entities: []string{hrBatterID, lexClubID},
 	}
 	addAnnotationVector(t, idx, partial)
 
@@ -319,9 +319,9 @@ func TestAPartlyAttributedCacheKeepsTheLexicalEvent(t *testing.T) {
 func TestALexicalOnlyCorpusReturnsTheFilteredSet(t *testing.T) {
 	idx := index.NewHNSWIndex("")
 	hits := []model.SearchHit{
-		annotationHit(1, homeRun, []string{hrBatterID, sfgID}),
-		annotationHit(2, homeRun, []string{hrBatterID, sfgID}),
-		annotationHit(3, "pitch", []string{hrPitcherID, sfgID}),
+		annotationHit(1, homeRun, []string{hrBatterID, lexClubID}),
+		annotationHit(2, homeRun, []string{hrBatterID, lexClubID}),
+		annotationHit(3, "pitch", []string{hrPitcherID, lexClubID}),
 	}
 	st := &lexicalHitStore{hits: hits}
 	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{

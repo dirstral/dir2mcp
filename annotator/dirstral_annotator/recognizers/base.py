@@ -413,7 +413,7 @@ def collapse_sightings(
 
 #: How much of a read has to still be on screen for a run to stay open, as a
 #: fraction of the shorter of the two token sequences. Measured on 180
-#: consecutive frames of the TV Rain ticker (0.5s apart, real tesseract `rus`):
+#: consecutive frames of a news ticker (0.5s apart, real tesseract `rus`):
 #: reads of the same scrolling passage score 0.53 or better even 4s apart,
 #: while reads of unrelated passages never exceed 0.20. 0.5 sits in the middle
 #: of that gap and reads naturally: half of what is on screen was on screen
@@ -510,11 +510,11 @@ def text_overlap(a: str, b: str) -> float:
     sliding window over one sentence, so they share a long ordered run of
     tokens and differ only at the clipped ends.
 
-    Three measures were compared on 180 consecutive frames of the TV Rain
+    Three measures were compared on 180 consecutive frames of a news broadcast
     ticker, OCR'd for real with tesseract `rus`: 1404 same-passage pairs (0.5s
     to 4s apart) against 7260 pairs at least 30s apart, which are unrelated
     passages. The reads are committed as
-    `tests/fixtures/tvrain_ticker_measure.json` and every figure below is
+    `tests/fixtures/news_ticker_measure.json` and every figure below is
     re-derived from them by `test_text_collapse.py`, because a previous version
     of this table carried a number that no longer matched the code and nothing
     recomputed it.
@@ -606,7 +606,7 @@ def collapse_text_sightings(
     changes from frame to frame while the thing on screen does not. A news
     ticker scrolls: the same headline is OCR'd at a different horizontal
     offset every frame, so every frame yields a different string and collapsing
-    on identity emits one cue per frame. On 90s of TV Rain (180 frames, real
+    on identity emits one cue per frame. On 90 s of news footage (180 frames, real
     tesseract) that is 180 near-duplicate cues for five headlines; this returns
     9, one per screenful, each carrying a readable window of the ticker.
 

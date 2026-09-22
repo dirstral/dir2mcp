@@ -256,7 +256,7 @@ def test_a_club_name_that_slugs_to_nothing_is_dropped():
 # The feed types every play. So the outcome becomes an event, and the question
 # becomes a selection instead of a sample.
 
-PILOT = Path(__file__).parent / "fixtures" / "gumbo_823215.json"
+PILOT = Path(__file__).parent / "fixtures" / "gumbo_reference_game.json"
 
 #: Game 823215, Washington at San Francisco: what the feed records.
 PILOT_HOME_RUNS = 6

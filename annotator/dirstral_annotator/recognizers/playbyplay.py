@@ -94,7 +94,7 @@ _SLUG_SEP = re.compile(r"[^a-z0-9]+")
 
 
 def team_id(name: str) -> str:
-    """"San Francisco Giants" -> "team:san-francisco-giants".
+    """"River City Otters" -> "team:river-city-otters".
 
     The slug round-trips through the emit layer's label fallback
     (`id.split(":")[-1].replace("-", " ").title()`), so a club needs no roster
@@ -175,8 +175,8 @@ def _with_team(player_id: str, team: str) -> tuple[str, ...]:
     Writing it into the text was measured on the pilot corpus and made
     retrieval WORSE: every statement names both clubs, so the label cannot
     discriminate between candidates, and it drags a team-scoped query onto
-    whichever role happens to rank first. "Giants home run" came back as a
-    Giants pitcher throwing balls (dirstral-spec design 0004 §6.1).
+    whichever role happens to rank first. A "<club> home run" query came back
+    as that club's pitcher throwing balls (dirstral-spec design 0004 §6.1).
 
     As an entity it is exact, because the cue's `event` already records which
     role this id is acting in: `pitch` is keyed on the pitcher and carries the

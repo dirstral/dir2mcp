@@ -15,7 +15,7 @@ func TestWordFilterInactiveIdentity(t *testing.T) {
 		if f.Active() {
 			t.Fatalf("filter %v: Active()=true, want false", phrases)
 		}
-		const in = "Subscribe to TV Rain for more"
+		const in = "Subscribe to our channel for more"
 		if got := f.Apply(in); got != in {
 			t.Fatalf("inactive Apply changed text: got %q want %q", got, in)
 		}

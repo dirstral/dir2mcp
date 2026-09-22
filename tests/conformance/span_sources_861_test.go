@@ -67,7 +67,7 @@ func recognitionCorpus861(t *testing.T, st *store.SQLiteStore, sources []string)
 		"Heliot Ramos hits a home run to left field",
 		model.Span{
 			Kind: "time", StartMS: 3346398, EndMS: 3354398,
-			Entities: []string{"player:heliot-ramos"},
+			Entities: []string{"player:sam-okafor"},
 			Event:    "home_run",
 			Sources:  sources,
 		})
@@ -75,7 +75,7 @@ func recognitionCorpus861(t *testing.T, st *store.SQLiteStore, sources []string)
 		"Logan Webb throws a home run ball on a pitch to the plate",
 		model.Span{
 			Kind: "time", StartMS: 120000, EndMS: 128000,
-			Entities: []string{"player:logan-webb"},
+			Entities: []string{"player:casey-nguyen"},
 			Event:    "pitch",
 			Sources:  sources,
 		})
@@ -311,7 +311,7 @@ func TestSources_AreProvenanceOnly(t *testing.T) {
 	cases := []struct{ tool, arguments string }{
 		{protocol.ToolNameSearch, `{"query":"home run","k":20}`},
 		{protocol.ToolNameSearch, `{"query":"home run","events":["home_run"],"k":20}`},
-		{protocol.ToolNameSearch, `{"query":"home run","entities":["player:logan-webb"],"k":20}`},
+		{protocol.ToolNameSearch, `{"query":"home run","entities":["player:casey-nguyen"],"k":20}`},
 		{protocol.ToolNameAsk, `{"question":"who hit a home run?","k":20}`},
 	}
 	for _, tc := range cases {

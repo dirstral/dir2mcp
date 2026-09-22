@@ -1,6 +1,6 @@
 """Backend-free tests for text-similarity run collapsing (scrolling overlays).
 
-Both fixtures are real material: consecutive frames of TV Rain's news ticker
+Both fixtures are real material: consecutive frames of a Russian-language news ticker
 OCR'd with tesseract `rus`, so the drift and the OCR noise in them are the ones
 the code has to survive rather than a synthetic sliding window. The 60-frame
 run exercises collapsing; the 180-frame run is what the `text_overlap`
@@ -26,12 +26,12 @@ from dirstral_annotator.recognizers.base import (
     text_tokens,
 )
 
-FIXTURE = Path(__file__).parent / "fixtures" / "tvrain_ticker_reads.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "news_ticker_reads.json"
 #: The longer run the `text_overlap` docstring's measurement table is derived
 #: from. Separate from the collapsing fixture above because the table needs
 #: pairs 30s apart to have an unrelated population at all, and 30s of ticker
 #: does not contain them.
-MEASURE_FIXTURE = Path(__file__).parent / "fixtures" / "tvrain_ticker_measure.json"
+MEASURE_FIXTURE = Path(__file__).parent / "fixtures" / "news_ticker_measure.json"
 
 
 def ticker_sightings(confidence: float = 0.7):

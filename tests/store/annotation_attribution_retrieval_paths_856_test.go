@@ -23,7 +23,7 @@ import (
 
 const (
 	attributionEvent    = "home_run"
-	attributionEntityID = "player:heliot-ramos"
+	attributionEntityID = "player:sam-okafor"
 )
 
 // embeddedAnnotationChunk seeds a live document, a recognition representation,
@@ -67,7 +67,7 @@ func attributionStore(t *testing.T) (*store.SQLiteStore, uint64) {
 		"Heliot Ramos hits a home run to left field",
 		model.Span{
 			Kind: "time", StartMS: 3346398, EndMS: 3354398,
-			Entities: []string{attributionEntityID, "team:san-francisco-giants"},
+			Entities: []string{attributionEntityID, "team:river-city-otters"},
 			Event:    attributionEvent,
 		})
 	return st, chunkID
@@ -79,8 +79,8 @@ func assertAttribution(t *testing.T, path string, span model.Span) {
 		t.Fatalf("%s: event = %q, want %q", path, span.Event, attributionEvent)
 	}
 	// Exact membership, not a substring of the joined ids: an id is an opaque
-	// token, and "player:heliot-ramos-old" must not pass for
-	// "player:heliot-ramos".
+	// token, and "player:sam-okafor-old" must not pass for
+	// "player:sam-okafor".
 	found := false
 	for _, entityID := range span.Entities {
 		if entityID == attributionEntityID {

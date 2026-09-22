@@ -30,7 +30,7 @@ import (
 // fenced context blocks.
 
 const (
-	pilotFile     = "giants.mp4"
+	gameFile      = "broadcast.mp4"
 	chapmanStart  = 3600000
 	chapmanEnd    = 3608000
 	exitVelocity  = "exit velocity 107 mph"
@@ -63,7 +63,7 @@ func buildAnnotationService(t *testing.T, gen model.Generator, chunks []annotati
 	}}, gen)
 	for _, c := range chunks {
 		svc.SetChunkMetadata(c.id, model.SearchHit{
-			ChunkID: c.id, RelPath: pilotFile, DocType: "video", Snippet: c.text,
+			ChunkID: c.id, RelPath: gameFile, DocType: "video", Snippet: c.text,
 			Span: model.Span{
 				Kind: "time", StartMS: c.startMS, EndMS: c.endMS,
 				Entities: []string{"player:matt-chapman"}, Event: c.event,
@@ -80,18 +80,18 @@ func buildAnnotationService(t *testing.T, gen model.Generator, chunks []annotati
 func chapmanMoment() []annotationChunk {
 	return []annotationChunk{
 		{id: 1, event: "at_bat", startMS: chapmanStart, endMS: chapmanEnd,
-			text: "At bat: Matt Chapman vs Foster Griffin (bottom of the 6th) - Matt Chapman homers (5)."},
+			text: "At bat: Riley Park vs Foster Griffin (bottom of the 6th) - Riley Park homers (5)."},
 		{id: 2, event: "batted_ball", startMS: chapmanStart, endMS: chapmanEnd,
-			text: "Batted ball: Matt Chapman vs Foster Griffin (bottom of the 6th): " +
+			text: "Batted ball: Riley Park vs Foster Griffin (bottom of the 6th): " +
 				exitVelocity + ", launch angle 22 degrees, " + homeRunLength + ", fly ball."},
 		{id: 3, event: "captivating", startMS: chapmanStart, endMS: chapmanEnd,
-			text: "Captivating moment (captivating index 38): Matt Chapman homers to left center field."},
+			text: "Captivating moment (captivating index 38): Riley Park homers to left center field."},
 		{id: 4, event: "home_run", startMS: chapmanStart, endMS: chapmanEnd,
-			text: "Home run: Matt Chapman off Foster Griffin, his fifth of the season."},
+			text: "Home run: Riley Park off Foster Griffin, his fifth of the season."},
 		{id: 5, event: "pitch", startMS: chapmanStart, endMS: chapmanEnd,
-			text: "Pitch: Foster Griffin to Matt Chapman (bottom of the 6th), four-seam fastball 93 mph."},
+			text: "Pitch: Foster Griffin to Riley Park (bottom of the 6th), four-seam fastball 93 mph."},
 		{id: 6, event: "scoring_play", startMS: chapmanStart, endMS: chapmanEnd,
-			text: "Scoring play (1 RBI, score: away 6, home 1): Matt Chapman homers."},
+			text: "Scoring play (1 RBI, score: away 6, home 1): Riley Park homers."},
 	}
 }
 
@@ -121,10 +121,10 @@ func promptContext(t *testing.T, prompt string) string {
 // dropped members of the Chapman moment were cited without ever being placed.
 func TestAsk890_CitesOnlyTextTheModelWasShown(t *testing.T) {
 	chunks := chapmanMoment()
-	gen := &fakeGenerator{out: "Matt Chapman homered in the sixth. [" + pilotFile + "]"}
+	gen := &fakeGenerator{out: "Riley Park homered in the sixth. [" + gameFile + "]"}
 	svc := buildAnnotationService(t, gen, chunks)
 
-	got, err := svc.Ask(context.Background(), "what happened on Matt Chapman's home run",
+	got, err := svc.Ask(context.Background(), "what happened on Riley Park's home run",
 		model.SearchQuery{K: 10})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -153,11 +153,11 @@ func TestAsk890_CitesOnlyTextTheModelWasShown(t *testing.T) {
 // exit velocity lives in a NON-primary member of the moment. The model must
 // read it, otherwise `ask` denies a fact that its own sixth citation states.
 func TestAsk890_PlacesTheMemberThatHoldsTheAnswer(t *testing.T) {
-	gen := &fakeGenerator{out: "107 mph. [" + pilotFile + "]"}
+	gen := &fakeGenerator{out: "107 mph. [" + gameFile + "]"}
 	svc := buildAnnotationService(t, gen, chapmanMoment())
 
 	if _, err := svc.Ask(context.Background(),
-		"What was the exit velocity on Matt Chapman's home run in the sixth inning?",
+		"What was the exit velocity on Riley Park's home run in the sixth inning?",
 		model.SearchQuery{K: 12}); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestAsk890_PlacesTheMemberThatHoldsTheAnswer(t *testing.T) {
 // one moment share ONE untrusted-document block, so the generator still reads
 // one event once and cannot count a role-split annotation as two events.
 func TestAsk890_KeepsOneMomentInOneFencedBlock(t *testing.T) {
-	gen := &fakeGenerator{out: "ok [" + pilotFile + "]"}
+	gen := &fakeGenerator{out: "ok [" + gameFile + "]"}
 	svc := buildAnnotationService(t, gen, chapmanMoment())
 
 	if _, err := svc.Ask(context.Background(), "what happened", model.SearchQuery{K: 12}); err != nil {
@@ -201,7 +201,7 @@ func TestAsk890_KeepsOneMomentInOneFencedBlock(t *testing.T) {
 // members left out must not be cited either.
 func TestAsk890_DropsTheCitationOfAMemberTheBudgetExcluded(t *testing.T) {
 	chunks := chapmanMoment()
-	gen := &fakeGenerator{out: "ok [" + pilotFile + "]"}
+	gen := &fakeGenerator{out: "ok [" + gameFile + "]"}
 	svc := buildAnnotationService(t, gen, chunks)
 	// Room for the fence and roughly one annotation, not for six.
 	svc.SetMaxContextChars(220)
@@ -252,7 +252,7 @@ func TestAsk890_CitesADuplicateMemberItCollapsed(t *testing.T) {
 		{id: 1, event: "at_bat", startMS: chapmanStart, endMS: chapmanEnd, text: shared},
 		{id: 2, event: "pitch", startMS: chapmanStart, endMS: chapmanEnd, text: shared},
 	}
-	gen := &fakeGenerator{out: "ok [" + pilotFile + "]"}
+	gen := &fakeGenerator{out: "ok [" + gameFile + "]"}
 	svc := buildAnnotationService(t, gen, chunks)
 
 	got, err := svc.Ask(context.Background(), "what did Bryce Eldridge do", model.SearchQuery{K: 10})
@@ -286,7 +286,7 @@ func TestAsk891_PlacesEveryMomentTheBudgetAffords(t *testing.T) {
 			text: fmt.Sprintf("Captivating moment (captivating index %d): play %d of the game.", index, i+1),
 		})
 	}
-	gen := &fakeGenerator{out: "The most captivating moment is play 15. [" + pilotFile + "]"}
+	gen := &fakeGenerator{out: "The most captivating moment is play 15. [" + gameFile + "]"}
 	svc := buildAnnotationService(t, gen, chunks)
 
 	got, err := svc.Ask(context.Background(), "what was the most captivating moment of the game",
@@ -356,7 +356,7 @@ func TestAsk891_StillAbstainsOnWeakEvidence(t *testing.T) {
 	}}, gen)
 	for i := 0; i < 40; i++ {
 		svc.SetChunkMetadata(uint64(i+1), model.SearchHit{
-			ChunkID: uint64(i + 1), RelPath: pilotFile, DocType: "video",
+			ChunkID: uint64(i + 1), RelPath: gameFile, DocType: "video",
 			Snippet: fmt.Sprintf("Captivating moment (captivating index %d).", 10+i),
 			Span: model.Span{
 				Kind: "time", StartMS: 60000 * i, EndMS: 60000*i + 8000,

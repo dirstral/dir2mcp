@@ -155,14 +155,14 @@ func recognitionCorpus856(t *testing.T, st *store.SQLiteStore) {
 		"Heliot Ramos hits a home run to left field",
 		model.Span{
 			Kind: "time", StartMS: 3346398, EndMS: 3354398,
-			Entities: []string{"player:heliot-ramos", "team:san-francisco-giants"},
+			Entities: []string{"player:sam-okafor", "team:river-city-otters"},
 			Event:    "home_run",
 		})
 	seed("game2.mp4", "video", "recognition",
 		"Logan Webb throws a home run ball on a pitch to the plate",
 		model.Span{
 			Kind: "time", StartMS: 120000, EndMS: 128000,
-			Entities: []string{"player:logan-webb"},
+			Entities: []string{"player:casey-nguyen"},
 			Event:    "pitch",
 		})
 	seed("notes.md", "md", "raw_text",
@@ -286,7 +286,7 @@ func assertShowsHomeRun856(t *testing.T, span map[string]interface{}, label stri
 		pretty, _ := json.MarshalIndent(span, "", "  ")
 		t.Fatalf("%s span carries no entities array:\n%s", label, pretty)
 	}
-	want := map[string]bool{"player:heliot-ramos": false, "team:san-francisco-giants": false}
+	want := map[string]bool{"player:sam-okafor": false, "team:river-city-otters": false}
 	for _, raw := range entities {
 		id, _ := raw.(string)
 		if _, tracked := want[id]; tracked {
@@ -422,7 +422,7 @@ func TestSpan_CanonicalValidatorRejectsAnUndeclaredField(t *testing.T) {
 
 	conforming := map[string]interface{}{
 		"kind": "time", "start_ms": float64(0), "end_ms": float64(1000),
-		"entities": []interface{}{"player:heliot-ramos"}, "event": "home_run",
+		"entities": []interface{}{"player:sam-okafor"}, "event": "home_run",
 		"sources": []interface{}{"scorebug"},
 	}
 	if err := validator.Validate(conforming); err != nil {

@@ -179,7 +179,7 @@ cues = NewsOverlayRecognizer(lang="rus").recognize(Path("broadcast.mp4"))
 The interpreter has no vocabulary to check against, so what it counts as
 evidence is **agreement between the two preprocessing passes**. Real glyphs
 survive both renderings; noise is a property of the rendering and does not.
-Measured on 105 band reads of a TV Rain broadcast, comparing the two overlay
+Measured on 105 band reads of a Russian-language news broadcast, comparing the two overlay
 bands against five background bands per frame:
 
 | population | median agreement | worst |
@@ -220,7 +220,7 @@ words that came off that band are words. A cue therefore passes a second gate,
 and this one is **on by default**: a cue is emitted only if its text is at
 least 20 characters long AND it was read with agreement of at least 0.6.
 
-Measured on 145 cues (94 headline, 51 ticker) from 15 minutes of a TV Rain
+Measured on 145 cues (94 headline, 51 ticker) from 15 minutes of a Russian-language news
 broadcast, read with tesseract `rus`. A cue counted as readable when it held a
 word of 4 or more Cyrillic letters that the programme's own subtitle track also
 held, so the vocabulary came from the same broadcast and needed no external

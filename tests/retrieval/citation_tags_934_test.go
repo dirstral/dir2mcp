@@ -43,7 +43,7 @@ func tagsService(t *testing.T, gen model.Generator, span model.Span) *retrieval.
 	svc.SetChunkMetadata(1, model.SearchHit{
 		ChunkID: 1,
 		RelPath: "game.mp4",
-		Snippet: "Matt Chapman homers on a fly ball to center field.",
+		Snippet: "Riley Park homers on a fly ball to center field.",
 		Span:    span,
 	})
 	return svc
@@ -86,7 +86,7 @@ func TestAsk934_TheRuleShowsATimeExample(t *testing.T) {
 // and the attribution machinery (footer + hallucination stripping, #403)
 // recognises it as citing the in-context document.
 func TestAsk934_FullTagAnswerEarnsItsAttribution(t *testing.T) {
-	gen := &tagRecordingGenerator{answer: "Matt Chapman homered [game.mp4@t=02:02:10-02:02:31]."}
+	gen := &tagRecordingGenerator{answer: "Riley Park homered [game.mp4@t=02:02:10-02:02:31]."}
 	svc := tagsService(t, gen, model.Span{Kind: "time", StartMS: 7330000, EndMS: 7351000})
 	got, err := svc.Ask(context.Background(), "who homered?", model.SearchQuery{K: 1})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestAsk934_FullTagAnswerEarnsItsAttribution(t *testing.T) {
 // bare form must still be matched. The change teaches a richer form; it must
 // not make the poorer one a hallucination.
 func TestAsk934_BareTagStaysAccepted(t *testing.T) {
-	gen := &tagRecordingGenerator{answer: "Matt Chapman homered [game.mp4]."}
+	gen := &tagRecordingGenerator{answer: "Riley Park homered [game.mp4]."}
 	svc := tagsService(t, gen, model.Span{Kind: "time", StartMS: 7330000, EndMS: 7351000})
 	got, err := svc.Ask(context.Background(), "who homered?", model.SearchQuery{K: 1})
 	if err != nil {
