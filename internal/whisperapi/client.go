@@ -165,10 +165,14 @@ func NewClient(baseURL, apiKey string) *Client {
 // carried here (unused by segment parsing today) so #252 can build
 // word-level timestamps on top of this struct without re-shaping it.
 type transcribeResponse struct {
-	Text     string              `json:"text"`
-	Language string              `json:"language,omitempty"`
-	Duration float64             `json:"duration,omitempty"`
-	Segments []transcriptSegment `json:"segments,omitempty"`
+	Text     string `json:"text"`
+	Language string `json:"language,omitempty"`
+	// LanguageProbability is the confidence a faster-whisper style server attaches
+	// to its language identification (SPEC §8.2.2). Absent on servers that do not
+	// report one; 0 then means "unknown confidence".
+	LanguageProbability float64             `json:"language_probability,omitempty"`
+	Duration            float64             `json:"duration,omitempty"`
+	Segments            []transcriptSegment `json:"segments,omitempty"`
 	// Words is the top-level word array some verbose_json servers return
 	// instead of (or in addition to) per-segment words. Used as a fallback
 	// when no segment carries its own words (#252).
@@ -539,7 +543,10 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	}
 
 	if segText, ok := parseTranscriptSegments(parsed); ok {
-		return model.TranscriptResult{Text: segText, Words: parsed.timedWords()}, nil
+		return model.TranscriptResult{
+			Text: segText, Words: parsed.timedWords(),
+			Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence(),
+		}, nil
 	}
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
@@ -551,7 +558,33 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	}
 	// Flat-text fallback (no segments): words have no segment frame to anchor
 	// against, so emit text only.
-	return model.TranscriptResult{Text: text}, nil
+	return model.TranscriptResult{Text: text, Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence()}, nil
+}
+
+// identifiedLanguage normalizes the server's reported language to a lower-case
+// BCP-47 primary subtag (SPEC §8.2.2). Whisper servers report either an ISO
+// 639-1 code ("ru") or, on some builds, an English name ("russian"); only the
+// two-letter form is a tag, so a name is passed through lower-cased and the
+// caller's primary-subtag normalization leaves it as an opaque value that
+// matches no route. Empty when the server reported nothing.
+func (r transcribeResponse) identifiedLanguage() string {
+	lang := strings.ToLower(strings.TrimSpace(r.Language))
+	if i := strings.IndexAny(lang, "-_"); i > 0 {
+		lang = lang[:i]
+	}
+	return lang
+}
+
+// languageConfidence clamps the reported language probability into [0,1]; a
+// server that reports none yields 0, which the caller reads as unknown.
+func (r transcribeResponse) languageConfidence() float64 {
+	if r.LanguageProbability <= 0 || r.Language == "" {
+		return 0
+	}
+	if r.LanguageProbability > 1 {
+		return 1
+	}
+	return r.LanguageProbability
 }
 
 // timedWords flattens the verbose_json word timestamps into a time-ordered

@@ -1244,7 +1244,7 @@ func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chun
 	if err != nil {
 		return 0, err
 	}
-	chunkID, err := insertChunkWithSpansWith(ctx, tx, chunk, spans, relPath, docType, repType, language)
+	chunkID, err := insertChunkWithSpansWith(ctx, tx, chunk, spans, relPath, docType, repType, chunkLanguage(spans, language))
 	if err != nil {
 		return 0, err
 	}
@@ -1625,7 +1625,7 @@ func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Ch
 	if err != nil {
 		return 0, err
 	}
-	return insertChunkWithSpansWith(ctx, t.tx, chunk, spans, relPath, docType, repType, language)
+	return insertChunkWithSpansWith(ctx, t.tx, chunk, spans, relPath, docType, repType, chunkLanguage(spans, language))
 }
 
 // UpsertRepresentationText implements model.RepresentationTextStore inside the
@@ -3388,6 +3388,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 			Event:        event,
 			Sources:      sources,
 			Attributes:   attributes,
+			Language:     languageFromExtraJSON(extraJSON),
 		}
 	case "region":
 		return regionSpanFromRow(start, end, extraJSON)
@@ -3422,6 +3423,46 @@ func annotationFromExtraJSON(extraJSON string) (entities []string, event string,
 		strings.TrimSpace(payload.Event),
 		model.NormalizeSources(payload.Sources),
 		model.NormalizeAttributes(payload.Attributes)
+}
+
+// languageFromExtraJSON reads the per-segment language a "time" span recorded
+// in its extra_json (SPEC §8.2.2). A NULL, empty or malformed payload, or one
+// without the key, yields "" meaning "the representation's language", which is
+// exactly what every span stored before the key existed means.
+func languageFromExtraJSON(extraJSON string) string {
+	if strings.TrimSpace(extraJSON) == "" {
+		return ""
+	}
+	var payload struct {
+		Language string `json:"language"`
+	}
+	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(payload.Language))
+}
+
+// chunkLanguage picks the language denormalized onto a chunk row for the §9.5
+// filter: the representation's recorded language unless one of the chunk's
+// "time" spans carries its own (SPEC §8.2.2). A chunk has one language because
+// the chunk window closes at a language change, so the first span that records
+// one speaks for the chunk. This is what keeps the filter from matching a chunk
+// on a language its text is not in.
+func chunkLanguage(spans []model.Span, repLanguage string) string {
+	for _, sp := range spans {
+		if strings.EqualFold(strings.TrimSpace(sp.Kind), "time") {
+			if lang := strings.TrimSpace(sp.Language); lang != "" {
+				return lang
+			}
+		}
+	}
+	return repLanguage
+}
+
+// ChunkLanguage is the exported counterpart of chunkLanguage, exposed for tests
+// in the tests/ tree.
+func ChunkLanguage(spans []model.Span, repLanguage string) string {
+	return chunkLanguage(spans, repLanguage)
 }
 
 // wordsFromExtraJSON reconstructs per-word timing for a "time" span from its
@@ -4390,7 +4431,8 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 	sources := model.NormalizeSources(span.Sources)
 	attributes := model.NormalizeAttributes(span.Attributes)
 	cues := span.Cues
-	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 && len(cues) == 0 {
+	language := strings.ToLower(strings.TrimSpace(span.Language))
+	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 && len(cues) == 0 && language == "" {
 		return "", nil
 	}
 	payload := struct {
@@ -4402,9 +4444,13 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 		Event        string            `json:"event,omitempty"`
 		Sources      []string          `json:"sources,omitempty"`
 		Attributes   map[string]string `json:"attributes,omitempty"`
+		// Language is the segment's own language when it differs from the
+		// representation's (SPEC §8.2.2); absent otherwise.
+		Language string `json:"language,omitempty"`
 	}{
 		Words: words, Cues: cues, Speaker: speaker, SpeakerLabel: speakerLabel,
 		Entities: entities, Event: event, Sources: sources, Attributes: attributes,
+		Language: language,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

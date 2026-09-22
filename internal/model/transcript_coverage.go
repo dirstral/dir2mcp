@@ -37,6 +37,21 @@ type TranscriptCoverage struct {
 	// non-overlapping and ascending (§8.6.13), so a consumer reads the gaps
 	// directly instead of reconstructing them from window arithmetic.
 	Ranges []CoverageRange `json:"ranges,omitempty"`
+	// Languages is the per-window language record of SPEC §8.2.2, recorded ONLY
+	// under media.stt.language_scope: window and REQUIRED there: which stretch of
+	// the recording resolved to which language, which STT profile decoded it, and
+	// whether that profile declares the language. Entries are in absolute
+	// recording time, coalesced over adjacent windows whose (language,
+	// language_source, route, covered) are identical, non-overlapping and
+	// ascending. Absent under the default item scope, so an existing corpus's
+	// coverage object is byte-for-byte unchanged.
+	Languages []CoverageLanguage `json:"languages,omitempty"`
+	// Refused lists the windows that were NOT decoded by decision (§8.2.2): an
+	// uncovered language under on_uncovered_language=skip, or a per-window
+	// quality-gate failure. A refused range is never inside Ranges. Absent when
+	// nothing was refused. A window that failed for a provider or transport
+	// reason is a failed window, counted in WindowsAttempted, not a refused one.
+	Refused []RefusedRange `json:"refused,omitempty"`
 	// Identity is the §8.6.7 "provider/model" that produced this transcript. It
 	// is NOT part of the persisted coverage object; a reader fills it from the
 	// sibling fields of the same meta_json so a §7.7 report can name what
@@ -50,6 +65,57 @@ type CoverageRange struct {
 	StartMS int `json:"start_ms"`
 	EndMS   int `json:"end_ms"`
 }
+
+// CoverageLanguage is one entry of TranscriptCoverage.Languages (SPEC §8.2.2):
+// a stretch of the recording, the language it resolved to, how that language
+// was obtained, the STT provider profile that decoded it, and whether that
+// profile declares the language. A window with NO resolvable language omits
+// Language, LanguageSource and LanguageConfidence (no BCP-47 tag is invented)
+// and records Covered=true, because the §8.2.1 floor does not apply when no
+// language is resolved.
+type CoverageLanguage struct {
+	StartMS int `json:"start_ms"`
+	EndMS   int `json:"end_ms"`
+	// Language is the BCP-47 primary subtag, or empty for an unknown window.
+	Language string `json:"language,omitempty"`
+	// LanguageSource is configured, detected or inherited. "inherited" appears
+	// ONLY here: a window below the confidence floor takes the preceding
+	// window's language, and the representation-level language_source (§5.2)
+	// never carries it.
+	LanguageSource string `json:"language_source,omitempty"`
+	// LanguageConfidence is the minimum detector confidence over the coalesced
+	// windows when LanguageSource is detected; absent otherwise.
+	LanguageConfidence *float64 `json:"language_confidence,omitempty"`
+	// Route names the STT provider profile that decoded the range.
+	Route string `json:"route"`
+	// Covered is false when the route's declared stt_languages omit Language
+	// (the §8.2.1 floor tripped under warn); true otherwise.
+	Covered bool `json:"covered"`
+}
+
+// RefusedRange is one stretch of the recording that was not decoded by
+// decision (SPEC §8.2.2).
+type RefusedRange struct {
+	StartMS int `json:"start_ms"`
+	EndMS   int `json:"end_ms"`
+	// Reason is RefusedLanguageUncovered or RefusedQualityGate.
+	Reason string `json:"reason"`
+}
+
+// Reasons a window is refused (SPEC §8.2.2 coverage.refused[].reason).
+const (
+	// RefusedLanguageUncovered: the window's resolved language is outside the
+	// decoding profile's declared coverage and on_uncovered_language is skip.
+	RefusedLanguageUncovered = "language_uncovered"
+	// RefusedQualityGate: the window decoded but failed the §8.6.6 checks run
+	// per window.
+	RefusedQualityGate = "quality_gate"
+)
+
+// CoverageLanguageSourceInherited is the language_source a coverage entry
+// records when a window below the confidence floor took the preceding window's
+// language (§8.2.2). It is scoped to coverage entries by design.
+const CoverageLanguageSourceInherited = "inherited"
 
 // Fraction is how much of the recording decoded, in [0,1]. It prefers the
 // measured time (DecodedMS/DurationMS), because that is the honest quantity an

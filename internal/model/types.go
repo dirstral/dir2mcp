@@ -338,6 +338,14 @@ type Span struct {
 	// is byte-identical to today. Persisted in the "time" span's extra_json.
 	Speaker      string
 	SpeakerLabel string
+	// Language is the BCP-47 primary subtag of THIS segment when it differs from
+	// the representation's recorded language (SPEC §8.2.2, a recording that
+	// changes language inside itself under media.stt.language_scope: window).
+	// Empty means "the representation's language". Metadata only: it never
+	// changes the chunk text or span bounds. Persisted in the "time" span's
+	// extra_json as `language`, and denormalized onto chunks.language so the
+	// §9.5 filter never matches a chunk on a language its text is not in.
+	Language string
 	// Entities and Event carry a recognition annotation's structured
 	// attribution on its "time" span (dirstral-spec design 0004 §7): the
 	// entity ids the annotation references, and the backend-declared event

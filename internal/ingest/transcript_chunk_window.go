@@ -105,12 +105,17 @@ func startWindow(seg chunkSegment) *chunkSegment {
 //
 // A speaker change always closes the window. A speaker turn is already the right
 // retrieval unit, and merging across one would attribute a chunk to a speaker
-// who did not say half of it.
+// who did not say half of it. A language change closes it for the same reason
+// (SPEC §8.2.2): a chunk that mixed two languages would be matched by the §9.5
+// filter on a language half its text is not in.
 func windowAccepts(cur, seg chunkSegment, w transcriptWindow) bool {
 	if seg.Span.StartMS < cur.Span.StartMS {
 		return false
 	}
 	if !sameSpeaker(cur.Span, seg.Span) {
+		return false
+	}
+	if !sameSpanLanguage(cur.Span, seg.Span) {
 		return false
 	}
 	if seg.Span.EndMS-cur.Span.StartMS > w.ChunkMS {
@@ -125,6 +130,14 @@ func windowAccepts(cur, seg chunkSegment, w transcriptWindow) bool {
 func sameSpeaker(a, b model.Span) bool {
 	return strings.TrimSpace(a.Speaker) == strings.TrimSpace(b.Speaker) &&
 		strings.TrimSpace(a.SpeakerLabel) == strings.TrimSpace(b.SpeakerLabel)
+}
+
+// sameSpanLanguage is the fourth close rule of SPEC §8.2.2: a chunk window never
+// spans a language change, so a chunk has one language and its segment
+// language is also the chunk's. An empty Language means "the representation's
+// language", so two unmarked segments agree and a marked one differs from them.
+func sameSpanLanguage(a, b model.Span) bool {
+	return strings.EqualFold(strings.TrimSpace(a.Language), strings.TrimSpace(b.Language))
 }
 
 // joinWindow appends seg to the open window: the text is joined with a single

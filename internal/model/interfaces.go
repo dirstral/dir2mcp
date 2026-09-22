@@ -318,6 +318,15 @@ type TranscriptResult struct {
 	// Words is the flat, time-ordered list of per-word timestamps across the whole
 	// transcript. Empty/nil when unavailable.
 	Words []TimedWord
+	// Language is the source language the provider identified for THIS request,
+	// as a BCP-47 primary subtag ("ru", "uk"), and LanguageConfidence the
+	// provider's confidence in it in [0,1] (SPEC §8.2.2). Both are optional:
+	// empty and 0 mean the provider reported nothing, and the pipeline falls back
+	// to text detection or to the item's resolved language. A provider that
+	// reports a language but no confidence leaves LanguageConfidence at 0; the
+	// caller treats 0 as "unknown confidence", not as "no confidence".
+	Language           string
+	LanguageConfidence float64
 }
 
 // StructuredTranscriber is an OPTIONAL capability a Transcriber MAY implement to

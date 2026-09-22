@@ -53,6 +53,23 @@ func coalesceCoverageRanges(ranges []CoverageRange) []CoverageRange {
 	return out
 }
 
+// newScopedTranscriptCoverage builds the coverage record of a decode run under
+// media.stt.language_scope: window (SPEC §8.2.2). Unlike newTranscriptCoverage it
+// records for ANY window count, including one: coverage.languages is required
+// under window scope whatever the count, and a one-window decode whose window
+// was refused must still say so. The per-piece language entries are coalesced on
+// (language, language_source, route, covered) and the refused ranges on reason.
+func newScopedTranscriptCoverage(stats windowStats, totalMS int) *TranscriptCoverage {
+	base := newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges)
+	if base == nil {
+		base = newTranscriptCoverage(2, stats.decoded, totalMS, stats.ranges)
+		base.WindowsAttempted = stats.attempted
+	}
+	base.Languages = coalesceCoverageLanguages(stats.languages, totalMS)
+	base.Refused = coalesceRefusedRanges(stats.refused, totalMS)
+	return base
+}
+
 // newTranscriptCoverage builds the §8.6.13 coverage record from a windowed
 // decode's raw per-piece ranges. It coalesces the ranges, clamps them to the
 // recording, and sums what is left.
