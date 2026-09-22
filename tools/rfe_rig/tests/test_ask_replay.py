@@ -44,6 +44,21 @@ class FallbackTest(unittest.TestCase):
         self.assertFalse(ask.is_fallback("Кулеба каже про НАТО [a.flac@t=1:00]."))
         self.assertFalse(ask.is_fallback(""))
 
+    def test_answer_source_is_authoritative(self):
+        # SPEC 9.4.5 (dir2mcp #1019): the daemon marks a retrieval-only answer
+        # itself. The field wins over the text shape in both directions, so a
+        # generated answer that happens to start with "Question:" is not a
+        # fallback, and a retrieval-only answer in any shape is.
+        self.assertFalse(ask.is_fallback("Question: x? Top context: y",
+                                         {"answer_source": "generated"}))
+        self.assertTrue(ask.is_fallback("Plain retrieved text.",
+                                        {"answer_source": "retrieval_only",
+                                         "answer_source_reason": "generator_error"}))
+        row = ask.score("en", "Plain retrieved text about the budget.",
+                        {"answer_source": "retrieval_only"})
+        self.assertFalse(row["generated"])
+        self.assertEqual(row["answer_source"], "retrieval_only")
+
     def test_score_row(self):
         row = ask.score("ru", "Question: О чём? Top context: - a.flac: Это ответ о том, что было.",
                         {"citations": [{"chunk_id": 1}, {"chunk_id": 2}]})

@@ -26,7 +26,7 @@ build-elevenlabs-bridge:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt fmt-check vet lint cyclo ineffassign misspell test test-race test-release-tools test-annotator check ci benchmark inspector-smoke conformance
+.PHONY: all clean clean-all help fmt fmt-check vet lint cyclo ineffassign misspell test test-race test-release-tools test-annotator test-rig check ci benchmark inspector-smoke conformance
 
 all: check
 
@@ -45,8 +45,9 @@ help:
 	@echo "  test   - run go test"
 	@echo "  test-race - run go test -race on the concurrency-sensitive packages (needs CGO)"
 	@echo "  test-annotator - run the Python annotator suite in its own venv"
-	@echo "  check  - fmt-check + vet + lint + cyclo + ineffassign + misspell + test + test-annotator + build"
-	@echo "  ci     - fmt-check + vet + cyclo + ineffassign + misspell + test + test-annotator (CI-safe default)"
+	@echo "  test-rig - run the RFE validation rig unit tests (stdlib only)"
+	@echo "  check  - fmt-check + vet + lint + cyclo + ineffassign + misspell + test + test-annotator + test-rig + build"
+	@echo "  ci     - fmt-check + vet + cyclo + ineffassign + misspell + test + test-annotator + test-rig (CI-safe default)"
 	@echo "  build-elevenlabs-bridge - build the ElevenLabs webhook bridge binary"
 	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
@@ -140,12 +141,17 @@ $(ANNOTATOR_STAMP): annotator/pyproject.toml
 test-annotator: $(ANNOTATOR_STAMP)
 	cd annotator && "$(ANNOTATOR_PY)" -m pytest -q
 
+# The RFE validation rig (tools/rfe_rig, #1032) is standard-library Python, so
+# its tests run under the ambient interpreter with no venv: nothing to install.
+test-rig:
+	python3 -m unittest discover -s tools/rfe_rig/tests
+
 # `check` is the documented local merge-readiness gate, so it has to cover the
 # whole repository: the annotator suite is part of it, and the formatting step
 # reports rather than rewrites.
-check: fmt-check vet lint cyclo ineffassign misspell test test-release-tools test-annotator build
+check: fmt-check vet lint cyclo ineffassign misspell test test-release-tools test-annotator test-rig build
 
-ci: fmt-check vet cyclo ineffassign misspell test test-release-tools test-annotator
+ci: fmt-check vet cyclo ineffassign misspell test test-release-tools test-annotator test-rig
 
 benchmark:
 	# run the large-corpus retrieval benchmark only

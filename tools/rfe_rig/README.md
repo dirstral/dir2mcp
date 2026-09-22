@@ -104,8 +104,10 @@ is that of the retrieved chunks, not of a model.
 ## Tests
 
 ```
-python3 -m unittest discover -s tools/rfe_rig/tests
+make test-rig    # or: python3 -m unittest discover -s tools/rfe_rig/tests
 ```
+
+`make ci` and `make check` run this target, so the rig cannot rot silently.
 
 `tests/test_ask_replay.py` replays `fixtures/ask_2026-09-12_main-final.json`
 (the measure.py output that #964 quoted, 15 KB of questions and answers) and

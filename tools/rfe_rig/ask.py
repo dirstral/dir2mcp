@@ -37,8 +37,20 @@ def load_questions(path):
     return out
 
 
-def is_fallback(answer):
-    """True for the daemon's retrieved-context answer shape."""
+def is_fallback(answer, structured=None):
+    """True when the answer is retrieved context published in place of a
+    generated answer.
+
+    A daemon built after dir2mcp #1019 says so itself: SPEC 9.4.5 marks such an
+    answer `answer_source: retrieval_only` in the structured content, and that
+    field is authoritative whenever it is present (`generated` or absent means
+    a model produced the text). An older daemon carries no `answer_source`, so
+    the text shape of its fallback ("Question: ... Top context: ...") is the
+    only evidence and is used then.
+    """
+    source = str((structured or {}).get("answer_source") or "").strip().lower()
+    if source:
+        return source == "retrieval_only"
     a = (answer or "").lstrip()
     return a.startswith("Question:") and "Top context:" in a
 
@@ -49,7 +61,8 @@ def score(want, answer, structured=None):
         "want": want, "got": got, "why": why,
         "tags": citation_tags(answer),
         "citations_n": len((structured or {}).get("citations") or []),
-        "generated": not is_fallback(answer),
+        "generated": not is_fallback(answer, structured),
+        "answer_source": (structured or {}).get("answer_source"),
     }
 
 
