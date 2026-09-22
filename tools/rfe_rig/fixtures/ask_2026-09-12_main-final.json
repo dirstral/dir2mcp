@@ -1,0 +1,218 @@
+[
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x24 (uk=24 ru=0 ky=0)",
+  "tags": 6,
+  "sec": 1.7,
+  "q": "Хто такий патріарх Філарет і про що він говорить у цьому записі?",
+  "answer": "Патріарх Філарет — це гість програми «Суботнє інтерв’ю», якого в записі представляють як патріарха та як людину, що «поступилася саном, посадою, аби створити нову церкву» [ukr_0652_filaret_programme.flac@t=00:08-00:41]. У розмові він говорить про створення єдиної в Україні православної церкви, про собор і те, чому він зняв свою кандидатуру, а також про роль української церкви, підтримку української держави й ставлення до поховання патріарха Володимира біля Софійського собору [ukr_0652_filaret_programme.flac@t=03:40-04:17] [ukr_0652_filaret_programme.flac@t=14:04-14:43] [ukr_0652_filaret_programme.flac@t=23:25-23:53] [ukr_0652_filaret_programme.flac@t=24:24-24:53] [ukr_0652_filaret_programme.flac@t=31:13-31:49].\n\nSources: [ukr_0652_filaret_programme.flac]"
+ },
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x28 (uk=28 ru=0 ky=0)",
+  "tags": 4,
+  "sec": 1.7,
+  "q": "Хто такий патріарх Філарет і про що він говорить у цьому записі?",
+  "answer": "Патріарх Філарет — це гість програми «Суботнє інтерв’ю», патріарх, який розповідає про створення єдиної в Україні православної церкви та про те, як він поступився саном і посадою заради цього. [ukr_0652_filaret_programme.flac@t=00:08-00:41] Він також говорить про собор, роль Вселенського патріарха, церковні рішення, поховання патріарха Володимира біля Софії та про підтримку української держави й церкви, зокрема в протистоянні російському впливу. [ukr_0652_filaret_programme.flac@t=03:01-04:17] [ukr_0652_filaret_programme.flac@t=23:25-24:53] [ukr_0652_filaret_programme.flac@t=14:04-14:43]\n\nSources: [ukr_0652_filaret_programme.flac]"
+ },
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x19 (uk=19 ru=0 ky=0)",
+  "tags": 2,
+  "sec": 1.1,
+  "q": "Що міністр закордонних справ Дмитро Кулеба каже про НАТО?",
+  "answer": "Дмитро Кулеба каже, що НАТО не треба «нав’язувати» чи просити Україну, а потрібно будувати такі комбінації й системну роботу з партнерами, щоб Росія йшла на поступки; він також зазначає, що міністерства налаштовані на максимальну результативність із залученням зовнішніх ресурсів і партнерської допомоги. [ukr_18126_kuleba_interview.flac@t=11:46-12:23] [ukr_18126_kuleba_interview.flac@t=21:42-22:20]\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x21 (uk=21 ru=0 ky=0)",
+  "tags": 1,
+  "sec": 1.1,
+  "q": "Що міністр закордонних справ Дмитро Кулеба каже про НАТО?",
+  "answer": "Міністр закордонних справ Дмитро Кулеба каже, що НАТО не можна розглядати окремо від теми Чорного моря, Криму й Азовського моря; він підкреслює, що питання чорноморської безпеки пронизує обговорення на Кримській платформі, а також що для президента відродження українського флоту є абсолютним пріоритетом і МЗС працює над залученням зовнішніх ресурсів і партнерської допомоги. [ukr_18126_kuleba_interview.flac@t=21:42-22:20]\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x8 (uk=8 ru=0 ky=0)",
+  "tags": 0,
+  "sec": 0.9,
+  "q": "Коли Кулеба почав працювати в Міністерстві закордонних справ?",
+  "answer": "У наданому контексті немає інформації про те, коли Кулеба почав працювати в Міністерстві закордонних справ."
+ },
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x8 (uk=8 ru=0 ky=0)",
+  "tags": 0,
+  "sec": 0.8,
+  "q": "Коли Кулеба почав працювати в Міністерстві закордонних справ?",
+  "answer": "У наданому контексті немає відповіді на те, коли саме Кулеба почав працювати в Міністерстві закордонних справ."
+ },
+ {
+  "want": "ru",
+  "got": "ru",
+  "why": "ru x2 (uk=0 ru=2 ky=0)",
+  "tags": 1,
+  "sec": 0.8,
+  "q": "Что Леонид Кравчук говорит о позиции по НАТО?",
+  "answer": "Леонид Кравчук говорит, что позиция по НАТО была изменена: он прямо упоминает «позиция по НАТО, вы говорите о том, что да, изменили» [ukr_1108_kravchuk_interview.flac@t=00:00-00:26].\n\nSources: [ukr_1108_kravchuk_interview.flac]"
+ },
+ {
+  "want": "ru",
+  "got": "ru",
+  "why": "ru x1 (uk=0 ru=1 ky=0)",
+  "tags": 1,
+  "sec": 0.8,
+  "q": "Что Леонид Кравчук говорит о позиции по НАТО?",
+  "answer": "Леонид Кравчук говорит, что позиция по НАТО была изменена: «позиция по НАТО… да, изменили».[ukr_1108_kravchuk_interview.flac@t=00:00-00:26]\n\nSources: [ukr_1108_kravchuk_interview.flac]"
+ },
+ {
+  "want": "ru",
+  "got": "ru",
+  "why": "ru x11 (uk=0 ru=11 ky=0)",
+  "tags": 3,
+  "sec": 1.6,
+  "q": "Что говорится в этих записях о Крыме?",
+  "answer": "В записях говорится, что Крым был аннексирован Россией грубо нарушая международные нормы, это называется «оккупация», и при этом отмечается, что Россия с Крымом «не справится»: там разруха, нет наплыва туристов и отдыхающих, а также обсуждается возможность сделать из Крыма военную базу [ukr_1108_kravchuk_interview.flac@t=11:32-12:09] [geo_2007_kikabidze_interview.flac@t=08:46-09:25] [ukr_1108_kravchuk_interview.flac@t=20:22-20:53].\n\nSources: [geo_2007_kikabidze_interview.flac], [ukr_1108_kravchuk_interview.flac]"
+ },
+ {
+  "want": "ru",
+  "got": "ru",
+  "why": "ru x12 (uk=0 ru=12 ky=0)",
+  "tags": 3,
+  "sec": 1.2,
+  "q": "Что говорится в этих записях о Крыме?",
+  "answer": "В записях о Крыме говорится, что его аннексия Россией была «чистой воды оккупация», что Россия «приняла решение отобрать» Крым Украины, нарушив международные нормы и принципы, и что в Крыму сейчас плохая ситуация: разруха, нет наплыва туристов и отдыхающих, а Россия говорит о возможности сделать Крым военной базой [ukr_1108_kravchuk_interview.flac@t=11:32-12:09] [geo_2007_kikabidze_interview.flac@t=08:46-09:25] [ukr_1108_kravchuk_interview.flac@t=20:22-20:53].\n\nSources: [geo_2007_kikabidze_interview.flac], [ukr_1108_kravchuk_interview.flac]"
+ },
+ {
+  "want": "ru",
+  "got": "ru",
+  "why": "ru x1 (uk=0 ru=1 ky=0)",
+  "tags": 1,
+  "sec": 0.9,
+  "q": "О чём спрашивают Вахтанга Кикабидзе?",
+  "answer": "Спрашивают о том, оторвутся ли бывшие республики от советского прошлого и можно ли сказать, что «русский мир» приходит туда, где говорят по-русски [geo_2007_kikabidze_interview.flac@t=17:15-17:54].\n\nSources: [geo_2007_kikabidze_interview.flac]"
+ },
+ {
+  "want": "ru",
+  "got": "ru?",
+  "why": "cyrillic 81, no distinctive letter",
+  "tags": 1,
+  "sec": 0.8,
+  "q": "О чём спрашивают Вахтанга Кикабидзе?",
+  "answer": "Спрашивают, как он оценивает русский мир и говорит ли он, что он приходит туда, где говорят по-русски. [geo_2007_kikabidze_interview.flac@t=17:15-17:54]\n\nSources: [geo_2007_kikabidze_interview.flac]"
+ },
+ {
+  "want": "en",
+  "got": "en",
+  "why": "latin 161 vs cyrillic 0",
+  "tags": 1,
+  "sec": 0.9,
+  "q": "What does the Ukrainian foreign minister say about NATO?",
+  "answer": "He says Ukraine will “find formats of interaction, formats of synergy with … NATO” and work with it as one of the international partners. [ukr_18126_kuleba_interview.flac@t=08:17-08:57]\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "en",
+  "got": "en",
+  "why": "latin 181 vs cyrillic 0",
+  "tags": 1,
+  "sec": 0.8,
+  "q": "What does the Ukrainian foreign minister say about NATO?",
+  "answer": "The Ukrainian foreign minister says Ukraine will seek “formats of interaction” and “synergy” with NATO, together with the UN, the Council of Europe, and the OSCE. [ukr_18126_kuleba_interview.flac@t=08:17-08:57]\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "en",
+  "got": "en",
+  "why": "latin 352 vs cyrillic 0",
+  "tags": 3,
+  "sec": 1.1,
+  "q": "What is said about Crimea in these recordings?",
+  "answer": "In these recordings, Crimea is described as an occupied territory whose de-occupation is the goal of the Crimean Platform, and the platform is meant to increase pressure on Russia to achieve that. It is also said that Crimea is a painful human-rights issue, and that there are UN resolutions dedicated to Crimea [ukr_18126_kuleba_interview.flac@t=02:59-03:34] [ukr_18126_kuleba_interview.flac@t=09:32-09:49] [ukr_18126_kuleba_interview.flac@t=08:17-08:57].\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "en",
+  "got": "en",
+  "why": "latin 403 vs cyrillic 0",
+  "tags": 3,
+  "sec": 1.2,
+  "q": "What is said about Crimea in these recordings?",
+  "answer": "About Crimea, the recordings say that the goal is to end the de-occupation of the peninsula and increase pressure on Russia as an aggressor [ukr_18126_kuleba_interview.flac@t=02:59-03:34]. They also say the Crimean Platform is meant to be a self-sufficient mechanism for this work and will not be “parked” anywhere [ukr_18126_kuleba_interview.flac@t=07:49-08:17]. Another point is that the protection of human rights in Crimea is described as “one of the most painful” issues [ukr_18126_kuleba_interview.flac@t=09:32-09:49].\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "en",
+  "got": "en",
+  "why": "latin 101 vs cyrillic 0",
+  "tags": 1,
+  "sec": 0.7,
+  "q": "When did Dmytro Kuleba become Minister of Foreign Affairs?",
+  "answer": "Dmytro Kuleba became Minister of Foreign Affairs in March 2020. [ukr_18126_kuleba_interview.flac@t=00:34-01:13]\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "en",
+  "got": "en",
+  "why": "latin 101 vs cyrillic 0",
+  "tags": 1,
+  "sec": 0.7,
+  "q": "When did Dmytro Kuleba become Minister of Foreign Affairs?",
+  "answer": "Dmytro Kuleba became Minister of Foreign Affairs in March 2020. [ukr_18126_kuleba_interview.flac@t=00:34-01:13]\n\nSources: [ukr_18126_kuleba_interview.flac]"
+ },
+ {
+  "want": "ky",
+  "got": "ru",
+  "why": "ru x12 (uk=0 ru=12 ky=4)",
+  "tags": 1,
+  "sec": 1.1,
+  "q": "Садыр Жапаров референдум жөнүндө эмне дейт?",
+  "answer": "Садыр Жапаров референдум тууралуу: Кыргызстанда 11-апрелде референдум өтөрүн, анда жаңы баш мыйзамдын долбоору сунушталып, «элдин добушу чечет, анын конституциялык тагдырын» деп айтат. [kgz_21138_japarov_broll.flac@t=05:45-06:24]\n\nSources: [kgz_21138_japarov_broll.flac]"
+ },
+ {
+  "want": "ky",
+  "got": "ru",
+  "why": "ru x8 (uk=0 ru=8 ky=4)",
+  "tags": 1,
+  "sec": 0.9,
+  "q": "Садыр Жапаров референдум жөнүндө эмне дейт?",
+  "answer": "Садыр Жапаров референдум тууралуу: «Кыргызстан референдумды 11 апрелде жерликти кеңештерге шайлоо менен бирге өткөрөт» жана «бул элдин добушу конституциялык тагдырын чечет» дейт. [kgz_21138_japarov_broll.flac@t=05:45-06:24]\n\nSources: [kgz_21138_japarov_broll.flac]"
+ },
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x2 (uk=2 ru=0 ky=0)",
+  "tags": 0,
+  "sec": 0.6,
+  "q": "Що Садир Жапаров каже про референдум?",
+  "answer": "У наданому контексті немає згадки про Садира Жапарова чи його слова про референдум."
+ },
+ {
+  "want": "uk",
+  "got": "uk",
+  "why": "uk x3 (uk=3 ru=0 ky=0)",
+  "tags": 0,
+  "sec": 0.7,
+  "q": "Що Садир Жапаров каже про референдум?",
+  "answer": "У наданому контексті немає згадки про Садира Жапарова чи його позицію щодо референдуму."
+ },
+ {
+  "want": "ru",
+  "got": "ru",
+  "why": "ru x1 (uk=0 ru=1 ky=0)",
+  "tags": 1,
+  "sec": 0.7,
+  "q": "Что Инна Кузнецова спрашивает у гостей программы?",
+  "answer": "Инна Кузнецова спрашивает у гостей программы: «Что изменилось в Грузии за последние 10 лет? И в какую сторону?» [geo_2007_kikabidze_interview.flac@t=20:00-20:35]\n\nSources: [geo_2007_kikabidze_interview.flac]"
+ },
+ {
+  "want": "ru",
+  "got": "ru",
+  "why": "ru x3 (uk=0 ru=3 ky=0)",
+  "tags": 4,
+  "sec": 1.3,
+  "q": "Что Инна Кузнецова спрашивает у гостей программы?",
+  "answer": "Инна Кузнецова спрашивает у гостей программы об их мнении и оценке событий: например, как они относятся к критике, как оценивают контракт Тимошенко, что изменилось в Грузии, и как они видят аннексию Крыма и оккупацию Абхазии и Южной Осетии. [geo_2007_kikabidze_interview.flac@t=25:04-25:37] [ukr_1108_kravchuk_interview.flac@t=01:04-01:42] [geo_2007_kikabidze_interview.flac@t=20:00-20:35] [geo_2007_kikabidze_interview.flac@t=07:40-08:09]\n\nSources: [geo_2007_kikabidze_interview.flac], [ukr_1108_kravchuk_interview.flac]"
+ }
+]

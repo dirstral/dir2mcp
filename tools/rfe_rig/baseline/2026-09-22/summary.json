@@ -1,0 +1,951 @@
+{
+ "schema": "rfe_rig.summary.v1",
+ "results_dir": "/mnt/data/rfe-val/rig/results/2026-09-22",
+ "ask": {
+  "asked": 24,
+  "in_language": 20,
+  "undecidable": 0,
+  "errors": 0,
+  "tagged": 0,
+  "cited_structured": 24,
+  "fallback_answers": 24,
+  "failing": [
+   {
+    "want": "en",
+    "got": "ru",
+    "q": "When did Dmytro Kuleba become Minister of Foreign Affairs?",
+    "run": 1
+   },
+   {
+    "want": "en",
+    "got": "ru",
+    "q": "When did Dmytro Kuleba become Minister of Foreign Affairs?",
+    "run": 2
+   },
+   {
+    "want": "ky",
+    "got": "ru",
+    "q": "Садыр Жапаров референдум жөнүндө эмне дейт?",
+    "run": 1
+   },
+   {
+    "want": "ky",
+    "got": "ru",
+    "q": "Садыр Жапаров референдум жөнүндө эмне дейт?",
+    "run": 2
+   }
+  ]
+ },
+ "ask_runs": 2,
+ "ask_replay": {
+  "asked": 24,
+  "in_language": 24,
+  "undecidable": 0,
+  "errors": 0,
+  "tagged": 20,
+  "cited_structured": 0,
+  "fallback_answers": 0,
+  "failing": []
+ },
+ "ask_replay_source": "ask_2026-09-12_main-final.json",
+ "coverage": [
+  {
+   "rel_path": "geo_2007_kikabidze_interview.flac",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": "ru",
+   "language_source": "detected",
+   "language_confidence": 1,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 46,
+   "chunks_deleted": 153,
+   "chunk_languages": {
+    "ru": 46
+   },
+   "window_s": {
+    "mean": 33.3,
+    "median": 35.5,
+    "min": 7.9,
+    "max": 46.8
+   },
+   "words_live": 2801,
+   "chars_live": 16908,
+   "delivered_covered_s": 1531.9,
+   "duration_s": 1545.3,
+   "delivered_coverage": 0.991,
+   "deleted_covered_s": 1214.1,
+   "deleted_coverage": 0.786
+  },
+  {
+   "rel_path": "kgz_18448_extremism_hospital.flac",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": null,
+   "language_source": null,
+   "language_confidence": null,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 50,
+   "chunks_deleted": 260,
+   "chunk_languages": {
+    "": 50
+   },
+   "window_s": {
+    "mean": 36.7,
+    "median": 37.3,
+    "min": 20.4,
+    "max": 92.2
+   },
+   "words_live": 3023,
+   "chars_live": 21110,
+   "delivered_covered_s": 1837.3,
+   "duration_s": 1877.0,
+   "delivered_coverage": 0.979,
+   "deleted_covered_s": 1572.3,
+   "deleted_coverage": 0.838
+  },
+  {
+   "rel_path": "kgz_21138_japarov_broll.flac",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": "mk",
+   "language_source": "detected",
+   "language_confidence": 1,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 126,
+   "chunks_deleted": 411,
+   "chunk_languages": {
+    "mk": 126
+   },
+   "window_s": {
+    "mean": 34.7,
+    "median": 35.7,
+    "min": 1.9,
+    "max": 96.0
+   },
+   "words_live": 7206,
+   "chars_live": 50407,
+   "delivered_covered_s": 4369.6,
+   "duration_s": 4384.6,
+   "delivered_coverage": 0.997,
+   "deleted_covered_s": 3550.1,
+   "deleted_coverage": 0.81
+  },
+  {
+   "rel_path": "kgz_29216_rahat_interview.wav",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": "tk",
+   "language_source": "detected",
+   "language_confidence": 1,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 55,
+   "chunks_deleted": 227,
+   "chunk_languages": {
+    "tk": 55
+   },
+   "window_s": {
+    "mean": 33.6,
+    "median": 36.1,
+    "min": 3.6,
+    "max": 40.1
+   },
+   "words_live": 3408,
+   "chars_live": 24480,
+   "delivered_covered_s": 1849.1,
+   "duration_s": 1851.6,
+   "delivered_coverage": 0.999,
+   "deleted_covered_s": 1516.3,
+   "deleted_coverage": 0.819
+  },
+  {
+   "rel_path": "rus_28974_shalygina_interview.flac",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": "ru",
+   "language_source": "detected",
+   "language_confidence": 0.7444678136078979,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 50,
+   "chunks_deleted": 232,
+   "chunk_languages": {
+    "ru": 50
+   },
+   "window_s": {
+    "mean": 34.6,
+    "median": 36.6,
+    "min": 14.2,
+    "max": 45.8
+   },
+   "words_live": 3154,
+   "chars_live": 18279,
+   "delivered_covered_s": 1728.6,
+   "duration_s": 1731.5,
+   "delivered_coverage": 0.998,
+   "deleted_covered_s": 1404.2,
+   "deleted_coverage": 0.811
+  },
+  {
+   "rel_path": "ukr_0652_filaret_programme.flac",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": "uk",
+   "language_source": "detected",
+   "language_confidence": 1,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 60,
+   "chunks_deleted": 125,
+   "chunk_languages": {
+    "uk": 60
+   },
+   "window_s": {
+    "mean": 33.1,
+    "median": 35.3,
+    "min": 13.2,
+    "max": 39.6
+   },
+   "words_live": 2773,
+   "chars_live": 16903,
+   "delivered_covered_s": 1986.2,
+   "duration_s": 2001.2,
+   "delivered_coverage": 0.993,
+   "deleted_covered_s": 1388.6,
+   "deleted_coverage": 0.694
+  },
+  {
+   "rel_path": "ukr_1108_kravchuk_interview.flac",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": "ru",
+   "language_source": "detected",
+   "language_confidence": 1,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 55,
+   "chunks_deleted": 162,
+   "chunk_languages": {
+    "ru": 55
+   },
+   "window_s": {
+    "mean": 33.4,
+    "median": 34.4,
+    "min": 12.9,
+    "max": 39.9
+   },
+   "words_live": 2938,
+   "chars_live": 18456,
+   "delivered_covered_s": 1837.1,
+   "duration_s": 1841.0,
+   "delivered_coverage": 0.998,
+   "deleted_covered_s": 1503.7,
+   "deleted_coverage": 0.817
+  },
+  {
+   "rel_path": "ukr_18126_kuleba_interview.flac",
+   "rep_type": "transcript",
+   "document_status": "ok",
+   "skip_reason": "",
+   "rep_deleted": false,
+   "provider": "whisper",
+   "model": "large-v3-multi",
+   "language": "en",
+   "language_source": "detected",
+   "language_confidence": 1,
+   "coverage": null,
+   "language_covered": null,
+   "chunks_live": 45,
+   "chunks_deleted": 180,
+   "chunk_languages": {
+    "en": 45
+   },
+   "window_s": {
+    "mean": 36.0,
+    "median": 37.5,
+    "min": 10.9,
+    "max": 39.9
+   },
+   "words_live": 3278,
+   "chars_live": 20299,
+   "delivered_covered_s": 1620.7,
+   "duration_s": 1622.8,
+   "delivered_coverage": 0.999,
+   "deleted_covered_s": 1218.6,
+   "deleted_coverage": 0.751
+  }
+ ],
+ "agreements": [
+  {
+   "file": "geo_2007_kikabidze_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-76d56b0863da__vs__gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt.json",
+   "recording": "geo_2007_kikabidze_interview.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-76d56b0863da",
+   "b": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 52,
+    "speech_windows": 52,
+    "agreeing_windows": 49,
+    "agree_fraction_all": 0.9423,
+    "coverage_by_agreement": 0.9423,
+    "mean_wer": 0.2545,
+    "mean_ned": 0.2187,
+    "overall_wer": 0.2363,
+    "a_tokens": 2793,
+    "b_tokens": 2967,
+    "a_windows_with_text": 52,
+    "b_windows_with_text": 52
+   }
+  },
+  {
+   "file": "geo_2007_kikabidze_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-76d56b0863da__vs__mms-1b-all-rus__rus-3d33597edbda-tf5.13.1.json",
+   "recording": "geo_2007_kikabidze_interview.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-76d56b0863da",
+   "b": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 52,
+    "speech_windows": 52,
+    "agreeing_windows": 26,
+    "agree_fraction_all": 0.5,
+    "coverage_by_agreement": 0.5,
+    "mean_wer": 0.5923,
+    "mean_ned": 0.5624,
+    "overall_wer": 0.5736,
+    "a_tokens": 2793,
+    "b_tokens": 2595,
+    "a_windows_with_text": 52,
+    "b_windows_with_text": 52
+   }
+  },
+  {
+   "file": "geo_2007_kikabidze_interview__gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt__vs__mms-1b-all-rus__rus-3d33597edbda-tf5.13.1.json",
+   "recording": "geo_2007_kikabidze_interview.flac",
+   "a": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "b": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 52,
+    "speech_windows": 52,
+    "agreeing_windows": 27,
+    "agree_fraction_all": 0.5192,
+    "coverage_by_agreement": 0.5192,
+    "mean_wer": 0.5545,
+    "mean_ned": 0.5517,
+    "overall_wer": 0.5477,
+    "a_tokens": 2967,
+    "b_tokens": 2595,
+    "a_windows_with_text": 52,
+    "b_windows_with_text": 52
+   }
+  },
+  {
+   "file": "kgz_18448_extremism_hospital__dir2mcp-whisper-large-v3-multi__large-v3-multi-b366b6e981c7__vs__mms-1b-all-kir__kir-3d33597edbda-tf5.13.1.json",
+   "recording": "kgz_18448_extremism_hospital.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-b366b6e981c7",
+   "b": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 63,
+    "speech_windows": 63,
+    "agreeing_windows": 0,
+    "agree_fraction_all": 0.0,
+    "coverage_by_agreement": 0.0,
+    "mean_wer": 1.0953,
+    "mean_ned": 0.9108,
+    "overall_wer": 0.994,
+    "a_tokens": 3023,
+    "b_tokens": 2988,
+    "a_windows_with_text": 61,
+    "b_windows_with_text": 63
+   }
+  },
+  {
+   "file": "kgz_18448_extremism_hospital__dir2mcp-whisper-large-v3-multi__large-v3-multi-b366b6e981c7__vs__whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1.json",
+   "recording": "kgz_18448_extremism_hospital.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-b366b6e981c7",
+   "b": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 63,
+    "speech_windows": 63,
+    "agreeing_windows": 0,
+    "agree_fraction_all": 0.0,
+    "coverage_by_agreement": 0.0,
+    "mean_wer": 1.1726,
+    "mean_ned": 0.9067,
+    "overall_wer": 1.0844,
+    "a_tokens": 3023,
+    "b_tokens": 3496,
+    "a_windows_with_text": 61,
+    "b_windows_with_text": 61
+   }
+  },
+  {
+   "file": "kgz_18448_extremism_hospital__whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1__vs__mms-1b-all-kir__kir-3d33597edbda-tf5.13.1.json",
+   "recording": "kgz_18448_extremism_hospital.flac",
+   "a": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "b": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 63,
+    "speech_windows": 63,
+    "agreeing_windows": 18,
+    "agree_fraction_all": 0.2857,
+    "coverage_by_agreement": 0.2857,
+    "mean_wer": 0.603,
+    "mean_ned": 0.5931,
+    "overall_wer": 0.5821,
+    "a_tokens": 3496,
+    "b_tokens": 2988,
+    "a_windows_with_text": 61,
+    "b_windows_with_text": 63
+   }
+  },
+  {
+   "file": "kgz_21138_japarov_broll__dir2mcp-whisper-large-v3-multi__large-v3-multi-58f8920d30cd__vs__mms-1b-all-kir__kir-3d33597edbda-tf5.13.1.json",
+   "recording": "kgz_21138_japarov_broll.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-58f8920d30cd",
+   "b": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 147,
+    "speech_windows": 147,
+    "agreeing_windows": 0,
+    "agree_fraction_all": 0.0,
+    "coverage_by_agreement": 0.0,
+    "mean_wer": 1.7089,
+    "mean_ned": 0.9355,
+    "overall_wer": 1.084,
+    "a_tokens": 7199,
+    "b_tokens": 7587,
+    "a_windows_with_text": 142,
+    "b_windows_with_text": 147
+   }
+  },
+  {
+   "file": "kgz_21138_japarov_broll__dir2mcp-whisper-large-v3-multi__large-v3-multi-58f8920d30cd__vs__whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1.json",
+   "recording": "kgz_21138_japarov_broll.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-58f8920d30cd",
+   "b": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 147,
+    "speech_windows": 147,
+    "agreeing_windows": 0,
+    "agree_fraction_all": 0.0,
+    "coverage_by_agreement": 0.0,
+    "mean_wer": 2.4505,
+    "mean_ned": 0.9299,
+    "overall_wer": 1.2021,
+    "a_tokens": 7199,
+    "b_tokens": 9030,
+    "a_windows_with_text": 142,
+    "b_windows_with_text": 145
+   }
+  },
+  {
+   "file": "kgz_21138_japarov_broll__whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1__vs__mms-1b-all-kir__kir-3d33597edbda-tf5.13.1.json",
+   "recording": "kgz_21138_japarov_broll.flac",
+   "a": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "b": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 147,
+    "speech_windows": 147,
+    "agreeing_windows": 63,
+    "agree_fraction_all": 0.4286,
+    "coverage_by_agreement": 0.4286,
+    "mean_wer": 0.7589,
+    "mean_ned": 0.5684,
+    "overall_wer": 0.5474,
+    "a_tokens": 9030,
+    "b_tokens": 7587,
+    "a_windows_with_text": 145,
+    "b_windows_with_text": 147
+   }
+  },
+  {
+   "file": "kgz_29216_rahat_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-22bf375577f5__vs__mms-1b-all-kir__kir-3d33597edbda-tf5.13.1.json",
+   "recording": "kgz_29216_rahat_interview.wav",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-22bf375577f5",
+   "b": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 62,
+    "speech_windows": 62,
+    "agreeing_windows": 0,
+    "agree_fraction_all": 0.0,
+    "coverage_by_agreement": 0.0,
+    "mean_wer": 1.1098,
+    "mean_ned": 0.9084,
+    "overall_wer": 0.9595,
+    "a_tokens": 3404,
+    "b_tokens": 3143,
+    "a_windows_with_text": 62,
+    "b_windows_with_text": 62
+   }
+  },
+  {
+   "file": "kgz_29216_rahat_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-22bf375577f5__vs__whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1.json",
+   "recording": "kgz_29216_rahat_interview.wav",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-22bf375577f5",
+   "b": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 62,
+    "speech_windows": 62,
+    "agreeing_windows": 0,
+    "agree_fraction_all": 0.0,
+    "coverage_by_agreement": 0.0,
+    "mean_wer": 1.2442,
+    "mean_ned": 0.8957,
+    "overall_wer": 1.0485,
+    "a_tokens": 3404,
+    "b_tokens": 3893,
+    "a_windows_with_text": 62,
+    "b_windows_with_text": 62
+   }
+  },
+  {
+   "file": "kgz_29216_rahat_interview__whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1__vs__mms-1b-all-kir__kir-3d33597edbda-tf5.13.1.json",
+   "recording": "kgz_29216_rahat_interview.wav",
+   "a": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "b": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 62,
+    "speech_windows": 62,
+    "agreeing_windows": 21,
+    "agree_fraction_all": 0.3387,
+    "coverage_by_agreement": 0.3387,
+    "mean_wer": 0.5824,
+    "mean_ned": 0.5749,
+    "overall_wer": 0.5759,
+    "a_tokens": 3893,
+    "b_tokens": 3143,
+    "a_windows_with_text": 62,
+    "b_windows_with_text": 62
+   }
+  },
+  {
+   "file": "rus_28974_shalygina_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-dbe07da33c68__vs__gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt.json",
+   "recording": "rus_28974_shalygina_interview.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-dbe07da33c68",
+   "b": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 58,
+    "speech_windows": 58,
+    "agreeing_windows": 49,
+    "agree_fraction_all": 0.8448,
+    "coverage_by_agreement": 0.8448,
+    "mean_wer": 0.3701,
+    "mean_ned": 0.2831,
+    "overall_wer": 0.2955,
+    "a_tokens": 3154,
+    "b_tokens": 3528,
+    "a_windows_with_text": 57,
+    "b_windows_with_text": 58
+   }
+  },
+  {
+   "file": "rus_28974_shalygina_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-dbe07da33c68__vs__mms-1b-all-rus__rus-3d33597edbda-tf5.13.1.json",
+   "recording": "rus_28974_shalygina_interview.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-dbe07da33c68",
+   "b": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 58,
+    "speech_windows": 58,
+    "agreeing_windows": 22,
+    "agree_fraction_all": 0.3793,
+    "coverage_by_agreement": 0.3793,
+    "mean_wer": 0.6112,
+    "mean_ned": 0.5721,
+    "overall_wer": 0.5602,
+    "a_tokens": 3154,
+    "b_tokens": 2865,
+    "a_windows_with_text": 57,
+    "b_windows_with_text": 58
+   }
+  },
+  {
+   "file": "rus_28974_shalygina_interview__gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt__vs__mms-1b-all-rus__rus-3d33597edbda-tf5.13.1.json",
+   "recording": "rus_28974_shalygina_interview.flac",
+   "a": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "b": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 58,
+    "speech_windows": 58,
+    "agreeing_windows": 22,
+    "agree_fraction_all": 0.3793,
+    "coverage_by_agreement": 0.3793,
+    "mean_wer": 0.5893,
+    "mean_ned": 0.5764,
+    "overall_wer": 0.5417,
+    "a_tokens": 3528,
+    "b_tokens": 2865,
+    "a_windows_with_text": 58,
+    "b_windows_with_text": 58
+   }
+  },
+  {
+   "file": "ukr_0652_filaret_programme__dir2mcp-whisper-large-v3-multi__large-v3-multi-6876a1b269fe__vs__mms-1b-all-ukr__ukr-3d33597edbda-tf5.13.1.json",
+   "recording": "ukr_0652_filaret_programme.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-6876a1b269fe",
+   "b": "mms-1b-all-ukr__ukr-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 67,
+    "speech_windows": 67,
+    "agreeing_windows": 64,
+    "agree_fraction_all": 0.9552,
+    "coverage_by_agreement": 0.9552,
+    "mean_wer": 0.274,
+    "mean_ned": 0.2712,
+    "overall_wer": 0.2704,
+    "a_tokens": 2755,
+    "b_tokens": 2620,
+    "a_windows_with_text": 67,
+    "b_windows_with_text": 67
+   }
+  },
+  {
+   "file": "ukr_1108_kravchuk_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-5ce9e2685163__vs__gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt.json",
+   "recording": "ukr_1108_kravchuk_interview.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-5ce9e2685163",
+   "b": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 62,
+    "speech_windows": 62,
+    "agreeing_windows": 61,
+    "agree_fraction_all": 0.9839,
+    "coverage_by_agreement": 0.9839,
+    "mean_wer": 0.2084,
+    "mean_ned": 0.1894,
+    "overall_wer": 0.2003,
+    "a_tokens": 2920,
+    "b_tokens": 3055,
+    "a_windows_with_text": 62,
+    "b_windows_with_text": 62
+   }
+  },
+  {
+   "file": "ukr_1108_kravchuk_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-5ce9e2685163__vs__mms-1b-all-rus__rus-3d33597edbda-tf5.13.1.json",
+   "recording": "ukr_1108_kravchuk_interview.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-5ce9e2685163",
+   "b": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 62,
+    "speech_windows": 62,
+    "agreeing_windows": 47,
+    "agree_fraction_all": 0.7581,
+    "coverage_by_agreement": 0.7581,
+    "mean_wer": 0.4168,
+    "mean_ned": 0.4117,
+    "overall_wer": 0.4202,
+    "a_tokens": 2920,
+    "b_tokens": 2597,
+    "a_windows_with_text": 62,
+    "b_windows_with_text": 62
+   }
+  },
+  {
+   "file": "ukr_1108_kravchuk_interview__gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt__vs__mms-1b-all-rus__rus-3d33597edbda-tf5.13.1.json",
+   "recording": "ukr_1108_kravchuk_interview.flac",
+   "a": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "b": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 62,
+    "speech_windows": 62,
+    "agreeing_windows": 46,
+    "agree_fraction_all": 0.7419,
+    "coverage_by_agreement": 0.7419,
+    "mean_wer": 0.4403,
+    "mean_ned": 0.4382,
+    "overall_wer": 0.4468,
+    "a_tokens": 3055,
+    "b_tokens": 2597,
+    "a_windows_with_text": 62,
+    "b_windows_with_text": 62
+   }
+  },
+  {
+   "file": "ukr_18126_kuleba_interview__dir2mcp-whisper-large-v3-multi__large-v3-multi-6a821246c5cc__vs__mms-1b-all-ukr__ukr-3d33597edbda-tf5.13.1.json",
+   "recording": "ukr_18126_kuleba_interview.flac",
+   "a": "dir2mcp-whisper-large-v3-multi__large-v3-multi-6a821246c5cc",
+   "b": "mms-1b-all-ukr__ukr-3d33597edbda-tf5.13.1",
+   "window_s": 30.0,
+   "threshold": 0.5,
+   "summary": {
+    "windows_total": 55,
+    "speech_windows": 55,
+    "agreeing_windows": 34,
+    "agree_fraction_all": 0.6182,
+    "coverage_by_agreement": 0.6182,
+    "mean_wer": 0.5559,
+    "mean_ned": 0.5409,
+    "overall_wer": 0.5811,
+    "a_tokens": 3263,
+    "b_tokens": 2696,
+    "a_windows_with_text": 55,
+    "b_windows_with_text": 55
+   }
+  }
+ ],
+ "transcripts": [
+  {
+   "recording": "geo_2007_kikabidze_interview.flac",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-76d56b0863da",
+   "kind": "sqlite",
+   "language": "ru",
+   "segments": 46,
+   "words": 2801,
+   "chars": 16908
+  },
+  {
+   "recording": "geo_2007_kikabidze_interview.flac",
+   "decoder": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "kind": "http",
+   "language": "ru",
+   "segments": 194,
+   "words": 2942,
+   "chars": 17955
+  },
+  {
+   "recording": "geo_2007_kikabidze_interview.flac",
+   "decoder": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "rus",
+   "segments": 52,
+   "words": 2581,
+   "chars": 15591
+  },
+  {
+   "recording": "kgz_18448_extremism_hospital.flac",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-b366b6e981c7",
+   "kind": "sqlite",
+   "language": "",
+   "segments": 50,
+   "words": 3023,
+   "chars": 21110
+  },
+  {
+   "recording": "kgz_18448_extremism_hospital.flac",
+   "decoder": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "kir",
+   "segments": 63,
+   "words": 2984,
+   "chars": 21570
+  },
+  {
+   "recording": "kgz_18448_extremism_hospital.flac",
+   "decoder": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "kind": "fw",
+   "language": "kk",
+   "segments": 63,
+   "words": 3496,
+   "chars": 23422
+  },
+  {
+   "recording": "kgz_21138_japarov_broll.flac",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-58f8920d30cd",
+   "kind": "sqlite",
+   "language": "mk",
+   "segments": 126,
+   "words": 7206,
+   "chars": 50407
+  },
+  {
+   "recording": "kgz_21138_japarov_broll.flac",
+   "decoder": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "kir",
+   "segments": 147,
+   "words": 7549,
+   "chars": 56661
+  },
+  {
+   "recording": "kgz_21138_japarov_broll.flac",
+   "decoder": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "kind": "fw",
+   "language": "kk",
+   "segments": 162,
+   "words": 9031,
+   "chars": 61212
+  },
+  {
+   "recording": "kgz_29216_rahat_interview.wav",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-22bf375577f5",
+   "kind": "sqlite",
+   "language": "tk",
+   "segments": 55,
+   "words": 3408,
+   "chars": 24480
+  },
+  {
+   "recording": "kgz_29216_rahat_interview.wav",
+   "decoder": "mms-1b-all-kir__kir-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "kir",
+   "segments": 62,
+   "words": 3121,
+   "chars": 23448
+  },
+  {
+   "recording": "kgz_29216_rahat_interview.wav",
+   "decoder": "whisper-small-kyrgyz-ct2__small-kyrgyz-ct2-kk-fw1.2.1",
+   "kind": "fw",
+   "language": "kk",
+   "segments": 70,
+   "words": 3893,
+   "chars": 26444
+  },
+  {
+   "recording": "rus_28974_shalygina_interview.flac",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-dbe07da33c68",
+   "kind": "sqlite",
+   "language": "ru",
+   "segments": 50,
+   "words": 3154,
+   "chars": 18279
+  },
+  {
+   "recording": "rus_28974_shalygina_interview.flac",
+   "decoder": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "kind": "http",
+   "language": "ru",
+   "segments": 212,
+   "words": 3473,
+   "chars": 20451
+  },
+  {
+   "recording": "rus_28974_shalygina_interview.flac",
+   "decoder": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "rus",
+   "segments": 58,
+   "words": 2845,
+   "chars": 17057
+  },
+  {
+   "recording": "ukr_0652_filaret_programme.flac",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-6876a1b269fe",
+   "kind": "sqlite",
+   "language": "uk",
+   "segments": 60,
+   "words": 2773,
+   "chars": 16903
+  },
+  {
+   "recording": "ukr_0652_filaret_programme.flac",
+   "decoder": "mms-1b-all-ukr__ukr-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "ukr",
+   "segments": 67,
+   "words": 2619,
+   "chars": 16105
+  },
+  {
+   "recording": "ukr_1108_kravchuk_interview.flac",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-5ce9e2685163",
+   "kind": "sqlite",
+   "language": "ru",
+   "segments": 55,
+   "words": 2938,
+   "chars": 18456
+  },
+  {
+   "recording": "ukr_1108_kravchuk_interview.flac",
+   "decoder": "gigaam-v3-e2e_rnnt__gigaam-v3-e2e_rnnt",
+   "kind": "http",
+   "language": "ru",
+   "segments": 236,
+   "words": 3059,
+   "chars": 19121
+  },
+  {
+   "recording": "ukr_1108_kravchuk_interview.flac",
+   "decoder": "mms-1b-all-rus__rus-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "rus",
+   "segments": 62,
+   "words": 2592,
+   "chars": 16411
+  },
+  {
+   "recording": "ukr_18126_kuleba_interview.flac",
+   "decoder": "dir2mcp-whisper-large-v3-multi__large-v3-multi-6a821246c5cc",
+   "kind": "sqlite",
+   "language": "en",
+   "segments": 45,
+   "words": 3278,
+   "chars": 20299
+  },
+  {
+   "recording": "ukr_18126_kuleba_interview.flac",
+   "decoder": "mms-1b-all-ukr__ukr-3d33597edbda-tf5.13.1",
+   "kind": "mms",
+   "language": "ukr",
+   "segments": 55,
+   "words": 2692,
+   "chars": 18133
+  }
+ ]
+}

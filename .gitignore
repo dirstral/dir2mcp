@@ -57,3 +57,7 @@ __pycache__/
 # The venv `make test-annotator` owns. It installs there rather than into the
 # ambient interpreter, which a PEP 668 python refuses.
 annotator/.venv-test/
+
+# Full decode outputs of the RFE validation rig stay on q2e
+# (/mnt/data/rfe-val/rig/results); only tools/rfe_rig/baseline/ summaries are tracked.
+tools/rfe_rig/results/
