@@ -9,11 +9,17 @@ R=/mnt/data/rfe-val/rig/results/2026-09-22
 C=/mnt/data/rfe-val/corpus_live
 PY=/home/ubuntu/rfe-pilot/stt-venv/bin/python
 M=/home/ubuntu/rfe-pilot/models/small-kyrgyz-ct2
+failed=0
 for f in kgz_29216_rahat_interview.wav kgz_18448_extremism_hospital.flac kgz_21138_japarov_broll.flac; do
   echo "=== $(date -u +%FT%TZ) fw small-kyrgyz $f"
   nice -n 10 python3 -m tools.rfe_rig --results "$R" transcribe \
     --decoder "fw:$M?language=kk&name=whisper-small-kyrgyz-ct2" --fw-python "$PY" --threads 4 "$C/$f"
   rc=$?
   echo "=== $(date -u +%FT%TZ) exit $rc"
+  if [ "$rc" -ne 0 ]; then failed=$((failed + 1)); fi
 done
+if [ "$failed" -ne 0 ]; then
+  echo "FW BATCH INCOMPLETE: $failed decode(s) failed $(date -u +%FT%TZ)"
+  exit 1
+fi
 echo "FW BATCH DONE $(date -u +%FT%TZ)"

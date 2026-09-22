@@ -13,6 +13,7 @@ Format (rfe_rig.transcript.v1):
                   times in seconds, absolute to the recording start
 """
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -35,8 +36,19 @@ def recording_stem(path):
     return os.path.splitext(os.path.basename(path))[0]
 
 
+def recording_key(path):
+    """Cache directory name for one recording: its stem plus a digest of its
+    canonical path. The stem alone would let /a/x.wav, /b/x.wav and /a/x.flac
+    share one cache entry and hand the second recording the first one's
+    transcript; the digest keeps them apart while the stem keeps the directory
+    readable."""
+    canonical = os.path.realpath(os.path.abspath(path))
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:10]
+    return f"{recording_stem(path)}-{digest}"
+
+
 def cache_path(results_dir, recording, dec_id):
-    return os.path.join(results_dir, "transcripts", recording_stem(recording), dec_id + ".json")
+    return os.path.join(results_dir, "transcripts", recording_key(recording), dec_id + ".json")
 
 
 def now_utc():
@@ -115,7 +127,7 @@ def load(path):
 
 def find_for(results_dir, recording, decoder_prefix):
     """All cached transcripts for a recording whose decoder id starts with prefix."""
-    d = os.path.join(results_dir, "transcripts", recording_stem(recording))
+    d = os.path.join(results_dir, "transcripts", recording_key(recording))
     if not os.path.isdir(d):
         return []
     out = []

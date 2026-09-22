@@ -119,7 +119,13 @@ class SqliteDecoderAndCacheTest(unittest.TestCase):
 
     def test_cache_path_and_stats(self):
         p = transcripts.cache_path("/r", "/x/rec.flac", "dec__1")
-        self.assertEqual(p, os.path.join("/r", "transcripts", "rec", "dec__1.json"))
+        key = transcripts.recording_key("/x/rec.flac")
+        self.assertTrue(key.startswith("rec-") and len(key) == len("rec-") + 10, key)
+        self.assertEqual(p, os.path.join("/r", "transcripts", key, "dec__1.json"))
+        # The key tells recordings apart by path and extension, not by stem.
+        self.assertNotEqual(transcripts.recording_key("/x/rec.flac"), transcripts.recording_key("/y/rec.flac"))
+        self.assertNotEqual(transcripts.recording_key("/x/rec.flac"), transcripts.recording_key("/x/rec.wav"))
+        self.assertEqual(transcripts.recording_key("/x/rec.flac"), transcripts.recording_key("/x/../x/rec.flac"))
         t = transcripts.build("/x/rec.flac", 10.0, {"kind": "test", "name": "n", "version": "v"},
                               [{"start": 0, "end": 4, "text": "a b", "words": [
                                   {"start": 0, "end": 1, "word": "a"}, {"start": 1, "end": 2, "word": " "}]}])
@@ -154,6 +160,37 @@ class SqliteDecoderAndCacheTest(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertIn("a.flac", lines[1])
         self.assertIn(",1.0,", lines[1])  # coverage_by_agreement of a self-comparison
+
+
+class VersionInputsTest(unittest.TestCase):
+    """Every input that changes a decoder's output is part of its version, so
+    two configurations never share one cache entry."""
+
+    def test_http_version_names_the_words_flag(self):
+        seen = []
+        real = decoders.http_health
+        decoders.http_health = lambda base: {"status": "ok", "model": "m"}
+        try:
+            a = decoders.Decoder("http://127.0.0.1:1?model=x", log=seen.append)
+            b = decoders.Decoder("http://127.0.0.1:1?model=x&words=0", log=seen.append)
+        finally:
+            decoders.http_health = real
+        self.assertNotEqual(a.version, b.version)
+        self.assertIn("words1", a.version)
+        self.assertIn("words0", b.version)
+
+    def test_model_dir_fingerprint_follows_the_weights(self):
+        with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+            for d in (d1, d2):
+                with open(os.path.join(d, "model.bin"), "wb") as fh:
+                    fh.write(b"weights")
+            f1 = decoders.model_dir_fingerprint(d1)
+            with open(os.path.join(d2, "model.bin"), "wb") as fh:
+                fh.write(b"other weights!")
+            f2 = decoders.model_dir_fingerprint(d2)
+            self.assertNotEqual(f1, f2)
+            self.assertEqual(len(f1), 12)
+            self.assertEqual(decoders.model_dir_fingerprint(os.path.join(d1, "missing")), "nodir")
 
 
 if __name__ == "__main__":

@@ -1,14 +1,39 @@
 """Minimal MCP streamable-HTTP client, ported from /mnt/data/rfe-val/measure.py.
 
 The bearer token is read from a file whose path the caller supplies. The token
-is never logged, never written into any result, and never a default value.
+is never logged, never written into any result, and never a default value. It
+is sent only over HTTPS, or over plain HTTP to a loopback address: a bearer
+token on cleartext HTTP to any other host would hand it, and the question, to
+an on-path observer.
 """
+import ipaddress
 import json
 import os
 import time
+import urllib.parse
 import urllib.request
 
 PROTO = "2025-11-25"
+LOOPBACK_HOSTS = {"localhost", "localhost.localdomain"}
+
+
+def check_url(url):
+    """Raise SystemExit unless url is https, or http to a loopback host."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme == "https":
+        return url
+    if u.scheme != "http":
+        raise SystemExit(f"MCP url must be http(s), got {url!r}")
+    host = (u.hostname or "").lower()
+    if host in LOOPBACK_HOSTS:
+        return url
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return url
+    except ValueError:
+        pass
+    raise SystemExit(f"refusing to send a bearer token over plain http to {host!r};"
+                     f" use https, or a loopback address (127.0.0.1, ::1, localhost)")
 
 
 def read_token(token_file):
@@ -23,7 +48,7 @@ def read_token(token_file):
 
 class MCP:
     def __init__(self, url, token, client_name="rfe-rig"):
-        self.url = url
+        self.url = check_url(url)
         self._token = token
         self.sid = None
         self.n = 0
@@ -63,21 +88,34 @@ class MCP:
         return self
 
     def ask(self, question, timeout=600):
-        """Return (answer_text, seconds, error_or_None, structured_content)."""
+        """Return (answer_text, seconds, error_or_None, structured_content).
+
+        A tool failure arrives either as the JSON-RPC `error` or, as MCP has
+        it for most tool errors, as `result.isError: true` with the message in
+        the content. Both are returned as the error; the message text is never
+        mistaken for an answer, so a failed call cannot be scored as an answer
+        in some language.
+        """
         t0 = time.time()
         r = self.call("tools/call",
                       {"name": "dir2mcp_ask", "arguments": {"question": question}},
                       timeout)
         dt = time.time() - t0
-        res = r.get("result") or {}
-        sc = res.get("structuredContent") or {}
-        answer = sc.get("answer") or ""
-        if not answer:
-            for c in res.get("content") or []:
-                if c.get("type") == "text":
-                    answer = c["text"]
-                    break
-        return answer, dt, r.get("error"), sc
+        return _unpack(r, dt)
+
+
+def _unpack(r, dt):
+    res = r.get("result") or {}
+    texts = [c.get("text", "") for c in res.get("content") or [] if c.get("type") == "text"]
+    if r.get("error"):
+        return "", dt, r["error"], {}
+    if res.get("isError"):
+        return "", dt, {"isError": True, "message": " ".join(t for t in texts if t) or "tool error"}, {}
+    sc = res.get("structuredContent") or {}
+    answer = sc.get("answer") or ""
+    if not answer and texts:
+        answer = texts[0]
+    return answer, dt, None, sc
 
 
 def parse_body(raw):

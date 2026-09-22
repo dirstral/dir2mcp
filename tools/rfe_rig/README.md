@@ -22,9 +22,9 @@ python3 -m tools.rfe_rig [--results DIR] <command> ...
 
 | command | what it does |
 |---|---|
-| `transcribe --decoder SPEC REC...` | decode recordings into the transcript cache (`results/transcripts/<rec>/<decoder_id>.json`); the cache key is (recording, decoder name, decoder version), so a re-run with the same decoder is a hit and a new model revision or a re-indexed state is a miss |
+| `transcribe --decoder SPEC REC...` | decode recordings into the transcript cache (`results/transcripts/<rec>-<path digest>/<decoder_id>.json`); the cache key is (recording canonical path, decoder name, decoder version), and the version folds every output-affecting input (model revision, word-timing flag, MMS chunk length, a fingerprint of a local model directory, the dir2mcp rep_hash), so a re-run with the same decoder is a hit and any change to what would be decoded is a miss |
 | `agreement --recording REC --a PREFIX --b PREFIX` | compare two cached decoders on a fixed 30 s grid; writes `results/agreement/<rec>__<a>__vs__<b>.json` and prints the worst windows |
-| `coverage --state-dir DIR [--media-dir DIR]` | read the dir2mcp state sqlite (copied first, opened read-only) for the per-recording baseline |
+| `coverage --state-dir DIR [--media-dir DIR]` | read the dir2mcp state sqlite (snapshotted first with SQLite's online backup API into a temp dir, then opened read-only, so the daemon's file is never touched and the copy is one coherent point in time) for the per-recording baseline |
 | `ask [--runs N] [--token-file F]` | the #964 measurement against a running daemon; `ask --replay FILE` re-scores a stored answer file without a daemon |
 | `report [--summary-dir DIR]` | `summary.md`, `summary.json` and `agreement.csv` over a results directory, also copied to `--summary-dir` |
 
@@ -43,7 +43,11 @@ Decoder specs:
   `fw_decode.py` (`--fw-python` names the faster-whisper interpreter).
 
 The MCP bearer token is read from `--token-file` or `RFE_RIG_TOKEN_FILE`. It
-is never printed and never written into a result.
+is never printed and never written into a result, and it is sent only over
+HTTPS or over plain HTTP to a loopback address (`127.0.0.1`, `::1`,
+`localhost`); any other `http://` URL is refused before a request is made.
+A tool call that comes back as `result.isError` is recorded as an error, not
+scored as an answer.
 
 ## Metrics
 

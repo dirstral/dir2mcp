@@ -1,7 +1,9 @@
 """Per-recording coverage baseline read from a dir2mcp state sqlite.
 
-The daemon holds the live database, so the file (with its -wal and -shm
-sidecars) is copied to a temporary directory first and opened read-only there.
+The daemon holds the live database, so it is snapshotted into a temporary
+directory first with SQLite's online backup API, which yields one coherent
+database whatever the daemon writes or checkpoints meanwhile, and the copy is
+opened read-only.
 
 Reported per transcript representation:
   language, language_source, language_confidence   from meta_json
@@ -20,7 +22,6 @@ the 8.6.13 decode coverage, which says how much audio the decoder attempted.
 """
 import json
 import os
-import shutil
 import sqlite3
 import statistics
 import tempfile
@@ -31,15 +32,27 @@ SCHEMA = "rfe_rig.coverage.v1"
 
 
 def snapshot_sqlite(state_dir, tmp_dir):
-    """Copy meta.sqlite (+wal/shm) so the read never touches the daemon's file."""
+    """Snapshot meta.sqlite into tmp_dir as one coherent database.
+
+    A file copy of the database and its -wal sidecar can capture two different
+    states when the daemon commits or checkpoints between the copies. The
+    backup API reads through one transaction, so the copy is a single point in
+    time and includes what the WAL held. Nothing is written to the daemon's
+    files.
+    """
     src = os.path.join(state_dir, "meta.sqlite")
     if not os.path.exists(src):
         raise SystemExit(f"no meta.sqlite under {state_dir}")
     dst = os.path.join(tmp_dir, "meta.sqlite")
-    shutil.copy2(src, dst)
-    for suffix in ("-wal", "-shm"):
-        if os.path.exists(src + suffix):
-            shutil.copy2(src + suffix, dst + suffix)
+    source = sqlite3.connect(src)
+    try:
+        target = sqlite3.connect(dst)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
     return dst
 
 

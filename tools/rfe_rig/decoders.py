@@ -24,6 +24,7 @@ The cache key is (recording, decoder name, decoder version). The version is
 resolved before the cache is consulted, so a new model revision or a re-indexed
 state is a miss and the same decoder is a hit.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -137,6 +138,28 @@ def _run_helper(python, script, args, log):
 # ---------------------------------------------------------------- identity
 
 
+def model_dir_fingerprint(model_dir):
+    """Short digest of a local model directory: every file's relative name,
+    size and modification time. Two directories with the same basename but
+    different weights, or one whose weights were replaced in place, get
+    different fingerprints, so they never share a cache entry. A missing
+    directory is "nodir"; the decode then fails on its own."""
+    if not os.path.isdir(model_dir):
+        return "nodir"
+    h = hashlib.sha1()
+    for root, dirs, files in os.walk(model_dir):
+        dirs.sort()
+        for name in sorted(files):
+            p = os.path.join(root, name)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            rel = os.path.relpath(p, model_dir)
+            h.update(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}\n".encode("utf-8"))
+    return h.hexdigest()[:12]
+
+
 class Decoder:
     """A resolved decoder: kind, target, params, name, version and a
     `decode(recording, duration_s, log)` that returns segments and language."""
@@ -166,7 +189,8 @@ class Decoder:
             self.detail = {"url": self.target, "health": health}
             name = self.params.get("name") or \
                 f"{urllib.parse.urlsplit(self.target).netloc}-{model or 'default'}"
-            return name, f"{health.get('model', '')}|{model}"
+            words = "1" if self.params.get("words", "1") != "0" else "0"
+            return name, f"{health.get('model', '')}|{model}|words{words}"
         if self.kind == "sqlite":
             # Identity depends on the recording (its rep_hash); resolved per call.
             return "dir2mcp", ""
@@ -179,7 +203,7 @@ class Decoder:
                            "transformers": out.get("transformers"), "torch": out.get("torch")}
             name = self.params.get("name") or f"mms-1b-all-{self.target}"
             return name, (f"{self.target}|{(out.get('model_revision') or '')[:12]}"
-                          f"|tf{out.get('transformers', '')}")
+                          f"|tf{out.get('transformers', '')}|chunk{self.mms_chunk_s:g}")
         if self.kind == "fw":
             out = _run_helper(self.fw_python, "fw_decode.py", ["--version-only"], self.log)
             base = os.path.basename(self.target.rstrip("/"))
@@ -188,7 +212,8 @@ class Decoder:
             self.detail = {"language": language, "faster_whisper": out.get("faster_whisper"),
                            "compute_type": out.get("compute_type")}
             name = self.params.get("name") or f"fw-{base}"
-            return name, f"{base}|{language}|fw{out.get('faster_whisper', '')}"
+            return name, (f"{base}|{model_dir_fingerprint(self.target)}|{language}"
+                          f"|fw{out.get('faster_whisper', '')}")
         raise DecoderError(self.kind)  # pragma: no cover - parse_spec rejects other kinds
 
     def identity_for(self, recording):
