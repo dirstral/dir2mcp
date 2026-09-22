@@ -216,3 +216,54 @@ func TestWindowQuality_GateOffRefusesNothing(t *testing.T) {
 		t.Errorf("gate off still refused: %+v", meta.Coverage)
 	}
 }
+
+// TestWindowQuality_MixedTracksAreALanguageSkip applies the same precedence
+// across the SELECTED tracks of a multi-track document (§8.6.12): track 0 is
+// refused for its language under skip, track 1 is rejected by the per-window
+// gate. No provider failed, so the document is a durable language skip, not
+// TRANSCRIBE_FAILED; a run that reported the error would retry a decision the
+// operator made and hide the reason that recurs.
+//
+// The decode is sequential (track 0's four windows, then track 1's), so the
+// fake's call ordinal tells the tracks apart: calls 1 to 4 report Ukrainian,
+// the rest are a repetition loop.
+func TestWindowQuality_MixedTracksAreALanguageSkip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "dub.m4a"), "fake-audio")
+	st := newRealStore(t)
+	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off", MediaSTTTracks: []string{"0", "1"}}
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
+	svc.SetTranscriber(&langWindowTranscriber{
+		def: langReply{lang: "ru", conf: 0.9, text: loopText},
+		script: map[int]langReply{
+			1: {lang: "uk", conf: 0.9}, 2: {lang: "uk", conf: 0.9}, 3: {lang: "uk", conf: 0.9}, 4: {lang: "uk", conf: 0.9},
+		},
+	})
+	svc.SetSTTIdentity("whisper", "large-v3")
+	svc.SetSTTLanguages([]string{"ru"})
+	svc.SetOnUncoveredLanguage("skip")
+	svc.SetLanguageScope("window")
+	svc.SetQualityGate(quality.New(quality.DefaultConfig()))
+	svc.ProbeMediaInfoFunc = threeTrackProbe()
+	svc.ExtractAudioTrackIndexFunc = func(_ context.Context, _ string, audioIndex int) ([]byte, error) {
+		return []byte(trackAudioBytes(audioIndex)), nil
+	}
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) {
+		return time.Duration(scopeTotalMS) * time.Millisecond, nil
+	}
+	svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+		return make([]byte, 10*(endMS-startMS)/scopeTotalMS+1), nil
+	}
+
+	f := ingest.DiscoveredFile{RelPath: "dub.m4a", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument hard-failed: %v", err)
+	}
+	doc := mustGetDoc(t, st, "dub.m4a")
+	if doc.Status != "skipped" || doc.SkipReason != model.SkipReasonLanguageUncovered {
+		t.Fatalf("dub.m4a: status=%q skip_reason=%q error=%q, want skipped/%s", doc.Status, doc.SkipReason, doc.ErrorMessage, model.SkipReasonLanguageUncovered)
+	}
+}

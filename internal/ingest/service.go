@@ -5501,6 +5501,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 	producedAny := false
 	failed := 0
 	partialSkips := 0
+	gateRejections := 0
 	skipReason := ""
 	var firstFailErr error
 	for _, n := range indices {
@@ -5535,6 +5536,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 		}
 		if rejected {
 			failed++
+			gateRejections++
 			continue
 		}
 		if produced {
@@ -5542,26 +5544,42 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 		}
 	}
 
-	// §8.6.6/§8.6.7 over the SELECTED track set: the document is an error only when
-	// every selected track failed (the degenerate single-track case is one track, so
-	// its failure is the document's). Surface it through the provider-failure channel
-	// so the caller marks the document status=error and retries it next run, without
-	// double-counting the video-no-representation path.
 	if failed == len(indices) {
-		// §8.6.13 (#961): when EVERY selected track was refused by the coverage
-		// floor, nothing failed: the daemon declined on purpose, so the document is
-		// a declared skip rather than an error to retry next run. A mix of refusals
-		// and real failures still reports the failure: it is the retryable one, and
-		// the more urgent thing to tell an operator.
-		if partialSkips == failed {
-			return false, skipReason, nil
-		}
-		if firstFailErr != nil {
-			return false, "", firstFailErr
-		}
-		return false, "", fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
+		skip, err := s.settleAllTracksFailed(doc, failed, partialSkips, gateRejections, skipReason, firstFailErr)
+		return false, skip, err
 	}
 	return producedAny, "", nil
+}
+
+// settleAllTracksFailed is the verdict on a multi-track document none of whose
+// SELECTED tracks produced a transcript (§8.6.6/§8.6.7 over the selected set;
+// the degenerate single-track case is one track, so its failure is the
+// document's).
+//
+//   - §8.6.13 (#961): every track refused by the coverage floor is a declared
+//     skip, not an error to retry: the daemon declined on purpose.
+//   - §8.2.2 terminal status across tracks: a track refused for its language
+//     next to a track the per-window gate rejected, with no provider failure
+//     among them, is the language skip. It is the operator's decision and it
+//     recurs on every run, exactly as across the windows of one track
+//     (judgeEmptyTranscript).
+//   - A real provider failure is reported in preference to any refusal: it is
+//     the retryable one, and the more urgent thing to tell an operator.
+//   - Otherwise (every track rejected by the gate, or refusals mixed with
+//     rejections without a language refusal) the document is the §8.6.6 error,
+//     surfaced through the provider-failure channel so the caller marks it
+//     status=error without double-counting the video-no-representation path.
+func (s *Service) settleAllTracksFailed(doc model.Document, failed, partialSkips, gateRejections int, skipReason string, firstFailErr error) (string, error) {
+	if partialSkips == failed {
+		return skipReason, nil
+	}
+	if firstFailErr == nil && partialSkips+gateRejections == failed && skipReason == model.SkipReasonLanguageUncovered {
+		return skipReason, nil
+	}
+	if firstFailErr != nil {
+		return "", firstFailErr
+	}
+	return "", fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
 }
 
 // preferLanguageSkip picks the skip reason a multi-track document reports when
