@@ -67,6 +67,7 @@ func newScopedTranscriptCoverage(stats windowStats, totalMS int) *TranscriptCove
 	}
 	base.Languages = coalesceCoverageLanguages(stats.languages, totalMS)
 	base.Refused = coalesceRefusedRanges(stats.refused, totalMS)
+	base.RefusedQualityReason = stats.firstQualityReason
 	return base
 }
 

@@ -459,7 +459,7 @@ func (s *Service) decodeSingleWindowScoped(ctx context.Context, relPath string, 
 	plan := windowSchedule{totalMS: totalMS, windowMS: totalMS, stepMS: totalMS, capBytes: sttPayloadCapBytes(s.transcriber), label: "transcription"}
 	core := CoverageRange{StartMS: 0, EndMS: totalMS}
 	wd := s.decodeWindowScoped(ctx, relPath, []windowPiece{{startMS: 0, endMS: totalMS, data: content}}, plan, core, st)
-	stats := windowStats{attempted: 1, languages: wd.languages, refused: wd.refused}
+	stats := windowStats{attempted: 1, languages: wd.languages, refused: wd.refused, firstQualityReason: wd.qualityReason}
 	if len(wd.decoded) == 0 {
 		if len(wd.refused) > 0 {
 			return "", nil, newScopedTranscriptCoverage(stats, totalMS), nil
@@ -587,6 +587,9 @@ type windowStats struct {
 	// under media.stt.language_scope: window (a nil state leaves them empty).
 	languages []model.CoverageLanguage
 	refused   []model.RefusedRange
+	// firstQualityReason is the §8.6.6 reason of the first window refused as
+	// quality_gate, carried onto the coverage record for the terminal status.
+	firstQualityReason string
 }
 
 // decodeTranscriptWindows extracts and decodes each scheduled window from the
@@ -628,6 +631,9 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		}
 		stats.languages = append(stats.languages, wd.languages...)
 		stats.refused = append(stats.refused, wd.refused...)
+		if wd.qualityReason != "" && stats.firstQualityReason == "" {
+			stats.firstQualityReason = wd.qualityReason
+		}
 		if wd.err != nil && firstDecodeErr == nil {
 			firstDecodeErr = wd.err
 		}
