@@ -648,6 +648,12 @@ func anyUncovered(entries []model.CoverageLanguage) bool {
 	return false
 }
 
+// languageUndetermined is the BCP-47 tag a span records when its window had no
+// resolvable language while the representation has one (§8.2.2). It is the
+// standard undetermined tag, not a guess, and a specific §9.5 filter never
+// matches it.
+const languageUndetermined = "und"
+
 // stampSegmentLanguages marks every transcript segment whose window resolved to
 // a language other than the representation's (§8.2.2 "recording": a segment span
 // in another language records `language` in its extra_json). A segment belongs
@@ -670,7 +676,13 @@ func stampSegmentLanguages(segs []chunkSegment, entries []model.CoverageLanguage
 			// end, which a provider emits for the last breath group.
 			last := i == len(entries)-1
 			if sp.StartMS >= e.StartMS && (sp.StartMS < e.EndMS || (last && sp.StartMS == e.EndMS)) {
-				if e.Language != "" && e.Language != repLang {
+				switch {
+				case e.Language == "" && repLang != "":
+					// An unknown window inside a recording that has a language:
+					// the span says so with the undetermined tag, so it is never
+					// read, filtered or answered as the representation's language.
+					sp.Language = languageUndetermined
+				case e.Language != "" && e.Language != repLang:
 					sp.Language = e.Language
 				}
 				break

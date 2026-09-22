@@ -343,6 +343,31 @@ func TestWindowLanguage_InheritanceAndUnknown(t *testing.T) {
 		{StartMS: win3StartMS, EndMS: scopeTotalMS, Language: "uk", LanguageSource: "inherited", Route: "whisper", Covered: true},
 	})
 	assertRepLanguage(t, meta, "uk", "detected", f64(0.9))
+	// The unknown first window's spans record "und", the undetermined tag, so
+	// a chunk built from them is never read or filtered as Ukrainian; the
+	// spans of the uk windows record nothing, since uk is the representation
+	// language.
+	var und, plain int
+	for _, sp := range h.store.spans {
+		if sp.Kind != "time" {
+			continue
+		}
+		switch {
+		case sp.StartMS < win2StartMS:
+			und++
+			if sp.Language != "und" {
+				t.Errorf("segment at %d ms is in the unknown window but records %q, want und", sp.StartMS, sp.Language)
+			}
+		default:
+			plain++
+			if sp.Language != "" {
+				t.Errorf("segment at %d ms is in the representation's language but records %q, want none", sp.StartMS, sp.Language)
+			}
+		}
+	}
+	if und == 0 || plain == 0 {
+		t.Fatalf("expected segments in both the unknown window and the uk windows, got %d and %d", und, plain)
+	}
 }
 
 // TestWindowLanguage_RoutesPerWindowAndRedecodesOnlyMovedWindows pins routing: a
