@@ -442,15 +442,62 @@ def test_a_jump_larger_than_one_says_nothing(roster, fake_frames):
     assert [c for c in cues if c.event == "pitch"] == []
 
 
-def test_a_count_that_goes_backwards_resets_rather_than_emits(roster, fake_frames):
-    """A new pitcher starts his own count, and OCR misreads a digit downward.
-    Neither is a pitch."""
+def test_a_count_that_goes_backwards_is_a_misread_and_is_ignored(roster, fake_frames):
+    """Counts are tracked per pitcher, so a new pitcher is a new key, never a
+    decrease. Within one game a pitcher's own count cannot go down, so a
+    stable lower read is a dropped digit ("87" read "12" here, "29" read "2"
+    on the pilot game). It must not replace the committed count: if it did,
+    the next real pitch (87 to 88) would look like a jump and emit nothing
+    (#1025)."""
     ocr = fake_frames(["RAY P: 87", "RAY P: 87",
                        "RAY P: 12", "RAY P: 12",
-                       "RAY P: 13", "RAY P: 13"])
+                       "RAY P: 13", "RAY P: 13",
+                       "RAY P: 88", "RAY P: 88"])
     cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
     pitches = [c for c in cues if c.event == "pitch"]
-    assert len(pitches) == 1 and pitches[0].text == "Pitch 13 by Robbie Ray"
+    assert [c.text for c in pitches] == ["Pitch 88 by Robbie Ray"]
+
+
+def test_an_implausible_jump_is_a_misread_and_is_ignored(roster, fake_frames):
+    """"26" read "265" is not 239 pitches thrown while the bug was away."""
+    ocr = fake_frames(["RAY P: 26", "RAY P: 26",
+                       "RAY P: 265", "RAY P: 265",
+                       "RAY P: 27", "RAY P: 27"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
+    assert [c.text for c in cues if c.event == "pitch"] == ["Pitch 27 by Robbie Ray"]
+
+
+def test_a_jump_through_glimpsed_counts_emits_one_cue_per_pitch(roster, fake_frames):
+    """43 is seen on one frame only, too weak to commit on, so 42 to 44 is a
+    +2 jump. The glimpse is the boundary between the two pitches: one lies
+    before it, one after. Each gets a cue over its own interval (#1025)."""
+    ocr = fake_frames(["RAY P: 42", "RAY P: 42",
+                       "RAY P: 43",
+                       "RAY P: 44", "RAY P: 44"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
+    pitches = sorted((c for c in cues if c.event == "pitch"), key=lambda c: c.start_s)
+    assert [c.text for c in pitches] == ["Pitch 43 by Robbie Ray", "Pitch 44 by Robbie Ray"]
+    assert pitches[0].start_s < pitches[1].start_s
+    assert pitches[0].end_s <= pitches[1].end_s
+
+
+def test_a_jump_with_an_unseen_count_still_emits_nothing(roster, fake_frames):
+    """42 to 44 with 43 never shown: two pitches happened, WHEN is unknown."""
+    ocr = fake_frames(["RAY P: 42", "RAY P: 42",
+                       "RAY P: 44", "RAY P: 44"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
+    assert [c for c in cues if c.event == "pitch"] == []
+
+
+def test_only_the_steps_with_both_bounds_are_placed(roster, fake_frames):
+    """62 committed, 63 never seen, 64 glimpsed, then 65: the pitch that made
+    it 65 lies between the glimpse of 64 and the first 65, so it is placed;
+    63 and 64 lack a bound and are skipped (the pilot's inning-break case)."""
+    ocr = fake_frames(["RAY P: 62", "RAY P: 62",
+                       "RAY P: 64",
+                       "RAY P: 65", "RAY P: 65"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
+    assert [c.text for c in cues if c.event == "pitch"] == ["Pitch 65 by Robbie Ray"]
 
 
 def test_a_pitch_a_graphic_already_reported_is_not_reported_twice(roster, fake_frames):

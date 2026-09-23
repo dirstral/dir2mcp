@@ -36,6 +36,8 @@ region search land on the bug instead of on the stands.
 from __future__ import annotations
 
 import difflib
+import json
+import os
 import re
 import unicodedata
 from collections.abc import Callable, Iterable
@@ -413,6 +415,7 @@ class ScorebugRecognizer:
             graphic_cues = self._pitch_cues(graphics, pitchers)
             cues += graphic_cues
             if self.count_pitch_cues:
+                _dump_counts(counted)
                 cues += _count_pitch_cues(
                     counted,
                     graphic_cues,
@@ -678,6 +681,31 @@ COUNT_PITCH_MAX_SPAN_S = 10.0
 COUNT_PITCH_DEDUPE_S = 5.0
 
 
+#: The largest rise between two stable reads of one pitcher's count that is
+#: taken as pitches thrown while the bug was away; anything larger is a
+#: misread digit ("26" read "265"). Measured on the pilot replay (#1025):
+#: recall 90.7 / 91.3 / 91.0% at bounds 3 / 5 / 8, precision 99.7% for all.
+COUNT_MAX_JUMP = 5
+
+
+def _plausible_count_step(current: int, candidate: int) -> bool:
+    """Whether a stable new read of a pitcher's count may replace the one
+    committed: it must not go down, and must not rise past COUNT_MAX_JUMP."""
+    return current <= candidate <= current + COUNT_MAX_JUMP
+
+
+def _dump_counts(counted: list[tuple[float, str, int]]) -> None:
+    """Write the raw count reads (t, player id, count) as JSON to the path in
+    SCOREBUG_COUNTS_DUMP, when set. A diagnosis of the counts path needs the
+    reads the cues were derived from, not only the cues (#1025). Off unless
+    asked; the pipeline's output is unchanged either way."""
+    path = os.environ.get("SCOREBUG_COUNTS_DUMP")
+    if not path:
+        return
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump([[round(t, 3), pid, n] for t, pid, n in sorted(counted)], fh)
+
+
 def _count_pitch_cues(
     counted: list[tuple[float, str, int]],
     graphic_cues: list[Cue],
@@ -696,11 +724,14 @@ def _count_pitch_cues(
     with a timestamp, already attributed to the pitcher whose field it sits in.
     It was being matched to identify the pitcher and its digits thrown away.
 
-    Only a +1 step counts. A larger jump means frames were missed or a digit was
-    misread, and while pitches certainly happened, WHEN is unknown; emitting
-    them at the moment the jump was noticed would be inventing timing the bug
-    never showed. A decrease is a new pitcher or OCR noise and resets the
-    tracking for that pitcher, never emits.
+    Each pitch is placed between the last sighting of the count before it and
+    the first sighting of the count it produced. A +1 step always has both. A
+    larger jump has them only for the steps whose intermediate counts were
+    glimpsed (seen on too few frames to commit on): those steps are placed,
+    the others are skipped, because emitting them would invent timing the bug
+    never showed (#1025). A decrease, or a rise past COUNT_MAX_JUMP, is a
+    misread digit and never replaces the committed count: a pitcher's own
+    count cannot go down within a game, and a new pitcher is a new key.
 
     **A +1 step does not carry a timestamp either, and this used to pretend it
     did.** The pitch happened somewhere between the last frame that showed the
@@ -731,31 +762,18 @@ def _count_pitch_cues(
     #: raised it happened after this, which is the only lower bound the bug
     #: gives.
     last_seen: dict[str, float] = {}
-    for t, pid, count in sorted(counted):
-        current = committed.get(pid)
-        if current is not None and count == current:
-            pending.pop(pid, None)  # the count simply has not moved
-            last_seen[pid] = t
-            continue
-        candidate, first_t, seen = pending.get(pid, (count, t, 0))
-        if candidate != count:
-            candidate, first_t, seen = count, t, 0
-        seen += 1
-        if seen < COUNT_STABLE_READS:
-            pending[pid] = (candidate, first_t, seen)
-            continue
-        pending.pop(pid, None)
-        previous = current
-        seen_at = last_seen.get(pid)
-        committed[pid] = candidate
-        last_seen[pid] = t
-        if previous is None or candidate != previous + 1:
-            continue
-        # The interval the pitch is known to lie in. `seen_at` is absent only
-        # when the old count was committed and never seen standing again, which
-        # leaves no lower bound: the cue keeps the old fixed width rather than
-        # reaching back to a time nothing was read at.
-        start = first_t - PITCH_CUE_PAD_S if seen_at is None else seen_at
+    #: Counts sighted since the last commit but never stable, value ->
+    #: (first_t, last_t). A glimpse is too weak to commit on, but when the
+    #: count later commits past it, the glimpse is exactly the boundary that
+    #: splits a jump into its pitches (#1025).
+    glimpsed: dict[str, dict[int, tuple[float, float]]] = {}
+
+    def emit(pid: str, count: int, lo: float | None, first_t: float) -> None:
+        # The interval the pitch is known to lie in. `lo` is absent only
+        # when the old count was committed and never seen standing again,
+        # which leaves no lower bound: the cue keeps the old fixed width
+        # rather than reaching back to a time nothing was read at.
+        start = first_t - PITCH_CUE_PAD_S if lo is None else lo
         if first_t - start > COUNT_PITCH_MAX_SPAN_S:
             # Past this the bug was away too long to place the pitch at all,
             # and a cue that wide is not a citation anyone can act on. Trimmed
@@ -772,9 +790,63 @@ def _count_pitch_cues(
                 confidence=COUNT_PITCH_CONFIDENCE,
                 # Named for the same reason as the graphic cues above (#909):
                 # "pitch 13" is not answerable text without the pitcher.
-                text=f"Pitch {candidate} by {label(pid)}",
+                text=f"Pitch {count} by {label(pid)}",
             )
         )
+
+    for t, pid, count in sorted(counted):
+        current = committed.get(pid)
+        if current is not None and count == current:
+            pending.pop(pid, None)  # the count simply has not moved
+            last_seen[pid] = t
+            continue
+        g = glimpsed.setdefault(pid, {})
+        lo_hi = g.get(count)
+        g[count] = (lo_hi[0] if lo_hi else t, t)
+        candidate, first_t, seen = pending.get(pid, (count, t, 0))
+        if candidate != count:
+            candidate, first_t, seen = count, t, 0
+        seen += 1
+        if seen < COUNT_STABLE_READS:
+            pending[pid] = (candidate, first_t, seen)
+            continue
+        pending.pop(pid, None)
+        if current is not None and not _plausible_count_step(current, candidate):
+            # A pitcher's own count never goes down within a game, and a jump
+            # past COUNT_MAX_JUMP is not pitches missed between two frames:
+            # both are a misread digit ("29" read "2", "26" read "265"), and
+            # committing one would turn the next real +1 into a jump that
+            # emits nothing (#1025). The committed count stands.
+            continue
+        previous = current
+        seen_at = last_seen.get(pid)
+        committed[pid] = candidate
+        last_seen[pid] = t
+        sightings = glimpsed.pop(pid, {})
+        if previous is None or candidate <= previous:
+            continue
+        # Each pitch v in the step lies between the LAST sighting of count v-1
+        # and the FIRST sighting of count v, so it is placed exactly when both
+        # sightings exist, in order. A glimpse too weak to commit on still is
+        # a sighting (#1025): a 42-to-44 jump with 43 glimpsed is two placed
+        # pitches, and a 62-to-65 jump across an inning break with only 64
+        # glimpsed places the last pitch and skips the two it cannot time.
+        # Emitting a step without both bounds would invent timing the bug
+        # never showed. A plain +1 is the one-step case, bounded below by the
+        # old count's last sighting (or the fixed pad when it has none).
+        last_of: dict[int, float | None] = {previous: seen_at}
+        first_of: dict[int, float] = {candidate: first_t}
+        for value, (lo_t, hi_t) in sightings.items():
+            if previous < value < candidate:
+                first_of[value] = lo_t
+                last_of[value] = hi_t
+        for value in range(previous + 1, candidate + 1):
+            if value - 1 not in last_of or value not in first_of:
+                continue
+            lo, hi = last_of[value - 1], first_of[value]
+            if lo is not None and lo > hi:
+                continue  # sightings out of order: a misread, not a pitch
+            emit(pid, value, lo, hi)
     return _drop_pitches_already_reported(cues, graphic_cues)
 
 

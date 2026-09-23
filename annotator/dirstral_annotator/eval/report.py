@@ -15,6 +15,7 @@ from ..roster import Roster
 from .align import Alignment
 from .diagnose import DEBUG_SAMPLE, Diagnostics, near_miss_summary
 from .score import SCORED_EVENT, Scorecard
+from . import misses as misses_mod
 
 
 def _pct(v: float | None) -> str:
@@ -85,6 +86,8 @@ def render(
     lines.append("")
     if diagnostics is not None:
         lines += _diagnostics_sections(diagnostics, roster, debug)
+    if card.scored:
+        lines += misses_mod.render(card, alignment, roster, misses_mod.diagnose(card, alignment, roster))
     return "\n".join(lines)
 
 
