@@ -1193,6 +1193,16 @@ type Config struct {
 	// action key, the same shape an operator already learned for §8.2.1.
 	MediaSTTOnPartialTranscript string
 
+	// MediaSTTLanguageScope is the granularity at which the source language is
+	// resolved, routed and coverage-checked (config `media.stt.language_scope`,
+	// SPEC §8.2.2, dir2mcp #1029): "item" (default) resolves ONE language per
+	// recording and routes the whole recording on it, exactly as §8.2.1 did;
+	// "window" does it per decode window, so a recording that changes language
+	// inside itself is decoded per passage and records coverage.languages and
+	// coverage.refused on its transcript meta_json. Any other value is
+	// CONFIG_INVALID. Off by default: an existing corpus is unchanged.
+	MediaSTTLanguageScope string
+
 	// MediaSTTTracks selects WHICH audio tracks of a multi-track media container
 	// are transcribed (config `media.stt.tracks`, SPEC §8.6.12, issue #567). It is
 	// the RAW, unvalidated form as written in config: an empty slice (the default)
@@ -1496,6 +1506,7 @@ type fileConfig struct {
 	MediaSTTOnUncoveredLanguage        *string
 	MediaSTTMinCoverage                *float64
 	MediaSTTOnPartialTranscript        *string
+	MediaSTTLanguageScope              *string
 	MediaSTTTracks                     []string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
@@ -1667,6 +1678,7 @@ type persistedConfig struct {
 	MediaSTTOnUncoveredLanguage        string        `yaml:"media_stt_on_uncovered_language"`
 	MediaSTTMinCoverage                float64       `yaml:"media_stt_min_coverage"`
 	MediaSTTOnPartialTranscript        string        `yaml:"media_stt_on_partial_transcript"`
+	MediaSTTLanguageScope              string        `yaml:"media_stt_language_scope"`
 	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
@@ -1913,6 +1925,7 @@ func Default() Config {
 		// behavior is unchanged unless an operator opts into strict skipping.
 		MediaSTTOnUncoveredLanguage: onUncoveredLanguageWarn,
 		MediaSTTOnPartialTranscript: onPartialTranscriptWarn,
+		MediaSTTLanguageScope:       languageScopeItem,
 		MediaVariantsGroup:          false,
 		MediaVariantsSelect:         "best",
 		MediaTranslateEnabled:       false,
@@ -2114,6 +2127,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTOnUncoveredLanguage:        cfg.MediaSTTOnUncoveredLanguage,
 		MediaSTTMinCoverage:                cfg.MediaSTTMinCoverage,
 		MediaSTTOnPartialTranscript:        cfg.MediaSTTOnPartialTranscript,
+		MediaSTTLanguageScope:              cfg.MediaSTTLanguageScope,
 		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
@@ -3124,6 +3138,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTOnPartialTranscript != nil {
 		cfg.MediaSTTOnPartialTranscript = *fc.MediaSTTOnPartialTranscript
 	}
+	if fc.MediaSTTLanguageScope != nil {
+		cfg.MediaSTTLanguageScope = *fc.MediaSTTLanguageScope
+	}
 	if fc.MediaSTTTracks != nil {
 		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
 	}
@@ -3638,6 +3655,7 @@ var configKeyAliases = map[string]string{
 	"media_stt_on_uncovered_language":         "media.stt.on_uncovered_language",
 	"media_stt_min_coverage":                  "media.stt.min_coverage",
 	"media_stt_on_partial_transcript":         "media.stt.on_partial_transcript",
+	"media_stt_language_scope":                "media.stt.language_scope",
 	"media_stt_tracks":                        "media.stt.tracks",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
@@ -4211,6 +4229,8 @@ func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaSTTOnUncoveredLanguage = strPtr(value)
 	case "media.stt.on_partial_transcript":
 		cfg.MediaSTTOnPartialTranscript = strPtr(value)
+	case "media.stt.language_scope":
+		cfg.MediaSTTLanguageScope = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -4506,6 +4526,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_stt_on_uncovered_language", cfg.MediaSTTOnUncoveredLanguage)
 	writeScalar("media_stt_min_coverage", strconv.FormatFloat(cfg.MediaSTTMinCoverage, 'f', -1, 64))
 	writeScalar("media_stt_on_partial_transcript", cfg.MediaSTTOnPartialTranscript)
+	writeScalar("media_stt_language_scope", cfg.MediaSTTLanguageScope)
 	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
@@ -5012,6 +5033,7 @@ func (c *Config) Validate() error {
 		c.validateSTTLanguageProviders,
 		c.validateMediaSTTOnUncoveredLanguage,
 		c.validateMediaSTTPartialTranscriptFloor,
+		c.validateMediaSTTLanguageScope,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
@@ -5694,6 +5716,33 @@ func (c *Config) validateMediaSTTPartialTranscriptFloor() error {
 		return fmt.Errorf("media.stt.on_partial_transcript must be one of warn, skip: %q", c.MediaSTTOnPartialTranscript)
 	}
 	c.MediaSTTOnPartialTranscript = action
+	return nil
+}
+
+// languageScopeItem / languageScopeWindow are the two values of
+// media.stt.language_scope (SPEC §8.2.2, #1029). "item" (default) resolves and
+// routes one language per recording; "window" does it per decode window.
+const (
+	languageScopeItem   = "item"
+	languageScopeWindow = "window"
+)
+
+// validateMediaSTTLanguageScope normalizes media.stt.language_scope: item or
+// window, case-insensitive, with empty defaulting to item. Anything else is
+// CONFIG_INVALID, because a misspelt scope that silently fell back to item
+// would leave an operator believing a mixed-language corpus is being routed
+// per window when it is not.
+func (c *Config) validateMediaSTTLanguageScope() error {
+	scope := strings.ToLower(strings.TrimSpace(c.MediaSTTLanguageScope))
+	if scope == "" {
+		scope = Default().MediaSTTLanguageScope
+	}
+	switch scope {
+	case languageScopeItem, languageScopeWindow:
+	default:
+		return fmt.Errorf("media.stt.language_scope must be one of item, window: %q", c.MediaSTTLanguageScope)
+	}
+	c.MediaSTTLanguageScope = scope
 	return nil
 }
 

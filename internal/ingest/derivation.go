@@ -167,8 +167,13 @@ func (s *Service) sttTranscriptMeta(speakers []Speaker, text string, hasWords bo
 // a non-diarized corpus's identity is unchanged.
 func (s *Service) activeTranscriptIdentity() string {
 	return joinTranscriptIdentity(
-		derivationIdentity(string(provider.CapSTT), s.sttProvider, s.sttModel, "", s.transcriptLanguage),
-		s.activeDiarizeIdentity())
+		joinTranscriptIdentity(
+			derivationIdentity(string(provider.CapSTT), s.sttProvider, s.sttModel, "", s.transcriptLanguage),
+			s.activeDiarizeIdentity()),
+		// §8.2.2: the language scope and route table join the identity only
+		// under window scope; under item the component is empty and the identity
+		// of every existing corpus is byte-stable.
+		languageScopeIdentity(s.languageScope, s.languageRouteIDs))
 }
 
 // joinTranscriptIdentity appends a non-empty diarize identity to the STT
@@ -609,7 +614,12 @@ func transcriptIdentityFromMeta(metaJSON string) (string, bool) {
 		diarizeIdentity = derivationIdentity(string(provider.CapDiarize),
 			meta.DiarizeProvider, meta.DiarizeModel, "", "")
 	}
-	return joinTranscriptIdentity(sttIdentity, diarizeIdentity), true
+	// §8.2.2: a window-scoped transcript recorded its scope and route table, and
+	// those join its identity exactly as the active identity does. A transcript
+	// with neither recorded folds in nothing.
+	return joinTranscriptIdentity(
+		joinTranscriptIdentity(sttIdentity, diarizeIdentity),
+		languageScopeIdentity(meta.LanguageScope, parseLanguageRoutes(meta.LanguageRoutes))), true
 }
 
 // ocrIdentityFromMeta builds the recorded OCR/extraction derivation identity of

@@ -423,6 +423,15 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 		// One request still carries the WHOLE recording, so it gets a timeout sized
 		// to the whole recording (issue #962). A nine-minute file is under the
 		// windowing threshold, and a hard language decodes it well past 120 s.
+		if s.windowScoped() && totalMS > 0 {
+			// §8.2.2: a recording that fits one request is ONE window, and the
+			// same rules apply to it. Without a duration there is no range to
+			// record, so that case keeps the item-scope path below and says so.
+			return s.decodeSingleWindowScoped(ctx, relPath, content, totalMS)
+		}
+		if s.windowScoped() {
+			s.getLogger().Printf("windowed transcription %s: media.stt.language_scope=window but the duration probe failed; decoding as one unscoped request", relPath)
+		}
 		return withoutCoverage(
 			s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.transcriber, totalMS), relPath, content))
 	}
@@ -439,6 +448,28 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 			s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.transcriber, totalMS), relPath, content))
 	}
 	return text, words, coverage, err
+}
+
+// decodeSingleWindowScoped runs the §8.2.2 rules over a recording that fits one
+// request, treating the whole recording as one window with the whole recording
+// as its core. The coverage object is recorded (coverage.languages is required
+// under window scope whatever the window count), with one attempted window.
+func (s *Service) decodeSingleWindowScoped(ctx context.Context, relPath string, content []byte, totalMS int) (string, []model.TimedWord, *TranscriptCoverage, error) {
+	st := s.newWindowLanguageState()
+	plan := windowSchedule{totalMS: totalMS, windowMS: totalMS, stepMS: totalMS, capBytes: sttPayloadCapBytes(s.transcriber), label: "transcription"}
+	core := CoverageRange{StartMS: 0, EndMS: totalMS}
+	wd := s.decodeWindowScoped(ctx, relPath, []windowPiece{{startMS: 0, endMS: totalMS, data: content}}, plan, core, st)
+	stats := windowStats{attempted: 1, languages: wd.languages, refused: wd.refused}
+	if len(wd.decoded) == 0 {
+		if len(wd.refused) > 0 {
+			return "", nil, newScopedTranscriptCoverage(stats, totalMS), nil
+		}
+		return "", nil, nil, wd.err
+	}
+	stats.decoded = 1
+	stats.ranges = wd.covered
+	text, words := MergeTranscriptWindows(wd.decoded, totalMS)
+	return text, words, newScopedTranscriptCoverage(stats, totalMS), nil
 }
 
 // withoutCoverage adapts a SINGLE-request decode to the windowed decode's return
@@ -503,13 +534,19 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	if stepMS <= 0 {
 		stepMS = windowMS
 	}
+	// §8.2.2: under window scope the transcription path carries a language state
+	// across windows; the translate path (a fixed English target) never does.
+	var st *windowLanguageState
+	if label == "transcription" && s.windowScoped() {
+		st = s.newWindowLanguageState()
+	}
 	windows, stats, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, stt, windowSchedule{
 		totalMS:  totalMS,
 		windowMS: windowMS,
 		stepMS:   stepMS,
 		capBytes: sttPayloadCapBytes(stt),
 		label:    label,
-	})
+	}, st)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -520,6 +557,9 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	// §8.6.13: the counts and the decoded ranges leave this function instead of
 	// dying in the log line above, so the transcript representation can record what
 	// it does and does not cover.
+	if st != nil {
+		return text, words, newScopedTranscriptCoverage(stats, totalMS), nil
+	}
 	return text, words, newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), nil
 }
 
@@ -543,6 +583,10 @@ type windowStats struct {
 	attempted int
 	decoded   int
 	ranges    []CoverageRange
+	// languages and refused are the §8.2.2 per-window records, populated only
+	// under media.stt.language_scope: window (a nil state leaves them empty).
+	languages []model.CoverageLanguage
+	refused   []model.RefusedRange
 }
 
 // decodeTranscriptWindows extracts and decodes each scheduled window from the
@@ -558,48 +602,100 @@ type windowStats struct {
 // two hours. If EVERY attempted window fails that is systemic (ffmpeg absent,
 // provider down, bad credentials, unsupported media), so it is returned as an
 // error and the document fails exactly as it does today.
-func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, plan windowSchedule) ([]TranscriptWindow, windowStats, error) {
+//
+// st is the §8.2.2 per-window language state, nil under item scope. With a
+// state, each window is decoded by decodeWindowScoped instead: identified,
+// routed, floor-checked and recorded. A window REFUSED there is neither decoded
+// nor failed: it is counted in attempted and listed in refused. When nothing
+// decoded and nothing failed, the refusals are the whole story and the caller
+// judges them (§8.2.2 terminal status) instead of retrying a decision. When a
+// refusal sits next to a real failure the failure wins, exactly as it does with
+// no refusals: it is the retryable one, and a language skip must never hide a
+// window the provider failed on.
+func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, plan windowSchedule, st *windowLanguageState) ([]TranscriptWindow, windowStats, error) {
 	var windows []TranscriptWindow
 	var firstDecodeErr, firstCutErr error
 	var stats windowStats
-	for _, start := range TranscriptWindowStarts(plan.totalMS, plan.stepMS, TranscriptWindowOverlapMS(plan.windowMS)) {
-		end := start + plan.windowMS
-		if end > plan.totalMS {
-			end = plan.totalMS
-		}
+	starts := TranscriptWindowStarts(plan.totalMS, plan.stepMS, TranscriptWindowOverlapMS(plan.windowMS))
+	for i := range starts {
 		stats.attempted++
-		pieces, err := s.extractWithinCap(ctx, tmpPath, start, end, plan.capBytes, maxWindowSplits)
-		if err != nil {
+		wd, cutErr := s.decodeScheduledWindow(ctx, relPath, tmpPath, stt, plan, starts, i, st)
+		if cutErr != nil {
 			if firstCutErr == nil {
-				firstCutErr = &windowExtractError{fmt.Errorf("extract %s window [%d,%d]ms: %w", plan.label, start, end, err)}
+				firstCutErr = cutErr
 			}
-			s.getLogger().Printf("windowed %s: cannot cut window [%d,%d]ms of %s: %v", plan.label, start, end, relPath, err)
 			continue
 		}
-		decoded, covered, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
-		if decodeErr != nil && firstDecodeErr == nil {
-			firstDecodeErr = decodeErr
+		stats.languages = append(stats.languages, wd.languages...)
+		stats.refused = append(stats.refused, wd.refused...)
+		if wd.err != nil && firstDecodeErr == nil {
+			firstDecodeErr = wd.err
 		}
-		if len(decoded) == 0 {
+		if len(wd.decoded) == 0 {
 			continue
 		}
 		stats.decoded++
-		stats.ranges = append(stats.ranges, covered...)
-		windows = append(windows, decoded...)
+		stats.ranges = append(stats.ranges, wd.covered...)
+		windows = append(windows, wd.decoded...)
 	}
-	if stats.attempted > 0 && stats.decoded == 0 {
-		// Prefer the provider's failure over a cut failure: it is the one whose
-		// retryable/terminal classification decides whether the document stays
-		// pending, and it must survive the aggregation rather than be flattened into
-		// an opaque string. With no decode failure recorded, nothing could be cut,
-		// and the windowExtractError tells the caller to send one request instead.
-		cause := firstDecodeErr
-		if cause == nil {
-			cause = firstCutErr
-		}
-		return nil, stats, fmt.Errorf("windowed %s %s: all %d windows failed: %w", plan.label, relPath, stats.attempted, cause)
+	if err := allWindowsFailed(relPath, plan, stats, firstDecodeErr, firstCutErr); err != nil {
+		return nil, stats, err
 	}
 	return windows, stats, nil
+}
+
+// allWindowsFailed is the verdict on a windowed decode that produced nothing:
+// nil when at least one window decoded, or when every window was refused (or
+// refused and silent) and none failed, because the refusals are the caller's to
+// judge (§8.2.2 terminal status) rather than a fault to retry. Otherwise the
+// systemic failure, with the provider's error preferred over a cut error: it is
+// the one whose retryable/terminal classification decides whether the document
+// stays pending, and it must survive the aggregation rather than be flattened
+// into an opaque string. With no decode failure recorded, nothing could be cut,
+// and the windowExtractError tells the caller to send one request instead.
+func allWindowsFailed(relPath string, plan windowSchedule, stats windowStats, firstDecodeErr, firstCutErr error) error {
+	if stats.attempted == 0 || stats.decoded > 0 {
+		return nil
+	}
+	if len(stats.refused) > 0 && firstDecodeErr == nil && firstCutErr == nil {
+		return nil
+	}
+	cause := firstDecodeErr
+	if cause == nil {
+		cause = firstCutErr
+	}
+	if n := len(stats.refused); n > 0 {
+		return fmt.Errorf("windowed %s %s: all %d windows failed or were refused (%d refused): %w", plan.label, relPath, stats.attempted, n, cause)
+	}
+	return fmt.Errorf("windowed %s %s: all %d windows failed: %w", plan.label, relPath, stats.attempted, cause)
+}
+
+// decodeScheduledWindow cuts and decodes the i-th scheduled window. A cut
+// failure is returned as the windowExtractError the caller aggregates; a decode
+// outcome (including a scoped refusal) comes back in the windowDecode. Under
+// window scope (st != nil) the window goes through decodeWindowScoped with its
+// core, the stretch the merge keeps of it: its start through the next window's
+// start, or the recording's end for the last window.
+func (s *Service) decodeScheduledWindow(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, plan windowSchedule, starts []int, i int, st *windowLanguageState) (windowDecode, *windowExtractError) {
+	start := starts[i]
+	end := start + plan.windowMS
+	if end > plan.totalMS {
+		end = plan.totalMS
+	}
+	pieces, err := s.extractWithinCap(ctx, tmpPath, start, end, plan.capBytes, maxWindowSplits)
+	if err != nil {
+		s.getLogger().Printf("windowed %s: cannot cut window [%d,%d]ms of %s: %v", plan.label, start, end, relPath, err)
+		return windowDecode{}, &windowExtractError{fmt.Errorf("extract %s window [%d,%d]ms: %w", plan.label, start, end, err)}
+	}
+	if st != nil {
+		core := CoverageRange{StartMS: start, EndMS: end}
+		if i+1 < len(starts) && starts[i+1] < core.EndMS {
+			core.EndMS = starts[i+1]
+		}
+		return s.decodeWindowScoped(ctx, relPath, pieces, plan, core, st), nil
+	}
+	decoded, covered, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
+	return windowDecode{decoded: decoded, covered: covered, err: decodeErr}, nil
 }
 
 // decodeWindowPieces decodes every piece of one scheduled window and returns the

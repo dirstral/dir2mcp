@@ -169,6 +169,15 @@ type transcriptMeta struct {
 	// and their meta_json is byte-for-byte unchanged. Per §5.2 absence MUST be read
 	// as "no assertion", never as "complete".
 	Coverage *TranscriptCoverage `json:"coverage,omitempty"`
+
+	// LanguageScope and LanguageRoutes record the §8.2.2 decode contract a
+	// window-scoped transcript was produced under: "window" and the canonical
+	// rendering of media.stt.language_providers (sorted lang=profile pairs). Both
+	// join the transcript's derivation identity (§8.6.7), because they change
+	// which model decodes which audio and therefore the text; an item-scoped
+	// transcript records neither, so its meta_json and identity are unchanged.
+	LanguageScope  string `json:"language_scope,omitempty"`
+	LanguageRoutes string `json:"language_routes,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

@@ -145,6 +145,21 @@ type Service struct {
 	minTranscriptCoverage float64
 	onPartialTranscript   string
 
+	// languageScope is the resolved media.stt.language_scope (SPEC §8.2.2,
+	// #1029): "item" (default) keeps the §8.2.1 one-language-per-recording
+	// contract; "window" resolves, routes and coverage-checks the source language
+	// per decode window. routes caches the transcribers built for
+	// media.stt.language_providers targets under window scope, keyed by BCP-47
+	// primary subtag, so a recording that alternates between two languages
+	// builds each once. Resolved once from config in NewService.
+	languageScope string
+	routeMu       sync.Mutex
+	routes        map[string]routedSTT
+	// languageRouteIDs is media.stt.language_providers resolved to route
+	// identities (languageRouteIdentities), the form that joins the §8.6.7
+	// derivation identity and is recorded as language_routes.
+	languageRouteIDs map[string]string
+
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
 	// enabled (tri-state) AND the active STT backend advertises CapDiarize.
@@ -894,15 +909,19 @@ func (s *Service) skipUncoveredLanguageTranscript(ctx context.Context, doc model
 //
 // It returns (suppressCredit, skipped); skipped is false when no refusal happened,
 // leaving every other path untouched.
-func (s *Service) recordPartialTranscriptSkip(ctx context.Context, doc model.Document, partialSkipped, mediaProduced bool) (bool, bool) {
-	if !partialSkipped {
+func (s *Service) recordPartialTranscriptSkip(ctx context.Context, doc model.Document, skipReason string, mediaProduced bool) (bool, bool) {
+	if skipReason == "" {
 		return false, false
 	}
 	if mediaProduced {
 		return false, true
 	}
 	s.addSkipped(1)
-	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonTranscriptPartial)
+	// skipReason is the reason the refusal carries: transcript_partial for the
+	// §8.6.13 floor, language_uncovered for a §8.2.2 decode whose every window was
+	// refused for its language. Recording the reason the refusal actually had is
+	// what lets the skip_reasons aggregate tell the two apart.
+	s.persistNonFatalDocSkip(ctx, doc, skipReason)
 	return true, true
 }
 
@@ -975,6 +994,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		onUncoveredLanguage:             normalizeOnUncoveredLanguage(cfg.MediaSTTOnUncoveredLanguage),
 		minTranscriptCoverage:           normalizeMinCoverage(cfg.MediaSTTMinCoverage),
 		onPartialTranscript:             normalizeOnPartialTranscript(cfg.MediaSTTOnPartialTranscript),
+		languageScope:                   normalizeLanguageScope(cfg.MediaSTTLanguageScope),
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -1116,6 +1136,11 @@ func (svc *Service) resolveTranslateBinding(cfg config.Config) {
 // ingest folds into the transcript cache key it writes (SPEC §8.6.7).
 func (s *Service) resolveTranscriptIdentityFields() {
 	s.transcriptLanguage = sttExpectedLanguage(s.cfg)
+	// §8.2.2: the route table joins the identity under window scope, resolved
+	// to profile and model once here, before the STT-off return below, so a
+	// routed corpus records the same component whether or not the default
+	// profile is eligible.
+	s.languageRouteIDs = s.languageRouteIdentities()
 	// Resolve the STT derivation identity (SPEC §8.6.7) from the same profile the
 	// transcriber uses, so a recorded transcript identity can be compared against
 	// the active one to detect a model swap. Empty when STT is off.
@@ -4587,7 +4612,7 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		if skip, suppressCredit := s.skipUncoveredLanguageTranscript(ctx, doc, mediaProduced); skip {
 			return suppressCredit, false, nil
 		}
-		produced, partialSkipped, err := s.generateTranscriptRepresentation(ctx, doc, content)
+		produced, skipReason, err := s.generateTranscriptRepresentation(ctx, doc, content)
 		if err != nil {
 			// Provider/transient failures should not fail the entire ingest run.
 			// Persistence/cache failures should still propagate.
@@ -4627,7 +4652,7 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		// the skip_reasons honest-coverage aggregate, exactly as the §8.2.1 language
 		// floor does. Handled in a helper to keep this function inside the
 		// cyclomatic-complexity budget.
-		if suppressCredit, skipped := s.recordPartialTranscriptSkip(ctx, doc, partialSkipped, mediaProduced); skipped {
+		if suppressCredit, skipped := s.recordPartialTranscriptSkip(ctx, doc, skipReason, mediaProduced); skipped {
 			return suppressCredit, false, nil
 		}
 		// produced == false: the transcript was empty (silence) or the video has no
@@ -5387,11 +5412,11 @@ type trackContext struct {
 
 // generateTranscriptRepresentation transcribes a media document (audio, or a
 // video's extracted audio track — issue #495) and persists the source transcript
-// representation(s) and their chunks. It returns (produced, partialSkipped, err):
+// representation(s) and their chunks. It returns (produced, skipReason, err):
 // produced is true when at least one transcript representation was actually
 // persisted, so the caller can tell a real transcript from a legitimately empty one
 // (silence, or a video with no audio track) and surface an otherwise-unsearchable
-// video (#398). partialSkipped is true when every selected track that failed did so
+// video (#398). skipReason is non-empty when every selected track that failed did so
 // because its windowed decode fell below the §8.6.13 coverage floor under
 // `media.stt.on_partial_transcript=skip`: a DELIBERATE not-indexed gap the caller
 // records as status="skipped", not as an error to retry (#961). A returned err
@@ -5401,23 +5426,23 @@ type trackContext struct {
 // the default `first` transcribes only track 0 (byte-for-byte today's behavior and
 // cost), while `all` / an explicit index list additionally transcribe each selected
 // track N ≥ 1 under a distinct `transcript@t<N>` rep_type.
-func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) (bool, bool, error) {
+func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) (bool, string, error) {
 	if s.repGen == nil || s.transcriber == nil {
-		return false, false, nil
+		return false, "", nil
 	}
 	sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks)
 	if err != nil {
 		// Should never happen (validated at startup), but fail closed rather than
 		// silently transcribing the wrong track set.
-		return false, false, err
+		return false, "", err
 	}
 	// Default (and overwhelmingly common) single-track path: transcribe only the
 	// first audio stream, keeping the eager quality-gate semantics and the honest
 	// "additional tracks dropped" diagnostic exactly as before (§8.6.12: track 0 is
 	// byte-for-byte unchanged).
 	if sel.Mode == config.STTTracksFirst {
-		produced, _, partialSkipped, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: true})
-		return produced, partialSkipped, terr
+		produced, _, skipReason, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: true})
+		return produced, skipReason, terr
 	}
 	return s.generateSelectedTrackTranscripts(ctx, doc, content, sel)
 }
@@ -5429,7 +5454,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 // dropped and recorded as honest coverage), and the DOCUMENT is reported as an
 // error only if EVERY selected track failed — otherwise it is ready with whatever
 // tracks succeeded.
-func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc model.Document, content []byte, sel config.STTTrackSelection) (bool, bool, error) {
+func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc model.Document, content []byte, sel config.STTTrackSelection) (bool, string, error) {
 	info := s.probeTrackInfo(ctx, doc)
 	indices := resolveTrackIndices(sel, info)
 	if len(indices) == 0 {
@@ -5437,8 +5462,8 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 			// Unprobeable / no audio census (ffprobe absent, undecodable input): fall
 			// back to the default first-track path so a media file still gets its
 			// track-0 transcript rather than being silently skipped.
-			produced, _, partialSkipped, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: false})
-			return produced, partialSkipped, terr
+			produced, _, skipReason, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: false})
+			return produced, skipReason, terr
 		}
 		// The probe succeeded but an explicit index list matched no existing track in
 		// THIS file (every listed index is past its track count — a per-file
@@ -5446,7 +5471,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 		// unselected track. A video with no other representation is still caught by
 		// the caller's no-representation check (#398).
 		s.getLogger().Printf("media.stt.tracks: none of the selected tracks exist in %s (%d audio stream(s)); no transcript produced (§8.6.12)", doc.RelPath, len(info.AudioStreams))
-		return false, false, nil
+		return false, "", nil
 	}
 
 	// Defer the eager per-document quality-gate error while looping so a rejected
@@ -5458,6 +5483,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 	producedAny := false
 	failed := 0
 	partialSkips := 0
+	skipReason := ""
 	var firstFailErr error
 	for _, n := range indices {
 		tc := trackContext{audioIndex: n}
@@ -5465,11 +5491,11 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 			tc.stream = info.AudioStreams[n]
 			tc.hasStream = true
 		}
-		produced, rejected, partialSkipped, terr := s.transcribeAndPersistTrack(ctx, doc, content, tc)
+		produced, rejected, trackSkip, terr := s.transcribeAndPersistTrack(ctx, doc, content, tc)
 		if terr != nil {
 			if isHardTranscriptError(terr) {
 				// A persistence/cache failure is not track-scoped; abort the document.
-				return producedAny, false, terr
+				return producedAny, "", terr
 			}
 			// A provider/transient transcription failure is scoped to this track.
 			failed++
@@ -5479,11 +5505,14 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 			s.logTrackDropped(doc, tc, terr.Error())
 			continue
 		}
-		if partialSkipped {
+		if trackSkip != "" {
 			// §8.6.13 skip: this track was refused on purpose, so it counts as failed
-			// for the all-failed decision below but is NOT a provider error.
+			// for the all-failed decision below but is NOT a provider error. When
+			// tracks were refused for different reasons the language one wins
+			// (§8.2.2 terminal status): it is the operator's decision and recurs.
 			failed++
 			partialSkips++
+			skipReason = preferLanguageSkip(skipReason, trackSkip)
 			continue
 		}
 		if rejected {
@@ -5507,14 +5536,25 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 		// and real failures still reports the failure: it is the retryable one, and
 		// the more urgent thing to tell an operator.
 		if partialSkips == failed {
-			return false, true, nil
+			return false, skipReason, nil
 		}
 		if firstFailErr != nil {
-			return false, false, firstFailErr
+			return false, "", firstFailErr
 		}
-		return false, false, fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
+		return false, "", fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
 	}
-	return producedAny, false, nil
+	return producedAny, "", nil
+}
+
+// preferLanguageSkip picks the skip reason a multi-track document reports when
+// its tracks were refused for different reasons (§8.2.2 terminal status): the
+// first reason seen, unless a later track was refused for its language, which
+// is the operator's own decision and recurs on every run.
+func preferLanguageSkip(current, next string) string {
+	if current == "" || next == model.SkipReasonLanguageUncovered {
+		return next
+	}
+	return current
 }
 
 // shiftSegmentsForLeadingSilence applies the optional leading-silence trim
@@ -5539,17 +5579,20 @@ func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.
 
 // transcribeAndPersistTrack transcribes ONE selected audio track and persists its
 // source transcript representation (plus, in single-pass mode, its translations).
-// It returns (produced, gateRejected, err): produced is true when a representation
-// was persisted; gateRejected is true when the quality gate dropped this track's
-// transcript under the deferred multi-track semantics (§8.6.12); err carries a
+// It returns (produced, gateRejected, skipReason, err): produced is true when a
+// representation was persisted; gateRejected is true when the quality gate
+// dropped this track's transcript under the deferred multi-track semantics
+// (§8.6.12); skipReason names the refusal that dropped the track on purpose
+// (transcript_partial for the §8.6.13 floor, language_uncovered for a §8.2.2
+// decode whose every window was refused), empty otherwise; err carries a
 // provider/transient transcription failure or a hard persistence error. Track 0
 // keeps the bare `transcript` rep_type and is byte-for-byte identical to the legacy
 // single-track path; each additional track N ≥ 1 is persisted under
 // `transcript@t<N>` with its container-declared track/language/label in meta_json.
-func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, bool, error) {
+func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, string, error) {
 	transcriptText, words, coverage, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
-		return false, false, false, err
+		return false, false, "", err
 	}
 
 	// Multi-track honesty (issue #567/#596): on the default first-track path the STT
@@ -5571,7 +5614,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// so this reports "no transcript produced" without a soft error: the run must
 	// not also count the withheld document as an error.
 	if s.screenDerivedSecrets(ctx, doc, derivedKindTranscript, transcriptText) {
-		return false, false, false, nil
+		return false, false, "", nil
 	}
 
 	// §8.6.13 partial-transcript floor (#961): a windowed decode that covered less
@@ -5581,8 +5624,8 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// runs BEFORE the §8.6.6 quality gate because the two measure different things:
 	// the gate screens the text that WAS decoded, this measures how much was
 	// decoded at all, and text that never existed cannot be screened.
-	if handled, skipped, rerr := s.settlePartialRefusal(ctx, doc, tc, coverage); handled {
-		return false, false, skipped, rerr
+	if handled, skipReason, rerr := s.settlePartialRefusal(ctx, doc, tc, coverage); handled {
+		return false, false, skipReason, rerr
 	}
 
 	var duration time.Duration
@@ -5601,7 +5644,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// persist-with-quarantine behavior below is preserved unchanged.
 	if decision.quarantine && s.deferGateDocError {
 		s.logTrackDropped(doc, tc, "output quality gate rejected the transcript")
-		return false, true, false, nil
+		return false, true, "", nil
 	}
 
 	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
@@ -5611,7 +5654,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// the export path applies to the sidecar. Off by default.
 	segments = applyCueCleaningToSegments(segments, s.captionCleanOptions())
 	if len(segments) == 0 {
-		return false, false, false, nil
+		return false, false, "", nil
 	}
 	// Optional model-driven speaker diarization (SPEC §8.6.8): when active and a
 	// diarizer is injected, attribute each segment to a speaker. This is metadata
@@ -5630,6 +5673,12 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// reason: a window must not cross a speaker change (SPEC 8.6.8 makes the
 	// speaker turn a chunk boundary), and the speakers only exist once
 	// applyDiarization has stamped them.
+	// §8.2.2: a segment whose window resolved to a language other than the
+	// representation's is marked before the chunk window runs, so the window's
+	// fourth close rule (a language change) sees the marks and a chunk keeps one
+	// language. No-op under item scope, where coverage carries no languages.
+	repLang, _, _ := windowLanguageForMeta(coverage, s.transcriptLanguage)
+	stampSegmentLanguages(segments, coverageLanguages(coverage), repLang)
 	segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
 
 	meta := s.sttTranscriptMeta(distinctSpeakers(segments), transcriptText, segmentsHaveWordTiming(segments))
@@ -5638,10 +5687,11 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// single-request decode, so the field stays absent and the meta_json of a
 	// short recording is unchanged (#961).
 	meta.Coverage = coverage
+	s.applyWindowLanguageMeta(&meta, coverage)
 	s.warnPartialTranscript(doc, tc, coverage)
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		return false, false, false, fmt.Errorf("marshal transcript meta: %w", err)
+		return false, false, "", fmt.Errorf("marshal transcript meta: %w", err)
 	}
 	rep := model.Representation{
 		DocID:       doc.DocID,
@@ -5653,7 +5703,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	}
 	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
 	if err != nil {
-		return false, false, false, fmt.Errorf("upsert transcript representation: %w", err)
+		return false, false, "", fmt.Errorf("upsert transcript representation: %w", err)
 	}
 
 	// Optional leading-silence trim (dir2mcp#258): when enabled, subtract the
@@ -5664,7 +5714,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// transcripts below, keeping source/translated time windows aligned.
 	trimOffsetMS := s.shiftSegmentsForLeadingSilence(ctx, doc, segments)
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
-		return false, false, false, fmt.Errorf("persist transcript chunks: %w", err)
+		return false, false, "", fmt.Errorf("persist transcript chunks: %w", err)
 	}
 
 	// Optional translation step (SPEC §8.6.2): after the source transcript
@@ -5684,7 +5734,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// final set of representations is identical either way — only the ordering
 	// differs. In single-pass mode (the default) it runs inline as before.
 	if s.activePass == passTranscription {
-		return true, false, false, nil
+		return true, false, "", nil
 	}
 	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS, tc.audioIndex); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
@@ -5698,7 +5748,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 		code := manifestErrorCode(err)
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
-	return true, false, false, nil
+	return true, false, "", nil
 }
 
 // judgeEmptyTranscript applies the §8.6.13 floor to a track that produced NO text
@@ -5710,16 +5760,32 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 // Recording that as ordinary silence would assert the recording had nothing to
 // say. An empty transcript cannot carry a secret, so the floor is the only
 // judgement left to make here.
-func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
+func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (string, error) {
+	// §8.2.2 terminal status: no window produced text and at least one was
+	// refused. A language refusal is an operator decision that recurs on every
+	// run, so the item is a declared skip with that reason, and any earlier
+	// run's transcript is retired first exactly as the §8.6.13 floor does. A
+	// decode whose every refusal is quality_gate is left to the §8.6.6 path
+	// (TRANSCRIBE_FAILED) once per-window gating lands (#1030); this build never
+	// emits that reason.
+	if reason := allWindowsRefusedReason(coverage); reason == model.RefusedLanguageUncovered {
+		s.logTrackDropped(doc, tc, fmt.Sprintf(
+			"every decode window was refused: the resolved language is outside the routed model's declared coverage (media.stt.on_uncovered_language=skip, SPEC §8.2.2; %d of %d windows refused)",
+			coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted))
+		if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
+			return "", fmt.Errorf("uncovered-language refusal for %s: %w", doc.RelPath, err)
+		}
+		return model.SkipReasonLanguageUncovered, nil
+	}
 	refused, err := s.refusePartialTranscript(ctx, doc, tc, coverage)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if refused {
-		return true, nil
+		return model.SkipReasonTranscriptPartial, nil
 	}
 	s.warnPartialTranscript(doc, tc, coverage)
-	return false, nil
+	return "", nil
 }
 
 // refusedTranscriptRep reports whether a stored representation is one the
@@ -5758,24 +5824,27 @@ func refusedTranscriptRep(rep store.RepresentationRow, base string) bool {
 // the caller: handled says whether the track is finished with, skipped whether
 // it was refused, and a non-nil error is always handled and never a skip, since
 // a refusal whose retirement failed must not be recorded as one.
-func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, error) {
+func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, string, error) {
 	refused, err := s.refusePartialTranscript(ctx, doc, tc, coverage)
 	if err != nil {
-		return true, false, err
+		return true, "", err
 	}
-	return refused, refused, nil
+	if refused {
+		return true, model.SkipReasonTranscriptPartial, nil
+	}
+	return false, "", nil
 }
 
 // settleEmptyTranscript turns the empty-transcript verdict into this function's
 // four-value return, so the caller carries one line rather than a nested error
 // branch. A refusal whose retirement failed is an error, not a skip: see
 // refusePartialTranscript.
-func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, bool, error) {
-	skipped, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
+func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, string, error) {
+	skipReason, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
 	if err != nil {
-		return false, false, false, err
+		return false, false, "", err
 	}
-	return false, false, skipped, nil
+	return false, false, skipReason, nil
 }
 
 func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
