@@ -1767,6 +1767,11 @@ func Default() Config {
 			"**/vendor/**",
 			"**/__pycache__/**",
 			"**/.env",
+			// The server's own configuration and second dotenv file (SPEC §7.2,
+			// 0.73.0). Both sit in the corpus root by convention and can hold a
+			// key; indexed, a first run cited .dir2mcp.yaml as a source.
+			"**/.env.local",
+			"**/.dir2mcp.yaml",
 			"**/*.pem",
 			"**/*.key",
 			"**/id_rsa",

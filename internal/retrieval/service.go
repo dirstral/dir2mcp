@@ -69,6 +69,8 @@ var defaultPathExcludes = []string{
 	"**/node_modules/**",
 	"**/.dir2mcp/**",
 	"**/.env",
+	"**/.env.local",
+	"**/.dir2mcp.yaml",
 	"**/*.pem",
 	"**/*.key",
 	"**/id_rsa",
