@@ -62,6 +62,12 @@ type TranscriptCoverage struct {
 	// when every window was refused that way. Transient: the persisted record
 	// carries only coverage.refused[].reason, as the spec defines it.
 	RefusedQualityReason string `json:"-"`
+	// ScreenedPerWindow is true only on a coverage record THIS run's decode
+	// built with the per-window quality gate active (SPEC §8.2.2). Transient:
+	// a record restored from the transcript cache never carries it, so text
+	// cached while gates were off is not taken as screened, and the
+	// document-level gate runs every check on it.
+	ScreenedPerWindow bool `json:"-"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds

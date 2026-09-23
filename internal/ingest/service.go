@@ -5314,12 +5314,12 @@ func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, k
 }
 
 // transcriptDocGate picks the document-level gate for a transcript: the
-// reduced windowDocGate when its windows were already screened one by one (a
-// window-scoped decode records coverage.languages, SPEC §8.2.2), else the
-// full gate. A recording that fell back to one unscoped request never met the
-// per-window gate, so it keeps every check.
+// reduced windowDocGate only when THIS run's decode screened every window
+// (coverage.ScreenedPerWindow, SPEC §8.2.2), else the full gate. A recording
+// decoded as one unscoped request, or a transcript restored from the cache
+// (possibly cached while gates were off), keeps every check.
 func (s *Service) transcriptDocGate(coverage *TranscriptCoverage) *quality.Gate {
-	if s.qualityGate != nil && s.windowGate != nil && s.windowDocGate != nil && coverage != nil && coverage.Languages != nil {
+	if s.qualityGate != nil && s.windowDocGate != nil && coverage != nil && coverage.ScreenedPerWindow {
 		return s.windowDocGate
 	}
 	return s.qualityGate

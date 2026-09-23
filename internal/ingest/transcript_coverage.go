@@ -108,3 +108,13 @@ func newTranscriptCoverage(attempted, decoded, totalMS int, ranges []CoverageRan
 		Ranges:           merged,
 	}
 }
+
+// liveScopedCoverage is newScopedTranscriptCoverage for a decode this run just
+// performed: it marks the record screened when the per-window gate was active.
+func (s *Service) liveScopedCoverage(stats windowStats, totalMS int) *TranscriptCoverage {
+	cov := newScopedTranscriptCoverage(stats, totalMS)
+	if cov != nil {
+		cov.ScreenedPerWindow = s.windowGate != nil
+	}
+	return cov
+}

@@ -370,3 +370,31 @@ func TestWindowQuality_ARefusedTrackRetiresItsOldTranscript(t *testing.T) {
 		t.Errorf("the refused track's old transcript is still live: %v", types)
 	}
 }
+
+// TestWindowQuality_ACachedTranscriptGetsTheFullGate: a transcript cached while
+// quality gates were off comes back with its coverage record, but its windows
+// were never screened. The reduced document gate must not apply to it: the
+// full gate runs and quarantines the merged loop.
+func TestWindowQuality_ACachedTranscriptGetsTheFullGate(t *testing.T) {
+	t.Parallel()
+	tr := &langWindowTranscriber{def: langReply{lang: "en", conf: 0.9, text: "[00:00] ok ok ok ok ok"}}
+	h, content := newScopedHarness(t, tr, scopeTotalMS)
+	h.svc.SetQualityGate(nil)
+	_ = runScoped(t, h, "talks/cached.m4a", content) // run 1: gates off, transcript cached
+	calls := tr.callCount()
+
+	cfg := quality.DefaultConfig()
+	cfg.Density.Enabled = false
+	h.svc.SetQualityGate(quality.New(cfg))
+	h.store.reps = nil
+	h.store.chunks = nil
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/cached.m4a"), content); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if tr.callCount() != calls {
+		t.Skipf("run 2 re-decoded (%d calls after %d): the transcript cache was not hit, so this path is not exercised", tr.callCount(), calls)
+	}
+	if !strings.Contains(h.logs.String(), "quality gate quarantined transcript") {
+		t.Errorf("a cached, never-screened transcript passed the reduced gate:\n%s", h.logs.String())
+	}
+}

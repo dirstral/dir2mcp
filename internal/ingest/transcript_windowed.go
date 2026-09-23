@@ -462,14 +462,14 @@ func (s *Service) decodeSingleWindowScoped(ctx context.Context, relPath string, 
 	stats := windowStats{attempted: 1, languages: wd.languages, refused: wd.refused, firstQualityReason: wd.qualityReason}
 	if len(wd.decoded) == 0 {
 		if len(wd.refused) > 0 {
-			return "", nil, newScopedTranscriptCoverage(stats, totalMS), nil
+			return "", nil, s.liveScopedCoverage(stats, totalMS), nil
 		}
 		return "", nil, nil, wd.err
 	}
 	stats.decoded = 1
 	stats.ranges = wd.covered
 	text, words := MergeTranscriptWindows(wd.decoded, totalMS)
-	return text, words, newScopedTranscriptCoverage(stats, totalMS), nil
+	return text, words, s.liveScopedCoverage(stats, totalMS), nil
 }
 
 // withoutCoverage adapts a SINGLE-request decode to the windowed decode's return
@@ -558,7 +558,7 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	// dying in the log line above, so the transcript representation can record what
 	// it does and does not cover.
 	if st != nil {
-		return text, words, newScopedTranscriptCoverage(stats, totalMS), nil
+		return text, words, s.liveScopedCoverage(stats, totalMS), nil
 	}
 	return text, words, newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), nil
 }
